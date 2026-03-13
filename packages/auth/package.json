@@ -1,0 +1,19 @@
+{
+  "name": "@steward/auth",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "@steward/db": "workspace:*",
+    "@steward/shared": "workspace:*",
+    "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2"
+  }
+}
