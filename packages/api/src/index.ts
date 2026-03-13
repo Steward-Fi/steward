@@ -1,54 +1,57 @@
+import { and, eq, gte, sql } from "drizzle-orm";
 import { Hono, type Context, type Next } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
-import { Vault } from "@steward/vault";
+
+import {
+  agents,
+  approvalQueue,
+  getDb,
+  policies,
+  tenants,
+  toPolicyRule,
+  toSignRequest,
+  toTxRecord,
+  transactions,
+} from "@steward/db";
 import { PolicyEngine } from "@steward/policy-engine";
 import type {
-  SignRequest,
-  PolicyRule,
-  ApiResponse,
   AgentIdentity,
+  ApiResponse,
+  PolicyRule,
+  SignRequest,
   Tenant,
   TenantConfig,
 } from "@steward/shared";
-
-// ─── Config ───
+import { Vault } from "@steward/vault";
 
 const MASTER_PASSWORD = process.env.STEWARD_MASTER_PASSWORD || "steward-dev-password";
 const PORT = parseInt(process.env.PORT || "3200");
 const DEFAULT_TENANT_ID = "default";
 
-// ─── Init ───
-
+const db = getDb();
 const vault = new Vault({
   masterPassword: MASTER_PASSWORD,
   rpcUrl: process.env.RPC_URL || "https://mainnet.base.org",
   chainId: 8453,
 });
-
 const policyEngine = new PolicyEngine();
-
-const defaultTenant: Tenant = {
-  id: DEFAULT_TENANT_ID,
-  name: "Default Tenant",
-  apiKeyHash: process.env.STEWARD_DEFAULT_TENANT_KEY || "",
-  createdAt: new Date(),
-};
 
 const defaultTenantConfig: TenantConfig = {
   id: DEFAULT_TENANT_ID,
-  name: defaultTenant.name,
+  name: "Default Tenant",
 };
 
-// In-memory tenant store (replace with DB)
-const tenants = new Map<string, Tenant>([[defaultTenant.id, defaultTenant]]);
 const tenantConfigs = new Map<string, TenantConfig>([[defaultTenantConfig.id, defaultTenantConfig]]);
 
-// In-memory policy store (replace with DB)
-const agentPolicies = new Map<string, PolicyRule[]>();
-
-// In-memory tx tracking (replace with DB)
-const txHistory = new Map<string, { timestamp: number; value: bigint }[]>();
+const defaultTenantReady = db
+  .insert(tenants)
+  .values({
+    id: DEFAULT_TENANT_ID,
+    name: "Default Tenant",
+    apiKeyHash: process.env.STEWARD_DEFAULT_TENANT_KEY || "",
+  })
+  .onConflictDoNothing();
 
 type AppVariables = {
   tenant: Tenant;
@@ -61,12 +64,6 @@ const app = new Hono<{ Variables: AppVariables }>();
 app.use("*", cors());
 app.use("*", logger());
 
-// ─── Helpers ───
-
-function getScopedKey(tenantId: string, agentId: string): string {
-  return `${tenantId}:${agentId}`;
-}
-
 function getTenantPayload(tenant: Tenant): Tenant & TenantConfig {
   const config = tenantConfigs.get(tenant.id);
   return {
@@ -77,13 +74,27 @@ function getTenantPayload(tenant: Tenant): Tenant & TenantConfig {
   };
 }
 
+async function findTenant(tenantId: string): Promise<Tenant | undefined> {
+  const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
+  return tenant;
+}
+
+async function ensureAgentForTenant(
+  tenantId: string,
+  agentId: string
+): Promise<AgentIdentity | undefined> {
+  return vault.getAgent(tenantId, agentId);
+}
+
 async function tenantAuth(
   c: Context<{ Variables: AppVariables }>,
   next: Next,
   options?: { requireTenantMatch?: string }
 ) {
+  await defaultTenantReady;
+
   const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
-  const tenant = tenants.get(tenantId);
+  const tenant = await findTenant(tenantId);
 
   if (!tenant) {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
@@ -105,7 +116,58 @@ async function tenantAuth(
   await next();
 }
 
-// ─── Middleware ───
+async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRule[]> {
+  const storedPolicies = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.agentId, agentId));
+
+  if (storedPolicies.length > 0) {
+    return storedPolicies.map(toPolicyRule);
+  }
+
+  return tenantConfigs.get(tenantId)?.defaultPolicies || [];
+}
+
+async function getTransactionStats(agentId: string) {
+  const now = new Date();
+  const oneHourAgo = new Date(now.getTime() - 3600_000);
+  const oneDayAgo = new Date(now.getTime() - 86400_000);
+  const oneWeekAgo = new Date(now.getTime() - 604800_000);
+
+  const [stats] = await db
+    .select({
+      recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgo})`,
+      recentTxCount24h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneDayAgo})`,
+      spentToday: sql<string>`
+        coalesce(
+          sum(
+            case
+              when ${transactions.createdAt} >= ${oneDayAgo} then (${transactions.value})::numeric
+              else 0
+            end
+          ),
+          0
+        )::text
+      `,
+      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
+    })
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.agentId, agentId),
+        gte(transactions.createdAt, oneWeekAgo),
+        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`
+      )
+    );
+
+  return {
+    recentTxCount1h: Number(stats?.recentTxCount1h ?? 0),
+    recentTxCount24h: Number(stats?.recentTxCount24h ?? 0),
+    spentToday: BigInt(stats?.spentToday ?? "0"),
+    spentThisWeek: BigInt(stats?.spentThisWeek ?? "0"),
+  };
+}
 
 app.use("/agents", (c, next) => tenantAuth(c, next));
 app.use("/agents/*", (c, next) => tenantAuth(c, next));
@@ -117,12 +179,8 @@ app.use("/tenants/:id/webhook", (c, next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") })
 );
 
-// ─── Health ───
-
 app.get("/", (c) => c.json({ name: "steward", version: "0.1.0", status: "running" }));
 app.get("/health", (c) => c.json({ ok: true }));
-
-// ─── Tenant Management ───
 
 app.post("/tenants", async (c) => {
   const body = await c.req.json<{
@@ -133,26 +191,26 @@ app.post("/tenants", async (c) => {
     defaultPolicies?: PolicyRule[];
   }>();
 
-  if (tenants.has(body.id)) {
+  const existingTenant = await findTenant(body.id);
+  if (existingTenant) {
     return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 400);
   }
 
-  const tenant: Tenant = {
-    id: body.id,
-    name: body.name,
-    apiKeyHash: body.apiKeyHash,
-    createdAt: new Date(),
-  };
+  const [tenant] = await db
+    .insert(tenants)
+    .values({
+      id: body.id,
+      name: body.name,
+      apiKeyHash: body.apiKeyHash,
+    })
+    .returning();
 
-  const tenantConfig: TenantConfig = {
+  tenantConfigs.set(body.id, {
     id: body.id,
     name: body.name,
     webhookUrl: body.webhookUrl,
     defaultPolicies: body.defaultPolicies,
-  };
-
-  tenants.set(tenant.id, tenant);
-  tenantConfigs.set(tenantConfig.id, tenantConfig);
+  });
 
   return c.json<ApiResponse<Tenant & TenantConfig>>({
     ok: true,
@@ -189,13 +247,12 @@ app.put("/tenants/:id/webhook", async (c) => {
   });
 });
 
-// ─── Agent Management ───
-
 app.post("/agents", async (c) => {
   const tenantId = c.get("tenantId");
   const body = await c.req.json<{ id: string; name: string; platformId?: string }>();
+
   try {
-    const identity = vault.createAgent(tenantId, body.id, body.name, body.platformId);
+    const identity = await vault.createAgent(tenantId, body.id, body.name, body.platformId);
     return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -203,100 +260,174 @@ app.post("/agents", async (c) => {
   }
 });
 
-app.get("/agents", (c) => {
+app.get("/agents", async (c) => {
   const tenantId = c.get("tenantId");
-  const agents = vault.listAgentsByTenant(tenantId);
-  return c.json<ApiResponse<AgentIdentity[]>>({ ok: true, data: agents });
+  const tenantAgents = await vault.listAgentsByTenant(tenantId);
+  return c.json<ApiResponse<AgentIdentity[]>>({ ok: true, data: tenantAgents });
 });
 
-app.get("/agents/:agentId", (c) => {
+app.get("/agents/:agentId", async (c) => {
   const tenantId = c.get("tenantId");
-  const agent = vault.getAgent(tenantId, c.req.param("agentId"));
-  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  const agent = await vault.getAgent(tenantId, c.req.param("agentId"));
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
   return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: agent });
 });
 
-// ─── Policy Management ───
+app.get("/agents/:agentId/policies", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
 
-app.get("/agents/:agentId/policies", (c) => {
-  const scopedKey = getScopedKey(c.get("tenantId"), c.req.param("agentId"));
-  const policies = agentPolicies.get(scopedKey) || [];
-  return c.json<ApiResponse<PolicyRule[]>>({ ok: true, data: policies });
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const agentPolicies = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.agentId, agentId));
+
+  return c.json<ApiResponse<PolicyRule[]>>({
+    ok: true,
+    data: agentPolicies.map(toPolicyRule),
+  });
 });
 
 app.put("/agents/:agentId/policies", async (c) => {
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
-  const scopedKey = getScopedKey(tenantId, agentId);
-  const policies = await c.req.json<PolicyRule[]>();
-  agentPolicies.set(scopedKey, policies);
-  return c.json<ApiResponse>({ ok: true });
-});
+  const agent = await ensureAgentForTenant(tenantId, agentId);
 
-// ─── Signing ───
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const nextPolicies = await c.req.json<PolicyRule[]>();
+
+  await db.delete(policies).where(eq(policies.agentId, agentId));
+
+  if (nextPolicies.length > 0) {
+    await db.insert(policies).values(
+      nextPolicies.map((policy) => ({
+        id: policy.id || crypto.randomUUID(),
+        agentId,
+        type: policy.type,
+        enabled: policy.enabled,
+        config: policy.config,
+      }))
+    );
+  }
+
+  const storedPolicies = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.agentId, agentId));
+
+  return c.json<ApiResponse<PolicyRule[]>>({
+    ok: true,
+    data: storedPolicies.map(toPolicyRule),
+  });
+});
 
 app.post("/vault/:agentId/sign", async (c) => {
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
-  const scopedKey = getScopedKey(tenantId, agentId);
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
   const request = await c.req.json<Omit<SignRequest, "agentId" | "tenantId">>();
   const signRequest: SignRequest = { ...request, tenantId, agentId };
+  const policySet = await getPolicySet(tenantId, agentId);
+  const stats = await getTransactionStats(agentId);
 
-  const policies = agentPolicies.get(scopedKey) || tenantConfigs.get(tenantId)?.defaultPolicies || [];
-
-  const history = txHistory.get(scopedKey) || [];
-  const now = Date.now();
-  const oneHourAgo = now - 3600_000;
-  const oneDayAgo = now - 86400_000;
-  const oneWeekAgo = now - 604800_000;
-
-  const recentTxCount1h = history.filter((t) => t.timestamp > oneHourAgo).length;
-  const recentTxCount24h = history.filter((t) => t.timestamp > oneDayAgo).length;
-  const spentToday = history
-    .filter((t) => t.timestamp > oneDayAgo)
-    .reduce((sum, t) => sum + t.value, 0n);
-  const spentThisWeek = history
-    .filter((t) => t.timestamp > oneWeekAgo)
-    .reduce((sum, t) => sum + t.value, 0n);
-
-  const evaluation = policyEngine.evaluate(policies, {
+  const evaluation = policyEngine.evaluate(policySet, {
     request: signRequest,
-    recentTxCount1h,
-    recentTxCount24h,
-    spentToday,
-    spentThisWeek,
+    recentTxCount1h: stats.recentTxCount1h,
+    recentTxCount24h: stats.recentTxCount24h,
+    spentToday: stats.spentToday,
+    spentThisWeek: stats.spentThisWeek,
   });
 
   if (!evaluation.approved) {
+    const txId = crypto.randomUUID();
+
     if (evaluation.requiresManualApproval) {
+      await db.insert(transactions).values({
+        id: txId,
+        agentId,
+        status: "pending",
+        toAddress: signRequest.to,
+        value: signRequest.value,
+        data: signRequest.data,
+        chainId: signRequest.chainId,
+        policyResults: evaluation.results,
+      });
+
+      await db.insert(approvalQueue).values({
+        id: crypto.randomUUID(),
+        txId,
+        agentId,
+        status: "pending",
+      });
+
       return c.json<ApiResponse>(
         {
           ok: false,
           error: "Transaction requires manual approval",
-          data: { results: evaluation.results, status: "pending_approval" },
+          data: { txId, results: evaluation.results, status: "pending_approval" },
         },
         202
       );
     }
+
+    await db.insert(transactions).values({
+      id: txId,
+      agentId,
+      status: "rejected",
+      toAddress: signRequest.to,
+      value: signRequest.value,
+      data: signRequest.data,
+      chainId: signRequest.chainId,
+      policyResults: evaluation.results,
+    });
+
     return c.json<ApiResponse>(
       {
         ok: false,
         error: "Transaction rejected by policy",
-        data: { results: evaluation.results },
+        data: { txId, results: evaluation.results },
       },
       403
     );
   }
 
   try {
-    const txHash = await vault.signTransaction(signRequest);
+    const txId = crypto.randomUUID();
+    const txHash = await vault.signTransaction(signRequest, {
+      txId,
+      policyResults: evaluation.results,
+      status: "signed",
+    });
 
-    if (!txHistory.has(scopedKey)) txHistory.set(scopedKey, []);
-    txHistory.get(scopedKey)?.push({ timestamp: now, value: BigInt(request.value) });
+    await db
+      .update(transactions)
+      .set({
+        status: "signed",
+        txHash,
+        policyResults: evaluation.results,
+        signedAt: new Date(),
+      })
+      .where(eq(transactions.id, txId));
 
-    return c.json<ApiResponse<{ txHash: string }>>({
+    return c.json<ApiResponse<{ txId: string; txHash: string }>>({
       ok: true,
-      data: { txHash },
+      data: { txId, txHash },
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -304,18 +435,180 @@ app.post("/vault/:agentId/sign", async (c) => {
   }
 });
 
-// ─── Transaction History ───
+app.post("/vault/:agentId/approve/:txId", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const txId = c.req.param("txId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
 
-app.get("/vault/:agentId/history", (c) => {
-  const scopedKey = getScopedKey(c.get("tenantId"), c.req.param("agentId"));
-  const history = txHistory.get(scopedKey) || [];
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const [transaction] = await db
+    .select()
+    .from(transactions)
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+  if (!transaction) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
+  }
+
+  const [queueEntry] = await db
+    .select()
+    .from(approvalQueue)
+    .where(
+      and(
+        eq(approvalQueue.txId, txId),
+        eq(approvalQueue.agentId, agentId),
+        eq(approvalQueue.status, "pending")
+      )
+    );
+
+  if (!queueEntry) {
+    return c.json<ApiResponse>({ ok: false, error: "Pending approval not found" }, 404);
+  }
+
+  try {
+    const txHash = await vault.signTransaction(
+      { ...toSignRequest(transaction), tenantId },
+      {
+        txId,
+        policyResults: transaction.policyResults,
+        status: "signed",
+      }
+    );
+
+    const resolvedAt = new Date();
+
+    await db
+      .update(approvalQueue)
+      .set({
+        status: "approved",
+        resolvedAt,
+        resolvedBy: tenantId,
+      })
+      .where(eq(approvalQueue.id, queueEntry.id));
+
+    await db
+      .update(transactions)
+      .set({
+        status: "signed",
+        txHash,
+        signedAt: resolvedAt,
+      })
+      .where(eq(transactions.id, txId));
+
+    return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+      ok: true,
+      data: { txId, txHash },
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: message }, 500);
+  }
+});
+
+app.post("/vault/:agentId/reject/:txId", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const txId = c.req.param("txId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const [queueEntry] = await db
+    .select()
+    .from(approvalQueue)
+    .where(
+      and(
+        eq(approvalQueue.txId, txId),
+        eq(approvalQueue.agentId, agentId),
+        eq(approvalQueue.status, "pending")
+      )
+    );
+
+  if (!queueEntry) {
+    return c.json<ApiResponse>({ ok: false, error: "Pending approval not found" }, 404);
+  }
+
+  const resolvedAt = new Date();
+
+  await db
+    .update(approvalQueue)
+    .set({
+      status: "rejected",
+      resolvedAt,
+      resolvedBy: tenantId,
+    })
+    .where(eq(approvalQueue.id, queueEntry.id));
+
+  await db
+    .update(transactions)
+    .set({
+      status: "rejected",
+    })
+    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+
+  return c.json<ApiResponse>({ ok: true });
+});
+
+app.get("/vault/:agentId/pending", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const pendingTransactions = await db
+    .select({
+      queueId: approvalQueue.id,
+      status: approvalQueue.status,
+      requestedAt: approvalQueue.requestedAt,
+      transaction: transactions,
+    })
+    .from(approvalQueue)
+    .innerJoin(transactions, eq(transactions.id, approvalQueue.txId))
+    .where(
+      and(
+        eq(approvalQueue.agentId, agentId),
+        eq(approvalQueue.status, "pending"),
+        eq(transactions.agentId, agentId)
+      )
+    );
+
   return c.json<ApiResponse>({
     ok: true,
-    data: history.map((t) => ({ timestamp: t.timestamp, value: t.value.toString() })),
+    data: pendingTransactions.map((entry) => ({
+      queueId: entry.queueId,
+      status: entry.status,
+      requestedAt: entry.requestedAt,
+      transaction: toTxRecord(entry.transaction),
+    })),
   });
 });
 
-// ─── Start ───
+app.get("/vault/:agentId/history", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const history = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.agentId, agentId));
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: history.map(toTxRecord),
+  });
+});
 
 console.log(`Steward API running on :${PORT}`);
-export default { port: PORT, fetch: app.fetch };
