@@ -10,9 +10,11 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
+    "@steward/db": "workspace:*",
+    "@steward/policy-engine": "workspace:*",
     "@steward/shared": "workspace:*",
     "@steward/vault": "workspace:*",
-    "@steward/policy-engine": "workspace:*",
+    "drizzle-orm": "^0.44.5",
     "hono": "^4.7.0"
   }
 }

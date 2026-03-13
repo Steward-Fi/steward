@@ -10,7 +10,9 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@steward/db": "workspace:*",
     "@steward/shared": "workspace:*",
+    "drizzle-orm": "^0.44.5",
     "viem": "^2.30.0"
   }
 }
