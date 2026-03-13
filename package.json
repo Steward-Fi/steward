@@ -5,6 +5,7 @@
     "packages/auth",
     "packages/db",
     "packages/*",
+    "packages/webhooks",
     "packages/sdk",
     "web"
   ],
