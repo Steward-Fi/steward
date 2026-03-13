@@ -40,9 +40,10 @@ export class Vault {
   /**
    * Create a new agent wallet. Returns the public identity (never the private key).
    */
-  createAgent(agentId: string, name: string, platformId?: string): AgentIdentity {
-    if (this.agents.has(agentId)) {
-      throw new Error(`Agent ${agentId} already exists`);
+  createAgent(tenantId: string, agentId: string, name: string, platformId?: string): AgentIdentity {
+    const scopedAgentId = this.getScopedAgentKey(tenantId, agentId);
+    if (this.agents.has(scopedAgentId)) {
+      throw new Error(`Agent ${agentId} already exists for tenant ${tenantId}`);
     }
 
     const privateKey = generatePrivateKey();
@@ -50,6 +51,7 @@ export class Vault {
 
     const identity: AgentIdentity = {
       id: agentId,
+      tenantId,
       name,
       walletAddress: account.address,
       platformId,
@@ -58,7 +60,7 @@ export class Vault {
 
     const encryptedKey = this.keyStore.encrypt(privateKey);
 
-    this.agents.set(agentId, { identity, encryptedKey });
+    this.agents.set(scopedAgentId, { identity, encryptedKey });
 
     return identity;
   }
@@ -66,8 +68,8 @@ export class Vault {
   /**
    * Get an agent's public identity
    */
-  getAgent(agentId: string): AgentIdentity | undefined {
-    return this.agents.get(agentId)?.identity;
+  getAgent(tenantId: string, agentId: string): AgentIdentity | undefined {
+    return this.agents.get(this.getScopedAgentKey(tenantId, agentId))?.identity;
   }
 
   /**
@@ -78,13 +80,20 @@ export class Vault {
   }
 
   /**
+   * List all agent identities for a tenant
+   */
+  listAgentsByTenant(tenantId: string): AgentIdentity[] {
+    return this.listAgents().filter((agent) => agent.tenantId === tenantId);
+  }
+
+  /**
    * Sign a transaction. Decrypts the key, signs, then discards the key.
    * Returns the signed transaction hash.
    */
   async signTransaction(request: SignRequest): Promise<string> {
-    const stored = this.agents.get(request.agentId);
+    const stored = this.agents.get(this.getScopedAgentKey(request.tenantId, request.agentId));
     if (!stored) {
-      throw new Error(`Agent ${request.agentId} not found`);
+      throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
 
     // Decrypt key (ephemeral)
@@ -116,10 +125,10 @@ export class Vault {
   /**
    * Sign arbitrary data (for ERC-8004 registration, etc.)
    */
-  async signMessage(agentId: string, message: string): Promise<string> {
-    const stored = this.agents.get(agentId);
+  async signMessage(tenantId: string, agentId: string, message: string): Promise<string> {
+    const stored = this.agents.get(this.getScopedAgentKey(tenantId, agentId));
     if (!stored) {
-      throw new Error(`Agent ${agentId} not found`);
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
     }
 
     const privateKey = this.keyStore.decrypt(stored.encryptedKey) as `0x${string}`;
@@ -127,5 +136,9 @@ export class Vault {
 
     const signature = await account.signMessage({ message });
     return signature;
+  }
+
+  private getScopedAgentKey(tenantId: string, agentId: string): string {
+    return `${tenantId}:${agentId}`;
   }
 }

@@ -1,9 +1,34 @@
 // @steward/shared — types, constants, utils
 
+// ─── Tenancy ───
+
+export interface Tenant {
+  id: string;
+  name: string;
+  apiKeyHash: string;
+  createdAt: Date;
+}
+
+export interface TenantConfig {
+  id: string;
+  name: string;
+  webhookUrl?: string;
+  defaultPolicies?: PolicyRule[];
+}
+
+export interface WebhookEvent {
+  type: "approval_required" | "tx_signed" | "tx_confirmed" | "tx_failed";
+  tenantId: string;
+  agentId: string;
+  data: Record<string, unknown>;
+  timestamp: Date;
+}
+
 // ─── Agent Identity ───
 
 export interface AgentIdentity {
   id: string;
+  tenantId: string;
   name: string;
   walletAddress: string;
   erc8004TokenId?: string;
@@ -58,6 +83,7 @@ export type TxStatus = "pending" | "approved" | "rejected" | "signed" | "broadca
 
 export interface SignRequest {
   agentId: string;
+  tenantId: string;
   to: string;
   value: string; // wei
   data?: string; // calldata
