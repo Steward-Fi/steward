@@ -1,4 +1,4 @@
-import { StewardClient } from "@steward/sdk";
+import { StewardClient } from "./steward-client";
 
 const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "http://localhost:3200";
 const API_KEY = process.env.NEXT_PUBLIC_STEWARD_API_KEY || "";

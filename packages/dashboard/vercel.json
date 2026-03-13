@@ -1,5 +1,3 @@
 {
-  "framework": "nextjs",
-  "installCommand": "cd ../.. && bun install",
-  "buildCommand": "cd ../.. && bun run build --filter=@steward/dashboard"
+  "framework": "nextjs"
 }

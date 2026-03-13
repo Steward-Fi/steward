@@ -9,12 +9,9 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@steward/sdk": "workspace:*",
-    "@steward/shared": "workspace:*",
     "next": "^15.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "lucide-react": "^0.460.0",
     "clsx": "^2.1.0"
   },
   "devDependencies": {
