@@ -8,6 +8,7 @@
     "start": "next start --port 3202"
   },
   "dependencies": {
+    "framer-motion": "^12.36.0",
     "next": "^15.3.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

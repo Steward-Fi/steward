@@ -1,0 +1,204 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { motion, AnimatePresence } from "framer-motion";
+import { steward } from "@/lib/api";
+import { shortenAddress, formatDate } from "@/lib/utils";
+import { CopyButton } from "@/components/copy-button";
+import type { AgentIdentity } from "@/lib/steward-client";
+
+const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
+
+export default function AgentsPage() {
+  const [agents, setAgents] = useState<AgentIdentity[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ id: "", name: "" });
+
+  useEffect(() => {
+    loadAgents();
+  }, []);
+
+  async function loadAgents() {
+    try {
+      setLoading(true);
+      const list = await steward.listAgents();
+      setAgents(list);
+    } catch {
+      /* silent */
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function createAgent(e: React.FormEvent) {
+    e.preventDefault();
+    if (!form.id || !form.name) return;
+    try {
+      setCreating(true);
+      await steward.createWallet(form.id, form.name);
+      setShowCreate(false);
+      setForm({ id: "", name: "" });
+      await loadAgents();
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to create agent");
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.3 }}
+      className="space-y-8"
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="font-display text-2xl font-700 tracking-tight">
+            Agents
+          </h1>
+          <p className="text-sm text-text-tertiary mt-1">
+            Manage agent wallets and policies
+          </p>
+        </div>
+        <button
+          onClick={() => setShowCreate(!showCreate)}
+          className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors font-medium"
+        >
+          New Agent
+        </button>
+      </div>
+
+      {/* Create form — inline, not a modal */}
+      <AnimatePresence>
+        {showCreate && (
+          <motion.form
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            transition={{ duration: 0.25, ease: easeOutQuart }}
+            onSubmit={createAgent}
+            className="overflow-hidden"
+          >
+            <div className="border border-border bg-bg-elevated p-6 space-y-5">
+              <h3 className="font-display text-sm font-600">Create Agent</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="text-xs text-text-tertiary block mb-1.5">
+                    Agent ID
+                  </label>
+                  <input
+                    type="text"
+                    value={form.id}
+                    onChange={(e) => setForm({ ...form, id: e.target.value })}
+                    placeholder="my-trading-agent"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-text-tertiary block mb-1.5">
+                    Display Name
+                  </label>
+                  <input
+                    type="text"
+                    value={form.name}
+                    onChange={(e) => setForm({ ...form, name: e.target.value })}
+                    placeholder="Trading Agent #1"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                  />
+                </div>
+              </div>
+              <div className="flex gap-3">
+                <button
+                  type="submit"
+                  disabled={creating || !form.id || !form.name}
+                  className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+                >
+                  {creating ? "Creating..." : "Create"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreate(false)}
+                  className="px-4 py-2 text-sm text-text-tertiary hover:text-text transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </motion.form>
+        )}
+      </AnimatePresence>
+
+      {/* Agent list */}
+      {loading ? (
+        <div className="space-y-px bg-border">
+          {[...Array(3)].map((_, i) => (
+            <div key={i} className="bg-bg h-20 animate-pulse" />
+          ))}
+        </div>
+      ) : agents.length === 0 ? (
+        <div className="py-20 text-center border border-border-subtle">
+          <p className="font-display text-lg font-600 text-text-secondary">
+            No agents yet
+          </p>
+          <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
+            Create your first agent to generate a managed wallet with policy enforcement.
+            Each agent gets its own address on Base.
+          </p>
+          <button
+            onClick={() => setShowCreate(true)}
+            className="mt-6 px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+          >
+            Create First Agent
+          </button>
+        </div>
+      ) : (
+        <div className="border-t border-border-subtle">
+          {agents.map((agent, i) => (
+            <motion.div
+              key={agent.id}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: i * 0.05, duration: 0.3 }}
+            >
+              <Link
+                href={`/dashboard/agents/${agent.id}`}
+                className="flex items-center justify-between py-5 border-b border-border-subtle hover:bg-bg-elevated/30 transition-colors px-2 -mx-2 group"
+              >
+                <div className="flex items-center gap-4 min-w-0">
+                  <div className="w-9 h-9 flex items-center justify-center bg-accent-bg font-display font-700 text-sm text-[oklch(0.75_0.15_55)] flex-shrink-0">
+                    {agent.name?.charAt(0)?.toUpperCase() || "A"}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-display font-600 text-sm group-hover:text-accent transition-colors truncate">
+                      {agent.name}
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-0.5 truncate">
+                      {agent.id}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4 flex-shrink-0">
+                  <div className="flex items-center gap-1">
+                    <span className="font-mono text-xs text-text-tertiary">
+                      {shortenAddress(agent.walletAddress, 6)}
+                    </span>
+                    <CopyButton text={agent.walletAddress} />
+                  </div>
+                  <span className="text-xs text-text-tertiary hidden md:inline">
+                    {agent.createdAt ? formatDate(agent.createdAt) : ""}
+                  </span>
+                </div>
+              </Link>
+            </motion.div>
+          ))}
+        </div>
+      )}
+    </motion.div>
+  );
+}

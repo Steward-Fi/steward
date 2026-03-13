@@ -1,28 +1,29 @@
 import type { Metadata } from "next";
+import { syne, instrumentSans } from "@/lib/fonts";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Steward — Agent Wallet Infrastructure",
-  description: "Give your agents wallets. Keep the keys safe. Let users set the rules. Open source policy-enforced signing for AI agents.",
+  description:
+    "Managed wallets for AI agents with policy enforcement, multi-tenant isolation, and webhook-driven approvals. Self-hosted.",
   openGraph: {
     title: "Steward — Agent Wallet Infrastructure",
-    description: "Policy-enforced wallet signing for AI agents. Open source, self-hostable, designed to embed.",
-    url: "https://steward.fi",
+    description: "Managed wallets for AI agents. Policy enforcement. Self-hosted.",
     type: "website",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "Steward — Agent Wallet Infrastructure",
-    description: "Policy-enforced wallet signing for AI agents.",
   },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <html lang="en">
-      <body className="antialiased font-sans">
-        {children}
-      </body>
+    <html
+      lang="en"
+      className={`${syne.variable} ${instrumentSans.variable}`}
+    >
+      <body className="noise-overlay">{children}</body>
     </html>
   );
 }
