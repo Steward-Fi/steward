@@ -1,0 +1,211 @@
+import { relations, sql } from "drizzle-orm";
+import {
+  boolean,
+  index,
+  integer,
+  jsonb,
+  pgEnum,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  varchar,
+} from "drizzle-orm/pg-core";
+
+export const policyTypeEnum = pgEnum("policy_type", [
+  "spending-limit",
+  "approved-addresses",
+  "auto-approve-threshold",
+  "time-window",
+  "rate-limit",
+]);
+
+export const transactionStatusEnum = pgEnum("transaction_status", [
+  "pending",
+  "approved",
+  "rejected",
+  "signed",
+  "broadcast",
+  "confirmed",
+  "failed",
+]);
+
+export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
+  "pending",
+  "approved",
+  "rejected",
+]);
+
+const timestamps = {
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow()
+    .$onUpdateFn(() => sql`now()`),
+};
+
+export const tenants = pgTable("tenants", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  apiKeyHash: text("api_key_hash").notNull(),
+  ...timestamps,
+});
+
+export const agents = pgTable(
+  "agents",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 255 }).notNull(),
+    walletAddress: varchar("wallet_address", { length: 128 }).notNull(),
+    platformId: varchar("platform_id", { length: 255 }),
+    erc8004TokenId: varchar("erc8004_token_id", { length: 255 }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdIdx: index("agents_tenant_id_idx").on(table.tenantId),
+  }),
+);
+
+export const encryptedKeys = pgTable(
+  "encrypted_keys",
+  {
+    agentId: varchar("agent_id", { length: 64 })
+      .primaryKey()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv").notNull(),
+    tag: text("tag").notNull(),
+    salt: text("salt").notNull(),
+  },
+  (table) => ({
+    agentIdUniqueIdx: uniqueIndex("encrypted_keys_agent_id_idx").on(table.agentId),
+  }),
+);
+
+export const policies = pgTable("policies", {
+  id: varchar("id", { length: 64 }).primaryKey(),
+  agentId: varchar("agent_id", { length: 64 })
+    .notNull()
+    .references(() => agents.id, { onDelete: "cascade" }),
+  type: policyTypeEnum("type").notNull(),
+  enabled: boolean("enabled").notNull().default(true),
+  config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+  ...timestamps,
+});
+
+export const transactions = pgTable(
+  "transactions",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    status: transactionStatusEnum("status").notNull(),
+    toAddress: varchar("to_address", { length: 128 }).notNull(),
+    value: text("value").notNull(),
+    data: text("data"),
+    chainId: integer("chain_id").notNull(),
+    txHash: varchar("tx_hash", { length: 128 }),
+    policyResults: jsonb("policy_results")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default([]),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    signedAt: timestamp("signed_at", { withTimezone: true }),
+    confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    agentIdIdx: index("transactions_agent_id_idx").on(table.agentId),
+  }),
+);
+
+export const approvalQueue = pgTable(
+  "approval_queue",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    txId: varchar("tx_id", { length: 64 })
+      .notNull()
+      .references(() => transactions.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    status: approvalQueueStatusEnum("status").notNull().default("pending"),
+    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolvedBy: varchar("resolved_by", { length: 255 }),
+  },
+  (table) => ({
+    txIdUniqueIdx: uniqueIndex("approval_queue_tx_id_idx").on(table.txId),
+    statusIdx: index("approval_queue_status_idx").on(table.status),
+  }),
+);
+
+export const tenantRelations = relations(tenants, ({ many }) => ({
+  agents: many(agents),
+}));
+
+export const agentRelations = relations(agents, ({ one, many }) => ({
+  tenant: one(tenants, {
+    fields: [agents.tenantId],
+    references: [tenants.id],
+  }),
+  encryptedKey: one(encryptedKeys, {
+    fields: [agents.id],
+    references: [encryptedKeys.agentId],
+  }),
+  policies: many(policies),
+  transactions: many(transactions),
+  approvalQueueEntries: many(approvalQueue),
+}));
+
+export const encryptedKeyRelations = relations(encryptedKeys, ({ one }) => ({
+  agent: one(agents, {
+    fields: [encryptedKeys.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const policyRelations = relations(policies, ({ one }) => ({
+  agent: one(agents, {
+    fields: [policies.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const transactionRelations = relations(transactions, ({ one }) => ({
+  agent: one(agents, {
+    fields: [transactions.agentId],
+    references: [agents.id],
+  }),
+  approvalQueueEntry: one(approvalQueue, {
+    fields: [transactions.id],
+    references: [approvalQueue.txId],
+  }),
+}));
+
+export const approvalQueueRelations = relations(approvalQueue, ({ one }) => ({
+  agent: one(agents, {
+    fields: [approvalQueue.agentId],
+    references: [agents.id],
+  }),
+  transaction: one(transactions, {
+    fields: [approvalQueue.txId],
+    references: [transactions.id],
+  }),
+}));
+
+export type Tenant = typeof tenants.$inferSelect;
+export type NewTenant = typeof tenants.$inferInsert;
+export type Agent = typeof agents.$inferSelect;
+export type NewAgent = typeof agents.$inferInsert;
+export type EncryptedKey = typeof encryptedKeys.$inferSelect;
+export type NewEncryptedKey = typeof encryptedKeys.$inferInsert;
+export type Policy = typeof policies.$inferSelect;
+export type NewPolicy = typeof policies.$inferInsert;
+export type Transaction = typeof transactions.$inferSelect;
+export type NewTransaction = typeof transactions.$inferInsert;
+export type ApprovalQueueEntry = typeof approvalQueue.$inferSelect;
+export type NewApprovalQueueEntry = typeof approvalQueue.$inferInsert;

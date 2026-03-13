@@ -2,6 +2,7 @@
   "name": "steward",
   "private": true,
   "workspaces": [
+    "packages/db",
     "packages/*",
     "web"
   ],
