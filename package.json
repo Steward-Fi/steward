@@ -4,6 +4,7 @@
   "workspaces": [
     "packages/db",
     "packages/*",
+    "packages/webhooks",
     "packages/sdk",
     "web"
   ],
