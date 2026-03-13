@@ -1,0 +1,18 @@
+{
+  "name": "@steward/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "build": "tsc",
+    "start": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@steward/shared": "workspace:*",
+    "@steward/vault": "workspace:*",
+    "@steward/policy-engine": "workspace:*",
+    "hono": "^4.7.0"
+  }
+}
