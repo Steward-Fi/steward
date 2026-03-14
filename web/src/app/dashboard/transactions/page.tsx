@@ -138,7 +138,7 @@ export default function TransactionsPage() {
       </div>
 
       {/* List */}
-      {filtered.length === 0 ? (
+      {error ? null : filtered.length === 0 ? (
         <div className="py-16 text-center border border-border-subtle">
           <p className="text-text-tertiary text-sm">
             {filter === "all"
