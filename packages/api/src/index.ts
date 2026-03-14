@@ -152,7 +152,13 @@ app.notFound((c) =>
   c.json<ApiResponse>({ ok: false, error: `Not found: ${c.req.method} ${c.req.path}` }, 404)
 );
 
-app.use("*", cors());
+app.use("*", cors({
+  origin: "*",
+  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowHeaders: ["Content-Type", "X-Steward-Tenant", "X-Steward-Key", "Authorization"],
+  exposeHeaders: ["Content-Length"],
+  maxAge: 86400,
+}));
 app.use("*", logger());
 app.use("*", async (c, next) => {
   if (c.req.path === "/health") {
