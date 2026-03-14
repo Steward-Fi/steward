@@ -1,0 +1,14 @@
+{
+  "extends": "../../../tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "lib": ["ES2022", "DOM"],
+    "noEmit": true,
+    "rootDir": "../..",
+    "paths": {
+      "@steward/sdk": ["../../sdk/src/index.ts"],
+      "@steward/shared": ["../../shared/src/index.ts"]
+    }
+  },
+  "include": ["src"]
+}
