@@ -201,9 +201,9 @@ async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRu
 
 async function getTransactionStats(agentId: string) {
   const now = new Date();
-  const oneHourAgo = new Date(now.getTime() - 3600_000);
-  const oneDayAgo = new Date(now.getTime() - 86400_000);
-  const oneWeekAgo = new Date(now.getTime() - 604800_000);
+  const oneHourAgo = new Date(now.getTime() - 3600_000).toISOString();
+  const oneDayAgo = new Date(now.getTime() - 86400_000).toISOString();
+  const oneWeekAgo = new Date(now.getTime() - 604800_000).toISOString();
 
   const [stats] = await db
     .select({
