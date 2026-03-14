@@ -1,6 +1,9 @@
 export { StewardClient, StewardApiError } from "./client";
 export type {
+  BatchAgentSpec,
+  BatchCreateResult,
   CreateWalletResult,
+  GetBalanceResult,
   GetHistoryResult,
   SignMessageResult,
   SignTransactionInput,
@@ -11,6 +14,7 @@ export type {
   StewardPendingApproval,
 } from "./client";
 export type {
+  AgentBalance,
   AgentIdentity,
   ApiResponse,
   PolicyResult,

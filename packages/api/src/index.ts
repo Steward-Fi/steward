@@ -18,6 +18,7 @@ import {
 } from "@steward/db";
 import { PolicyEngine } from "@steward/policy-engine";
 import type {
+  AgentBalance,
   AgentIdentity,
   ApiResponse,
   PolicyRule,
@@ -360,6 +361,82 @@ app.get("/agents/:agentId", async (c) => {
   }
 
   return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: agent });
+});
+
+app.get("/agents/:agentId/balance", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const chainIdParam = c.req.query("chainId");
+  const chainId = chainIdParam ? parseInt(chainIdParam, 10) : undefined;
+
+  try {
+    const balance = await vault.getBalance(tenantId, agentId, chainId);
+    return c.json<ApiResponse<AgentBalance>>({
+      ok: true,
+      data: {
+        agentId,
+        walletAddress: balance.walletAddress,
+        balances: {
+          native: balance.native.toString(),
+          nativeFormatted: balance.nativeFormatted,
+          chainId: balance.chainId,
+          symbol: balance.symbol,
+        },
+      },
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
+});
+
+app.post("/agents/batch", async (c) => {
+  const tenantId = c.get("tenantId");
+  const body = await c.req.json<{
+    agents: Array<{ id: string; name: string; platformId?: string }>;
+    applyPolicies?: PolicyRule[];
+  }>();
+
+  if (!Array.isArray(body.agents) || body.agents.length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "agents array is required and must not be empty" }, 400);
+  }
+
+  const created: AgentIdentity[] = [];
+  const errors: Array<{ id: string; error: string }> = [];
+
+  for (const agentSpec of body.agents) {
+    try {
+      const identity = await vault.createAgent(tenantId, agentSpec.id, agentSpec.name, agentSpec.platformId);
+
+      if (body.applyPolicies && body.applyPolicies.length > 0) {
+        await db.delete(policies).where(eq(policies.agentId, agentSpec.id));
+        await db.insert(policies).values(
+          body.applyPolicies.map((policy) => ({
+            id: policy.id || crypto.randomUUID(),
+            agentId: agentSpec.id,
+            type: policy.type,
+            enabled: policy.enabled,
+            config: policy.config,
+          }))
+        );
+      }
+
+      created.push(identity);
+    } catch (e: unknown) {
+      errors.push({ id: agentSpec.id, error: e instanceof Error ? e.message : "Unknown error" });
+    }
+  }
+
+  return c.json<ApiResponse<{ created: AgentIdentity[]; errors: Array<{ id: string; error: string }> }>>({
+    ok: true,
+    data: { created, errors },
+  });
 });
 
 app.get("/agents/:agentId/policies", async (c) => {

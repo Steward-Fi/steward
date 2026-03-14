@@ -17,7 +17,8 @@
     "@steward/vault": "workspace:*",
     "@steward/webhooks": "workspace:*",
     "drizzle-orm": "^0.44.5",
-    "hono": "^4.7.0"
+    "hono": "^4.7.0",
+    "viem": "^2.30.0"
   },
   "devDependencies": {
     "@types/node": "^25.5.0"

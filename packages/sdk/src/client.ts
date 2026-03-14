@@ -1,4 +1,17 @@
-import type { AgentIdentity, ApiResponse, PolicyResult, PolicyRule } from "@steward/shared";
+import type { AgentBalance, AgentIdentity, ApiResponse, PolicyResult, PolicyRule } from "@steward/shared";
+
+export interface BatchAgentSpec {
+  id: string;
+  name: string;
+  platformId?: string;
+}
+
+export interface BatchCreateResult {
+  created: AgentIdentity[];
+  errors: Array<{ id: string; error: string }>;
+}
+
+export type GetBalanceResult = AgentBalance;
 
 export interface StewardClientConfig {
   baseUrl: string;
@@ -173,6 +186,44 @@ export class StewardClient {
     }
 
     return response.data;
+  }
+
+  /**
+   * Get the on-chain native balance for an agent wallet.
+   * Optionally pass a chainId to query a specific network (defaults to the server's active chain).
+   */
+  async getBalance(agentId: string, chainId?: number): Promise<GetBalanceResult> {
+    const params = chainId ? `?chainId=${chainId}` : "";
+    const response = await this.request<AgentBalance, StewardErrorResponse>(
+      `/agents/${encodeURIComponent(agentId)}/balance${params}`,
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Create multiple agent wallets in a single request.
+   * Optionally supply a shared policy set to apply to every created agent.
+   */
+  async createWalletBatch(agents: BatchAgentSpec[], policies?: PolicyRule[]): Promise<BatchCreateResult> {
+    const response = await this.request<BatchCreateResult, StewardErrorResponse>("/agents/batch", {
+      method: "POST",
+      body: JSON.stringify({ agents, applyPolicies: policies }),
+    });
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    const result = response.data;
+    return {
+      ...result,
+      created: result.created.map(parseAgentIdentity),
+    };
   }
 
   private async request<TSuccess, TFailure = unknown>(

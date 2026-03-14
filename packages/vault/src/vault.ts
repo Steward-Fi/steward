@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
-import { createWalletClient, http, type Chain } from "viem";
+import { createPublicClient, createWalletClient, formatEther, http, type Chain } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { base, baseSepolia } from "viem/chains";
+import { base, baseSepolia, bsc, bscTestnet } from "viem/chains";
 
 import {
   agents,
@@ -23,6 +23,16 @@ export interface VaultConfig {
 const CHAINS: Record<number, Chain> = {
   8453: base,
   84532: baseSepolia,
+  56: bsc,
+  97: bscTestnet,
+};
+
+// Default public RPC URLs per chain (override with env / VaultConfig.rpcUrl for the active chain)
+const CHAIN_RPCS: Record<number, string> = {
+  8453: "https://mainnet.base.org",
+  84532: "https://sepolia.base.org",
+  56: "https://bsc-dataseed.binance.org",
+  97: "https://data-seed-prebsc-1-s1.bnbchain.org:8545",
 };
 
 export interface SignTransactionOptions {
@@ -209,6 +219,39 @@ export class Vault {
       });
 
     return hash;
+  }
+
+  /**
+   * Get the on-chain native balance for an agent's wallet.
+   * Returns balance in wei plus chain metadata.
+   */
+  async getBalance(
+    tenantId: string,
+    agentId: string,
+    chainId?: number
+  ): Promise<{ native: bigint; nativeFormatted: string; chainId: number; symbol: string; walletAddress: string }> {
+    const agent = await this.getAgent(tenantId, agentId);
+    if (!agent) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+
+    const resolvedChainId = chainId ?? this.config.chainId ?? 8453;
+    const chain = CHAINS[resolvedChainId];
+    if (!chain) {
+      throw new Error(`Unsupported chain: ${resolvedChainId}`);
+    }
+
+    const rpcUrl = CHAIN_RPCS[resolvedChainId] ?? this.config.rpcUrl;
+    const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
+    const native = await publicClient.getBalance({ address: agent.walletAddress as `0x${string}` });
+
+    return {
+      native,
+      nativeFormatted: formatEther(native),
+      chainId: resolvedChainId,
+      symbol: chain.nativeCurrency.symbol,
+      walletAddress: agent.walletAddress,
+    };
   }
 
   /**

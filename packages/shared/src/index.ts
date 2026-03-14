@@ -119,11 +119,26 @@ export interface ApiResponse<T = unknown> {
   error?: string;
 }
 
+// ─── Balance ───
+
+export interface AgentBalance {
+  agentId: string;
+  walletAddress: string;
+  balances: {
+    native: string;          // wei as string
+    nativeFormatted: string; // human-readable (e.g. "0.005")
+    chainId: number;
+    symbol: string;          // e.g. "ETH", "BNB"
+  };
+}
+
 // ─── Constants ───
 
 export const SUPPORTED_CHAINS = {
   base: 8453,
   baseSepolia: 84532,
+  bsc: 56,
+  bscTestnet: 97,
 } as const;
 
 export const DEFAULT_CHAIN_ID = SUPPORTED_CHAINS.base;
