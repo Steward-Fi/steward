@@ -17,5 +17,6 @@
   },
   "devDependencies": {
     "drizzle-kit": "^0.31.4"
-  }
+  },
+  "description": "Drizzle ORM schema, migrations, and PostgreSQL client for Steward"
 }

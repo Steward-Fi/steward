@@ -1,86 +1,202 @@
-# Steward Monorepo
+# Steward
 
-Steward is agent wallet infrastructure with policy enforcement. It gives agents wallet access through a controlled signing layer, so users can define what an agent may sign, when approval is required, and how activity is surfaced across the API and dashboard.
+**Agent wallet infrastructure with policy enforcement.**
 
-## Packages
+AI agents need to spend money. Giving them raw private keys is insane — no limits, no oversight, no kill switch. Steward sits between the agent and its wallet, enforcing policies you define.
 
-| Path | Description |
-| --- | --- |
-| `web` | Next.js app for the steward.fi landing page and `/dashboard/*` product routes |
-| `packages/api` | Hono API that manages tenants, agents, policies, approvals, and signing flows |
-| `packages/auth` | Shared auth helpers and tenant middleware for API-facing services |
-| `packages/db` | Drizzle/Postgres client, schema, and migration entrypoints |
-| `packages/policy-engine` | Policy evaluation engine for transaction approval decisions |
-| `packages/sdk` | TypeScript client for talking to the Steward API from agents or apps |
-| `packages/shared` | Shared domain types, constants, and API contracts |
-| `packages/vault` | Secure wallet creation, key custody, and transaction signing |
-| `packages/webhooks` | Webhook delivery and retry queue primitives for Steward events |
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Base](https://img.shields.io/badge/chain-Base-0052ff.svg)](https://base.org)
+[![API](https://img.shields.io/badge/API-live-brightgreen)](https://api.steward.fi)
+
+---
+
+## How It Works
+
+```
+Agent/Platform  →  Steward SDK  →  Policy Engine  →  Vault (AES-256-GCM)  →  Chain
+                                        ↓
+                                  Approval Queue  →  Dashboard / Webhook
+```
+
+1. Agent requests a transaction through the Steward SDK
+2. Policy engine evaluates the request — spending limits, approved addresses, rate limits, time windows, auto-approve thresholds
+3. **All hard policies pass** → signed and broadcast immediately
+4. **Soft policy fails** (auto-approve threshold) → queued for human approval
+5. **Hard policy fails** → rejected immediately, webhook fired
+
+---
 
 ## Quick Start
 
-1. Install dependencies:
+```bash
+git clone https://github.com/0xSolace/steward
+cd steward
+cp .env.example .env  # edit with your postgres URL + master password
+docker compose up -d
+```
+
+The API is now running at `http://localhost:3200`.
+
+---
+
+## SDK Usage
 
 ```bash
+npm install @steward/sdk
+# or: bun add @steward/sdk
+```
+
+```typescript
+import { StewardClient } from '@steward/sdk';
+
+const steward = new StewardClient({
+  baseUrl: 'http://localhost:3200',
+  tenantId: 'my-platform',
+  apiKey: 'my-key',
+});
+
+// Create a wallet for an agent
+const agent = await steward.createWallet('agent-1', 'Trading Bot');
+console.log(agent.walletAddress); // 0x...
+
+// Set policies
+await steward.setPolicies(agent.id, [
+  {
+    id: 'limit',
+    type: 'spending-limit',
+    enabled: true,
+    config: {
+      maxPerTx:   '100000000000000000',  // 0.1 ETH
+      maxPerDay:  '1000000000000000000', // 1 ETH
+      maxPerWeek: '5000000000000000000', // 5 ETH
+    },
+  },
+  {
+    id: 'addrs',
+    type: 'approved-addresses',
+    enabled: true,
+    config: { mode: 'whitelist', addresses: ['0xDEX...'] },
+  },
+]);
+
+// Sign a transaction — returns txHash or queues for approval
+const result = await steward.signTransaction(agent.id, {
+  to: '0xDEX...',
+  value: '50000000000000000', // 0.05 ETH
+  chainId: 8453,              // Base
+});
+
+if ('txHash' in result) {
+  console.log('Signed:', result.txHash);
+} else {
+  console.log('Queued for approval:', result.status); // 'pending_approval'
+}
+```
+
+---
+
+## Policy Types
+
+| Type | What it does |
+|------|-------------|
+| `spending-limit` | Cap per transaction, per day, per week (wei) |
+| `approved-addresses` | Whitelist or blocklist destination addresses |
+| `rate-limit` | Max transactions per hour / per day |
+| `time-window` | Only allow transactions during defined UTC hours |
+| `auto-approve-threshold` | Auto-sign below threshold; queue above for human review |
+
+Policies are composable — mix and match. Hard policies (all except `auto-approve-threshold`) reject immediately on failure. The auto-approve threshold is the only soft gate; failure queues instead of rejects.
+
+---
+
+## Webhook Events
+
+Configure a webhook URL on your tenant and Steward will POST on every state change:
+
+| Event | When |
+|-------|------|
+| `approval_required` | Transaction queued for manual review |
+| `tx_signed` | Transaction signed and broadcast |
+| `tx_rejected` | Transaction rejected by a hard policy |
+| `tx_failed` | Transaction failed on-chain |
+
+```json
+{
+  "type": "approval_required",
+  "tenantId": "my-platform",
+  "agentId": "agent-1",
+  "data": {
+    "txId": "...",
+    "to": "0x...",
+    "value": "50000000000000000",
+    "policyResults": [...]
+  },
+  "timestamp": "2024-01-01T00:00:00.000Z"
+}
+```
+
+---
+
+## Live Demo
+
+- **Dashboard:** https://steward.fi/dashboard
+- **API:** https://api.steward.fi
+- **On-chain proof:** https://basescan.org/tx/0x8d7592b93cad0983b481451c6d0c05900a1c6d74ee7eadbcdc7533a77ae45dc0
+
+---
+
+## Packages
+
+This is a Bun monorepo managed with [Turborepo](https://turbo.build).
+
+| Package | Description |
+|---------|-------------|
+| [`@steward/api`](packages/api) | Hono REST API — agents, policies, approvals, signing |
+| [`@steward/vault`](packages/vault) | AES-256-GCM encrypted keystore + transaction signing via viem |
+| [`@steward/policy-engine`](packages/policy-engine) | Composable policy evaluation engine |
+| [`@steward/sdk`](packages/sdk) | TypeScript HTTP client for agents and integrations |
+| [`@steward/db`](packages/db) | Drizzle ORM schema, migrations, and Postgres client |
+| [`@steward/auth`](packages/auth) | Timing-safe API key validation and tenant middleware |
+| [`@steward/webhooks`](packages/webhooks) | Webhook dispatch and retry queue |
+| [`@steward/shared`](packages/shared) | Shared types, interfaces, and constants |
+| `web` | Next.js landing page and dashboard at steward.fi |
+
+---
+
+## Development
+
+```bash
+# Install all dependencies
 bun install
-```
 
-2. Set the environment variables used in local development:
+# Copy env and fill in values
+cp .env.example .env
 
-```bash
-DATABASE_URL=postgres://...
-STEWARD_MASTER_PASSWORD=change-me
-STEWARD_DEFAULT_TENANT_KEY=local-api-key
-RPC_URL=https://mainnet.base.org
-NEXT_PUBLIC_STEWARD_API_URL=http://localhost:3200
-NEXT_PUBLIC_STEWARD_API_KEY=local-api-key
-NEXT_PUBLIC_STEWARD_TENANT_ID=default
-```
-
-3. Start the monorepo:
-
-```bash
+# Start everything (API + Postgres via Docker, web in dev mode)
 bun run dev
 ```
 
-The root `dev` script runs the Turborepo pipeline. The web app serves the landing page and dashboard from `web`, and the API serves local backend routes on port `3200`.
+Environment variables:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DATABASE_URL` | ✅ | PostgreSQL connection string |
+| `STEWARD_MASTER_PASSWORD` | ✅ | 256-bit hex secret for vault encryption |
+| `PORT` | — | API port (default: 3200) |
+| `RPC_URL` | — | EVM RPC endpoint (default: Base mainnet) |
+| `CHAIN_ID` | — | Chain ID (default: 8453) |
+| `STEWARD_DEFAULT_TENANT_KEY` | — | Dev API key for the default tenant |
+
+---
 
 ## Architecture
 
-```text
-Agent / Client App
-        |
-        v
-  @steward/sdk
-        |
-        v
-packages/api (Hono)
-   |        |        \
-   |        |         \
-   v        v          v
-auth     policy-engine  webhooks
-   \        | 
-    \       v
-     ----> vault
-             |
-             v
-          db/shared
-             |
-             v
-         PostgreSQL / chain RPC
+The vault encrypts each agent's private key with `AES-256-GCM` using a key derived from the master password + agent ID. Keys never exist in plaintext outside of a signing operation. All signing happens in-process; the raw key is never sent over the wire.
 
-web (Next.js)
-  |- /
-  \- /dashboard/*
-     consumes API + SDK contracts
-```
+Policy evaluation is stateless and synchronous. The engine receives the transaction request plus pre-fetched spend/rate context, evaluates all enabled rules, and returns an `EvaluationResult` with per-policy pass/fail details.
 
-## Development Notes
-
-- Package management: Bun workspaces
-- Task orchestration: Turborepo
-- Main frontend: Next.js in `web`
-- Backend/runtime: Bun + TypeScript
+---
 
 ## License
 
-MIT
+[MIT](LICENSE)

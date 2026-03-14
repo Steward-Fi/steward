@@ -11,5 +11,6 @@
   },
   "dependencies": {
     "@steward/shared": "workspace:*"
-  }
+  },
+  "description": "Composable policy evaluation engine \u2014 spending limits, address filters, rate limits, time windows"
 }

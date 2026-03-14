@@ -14,5 +14,6 @@
     "@steward/shared": "workspace:*",
     "drizzle-orm": "^0.44.5",
     "viem": "^2.30.0"
-  }
+  },
+  "description": "AES-256-GCM encrypted keystore and transaction signing via viem"
 }

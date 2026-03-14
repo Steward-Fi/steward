@@ -9,5 +9,6 @@
   },
   "dependencies": {
     "@steward/shared": "workspace:*"
-  }
+  },
+  "description": "Webhook dispatch and retry queue for Steward transaction events"
 }

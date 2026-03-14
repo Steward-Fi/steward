@@ -16,5 +16,6 @@
   },
   "dependencies": {
     "@steward/shared": "workspace:*"
-  }
+  },
+  "description": "TypeScript HTTP client for the Steward agent wallet API"
 }

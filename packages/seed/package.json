@@ -11,5 +11,6 @@
     "@steward/db": "workspace:*",
     "@steward/vault": "workspace:*",
     "viem": "^2.30.0"
-  }
+  },
+  "description": "Database seed scripts for local development and demos"
 }

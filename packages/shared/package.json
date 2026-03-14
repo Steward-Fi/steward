@@ -7,5 +7,6 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch"
-  }
+  },
+  "description": "Shared domain types, interfaces, and constants for the Steward monorepo"
 }
