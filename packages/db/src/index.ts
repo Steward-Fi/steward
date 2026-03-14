@@ -65,6 +65,7 @@ export function toPolicyRule(policy: Policy): DbPolicyRule {
 export function toSignRequest(transaction: Transaction): SignRequest {
   return {
     agentId: transaction.agentId,
+    tenantId: "",
     to: transaction.toAddress,
     value: transaction.value,
     data: transaction.data ?? undefined,
@@ -79,7 +80,7 @@ export function toTxRecord(transaction: Transaction): DbTxRecord {
     status: transaction.status,
     request: toSignRequest(transaction),
     txHash: transaction.txHash ?? undefined,
-    policyResults: (transaction.policyResults as PolicyResult[]) ?? [],
+    policyResults: transaction.policyResults ?? [],
     createdAt: transaction.createdAt,
     signedAt: transaction.signedAt ?? undefined,
     confirmedAt: transaction.confirmedAt ?? undefined,

@@ -6,6 +6,7 @@ import { logger } from "hono/logger";
 import {
   agents,
   approvalQueue,
+  closeDb,
   getDb,
   policies,
   tenants,
@@ -25,9 +26,31 @@ import type {
 } from "@steward/shared";
 import { Vault } from "@steward/vault";
 
-const MASTER_PASSWORD = process.env.STEWARD_MASTER_PASSWORD || "steward-dev-password";
-const PORT = parseInt(process.env.PORT || "3200");
+const API_VERSION = process.env.API_VERSION || "0.1.0";
+const startTime = Date.now();
+const PORT = parseInt(process.env.PORT || "3200", 10);
 const DEFAULT_TENANT_ID = "default";
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX_REQUESTS = 100;
+
+function requireEnv(name: string): string {
+  const value = process.env[name]?.trim();
+
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+
+  return value;
+}
+
+const DATABASE_URL = requireEnv("DATABASE_URL");
+const MASTER_PASSWORD = requireEnv("STEWARD_MASTER_PASSWORD");
+
+if (!Number.isInteger(PORT) || PORT <= 0) {
+  throw new Error("PORT must be a positive integer");
+}
+
+process.env.DATABASE_URL = DATABASE_URL;
 
 const db = getDb();
 const vault = new Vault({
@@ -60,9 +83,53 @@ type AppVariables = {
 };
 
 const app = new Hono<{ Variables: AppVariables }>();
+const requestLog = new Map<string, { count: number; resetAt: number }>();
+let isShuttingDown = false;
 
 app.use("*", cors());
 app.use("*", logger());
+app.use("*", async (c, next) => {
+  if (c.req.path === "/health") {
+    return next();
+  }
+
+  if (isShuttingDown) {
+    return c.json<ApiResponse>({ ok: false, error: "Server is shutting down" }, 503);
+  }
+
+  const forwardedFor = c.req.header("x-forwarded-for");
+  const ip = forwardedFor?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "unknown";
+  const now = Date.now();
+  const current = requestLog.get(ip);
+
+  if (!current || current.resetAt <= now) {
+    requestLog.set(ip, {
+      count: 1,
+      resetAt: now + RATE_LIMIT_WINDOW_MS,
+    });
+    return next();
+  }
+
+  if (current.count >= RATE_LIMIT_MAX_REQUESTS) {
+    c.header("Retry-After", Math.ceil((current.resetAt - now) / 1000).toString());
+    return c.json<ApiResponse>({ ok: false, error: "Rate limit exceeded" }, 429);
+  }
+
+  current.count += 1;
+  requestLog.set(ip, current);
+
+  return next();
+});
+
+const requestLogCleanupTimer = setInterval(() => {
+  const now = Date.now();
+
+  for (const [ip, entry] of requestLog.entries()) {
+    if (entry.resetAt <= now) {
+      requestLog.delete(ip);
+    }
+  }
+}, RATE_LIMIT_WINDOW_MS);
 
 function getTenantPayload(tenant: Tenant): Tenant & TenantConfig {
   const config = tenantConfigs.get(tenant.id);
@@ -179,8 +246,14 @@ app.use("/tenants/:id/webhook", (c, next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") })
 );
 
-app.get("/", (c) => c.json({ name: "steward", version: "0.1.0", status: "running" }));
-app.get("/health", (c) => c.json({ ok: true }));
+app.get("/", (c) => c.json({ name: "steward", version: API_VERSION, status: "running" }));
+app.get("/health", (c) =>
+  c.json({
+    status: "ok",
+    version: API_VERSION,
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+  })
+);
 
 app.post("/tenants", async (c) => {
   const body = await c.req.json<{
@@ -611,4 +684,39 @@ app.get("/vault/:agentId/history", async (c) => {
   });
 });
 
-console.log(`Steward API running on :${PORT}`);
+const server = Bun.serve({
+  port: PORT,
+  fetch: (request) => app.fetch(request),
+  idleTimeout: 30,
+});
+
+const shutdown = async (signal: string) => {
+  if (isShuttingDown) {
+    return;
+  }
+
+  isShuttingDown = true;
+  console.log(`Received ${signal}, shutting down Steward API`);
+
+  server.stop(true);
+  clearInterval(requestLogCleanupTimer);
+  requestLog.clear();
+
+  try {
+    await closeDb();
+  } catch (error) {
+    console.error("Failed to close database connection cleanly", error);
+  }
+
+  process.exit(0);
+};
+
+process.on("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+
+process.on("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
+
+console.log(`Steward API running on :${server.port}`);

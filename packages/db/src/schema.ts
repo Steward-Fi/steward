@@ -11,6 +11,7 @@ import {
   uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
+import type { PolicyResult } from "@steward/shared";
 
 export const policyTypeEnum = pgEnum("policy_type", [
   "spending-limit",
@@ -110,7 +111,7 @@ export const transactions = pgTable(
     chainId: integer("chain_id").notNull(),
     txHash: varchar("tx_hash", { length: 128 }),
     policyResults: jsonb("policy_results")
-      .$type<Array<Record<string, unknown>>>()
+      .$type<PolicyResult[]>()
       .notNull()
       .default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
