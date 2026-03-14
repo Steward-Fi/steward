@@ -15,7 +15,6 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@steward/db": "workspace:*",
     "@steward/shared": "workspace:*"
   }
 }
