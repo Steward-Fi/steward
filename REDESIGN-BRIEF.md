@@ -125,7 +125,7 @@ Also look into:
 6. **Settings** (`/dashboard/settings`) - Connection config, webhook setup, SDK snippet
 
 ### Dashboard Design Notes
-- Use `@steward/sdk` for API calls (import from source, use `transpilePackages`)
+- Use `@stwd/sdk` for API calls (import from source, use `transpilePackages`)
 - All client-side rendered (`"use client"`)
 - Make empty states interesting (not just "nothing here" with an icon)
 - Status indicators should be sharp and clear

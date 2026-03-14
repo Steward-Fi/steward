@@ -263,7 +263,7 @@ const WAIFU_DEFAULT_POLICIES = [
 
 **SDK README (`packages/sdk/README.md`):**
 ```typescript
-import { StewardClient } from 'steward-sdk';
+import { StewardClient } from '@stwd/sdk';
 
 const steward = new StewardClient({
   baseUrl: 'https://api.steward.fi',

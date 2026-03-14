@@ -3,7 +3,7 @@ import { Hono, type Context, type Next } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 
-import { hashApiKey, validateApiKey } from "@steward/auth";
+import { hashApiKey, validateApiKey } from "@stwd/auth";
 import {
   agents,
   approvalQueue,
@@ -15,8 +15,8 @@ import {
   toSignRequest,
   toTxRecord,
   transactions,
-} from "@steward/db";
-import { PolicyEngine } from "@steward/policy-engine";
+} from "@stwd/db";
+import { PolicyEngine } from "@stwd/policy-engine";
 import type {
   AgentBalance,
   AgentIdentity,
@@ -25,9 +25,9 @@ import type {
   SignRequest,
   Tenant,
   TenantConfig,
-} from "@steward/shared";
-import { Vault } from "@steward/vault";
-import { WebhookDispatcher } from "@steward/webhooks";
+} from "@stwd/shared";
+import { Vault } from "@stwd/vault";
+import { WebhookDispatcher } from "@stwd/webhooks";
 
 const API_VERSION = process.env.API_VERSION || "0.1.0";
 const startTime = Date.now();

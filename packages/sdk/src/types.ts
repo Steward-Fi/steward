@@ -1,5 +1,5 @@
 // Standalone type definitions for the published SDK
-// These mirror @steward/shared but are bundled here for npm distribution
+// These mirror @stwd/shared but are bundled here for npm distribution
 
 export interface AgentIdentity {
   id: string;

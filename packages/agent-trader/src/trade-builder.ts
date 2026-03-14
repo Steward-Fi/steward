@@ -13,7 +13,7 @@
  */
 
 import { encodeFunctionData } from "viem";
-import type { SignTransactionInput } from "@steward/sdk";
+import type { SignTransactionInput } from "@stwd/sdk";
 
 // ─── Portal ABI ───────────────────────────────────────────────────────────────
 

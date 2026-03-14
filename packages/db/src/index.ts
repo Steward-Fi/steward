@@ -4,7 +4,7 @@ import type {
   PolicyRule,
   SignRequest,
   TxRecord,
-} from "@steward/shared";
+} from "@stwd/shared";
 
 export {
   closeDb,

@@ -1,4 +1,4 @@
-import type { WebhookEvent } from "@steward/shared";
+import type { WebhookEvent } from "@stwd/shared";
 
 export interface WebhookDeliveryResult {
   success: boolean;

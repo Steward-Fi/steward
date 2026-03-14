@@ -57,7 +57,7 @@ bun install
 3. Run the example:
 
 ```bash
-bun run --filter @steward/example-waifu-integration start
+bun run --filter @stwd/example-waifu-integration start
 ```
 
 You should see console output for tenant registration, wallet creation, policy installation, webhook delivery, medium-tx approval, and the final transaction history.

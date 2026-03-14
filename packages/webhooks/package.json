@@ -1,5 +1,5 @@
 {
-  "name": "@steward/webhooks",
+  "name": "@stwd/webhooks",
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
@@ -8,7 +8,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@steward/shared": "workspace:*"
+    "@stwd/shared": "workspace:*"
   },
   "description": "Webhook dispatch and retry queue for Steward transaction events"
 }

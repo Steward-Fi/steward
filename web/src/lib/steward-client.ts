@@ -1,5 +1,5 @@
 // Inline SDK client for standalone deployment
-// Mirrors @steward/sdk interface
+// Mirrors @stwd/sdk interface
 
 export interface StewardClientConfig {
   baseUrl: string;

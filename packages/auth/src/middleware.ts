@@ -1,6 +1,6 @@
 import { createMiddleware } from "hono/factory";
-import type { ApiResponse } from "@steward/shared";
-import { getDb, type Tenant } from "@steward/db";
+import type { ApiResponse } from "@stwd/shared";
+import { getDb, type Tenant } from "@stwd/db";
 
 import { validateApiKey } from "./api-keys";
 import type { AuthVariables } from "./types";

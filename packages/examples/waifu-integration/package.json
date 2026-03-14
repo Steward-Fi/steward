@@ -1,5 +1,5 @@
 {
-  "name": "@steward/example-waifu-integration",
+  "name": "@stwd/example-waifu-integration",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,8 +9,8 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
-    "@steward/sdk": "workspace:*",
-    "@steward/shared": "workspace:*"
+    "@stwd/sdk": "workspace:*",
+    "@stwd/shared": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.8.0"

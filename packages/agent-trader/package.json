@@ -1,5 +1,5 @@
 {
-  "name": "@steward/agent-trader",
+  "name": "@stwd/agent-trader",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,8 +9,8 @@
     "build": "tsc --noEmit"
   },
   "dependencies": {
-    "@steward/sdk": "workspace:*",
-    "@steward/shared": "workspace:*",
+    "@stwd/sdk": "workspace:*",
+    "@stwd/shared": "workspace:*",
     "viem": "^2.30.0"
   },
   "devDependencies": {

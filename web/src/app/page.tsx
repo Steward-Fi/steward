@@ -104,7 +104,7 @@ function Hero() {
                 filename="agent.ts"
                 language="typescript"
                 typeEffect
-                code={`import { StewardClient } from "steward-sdk"
+                code={`import { StewardClient } from "@stwd/sdk"
 
 const steward = new StewardClient({
   baseUrl: "https://api.steward.fi",
@@ -327,7 +327,7 @@ await steward.setPolicies("agent-alpha", [
             <Reveal delay={0.3}>
               <div className="mt-8">
                 <code className="text-xs text-text-tertiary font-mono">
-                  npm i steward-sdk
+                  npm i @stwd/sdk
                 </code>
               </div>
             </Reveal>

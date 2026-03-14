@@ -1,19 +1,19 @@
-# steward-sdk
+# @stwd/sdk
 
 TypeScript client for the [Steward](https://steward.fi) API. Use this in your agents, bots, or platform integrations to create wallets, set policies, and submit transactions for signing.
 
 ## Installation
 
 ```bash
-npm install steward-sdk
-# bun add steward-sdk
-# pnpm add steward-sdk
+npm install @stwd/sdk
+# bun add @stwd/sdk
+# pnpm add @stwd/sdk
 ```
 
 ## Quick Start
 
 ```typescript
-import { StewardClient } from 'steward-sdk';
+import { StewardClient } from '@stwd/sdk';
 
 const steward = new StewardClient({
   baseUrl: 'https://api.steward.fi',
@@ -355,8 +355,8 @@ class StewardApiError<TData = unknown> extends Error {
 ### Example
 
 ```typescript
-import { StewardClient, StewardApiError } from 'steward-sdk';
-import type { PolicyResult } from 'steward-sdk';
+import { StewardClient, StewardApiError } from '@stwd/sdk';
+import type { PolicyResult } from '@stwd/sdk';
 
 try {
   const result = await steward.signTransaction('agent-1', tx);

@@ -1,5 +1,5 @@
 {
-  "name": "@steward/auth",
+  "name": "@stwd/auth",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -9,8 +9,8 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@steward/db": "workspace:*",
-    "@steward/shared": "workspace:*",
+    "@stwd/db": "workspace:*",
+    "@stwd/shared": "workspace:*",
     "hono": "^4.7.0"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 {
-  "name": "@steward/api",
+  "name": "@stwd/api",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,12 +10,12 @@
     "start": "bun src/index.ts"
   },
   "dependencies": {
-    "@steward/auth": "workspace:*",
-    "@steward/db": "workspace:*",
-    "@steward/policy-engine": "workspace:*",
-    "@steward/shared": "workspace:*",
-    "@steward/vault": "workspace:*",
-    "@steward/webhooks": "workspace:*",
+    "@stwd/auth": "workspace:*",
+    "@stwd/db": "workspace:*",
+    "@stwd/policy-engine": "workspace:*",
+    "@stwd/shared": "workspace:*",
+    "@stwd/vault": "workspace:*",
+    "@stwd/webhooks": "workspace:*",
     "drizzle-orm": "^0.44.5",
     "hono": "^4.7.0",
     "viem": "^2.30.0"
@@ -23,5 +23,5 @@
   "devDependencies": {
     "@types/node": "^25.5.0"
   },
-  "description": "Hono REST API for Steward \u2014 agents, policies, approvals, and transaction signing"
+  "description": "Hono REST API for Steward — agents, policies, approvals, and transaction signing"
 }

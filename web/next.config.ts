@@ -2,7 +2,7 @@ import type { NextConfig } from "next";
 
 const config: NextConfig = {
   reactStrictMode: true,
-  transpilePackages: ["@steward/sdk", "@steward/shared"],
+  transpilePackages: ["@stwd/sdk", "@stwd/shared"],
 };
 
 export default config;

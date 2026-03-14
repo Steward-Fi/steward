@@ -1,4 +1,4 @@
-import type { PolicyRule, PolicyResult, SignRequest } from "@steward/shared";
+import type { PolicyRule, PolicyResult, SignRequest } from "@stwd/shared";
 import { evaluatePolicy, type EvaluatorContext } from "./evaluators";
 
 export interface PolicyEvaluationContext {

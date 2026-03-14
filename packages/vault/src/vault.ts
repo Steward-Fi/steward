@@ -9,8 +9,8 @@ import {
   getDb,
   toAgentIdentity,
   transactions,
-} from "@steward/db";
-import type { PolicyResult, SignRequest, TxStatus, AgentIdentity } from "@steward/shared";
+} from "@stwd/db";
+import type { PolicyResult, SignRequest, TxStatus, AgentIdentity } from "@stwd/shared";
 
 import { KeyStore, type EncryptedKey } from "./keystore";
 

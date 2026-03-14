@@ -17,7 +17,7 @@
 import { createPublicClient, http } from "viem";
 import type { PublicClient } from "viem";
 import { base } from "viem/chains";
-import type { StewardClient } from "@steward/sdk";
+import type { StewardClient } from "@stwd/sdk";
 import type { AgentState } from "./strategies/types.js";
 import type { AgentTraderConfig } from "./config.js";
 import { logWarn } from "./logger.js";

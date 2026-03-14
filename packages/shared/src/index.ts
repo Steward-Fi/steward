@@ -1,4 +1,4 @@
-// @steward/shared — types, constants, utils
+// @stwd/shared — types, constants, utils
 
 // ─── Tenancy ───
 

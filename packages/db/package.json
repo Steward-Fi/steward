@@ -1,5 +1,5 @@
 {
-  "name": "@steward/db",
+  "name": "@stwd/db",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
     "generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@steward/shared": "workspace:*",
+    "@stwd/shared": "workspace:*",
     "drizzle-orm": "^0.44.5",
     "postgres": "^3.4.7"
   },

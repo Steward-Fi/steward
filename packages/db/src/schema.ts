@@ -11,7 +11,7 @@ import {
   uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
-import type { PolicyResult } from "@steward/shared";
+import type { PolicyResult } from "@stwd/shared";
 
 export const policyTypeEnum = pgEnum("policy_type", [
   "spending-limit",

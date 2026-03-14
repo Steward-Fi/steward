@@ -1,5 +1,5 @@
 /**
- * @steward/agent-trader — Autonomous Agent Trading Service
+ * @stwd/agent-trader — Autonomous Agent Trading Service
  *
  * Entry point.  Bootstraps the service:
  *   1. Loads configuration
@@ -9,7 +9,7 @@
  *   5. Registers graceful-shutdown handlers
  */
 
-import { StewardClient } from "@steward/sdk";
+import { StewardClient } from "@stwd/sdk";
 import { loadConfig } from "./config.js";
 import { startAgentLoop } from "./loop.js";
 import type { AgentLoop } from "./loop.js";

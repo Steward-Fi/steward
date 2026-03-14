@@ -1,5 +1,5 @@
 {
-  "name": "@steward/vault",
+  "name": "@stwd/vault",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,8 +10,8 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@steward/db": "workspace:*",
-    "@steward/shared": "workspace:*",
+    "@stwd/db": "workspace:*",
+    "@stwd/shared": "workspace:*",
     "drizzle-orm": "^0.44.5",
     "viem": "^2.30.0"
   },

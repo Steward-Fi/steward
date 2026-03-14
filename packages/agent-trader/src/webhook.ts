@@ -5,7 +5,7 @@
  * registered handlers.  The server uses Bun.serve when available, falling back
  * to Node's built-in `http` module.
  *
- * Supported event types (from @steward/shared WebhookEvent):
+ * Supported event types (from @stwd/shared WebhookEvent):
  *   approval_required  — human review needed before tx proceeds
  *   tx_signed          — transaction was signed and broadcast
  *   tx_confirmed       — on-chain confirmation received
@@ -13,7 +13,7 @@
  *   tx_rejected        — policy or manual rejection
  */
 
-import type { WebhookEvent } from "@steward/shared";
+import type { WebhookEvent } from "@stwd/shared";
 import { logWebhook, logError, logInfo } from "./logger.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────

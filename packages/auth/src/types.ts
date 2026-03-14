@@ -1,4 +1,4 @@
-import type { Tenant } from "@steward/db";
+import type { Tenant } from "@stwd/db";
 
 export interface AuthContext {
   tenantId: string;

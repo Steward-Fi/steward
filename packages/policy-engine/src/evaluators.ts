@@ -7,7 +7,7 @@ import type {
   AutoApproveConfig,
   RateLimitConfig,
   TimeWindowConfig,
-} from "@steward/shared";
+} from "@stwd/shared";
 
 export interface EvaluatorContext {
   request: SignRequest;

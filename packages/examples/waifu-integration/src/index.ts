@@ -1,5 +1,5 @@
-import { StewardApiError, StewardClient, type PolicyRule, type TxRecord } from "@steward/sdk";
-import type { ApiResponse, WebhookEvent } from "@steward/shared";
+import { StewardApiError, StewardClient, type PolicyRule, type TxRecord } from "@stwd/sdk";
+import type { ApiResponse, WebhookEvent } from "@stwd/shared";
 
 const BASE_CHAIN_ID = 8453;
 const USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";

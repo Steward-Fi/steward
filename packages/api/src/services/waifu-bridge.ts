@@ -9,9 +9,9 @@
 import { eq } from "drizzle-orm";
 import { parseEther } from "viem";
 
-import { getDb, policies } from "@steward/db";
-import type { AgentBalance, AgentIdentity, PolicyRule } from "@steward/shared";
-import { Vault } from "@steward/vault";
+import { getDb, policies } from "@stwd/db";
+import type { AgentBalance, AgentIdentity, PolicyRule } from "@stwd/shared";
+import { Vault } from "@stwd/vault";
 
 // BSC Mainnet — the chain waifu.fun operates on
 export const WAIFU_CHAIN_ID = 56;

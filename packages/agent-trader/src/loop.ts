@@ -12,7 +12,7 @@
  * continues on the next tick.
  */
 
-import type { StewardClient, StewardApiError } from "@steward/sdk";
+import type { StewardClient, StewardApiError } from "@stwd/sdk";
 import type { AgentTraderConfig, TraderConfig } from "./config.js";
 import type { Strategy } from "./strategies/types.js";
 import { resolveStrategy } from "./strategies/index.js";

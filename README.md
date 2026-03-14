@@ -42,12 +42,12 @@ The API is now running at `http://localhost:3200`.
 ## SDK Usage
 
 ```bash
-npm install steward-sdk
-# or: bun add steward-sdk
+npm install @stwd/sdk
+# or: bun add @stwd/sdk
 ```
 
 ```typescript
-import { StewardClient } from 'steward-sdk';
+import { StewardClient } from '@stwd/sdk';
 
 const steward = new StewardClient({
   baseUrl: 'http://localhost:3200',
@@ -151,14 +151,14 @@ This is a Bun monorepo managed with [Turborepo](https://turbo.build).
 
 | Package | Description |
 |---------|-------------|
-| [`@steward/api`](packages/api) | Hono REST API — agents, policies, approvals, signing |
-| [`@steward/vault`](packages/vault) | AES-256-GCM encrypted keystore + transaction signing via viem |
-| [`@steward/policy-engine`](packages/policy-engine) | Composable policy evaluation engine |
-| [`steward-sdk`](packages/sdk) | TypeScript HTTP client for agents and integrations (`npm i steward-sdk`) |
-| [`@steward/db`](packages/db) | Drizzle ORM schema, migrations, and Postgres client |
-| [`@steward/auth`](packages/auth) | Timing-safe API key validation and tenant middleware |
-| [`@steward/webhooks`](packages/webhooks) | Webhook dispatch and retry queue |
-| [`@steward/shared`](packages/shared) | Shared types, interfaces, and constants |
+| [`@stwd/api`](packages/api) | Hono REST API — agents, policies, approvals, signing |
+| [`@stwd/vault`](packages/vault) | AES-256-GCM encrypted keystore + transaction signing via viem |
+| [`@stwd/policy-engine`](packages/policy-engine) | Composable policy evaluation engine |
+| [`@stwd/sdk`](packages/sdk) | TypeScript HTTP client for agents and integrations (`npm i @stwd/sdk`) |
+| [`@stwd/db`](packages/db) | Drizzle ORM schema, migrations, and Postgres client |
+| [`@stwd/auth`](packages/auth) | Timing-safe API key validation and tenant middleware |
+| [`@stwd/webhooks`](packages/webhooks) | Webhook dispatch and retry queue |
+| [`@stwd/shared`](packages/shared) | Shared types, interfaces, and constants |
 | `web` | Next.js landing page and dashboard at steward.fi |
 
 ---
