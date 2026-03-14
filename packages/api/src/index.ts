@@ -57,8 +57,8 @@ process.env.DATABASE_URL = DATABASE_URL;
 const db = getDb();
 const vault = new Vault({
   masterPassword: MASTER_PASSWORD,
-  rpcUrl: process.env.RPC_URL || "https://mainnet.base.org",
-  chainId: 8453,
+  rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
+  chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
 });
 const policyEngine = new PolicyEngine();
 const webhookDispatcher = new WebhookDispatcher();
