@@ -17,5 +17,9 @@
   "devDependencies": {
     "turbo": "^2.5.0",
     "typescript": "^5.8.0"
+  },
+  "dependencies": {
+    "jose": "^6.2.1",
+    "siwe": "^3.0.0"
   }
 }

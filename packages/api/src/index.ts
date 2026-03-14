@@ -2,8 +2,10 @@ import { and, eq, gte, sql } from "drizzle-orm";
 import { Hono, type Context, type Next } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
+import { SignJWT, jwtVerify } from "jose";
+import { generateNonce, SiweMessage } from "siwe";
 
-import { hashApiKey, validateApiKey } from "@stwd/auth";
+import { generateApiKey, hashApiKey, validateApiKey } from "@stwd/auth";
 import {
   agents,
   approvalQueue,
@@ -35,6 +37,49 @@ const PORT = parseInt(process.env.PORT || "3200", 10);
 const DEFAULT_TENANT_ID = "default";
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 100;
+
+// ─── SIWE nonce store & JWT helpers ────────────────────────────────────────────
+
+const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
+
+const JWT_SECRET = new TextEncoder().encode(
+  process.env.STEWARD_MASTER_PASSWORD || "dev-secret"
+);
+const JWT_ISSUER = "steward";
+const JWT_EXPIRY = "24h";
+
+async function createSessionToken(
+  address: string,
+  tenantId: string
+): Promise<string> {
+  return new SignJWT({ address, tenantId })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setIssuer(JWT_ISSUER)
+    .setExpirationTime(JWT_EXPIRY)
+    .sign(JWT_SECRET);
+}
+
+async function verifySessionToken(token: string) {
+  try {
+    const { payload } = await jwtVerify(token, JWT_SECRET, {
+      issuer: JWT_ISSUER,
+    });
+    return payload as { address: string; tenantId: string };
+  } catch {
+    return null;
+  }
+}
+
+// Clean up expired nonces every 5 minutes
+const nonceCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of nonceStore.entries()) {
+    if (entry.expiresAt <= now) {
+      nonceStore.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
 
 // ─── Input validation helpers ─────────────────────────────────────────────────
 
@@ -330,6 +375,200 @@ app.get("/health", (c) =>
     uptime: Math.floor((Date.now() - startTime) / 1000),
   })
 );
+
+// ─── SIWE Auth Endpoints ──────────────────────────────────────────────────────
+
+app.get("/auth/nonce", (c) => {
+  const nonce = generateNonce();
+  nonceStore.set(nonce, {
+    nonce,
+    expiresAt: Date.now() + 5 * 60 * 1000, // 5-minute expiry
+  });
+  return c.json({ nonce });
+});
+
+app.post("/auth/verify", async (c) => {
+  const body = await safeJsonParse<{ message: string; signature: string }>(c);
+  if (!body || !body.message || !body.signature) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "message and signature are required" },
+      400
+    );
+  }
+
+  let siweMessage: SiweMessage;
+  try {
+    siweMessage = new SiweMessage(body.message);
+  } catch {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid SIWE message format" },
+      400
+    );
+  }
+
+  // Verify the nonce exists and hasn't expired
+  const storedNonce = nonceStore.get(siweMessage.nonce);
+  if (!storedNonce || storedNonce.expiresAt <= Date.now()) {
+    nonceStore.delete(siweMessage.nonce);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired nonce" },
+      401
+    );
+  }
+
+  // Verify the SIWE signature
+  try {
+    await siweMessage.verify({ signature: body.signature });
+  } catch {
+    nonceStore.delete(siweMessage.nonce);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid signature" },
+      401
+    );
+  }
+
+  // Nonce used — delete it
+  nonceStore.delete(siweMessage.nonce);
+
+  const address = siweMessage.address;
+  let isNewTenant = false;
+  let rawApiKey: string | undefined;
+
+  // Look up tenant by owner_address
+  const [existingTenant] = await db
+    .select()
+    .from(tenants)
+    .where(eq(tenants.ownerAddress, address));
+
+  let tenant = existingTenant;
+
+  if (!tenant) {
+    // Auto-create tenant
+    isNewTenant = true;
+    const tenantId = `t-${address.slice(2, 10).toLowerCase()}`;
+    const tenantName = `${address.slice(0, 6)}...${address.slice(-4)}`;
+    const apiKeyPair = generateApiKey();
+    rawApiKey = apiKeyPair.key;
+
+    const [newTenant] = await db
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: tenantName,
+        apiKeyHash: apiKeyPair.hash,
+        ownerAddress: address,
+      })
+      .onConflictDoNothing()
+      .returning();
+
+    if (!newTenant) {
+      // Conflict — tenant with that id already exists, try fetching by address again
+      const [retryTenant] = await db
+        .select()
+        .from(tenants)
+        .where(eq(tenants.ownerAddress, address));
+      if (retryTenant) {
+        tenant = retryTenant;
+        isNewTenant = false;
+      } else {
+        return c.json<ApiResponse>(
+          { ok: false, error: "Failed to create tenant" },
+          500
+        );
+      }
+    } else {
+      tenant = newTenant;
+      // Also register it in the in-memory config
+      tenantConfigs.set(tenantId, { id: tenantId, name: tenantName });
+    }
+  }
+
+  const token = await createSessionToken(address, tenant.id);
+
+  const response: Record<string, unknown> = {
+    ok: true,
+    token,
+    address,
+    tenant: {
+      id: tenant.id,
+      name: tenant.name,
+    },
+  };
+
+  // Only return raw API key on first creation
+  if (isNewTenant && rawApiKey) {
+    (response.tenant as Record<string, unknown>).apiKey = rawApiKey;
+  }
+
+  return c.json(response);
+});
+
+app.get("/auth/session", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return c.json({ authenticated: false });
+  }
+
+  const token = authHeader.slice(7);
+  const payload = await verifySessionToken(token);
+
+  if (!payload) {
+    return c.json({ authenticated: false });
+  }
+
+  return c.json({
+    authenticated: true,
+    address: payload.address,
+    tenantId: payload.tenantId,
+  });
+});
+
+app.post("/auth/logout", (c) => {
+  return c.json({ ok: true });
+});
+
+// ─── Session Auth Middleware (for dashboard routes) ───────────────────────────
+
+async function sessionAuth(
+  c: Context<{ Variables: AppVariables }>,
+  next: Next
+) {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Authorization header required" },
+      401
+    );
+  }
+
+  const token = authHeader.slice(7);
+  const payload = await verifySessionToken(token);
+  if (!payload) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired session token" },
+      401
+    );
+  }
+
+  const tenant = await findTenant(payload.tenantId);
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  c.set("tenantId", payload.tenantId);
+  c.set("tenant", tenant);
+  c.set(
+    "tenantConfig",
+    tenantConfigs.get(payload.tenantId) || {
+      id: tenant.id,
+      name: tenant.name,
+    }
+  );
+
+  await next();
+}
+
+// ─── Tenant Auth Middleware (API key based — for SDK/programmatic access) ─────
 
 app.post("/tenants", async (c) => {
   const body = await safeJsonParse<{
@@ -1026,7 +1265,9 @@ const shutdown = async (signal: string) => {
 
   server.stop(true);
   clearInterval(requestLogCleanupTimer);
+  clearInterval(nonceCleanupTimer);
   requestLog.clear();
+  nonceStore.clear();
 
   try {
     await closeDb();
