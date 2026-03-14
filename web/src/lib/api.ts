@@ -1,13 +1,36 @@
 import { StewardClient } from "./steward-client";
 
-const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "http://localhost:3200";
-const API_KEY = process.env.NEXT_PUBLIC_STEWARD_API_KEY || "";
-const TENANT_ID = process.env.NEXT_PUBLIC_STEWARD_TENANT_ID || "default";
+// API URL is still public (it's the endpoint, not a secret)
+export const API_URL =
+  process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
 
-export const steward = new StewardClient({
+// These are no longer hardcoded. They come from the auth context at runtime.
+// Default empty values for SSR / initial render.
+let _apiKey = "";
+let _tenantId = "";
+
+export function setCredentials(tenantId: string, apiKey: string) {
+  _tenantId = tenantId;
+  _apiKey = apiKey;
+  // Recreate the client with new credentials
+  _steward = new StewardClient({
+    baseUrl: API_URL,
+    apiKey: _apiKey,
+    tenantId: _tenantId,
+  });
+}
+
+let _steward = new StewardClient({
   baseUrl: API_URL,
-  apiKey: API_KEY,
-  tenantId: TENANT_ID,
+  apiKey: _apiKey,
+  tenantId: _tenantId,
 });
 
-export { API_URL, API_KEY, TENANT_ID };
+// Proxy getter so components always get the latest client
+export const steward = new Proxy({} as StewardClient, {
+  get(_target, prop) {
+    return (_steward as unknown as Record<string | symbol, unknown>)[prop];
+  },
+});
+
+export { _tenantId as TENANT_ID, _apiKey as API_KEY };

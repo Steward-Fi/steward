@@ -2,14 +2,20 @@
 
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { API_URL, TENANT_ID, API_KEY } from "@/lib/api";
+import { API_URL } from "@/lib/api";
+import { useAuth } from "@/components/auth-provider";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
 
 export default function SettingsPage() {
+  const { user, tenant } = useAuth();
   const [webhookUrl, setWebhookUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+
+  const TENANT_ID = tenant?.tenantId || "";
+  const API_KEY = tenant?.apiKey || "";
 
   async function saveWebhook(e: React.FormEvent) {
     e.preventDefault();
@@ -80,12 +86,39 @@ const policies = await steward.getPolicies("my-agent")`;
         </p>
       </div>
 
+      {/* Account */}
+      {user && (
+        <div className="space-y-4">
+          <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+            Account
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-border">
+            <div className="bg-bg p-5">
+              <label className="text-xs text-text-tertiary block mb-2">
+                Email
+              </label>
+              <span className="font-mono text-sm text-text-secondary">
+                {user.email}
+              </span>
+            </div>
+            <div className="bg-bg p-5">
+              <label className="text-xs text-text-tertiary block mb-2">
+                Workspace
+              </label>
+              <span className="font-mono text-sm text-text-secondary">
+                {tenant?.tenantName || "—"}
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Connection */}
       <div className="space-y-4">
         <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
-          Connection
+          API Connection
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-border">
+        <div className="space-y-px bg-border">
           <div className="bg-bg p-5">
             <label className="text-xs text-text-tertiary block mb-2">
               API Endpoint
@@ -106,6 +139,25 @@ const policies = await steward.getPolicies("my-agent")`;
                 {TENANT_ID}
               </span>
               <CopyButton text={TENANT_ID} />
+            </div>
+          </div>
+          <div className="bg-bg p-5">
+            <label className="text-xs text-text-tertiary block mb-2">
+              API Key
+            </label>
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-mono text-sm text-text-secondary truncate">
+                {showKey ? API_KEY : `${API_KEY.slice(0, 8)}${"•".repeat(32)}`}
+              </span>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={() => setShowKey(!showKey)}
+                  className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
+                >
+                  {showKey ? "Hide" : "Reveal"}
+                </button>
+                <CopyButton text={API_KEY} />
+              </div>
             </div>
           </div>
         </div>

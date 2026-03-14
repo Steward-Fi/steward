@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AuthWrapper } from "@/components/auth-wrapper";
 
 export const metadata: Metadata = {
   title: "Steward — Agent Wallet Infrastructure",
@@ -39,7 +40,9 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body className="noise-overlay">{children}</body>
+      <body className="noise-overlay">
+        <AuthWrapper>{children}</AuthWrapper>
+      </body>
     </html>
   );
 }

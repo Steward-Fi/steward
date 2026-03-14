@@ -8,6 +8,8 @@
     "start": "next start --port 3202"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.9.0",
+    "@supabase/supabase-js": "^2.99.1",
     "framer-motion": "^12.36.0",
     "next": "^15.3.0",
     "react": "^19.0.0",

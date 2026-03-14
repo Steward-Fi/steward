@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
-import { steward, API_URL, TENANT_ID, API_KEY } from "@/lib/api";
+import { steward, API_URL } from "@/lib/api";
+import { useAuth } from "@/components/auth-provider";
 import { shortenAddress, formatDate, formatWei } from "@/lib/utils";
 import { getChainSymbol } from "@/lib/chains";
 import { ChainBadge } from "@/components/chain-badge";
@@ -32,6 +33,9 @@ interface Toast {
 }
 
 export default function ApprovalsPage() {
+  const { tenant } = useAuth();
+  const TENANT_ID = tenant?.tenantId || "";
+  const API_KEY = tenant?.apiKey || "";
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

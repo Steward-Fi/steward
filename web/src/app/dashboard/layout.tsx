@@ -1,12 +1,40 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { DashboardNav } from "@/components/dashboard-nav";
+import { useAuth } from "@/components/auth-provider";
 
 export default function DashboardLayout({
   children,
 }: {
   children: React.ReactNode;
 }) {
+  const { user, tenant, loading } = useAuth();
+  const router = useRouter();
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    if (loading) return;
+    if (!user) {
+      router.push("/login");
+      return;
+    }
+    if (!tenant) {
+      router.push("/onboard");
+      return;
+    }
+    setReady(true);
+  }, [user, tenant, loading, router]);
+
+  if (loading || !ready) {
+    return (
+      <div className="min-h-screen bg-bg flex items-center justify-center">
+        <div className="w-5 h-5 border border-text-tertiary border-t-accent animate-spin" />
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-bg">
       <DashboardNav />

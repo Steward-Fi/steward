@@ -2,8 +2,9 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { motion } from "framer-motion";
+import { useAuth } from "@/components/auth-provider";
 
 const links = [
   { href: "/dashboard", label: "Overview", exact: true },
@@ -15,10 +16,17 @@ const links = [
 
 export function DashboardNav() {
   const pathname = usePathname();
+  const router = useRouter();
+  const { user, tenant, signOut } = useAuth();
 
   function isActive(href: string, exact?: boolean) {
     if (exact) return pathname === href;
     return pathname.startsWith(href);
+  }
+
+  async function handleSignOut() {
+    await signOut();
+    router.push("/login");
   }
 
   return (
@@ -63,14 +71,19 @@ export function DashboardNav() {
           </div>
 
           <div className="flex items-center gap-4">
-            <a
-              href="https://github.com/0xSolace/steward"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
-            >
-              GitHub
-            </a>
+            {tenant && (
+              <span className="text-xs text-text-tertiary hidden md:inline font-mono">
+                {tenant.tenantName}
+              </span>
+            )}
+            {user && (
+              <button
+                onClick={handleSignOut}
+                className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
+              >
+                Sign out
+              </button>
+            )}
           </div>
         </div>
       </div>
