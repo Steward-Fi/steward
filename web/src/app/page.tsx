@@ -54,9 +54,9 @@ function Hero() {
               transition={{ duration: 0.7, ease: easeOutExpo, delay: 0.2 }}
               className="font-display text-hero font-800 leading-[0.92] tracking-[-0.03em]"
             >
-              Managed wallets
+              Wallets agents
               <br />
-              <span className="text-[oklch(0.75_0.15_55)]">for agents</span>
+              <span className="text-[oklch(0.75_0.15_55)]">can't drain</span>
             </motion.h1>
 
             <motion.p
@@ -65,8 +65,8 @@ function Hero() {
               transition={{ duration: 0.6, ease: easeOutExpo, delay: 0.4 }}
               className="mt-8 text-lg md:text-xl text-text-secondary max-w-xl leading-relaxed"
             >
-              Policy enforcement. Multi-tenant isolation. Webhook-driven approvals.
-              One SDK call to go from raw keys to governed wallets.
+              Policy-enforced signing. Multi-tenant isolation. Human-in-the-loop approvals.
+              Your agents spend money — Steward makes sure they spend it safely.
             </motion.p>
 
             <motion.div
@@ -76,18 +76,18 @@ function Hero() {
               className="mt-10 flex items-center gap-5"
             >
               <a
+                href="/dashboard"
+                className="px-6 py-3 bg-accent text-bg font-medium text-sm hover:bg-accent-hover transition-colors"
+              >
+                Launch Dashboard
+              </a>
+              <a
                 href="https://github.com/0xSolace/steward"
                 target="_blank"
                 rel="noopener noreferrer"
-                className="px-6 py-3 bg-accent text-bg font-medium text-sm hover:bg-accent-hover transition-colors"
-              >
-                View on GitHub
-              </a>
-              <a
-                href="/dashboard"
                 className="px-6 py-3 border border-border text-text-secondary text-sm hover:text-text hover:border-text-tertiary transition-colors"
               >
-                Open Dashboard
+                View on GitHub
               </a>
             </motion.div>
           </div>
@@ -145,17 +145,15 @@ function ProblemSection() {
         </Reveal>
         <Reveal direction="up" delay={0.1}>
           <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-3xl">
-            AI agents need wallets.
+            Agents sign whatever they want.
             <br />
-            Raw private keys are{" "}
-            <span className="text-[oklch(0.75_0.15_55)]">unacceptable</span>.
+            That&apos;s{" "}
+            <span className="text-[oklch(0.75_0.15_55)]">the problem</span>.
           </h2>
         </Reveal>
         <Reveal direction="up" delay={0.2}>
           <p className="mt-8 text-lg text-text-secondary max-w-2xl leading-relaxed">
-            Every agent platform solves key management differently. Most get it wrong.
-            Hot keys with no limits. No audit trail. No way to stop a rogue agent
-            before it drains a wallet. Steward fixes this at the infrastructure layer.
+            Every agent framework ships the same thing: a raw private key in an env var, no spending limits, no restrictions. One hallucination, one prompt injection — the wallet is drained. No undo on a blockchain. Steward fixes this at the infrastructure layer.
           </p>
         </Reveal>
       </div>
@@ -169,7 +167,7 @@ function HowItWorksSection() {
     {
       num: "01",
       label: "Request",
-      desc: "Agent submits a transaction through the SDK. Includes destination, value, and calldata.",
+      desc: "Agent calls steward.signTransaction() with destination, value, and calldata. Never touches the private key.",
     },
     {
       num: "02",
@@ -179,12 +177,12 @@ function HowItWorksSection() {
     {
       num: "03",
       label: "Decide",
-      desc: "Auto-approve, queue for manual review, or reject. Webhook fires on state change.",
+      desc: "Auto-approve below threshold, queue for human review above it, or reject outright. Webhooks fire on every state change.",
     },
     {
       num: "04",
       label: "Sign",
-      desc: "Approved transactions are signed from the agent's managed wallet and broadcast to Base.",
+      desc: "Key is decrypted in-process, transaction is signed and broadcast to Base. Key is discarded immediately.",
     },
   ];
 
@@ -373,7 +371,7 @@ function PlatformsSection() {
               <p className="mt-6 text-lg text-text-secondary leading-relaxed max-w-xl">
                 Run one Steward instance for thousands of agents across isolated tenants.
                 Each tenant gets its own API key, policies, and webhook endpoints.
-                No per-transaction rent. No vendor lock-in.
+                Self-hosted. No per-transaction rent. No vendor lock-in.
               </p>
             </Reveal>
           </div>
@@ -431,6 +429,14 @@ function Footer() {
             className="hover:text-text transition-colors"
           >
             GitHub
+          </a>
+          <a
+            href="https://npmjs.com/package/@stwd/sdk"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-text transition-colors"
+          >
+            npm
           </a>
           <a
             href="https://www.synthesis.fun"

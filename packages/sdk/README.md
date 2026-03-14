@@ -235,6 +235,24 @@ await steward.setPolicies('scout-1', [
 
 ---
 
+### `getBalance`
+
+Get the on-chain native balance for an agent wallet. Optionally pass a `chainId` to query a specific network (defaults to the server's active chain).
+
+```typescript
+getBalance(agentId: string, chainId?: number): Promise<AgentBalance>
+```
+
+```typescript
+const balance = await steward.getBalance('scout-1');
+// { balance: '1500000000000000000', formatted: '1.5', symbol: 'ETH', chainId: 8453 }
+
+// Query a specific chain
+const bscBalance = await steward.getBalance('scout-1', 56);
+```
+
+---
+
 ### `getHistory`
 
 Retrieve signing history for an agent.
@@ -247,6 +265,59 @@ getHistory(agentId: string): Promise<StewardHistoryEntry[]>
 interface StewardHistoryEntry {
   timestamp: number; // Unix ms
   value: string;     // wei
+}
+```
+
+---
+
+### `createWalletBatch`
+
+Create multiple agent wallets in a single request. Optionally supply a shared policy set to apply to every created agent.
+
+```typescript
+createWalletBatch(
+  agents: BatchAgentSpec[],
+  policies?: PolicyRule[]
+): Promise<BatchCreateResult>
+```
+
+#### `BatchAgentSpec`
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | `string` | ✅ | Unique identifier for the agent |
+| `name` | `string` | ✅ | Human-readable label |
+| `platformId` | `string` | — | Optional external ID |
+
+#### `BatchCreateResult`
+
+```typescript
+interface BatchCreateResult {
+  created: AgentIdentity[];
+  errors: Array<{ id: string; error: string }>;
+}
+```
+
+```typescript
+const result = await steward.createWalletBatch(
+  [
+    { id: 'agent-1', name: 'Scout Alpha' },
+    { id: 'agent-2', name: 'Scout Beta' },
+    { id: 'agent-3', name: 'Scout Gamma' },
+  ],
+  [
+    {
+      id: 'spend',
+      type: 'spending-limit',
+      enabled: true,
+      config: { maxPerTx: '100000000000000000', maxPerDay: '500000000000000000' },
+    },
+  ]
+);
+
+console.log(`Created ${result.created.length} agents`);
+if (result.errors.length) {
+  console.warn('Failures:', result.errors);
 }
 ```
 
