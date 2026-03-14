@@ -1,4 +1,4 @@
-import type { AgentBalance, AgentIdentity, ApiResponse, PolicyResult, PolicyRule } from "@steward/shared";
+import type { AgentBalance, AgentIdentity, ApiResponse, PolicyResult, PolicyRule } from "./types";
 
 export interface BatchAgentSpec {
   id: string;

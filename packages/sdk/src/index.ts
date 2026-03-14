@@ -17,9 +17,13 @@ export type {
   AgentBalance,
   AgentIdentity,
   ApiResponse,
+  ApprovedAddressesConfig,
+  AutoApproveConfig,
   PolicyResult,
   PolicyRule,
-  SignRequest,
-  TxRecord,
-  TxStatus,
-} from "@steward/shared";
+  PolicyType,
+  RateLimitConfig,
+  SpendingLimitConfig,
+  TimeWindowConfig,
+} from "./types";
+export { SUPPORTED_CHAINS } from "./types";

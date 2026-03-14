@@ -1,21 +1,40 @@
 {
-  "name": "@steward/sdk",
+  "name": "steward-sdk",
   "version": "0.1.0",
+  "description": "TypeScript SDK for Steward — agent wallet infrastructure with policy enforcement",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "default": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "@steward/shared": "workspace:*"
-  },
-  "description": "TypeScript HTTP client for the Steward agent wallet API"
+  "keywords": [
+    "steward",
+    "agent",
+    "wallet",
+    "policy",
+    "ethereum",
+    "base",
+    "web3",
+    "ai-agent",
+    "sdk"
+  ],
+  "author": "0xSolace",
+  "license": "MIT",
+  "homepage": "https://steward.fi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0xSolace/steward"
+  }
 }
