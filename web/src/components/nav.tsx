@@ -1,6 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
+import Image from "next/image";
 import Link from "next/link";
 
 export function Nav() {
@@ -15,11 +16,9 @@ export function Nav() {
           "linear-gradient(to bottom, rgba(11,10,9,0.95) 0%, rgba(11,10,9,0) 100%)",
       }}
     >
-      <Link
-        href="/"
-        className="font-display text-lg font-bold tracking-tight text-text hover:text-accent transition-colors"
-      >
-        steward
+      <Link href="/" className="flex items-center gap-2.5 hover:opacity-80 transition-opacity">
+        <Image src="/logo.png" alt="Steward" width={24} height={24} className="w-6 h-6" />
+        <span className="font-display text-lg font-bold tracking-tight text-text">steward</span>
       </Link>
 
       <div className="flex items-center gap-8">

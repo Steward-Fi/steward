@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "framer-motion";
@@ -25,11 +26,9 @@ export function DashboardNav() {
       <div className="max-w-[1400px] mx-auto px-6 md:px-10">
         <div className="flex items-center justify-between h-14">
           <div className="flex items-center gap-10">
-            <Link
-              href="/"
-              className="font-display text-base font-bold tracking-tight text-text hover:text-accent transition-colors"
-            >
-              steward
+            <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+              <Image src="/logo.png" alt="Steward" width={20} height={20} className="w-5 h-5" />
+              <span className="font-display text-base font-bold tracking-tight text-text">steward</span>
             </Link>
 
             <nav className="flex items-center gap-1">

@@ -1,6 +1,7 @@
 "use client";
 
 import { motion, useScroll, useTransform } from "framer-motion";
+import Image from "next/image";
 import { useRef } from "react";
 import { Nav } from "@/components/nav";
 import { Reveal, StaggerContainer, StaggerItem } from "@/components/motion-wrapper";
@@ -27,6 +28,11 @@ function Hero() {
         <div className="absolute top-0 left-[70%] w-px h-full bg-border-subtle opacity-30" />
         <div className="absolute top-[30%] left-0 w-full h-px bg-border-subtle opacity-20" />
         <div className="absolute top-[60%] left-0 w-full h-px bg-border-subtle opacity-15" />
+      </div>
+
+      {/* Compass star watermark */}
+      <div className="absolute top-1/2 right-[5%] -translate-y-1/2 opacity-[0.04] pointer-events-none hidden lg:block">
+        <Image src="/logo.png" alt="" width={600} height={600} className="w-[500px] h-[500px]" />
       </div>
 
       <motion.div style={{ opacity, y }} className="relative max-w-[1400px] mx-auto w-full">
@@ -409,7 +415,10 @@ function Footer() {
     <footer className="border-t border-border-subtle px-6 md:px-10 py-12">
       <div className="max-w-[1400px] mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
         <div>
-          <span className="font-display text-base font-bold tracking-tight">steward</span>
+          <div className="flex items-center gap-2">
+            <Image src="/logo.png" alt="" width={18} height={18} className="w-[18px] h-[18px] opacity-60" />
+            <span className="font-display text-base font-bold tracking-tight">steward</span>
+          </div>
           <p className="text-xs text-text-tertiary mt-1">
             Agent wallet infrastructure. Built for Synthesis 2026.
           </p>

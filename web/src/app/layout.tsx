@@ -5,10 +5,30 @@ export const metadata: Metadata = {
   title: "Steward — Agent Wallet Infrastructure",
   description:
     "Managed wallets for AI agents with policy enforcement, multi-tenant isolation, and webhook-driven approvals. Self-hosted.",
+  icons: {
+    icon: [
+      { url: "/favicon.ico", sizes: "32x32" },
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [
+      { url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" },
+    ],
+  },
+  manifest: "/site.webmanifest",
   openGraph: {
     title: "Steward — Agent Wallet Infrastructure",
-    description: "Managed wallets for AI agents. Policy enforcement. Self-hosted.",
+    description:
+      "Managed wallets for AI agents. Policy enforcement. Self-hosted.",
     type: "website",
+    images: [
+      {
+        url: "/logo.png",
+        width: 1463,
+        height: 1463,
+        alt: "Steward compass star logo",
+      },
+    ],
   },
 };
 
