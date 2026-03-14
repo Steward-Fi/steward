@@ -19,6 +19,11 @@ import type {
   TxRecord,
 } from "@/lib/steward-client";
 
+interface BalanceInfo {
+  balance: string;
+  formatted?: string;
+}
+
 // All 5 canonical policy types with sensible display defaults
 const ALL_POLICY_TYPES: { type: string; defaultConfig: Record<string, unknown> }[] = [
   {
@@ -64,7 +69,9 @@ export default function AgentDetailPage() {
   const [agent, setAgent] = useState<AgentIdentity | null>(null);
   const [policies, setPolicies] = useState<PolicyRule[]>([]);
   const [transactions, setTransactions] = useState<TxRecord[]>([]);
+  const [balance, setBalance] = useState<BalanceInfo | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"transactions" | "policies">(
     "transactions"
   );
@@ -76,16 +83,25 @@ export default function AgentDetailPage() {
   async function loadAgent() {
     try {
       setLoading(true);
+      setError(null);
       const [agentData, policyData, txData] = await Promise.all([
         steward.getAgent(agentId),
-        steward.getPolicies(agentId),
-        steward.getHistory(agentId),
+        steward.getPolicies(agentId).catch(() => [] as PolicyRule[]),
+        steward.getHistory(agentId).catch(() => [] as TxRecord[]),
       ]);
       setAgent(agentData);
       setPolicies(mergePolicies(policyData));
       setTransactions(txData);
-    } catch {
-      /* failed */
+
+      // Fetch balance separately (non-blocking)
+      try {
+        const balanceData = await steward.getBalance(agentId);
+        setBalance(balanceData as BalanceInfo);
+      } catch {
+        /* balance endpoint may not be available */
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to load agent");
     } finally {
       setLoading(false);
     }
@@ -99,6 +115,31 @@ export default function AgentDetailPage() {
           {[...Array(3)].map((_, i) => (
             <div key={i} className="bg-bg p-8 h-28 animate-pulse" />
           ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="py-20 text-center">
+        <p className="font-display text-lg font-600 text-text-secondary">
+          Failed to load agent
+        </p>
+        <p className="text-sm text-text-tertiary mt-2 font-mono">{error}</p>
+        <div className="flex items-center justify-center gap-3 mt-6">
+          <button
+            onClick={loadAgent}
+            className="text-xs px-4 py-2 bg-accent text-bg hover:bg-accent-hover transition-colors"
+          >
+            Retry
+          </button>
+          <Link
+            href="/dashboard/agents"
+            className="text-xs px-4 py-2 text-text-tertiary hover:text-text-secondary transition-colors"
+          >
+            Back to Agents
+          </Link>
         </div>
       </div>
     );
@@ -189,8 +230,14 @@ export default function AgentDetailPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-4 gap-px bg-border">
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-px bg-border">
         {[
+          {
+            label: "Balance",
+            value: balance
+              ? `${formatWei(balance.balance || "0")} ETH`
+              : "—",
+          },
           { label: "Transactions", value: transactions.length },
           {
             label: "Pending",

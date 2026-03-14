@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --noEmit",
     "dev": "tsc --watch"
   },
   "description": "Shared domain types, interfaces, and constants for the Steward monorepo"

@@ -26,4 +26,5 @@ export type {
   SpendingLimitConfig,
   TimeWindowConfig,
 } from "./types";
+export type { SignRequest, TxRecord, TxStatus } from "./types";
 export { SUPPORTED_CHAINS } from "./types";

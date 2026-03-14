@@ -13,6 +13,7 @@ const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
 export default function AgentsPage() {
   const [agents, setAgents] = useState<AgentIdentity[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -25,10 +26,11 @@ export default function AgentsPage() {
   async function loadAgents() {
     try {
       setLoading(true);
+      setError(null);
       const list = await steward.listAgents();
       setAgents(list);
-    } catch {
-      /* silent */
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to load agents");
     } finally {
       setLoading(false);
     }
@@ -176,6 +178,20 @@ export default function AgentsPage() {
           </motion.form>
         )}
       </AnimatePresence>
+
+      {/* Error state */}
+      {error && !loading && (
+        <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
+          <p className="text-text-secondary text-sm mb-1">Failed to load agents</p>
+          <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
+          <button
+            onClick={loadAgents}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Agent list */}
       {loading ? (

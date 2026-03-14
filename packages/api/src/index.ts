@@ -36,6 +36,52 @@ const DEFAULT_TENANT_ID = "default";
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_REQUESTS = 100;
 
+// ─── Input validation helpers ─────────────────────────────────────────────────
+
+const AGENT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,128}$/;
+const TENANT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,64}$/;
+
+function isValidAgentId(id: unknown): id is string {
+  return typeof id === "string" && AGENT_ID_RE.test(id);
+}
+
+function isValidTenantId(id: unknown): id is string {
+  return typeof id === "string" && TENANT_ID_RE.test(id);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isValidAddress(value: unknown): boolean {
+  return typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value);
+}
+
+/** Safely parse JSON body, returning null on failure instead of throwing. */
+async function safeJsonParse<T>(c: Context): Promise<T | null> {
+  try {
+    return await c.req.json<T>();
+  } catch {
+    return null;
+  }
+}
+
+/** Mask internal error details for 500 responses — log the real error server-side. */
+function sanitizeErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    // Allow known, safe error messages through
+    const safe = [
+      "already exists",
+      "not found",
+      "Unsupported chain",
+    ];
+    if (safe.some((s) => error.message.includes(s))) {
+      return error.message;
+    }
+  }
+  return "Internal server error";
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
 
@@ -89,6 +135,22 @@ type AppVariables = {
 const app = new Hono<{ Variables: AppVariables }>();
 const requestLog = new Map<string, { count: number; resetAt: number }>();
 let isShuttingDown = false;
+
+// ─── Global error handler — catches unhandled throws (bad JSON, etc.) ─────────
+app.onError((err, c) => {
+  // JSON parse errors from c.req.json()
+  if (err instanceof SyntaxError || err.message?.includes("JSON")) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  console.error("Unhandled API error:", err);
+  return c.json<ApiResponse>({ ok: false, error: "Internal server error" }, 500);
+});
+
+// ─── 404 fallback ─────────────────────────────────────────────────────────────
+app.notFound((c) =>
+  c.json<ApiResponse>({ ok: false, error: `Not found: ${c.req.method} ${c.req.path}` }, 404)
+);
 
 app.use("*", cors());
 app.use("*", logger());
@@ -264,13 +326,32 @@ app.get("/health", (c) =>
 );
 
 app.post("/tenants", async (c) => {
-  const body = await c.req.json<{
+  const body = await safeJsonParse<{
     id: string;
     name: string;
     apiKeyHash: string;
     webhookUrl?: string;
     defaultPolicies?: PolicyRule[];
-  }>();
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isValidTenantId(body.id)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id — must be 1-64 alphanumeric characters (plus _ - . :)" },
+      400,
+    );
+  }
+
+  if (!isNonEmptyString(body.name)) {
+    return c.json<ApiResponse>({ ok: false, error: "name is required and must be a non-empty string" }, 400);
+  }
+
+  if (typeof body.apiKeyHash !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "apiKeyHash is required" }, 400);
+  }
 
   const existingTenant = await findTenant(body.id);
   if (existingTenant) {
@@ -316,7 +397,19 @@ app.get("/tenants/:id", (c) => {
 app.put("/tenants/:id/webhook", async (c) => {
   const tenant = c.get("tenant");
   const tenantConfig = c.get("tenantConfig");
-  const body = await c.req.json<{ webhookUrl?: string; defaultPolicies?: PolicyRule[] }>();
+  const body = await safeJsonParse<{ webhookUrl?: string; defaultPolicies?: PolicyRule[] }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (body.webhookUrl !== undefined && typeof body.webhookUrl !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "webhookUrl must be a string" }, 400);
+  }
+
+  if (body.defaultPolicies !== undefined && !Array.isArray(body.defaultPolicies)) {
+    return c.json<ApiResponse>({ ok: false, error: "defaultPolicies must be an array" }, 400);
+  }
 
   const updatedConfig: TenantConfig = {
     ...tenantConfig,
@@ -336,7 +429,22 @@ app.put("/tenants/:id/webhook", async (c) => {
 
 app.post("/agents", async (c) => {
   const tenantId = c.get("tenantId");
-  const body = await c.req.json<{ id: string; name: string; platformId?: string }>();
+  const body = await safeJsonParse<{ id: string; name: string; platformId?: string }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isValidAgentId(body.id)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)" },
+      400,
+    );
+  }
+
+  if (!isNonEmptyString(body.name)) {
+    return c.json<ApiResponse>({ ok: false, error: "name is required and must be a non-empty string" }, 400);
+  }
 
   try {
     const identity = await vault.createAgent(tenantId, body.id, body.name, body.platformId);
@@ -398,13 +506,33 @@ app.get("/agents/:agentId/balance", async (c) => {
 
 app.post("/agents/batch", async (c) => {
   const tenantId = c.get("tenantId");
-  const body = await c.req.json<{
+  const body = await safeJsonParse<{
     agents: Array<{ id: string; name: string; platformId?: string }>;
     applyPolicies?: PolicyRule[];
-  }>();
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
 
   if (!Array.isArray(body.agents) || body.agents.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "agents array is required and must not be empty" }, 400);
+  }
+
+  // Validate each agent spec
+  for (const agentSpec of body.agents) {
+    if (!isValidAgentId(agentSpec.id)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Invalid agent id "${String(agentSpec.id)}" — must be 1-128 alphanumeric characters (plus _ - . :)` },
+        400,
+      );
+    }
+    if (!isNonEmptyString(agentSpec.name)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Agent "${agentSpec.id}" is missing a name` },
+        400,
+      );
+    }
   }
 
   const created: AgentIdentity[] = [];
@@ -468,7 +596,31 @@ app.put("/agents/:agentId/policies", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const nextPolicies = await c.req.json<PolicyRule[]>();
+  const nextPolicies = await safeJsonParse<PolicyRule[]>(c);
+
+  if (!nextPolicies || !Array.isArray(nextPolicies)) {
+    return c.json<ApiResponse>({ ok: false, error: "Request body must be a JSON array of policies" }, 400);
+  }
+
+  // Validate each policy
+  const validPolicyTypes = ["spending-limit", "approved-addresses", "auto-approve-threshold", "time-window", "rate-limit"];
+  for (const policy of nextPolicies) {
+    if (!isNonEmptyString(policy.type)) {
+      return c.json<ApiResponse>({ ok: false, error: "Each policy must have a non-empty 'type' field" }, 400);
+    }
+    if (!validPolicyTypes.includes(policy.type)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Unknown policy type "${policy.type}" — supported types: ${validPolicyTypes.join(", ")}` },
+        400,
+      );
+    }
+    if (typeof policy.enabled !== "boolean") {
+      return c.json<ApiResponse>({ ok: false, error: `Policy "${policy.id || policy.type}": enabled must be a boolean` }, 400);
+    }
+    if (typeof policy.config !== "object" || policy.config === null || Array.isArray(policy.config)) {
+      return c.json<ApiResponse>({ ok: false, error: `Policy "${policy.id || policy.type}": config must be an object` }, 400);
+    }
+  }
 
   await db.delete(policies).where(eq(policies.agentId, agentId));
 
@@ -504,7 +656,21 @@ app.post("/vault/:agentId/sign", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const request = await c.req.json<Omit<SignRequest, "agentId" | "tenantId">>();
+  const request = await safeJsonParse<Omit<SignRequest, "agentId" | "tenantId">>(c);
+  if (!request) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isNonEmptyString(request.to)) {
+    return c.json<ApiResponse>({ ok: false, error: "'to' address is required" }, 400);
+  }
+  if (!isValidAddress(request.to)) {
+    return c.json<ApiResponse>({ ok: false, error: "'to' must be a valid Ethereum address (0x + 40 hex chars)" }, 400);
+  }
+  if (request.value === undefined || request.value === null) {
+    return c.json<ApiResponse>({ ok: false, error: "'value' is required (wei amount as string)" }, 400);
+  }
+
   const signRequest: SignRequest = { ...request, tenantId, agentId };
   const policySet = await getPolicySet(tenantId, agentId);
   const stats = await getTransactionStats(agentId);
@@ -623,19 +789,20 @@ app.post("/vault/:agentId/sign", async (c) => {
       data: { txId, txHash },
     });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
+    const rawMessage = e instanceof Error ? e.message : "Unknown error";
+    console.error(`Sign transaction failed for agent ${agentId}:`, e);
 
     const webhookUrlFailed = tenantConfigs.get(tenantId)?.webhookUrl;
     if (webhookUrlFailed) {
       webhookDispatcher
         .dispatch(
-          { type: "tx_failed", tenantId, agentId, data: { error: message }, timestamp: new Date() },
+          { type: "tx_failed", tenantId, agentId, data: { error: rawMessage }, timestamp: new Date() },
           webhookUrlFailed
         )
         .catch(console.error);
     }
 
-    return c.json<ApiResponse>({ ok: false, error: message }, 500);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 
@@ -717,19 +884,20 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
       data: { txId, txHash },
     });
   } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
+    const rawMessage = e instanceof Error ? e.message : "Unknown error";
+    console.error(`Approve transaction failed for agent ${agentId}, tx ${txId}:`, e);
 
     const webhookUrlFailed = tenantConfigs.get(tenantId)?.webhookUrl;
     if (webhookUrlFailed) {
       webhookDispatcher
         .dispatch(
-          { type: "tx_failed", tenantId, agentId, data: { txId, error: message }, timestamp: new Date() },
+          { type: "tx_failed", tenantId, agentId, data: { txId, error: rawMessage }, timestamp: new Date() },
           webhookUrlFailed
         )
         .catch(console.error);
     }
 
-    return c.json<ApiResponse>({ ok: false, error: message }, 500);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
 

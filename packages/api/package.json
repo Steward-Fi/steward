@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "bun --watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc --noEmit",
     "start": "bun src/index.ts"
   },
   "dependencies": {

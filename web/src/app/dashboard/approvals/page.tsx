@@ -32,6 +32,7 @@ interface Toast {
 export default function ApprovalsPage() {
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
 
@@ -50,6 +51,7 @@ export default function ApprovalsPage() {
   async function loadPending() {
     try {
       setLoading(true);
+      setError(null);
       const agents: AgentIdentity[] = await steward.listAgents();
       const allPending: PendingItem[] = [];
 
@@ -81,8 +83,8 @@ export default function ApprovalsPage() {
           new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime()
       );
       setPending(allPending);
-    } catch {
-      /* silent */
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to load approvals");
     } finally {
       setLoading(false);
     }
@@ -191,7 +193,21 @@ export default function ApprovalsPage() {
         </AnimatePresence>
       </div>
 
-      {pending.length === 0 ? (
+      {/* Error state */}
+      {error && !loading && (
+        <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
+          <p className="text-text-secondary text-sm mb-1">Failed to load approvals</p>
+          <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
+          <button
+            onClick={loadPending}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {pending.length === 0 && !error ? (
         <div className="py-20 text-center border border-border-subtle">
           <p className="font-display text-lg font-600 text-text-secondary">
             Queue is clear

@@ -13,6 +13,7 @@
     "test": "turbo test",
     "seed": "bun packages/seed/src/index.ts"
   },
+  "packageManager": "bun@1.3.9",
   "devDependencies": {
     "turbo": "^2.5.0",
     "typescript": "^5.8.0"

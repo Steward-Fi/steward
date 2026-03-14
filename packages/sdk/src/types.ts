@@ -74,6 +74,31 @@ export interface RateLimitConfig {
   maxTxPerDay: number;
 }
 
+export type TxStatus = "pending" | "approved" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
+
+export interface SignRequest {
+  agentId: string;
+  tenantId: string;
+  to: string;
+  value: string;
+  data?: string;
+  chainId: number;
+  nonce?: number;
+  gasLimit?: string;
+}
+
+export interface TxRecord {
+  id: string;
+  agentId: string;
+  status: TxStatus;
+  request: SignRequest;
+  txHash?: string;
+  policyResults: PolicyResult[];
+  createdAt: Date;
+  signedAt?: Date;
+  confirmedAt?: Date;
+}
+
 export const SUPPORTED_CHAINS = {
   base: 8453,
   baseSepolia: 84532,

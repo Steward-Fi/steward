@@ -10,11 +10,11 @@
       },
     },
     "packages/agent-trader": {
-      "name": "@steward/agent-trader",
+      "name": "@stwd/agent-trader",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/sdk": "workspace:*",
-        "@steward/shared": "workspace:*",
+        "@stwd/sdk": "workspace:*",
+        "@stwd/shared": "workspace:*",
         "viem": "^2.30.0",
       },
       "devDependencies": {
@@ -23,15 +23,15 @@
       },
     },
     "packages/api": {
-      "name": "@steward/api",
+      "name": "@stwd/api",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/auth": "workspace:*",
-        "@steward/db": "workspace:*",
-        "@steward/policy-engine": "workspace:*",
-        "@steward/shared": "workspace:*",
-        "@steward/vault": "workspace:*",
-        "@steward/webhooks": "workspace:*",
+        "@stwd/auth": "workspace:*",
+        "@stwd/db": "workspace:*",
+        "@stwd/policy-engine": "workspace:*",
+        "@stwd/shared": "workspace:*",
+        "@stwd/vault": "workspace:*",
+        "@stwd/webhooks": "workspace:*",
         "drizzle-orm": "^0.44.5",
         "hono": "^4.7.0",
         "viem": "^2.30.0",
@@ -41,11 +41,11 @@
       },
     },
     "packages/auth": {
-      "name": "@steward/auth",
+      "name": "@stwd/auth",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/db": "workspace:*",
-        "@steward/shared": "workspace:*",
+        "@stwd/db": "workspace:*",
+        "@stwd/shared": "workspace:*",
         "hono": "^4.7.0",
       },
       "devDependencies": {
@@ -53,10 +53,10 @@
       },
     },
     "packages/db": {
-      "name": "@steward/db",
+      "name": "@stwd/db",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/shared": "workspace:*",
+        "@stwd/shared": "workspace:*",
         "drizzle-orm": "^0.44.5",
         "postgres": "^3.4.7",
       },
@@ -65,62 +65,59 @@
       },
     },
     "packages/examples/waifu-integration": {
-      "name": "@steward/example-waifu-integration",
+      "name": "@stwd/example-waifu-integration",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/sdk": "workspace:*",
-        "@steward/shared": "workspace:*",
+        "@stwd/sdk": "workspace:*",
+        "@stwd/shared": "workspace:*",
       },
       "devDependencies": {
         "typescript": "^5.8.0",
       },
     },
     "packages/policy-engine": {
-      "name": "@steward/policy-engine",
+      "name": "@stwd/policy-engine",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/shared": "workspace:*",
+        "@stwd/shared": "workspace:*",
       },
     },
     "packages/sdk": {
-      "name": "@steward/sdk",
+      "name": "@stwd/sdk",
       "version": "0.1.0",
-      "dependencies": {
-        "@steward/shared": "workspace:*",
-      },
     },
     "packages/seed": {
-      "name": "@steward/seed",
+      "name": "@stwd/seed",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/db": "workspace:*",
-        "@steward/vault": "workspace:*",
+        "@stwd/db": "workspace:*",
+        "@stwd/vault": "workspace:*",
         "viem": "^2.30.0",
       },
     },
     "packages/shared": {
-      "name": "@steward/shared",
+      "name": "@stwd/shared",
       "version": "0.1.0",
     },
     "packages/vault": {
-      "name": "@steward/vault",
+      "name": "@stwd/vault",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/db": "workspace:*",
-        "@steward/shared": "workspace:*",
+        "@stwd/db": "workspace:*",
+        "@stwd/shared": "workspace:*",
         "drizzle-orm": "^0.44.5",
         "viem": "^2.30.0",
       },
     },
     "packages/webhooks": {
-      "name": "@steward/webhooks",
+      "name": "@stwd/webhooks",
       "version": "0.1.0",
       "dependencies": {
-        "@steward/shared": "workspace:*",
+        "@stwd/shared": "workspace:*",
       },
     },
     "web": {
-      "name": "@steward/web",
+      "name": "@stwd/web",
       "version": "0.1.0",
       "dependencies": {
         "framer-motion": "^12.36.0",
@@ -298,29 +295,29 @@
 
     "@scure/bip39": ["@scure/bip39@1.6.0", "", { "dependencies": { "@noble/hashes": "~1.8.0", "@scure/base": "~1.2.5" } }, "sha512-+lF0BbLiJNwVlev4eKelw1WWLaiKXw7sSl8T6FvBlWkdX+94aGJ4o8XjUdlyhTCjd8c+B3KT3JfS8P0bLRNU6A=="],
 
-    "@steward/agent-trader": ["@steward/agent-trader@workspace:packages/agent-trader"],
+    "@stwd/agent-trader": ["@stwd/agent-trader@workspace:packages/agent-trader"],
 
-    "@steward/api": ["@steward/api@workspace:packages/api"],
+    "@stwd/api": ["@stwd/api@workspace:packages/api"],
 
-    "@steward/auth": ["@steward/auth@workspace:packages/auth"],
+    "@stwd/auth": ["@stwd/auth@workspace:packages/auth"],
 
-    "@steward/db": ["@steward/db@workspace:packages/db"],
+    "@stwd/db": ["@stwd/db@workspace:packages/db"],
 
-    "@steward/example-waifu-integration": ["@steward/example-waifu-integration@workspace:packages/examples/waifu-integration"],
+    "@stwd/example-waifu-integration": ["@stwd/example-waifu-integration@workspace:packages/examples/waifu-integration"],
 
-    "@steward/policy-engine": ["@steward/policy-engine@workspace:packages/policy-engine"],
+    "@stwd/policy-engine": ["@stwd/policy-engine@workspace:packages/policy-engine"],
 
-    "@steward/sdk": ["@steward/sdk@workspace:packages/sdk"],
+    "@stwd/sdk": ["@stwd/sdk@workspace:packages/sdk"],
 
-    "@steward/seed": ["@steward/seed@workspace:packages/seed"],
+    "@stwd/seed": ["@stwd/seed@workspace:packages/seed"],
 
-    "@steward/shared": ["@steward/shared@workspace:packages/shared"],
+    "@stwd/shared": ["@stwd/shared@workspace:packages/shared"],
 
-    "@steward/vault": ["@steward/vault@workspace:packages/vault"],
+    "@stwd/vault": ["@stwd/vault@workspace:packages/vault"],
 
-    "@steward/web": ["@steward/web@workspace:web"],
+    "@stwd/web": ["@stwd/web@workspace:web"],
 
-    "@steward/webhooks": ["@steward/webhooks@workspace:packages/webhooks"],
+    "@stwd/webhooks": ["@stwd/webhooks@workspace:packages/webhooks"],
 
     "@swc/helpers": ["@swc/helpers@0.5.15", "", { "dependencies": { "tslib": "^2.8.0" } }, "sha512-JQ5TuMi45Owi4/BIMAJBoSQoOJu12oOk/gADqlcUL9JEdHB8vyjUSsxqeNXnmXHjYKMi2WcYtezGEEhqUI/E2g=="],
 
@@ -562,11 +559,11 @@
 
     "@esbuild-kit/core-utils/esbuild": ["esbuild@0.18.20", "", { "optionalDependencies": { "@esbuild/android-arm": "0.18.20", "@esbuild/android-arm64": "0.18.20", "@esbuild/android-x64": "0.18.20", "@esbuild/darwin-arm64": "0.18.20", "@esbuild/darwin-x64": "0.18.20", "@esbuild/freebsd-arm64": "0.18.20", "@esbuild/freebsd-x64": "0.18.20", "@esbuild/linux-arm": "0.18.20", "@esbuild/linux-arm64": "0.18.20", "@esbuild/linux-ia32": "0.18.20", "@esbuild/linux-loong64": "0.18.20", "@esbuild/linux-mips64el": "0.18.20", "@esbuild/linux-ppc64": "0.18.20", "@esbuild/linux-riscv64": "0.18.20", "@esbuild/linux-s390x": "0.18.20", "@esbuild/linux-x64": "0.18.20", "@esbuild/netbsd-x64": "0.18.20", "@esbuild/openbsd-x64": "0.18.20", "@esbuild/sunos-x64": "0.18.20", "@esbuild/win32-arm64": "0.18.20", "@esbuild/win32-ia32": "0.18.20", "@esbuild/win32-x64": "0.18.20" }, "bin": { "esbuild": "bin/esbuild" } }, "sha512-ceqxoedUrcayh7Y7ZX6NdbbDzGROiyVBgC4PriJThBKSVPWnnFHZAkfI1lJT8QFkOwH4qOS2SJkS4wvpGl8BpA=="],
 
-    "@steward/api/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
+    "@stwd/api/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
-    "@steward/auth/@types/node": ["@types/node@24.12.0", "", { "dependencies": { "undici-types": "~7.16.0" } }, "sha512-GYDxsZi3ChgmckRT9HPU0WEhKLP08ev/Yfcq2AstjrDASOYCSXeyjDsHg4v5t4jOj7cyDX3vmprafKlWIG9MXQ=="],
+    "@stwd/auth/@types/node": ["@types/node@24.12.0", "", { "dependencies": { "undici-types": "~7.16.0" } }, "sha512-GYDxsZi3ChgmckRT9HPU0WEhKLP08ev/Yfcq2AstjrDASOYCSXeyjDsHg4v5t4jOj7cyDX3vmprafKlWIG9MXQ=="],
 
-    "@steward/web/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
+    "@stwd/web/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
     "bun-types/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
@@ -622,11 +619,11 @@
 
     "@esbuild-kit/core-utils/esbuild/@esbuild/win32-x64": ["@esbuild/win32-x64@0.18.20", "", { "os": "win32", "cpu": "x64" }, "sha512-kTdfRcSiDfQca/y9QIkng02avJ+NCaQvrMejlsB3RRv5sE9rRoeBPISaZpKxHELzRxZyLvNts1P27W3wV+8geQ=="],
 
-    "@steward/api/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
+    "@stwd/api/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
 
-    "@steward/auth/@types/node/undici-types": ["undici-types@7.16.0", "", {}, "sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw=="],
+    "@stwd/auth/@types/node/undici-types": ["undici-types@7.16.0", "", {}, "sha512-Zz+aZWSj8LE6zoxD+xrjh4VfkIG8Ya6LvYkZqtUQGJPZjYl53ypCaUwWqo7eI0x66KBGeRo+mlBEkMSeSZ38Nw=="],
 
-    "@steward/web/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
+    "@stwd/web/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
 
     "bun-types/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
   }

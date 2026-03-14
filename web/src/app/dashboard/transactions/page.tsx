@@ -22,6 +22,7 @@ const FILTERS = [
 export default function TransactionsPage() {
   const [transactions, setTransactions] = useState<TxWithAgent[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("all");
 
   useEffect(() => {
@@ -31,6 +32,7 @@ export default function TransactionsPage() {
   async function loadTransactions() {
     try {
       setLoading(true);
+      setError(null);
       const agents = await steward.listAgents();
       const allTx: TxWithAgent[] = [];
 
@@ -45,7 +47,7 @@ export default function TransactionsPage() {
             }))
           );
         } catch {
-          /* skip */
+          /* skip individual agent */
         }
       }
 
@@ -55,8 +57,8 @@ export default function TransactionsPage() {
           new Date(a.createdAt || 0).getTime()
       );
       setTransactions(allTx);
-    } catch {
-      /* silent */
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to load transactions");
     } finally {
       setLoading(false);
     }
@@ -100,6 +102,20 @@ export default function TransactionsPage() {
           All transactions across agents
         </p>
       </div>
+
+      {/* Error state */}
+      {error && !loading && (
+        <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
+          <p className="text-text-secondary text-sm mb-1">Failed to load transactions</p>
+          <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
+          <button
+            onClick={loadTransactions}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="flex gap-1 flex-wrap">
@@ -176,7 +192,7 @@ export default function TransactionsPage() {
               </div>
               <div className="w-28 text-right">
                 <span className="text-sm tabular-nums text-text-secondary">
-                  {formatWei(tx.request?.value || tx.value || "0")}
+                  {formatWei(tx.request?.value || tx.value || "0")} ETH
                 </span>
               </div>
               <div className="w-36 text-right">

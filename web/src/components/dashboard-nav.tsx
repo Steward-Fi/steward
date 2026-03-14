@@ -24,21 +24,21 @@ export function DashboardNav() {
   return (
     <header className="border-b border-border sticky top-0 z-40 bg-bg/90 backdrop-blur-sm">
       <div className="max-w-[1400px] mx-auto px-6 md:px-10">
-        <div className="flex items-center justify-between h-14">
-          <div className="flex items-center gap-10">
-            <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
+        <div className="flex items-center justify-between h-14 gap-4">
+          <div className="flex items-center gap-4 md:gap-10 min-w-0 flex-1">
+            <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity flex-shrink-0">
               <Image src="/logo.png" alt="Steward" width={20} height={20} className="w-5 h-5" />
               <span className="font-display text-base font-bold tracking-tight text-text">steward</span>
             </Link>
 
-            <nav className="flex items-center gap-1">
+            <nav className="flex items-center gap-1 overflow-x-auto scrollbar-hide">
               {links.map((link) => {
                 const active = isActive(link.href, link.exact);
                 return (
                   <Link
                     key={link.href}
                     href={link.href}
-                    className={`relative px-3 py-1.5 text-sm transition-colors ${
+                    className={`relative px-3 py-1.5 text-sm transition-colors whitespace-nowrap flex-shrink-0 ${
                       active
                         ? "text-text"
                         : "text-text-tertiary hover:text-text-secondary"

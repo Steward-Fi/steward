@@ -4,7 +4,7 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --noEmit",
     "dev": "tsc --watch"
   },
   "dependencies": {

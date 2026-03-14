@@ -18,8 +18,8 @@ const statusConfig: Record<string, { label: string; color: string; bg: string }>
   },
   signed: {
     label: "Signed",
-    color: "text-sky-400",
-    bg: "bg-sky-400/10",
+    color: "text-emerald-400",
+    bg: "bg-emerald-400/10",
   },
   broadcast: {
     label: "Broadcast",
@@ -33,8 +33,8 @@ const statusConfig: Record<string, { label: string; color: string; bg: string }>
   },
   failed: {
     label: "Failed",
-    color: "text-red-500",
-    bg: "bg-red-500/10",
+    color: "text-orange-400",
+    bg: "bg-orange-400/10",
   },
 };
 

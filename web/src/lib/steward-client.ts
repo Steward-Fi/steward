@@ -96,6 +96,10 @@ export class StewardClient {
     return this.request<AgentIdentity[]>("/agents");
   }
 
+  async getBalance(agentId: string) {
+    return this.request<{ balance: string; formatted?: string }>(`/agents/${agentId}/balance`);
+  }
+
   async getPolicies(agentId: string): Promise<PolicyRule[]> {
     return this.request<PolicyRule[]>(`/agents/${agentId}/policies`);
   }
