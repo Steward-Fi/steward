@@ -24,7 +24,7 @@ export function Nav() {
 
       <div className="flex items-center gap-8">
         <a
-          href="https://github.com/0xSteward"
+          href="https://github.com/0xSolace/steward"
           target="_blank"
           rel="noopener noreferrer"
           className="text-sm text-text-secondary hover:text-text transition-colors"

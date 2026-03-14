@@ -70,7 +70,7 @@ function Hero() {
               className="mt-10 flex items-center gap-5"
             >
               <a
-                href="https://github.com/0xSteward"
+                href="https://github.com/0xSolace/steward"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="px-6 py-3 bg-accent text-bg font-medium text-sm hover:bg-accent-hover transition-colors"
@@ -416,7 +416,7 @@ function Footer() {
         </div>
         <div className="flex items-center gap-6 text-sm text-text-tertiary">
           <a
-            href="https://github.com/0xSteward"
+            href="https://github.com/0xSolace/steward"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-text transition-colors"

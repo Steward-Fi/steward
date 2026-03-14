@@ -65,7 +65,7 @@ export function DashboardNav() {
 
           <div className="flex items-center gap-4">
             <a
-              href="https://github.com/0xSteward"
+              href="https://github.com/0xSolace/steward"
               target="_blank"
               rel="noopener noreferrer"
               className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
