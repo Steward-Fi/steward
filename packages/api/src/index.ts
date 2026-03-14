@@ -201,19 +201,23 @@ async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRu
 
 async function getTransactionStats(agentId: string) {
   const now = new Date();
-  const oneHourAgo = new Date(now.getTime() - 3600_000).toISOString();
-  const oneDayAgo = new Date(now.getTime() - 86400_000).toISOString();
-  const oneWeekAgo = new Date(now.getTime() - 604800_000).toISOString();
+  const oneHourAgo = new Date(now.getTime() - 3600_000);
+  const oneDayAgo = new Date(now.getTime() - 86400_000);
+  const oneWeekAgo = new Date(now.getTime() - 604800_000);
+
+  // ISO strings for raw sql`` templates (postgres.js can't serialize Date objects)
+  const oneHourAgoStr = oneHourAgo.toISOString();
+  const oneDayAgoStr = oneDayAgo.toISOString();
 
   const [stats] = await db
     .select({
-      recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgo})`,
-      recentTxCount24h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneDayAgo})`,
+      recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgoStr}::timestamptz)`,
+      recentTxCount24h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz)`,
       spentToday: sql<string>`
         coalesce(
           sum(
             case
-              when ${transactions.createdAt} >= ${oneDayAgo} then (${transactions.value})::numeric
+              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz then (${transactions.value})::numeric
               else 0
             end
           ),
