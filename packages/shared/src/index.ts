@@ -135,10 +135,42 @@ export interface AgentBalance {
 // ─── Constants ───
 
 export const SUPPORTED_CHAINS = {
-  base: 8453,
-  baseSepolia: 84532,
+  ethereum: 1,
   bsc: 56,
   bscTestnet: 97,
+  polygon: 137,
+  base: 8453,
+  arbitrum: 42161,
+  baseSepolia: 84532,
 } as const;
 
 export const DEFAULT_CHAIN_ID = SUPPORTED_CHAINS.base;
+
+// ─── Chain Metadata ───
+
+export interface ChainMeta {
+  id: number;
+  name: string;
+  symbol: string;
+  explorerUrl: string;
+  explorerTxUrl: string; // append tx hash to this
+}
+
+export const CHAIN_META: Record<number, ChainMeta> = {
+  1: { id: 1, name: "Ethereum", symbol: "ETH", explorerUrl: "https://etherscan.io", explorerTxUrl: "https://etherscan.io/tx/" },
+  56: { id: 56, name: "BSC", symbol: "BNB", explorerUrl: "https://bscscan.com", explorerTxUrl: "https://bscscan.com/tx/" },
+  97: { id: 97, name: "BSC Testnet", symbol: "tBNB", explorerUrl: "https://testnet.bscscan.com", explorerTxUrl: "https://testnet.bscscan.com/tx/" },
+  137: { id: 137, name: "Polygon", symbol: "POL", explorerUrl: "https://polygonscan.com", explorerTxUrl: "https://polygonscan.com/tx/" },
+  8453: { id: 8453, name: "Base", symbol: "ETH", explorerUrl: "https://basescan.org", explorerTxUrl: "https://basescan.org/tx/" },
+  42161: { id: 42161, name: "Arbitrum", symbol: "ETH", explorerUrl: "https://arbiscan.io", explorerTxUrl: "https://arbiscan.io/tx/" },
+  84532: { id: 84532, name: "Base Sepolia", symbol: "ETH", explorerUrl: "https://sepolia.basescan.org", explorerTxUrl: "https://sepolia.basescan.org/tx/" },
+};
+
+export function getChainMeta(chainId: number): ChainMeta | undefined {
+  return CHAIN_META[chainId];
+}
+
+export function getExplorerTxLink(chainId: number, txHash: string): string | undefined {
+  const meta = CHAIN_META[chainId];
+  return meta ? `${meta.explorerTxUrl}${txHash}` : undefined;
+}

@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 import { createPublicClient, createWalletClient, formatEther, http, type Chain } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { base, baseSepolia, bsc, bscTestnet } from "viem/chains";
+import { arbitrum, base, baseSepolia, bsc, bscTestnet, mainnet, polygon } from "viem/chains";
 
 import {
   agents,
@@ -21,18 +21,24 @@ export interface VaultConfig {
 }
 
 const CHAINS: Record<number, Chain> = {
-  8453: base,
-  84532: baseSepolia,
-  56: bsc,
-  97: bscTestnet,
+  1: mainnet,        // Ethereum
+  56: bsc,           // BSC
+  97: bscTestnet,    // BSC Testnet
+  137: polygon,      // Polygon
+  8453: base,        // Base
+  42161: arbitrum,    // Arbitrum
+  84532: baseSepolia, // Base Sepolia
 };
 
 // Default public RPC URLs per chain (override with env / VaultConfig.rpcUrl for the active chain)
 const CHAIN_RPCS: Record<number, string> = {
-  8453: "https://mainnet.base.org",
-  84532: "https://sepolia.base.org",
+  1: "https://eth.llamarpc.com",
   56: "https://bsc-dataseed.binance.org",
   97: "https://data-seed-prebsc-1-s1.bnbchain.org:8545",
+  137: "https://polygon-rpc.com",
+  8453: "https://mainnet.base.org",
+  42161: "https://arb1.arbitrum.io/rpc",
+  84532: "https://sepolia.base.org",
 };
 
 export interface SignTransactionOptions {
