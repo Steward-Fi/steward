@@ -67,7 +67,7 @@ This is not a pitch deck. Everything listed here is deployed, running, and proce
 | `@steward/api` | Hono REST API. Agents, policies, approvals, signing, health checks. Multi-tenant middleware. | 874 |
 | `@steward/vault` | AES-256-GCM encrypted keystore. Key derivation from master password + agent ID. Transaction signing via viem. Supports Base, Base Sepolia, BSC, BSC Testnet. | 282 |
 | `@steward/policy-engine` | 5 composable policy types. Stateless evaluation. Hard/soft failure modes. | 204 |
-| `@steward/sdk` | TypeScript HTTP client. `createWallet`, `signTransaction`, `setPolicies`, `getPolicies`, `getHistory`, `getBalance`, `createWalletBatch`. | 326 |
+| `steward-sdk` | TypeScript HTTP client ([npm](https://npmjs.com/package/steward-sdk)). `createWallet`, `signTransaction`, `setPolicies`, `getPolicies`, `getHistory`, `getBalance`, `createWalletBatch`. | 326 |
 | `@steward/db` | Drizzle ORM + PostgreSQL. Tenants, agents, policies, transactions, approval queue tables. Migration support. | 180 |
 | `@steward/auth` | SHA-256 + `timingSafeEqual` API key validation. Tenant-scoped middleware. | 140 |
 | `@steward/webhooks` | Fire-and-forget event dispatcher. Retry queue. 4 event types. | 120 |
@@ -115,7 +115,7 @@ This runs on real ETH. Base mainnet. Not testnet.
 Three calls. That is the entire integration surface.
 
 ```typescript
-import { StewardClient } from '@steward/sdk';
+import { StewardClient } from 'steward-sdk';
 
 const steward = new StewardClient({
   baseUrl: 'https://api.steward.fi',

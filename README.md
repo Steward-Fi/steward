@@ -42,12 +42,12 @@ The API is now running at `http://localhost:3200`.
 ## SDK Usage
 
 ```bash
-npm install @steward/sdk
-# or: bun add @steward/sdk
+npm install steward-sdk
+# or: bun add steward-sdk
 ```
 
 ```typescript
-import { StewardClient } from '@steward/sdk';
+import { StewardClient } from 'steward-sdk';
 
 const steward = new StewardClient({
   baseUrl: 'http://localhost:3200',
@@ -154,7 +154,7 @@ This is a Bun monorepo managed with [Turborepo](https://turbo.build).
 | [`@steward/api`](packages/api) | Hono REST API — agents, policies, approvals, signing |
 | [`@steward/vault`](packages/vault) | AES-256-GCM encrypted keystore + transaction signing via viem |
 | [`@steward/policy-engine`](packages/policy-engine) | Composable policy evaluation engine |
-| [`@steward/sdk`](packages/sdk) | TypeScript HTTP client for agents and integrations |
+| [`steward-sdk`](packages/sdk) | TypeScript HTTP client for agents and integrations (`npm i steward-sdk`) |
 | [`@steward/db`](packages/db) | Drizzle ORM schema, migrations, and Postgres client |
 | [`@steward/auth`](packages/auth) | Timing-safe API key validation and tenant middleware |
 | [`@steward/webhooks`](packages/webhooks) | Webhook dispatch and retry queue |

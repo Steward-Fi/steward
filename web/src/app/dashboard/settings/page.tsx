@@ -36,7 +36,7 @@ export default function SettingsPage() {
     }
   }
 
-  const sdkSnippet = `import { StewardClient } from "@steward/sdk"
+  const sdkSnippet = `import { StewardClient } from "steward-sdk"
 
 const steward = new StewardClient({
   baseUrl: "${API_URL}",
@@ -164,9 +164,9 @@ const policies = await steward.getPolicies("my-agent")`;
         <div className="border border-border bg-bg-elevated max-w-3xl">
           <div className="px-4 py-2.5 border-b border-border-subtle flex items-center justify-between">
             <span className="text-xs text-text-tertiary font-mono">
-              bun add @steward/sdk
+              npm i steward-sdk
             </span>
-            <CopyButton text="bun add @steward/sdk" />
+            <CopyButton text="npm i steward-sdk" />
           </div>
         </div>
         <div className="border border-border bg-bg-elevated max-w-3xl">
