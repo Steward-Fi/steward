@@ -1,6 +1,0 @@
-.next/
-out/
-node_modules/
-.env.local
-.vercel
-.env*.local

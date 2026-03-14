@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { syne, instrumentSans } from "@/lib/fonts";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -19,10 +18,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html
-      lang="en"
-      className={`${syne.variable} ${instrumentSans.variable}`}
-    >
+    <html lang="en">
       <body className="noise-overlay">{children}</body>
     </html>
   );

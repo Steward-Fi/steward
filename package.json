@@ -2,13 +2,8 @@
   "name": "steward",
   "private": true,
   "workspaces": [
-    "packages/auth",
-    "packages/db",
     "packages/*",
     "packages/examples/*",
-    "packages/webhooks",
-    "packages/sdk",
-    "packages/dashboard",
     "web"
   ],
   "scripts": {

@@ -1,13 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "baseUrl": ".",
-    "lib": ["ES2022", "DOM"],
     "outDir": "dist",
-    "paths": {
-      "@steward/db": ["../db/dist/index.d.ts"],
-      "@steward/shared": ["../shared/dist/index.d.ts"]
-    },
     "rootDir": "src"
   },
   "include": ["src"]

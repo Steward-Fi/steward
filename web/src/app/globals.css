@@ -44,6 +44,8 @@
   --text-4xl: 2.5rem;
   --text-hero: clamp(3.5rem, 8vw + 1rem, 8rem);
   --text-hero-sm: clamp(2.5rem, 5vw + 1rem, 5rem);
+  --font-display: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Instrument Sans", "Avenir Next", system-ui, sans-serif;
 }
 
 @layer base {
