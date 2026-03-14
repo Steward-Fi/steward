@@ -1,14 +1,24 @@
 "use client";
 
 import { useState } from "react";
+import { useAccount } from "wagmi";
 import { motion } from "framer-motion";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/components/auth-provider";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
 
+const CHAIN_NAMES: Record<number, string> = {
+  1: "Ethereum",
+  137: "Polygon",
+  8453: "Base",
+  42161: "Arbitrum",
+  56: "BNB Chain",
+};
+
 export default function SettingsPage() {
-  const { user, tenant } = useAuth();
+  const { address, tenant } = useAuth();
+  const { chainId } = useAccount();
   const [webhookUrl, setWebhookUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -87,18 +97,26 @@ const policies = await steward.getPolicies("my-agent")`;
       </div>
 
       {/* Account */}
-      {user && (
+      {address && (
         <div className="space-y-4">
           <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
             Account
           </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-border">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border">
             <div className="bg-bg p-5">
               <label className="text-xs text-text-tertiary block mb-2">
-                Email
+                Wallet
+              </label>
+              <span className="font-mono text-sm text-text-secondary break-all">
+                {address}
+              </span>
+            </div>
+            <div className="bg-bg p-5">
+              <label className="text-xs text-text-tertiary block mb-2">
+                Chain
               </label>
               <span className="font-mono text-sm text-text-secondary">
-                {user.email}
+                {chainId ? (CHAIN_NAMES[chainId] || `Chain ${chainId}`) : "\u2014"}
               </span>
             </div>
             <div className="bg-bg p-5">
@@ -106,7 +124,7 @@ const policies = await steward.getPolicies("my-agent")`;
                 Workspace
               </label>
               <span className="font-mono text-sm text-text-secondary">
-                {tenant?.tenantName || "—"}
+                {tenant?.tenantName || "\u2014"}
               </span>
             </div>
           </div>
@@ -141,25 +159,27 @@ const policies = await steward.getPolicies("my-agent")`;
               <CopyButton text={TENANT_ID} />
             </div>
           </div>
-          <div className="bg-bg p-5">
-            <label className="text-xs text-text-tertiary block mb-2">
-              API Key
-            </label>
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-mono text-sm text-text-secondary truncate">
-                {showKey ? API_KEY : `${API_KEY.slice(0, 8)}${"•".repeat(32)}`}
-              </span>
-              <div className="flex items-center gap-2 flex-shrink-0">
-                <button
-                  onClick={() => setShowKey(!showKey)}
-                  className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
-                >
-                  {showKey ? "Hide" : "Reveal"}
-                </button>
-                <CopyButton text={API_KEY} />
+          {API_KEY && (
+            <div className="bg-bg p-5">
+              <label className="text-xs text-text-tertiary block mb-2">
+                API Key
+              </label>
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-sm text-text-secondary truncate">
+                  {showKey ? API_KEY : `${API_KEY.slice(0, 8)}${"•".repeat(32)}`}
+                </span>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  <button
+                    onClick={() => setShowKey(!showKey)}
+                    className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
+                  >
+                    {showKey ? "Hide" : "Reveal"}
+                  </button>
+                  <CopyButton text={API_KEY} />
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
 

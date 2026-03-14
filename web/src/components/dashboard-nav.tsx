@@ -14,17 +14,22 @@ const links = [
   { href: "/dashboard/settings", label: "Settings" },
 ];
 
+function shortenAddr(addr: string | undefined): string {
+  if (!addr) return "";
+  return `${addr.slice(0, 6)}\u2026${addr.slice(-4)}`;
+}
+
 export function DashboardNav() {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, tenant, signOut } = useAuth();
+  const { address, tenant, signOut } = useAuth();
 
   function isActive(href: string, exact?: boolean) {
     if (exact) return pathname === href;
-    return pathname.startsWith(href);
+    return pathname?.startsWith(href) ?? false;
   }
 
-  async function handleSignOut() {
+  async function handleDisconnect() {
     await signOut();
     router.push("/login");
   }
@@ -76,14 +81,17 @@ export function DashboardNav() {
                 {tenant.tenantName}
               </span>
             )}
-            {user && (
-              <button
-                onClick={handleSignOut}
-                className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
-              >
-                Sign out
-              </button>
+            {address && (
+              <span className="text-xs text-text-tertiary hidden md:inline font-mono">
+                {shortenAddr(address)}
+              </span>
             )}
+            <button
+              onClick={handleDisconnect}
+              className="text-xs text-text-tertiary hover:text-text-secondary transition-colors"
+            >
+              Disconnect
+            </button>
           </div>
         </div>
       </div>

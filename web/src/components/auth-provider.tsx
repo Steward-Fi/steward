@@ -6,26 +6,29 @@ import {
   useEffect,
   useState,
   useCallback,
+  useRef,
   type ReactNode,
 } from "react";
-import { createClient } from "@/lib/supabase";
+import { useAccount, useSignMessage, useDisconnect } from "wagmi";
+import { SiweMessage } from "siwe";
 import { setCredentials } from "@/lib/api";
-import type { User, SupabaseClient } from "@supabase/supabase-js";
+
+const API_URL =
+  process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
 
 interface TenantInfo {
   tenantId: string;
   tenantName: string;
-  apiKey: string;
-  role: string;
+  apiKey?: string;
 }
 
 interface AuthContextType {
-  user: User | null;
+  address: string | undefined;
   tenant: TenantInfo | null;
-  supabase: SupabaseClient;
-  loading: boolean;
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  signIn: () => Promise<void>;
   signOut: () => Promise<void>;
-  refreshTenant: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -36,77 +39,158 @@ export function useAuth() {
   return ctx;
 }
 
+const TOKEN_KEY = "steward_session";
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [supabase] = useState(() => createClient());
-  const [user, setUser] = useState<User | null>(null);
+  const { address, chainId, isConnected } = useAccount();
+  const { signMessageAsync } = useSignMessage();
+  const { disconnect } = useDisconnect();
+
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const signingRef = useRef(false);
 
-  const loadTenant = useCallback(
-    async (userId: string) => {
-      const { data } = await supabase
-        .from("steward_tenants")
-        .select("tenant_id, tenant_name, api_key, role")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: true })
-        .limit(1)
-        .single();
-
-      if (data) {
-        const t = {
-          tenantId: data.tenant_id,
-          tenantName: data.tenant_name,
-          apiKey: data.api_key,
-          role: data.role,
-        };
-        setTenant(t);
-        setCredentials(t.tenantId, t.apiKey);
-      } else {
-        setTenant(null);
-      }
-    },
-    [supabase],
-  );
-
+  // Validate existing session on mount
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      const u = session?.user ?? null;
-      setUser(u);
-      if (u) {
-        loadTenant(u.id).finally(() => setLoading(false));
+    validateSession();
+  }, []);
+
+  // When wallet disconnects, clear auth state
+  useEffect(() => {
+    if (!isConnected && isAuthenticated) {
+      clearSession();
+    }
+  }, [isConnected]);
+
+  async function validateSession() {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) {
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_URL}/auth/session`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+
+      if (data.authenticated) {
+        setIsAuthenticated(true);
+        if (data.address && data.tenantId) {
+          const tenantInfo: TenantInfo = {
+            tenantId: data.tenantId,
+            tenantName: data.tenantName || data.tenantId,
+            apiKey: data.apiKey,
+          };
+          setTenant(tenantInfo);
+          if (tenantInfo.apiKey) {
+            setCredentials(tenantInfo.tenantId, tenantInfo.apiKey);
+          }
+        }
       } else {
-        setLoading(false);
+        localStorage.removeItem(TOKEN_KEY);
       }
-    });
+    } catch {
+      // Session check failed — don't clear, might be network issue
+    } finally {
+      setIsLoading(false);
+    }
+  }
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      const u = session?.user ?? null;
-      setUser(u);
-      if (u) {
-        loadTenant(u.id);
-      } else {
-        setTenant(null);
-      }
-    });
-
-    return () => subscription.unsubscribe();
-  }, [supabase, loadTenant]);
-
-  const signOut = async () => {
-    await supabase.auth.signOut();
-    setUser(null);
+  function clearSession() {
+    localStorage.removeItem(TOKEN_KEY);
+    setIsAuthenticated(false);
     setTenant(null);
-  };
+  }
 
-  const refreshTenant = async () => {
-    if (user) await loadTenant(user.id);
-  };
+  const signIn = useCallback(async () => {
+    if (!address || !chainId || signingRef.current) return;
+    signingRef.current = true;
+
+    try {
+      // 1. Get nonce
+      const nonceRes = await fetch(`${API_URL}/auth/nonce`);
+      const { nonce } = await nonceRes.json();
+
+      // 2. Construct SIWE message
+      const message = new SiweMessage({
+        domain: window.location.host,
+        address: address,
+        statement: "Sign in to Steward",
+        uri: window.location.origin,
+        version: "1",
+        chainId: chainId,
+        nonce: nonce,
+      });
+
+      const messageString = message.prepareMessage();
+
+      // 3. Sign with wallet
+      const signature = await signMessageAsync({ message: messageString });
+
+      // 4. Verify with API
+      const verifyRes = await fetch(`${API_URL}/auth/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: messageString, signature }),
+      });
+
+      const verifyData = await verifyRes.json();
+
+      if (verifyData.token) {
+        localStorage.setItem(TOKEN_KEY, verifyData.token);
+        setIsAuthenticated(true);
+
+        if (verifyData.tenant) {
+          const tenantInfo: TenantInfo = {
+            tenantId: verifyData.tenant.id,
+            tenantName: verifyData.tenant.name,
+            apiKey: verifyData.tenant.apiKey,
+          };
+          setTenant(tenantInfo);
+          if (tenantInfo.apiKey) {
+            setCredentials(tenantInfo.tenantId, tenantInfo.apiKey);
+          }
+        }
+      } else {
+        throw new Error(verifyData.error || "Verification failed");
+      }
+    } catch (err) {
+      console.error("SIWE sign-in failed:", err);
+      throw err;
+    } finally {
+      signingRef.current = false;
+    }
+  }, [address, chainId, signMessageAsync]);
+
+  const signOut = useCallback(async () => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (token) {
+      try {
+        await fetch(`${API_URL}/auth/logout`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch {
+        // Logout API call is best-effort
+      }
+    }
+    clearSession();
+    disconnect();
+  }, [disconnect]);
 
   return (
     <AuthContext.Provider
-      value={{ user, tenant, supabase, loading, signOut, refreshTenant }}
+      value={{
+        address,
+        tenant,
+        isAuthenticated,
+        isLoading,
+        signIn,
+        signOut,
+      }}
     >
       {children}
     </AuthContext.Provider>

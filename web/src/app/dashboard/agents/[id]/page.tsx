@@ -66,7 +66,7 @@ function mergePolicies(apiPolicies: PolicyRule[]): PolicyRule[] {
 
 export default function AgentDetailPage() {
   const params = useParams();
-  const agentId = params.id as string;
+  const agentId = params?.id as string;
 
   const [agent, setAgent] = useState<AgentIdentity | null>(null);
   const [policies, setPolicies] = useState<PolicyRule[]>([]);

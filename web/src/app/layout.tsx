@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { AuthWrapper } from "@/components/auth-wrapper";
+import "@rainbow-me/rainbowkit/styles.css";
+import { Providers } from "@/components/providers";
 
 export const metadata: Metadata = {
   title: "Steward — Agent Wallet Infrastructure",
@@ -41,7 +42,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="noise-overlay">
-        <AuthWrapper>{children}</AuthWrapper>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

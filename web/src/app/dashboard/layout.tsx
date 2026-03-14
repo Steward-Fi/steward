@@ -10,24 +10,20 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { user, tenant, loading } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
   const router = useRouter();
   const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    if (loading) return;
-    if (!user) {
+    if (isLoading) return;
+    if (!isAuthenticated) {
       router.push("/login");
       return;
     }
-    if (!tenant) {
-      router.push("/onboard");
-      return;
-    }
     setReady(true);
-  }, [user, tenant, loading, router]);
+  }, [isAuthenticated, isLoading, router]);
 
-  if (loading || !ready) {
+  if (isLoading || !ready) {
     return (
       <div className="min-h-screen bg-bg flex items-center justify-center">
         <div className="w-5 h-5 border border-text-tertiary border-t-accent animate-spin" />
