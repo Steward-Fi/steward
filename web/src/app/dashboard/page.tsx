@@ -5,7 +5,9 @@ import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import { steward } from "@/lib/api";
 import { shortenAddress, formatDate, formatWei, statusColor } from "@/lib/utils";
+import { getChainSymbol } from "@/lib/chains";
 import { StatusBadge } from "@/components/status-badge";
+import { ChainBadge } from "@/components/chain-badge";
 import type { AgentIdentity, TxRecord } from "@/lib/steward-client";
 
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
@@ -209,6 +211,7 @@ export default function DashboardOverview() {
               >
                 <div className="flex items-center gap-4 min-w-0">
                   <StatusBadge status={tx.status} />
+                  <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
                   <Link
                     href={`/dashboard/agents/${tx.agentId}`}
                     className="text-sm text-text hover:text-accent transition-colors truncate"
@@ -227,7 +230,7 @@ export default function DashboardOverview() {
                 </div>
                 <div className="flex items-center gap-6 flex-shrink-0">
                   <span className="text-sm tabular-nums text-text-secondary">
-                    {formatWei(tx.request?.value || tx.value || "0")} ETH
+                    {formatWei(tx.request?.value || tx.value || "0", getChainSymbol(tx.request?.chainId || tx.chainId || 8453))}
                   </span>
                   <span className="text-xs text-text-tertiary hidden md:inline">
                     {tx.createdAt ? formatDate(tx.createdAt) : ""}

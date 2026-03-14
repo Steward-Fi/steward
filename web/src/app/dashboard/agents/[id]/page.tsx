@@ -11,7 +11,9 @@ import {
   formatWei,
   policyTypeLabel,
 } from "@/lib/utils";
+import { getChainSymbol, getExplorerTxLink, getExplorerAddressLink } from "@/lib/chains";
 import { StatusBadge } from "@/components/status-badge";
+import { ChainBadge } from "@/components/chain-badge";
 import { CopyButton } from "@/components/copy-button";
 import type {
   AgentIdentity,
@@ -219,12 +221,12 @@ export default function AgentDetailPage() {
             </div>
           </div>
           <a
-            href={`https://basescan.org/address/${agent.walletAddress}`}
+            href={getExplorerAddressLink(transactions[0]?.request?.chainId || transactions[0]?.chainId || 8453, agent.walletAddress) || `https://basescan.org/address/${agent.walletAddress}`}
             target="_blank"
             rel="noopener noreferrer"
             className="text-xs text-text-tertiary hover:text-text-secondary transition-colors px-3 py-1.5 border border-border hover:border-border flex-shrink-0"
           >
-            BaseScan ↗
+            Explorer ↗
           </a>
         </div>
       </div>
@@ -319,6 +321,7 @@ export default function AgentDetailPage() {
               {/* Column headers */}
               <div className="hidden md:flex items-center py-2 border-b border-border text-xs text-text-tertiary tracking-wider uppercase px-2">
                 <span className="w-28">Status</span>
+                <span className="w-20">Chain</span>
                 <span className="flex-1">To</span>
                 <span className="w-28 text-right">Value</span>
                 <span className="w-36 text-right">TX Hash</span>
@@ -335,6 +338,9 @@ export default function AgentDetailPage() {
                   <div className="w-28">
                     <StatusBadge status={tx.status} />
                   </div>
+                  <div className="w-20">
+                    <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
+                  </div>
                   <div className="flex-1 min-w-0">
                     <span className="font-mono text-xs text-text-tertiary">
                       {shortenAddress(
@@ -345,13 +351,13 @@ export default function AgentDetailPage() {
                   </div>
                   <div className="w-28 text-right">
                     <span className="text-sm tabular-nums text-text-secondary">
-                      {formatWei(tx.request?.value || tx.value || "0")} ETH
+                      {formatWei(tx.request?.value || tx.value || "0", getChainSymbol(tx.request?.chainId || tx.chainId || 8453))}
                     </span>
                   </div>
                   <div className="w-36 text-right">
                     {tx.txHash ? (
                       <a
-                        href={`https://basescan.org/tx/${tx.txHash}`}
+                        href={getExplorerTxLink(tx.request?.chainId || tx.chainId || 8453, tx.txHash) || "#"}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="font-mono text-xs text-accent hover:text-accent-hover transition-colors"

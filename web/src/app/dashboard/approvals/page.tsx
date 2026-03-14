@@ -5,6 +5,8 @@ import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
 import { steward, API_URL, TENANT_ID, API_KEY } from "@/lib/api";
 import { shortenAddress, formatDate, formatWei } from "@/lib/utils";
+import { getChainSymbol } from "@/lib/chains";
+import { ChainBadge } from "@/components/chain-badge";
 import type { AgentIdentity } from "@/lib/steward-client";
 
 interface PendingItem {
@@ -236,6 +238,7 @@ export default function ApprovalsPage() {
                       <span className="text-xs px-2 py-0.5 bg-amber-400/10 text-amber-400 font-medium">
                         Pending
                       </span>
+                      <ChainBadge chainId={item.transaction?.request?.chainId || item.transaction?.chainId || 8453} />
                       <span className="text-xs text-text-tertiary">
                         {formatDate(item.requestedAt)}
                       </span>
@@ -268,17 +271,9 @@ export default function ApprovalsPage() {
                           {formatWei(
                             item.transaction?.request?.value ||
                               item.transaction?.value ||
-                              "0"
-                          )}{" "}
-                          ETH
-                        </span>
-                      </span>
-                      <span>
-                        Chain:{" "}
-                        <span className="text-text-secondary">
-                          {item.transaction?.request?.chainId ||
-                            item.transaction?.chainId ||
-                            8453}
+                              "0",
+                            getChainSymbol(item.transaction?.request?.chainId || item.transaction?.chainId || 8453)
+                          )}
                         </span>
                       </span>
                       {item.transaction?.request?.data && (

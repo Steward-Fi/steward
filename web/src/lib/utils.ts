@@ -3,18 +3,16 @@ export function shortenAddress(addr: string, chars = 4): string {
   return `${addr.slice(0, chars + 2)}...${addr.slice(-chars)}`;
 }
 
-export function formatWei(wei: string): string {
+export function formatWei(wei: string, symbol?: string): string {
   if (!wei) return "0";
   try {
     const eth = Number(BigInt(wei)) / 1e18;
-    if (eth === 0) return "0";
-    if (eth < 0.0001) return "<0.0001";
-    return eth.toFixed(4);
+    const formatted = eth === 0 ? "0" : eth < 0.0001 ? "<0.0001" : eth.toFixed(4);
+    return symbol ? `${formatted} ${symbol}` : formatted;
   } catch {
     const eth = Number(wei) / 1e18;
-    if (eth === 0) return "0";
-    if (eth < 0.0001) return "<0.0001";
-    return eth.toFixed(4);
+    const formatted = eth === 0 ? "0" : eth < 0.0001 ? "<0.0001" : eth.toFixed(4);
+    return symbol ? `${formatted} ${symbol}` : formatted;
   }
 }
 

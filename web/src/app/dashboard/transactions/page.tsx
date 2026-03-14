@@ -5,7 +5,9 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { steward } from "@/lib/api";
 import { shortenAddress, formatDate, formatWei } from "@/lib/utils";
+import { getChainSymbol, getExplorerTxLink } from "@/lib/chains";
 import { StatusBadge } from "@/components/status-badge";
+import { ChainBadge } from "@/components/chain-badge";
 import type { TxRecord } from "@/lib/steward-client";
 
 type TxWithAgent = TxRecord & { agentName?: string };
@@ -156,6 +158,7 @@ export default function TransactionsPage() {
           {/* Table header */}
           <div className="hidden md:flex items-center py-2 border-b border-border text-xs text-text-tertiary tracking-wider uppercase px-2">
             <span className="w-28">Status</span>
+            <span className="w-20">Chain</span>
             <span className="flex-1">Agent</span>
             <span className="w-36">To</span>
             <span className="w-28 text-right">Value</span>
@@ -173,6 +176,9 @@ export default function TransactionsPage() {
             >
               <div className="w-28">
                 <StatusBadge status={tx.status} />
+              </div>
+              <div className="w-20">
+                <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
               </div>
               <div className="flex-1 min-w-0">
                 <Link
@@ -192,13 +198,13 @@ export default function TransactionsPage() {
               </div>
               <div className="w-28 text-right">
                 <span className="text-sm tabular-nums text-text-secondary">
-                  {formatWei(tx.request?.value || tx.value || "0")} ETH
+                  {formatWei(tx.request?.value || tx.value || "0", getChainSymbol(tx.request?.chainId || tx.chainId || 8453))}
                 </span>
               </div>
               <div className="w-36 text-right">
                 {tx.txHash ? (
                   <a
-                    href={`https://basescan.org/tx/${tx.txHash}`}
+                    href={getExplorerTxLink(tx.request?.chainId || tx.chainId || 8453, tx.txHash) || "#"}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="font-mono text-xs text-text-tertiary hover:text-text-secondary transition-colors"
