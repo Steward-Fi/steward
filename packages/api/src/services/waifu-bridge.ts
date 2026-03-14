@@ -13,6 +13,8 @@ import { getDb, policies } from "@stwd/db";
 import type { AgentBalance, AgentIdentity, PolicyRule } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
 
+const AGENT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,128}$/;
+
 // BSC Mainnet — the chain waifu.fun operates on
 export const WAIFU_CHAIN_ID = 56;
 
@@ -85,6 +87,7 @@ export class WaifuBridge {
    * @param name          — human-readable agent name (e.g. "Milady Trader")
    * @param platformId    — waifu.fun platform identifier (e.g. "waifu.fun:1")
    * @param portalAddress — optional Flap Protocol portal address to whitelist
+   * @throws Error if waifuAgentId is invalid or agent already exists
    */
   async provisionAgent(
     waifuAgentId: string,
@@ -92,28 +95,56 @@ export class WaifuBridge {
     platformId: string,
     portalAddress?: string
   ): Promise<ProvisionAgentResult> {
+    if (!waifuAgentId || !AGENT_ID_RE.test(waifuAgentId)) {
+      throw new Error(`Invalid agent ID "${waifuAgentId}" — must be 1-128 alphanumeric characters (plus _ - . :)`);
+    }
+    if (!name || name.trim().length === 0) {
+      throw new Error("Agent name is required");
+    }
+    if (!platformId || platformId.trim().length === 0) {
+      throw new Error("platformId is required for waifu.fun provisioning");
+    }
+
+    console.log(`[WaifuBridge] Provisioning agent "${waifuAgentId}" (${name}) for tenant ${this.tenantId}`);
+
     // Create the Steward wallet
-    const agent = await this.vault.createAgent(
-      this.tenantId,
-      waifuAgentId,
-      name,
-      platformId
-    );
+    let agent: AgentIdentity;
+    try {
+      agent = await this.vault.createAgent(
+        this.tenantId,
+        waifuAgentId,
+        name,
+        platformId
+      );
+    } catch (err) {
+      console.error(`[WaifuBridge] Failed to create agent "${waifuAgentId}":`, err);
+      throw err;
+    }
+
+    console.log(`[WaifuBridge] Agent "${waifuAgentId}" created — wallet ${agent.walletAddress}`);
 
     // Apply default waifu policies
     const defaultPolicies = buildDefaultPolicies(portalAddress);
     const db = getDb();
 
-    await db.delete(policies).where(eq(policies.agentId, waifuAgentId));
-    await db.insert(policies).values(
-      defaultPolicies.map((policy) => ({
-        id: policy.id,
-        agentId: waifuAgentId,
-        type: policy.type,
-        enabled: policy.enabled,
-        config: policy.config,
-      }))
-    );
+    try {
+      await db.delete(policies).where(eq(policies.agentId, waifuAgentId));
+      await db.insert(policies).values(
+        defaultPolicies.map((policy) => ({
+          id: policy.id,
+          agentId: waifuAgentId,
+          type: policy.type,
+          enabled: policy.enabled,
+          config: policy.config,
+        }))
+      );
+    } catch (err) {
+      console.error(`[WaifuBridge] Failed to apply default policies for agent "${waifuAgentId}":`, err);
+      // Agent was created but policies failed — caller should retry policy setup
+      throw new Error(`Agent created but policy setup failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    console.log(`[WaifuBridge] Default policies applied for agent "${waifuAgentId}" (${defaultPolicies.length} rules)`);
 
     return { agent, policies: defaultPolicies };
   }
@@ -129,20 +160,32 @@ export class WaifuBridge {
   /**
    * Query on-chain native balance (BNB) for a waifu agent on BSC.
    * Accepts an optional `chainId` override for testnet use.
+   *
+   * @throws Error if the agent doesn't exist or balance fetch fails
    */
   async syncAgentBalance(agentId: string, chainId?: number): Promise<AgentBalance> {
-    const resolvedChainId = chainId ?? WAIFU_CHAIN_ID;
-    const balance = await this.vault.getBalance(this.tenantId, agentId, resolvedChainId);
+    if (!agentId) {
+      throw new Error("agentId is required for balance sync");
+    }
 
-    return {
-      agentId,
-      walletAddress: balance.walletAddress,
-      balances: {
-        native: balance.native.toString(),
-        nativeFormatted: balance.nativeFormatted,
-        chainId: balance.chainId,
-        symbol: balance.symbol,
-      },
-    };
+    const resolvedChainId = chainId ?? WAIFU_CHAIN_ID;
+
+    try {
+      const balance = await this.vault.getBalance(this.tenantId, agentId, resolvedChainId);
+
+      return {
+        agentId,
+        walletAddress: balance.walletAddress,
+        balances: {
+          native: balance.native.toString(),
+          nativeFormatted: balance.nativeFormatted,
+          chainId: balance.chainId,
+          symbol: balance.symbol,
+        },
+      };
+    } catch (err) {
+      console.error(`[WaifuBridge] Failed to sync balance for agent "${agentId}" on chain ${resolvedChainId}:`, err);
+      throw err;
+    }
   }
 }

@@ -1,4 +1,4 @@
-import type { AgentBalance, AgentIdentity, ApiResponse, PolicyResult, PolicyRule } from "./types";
+import type { AgentBalance, AgentIdentity, ApiResponse, PolicyResult, PolicyRule } from "./types.ts";
 
 export interface BatchAgentSpec {
   id: string;

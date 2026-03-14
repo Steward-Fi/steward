@@ -1,4 +1,4 @@
-export { StewardClient, StewardApiError } from "./client";
+export { StewardClient, StewardApiError } from "./client.ts";
 export type {
   BatchAgentSpec,
   BatchCreateResult,
@@ -12,7 +12,7 @@ export type {
   StewardErrorResponse,
   StewardHistoryEntry,
   StewardPendingApproval,
-} from "./client";
+} from "./client.ts";
 export type {
   AgentBalance,
   AgentIdentity,
@@ -25,6 +25,6 @@ export type {
   RateLimitConfig,
   SpendingLimitConfig,
   TimeWindowConfig,
-} from "./types";
-export type { SignRequest, TxRecord, TxStatus } from "./types";
-export { SUPPORTED_CHAINS } from "./types";
+} from "./types.ts";
+export type { SignRequest, TxRecord, TxStatus } from "./types.ts";
+export { SUPPORTED_CHAINS } from "./types.ts";

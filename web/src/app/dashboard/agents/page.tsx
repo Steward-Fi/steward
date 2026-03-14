@@ -200,7 +200,7 @@ export default function AgentsPage() {
             <div key={i} className="bg-bg h-20 animate-pulse" />
           ))}
         </div>
-      ) : agents.length === 0 ? (
+      ) : error ? null : agents.length === 0 ? (
         <div className="py-20 text-center border border-border-subtle">
           <p className="font-display text-lg font-600 text-text-secondary">
             No agents yet
