@@ -15,7 +15,8 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ id: "", name: "" });
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [form, setForm] = useState({ id: "", name: "", platformId: "" });
 
   useEffect(() => {
     loadAgents();
@@ -36,17 +37,29 @@ export default function AgentsPage() {
   async function createAgent(e: React.FormEvent) {
     e.preventDefault();
     if (!form.id || !form.name) return;
+    setCreateError(null);
     try {
       setCreating(true);
-      await steward.createWallet(form.id, form.name);
+      const newAgent = await steward.createWallet(
+        form.id,
+        form.name,
+        form.platformId || undefined
+      );
+      // Add directly to list without re-fetching
+      setAgents((prev) => [newAgent, ...prev]);
       setShowCreate(false);
-      setForm({ id: "", name: "" });
-      await loadAgents();
+      setForm({ id: "", name: "", platformId: "" });
     } catch (err: unknown) {
-      alert(err instanceof Error ? err.message : "Failed to create agent");
+      setCreateError(err instanceof Error ? err.message : "Failed to create agent");
     } finally {
       setCreating(false);
     }
+  }
+
+  function handleCancelCreate() {
+    setShowCreate(false);
+    setCreateError(null);
+    setForm({ id: "", name: "", platformId: "" });
   }
 
   return (
@@ -87,10 +100,10 @@ export default function AgentsPage() {
           >
             <div className="border border-border bg-bg-elevated p-6 space-y-5">
               <h3 className="font-display text-sm font-600">Create Agent</h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
                   <label className="text-xs text-text-tertiary block mb-1.5">
-                    Agent ID
+                    Agent ID <span className="text-accent">*</span>
                   </label>
                   <input
                     type="text"
@@ -102,7 +115,7 @@ export default function AgentsPage() {
                 </div>
                 <div>
                   <label className="text-xs text-text-tertiary block mb-1.5">
-                    Display Name
+                    Display Name <span className="text-accent">*</span>
                   </label>
                   <input
                     type="text"
@@ -112,7 +125,37 @@ export default function AgentsPage() {
                     className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                   />
                 </div>
+                <div>
+                  <label className="text-xs text-text-tertiary block mb-1.5">
+                    Platform ID{" "}
+                    <span className="text-text-tertiary">(optional)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={form.platformId}
+                    onChange={(e) =>
+                      setForm({ ...form, platformId: e.target.value })
+                    }
+                    placeholder="discord / twitter / etc."
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                  />
+                </div>
               </div>
+
+              {/* Error */}
+              <AnimatePresence>
+                {createError && (
+                  <motion.p
+                    initial={{ opacity: 0, y: -4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -4 }}
+                    className="text-xs text-red-400 font-mono"
+                  >
+                    {createError}
+                  </motion.p>
+                )}
+              </AnimatePresence>
+
               <div className="flex gap-3">
                 <button
                   type="submit"
@@ -123,7 +166,7 @@ export default function AgentsPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setShowCreate(false)}
+                  onClick={handleCancelCreate}
                   className="px-4 py-2 text-sm text-text-tertiary hover:text-text transition-colors"
                 >
                   Cancel
@@ -147,8 +190,8 @@ export default function AgentsPage() {
             No agents yet
           </p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
-            Create your first agent to generate a managed wallet with policy enforcement.
-            Each agent gets its own address on Base.
+            Create your first agent to generate a managed wallet with policy
+            enforcement. Each agent gets its own address on Base.
           </p>
           <button
             onClick={() => setShowCreate(true)}
@@ -159,44 +202,52 @@ export default function AgentsPage() {
         </div>
       ) : (
         <div className="border-t border-border-subtle">
-          {agents.map((agent, i) => (
-            <motion.div
-              key={agent.id}
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: i * 0.05, duration: 0.3 }}
-            >
-              <Link
-                href={`/dashboard/agents/${agent.id}`}
-                className="flex items-center justify-between py-5 border-b border-border-subtle hover:bg-bg-elevated/30 transition-colors px-2 -mx-2 group"
+          <AnimatePresence initial={false}>
+            {agents.map((agent, i) => (
+              <motion.div
+                key={agent.id}
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: "auto" }}
+                exit={{ opacity: 0, height: 0 }}
+                transition={{ delay: i * 0.04, duration: 0.3 }}
               >
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="w-9 h-9 flex items-center justify-center bg-accent-bg font-display font-700 text-sm text-[oklch(0.75_0.15_55)] flex-shrink-0">
-                    {agent.name?.charAt(0)?.toUpperCase() || "A"}
-                  </div>
-                  <div className="min-w-0">
-                    <div className="font-display font-600 text-sm group-hover:text-accent transition-colors truncate">
-                      {agent.name}
+                <Link
+                  href={`/dashboard/agents/${agent.id}`}
+                  className="flex items-center justify-between py-5 border-b border-border-subtle hover:bg-bg-elevated/30 transition-colors px-2 -mx-2 group"
+                >
+                  <div className="flex items-center gap-4 min-w-0">
+                    <div className="w-9 h-9 flex items-center justify-center bg-accent-bg font-display font-700 text-sm text-[oklch(0.75_0.15_55)] flex-shrink-0">
+                      {agent.name?.charAt(0)?.toUpperCase() || "A"}
                     </div>
-                    <div className="text-xs text-text-tertiary mt-0.5 truncate">
-                      {agent.id}
+                    <div className="min-w-0">
+                      <div className="font-display font-600 text-sm group-hover:text-accent transition-colors truncate">
+                        {agent.name}
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-0.5 truncate">
+                        {agent.id}
+                        {agent.platformId && (
+                          <span className="ml-2 text-text-tertiary/60">
+                            · {agent.platformId}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
-                </div>
-                <div className="flex items-center gap-4 flex-shrink-0">
-                  <div className="flex items-center gap-1">
-                    <span className="font-mono text-xs text-text-tertiary">
-                      {shortenAddress(agent.walletAddress, 6)}
+                  <div className="flex items-center gap-4 flex-shrink-0">
+                    <div className="flex items-center gap-1">
+                      <span className="font-mono text-xs text-text-tertiary">
+                        {shortenAddress(agent.walletAddress, 6)}
+                      </span>
+                      <CopyButton text={agent.walletAddress} />
+                    </div>
+                    <span className="text-xs text-text-tertiary hidden md:inline">
+                      {agent.createdAt ? formatDate(agent.createdAt) : ""}
                     </span>
-                    <CopyButton text={agent.walletAddress} />
                   </div>
-                  <span className="text-xs text-text-tertiary hidden md:inline">
-                    {agent.createdAt ? formatDate(agent.createdAt) : ""}
-                  </span>
-                </div>
-              </Link>
-            </motion.div>
-          ))}
+                </Link>
+              </motion.div>
+            ))}
+          </AnimatePresence>
         </div>
       )}
     </motion.div>

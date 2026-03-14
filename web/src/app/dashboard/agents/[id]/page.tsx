@@ -19,6 +19,44 @@ import type {
   TxRecord,
 } from "@/lib/steward-client";
 
+// All 5 canonical policy types with sensible display defaults
+const ALL_POLICY_TYPES: { type: string; defaultConfig: Record<string, unknown> }[] = [
+  {
+    type: "spending-limit",
+    defaultConfig: { maxPerTx: "0", maxPerDay: "0" },
+  },
+  {
+    type: "approved-addresses",
+    defaultConfig: { addresses: [], mode: "whitelist" },
+  },
+  {
+    type: "auto-approve-threshold",
+    defaultConfig: { threshold: "0" },
+  },
+  {
+    type: "time-window",
+    defaultConfig: { allowedHours: [], allowedDays: [] },
+  },
+  {
+    type: "rate-limit",
+    defaultConfig: { maxTxPerHour: 0, maxTxPerDay: 0 },
+  },
+];
+
+/** Merge API-returned policies with default stubs for any missing types */
+function mergePolicies(apiPolicies: PolicyRule[]): PolicyRule[] {
+  return ALL_POLICY_TYPES.map((pt, i) => {
+    const existing = apiPolicies.find((p) => p.type === pt.type);
+    if (existing) return existing;
+    return {
+      id: `default-${pt.type}-${i}`,
+      type: pt.type,
+      enabled: false,
+      config: pt.defaultConfig,
+    };
+  });
+}
+
 export default function AgentDetailPage() {
   const params = useParams();
   const agentId = params.id as string;
@@ -44,7 +82,7 @@ export default function AgentDetailPage() {
         steward.getHistory(agentId),
       ]);
       setAgent(agentData);
-      setPolicies(policyData);
+      setPolicies(mergePolicies(policyData));
       setTransactions(txData);
     } catch {
       /* failed */
@@ -97,6 +135,8 @@ export default function AgentDetailPage() {
     (tx) => tx.status === "pending"
   ).length;
 
+  const activePolicies = policies.filter((p) => p.enabled).length;
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -104,7 +144,7 @@ export default function AgentDetailPage() {
       transition={{ duration: 0.3 }}
       className="space-y-10"
     >
-      {/* Header */}
+      {/* Breadcrumb + Header */}
       <div>
         <Link
           href="/dashboard/agents"
@@ -118,8 +158,16 @@ export default function AgentDetailPage() {
             <h1 className="font-display text-2xl font-700 tracking-tight">
               {agent.name}
             </h1>
-            <div className="flex items-center gap-3 mt-2">
+            <div className="flex items-center gap-3 mt-2 flex-wrap">
               <span className="text-xs text-text-tertiary">{agent.id}</span>
+              {agent.platformId && (
+                <>
+                  <span className="text-border">|</span>
+                  <span className="text-xs text-text-tertiary">
+                    {agent.platformId}
+                  </span>
+                </>
+              )}
               <span className="text-border">|</span>
               <div className="flex items-center gap-1">
                 <span className="font-mono text-xs text-text-secondary">
@@ -133,15 +181,15 @@ export default function AgentDetailPage() {
             href={`https://basescan.org/address/${agent.walletAddress}`}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-xs text-text-tertiary hover:text-text-secondary transition-colors px-3 py-1.5 border border-border hover:border-border"
+            className="text-xs text-text-tertiary hover:text-text-secondary transition-colors px-3 py-1.5 border border-border hover:border-border flex-shrink-0"
           >
-            BaseScan
+            BaseScan ↗
           </a>
         </div>
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-px bg-border">
+      <div className="grid grid-cols-1 sm:grid-cols-4 gap-px bg-border">
         {[
           { label: "Transactions", value: transactions.length },
           {
@@ -152,6 +200,11 @@ export default function AgentDetailPage() {
           {
             label: "Volume",
             value: `${formatWei(totalVolume.toString())} ETH`,
+          },
+          {
+            label: "Active Policies",
+            value: `${activePolicies} / ${policies.length}`,
+            accent: activePolicies === 0,
           },
         ].map((stat, i) => (
           <motion.div
@@ -189,19 +242,23 @@ export default function AgentDetailPage() {
           >
             {tab === "transactions"
               ? `Transactions (${transactions.length})`
-              : `Policies (${policies.length})`}
+              : `Policies (${activePolicies}/${policies.length})`}
             {activeTab === tab && (
               <motion.div
                 layoutId="agent-tab-indicator"
                 className="absolute bottom-0 left-0 right-0 h-[2px] bg-accent"
-                transition={{ type: "tween", duration: 0.2, ease: [0.25, 1, 0.5, 1] }}
+                transition={{
+                  type: "tween",
+                  duration: 0.2,
+                  ease: [0.25, 1, 0.5, 1],
+                }}
               />
             )}
           </button>
         ))}
       </div>
 
-      {/* Tab Content */}
+      {/* Transactions Tab */}
       {activeTab === "transactions" && (
         <div>
           {transactions.length === 0 ? (
@@ -212,38 +269,55 @@ export default function AgentDetailPage() {
             </div>
           ) : (
             <div className="border-t border-border-subtle">
+              {/* Column headers */}
+              <div className="hidden md:flex items-center py-2 border-b border-border text-xs text-text-tertiary tracking-wider uppercase px-2">
+                <span className="w-28">Status</span>
+                <span className="flex-1">To</span>
+                <span className="w-28 text-right">Value</span>
+                <span className="w-36 text-right">TX Hash</span>
+                <span className="w-32 text-right">Time</span>
+              </div>
               {transactions.map((tx, i) => (
                 <motion.div
                   key={tx.id || i}
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   transition={{ delay: i * 0.03, duration: 0.3 }}
-                  className="flex items-center justify-between py-3.5 border-b border-border-subtle hover:bg-bg-elevated/30 transition-colors px-2 -mx-2"
+                  className="flex flex-col md:flex-row md:items-center py-3.5 border-b border-border-subtle hover:bg-bg-elevated/30 transition-colors px-2 gap-2 md:gap-0"
                 >
-                  <div className="flex items-center gap-4 min-w-0">
+                  <div className="w-28">
                     <StatusBadge status={tx.status} />
+                  </div>
+                  <div className="flex-1 min-w-0">
                     <span className="font-mono text-xs text-text-tertiary">
                       {shortenAddress(
                         tx.request?.to || tx.toAddress || "0x0",
-                        6
+                        8
                       )}
                     </span>
                   </div>
-                  <div className="flex items-center gap-6 flex-shrink-0">
+                  <div className="w-28 text-right">
                     <span className="text-sm tabular-nums text-text-secondary">
                       {formatWei(tx.request?.value || tx.value || "0")} ETH
                     </span>
-                    {tx.txHash && (
+                  </div>
+                  <div className="w-36 text-right">
+                    {tx.txHash ? (
                       <a
                         href={`https://basescan.org/tx/${tx.txHash}`}
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="font-mono text-xs text-text-tertiary hover:text-text-secondary transition-colors"
+                        className="font-mono text-xs text-accent hover:text-accent-hover transition-colors"
+                        title={tx.txHash}
                       >
-                        {shortenAddress(tx.txHash, 6)}
+                        {shortenAddress(tx.txHash, 6)} ↗
                       </a>
+                    ) : (
+                      <span className="text-xs text-text-tertiary">&mdash;</span>
                     )}
-                    <span className="text-xs text-text-tertiary hidden md:inline">
+                  </div>
+                  <div className="w-32 text-right">
+                    <span className="text-xs text-text-tertiary">
                       {tx.createdAt ? formatDate(tx.createdAt) : ""}
                     </span>
                   </div>
@@ -254,76 +328,93 @@ export default function AgentDetailPage() {
         </div>
       )}
 
+      {/* Policies Tab */}
       {activeTab === "policies" && (
-        <div>
-          {policies.length === 0 ? (
-            <div className="py-16 text-center border border-border-subtle">
-              <p className="text-text-tertiary text-sm">
-                No policies configured. This agent has no spending restrictions.
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-px bg-border">
-              {policies.map((policy, i) => (
-                <motion.div
-                  key={policy.id || i}
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ delay: i * 0.05, duration: 0.3 }}
-                  className="bg-bg p-5 flex items-center justify-between"
-                >
-                  <div className="flex items-center gap-4">
-                    <span
-                      className={`w-1.5 h-1.5 rounded-full ${
-                        policy.enabled ? "bg-emerald-400" : "bg-text-tertiary"
+        <div className="space-y-2">
+          <p className="text-xs text-text-tertiary mb-4">
+            All 5 policy types are shown. Disabled policies are placeholders —
+            configure them via the API or SDK.
+          </p>
+          <div className="space-y-px bg-border">
+            {policies.map((policy, i) => (
+              <motion.div
+                key={policy.id || i}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: i * 0.05, duration: 0.3 }}
+                className="bg-bg p-5 flex items-center justify-between"
+              >
+                <div className="flex items-center gap-4">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                      policy.enabled ? "bg-emerald-400" : "bg-text-tertiary/30"
+                    }`}
+                  />
+                  <div>
+                    <div
+                      className={`text-sm font-display font-600 ${
+                        policy.enabled ? "text-text" : "text-text-tertiary"
                       }`}
-                    />
-                    <div>
-                      <div className="text-sm font-display font-600">
-                        {policyTypeLabel(policy.type)}
-                      </div>
-                      <div className="text-xs text-text-tertiary mt-0.5">
-                        {formatPolicyConfig(policy.type, policy.config as Record<string, string>)}
-                      </div>
+                    >
+                      {policyTypeLabel(policy.type)}
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-0.5">
+                      {policy.enabled
+                        ? formatPolicyConfig(
+                            policy.type,
+                            policy.config as Record<string, string>
+                          )
+                        : "Not configured"}
                     </div>
                   </div>
-                  <span
-                    className={`text-xs ${
-                      policy.enabled
-                        ? "text-emerald-400"
-                        : "text-text-tertiary"
-                    }`}
-                  >
-                    {policy.enabled ? "Active" : "Disabled"}
-                  </span>
-                </motion.div>
-              ))}
-            </div>
-          )}
+                </div>
+                <span
+                  className={`text-xs flex-shrink-0 ${
+                    policy.enabled ? "text-emerald-400" : "text-text-tertiary/50"
+                  }`}
+                >
+                  {policy.enabled ? "Active" : "Disabled"}
+                </span>
+              </motion.div>
+            ))}
+          </div>
         </div>
       )}
     </motion.div>
   );
 }
 
-function formatPolicyConfig(type: string, config: Record<string, string>): string {
+function formatPolicyConfig(
+  type: string,
+  config: Record<string, string>
+): string {
   switch (type) {
     case "spending-limit":
-      return `Max ${formatWei(config.maxPerTx || "0")}/tx \u00B7 ${formatWei(config.maxPerDay || "0")}/day`;
+      return `Max ${formatWei(config.maxPerTx || "0")} ETH/tx · ${formatWei(
+        config.maxPerDay || "0"
+      )} ETH/day`;
     case "approved-addresses": {
       const addresses = config.addresses as unknown;
       const count = Array.isArray(addresses) ? addresses.length : 0;
-      return `${count} addresses (${config.mode || "whitelist"})`;
+      return `${count} address${count !== 1 ? "es" : ""} (${
+        config.mode || "whitelist"
+      })`;
     }
     case "auto-approve-threshold":
-      return `Auto-approve below ${formatWei(config.threshold || "0")} ETH`;
+      return `Auto-approve below ${formatWei(
+        config.threshold || "0"
+      )} ETH`;
     case "time-window": {
       const hours = config.allowedHours as unknown;
       const days = config.allowedDays as unknown;
-      return `${Array.isArray(hours) ? hours.length : 0} windows \u00B7 ${Array.isArray(days) ? days.length : 7} days`;
+      return `${Array.isArray(hours) ? hours.length : 0} hour windows · ${
+        Array.isArray(days) ? days.length : 7
+      } days/week`;
     }
     case "rate-limit":
-      return `${config.maxTxPerHour || 0}/hour \u00B7 ${config.maxTxPerDay || 0}/day`;
+      return `${config.maxTxPerHour || 0}/hour · ${
+        config.maxTxPerDay || 0
+      }/day`;
     default:
       return JSON.stringify(config);
   }
