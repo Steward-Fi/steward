@@ -17,7 +17,7 @@ export interface TenantConfig {
 }
 
 export interface WebhookEvent {
-  type: "approval_required" | "tx_signed" | "tx_confirmed" | "tx_failed";
+  type: "approval_required" | "tx_signed" | "tx_confirmed" | "tx_failed" | "tx_rejected";
   tenantId: string;
   agentId: string;
   data: Record<string, unknown>;

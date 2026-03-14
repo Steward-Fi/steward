@@ -3,6 +3,7 @@ import { Hono, type Context, type Next } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 
+import { hashApiKey, validateApiKey } from "@steward/auth";
 import {
   agents,
   approvalQueue,
@@ -25,6 +26,7 @@ import type {
   TenantConfig,
 } from "@steward/shared";
 import { Vault } from "@steward/vault";
+import { WebhookDispatcher } from "@steward/webhooks";
 
 const API_VERSION = process.env.API_VERSION || "0.1.0";
 const startTime = Date.now();
@@ -59,6 +61,7 @@ const vault = new Vault({
   chainId: 8453,
 });
 const policyEngine = new PolicyEngine();
+const webhookDispatcher = new WebhookDispatcher();
 
 const defaultTenantConfig: TenantConfig = {
   id: DEFAULT_TENANT_ID,
@@ -172,7 +175,7 @@ async function tenantAuth(
   }
 
   const apiKey = c.req.header("X-Steward-Key") || "";
-  if (tenant.apiKeyHash && apiKey !== tenant.apiKeyHash) {
+  if (tenant.apiKeyHash && !validateApiKey(apiKey, tenant.apiKeyHash)) {
     return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
   }
 
@@ -269,12 +272,18 @@ app.post("/tenants", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 400);
   }
 
+  // If caller passes a raw key (stw_…) instead of a hash, hash it now
+  const apiKeyHash =
+    body.apiKeyHash && !body.apiKeyHash.match(/^[0-9a-f]{64}$/)
+      ? hashApiKey(body.apiKeyHash)
+      : body.apiKeyHash;
+
   const [tenant] = await db
     .insert(tenants)
     .values({
       id: body.id,
       name: body.name,
-      apiKeyHash: body.apiKeyHash,
+      apiKeyHash,
     })
     .returning();
 
@@ -449,6 +458,16 @@ app.post("/vault/:agentId/sign", async (c) => {
         status: "pending",
       });
 
+      const webhookUrlApproval = tenantConfigs.get(tenantId)?.webhookUrl;
+      if (webhookUrlApproval) {
+        webhookDispatcher
+          .dispatch(
+            { type: "approval_required", tenantId, agentId, data: { txId, results: evaluation.results }, timestamp: new Date() },
+            webhookUrlApproval
+          )
+          .catch(console.error);
+      }
+
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -469,6 +488,16 @@ app.post("/vault/:agentId/sign", async (c) => {
       chainId: signRequest.chainId,
       policyResults: evaluation.results,
     });
+
+    const webhookUrlRejected = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlRejected) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_rejected", tenantId, agentId, data: { txId, results: evaluation.results }, timestamp: new Date() },
+          webhookUrlRejected
+        )
+        .catch(console.error);
+    }
 
     return c.json<ApiResponse>(
       {
@@ -498,12 +527,33 @@ app.post("/vault/:agentId/sign", async (c) => {
       })
       .where(eq(transactions.id, txId));
 
+    const webhookUrlSigned = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlSigned) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_signed", tenantId, agentId, data: { txId, txHash }, timestamp: new Date() },
+          webhookUrlSigned
+        )
+        .catch(console.error);
+    }
+
     return c.json<ApiResponse<{ txId: string; txHash: string }>>({
       ok: true,
       data: { txId, txHash },
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
+
+    const webhookUrlFailed = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlFailed) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_failed", tenantId, agentId, data: { error: message }, timestamp: new Date() },
+          webhookUrlFailed
+        )
+        .catch(console.error);
+    }
+
     return c.json<ApiResponse>({ ok: false, error: message }, 500);
   }
 });
@@ -571,12 +621,33 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
       })
       .where(eq(transactions.id, txId));
 
+    const webhookUrlApproved = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlApproved) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_signed", tenantId, agentId, data: { txId, txHash }, timestamp: new Date() },
+          webhookUrlApproved
+        )
+        .catch(console.error);
+    }
+
     return c.json<ApiResponse<{ txId: string; txHash: string }>>({
       ok: true,
       data: { txId, txHash },
     });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
+
+    const webhookUrlFailed = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlFailed) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_failed", tenantId, agentId, data: { txId, error: message }, timestamp: new Date() },
+          webhookUrlFailed
+        )
+        .catch(console.error);
+    }
+
     return c.json<ApiResponse>({ ok: false, error: message }, 500);
   }
 });
