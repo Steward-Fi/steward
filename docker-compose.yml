@@ -1,0 +1,55 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: ${PORT:-3200}
+      API_VERSION: ${API_VERSION:-0.1.0}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:-steward_dev_password}@postgres:5432/${POSTGRES_DB:-steward}}
+      STEWARD_MASTER_PASSWORD: ${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}
+      RPC_URL: ${RPC_URL:-https://mainnet.base.org}
+      STEWARD_DEFAULT_TENANT_KEY: ${STEWARD_DEFAULT_TENANT_KEY:-}
+    ports:
+      - "127.0.0.1:${PORT:-3200}:3200"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const response = await fetch('http://127.0.0.1:3200/health'); if (!response.ok) process.exit(1);"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - public
+      - backend
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-steward}
+      POSTGRES_USER: ${POSTGRES_USER:-steward}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-steward_dev_password}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-steward} -d ${POSTGRES_DB:-steward}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - backend
+
+volumes:
+  postgres-data:
+
+networks:
+  public:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
