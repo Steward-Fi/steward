@@ -14,7 +14,8 @@
     "dev": "turbo dev",
     "build": "turbo build",
     "lint": "turbo lint",
-    "test": "turbo test"
+    "test": "turbo test",
+    "seed": "bun packages/seed/src/index.ts"
   },
   "devDependencies": {
     "turbo": "^2.5.0",
