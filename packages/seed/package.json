@@ -1,0 +1,15 @@
+{
+  "name": "@steward/seed",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "seed": "bun src/index.ts"
+  },
+  "dependencies": {
+    "@steward/db": "workspace:*",
+    "@steward/vault": "workspace:*",
+    "viem": "^2.30.0"
+  }
+}
