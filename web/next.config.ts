@@ -7,9 +7,8 @@ const config: NextConfig = {
     config.resolve.fallback = {
       ...config.resolve.fallback,
       "pino-pretty": false,
+      "@react-native-async-storage/async-storage": false,
     };
-    // Fix for @metamask/sdk react-native import
-    config.externals = config.externals || [];
     return config;
   },
 };
