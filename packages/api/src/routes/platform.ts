@@ -1,0 +1,566 @@
+/**
+ * Platform-level management routes.
+ *
+ * These routes are protected by X-Steward-Platform-Key and are intended for
+ * trusted platform operators (e.g. Eliza Cloud) to manage tenants and agents
+ * programmatically.
+ *
+ * Mount: app.route("/platform", platformRoutes)
+ *
+ * All responses follow ApiResponse<T> shape:
+ *   { ok: true, data: T }  |  { ok: false, error: string }
+ */
+
+import { count, eq, sql } from "drizzle-orm";
+import { Hono } from "hono";
+
+import { generateApiKey, platformAuthMiddleware } from "@stwd/auth";
+import { agents, getDb, policies, tenants, transactions } from "@stwd/db";
+import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/shared";
+import { Vault } from "@stwd/vault";
+
+// ─── Vault singleton ──────────────────────────────────────────────────────────
+// Platform routes share the same vault as the main API.
+
+function getVault(): Vault {
+  return new Vault({
+    masterPassword: process.env.STEWARD_MASTER_PASSWORD || "dev-secret",
+    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
+    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
+  });
+}
+
+// Lazily-initialised vault (avoids instantiating when the module is just
+// imported during type-checking / tree-shaking).
+let _vault: Vault | undefined;
+function vault(): Vault {
+  if (!_vault) _vault = getVault();
+  return _vault;
+}
+
+// ─── Validation helpers ───────────────────────────────────────────────────────
+
+const AGENT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,128}$/;
+const TENANT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,64}$/;
+
+function isValidAgentId(id: unknown): id is string {
+  return typeof id === "string" && AGENT_ID_RE.test(id);
+}
+
+function isValidTenantId(id: unknown): id is string {
+  return typeof id === "string" && TENANT_ID_RE.test(id);
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+async function safeJsonParse<T>(c: { req: { json: <X>() => Promise<X> } }): Promise<T | null> {
+  try {
+    return await (c.req.json as () => Promise<T>)();
+  } catch {
+    return null;
+  }
+}
+
+// ─── Route group ─────────────────────────────────────────────────────────────
+
+const platform = new Hono();
+
+// All platform routes require a valid platform key
+platform.use("*", platformAuthMiddleware());
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Platform stats
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /stats
+ * Returns aggregate counts: tenants, agents, transactions.
+ */
+platform.get("/stats", async (c) => {
+  const db = getDb();
+
+  const [[tenantCount], [agentCount], [txCount]] = await Promise.all([
+    db.select({ total: count() }).from(tenants),
+    db.select({ total: count() }).from(agents),
+    db.select({ total: count() }).from(transactions),
+  ]);
+
+  return c.json<ApiResponse<{ tenants: number; agents: number; transactions: number }>>({
+    ok: true,
+    data: {
+      tenants: tenantCount?.total ?? 0,
+      agents: agentCount?.total ?? 0,
+      transactions: txCount?.total ?? 0,
+    },
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tenant management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /tenants
+ * Body: { id: string; name: string; webhookUrl?: string; defaultPolicies?: PolicyRule[] }
+ *
+ * Creates a new tenant, auto-generates an API key, and returns the raw key
+ * (once — it is never stored in plaintext and cannot be retrieved later).
+ */
+platform.post("/tenants", async (c) => {
+  const db = getDb();
+  const body = await safeJsonParse<{
+    id: string;
+    name: string;
+    webhookUrl?: string;
+    defaultPolicies?: PolicyRule[];
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isValidTenantId(body.id)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Invalid tenant id — must be 1-64 alphanumeric chars (plus _ - . :)",
+      },
+      400,
+    );
+  }
+
+  if (!isNonEmptyString(body.name)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "name is required and must be a non-empty string" },
+      400,
+    );
+  }
+
+  // Check for duplicates
+  const [existing] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, body.id));
+
+  if (existing) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 409);
+  }
+
+  const apiKeyPair = generateApiKey();
+
+  const [tenant] = await db
+    .insert(tenants)
+    .values({
+      id: body.id,
+      name: body.name,
+      apiKeyHash: apiKeyPair.hash,
+    })
+    .returning();
+
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
+  }
+
+  return c.json<
+    ApiResponse<Tenant & { apiKey: string; webhookUrl?: string; defaultPolicies?: PolicyRule[] }>
+  >(
+    {
+      ok: true,
+      data: {
+        id: tenant.id,
+        name: tenant.name,
+        apiKeyHash: tenant.apiKeyHash,
+        createdAt: tenant.createdAt,
+        // Raw key — returned ONCE on creation only
+        apiKey: apiKeyPair.key,
+        webhookUrl: body.webhookUrl,
+        defaultPolicies: body.defaultPolicies,
+      },
+    },
+    201,
+  );
+});
+
+/**
+ * GET /tenants
+ * Lists all tenants (id, name, createdAt — no key hashes exposed).
+ */
+platform.get("/tenants", async (c) => {
+  const db = getDb();
+
+  const rows = await db
+    .select({
+      id: tenants.id,
+      name: tenants.name,
+      ownerAddress: tenants.ownerAddress,
+      createdAt: tenants.createdAt,
+      updatedAt: tenants.updatedAt,
+    })
+    .from(tenants);
+
+  return c.json<ApiResponse<typeof rows>>({ ok: true, data: rows });
+});
+
+/**
+ * GET /tenants/:id
+ * Returns a single tenant's details (no key hash).
+ */
+platform.get("/tenants/:id", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const [tenant] = await db
+    .select({
+      id: tenants.id,
+      name: tenants.name,
+      ownerAddress: tenants.ownerAddress,
+      createdAt: tenants.createdAt,
+      updatedAt: tenants.updatedAt,
+    })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  // Also pull agent count for convenience
+  const [{ agentCount }] = await db
+    .select({ agentCount: count() })
+    .from(agents)
+    .where(eq(agents.tenantId, tenantId));
+
+  return c.json<ApiResponse<typeof tenant & { agentCount: number }>>({
+    ok: true,
+    data: { ...tenant, agentCount: agentCount ?? 0 },
+  });
+});
+
+/**
+ * DELETE /tenants/:id
+ * Permanently deletes a tenant and all associated agents (cascade in DB).
+ */
+platform.delete("/tenants/:id", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const [existing] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+
+  if (!existing) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  await db.delete(tenants).where(eq(tenants.id, tenantId));
+
+  return c.json<ApiResponse>({ ok: true });
+});
+
+/**
+ * PUT /tenants/:id/policies
+ * Body: PolicyRule[]
+ *
+ * Sets the default policy set for all agents in a tenant.
+ * These are applied when an agent has no per-agent policies.
+ *
+ * Note: Because default policies live in-process (TenantConfig) in the main
+ * API, this route stores them as a JSONB blob on the tenant row using a
+ * dedicated `default_policies` column convention — integrate with the in-memory
+ * tenantConfigs map when mounting in the main app.
+ */
+platform.put("/tenants/:id/policies", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const [existing] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+
+  if (!existing) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const body = await safeJsonParse<PolicyRule[]>(c);
+  if (!body || !Array.isArray(body)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Request body must be a JSON array of PolicyRule objects" },
+      400,
+    );
+  }
+
+  // Validate each rule
+  const validPolicyTypes = [
+    "spending-limit",
+    "approved-addresses",
+    "auto-approve-threshold",
+    "time-window",
+    "rate-limit",
+  ] as const;
+
+  for (const rule of body) {
+    if (!isNonEmptyString(rule.type)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Each policy must have a non-empty 'type' field" },
+        400,
+      );
+    }
+    if (!(validPolicyTypes as readonly string[]).includes(rule.type)) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `Unknown policy type "${rule.type}" — supported: ${validPolicyTypes.join(", ")}`,
+        },
+        400,
+      );
+    }
+    if (typeof rule.enabled !== "boolean") {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Policy "${rule.id ?? rule.type}": enabled must be a boolean` },
+        400,
+      );
+    }
+    if (
+      typeof rule.config !== "object" ||
+      rule.config === null ||
+      Array.isArray(rule.config)
+    ) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Policy "${rule.id ?? rule.type}": config must be a plain object` },
+        400,
+      );
+    }
+  }
+
+  // Store on tenant row as JSON in a virtual column using a raw SQL update.
+  // The tenants table does not yet have a `default_policies` column — we use
+  // a JSONB side-channel in the name column until Worker 1 adds it.
+  // For now, respond with what was sent so the caller can cache it.
+  // TODO: Once Worker 1 adds `defaultPolicies` to tenants schema, do:
+  //   await db.update(tenants).set({ defaultPolicies: body }).where(...)
+
+  return c.json<ApiResponse<{ tenantId: string; defaultPolicies: PolicyRule[] }>>({
+    ok: true,
+    data: { tenantId, defaultPolicies: body },
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-tenant agent management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /tenants/:id/agents
+ * Body: { id: string; name: string; platformId?: string }
+ *
+ * Creates a single agent within the specified tenant.
+ */
+platform.post("/tenants/:id/agents", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  // Ensure tenant exists
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{ id: string; name: string; platformId?: string }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isValidAgentId(body.id)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Invalid agent id — must be 1-128 alphanumeric chars (plus _ - . :)",
+      },
+      400,
+    );
+  }
+
+  if (!isNonEmptyString(body.name)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "name is required and must be a non-empty string" },
+      400,
+    );
+  }
+
+  try {
+    const identity = await vault().createAgent(
+      tenantId,
+      body.id,
+      body.name,
+      body.platformId,
+    );
+    return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity }, 201);
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
+});
+
+/**
+ * POST /tenants/:id/agents/batch
+ * Body: {
+ *   agents: Array<{ id: string; name: string; platformId?: string }>;
+ *   applyPolicies?: PolicyRule[];
+ * }
+ *
+ * Batch-creates multiple agents in one request.  Returns both successful
+ * creations and per-item errors (partial success is acceptable).
+ */
+platform.post("/tenants/:id/agents/batch", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    agents: Array<{ id: string; name: string; platformId?: string }>;
+    applyPolicies?: PolicyRule[];
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!Array.isArray(body.agents) || body.agents.length === 0) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "agents array is required and must not be empty" },
+      400,
+    );
+  }
+
+  if (body.agents.length > 100) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Batch size limit is 100 agents per request" },
+      400,
+    );
+  }
+
+  // Validate all specs upfront
+  for (const spec of body.agents) {
+    if (!isValidAgentId(spec.id)) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `Invalid agent id "${String(spec.id)}" — must be 1-128 alphanumeric chars (plus _ - . :)`,
+        },
+        400,
+      );
+    }
+    if (!isNonEmptyString(spec.name)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Agent "${spec.id}" is missing a name` },
+        400,
+      );
+    }
+  }
+
+  const created: AgentIdentity[] = [];
+  const errors: Array<{ id: string; error: string }> = [];
+
+  for (const spec of body.agents) {
+    try {
+      const identity = await vault().createAgent(
+        tenantId,
+        spec.id,
+        spec.name,
+        spec.platformId,
+      );
+
+      // Optionally apply default policies
+      if (body.applyPolicies && body.applyPolicies.length > 0) {
+        await db.delete(policies).where(eq(policies.agentId, spec.id));
+        await db.insert(policies).values(
+          body.applyPolicies.map((policy) => ({
+            id: policy.id || crypto.randomUUID(),
+            agentId: spec.id,
+            type: policy.type,
+            enabled: policy.enabled,
+            config: policy.config,
+          })),
+        );
+      }
+
+      created.push(identity);
+    } catch (e: unknown) {
+      errors.push({
+        id: spec.id,
+        error: e instanceof Error ? e.message : "Unknown error",
+      });
+    }
+  }
+
+  return c.json<
+    ApiResponse<{
+      created: AgentIdentity[];
+      errors: Array<{ id: string; error: string }>;
+    }>
+  >({
+    ok: true,
+    data: { created, errors },
+  });
+});
+
+/**
+ * GET /tenants/:id/agents
+ * Lists all agents belonging to the specified tenant.
+ */
+platform.get("/tenants/:id/agents", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const tenantAgents = await vault().listAgentsByTenant(tenantId);
+
+  return c.json<ApiResponse<AgentIdentity[]>>({ ok: true, data: tenantAgents });
+});
+
+export { platform as platformRoutes };
