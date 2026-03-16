@@ -9,6 +9,7 @@ import {
   text,
   timestamp,
   uniqueIndex,
+  uuid,
   varchar,
 } from "drizzle-orm/pg-core";
 import type { PolicyResult } from "@stwd/shared";
@@ -64,6 +65,8 @@ export const agents = pgTable(
     walletAddress: varchar("wallet_address", { length: 128 }).notNull(),
     platformId: varchar("platform_id", { length: 255 }),
     erc8004TokenId: varchar("erc8004_token_id", { length: 255 }),
+    ownerUserId: uuid("owner_user_id"),
+    walletType: varchar("wallet_type", { length: 32 }).default("agent"),
     ...timestamps,
   },
   (table) => ({

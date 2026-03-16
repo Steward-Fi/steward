@@ -16,6 +16,7 @@ export {
 } from "./client";
 export { runMigrations } from "./migrate";
 export * from "./schema";
+export * from "./schema-auth";
 
 import type { Agent, Policy, Transaction } from "./schema";
 

@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 
 import * as schema from "./schema";
+import * as schemaAuth from "./schema-auth";
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -26,7 +27,7 @@ export function createPostgresClient(connectionString = getDatabaseUrl()) {
 
 export function createDb(connectionString = getDatabaseUrl()) {
   const client = createPostgresClient(connectionString);
-  const db = drizzle(client, { schema });
+  const db = drizzle(client, { schema: { ...schema, ...schemaAuth } });
 
   return { client, db };
 }
