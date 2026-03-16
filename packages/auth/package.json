@@ -12,7 +12,8 @@
     "@simplewebauthn/server": "^13",
     "@stwd/db": "workspace:*",
     "@stwd/shared": "workspace:*",
-    "hono": "^4.7.0"
+    "hono": "^4.7.0",
+    "resend": "^6.9.4"
   },
   "devDependencies": {
     "@types/node": "^24.5.2"
