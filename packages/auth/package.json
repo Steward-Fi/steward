@@ -9,6 +9,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
+    "@simplewebauthn/server": "^13",
     "@stwd/db": "workspace:*",
     "@stwd/shared": "workspace:*",
     "hono": "^4.7.0"
