@@ -247,7 +247,9 @@ function base64urlToUint8Array(base64url: string): Uint8Array<ArrayBuffer> {
   // Normalise base64url → standard base64
   const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
   const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
-  const buf = Buffer.from(padded, "base64");
+  // Use hex as intermediate to avoid TypeScript encoding type issues across @types/node versions
+  const hexStr = [...atob(padded)].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+  const buf = Buffer.from(hexStr, "hex");
   // Slice to produce a plain ArrayBuffer (not a SharedArrayBuffer slice)
   return new Uint8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)) as Uint8Array<ArrayBuffer>;
 }
@@ -256,9 +258,9 @@ function base64urlToUint8Array(base64url: string): Uint8Array<ArrayBuffer> {
  * Convert a Uint8Array to a base64url string (for persisting public keys).
  */
 export function uint8ArrayToBase64url(bytes: Uint8Array): string {
-  return Buffer.from(bytes)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  // Build hex string without Buffer.from(Uint8Array) which has type issues across @types/node versions
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  const raw = hex.match(/.{1,2}/g)!.map(byte => String.fromCharCode(parseInt(byte, 16))).join("");
+  const base64 = btoa(raw);
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }

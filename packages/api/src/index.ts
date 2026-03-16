@@ -200,7 +200,7 @@ app.notFound((c) =>
 app.use("*", cors({
   origin: "*",
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "X-Steward-Tenant", "X-Steward-Key", "Authorization"],
+  allowHeaders: ["Content-Type", "X-Steward-Tenant", "X-Steward-Key", "X-Steward-Platform-Key", "Authorization"],
   exposeHeaders: ["Content-Length"],
   maxAge: 86400,
 }));
@@ -376,7 +376,14 @@ app.get("/health", (c) =>
   })
 );
 
-// ─── SIWE Auth Endpoints ──────────────────────────────────────────────────────
+// ─── New Route Modules (v2 auth + platform + user) ────────────────────────────
+import { platformRoutes } from "./routes/platform";
+import { userRoutes } from "./routes/user";
+
+app.route("/platform", platformRoutes);
+app.route("/user", userRoutes);
+
+// ─── SIWE Auth Endpoints (legacy, kept for backward compatibility) ────────────
 
 app.get("/auth/nonce", (c) => {
   const nonce = generateNonce();

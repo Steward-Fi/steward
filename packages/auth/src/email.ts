@@ -33,7 +33,8 @@ const DEFAULT_TTL_MS = 10 * 60 * 1000; // 10 min
 const DEFAULT_CALLBACK = "/auth/callback/email";
 
 function generateToken(): string {
-  return randomBytes(TOKEN_BYTES).toString("base64url");
+  // URL-safe hex token (64 chars from 32 bytes)
+  return randomBytes(TOKEN_BYTES).toString("hex");
 }
 
 function hashToken(token: string): string {
