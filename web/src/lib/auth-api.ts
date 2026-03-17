@@ -116,14 +116,14 @@ export async function signInWithPasskey(email: string): Promise<AuthResult> {
   if (hasCredentials && authOpts) {
     // ── Existing passkey — authenticate ──────────────────────────────────
     const authResponse = await startAuthentication({
-      optionsJSON: authOpts as Parameters<typeof startAuthentication>[0]["optionsJSON"],
+      optionsJSON: authOpts as unknown as Parameters<typeof startAuthentication>[0]["optionsJSON"],
     });
     return verifyPasskeyLogin(email, authResponse);
   } else {
     // ── New passkey — register ────────────────────────────────────────────
     const regOpts = await getPasskeyRegisterOptions(email);
     const regResponse = await startRegistration({
-      optionsJSON: regOpts as Parameters<typeof startRegistration>[0]["optionsJSON"],
+      optionsJSON: regOpts as unknown as Parameters<typeof startRegistration>[0]["optionsJSON"],
     });
     return verifyPasskeyRegistration(email, regResponse);
   }
