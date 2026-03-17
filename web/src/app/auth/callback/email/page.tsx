@@ -24,8 +24,8 @@ function EmailCallbackInner() {
     if (verifiedRef.current) return;
     verifiedRef.current = true;
 
-    const token = params.get("token");
-    const email = params.get("email");
+    const token = params?.get("token") ?? null;
+    const email = params?.get("email") ?? null;
 
     if (!token || !email) {
       setState("error");
