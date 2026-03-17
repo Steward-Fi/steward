@@ -142,6 +142,9 @@ export const SUPPORTED_CHAINS = {
   base: 8453,
   arbitrum: 42161,
   baseSepolia: 84532,
+  // Solana — convention IDs (not EVM chainIds)
+  solana: 101,
+  solanaDevnet: 102,
 } as const;
 
 export const DEFAULT_CHAIN_ID = SUPPORTED_CHAINS.base;
@@ -164,6 +167,9 @@ export const CHAIN_META: Record<number, ChainMeta> = {
   8453: { id: 8453, name: "Base", symbol: "ETH", explorerUrl: "https://basescan.org", explorerTxUrl: "https://basescan.org/tx/" },
   42161: { id: 42161, name: "Arbitrum", symbol: "ETH", explorerUrl: "https://arbiscan.io", explorerTxUrl: "https://arbiscan.io/tx/" },
   84532: { id: 84532, name: "Base Sepolia", symbol: "ETH", explorerUrl: "https://sepolia.basescan.org", explorerTxUrl: "https://sepolia.basescan.org/tx/" },
+  // Solana
+  101: { id: 101, name: "Solana", symbol: "SOL", explorerUrl: "https://explorer.solana.com", explorerTxUrl: "https://explorer.solana.com/tx/" },
+  102: { id: 102, name: "Solana Devnet", symbol: "SOL", explorerUrl: "https://explorer.solana.com?cluster=devnet", explorerTxUrl: "https://explorer.solana.com/tx/" },
 };
 
 export function getChainMeta(chainId: number): ChainMeta | undefined {
