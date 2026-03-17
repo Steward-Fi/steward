@@ -2,19 +2,23 @@
 
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
-  useState,
-  useCallback,
   useRef,
+  useState,
   type ReactNode,
 } from "react";
-import { useAccount, useSignMessage, useDisconnect } from "wagmi";
+import { useAccount, useDisconnect, useSignMessage } from "wagmi";
 import { SiweMessage } from "siwe";
+
 import { setCredentials } from "@/lib/api";
+import { sendMagicLink, signInWithPasskey, type AuthResult } from "@/lib/auth-api";
 
 const API_URL =
   process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface TenantInfo {
   tenantId: string;
@@ -22,12 +26,34 @@ interface TenantInfo {
   apiKey?: string;
 }
 
-interface AuthContextType {
+export interface AuthContextType {
+  /** Ethereum address — set when signed in via wallet (SIWE) */
   address: string | undefined;
+  /** Email — set when signed in via passkey or magic link */
+  email: string | undefined;
+  /** User UUID — set when signed in via passkey or magic link */
+  userId: string | undefined;
+  /** Tenant info — set when signed in via wallet (SIWE) */
   tenant: TenantInfo | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  /** SIWE wallet sign-in */
   signIn: () => Promise<void>;
+  /**
+   * Passkey sign-in/registration.
+   * Automatically detects whether the user needs to register or authenticate.
+   */
+  signInWithPasskey: (email: string) => Promise<void>;
+  /**
+   * Send a magic link to the given email.
+   * Returns `{ ok, expiresAt }` — the caller shows "check your inbox".
+   * Actual JWT is issued in the callback page via verifyMagicLink.
+   */
+  signInWithEmail: (
+    email: string,
+  ) => Promise<{ ok: boolean; expiresAt?: string }>;
+  /** Finalise a magic-link login with the verified AuthResult (called by callback page) */
+  completeEmailAuth: (result: AuthResult) => void;
   signOut: () => Promise<void>;
 }
 
@@ -41,24 +67,31 @@ export function useAuth() {
 
 const TOKEN_KEY = "steward_session";
 
+// ─── Provider ─────────────────────────────────────────────────────────────────
+
 export function AuthProvider({ children }: { children: ReactNode }) {
+  // Wagmi (wallet)
   const { address, chainId, isConnected } = useAccount();
   const { signMessageAsync } = useSignMessage();
   const { disconnect } = useDisconnect();
 
+  // Auth state
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
+  const [email, setEmail] = useState<string | undefined>(undefined);
+  const [userId, setUserId] = useState<string | undefined>(undefined);
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const signingRef = useRef(false);
 
-  // Validate existing session on mount
+  // ── Session validation on mount ─────────────────────────────────────────────
+
   useEffect(() => {
     validateSession();
   }, []);
 
-  // When wallet disconnects, clear auth state
+  // When wallet disconnects, clear auth state (but only if wallet was the auth method)
   useEffect(() => {
-    if (!isConnected && isAuthenticated) {
+    if (!isConnected && isAuthenticated && tenant) {
       clearSession();
     }
   }, [isConnected]);
@@ -78,7 +111,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (data.authenticated) {
         setIsAuthenticated(true);
+
         if (data.address && data.tenantId) {
+          // SIWE session
           const tenantInfo: TenantInfo = {
             tenantId: data.tenantId,
             tenantName: data.tenantName || data.tenantId,
@@ -88,12 +123,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           if (tenantInfo.apiKey) {
             setCredentials(tenantInfo.tenantId, tenantInfo.apiKey);
           }
+        } else if (data.userId) {
+          // User session (passkey / email)
+          setUserId(data.userId);
+          setEmail(data.email as string | undefined);
         }
       } else {
         localStorage.removeItem(TOKEN_KEY);
       }
     } catch {
-      // Session check failed — don't clear, might be network issue
+      // Session check failed — don't clear (might be a network hiccup)
     } finally {
       setIsLoading(false);
     }
@@ -103,34 +142,33 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(TOKEN_KEY);
     setIsAuthenticated(false);
     setTenant(null);
+    setEmail(undefined);
+    setUserId(undefined);
   }
+
+  // ── SIWE (wallet) sign-in ───────────────────────────────────────────────────
 
   const signIn = useCallback(async () => {
     if (!address || !chainId || signingRef.current) return;
     signingRef.current = true;
 
     try {
-      // 1. Get nonce
       const nonceRes = await fetch(`${API_URL}/auth/nonce`);
       const { nonce } = await nonceRes.json();
 
-      // 2. Construct SIWE message
       const message = new SiweMessage({
         domain: window.location.host,
-        address: address,
+        address,
         statement: "Sign in to Steward",
         uri: window.location.origin,
         version: "1",
-        chainId: chainId,
-        nonce: nonce,
+        chainId,
+        nonce,
       });
 
       const messageString = message.prepareMessage();
-
-      // 3. Sign with wallet
       const signature = await signMessageAsync({ message: messageString });
 
-      // 4. Verify with API
       const verifyRes = await fetch(`${API_URL}/auth/verify`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -165,6 +203,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [address, chainId, signMessageAsync]);
 
+  // ── Passkey sign-in ─────────────────────────────────────────────────────────
+
+  const handlePasskeySignIn = useCallback(async (inputEmail: string) => {
+    const result = await signInWithPasskey(inputEmail);
+    localStorage.setItem(TOKEN_KEY, result.token);
+    setIsAuthenticated(true);
+    setUserId(result.user.id);
+    setEmail(result.user.email);
+  }, []);
+
+  // ── Email magic link ────────────────────────────────────────────────────────
+
+  const handleEmailSignIn = useCallback(
+    async (inputEmail: string): Promise<{ ok: boolean; expiresAt?: string }> => {
+      return sendMagicLink(inputEmail);
+    },
+    [],
+  );
+
+  /**
+   * Called by the /auth/callback/email page after the magic link is verified.
+   * Stores the JWT and updates auth state without a full page reload.
+   */
+  const completeEmailAuth = useCallback((result: AuthResult) => {
+    localStorage.setItem(TOKEN_KEY, result.token);
+    setIsAuthenticated(true);
+    setUserId(result.user.id);
+    setEmail(result.user.email);
+  }, []);
+
+  // ── Sign out ────────────────────────────────────────────────────────────────
+
   const signOut = useCallback(async () => {
     const token = localStorage.getItem(TOKEN_KEY);
     if (token) {
@@ -174,21 +244,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           headers: { Authorization: `Bearer ${token}` },
         });
       } catch {
-        // Logout API call is best-effort
+        // Best-effort
       }
     }
     clearSession();
-    disconnect();
-  }, [disconnect]);
+    // Only disconnect wallet if it was the auth method
+    if (tenant) disconnect();
+  }, [disconnect, tenant]);
+
+  // ── Context value ───────────────────────────────────────────────────────────
 
   return (
     <AuthContext.Provider
       value={{
         address,
+        email,
+        userId,
         tenant,
         isAuthenticated,
         isLoading,
         signIn,
+        signInWithPasskey: handlePasskeySignIn,
+        signInWithEmail: handleEmailSignIn,
+        completeEmailAuth,
         signOut,
       }}
     >

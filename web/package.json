@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.10",
+    "@simplewebauthn/browser": "^13",
     "@tanstack/react-query": "^5.90.21",
     "framer-motion": "^12.36.0",
     "next": "^15.3.0",

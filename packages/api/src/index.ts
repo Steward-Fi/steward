@@ -376,14 +376,18 @@ app.get("/health", (c) =>
   })
 );
 
-// ─── New Route Modules (v2 auth + platform + user) ────────────────────────────
+// ─── Route Modules ────────────────────────────────────────────────────────────
+import { authRoutes } from "./routes/auth";
 import { platformRoutes } from "./routes/platform";
 import { userRoutes } from "./routes/user";
 
+// authRoutes is mounted first so its /session handler (which supports both
+// SIWE and user-session JWTs) takes precedence over the legacy inline version.
+app.route("/auth", authRoutes);
 app.route("/platform", platformRoutes);
 app.route("/user", userRoutes);
 
-// ─── SIWE Auth Endpoints (legacy, kept for backward compatibility) ────────────
+// ─── SIWE Auth Endpoints (legacy inline — superseded by /routes/auth.ts) ──────
 
 app.get("/auth/nonce", (c) => {
   const nonce = generateNonce();
