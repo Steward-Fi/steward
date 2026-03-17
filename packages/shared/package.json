@@ -1,12 +1,46 @@
 {
   "name": "@stwd/shared",
-  "version": "0.1.0",
-  "private": true,
+  "version": "0.2.0",
+  "description": "Shared domain types, interfaces, and constants for the Steward monorepo",
   "type": "module",
-  "main": "src/index.ts",
-  "scripts": {
-    "build": "tsc --noEmit",
-    "dev": "tsc --watch"
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
-  "description": "Shared domain types, interfaces, and constants for the Steward monorepo"
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "steward",
+    "agent",
+    "wallet",
+    "policy",
+    "types",
+    "ethereum",
+    "base",
+    "web3",
+    "ai-agent",
+    "sdk"
+  ],
+  "author": "0xSolace",
+  "license": "MIT",
+  "homepage": "https://steward.fi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0xSolace/steward"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }
