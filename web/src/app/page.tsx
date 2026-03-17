@@ -45,7 +45,7 @@ function Hero() {
               transition={{ duration: 0.6, ease: easeOutExpo, delay: 0.1 }}
               className="text-sm text-text-tertiary tracking-widest uppercase mb-6"
             >
-              Agent wallet infrastructure
+              The policy layer for autonomous finance
             </motion.p>
 
             <motion.h1
@@ -54,9 +54,9 @@ function Hero() {
               transition={{ duration: 0.7, ease: easeOutExpo, delay: 0.2 }}
               className="font-display text-hero font-800 leading-[0.92] tracking-[-0.03em]"
             >
-              Wallets agents
+              Agents move money.
               <br />
-              <span className="text-[oklch(0.75_0.15_55)]">can't drain</span>
+              <span className="text-[oklch(0.75_0.15_55)]">Steward governs how.</span>
             </motion.h1>
 
             <motion.p
@@ -65,8 +65,8 @@ function Hero() {
               transition={{ duration: 0.6, ease: easeOutExpo, delay: 0.4 }}
               className="mt-8 text-lg md:text-xl text-text-secondary max-w-xl leading-relaxed"
             >
-              Policy-enforced signing. Multi-tenant isolation. Human-in-the-loop approvals.
-              Your agents spend money — Steward makes sure they spend it safely.
+              Policy-enforced signing. Scoped wallets. Human-in-the-loop approvals.
+              The open-source governance layer for any agent framework.
             </motion.p>
 
             <motion.div
@@ -101,29 +101,32 @@ function Hero() {
           >
             <div className="border border-border bg-bg-elevated">
               <CodeBlock
-                filename="agent.ts"
+                filename="configure-agent.ts"
                 language="typescript"
                 typeEffect
                 code={`import { StewardClient } from "@stwd/sdk"
 
 const steward = new StewardClient({
   baseUrl: "https://api.steward.fi",
-  tenantId: "eliza-cloud",
+  tenantId: "my-platform",
 })
 
 const wallet = await steward.createWallet(
   "trading-agent-01",
-  "Alpha Trader"
+  "DeFi Trading Bot"
 )
 
-const tx = await steward.signTransaction(
-  wallet.id,
-  {
-    to: "0xdead...beef",
-    value: "100000000000000",
-    chainId: 8453,
-  }
-)`}
+await steward.setPolicies(wallet.id, [
+  { type: "spending-limit",
+    config: { maxPerTx: "1e18",
+              maxPerDay: "10e18" } },
+  { type: "approved-addresses",
+    config: { addresses: [
+      "0xUniswap...",
+      "0xTreasury..."] } },
+  { type: "human-approval",
+    config: { threshold: "5e18" } },
+])`}
               />
             </div>
           </motion.div>
@@ -153,7 +156,11 @@ function ProblemSection() {
         </Reveal>
         <Reveal direction="up" delay={0.2}>
           <p className="mt-8 text-lg text-text-secondary max-w-2xl leading-relaxed">
-            Every agent framework ships the same thing: a raw private key in an env var, no spending limits, no restrictions. One hallucination, one prompt injection — the wallet is drained. No undo on a blockchain. Steward fixes this at the infrastructure layer.
+            Trading bots, treasury managers, prediction markets, reward systems.
+            Agents are already moving real money. But every framework ships the same thing:
+            a raw key in an env var, no spending limits, no restrictions.
+            One hallucination, one prompt injection, and the wallet is drained.
+            No undo on a blockchain.
           </p>
         </Reveal>
       </div>
@@ -221,33 +228,37 @@ function HowItWorksSection() {
 }
 
 function FlowDiagram() {
+  const nodes = [
+    { label: "Agent", sub: "SDK call" },
+    { label: "Policy Engine", sub: "Evaluate rules" },
+    { label: "Decision", sub: "Approve / Queue / Reject" },
+    { label: "Vault", sub: "Sign & broadcast" },
+  ];
+
   return (
-    <div className="flex items-center justify-between gap-2 overflow-x-auto py-6 px-4">
-      {[
-        { label: "Agent", sub: "SDK call" },
-        { label: "Policy Engine", sub: "Evaluate rules" },
-        { label: "Decision", sub: "Approve / Queue / Reject" },
-        { label: "Vault", sub: "Sign & broadcast" },
-      ].map((node, i) => (
-        <div key={node.label} className="flex items-center gap-2 flex-shrink-0">
+    <div className="flex items-center justify-between overflow-x-auto py-6">
+      {nodes.map((node, i) => (
+        <div key={node.label} className="flex items-center flex-1 min-w-0">
           <motion.div
             initial={{ opacity: 0, scale: 0.9 }}
             whileInView={{ opacity: 1, scale: 1 }}
             viewport={{ once: true }}
             transition={{ delay: i * 0.15, duration: 0.4, ease: [0.25, 1, 0.5, 1] }}
-            className="border border-border px-5 py-3 bg-bg-elevated"
+            className="border border-border px-5 py-3 bg-bg-elevated flex-shrink-0"
           >
             <div className="text-sm font-display font-700">{node.label}</div>
             <div className="text-xs text-text-tertiary mt-0.5">{node.sub}</div>
           </motion.div>
-          {i < 3 && (
+          {i < nodes.length - 1 && (
             <motion.div
               initial={{ opacity: 0, scaleX: 0 }}
               whileInView={{ opacity: 1, scaleX: 1 }}
               viewport={{ once: true }}
               transition={{ delay: i * 0.15 + 0.2, duration: 0.3, ease: [0.25, 1, 0.5, 1] }}
-              className="w-8 md:w-16 h-px bg-border origin-left flex-shrink-0"
-            />
+              className="flex-1 h-px bg-border origin-left mx-1 relative min-w-[16px]"
+            >
+              <div className="absolute right-0 top-1/2 -translate-y-1/2 w-0 h-0 border-t-[4px] border-t-transparent border-b-[4px] border-b-transparent border-l-[6px] border-l-border" />
+            </motion.div>
           )}
         </div>
       ))}
@@ -359,7 +370,7 @@ function PlatformsSection() {
           <div className="lg:col-span-7">
             <Reveal>
               <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
-                For platforms
+                Built for real operations
               </p>
             </Reveal>
             <Reveal delay={0.1}>
@@ -371,7 +382,7 @@ function PlatformsSection() {
               <p className="mt-6 text-lg text-text-secondary leading-relaxed max-w-xl">
                 Run one Steward instance for thousands of agents across isolated tenants.
                 Each tenant gets its own API key, policies, and webhook endpoints.
-                Self-hosted. No per-transaction rent. No vendor lock-in.
+                Self-hosted. No per-transaction toll. No vendor lock-in.
               </p>
             </Reveal>
           </div>
@@ -380,16 +391,20 @@ function PlatformsSection() {
             <StaggerContainer staggerDelay={0.12} className="space-y-6">
               {[
                 {
-                  name: "Eliza Cloud",
-                  desc: "400+ agents, each with scoped spending limits",
+                  name: "DeFi & Trading",
+                  desc: "Trading bots, yield agents, and liquidity managers with enforced spending limits and approved counterparties",
                 },
                 {
-                  name: "waifu.fun",
-                  desc: "Character agents with per-interaction micro-payments",
+                  name: "Prediction Markets",
+                  desc: "Autonomous market makers with risk boundaries and position limits",
                 },
                 {
-                  name: "Your platform",
-                  desc: "Any agent framework. Any chain. Any scale.",
+                  name: "Treasuries & Rewards",
+                  desc: "DAO treasuries, perks systems, and micro-payment agents with multi-party approval flows",
+                },
+                {
+                  name: "RWA & Settlement",
+                  desc: "Commodity finance, collateral management, and tokenized asset operations",
                 },
               ].map((tenant) => (
                 <StaggerItem key={tenant.name}>
@@ -407,6 +422,52 @@ function PlatformsSection() {
   );
 }
 
+// --- Open Source Banner ---
+function OpenSourceSection() {
+  return (
+    <section className="relative px-6 md:px-10 py-32 md:py-44 border-t border-border-subtle">
+      <div className="max-w-[1400px] mx-auto text-center">
+        <Reveal>
+          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
+            Open source
+          </p>
+        </Reveal>
+        <Reveal delay={0.1}>
+          <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-2xl mx-auto">
+            Infrastructure, not rent-seeking middleware.
+          </h2>
+        </Reveal>
+        <Reveal delay={0.2}>
+          <p className="mt-6 text-lg text-text-secondary leading-relaxed max-w-xl mx-auto">
+            No tolls. No per-transaction fees. MIT-licensed, self-hostable,
+            built to be the foundation you own, not a dependency you rent.
+          </p>
+        </Reveal>
+        <Reveal delay={0.3}>
+          <div className="mt-10 flex items-center justify-center gap-5">
+            <a
+              href="https://github.com/0xSolace/steward"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-6 py-3 border border-border text-text-secondary text-sm hover:text-text hover:border-text-tertiary transition-colors"
+            >
+              Browse the source
+            </a>
+            <a
+              href="https://npmjs.com/package/@stwd/sdk"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-6 py-3 border border-border text-text-secondary text-sm hover:text-text hover:border-text-tertiary transition-colors"
+            >
+              npm i @stwd/sdk
+            </a>
+          </div>
+        </Reveal>
+      </div>
+    </section>
+  );
+}
+
 // --- Footer ---
 function Footer() {
   return (
@@ -418,7 +479,7 @@ function Footer() {
             <span className="font-display text-base font-bold tracking-tight">steward</span>
           </div>
           <p className="text-xs text-text-tertiary mt-1">
-            Agent wallet infrastructure. Built for Synthesis 2026.
+            The trust layer for autonomous finance. Open source.
           </p>
         </div>
         <div className="flex items-center gap-6 text-sm text-text-tertiary">
@@ -439,12 +500,12 @@ function Footer() {
             npm
           </a>
           <a
-            href="https://www.synthesis.fun"
+            href="https://docs.steward.fi"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-text transition-colors"
           >
-            Synthesis Hackathon
+            Docs
           </a>
         </div>
       </div>
@@ -462,6 +523,7 @@ export default function LandingPage() {
       <HowItWorksSection />
       <SDKSection />
       <PlatformsSection />
+      <OpenSourceSection />
       <Footer />
     </main>
   );
