@@ -36,6 +36,13 @@ async function apiPost<T = unknown>(
     body: JSON.stringify(body),
   });
   const json = await res.json();
+  // Normalize: some endpoints return { ok, token, user } (flat)
+  // while others return { ok, data: { ... } } (nested).
+  // Wrap flat responses into { ok, data } for consistent access.
+  if (json.ok && !json.data && !json.error) {
+    const { ok, ...rest } = json;
+    return { ok: true, data: rest as T };
+  }
   return json;
 }
 
@@ -46,12 +53,16 @@ async function apiPost<T = unknown>(
  * Lazily creates the user record on the server if needed.
  */
 async function getPasskeyRegisterOptions(email: string) {
-  const result = await apiPost<Record<string, unknown>>(
-    "/auth/passkey/register/options",
-    { email },
-  );
-  if (!result.ok) throw new Error(result.error);
-  return result.data;
+  const res = await fetch(`${API_URL}/auth/passkey/register/options`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const json = await res.json();
+  // This endpoint returns raw WebAuthn options (no ok wrapper) on success,
+  // or { ok: false, error } on failure
+  if (json.ok === false) throw new Error(json.error || "Failed to get registration options");
+  return json;
 }
 
 /**
@@ -59,12 +70,14 @@ async function getPasskeyRegisterOptions(email: string) {
  * Returns `allowCredentials` if the user has registered passkeys.
  */
 async function getPasskeyLoginOptions(email: string) {
-  const result = await apiPost<{
-    allowCredentials?: Array<{ id: string }>;
-    [key: string]: unknown;
-  }>("/auth/passkey/login/options", { email });
-  if (!result.ok) throw new Error(result.error);
-  return result.data;
+  const res = await fetch(`${API_URL}/auth/passkey/login/options`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const json = await res.json();
+  if (json.ok === false) throw new Error(json.error || "Failed to get login options");
+  return json as { allowCredentials?: Array<{ id: string }>; [key: string]: unknown };
 }
 
 async function verifyPasskeyRegistration(
