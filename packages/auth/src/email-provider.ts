@@ -5,7 +5,7 @@ import { Resend } from "resend";
  * Swap implementations without touching EmailAuth logic.
  */
 export interface EmailProvider {
-  send(to: string, subject: string, text: string): Promise<void>;
+  send(to: string, subject: string, text: string, html?: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -14,7 +14,7 @@ export interface EmailProvider {
 
 export interface ResendProviderConfig {
   apiKey: string;
-  from: string; // e.g. "login@steward.fi"
+  from: string; // e.g. "Steward <login@steward.fi>"
 }
 
 export class ResendProvider implements EmailProvider {
@@ -26,12 +26,13 @@ export class ResendProvider implements EmailProvider {
     this.from = config.from;
   }
 
-  async send(to: string, subject: string, text: string): Promise<void> {
+  async send(to: string, subject: string, text: string, html?: string): Promise<void> {
     const { error } = await this.client.emails.send({
       from: this.from,
       to,
       subject,
       text,
+      ...(html ? { html } : {}),
     });
 
     if (error) {
