@@ -5,6 +5,7 @@ export interface StewardClientConfig {
   baseUrl: string;
   apiKey?: string;
   tenantId?: string;
+  authToken?: string; // JWT from passkey/email auth
 }
 
 export interface AgentIdentity {
@@ -66,8 +67,13 @@ export class StewardClient {
     this.baseUrl = config.baseUrl.replace(/\/$/, "");
     this.headers = {
       "Content-Type": "application/json",
-      ...(config.tenantId ? { "X-Steward-Tenant": config.tenantId } : {}),
-      ...(config.apiKey ? { "X-Steward-Key": config.apiKey } : {}),
+      // JWT Bearer takes priority over tenant header auth
+      ...(config.authToken
+        ? { Authorization: `Bearer ${config.authToken}` }
+        : {
+            ...(config.tenantId ? { "X-Steward-Tenant": config.tenantId } : {}),
+            ...(config.apiKey ? { "X-Steward-Key": config.apiKey } : {}),
+          }),
     };
   }
 

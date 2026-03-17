@@ -12,7 +12,7 @@ import {
 import { useAccount, useDisconnect, useSignMessage } from "wagmi";
 import { SiweMessage } from "siwe";
 
-import { setCredentials } from "@/lib/api";
+import { setAuthToken, setCredentials } from "@/lib/api";
 import { sendMagicLink, signInWithPasskey, type AuthResult } from "@/lib/auth-api";
 
 const API_URL =
@@ -124,7 +124,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             setCredentials(tenantInfo.tenantId, tenantInfo.apiKey);
           }
         } else if (data.userId) {
-          // User session (passkey / email)
+          // User session (passkey / email) — wire up JWT Bearer for dashboard calls
+          setAuthToken(token);
           setUserId(data.userId);
           setEmail(data.email as string | undefined);
         }
@@ -208,6 +209,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const handlePasskeySignIn = useCallback(async (inputEmail: string) => {
     const result = await signInWithPasskey(inputEmail);
     localStorage.setItem(TOKEN_KEY, result.token);
+    setAuthToken(result.token);
     setIsAuthenticated(true);
     setUserId(result.user.id);
     setEmail(result.user.email);
@@ -228,6 +230,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    */
   const completeEmailAuth = useCallback((result: AuthResult) => {
     localStorage.setItem(TOKEN_KEY, result.token);
+    setAuthToken(result.token);
     setIsAuthenticated(true);
     setUserId(result.user.id);
     setEmail(result.user.email);

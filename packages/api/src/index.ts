@@ -277,6 +277,27 @@ async function tenantAuth(
 ) {
   await defaultTenantReady;
 
+  // ── JWT Bearer auth (passkey / email login) ───────────────────────────────
+  const authHeader = c.req.header("Authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    const token = authHeader.slice(7);
+    const payload = await verifySessionToken(token);
+    if (payload?.tenantId) {
+      const jwtTenant = await findTenant(payload.tenantId);
+      if (jwtTenant) {
+        if (options?.requireTenantMatch && payload.tenantId !== options.requireTenantMatch) {
+          return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+        }
+        c.set("tenantId", payload.tenantId);
+        c.set("tenant", jwtTenant);
+        c.set("tenantConfig", tenantConfigs.get(payload.tenantId) || { id: jwtTenant.id, name: jwtTenant.name });
+        return next();
+      }
+    }
+    // Invalid/expired JWT — fall through to header auth so existing tooling still works
+  }
+
+  // ── Legacy X-Steward-Tenant / X-Steward-Key header auth ──────────────────
   const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
   const tenant = await findTenant(tenantId);
 

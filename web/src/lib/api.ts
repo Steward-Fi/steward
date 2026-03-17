@@ -20,6 +20,14 @@ export function setCredentials(tenantId: string, apiKey: string) {
   });
 }
 
+export function setAuthToken(token: string) {
+  // Recreate the client using JWT Bearer auth (passkey / email login)
+  _steward = new StewardClient({
+    baseUrl: API_URL,
+    authToken: token,
+  });
+}
+
 let _steward = new StewardClient({
   baseUrl: API_URL,
   apiKey: _apiKey,
