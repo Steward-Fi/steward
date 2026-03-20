@@ -85,6 +85,50 @@ export interface SignRequest {
   chainId: number;
   nonce?: number;
   gasLimit?: string;
+  broadcast?: boolean;
+}
+
+export interface TypedDataDomain {
+  name?: string;
+  version?: string;
+  chainId?: number;
+  verifyingContract?: string;
+  salt?: string;
+}
+
+export interface TypedDataField {
+  name: string;
+  type: string;
+}
+
+export interface SignTypedDataRequest {
+  agentId: string;
+  tenantId: string;
+  domain: TypedDataDomain;
+  types: Record<string, TypedDataField[]>;
+  primaryType: string;
+  value: Record<string, unknown>;
+}
+
+export interface SignSolanaTransactionRequest {
+  agentId: string;
+  tenantId: string;
+  transaction: string;
+  chainId?: number;
+  broadcast?: boolean;
+}
+
+export interface RpcRequest {
+  method: string;
+  params?: unknown[];
+  chainId: number;
+}
+
+export interface RpcResponse {
+  jsonrpc: string;
+  id: number;
+  result?: unknown;
+  error?: { code: number; message: string; data?: unknown };
 }
 
 export interface TxRecord {

@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
-import { createPublicClient, createWalletClient, formatEther, http, type Chain } from "viem";
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { createPublicClient, createWalletClient, formatEther, http, type Chain, type TransactionSerializable } from "viem";
+import { generatePrivateKey, privateKeyToAccount, signTransaction as viemSignTransaction } from "viem/accounts";
 import { arbitrum, base, baseSepolia, bsc, bscTestnet, mainnet, polygon } from "viem/chains";
 
 import {
@@ -10,7 +10,16 @@ import {
   toAgentIdentity,
   transactions,
 } from "@stwd/db";
-import type { PolicyResult, SignRequest, TxStatus, AgentIdentity } from "@stwd/shared";
+import type {
+  PolicyResult,
+  SignRequest,
+  SignTypedDataRequest,
+  SignSolanaTransactionRequest,
+  RpcRequest,
+  RpcResponse,
+  TxStatus,
+  AgentIdentity,
+} from "@stwd/shared";
 
 import { KeyStore, type EncryptedKey } from "./keystore";
 import {
@@ -191,7 +200,10 @@ export class Vault {
   /**
    * Sign a transaction. Decrypts the key, signs, then discards the key.
    * Routes to Solana or EVM based on chainId (101/102 = Solana, otherwise EVM).
-   * Returns the transaction hash / signature.
+   *
+   * When `broadcast` is false (or request.broadcast is false), returns the
+   * serialized signed transaction instead of broadcasting it.
+   * Returns the transaction hash (when broadcast) or signed serialized tx (when not).
    */
   async signTransaction(
     request: SignRequest,
@@ -216,6 +228,7 @@ export class Vault {
     const secretKey = this.keyStore.decrypt(stored.encryptedKey as EncryptedKey);
     const chainId = request.chainId || this.config.chainId || 8453;
     const isSolana = detectChainType(stored.walletAddress) === "solana";
+    const shouldBroadcast = request.broadcast !== false;
 
     let hash: string;
 
@@ -234,18 +247,38 @@ export class Vault {
         throw new Error(`Unsupported EVM chain: ${chainId}`);
       }
 
-      const client = createWalletClient({
-        account,
-        chain,
-        transport: http(this.config.rpcUrl),
-      });
+      if (shouldBroadcast) {
+        const client = createWalletClient({
+          account,
+          chain,
+          transport: http(this.config.rpcUrl),
+        });
 
-      hash = await client.sendTransaction({
-        to: request.to as `0x${string}`,
-        value: BigInt(request.value),
-        data: request.data as `0x${string}` | undefined,
-        gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
-      });
+        hash = await client.sendTransaction({
+          to: request.to as `0x${string}`,
+          value: BigInt(request.value),
+          data: request.data as `0x${string}` | undefined,
+          gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
+        });
+      } else {
+        // Sign without broadcasting — return the serialized signed transaction
+        const rpcUrl = CHAIN_RPCS[chainId] ?? this.config.rpcUrl;
+        const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
+        const nonce = request.nonce ?? await publicClient.getTransactionCount({ address: account.address });
+        const gasPrice = await publicClient.getGasPrice();
+
+        const txRequest: TransactionSerializable = {
+          to: request.to as `0x${string}`,
+          value: BigInt(request.value),
+          data: request.data as `0x${string}` | undefined,
+          gas: request.gasLimit ? BigInt(request.gasLimit) : 21000n,
+          nonce,
+          gasPrice,
+          chainId,
+        };
+
+        hash = await account.signTransaction(txRequest);
+      }
     }
 
     const txId = options.txId ?? crypto.randomUUID();
@@ -256,12 +289,12 @@ export class Vault {
       .values({
         id: txId,
         agentId: request.agentId,
-        status: options.status ?? "signed",
+        status: shouldBroadcast ? (options.status ?? "signed") : "signed",
         toAddress: request.to,
         value: request.value,
         data: request.data,
         chainId,
-        txHash: hash,
+        txHash: shouldBroadcast ? hash : undefined,
         policyResults: options.policyResults ?? [],
         signedAt,
         createdAt: signedAt,
@@ -270,12 +303,12 @@ export class Vault {
         target: transactions.id,
         set: {
           agentId: request.agentId,
-          status: options.status ?? "signed",
+          status: shouldBroadcast ? (options.status ?? "signed") : "signed",
           toAddress: request.to,
           value: request.value,
           data: request.data,
           chainId,
-          txHash: hash,
+          txHash: shouldBroadcast ? hash : undefined,
           policyResults: options.policyResults ?? [],
           signedAt,
         },
@@ -441,5 +474,164 @@ export class Vault {
     const account = privateKeyToAccount(secretKey as `0x${string}`);
     const signature = await account.signMessage({ message });
     return signature;
+  }
+
+  /**
+   * Sign EIP-712 typed data (`eth_signTypedData_v4`).
+   * Used for DEX approvals, ERC-20 permits, and structured data signatures.
+   */
+  async signTypedData(
+    request: SignTypedDataRequest
+  ): Promise<string> {
+    const db = getDb();
+    const [stored] = await db
+      .select({
+        walletAddress: agents.walletAddress,
+        encryptedKey: encryptedKeys,
+      })
+      .from(agents)
+      .innerJoin(encryptedKeys, eq(encryptedKeys.agentId, agents.id))
+      .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
+
+    if (!stored) {
+      throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    }
+
+    if (detectChainType(stored.walletAddress) === "solana") {
+      throw new Error("EIP-712 typed data signing is not supported for Solana wallets");
+    }
+
+    const secretKey = this.keyStore.decrypt(stored.encryptedKey as EncryptedKey);
+    const account = privateKeyToAccount(secretKey as `0x${string}`);
+
+    const signature = await account.signTypedData({
+      domain: {
+        name: request.domain.name,
+        version: request.domain.version,
+        chainId: request.domain.chainId,
+        verifyingContract: request.domain.verifyingContract as `0x${string}` | undefined,
+        salt: request.domain.salt as `0x${string}` | undefined,
+      },
+      types: request.types as Record<string, Array<{ name: string; type: string }>>,
+      primaryType: request.primaryType,
+      message: request.value,
+    });
+
+    return signature;
+  }
+
+  /**
+   * Sign a serialized Solana transaction.
+   * Accepts a base64-encoded transaction, signs it with the agent's Ed25519 key,
+   * and optionally broadcasts it.
+   */
+  async signSolanaTransaction(
+    request: SignSolanaTransactionRequest
+  ): Promise<{ signature: string; broadcast: boolean }> {
+    const db = getDb();
+    const [stored] = await db
+      .select({
+        walletAddress: agents.walletAddress,
+        encryptedKey: encryptedKeys,
+      })
+      .from(agents)
+      .innerJoin(encryptedKeys, eq(encryptedKeys.agentId, agents.id))
+      .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
+
+    if (!stored) {
+      throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    }
+
+    if (detectChainType(stored.walletAddress) !== "solana") {
+      throw new Error("Solana transaction signing requires a Solana wallet");
+    }
+
+    const secretKey = this.keyStore.decrypt(stored.encryptedKey as EncryptedKey);
+    const keypair = restoreSolanaKeypair(secretKey);
+    const chainId = request.chainId ?? 101;
+    const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(chainId);
+    const shouldBroadcast = request.broadcast !== false;
+
+    // Deserialize the transaction from base64
+    const { Transaction: SolTransaction, Connection } = await import("@solana/web3.js");
+    const txBytes = Uint8Array.from(atob(request.transaction), c => c.charCodeAt(0));
+    const tx = SolTransaction.from(txBytes);
+
+    // Sign the transaction
+    tx.partialSign(keypair);
+
+    if (shouldBroadcast) {
+      const connection = new Connection(rpcUrl, "confirmed");
+      const rawTx = tx.serialize();
+      const sig = await connection.sendRawTransaction(rawTx, {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+      });
+
+      const { blockhash, lastValidBlockHeight } =
+        await connection.getLatestBlockhash("confirmed");
+      await connection.confirmTransaction(
+        { signature: sig, blockhash, lastValidBlockHeight },
+        "confirmed"
+      );
+
+      return { signature: sig, broadcast: true };
+    }
+
+    // Return serialized signed transaction as base64
+    const rawBytes = tx.serialize();
+    const serialized = btoa(Array.from(rawBytes, b => String.fromCharCode(b)).join(""));
+    return { signature: serialized, broadcast: false };
+  }
+
+  /**
+   * Proxy a read-only RPC call to the appropriate chain provider.
+   * Supports both EVM and Solana RPC methods.
+   */
+  async rpcPassthrough(request: RpcRequest): Promise<RpcResponse> {
+    const chainId = request.chainId;
+    const isSolana = chainId === 101 || chainId === 102;
+
+    let rpcUrl: string;
+    if (isSolana) {
+      rpcUrl = SOLANA_RPCS[chainId] ?? SOLANA_RPCS[101];
+    } else {
+      rpcUrl = CHAIN_RPCS[chainId] ?? this.config.rpcUrl ?? "";
+    }
+
+    if (!rpcUrl) {
+      throw new Error(`No RPC URL configured for chainId ${chainId}`);
+    }
+
+    // Block signing/state-modifying methods — this is read-only passthrough
+    const blockedMethods = [
+      "eth_sendTransaction",
+      "eth_sendRawTransaction",
+      "eth_sign",
+      "personal_sign",
+      "eth_signTypedData",
+      "eth_signTypedData_v4",
+      "sendTransaction",
+    ];
+    if (blockedMethods.includes(request.method)) {
+      throw new Error(`Method ${request.method} is not allowed via RPC passthrough — use the signing endpoints`);
+    }
+
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: request.method,
+        params: request.params ?? [],
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`RPC request failed: ${response.status} ${response.statusText}`);
+    }
+
+    return (await response.json()) as RpcResponse;
   }
 }

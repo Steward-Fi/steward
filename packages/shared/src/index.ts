@@ -90,6 +90,59 @@ export interface SignRequest {
   chainId: number;
   nonce?: number;
   gasLimit?: string;
+  broadcast?: boolean; // default true — set false to return signed tx without broadcasting
+}
+
+/**
+ * EIP-712 typed data signing request (`eth_signTypedData_v4`).
+ */
+export interface SignTypedDataRequest {
+  agentId: string;
+  tenantId: string;
+  domain: TypedDataDomain;
+  types: Record<string, TypedDataField[]>;
+  primaryType: string;
+  value: Record<string, unknown>;
+}
+
+export interface TypedDataDomain {
+  name?: string;
+  version?: string;
+  chainId?: number;
+  verifyingContract?: string;
+  salt?: string;
+}
+
+export interface TypedDataField {
+  name: string;
+  type: string;
+}
+
+/**
+ * Solana transaction signing request.
+ */
+export interface SignSolanaTransactionRequest {
+  agentId: string;
+  tenantId: string;
+  transaction: string; // base64-encoded serialized transaction
+  chainId?: number; // 101 = mainnet, 102 = devnet
+  broadcast?: boolean; // default true
+}
+
+/**
+ * Generic RPC passthrough request for read-only operations.
+ */
+export interface RpcRequest {
+  method: string;
+  params?: unknown[];
+  chainId: number;
+}
+
+export interface RpcResponse {
+  jsonrpc: string;
+  id: number;
+  result?: unknown;
+  error?: { code: number; message: string; data?: unknown };
 }
 
 export interface TxRecord {

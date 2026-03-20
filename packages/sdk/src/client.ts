@@ -1,4 +1,15 @@
-import type { AgentBalance, AgentIdentity, ApiResponse, PolicyResult, PolicyRule } from "./types.ts";
+import type {
+  AgentBalance,
+  AgentIdentity,
+  ApiResponse,
+  PolicyResult,
+  PolicyRule,
+  RpcRequest,
+  RpcResponse,
+  SignTypedDataRequest,
+  TypedDataDomain,
+  TypedDataField,
+} from "./types.ts";
 
 export interface BatchAgentSpec {
   id: string;
@@ -24,6 +35,26 @@ export interface SignTransactionInput {
   value: string;
   data?: string;
   chainId?: number;
+  broadcast?: boolean; // default true; set false to get signed tx without broadcasting
+}
+
+export interface SignTypedDataInput {
+  domain: TypedDataDomain;
+  types: Record<string, TypedDataField[]>;
+  primaryType: string;
+  value: Record<string, unknown>;
+}
+
+export interface SignSolanaTransactionInput {
+  transaction: string; // base64-encoded serialized Solana transaction
+  chainId?: number;    // 101 = mainnet, 102 = devnet
+  broadcast?: boolean; // default true
+}
+
+export interface RpcPassthroughInput {
+  method: string;
+  params?: unknown[];
+  chainId: number;
 }
 
 export interface StewardPendingApproval {
@@ -42,7 +73,10 @@ export interface SignMessageResult {
 
 export type CreateWalletResult = AgentIdentity;
 export type GetHistoryResult = StewardHistoryEntry[];
-export type SignTransactionResult = { txHash: string } | StewardPendingApproval;
+export type SignTransactionResult = { txHash: string } | { signedTx: string } | StewardPendingApproval;
+export type SignTypedDataResult = { signature: string };
+export type SignSolanaTransactionResult = { signature: string; broadcast: boolean };
+export type RpcPassthroughResult = RpcResponse;
 export type StewardErrorResponse = { results?: PolicyResult[] };
 
 type ApiRequestResult<TSuccess, TFailure> =
@@ -178,6 +212,66 @@ export class StewardClient {
       {
         method: "POST",
         body: JSON.stringify({ message }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Sign EIP-712 typed data (`eth_signTypedData_v4`).
+   * Used for DEX approvals, ERC-20 permits, and structured data signatures.
+   */
+  async signTypedData(agentId: string, input: SignTypedDataInput): Promise<SignTypedDataResult> {
+    const response = await this.request<SignTypedDataResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/sign-typed-data`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Sign a serialized Solana transaction.
+   * Pass a base64-encoded transaction; optionally broadcast via Solana RPC.
+   */
+  async signSolanaTransaction(agentId: string, input: SignSolanaTransactionInput): Promise<SignSolanaTransactionResult> {
+    const response = await this.request<SignSolanaTransactionResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/sign-solana`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Proxy a read-only RPC call to the appropriate chain provider.
+   * Signing/state-modifying methods are blocked server-side.
+   */
+  async rpcPassthrough(agentId: string, input: RpcPassthroughInput): Promise<RpcPassthroughResult> {
+    const response = await this.request<RpcPassthroughResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/rpc`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
       },
     );
 

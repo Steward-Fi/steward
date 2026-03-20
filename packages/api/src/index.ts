@@ -24,7 +24,11 @@ import type {
   AgentIdentity,
   ApiResponse,
   PolicyRule,
+  RpcRequest,
+  RpcResponse,
   SignRequest,
+  SignSolanaTransactionRequest,
+  SignTypedDataRequest,
   Tenant,
   TenantConfig,
 } from "@stwd/shared";
@@ -1133,7 +1137,8 @@ app.post("/vault/:agentId/sign", async (c) => {
 
   try {
     const txId = crypto.randomUUID();
-    const txHash = await vault.signTransaction(signRequest, {
+    const shouldBroadcast = signRequest.broadcast !== false;
+    const result = await vault.signTransaction(signRequest, {
       txId,
       policyResults: evaluation.results,
       status: "signed",
@@ -1143,7 +1148,7 @@ app.post("/vault/:agentId/sign", async (c) => {
       .update(transactions)
       .set({
         status: "signed",
-        txHash,
+        txHash: shouldBroadcast ? result : undefined,
         policyResults: evaluation.results,
         signedAt: new Date(),
       })
@@ -1153,15 +1158,22 @@ app.post("/vault/:agentId/sign", async (c) => {
     if (webhookUrlSigned) {
       webhookDispatcher
         .dispatch(
-          { type: "tx_signed", tenantId, agentId, data: { txId, txHash }, timestamp: new Date() },
+          { type: "tx_signed", tenantId, agentId, data: { txId, txHash: shouldBroadcast ? result : undefined }, timestamp: new Date() },
           webhookUrlSigned
         )
         .catch(console.error);
     }
 
-    return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+    if (shouldBroadcast) {
+      return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+        ok: true,
+        data: { txId, txHash: result },
+      });
+    }
+
+    return c.json<ApiResponse<{ txId: string; signedTx: string }>>({
       ok: true,
-      data: { txId, txHash },
+      data: { txId, signedTx: result },
     });
   } catch (e: unknown) {
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
@@ -1383,6 +1395,150 @@ app.get("/vault/:agentId/history", async (c) => {
     ok: true,
     data: history.map(toTxRecord),
   });
+});
+
+// ─── EIP-712 Typed Data Signing ───────────────────────────────────────────
+app.post("/vault/:agentId/sign-typed-data", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    domain: SignTypedDataRequest["domain"];
+    types: SignTypedDataRequest["types"];
+    primaryType: string;
+    value: Record<string, unknown>;
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!body.domain || typeof body.domain !== "object") {
+    return c.json<ApiResponse>({ ok: false, error: "'domain' is required and must be an object" }, 400);
+  }
+  if (!body.types || typeof body.types !== "object") {
+    return c.json<ApiResponse>({ ok: false, error: "'types' is required and must be an object" }, 400);
+  }
+  if (!isNonEmptyString(body.primaryType)) {
+    return c.json<ApiResponse>({ ok: false, error: "'primaryType' is required" }, 400);
+  }
+  if (!body.value || typeof body.value !== "object") {
+    return c.json<ApiResponse>({ ok: false, error: "'value' is required and must be an object" }, 400);
+  }
+
+  try {
+    const signature = await vault.signTypedData({
+      agentId,
+      tenantId,
+      domain: body.domain,
+      types: body.types,
+      primaryType: body.primaryType,
+      value: body.value,
+    });
+
+    return c.json<ApiResponse<{ signature: string }>>({
+      ok: true,
+      data: { signature },
+    });
+  } catch (e: unknown) {
+    const rawMessage = e instanceof Error ? e.message : "Unknown error";
+    console.error(`Sign typed data failed for agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
+// ─── Solana Transaction Signing ───────────────────────────────────────────
+app.post("/vault/:agentId/sign-solana", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    transaction: string;
+    chainId?: number;
+    broadcast?: boolean;
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isNonEmptyString(body.transaction)) {
+    return c.json<ApiResponse>({ ok: false, error: "'transaction' is required (base64-encoded serialized Solana transaction)" }, 400);
+  }
+
+  try {
+    const result = await vault.signSolanaTransaction({
+      agentId,
+      tenantId,
+      transaction: body.transaction,
+      chainId: body.chainId,
+      broadcast: body.broadcast,
+    });
+
+    return c.json<ApiResponse<{ signature: string; broadcast: boolean }>>({
+      ok: true,
+      data: result,
+    });
+  } catch (e: unknown) {
+    console.error(`Solana sign failed for agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
+// ─── Generic RPC Passthrough ──────────────────────────────────────────────
+app.post("/vault/:agentId/rpc", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<RpcRequest>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isNonEmptyString(body.method)) {
+    return c.json<ApiResponse>({ ok: false, error: "'method' is required" }, 400);
+  }
+
+  if (!body.chainId || typeof body.chainId !== "number") {
+    return c.json<ApiResponse>({ ok: false, error: "'chainId' is required and must be a number" }, 400);
+  }
+
+  try {
+    const result = await vault.rpcPassthrough(body);
+    return c.json<ApiResponse<RpcResponse>>({
+      ok: true,
+      data: result,
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    console.error(`RPC passthrough failed for agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
 });
 
 // ─── Key Import ───────────────────────────────────────────────────────────
