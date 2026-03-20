@@ -47,6 +47,7 @@ const JWT_SECRET = new TextEncoder().encode(
 );
 const JWT_ISSUER = "steward";
 const JWT_EXPIRY = "24h";
+const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 
 async function createSessionToken(
   address: string,
@@ -60,12 +61,30 @@ async function createSessionToken(
     .sign(JWT_SECRET);
 }
 
+/**
+ * Create an agent-scoped JWT. The token carries the agentId, tenantId,
+ * and a `scope: "agent"` claim so middleware can distinguish it from
+ * session JWTs and restrict access to that agent's own resources.
+ */
+async function createAgentToken(
+  agentId: string,
+  tenantId: string,
+  expiresIn?: string
+): Promise<string> {
+  return new SignJWT({ agentId, tenantId, scope: "agent" })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuedAt()
+    .setIssuer(JWT_ISSUER)
+    .setExpirationTime(expiresIn || AGENT_TOKEN_EXPIRY)
+    .sign(JWT_SECRET);
+}
+
 async function verifySessionToken(token: string) {
   try {
     const { payload } = await jwtVerify(token, JWT_SECRET, {
       issuer: JWT_ISSUER,
     });
-    return payload as { address: string; tenantId: string };
+    return payload as { address: string; tenantId: string; agentId?: string; scope?: string };
   } catch {
     return null;
   }
@@ -175,6 +194,8 @@ type AppVariables = {
   tenant: Tenant;
   tenantConfig: TenantConfig;
   tenantId: string;
+  agentScope?: string;   // agentId from agent-scoped JWT, if present
+  authType?: "api-key" | "session-jwt" | "agent-token";
 };
 
 const app = new Hono<{ Variables: AppVariables }>();
@@ -277,7 +298,7 @@ async function tenantAuth(
 ) {
   await defaultTenantReady;
 
-  // ── JWT Bearer auth (passkey / email login) ───────────────────────────────
+  // ── JWT Bearer auth (passkey / email login / agent-scoped) ────────────────
   const authHeader = c.req.header("Authorization");
   if (authHeader?.startsWith("Bearer ")) {
     const token = authHeader.slice(7);
@@ -291,6 +312,15 @@ async function tenantAuth(
         c.set("tenantId", payload.tenantId);
         c.set("tenant", jwtTenant);
         c.set("tenantConfig", tenantConfigs.get(payload.tenantId) || { id: jwtTenant.id, name: jwtTenant.name });
+
+        // Store agent scope info for downstream middleware
+        if (payload.scope === "agent" && payload.agentId) {
+          c.set("agentScope", payload.agentId);
+          c.set("authType", "agent-token");
+        } else {
+          c.set("authType", "session-jwt");
+        }
+
         return next();
       }
     }
@@ -317,8 +347,40 @@ async function tenantAuth(
   c.set("tenantId", tenantId);
   c.set("tenant", tenant);
   c.set("tenantConfig", tenantConfigs.get(tenantId) || { id: tenant.id, name: tenant.name });
+  c.set("authType", "api-key");
 
   await next();
+}
+
+/**
+ * Middleware that enforces agent-scoped access.
+ * If the request was authenticated with an agent-scoped JWT, verifies that
+ * the JWT's agentId matches the `:agentId` route parameter.
+ * Tenant API keys and session JWTs pass through unrestricted (backward compatible).
+ */
+function requireAgentAccess(
+  c: Context<{ Variables: AppVariables }>,
+): boolean {
+  const agentScope = c.get("agentScope");
+  if (!agentScope) {
+    // Authenticated via tenant API key or session JWT — full access
+    return true;
+  }
+
+  // Agent-scoped JWT — must match the route's agentId
+  const routeAgentId = c.req.param("agentId");
+  return agentScope === routeAgentId;
+}
+
+/**
+ * Middleware that blocks agent-scoped tokens entirely.
+ * Used for sensitive endpoints (e.g., key import) that require tenant-level auth.
+ */
+function requireTenantLevel(
+  c: Context<{ Variables: AppVariables }>,
+): boolean {
+  const authType = c.get("authType");
+  return authType !== "agent-token";
 }
 
 async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRule[]> {
@@ -738,6 +800,36 @@ app.get("/agents", async (c) => {
   return c.json<ApiResponse<AgentIdentity[]>>({ ok: true, data: tenantAgents });
 });
 
+// ─── Agent Token Generation ───────────────────────────────────────────────
+app.post("/agents/:agentId/token", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+
+  // Only tenant-level auth can generate agent tokens
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent tokens cannot generate other agent tokens" }, 403);
+  }
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{ expiresIn?: string }>(c);
+  const expiresIn = body?.expiresIn || AGENT_TOKEN_EXPIRY;
+
+  try {
+    const token = await createAgentToken(agentId, tenantId, expiresIn);
+    return c.json<ApiResponse<{ token: string; agentId: string; tenantId: string; scope: string; expiresIn: string }>>({
+      ok: true,
+      data: { token, agentId, tenantId, scope: "agent", expiresIn },
+    });
+  } catch (e: unknown) {
+    console.error(`Failed to generate agent token for ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
+  }
+});
+
 app.get("/agents/:agentId", async (c) => {
   const tenantId = c.get("tenantId");
   const agent = await vault.getAgent(tenantId, c.req.param("agentId"));
@@ -749,6 +841,9 @@ app.get("/agents/:agentId", async (c) => {
 });
 
 app.get("/agents/:agentId/balance", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -925,6 +1020,9 @@ app.put("/agents/:agentId/policies", async (c) => {
 });
 
 app.post("/vault/:agentId/sign", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -1225,6 +1323,9 @@ app.post("/vault/:agentId/reject/:txId", async (c) => {
 });
 
 app.get("/vault/:agentId/pending", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -1262,6 +1363,9 @@ app.get("/vault/:agentId/pending", async (c) => {
 });
 
 app.get("/vault/:agentId/history", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -1279,6 +1383,48 @@ app.get("/vault/:agentId/history", async (c) => {
     ok: true,
     data: history.map(toTxRecord),
   });
+});
+
+// ─── Key Import ───────────────────────────────────────────────────────────
+app.post("/vault/:agentId/import", async (c) => {
+  // Only tenant-level auth can import keys
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Key import requires tenant-level authentication" }, 403);
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+
+  if (!isValidAgentId(agentId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)" },
+      400,
+    );
+  }
+
+  const body = await safeJsonParse<{ privateKey: string; chain: "evm" | "solana" }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isNonEmptyString(body.privateKey)) {
+    return c.json<ApiResponse>({ ok: false, error: "privateKey is required" }, 400);
+  }
+
+  if (body.chain !== "evm" && body.chain !== "solana") {
+    return c.json<ApiResponse>({ ok: false, error: "chain must be 'evm' or 'solana'" }, 400);
+  }
+
+  try {
+    const result = await vault.importKey(tenantId, agentId, body.privateKey, body.chain);
+    return c.json<ApiResponse<{ agentId: string; walletAddress: string; chain: string }>>({
+      ok: true,
+      data: { agentId, walletAddress: result.walletAddress, chain: body.chain },
+    });
+  } catch (e: unknown) {
+    console.error(`Key import failed for agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
 });
 
 const server = Bun.serve({

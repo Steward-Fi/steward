@@ -334,6 +334,85 @@ export class Vault {
   }
 
   /**
+   * Import an existing private key into the vault for an agent.
+   * Creates the agent record if it doesn't exist, or updates the key if it does.
+   * Returns the derived public address.
+   *
+   * @param chainType - "evm" or "solana"
+   */
+  async importKey(
+    tenantId: string,
+    agentId: string,
+    privateKey: string,
+    chainType: "evm" | "solana"
+  ): Promise<{ walletAddress: string }> {
+    const db = getDb();
+
+    let walletAddress: string;
+
+    if (chainType === "solana") {
+      // For Solana, the private key should be a 64-byte hex string (seed + pubkey)
+      // or a 32-byte hex seed — we'll handle both
+      const kp = restoreSolanaKeypair(privateKey);
+      walletAddress = kp.publicKey.toBase58();
+    } else {
+      // EVM — expect 0x-prefixed hex private key
+      const normalizedKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
+      const account = privateKeyToAccount(normalizedKey as `0x${string}`);
+      walletAddress = account.address;
+    }
+
+    const encryptedKey = this.keyStore.encrypt(privateKey);
+    const now = new Date();
+
+    // Check if agent already exists
+    const [existingAgent] = await db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+
+    if (existingAgent) {
+      // Update wallet address and replace encrypted key
+      await db
+        .update(agents)
+        .set({ walletAddress, updatedAt: now })
+        .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+
+      await db
+        .delete(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, agentId));
+
+      await db.insert(encryptedKeys).values({
+        agentId,
+        ciphertext: encryptedKey.ciphertext,
+        iv: encryptedKey.iv,
+        tag: encryptedKey.tag,
+        salt: encryptedKey.salt,
+      });
+    } else {
+      // Create new agent record
+      await db.insert(agents).values({
+        id: agentId,
+        tenantId,
+        name: agentId,
+        walletAddress,
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      await db.insert(encryptedKeys).values({
+        agentId,
+        ciphertext: encryptedKey.ciphertext,
+        iv: encryptedKey.iv,
+        tag: encryptedKey.tag,
+        salt: encryptedKey.salt,
+      });
+    }
+
+    return { walletAddress };
+  }
+
+  /**
    * Sign an arbitrary message. Routes to Solana Ed25519 or EVM ECDSA
    * based on the agent's wallet address format.
    */
