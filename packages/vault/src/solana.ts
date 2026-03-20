@@ -42,10 +42,89 @@ export function generateSolanaKeypair(): { publicKey: string; secretKey: string 
 }
 
 /**
- * Restore a Solana Keypair from a 64-byte hex secret key string.
+ * Check if a string is valid hexadecimal (only 0-9, a-f, A-F).
  */
-export function restoreSolanaKeypair(secretKeyHex: string): Keypair {
-  return Keypair.fromSecretKey(Buffer.from(secretKeyHex, "hex"));
+function isHexString(str: string): boolean {
+  return /^[0-9a-fA-F]+$/.test(str);
+}
+
+/**
+ * Decode a base58-encoded string to Uint8Array.
+ * Uses the Bitcoin alphabet (same as Solana).
+ */
+function decodeBase58(encoded: string): Uint8Array {
+  const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  const BASE = BigInt(58);
+
+  // Handle empty input
+  if (encoded.length === 0) {
+    return new Uint8Array(0);
+  }
+
+  // Count leading '1's (they represent leading zero bytes)
+  let leadingZeros = 0;
+  for (let i = 0; i < encoded.length && encoded[i] === "1"; i++) {
+    leadingZeros++;
+  }
+
+  // Convert base58 to a big integer
+  let num = BigInt(0);
+  for (const char of encoded) {
+    const index = ALPHABET.indexOf(char);
+    if (index === -1) {
+      throw new Error(`Invalid base58 character: ${char}`);
+    }
+    num = num * BASE + BigInt(index);
+  }
+
+  // Convert the big integer to bytes
+  const bytes: number[] = [];
+  while (num > 0n) {
+    bytes.unshift(Number(num % 256n));
+    num = num / 256n;
+  }
+
+  // Add leading zero bytes back
+  const result = new Uint8Array(leadingZeros + bytes.length);
+  result.set(bytes, leadingZeros);
+
+  return result;
+}
+
+/**
+ * Restore a Solana Keypair from a secret key string.
+ * Accepts either:
+ * - 128-character hex string (64 bytes: 32-byte seed + 32-byte pubkey)
+ * - 64-character hex string (32-byte seed only)
+ * - Base58-encoded 64-byte secret key (as stored by Phantom, Solana CLI)
+ */
+export function restoreSolanaKeypair(secretKey: string): Keypair {
+  let keyBytes: Uint8Array;
+
+  // Detect format: hex strings are longer and only contain hex chars
+  // A 64-byte key in hex = 128 chars, in base58 ≈ 87-88 chars
+  // A 32-byte seed in hex = 64 chars, in base58 ≈ 43-44 chars
+  if (isHexString(secretKey) && (secretKey.length === 128 || secretKey.length === 64)) {
+    // Hex-encoded key
+    keyBytes = Uint8Array.from(Buffer.from(secretKey, "hex"));
+  } else {
+    // Assume base58-encoded
+    keyBytes = decodeBase58(secretKey);
+  }
+
+  // If we only have a 32-byte seed, we need to derive the keypair
+  if (keyBytes.length === 32) {
+    return Keypair.fromSeed(keyBytes);
+  }
+
+  // Full 64-byte secret key
+  if (keyBytes.length === 64) {
+    return Keypair.fromSecretKey(keyBytes);
+  }
+
+  throw new Error(
+    `Invalid Solana secret key: expected 32-byte seed or 64-byte key, got ${keyBytes.length} bytes`
+  );
 }
 
 // ─── Transactions ──────────────────────────────────────────────────────────

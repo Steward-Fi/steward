@@ -45,8 +45,41 @@ export function evaluatePolicy(
   }
 }
 
+/**
+ * Normalize spending-limit config to the canonical format (maxPerTx/maxPerDay/maxPerWeek).
+ * Accepts both the canonical format and the simplified maxAmount/period format.
+ */
+function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
+  // If already in canonical format, use as-is
+  if (config.maxPerTx !== undefined) {
+    return config as unknown as SpendingLimitConfig;
+  }
+
+  // Convert from maxAmount/period format
+  const maxAmount = String(config.maxAmount ?? "0");
+  const period = String(config.period ?? "day").toLowerCase();
+
+  // Use a very large default for unrestricted limits
+  const MAX_UINT = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+  switch (period) {
+    case "tx":
+    case "transaction":
+      return { maxPerTx: maxAmount, maxPerDay: MAX_UINT, maxPerWeek: MAX_UINT };
+    case "day":
+    case "daily":
+      return { maxPerTx: maxAmount, maxPerDay: maxAmount, maxPerWeek: MAX_UINT };
+    case "week":
+    case "weekly":
+      return { maxPerTx: maxAmount, maxPerDay: MAX_UINT, maxPerWeek: maxAmount };
+    default:
+      // Fallback: treat as per-tx limit
+      return { maxPerTx: maxAmount, maxPerDay: MAX_UINT, maxPerWeek: MAX_UINT };
+  }
+}
+
 function evaluateSpendingLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
-  const config = rule.config as unknown as SpendingLimitConfig;
+  const config = normalizeSpendingLimitConfig(rule.config);
   const txValue = BigInt(ctx.request.value);
   const base = { policyId: rule.id, type: rule.type } as const;
 

@@ -136,10 +136,47 @@ describe("Solana Keypair", () => {
     expect(kp.secretKey.length).toBe(128);
   });
 
-  it("restores keypair from secret key hex", () => {
+  it("restores keypair from 128-char hex secret key", () => {
     const kp = generateSolanaKeypair();
     const restored = restoreSolanaKeypair(kp.secretKey);
     expect(restored.publicKey.toBase58()).toBe(kp.publicKey);
+  });
+
+  it("restores keypair from base58-encoded secret key", () => {
+    // This is the format agents typically use (Phantom export, Solana CLI)
+    // Generate a keypair and convert to base58 for testing
+    const kp = generateSolanaKeypair();
+    const hexBytes = Buffer.from(kp.secretKey, "hex");
+    
+    // Encode as base58 (same alphabet as Solana uses)
+    const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let num = BigInt("0x" + hexBytes.toString("hex"));
+    let base58 = "";
+    while (num > 0n) {
+      const remainder = Number(num % 58n);
+      base58 = ALPHABET[remainder] + base58;
+      num = num / 58n;
+    }
+    // Add leading '1's for leading zero bytes
+    for (let i = 0; i < hexBytes.length && hexBytes[i] === 0; i++) {
+      base58 = "1" + base58;
+    }
+    
+    // Now restore from base58
+    const restored = restoreSolanaKeypair(base58);
+    expect(restored.publicKey.toBase58()).toBe(kp.publicKey);
+  });
+
+  it("restores keypair from 64-char hex seed (32 bytes)", () => {
+    const kp = generateSolanaKeypair();
+    // Extract just the 32-byte seed from the 64-byte secret key
+    const seed = kp.secretKey.slice(0, 64); // first 32 bytes as hex
+    const restored = restoreSolanaKeypair(seed);
+    expect(restored.publicKey.toBase58()).toBe(kp.publicKey);
+  });
+
+  it("throws on invalid secret key length", () => {
+    expect(() => restoreSolanaKeypair("abc123")).toThrow();
   });
 });
 

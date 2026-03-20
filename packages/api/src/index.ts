@@ -150,6 +150,55 @@ function sanitizeErrorMessage(error: unknown): string {
   return "Internal server error";
 }
 
+/**
+ * Check if an error is an RPC/blockchain error (as opposed to internal server error).
+ * RPC errors should be passed through with their actual message.
+ */
+function isRpcError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message.toLowerCase();
+  const rpcIndicators = [
+    "insufficient funds",
+    "insufficient balance",
+    "nonce too low",
+    "nonce too high",
+    "gas too low",
+    "gas limit",
+    "underpriced",
+    "replacement transaction",
+    "exceeds block gas limit",
+    "execution reverted",
+    "out of gas",
+    "invalid sender",
+    "invalid signature",
+    "account not found",
+    "blockhash not found",
+    "transaction simulation failed",
+    "instruction error",
+    "custom program error",
+    "rpc error",
+    "failed to send transaction",
+    "transaction failed",
+    "0x", // Solidity error selectors
+  ];
+  return rpcIndicators.some((indicator) => msg.includes(indicator));
+}
+
+/**
+ * Extract a user-friendly message from an RPC error.
+ */
+function extractRpcErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    // Try to extract inner error message if present
+    const innerMatch = error.message.match(/message["\s:]+([^"]+)/i);
+    if (innerMatch) {
+      return innerMatch[1].trim();
+    }
+    return error.message;
+  }
+  return "RPC error";
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name]?.trim();
 
@@ -344,8 +393,20 @@ async function tenantAuth(
   }
 
   const apiKey = c.req.header("X-Steward-Key") || "";
-  if (tenant.apiKeyHash && !validateApiKey(apiKey, tenant.apiKeyHash)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+  
+  // If tenant has an API key hash configured, validate the provided key
+  if (tenant.apiKeyHash) {
+    if (!validateApiKey(apiKey, tenant.apiKeyHash)) {
+      return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+    }
+  } else {
+    // No API key hash configured — require explicit auth (no anonymous access)
+    // This prevents the default tenant from being unprotected when STEWARD_DEFAULT_TENANT_KEY is empty
+    if (!apiKey) {
+      return c.json<ApiResponse>({ ok: false, error: "API key required" }, 401);
+    }
+    // If a key was provided but tenant has no hash, reject (can't validate)
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not configured for API key auth" }, 403);
   }
 
   c.set("tenantId", tenantId);
@@ -1189,6 +1250,11 @@ app.post("/vault/:agentId/sign", async (c) => {
         .catch(console.error);
     }
 
+    // Return 502 for RPC/blockchain errors with the actual error message
+    if (isRpcError(e)) {
+      return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
+    }
+
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -1282,6 +1348,11 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
           webhookUrlFailed
         )
         .catch(console.error);
+    }
+
+    // Return 502 for RPC/blockchain errors with the actual error message
+    if (isRpcError(e)) {
+      return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
     }
 
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
@@ -1497,6 +1568,12 @@ app.post("/vault/:agentId/sign-solana", async (c) => {
     });
   } catch (e: unknown) {
     console.error(`Solana sign failed for agent ${agentId}:`, e);
+    
+    // Return 502 for RPC/blockchain errors with the actual error message
+    if (isRpcError(e)) {
+      return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
+    }
+    
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
