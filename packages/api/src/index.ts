@@ -1663,7 +1663,10 @@ app.post("/vault/:agentId/import", async (c) => {
   }
 });
 
+const BIND_HOST = process.env.STEWARD_BIND_HOST || "127.0.0.1";
+
 const server = Bun.serve({
+  hostname: BIND_HOST,
   port: PORT,
   fetch: (request) => app.fetch(request),
   idleTimeout: 30,
@@ -1700,4 +1703,4 @@ process.on("SIGTERM", () => {
   void shutdown("SIGTERM");
 });
 
-console.log(`Steward API running on :${server.port}`);
+console.log(`Steward API running on ${server.hostname}:${server.port}`);
