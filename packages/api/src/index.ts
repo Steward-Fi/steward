@@ -1,5 +1,6 @@
 import { and, eq, gte, sql } from "drizzle-orm";
 import { Hono, type Context, type Next } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { SignJWT, jwtVerify } from "jose";
@@ -278,10 +279,16 @@ app.use("*", cors({
   origin: "*",
   allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "X-Steward-Tenant", "X-Steward-Key", "X-Steward-Platform-Key", "Authorization"],
-  exposeHeaders: ["Content-Length"],
+  exposeHeaders: ["Content-Length", "X-Request-Id"],
   maxAge: 86400,
 }));
 app.use("*", logger());
+
+// ─── Body size limit (1MB) ────────────────────────────────────────────────────
+app.use("*", bodyLimit({
+  maxSize: 1024 * 1024, // 1MB
+  onError: (c) => c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
+}));
 app.use("*", async (c, next) => {
   if (c.req.path === "/health") {
     return next();
