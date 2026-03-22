@@ -46,9 +46,12 @@ const RATE_LIMIT_MAX_REQUESTS = 100;
 
 const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.STEWARD_MASTER_PASSWORD || "dev-secret"
-);
+// JWT secret: prefer dedicated STEWARD_JWT_SECRET, fall back to master password with warning
+const jwtSecretSource = process.env.STEWARD_JWT_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+if (!process.env.STEWARD_JWT_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
+  console.warn("⚠️ STEWARD_JWT_SECRET not set, falling back to master password. Set a separate JWT secret for production.");
+}
+const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 const JWT_ISSUER = "steward";
 const JWT_EXPIRY = "24h";
 const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";

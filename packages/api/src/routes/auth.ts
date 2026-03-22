@@ -37,9 +37,12 @@ import { Vault, provisionUserWallet } from "@stwd/vault";
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.STEWARD_MASTER_PASSWORD || "dev-secret",
-);
+// JWT secret: prefer dedicated STEWARD_JWT_SECRET, fall back to master password with warning
+const jwtSecretSource = process.env.STEWARD_JWT_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+if (!process.env.STEWARD_JWT_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
+  console.warn("⚠️ STEWARD_JWT_SECRET not set, falling back to master password. Set a separate JWT secret for production.");
+}
+const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 const JWT_ISSUER = "steward";
 const JWT_EXPIRY = "24h";
 
