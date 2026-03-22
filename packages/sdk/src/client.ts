@@ -27,6 +27,8 @@ export type GetBalanceResult = AgentBalance;
 export interface StewardClientConfig {
   baseUrl: string;
   apiKey?: string;
+  /** Agent-scoped JWT — sent as `Authorization: Bearer <token>`. Preferred over apiKey when both are set. */
+  bearerToken?: string;
   tenantId?: string;
 }
 
@@ -105,11 +107,13 @@ export class StewardApiError<TData = unknown> extends Error {
 export class StewardClient {
   private readonly baseUrl: string;
   private readonly apiKey?: string;
+  private readonly bearerToken?: string;
   private readonly tenantId?: string;
 
-  constructor({ baseUrl, apiKey, tenantId }: StewardClientConfig) {
+  constructor({ baseUrl, apiKey, bearerToken, tenantId }: StewardClientConfig) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiKey = apiKey;
+    this.bearerToken = bearerToken;
     this.tenantId = tenantId;
   }
 
@@ -365,7 +369,9 @@ export class StewardClient {
     if (!merged.has("Accept")) {
       merged.set("Accept", "application/json");
     }
-    if (this.apiKey) {
+    if (this.bearerToken) {
+      merged.set("Authorization", `Bearer ${this.bearerToken}`);
+    } else if (this.apiKey) {
       merged.set("X-Steward-Key", this.apiKey);
     }
     if (this.tenantId) {
