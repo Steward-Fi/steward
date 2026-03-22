@@ -261,12 +261,14 @@ let isShuttingDown = false;
 
 // ─── Global error handler — catches unhandled throws (bad JSON, etc.) ─────────
 app.onError((err, c) => {
+  const requestId = c.get("requestId") || "unknown";
+
   // JSON parse errors from c.req.json()
   if (err instanceof SyntaxError || err.message?.includes("JSON")) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  console.error("Unhandled API error:", err);
+  console.error(`[${requestId}] Unhandled API error:`, err);
   return c.json<ApiResponse>({ ok: false, error: "Internal server error" }, 500);
 });
 
@@ -283,6 +285,9 @@ app.use("*", cors({
   maxAge: 86400,
 }));
 app.use("*", logger());
+
+// ─── Request correlation IDs ──────────────────────────────────────────────────
+app.use("*", correlationId);
 
 // ─── Body size limit (1MB) ────────────────────────────────────────────────────
 app.use("*", bodyLimit({
@@ -535,6 +540,7 @@ app.get("/health", (c) =>
 );
 
 // ─── Route Modules ────────────────────────────────────────────────────────────
+import { correlationId } from "./middleware/correlation";
 import { authRoutes } from "./routes/auth";
 import { platformRoutes } from "./routes/platform";
 import { userRoutes } from "./routes/user";
@@ -900,7 +906,8 @@ app.post("/agents/:agentId/token", async (c) => {
       data: { token, agentId, tenantId, scope: "agent", expiresIn },
     });
   } catch (e: unknown) {
-    console.error(`Failed to generate agent token for ${agentId}:`, e);
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Failed to generate agent token for ${agentId}:`, e);
     return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
   }
 });
@@ -1247,14 +1254,15 @@ app.post("/vault/:agentId/sign", async (c) => {
       data: { txId, signedTx: result },
     });
   } catch (e: unknown) {
+    const requestId = c.get("requestId") || "unknown";
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
-    console.error(`Sign transaction failed for agent ${agentId}:`, e);
+    console.error(`[${requestId}] Sign transaction failed for agent ${agentId}:`, e);
 
     const webhookUrlFailed = tenantConfigs.get(tenantId)?.webhookUrl;
     if (webhookUrlFailed) {
       webhookDispatcher
         .dispatch(
-          { type: "tx_failed", tenantId, agentId, data: { error: rawMessage }, timestamp: new Date() },
+          { type: "tx_failed", tenantId, agentId, data: { error: rawMessage, requestId }, timestamp: new Date() },
           webhookUrlFailed
         )
         .catch(console.error);
@@ -1347,14 +1355,15 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
       data: { txId, txHash },
     });
   } catch (e: unknown) {
+    const requestId = c.get("requestId") || "unknown";
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
-    console.error(`Approve transaction failed for agent ${agentId}, tx ${txId}:`, e);
+    console.error(`[${requestId}] Approve transaction failed for agent ${agentId}, tx ${txId}:`, e);
 
     const webhookUrlFailed = tenantConfigs.get(tenantId)?.webhookUrl;
     if (webhookUrlFailed) {
       webhookDispatcher
         .dispatch(
-          { type: "tx_failed", tenantId, agentId, data: { txId, error: rawMessage }, timestamp: new Date() },
+          { type: "tx_failed", tenantId, agentId, data: { txId, error: rawMessage, requestId }, timestamp: new Date() },
           webhookUrlFailed
         )
         .catch(console.error);
@@ -1530,8 +1539,8 @@ app.post("/vault/:agentId/sign-typed-data", async (c) => {
       data: { signature },
     });
   } catch (e: unknown) {
-    const rawMessage = e instanceof Error ? e.message : "Unknown error";
-    console.error(`Sign typed data failed for agent ${agentId}:`, e);
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Sign typed data failed for agent ${agentId}:`, e);
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
@@ -1577,7 +1586,8 @@ app.post("/vault/:agentId/sign-solana", async (c) => {
       data: result,
     });
   } catch (e: unknown) {
-    console.error(`Solana sign failed for agent ${agentId}:`, e);
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Solana sign failed for agent ${agentId}:`, e);
     
     // Return 502 for RPC/blockchain errors with the actual error message
     if (isRpcError(e)) {
@@ -1622,8 +1632,9 @@ app.post("/vault/:agentId/rpc", async (c) => {
       data: result,
     });
   } catch (e: unknown) {
+    const requestId = c.get("requestId") || "unknown";
     const message = e instanceof Error ? e.message : "Unknown error";
-    console.error(`RPC passthrough failed for agent ${agentId}:`, e);
+    console.error(`[${requestId}] RPC passthrough failed for agent ${agentId}:`, e);
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
   }
 });
@@ -1665,7 +1676,8 @@ app.post("/vault/:agentId/import", async (c) => {
       data: { agentId, walletAddress: result.walletAddress, chain: body.chain },
     });
   } catch (e: unknown) {
-    console.error(`Key import failed for agent ${agentId}:`, e);
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Key import failed for agent ${agentId}:`, e);
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
