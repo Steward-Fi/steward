@@ -1321,19 +1321,28 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
   }
 
-  const [queueEntry] = await db
-    .select()
-    .from(approvalQueue)
+  // Atomically claim the pending approval — only one concurrent request can succeed.
+  // We transition directly to "approved" (the schema has no "processing" value) and
+  // revert to "pending" inside the catch block if signing fails, so the request can be retried.
+  const resolvedAt = new Date();
+  const claimResult = await db
+    .update(approvalQueue)
+    .set({
+      status: "approved",
+      resolvedAt,
+      resolvedBy: tenantId,
+    })
     .where(
       and(
         eq(approvalQueue.txId, txId),
         eq(approvalQueue.agentId, agentId),
         eq(approvalQueue.status, "pending")
       )
-    );
+    )
+    .returning({ id: approvalQueue.id });
 
-  if (!queueEntry) {
-    return c.json<ApiResponse>({ ok: false, error: "Pending approval not found" }, 404);
+  if (claimResult.length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction already processed or not found" }, 409);
   }
 
   try {
@@ -1372,17 +1381,7 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
       );
     }
 
-    const resolvedAt = new Date();
-
-    await db
-      .update(approvalQueue)
-      .set({
-        status: "approved",
-        resolvedAt,
-        resolvedBy: tenantId,
-      })
-      .where(eq(approvalQueue.id, queueEntry.id));
-
+    // approvalQueue already updated atomically above; just update the transaction record.
     await db
       .update(transactions)
       .set({
@@ -1407,6 +1406,17 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
       data: { txId, txHash },
     });
   } catch (e: unknown) {
+    // Revert the atomic claim so the approval can be retried
+    await db
+      .update(approvalQueue)
+      .set({ status: "pending", resolvedAt: null, resolvedBy: null })
+      .where(
+        and(
+          eq(approvalQueue.txId, txId),
+          eq(approvalQueue.agentId, agentId)
+        )
+      );
+
     const requestId = c.get("requestId") || "unknown";
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
     console.error(`[${requestId}] Approve transaction failed for agent ${agentId}, tx ${txId}:`, e);
@@ -1443,31 +1453,26 @@ app.post("/vault/:agentId/reject/:txId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const [queueEntry] = await db
-    .select()
-    .from(approvalQueue)
+  // Atomically transition from "pending" → "rejected"; prevents concurrent approve/reject races.
+  const rejectResult = await db
+    .update(approvalQueue)
+    .set({
+      status: "rejected",
+      resolvedAt: new Date(),
+      resolvedBy: tenantId,
+    })
     .where(
       and(
         eq(approvalQueue.txId, txId),
         eq(approvalQueue.agentId, agentId),
         eq(approvalQueue.status, "pending")
       )
-    );
+    )
+    .returning({ id: approvalQueue.id });
 
-  if (!queueEntry) {
-    return c.json<ApiResponse>({ ok: false, error: "Pending approval not found" }, 404);
+  if (rejectResult.length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction already processed or not found" }, 409);
   }
-
-  const resolvedAt = new Date();
-
-  await db
-    .update(approvalQueue)
-    .set({
-      status: "rejected",
-      resolvedAt,
-      resolvedBy: tenantId,
-    })
-    .where(eq(approvalQueue.id, queueEntry.id));
 
   await db
     .update(transactions)
