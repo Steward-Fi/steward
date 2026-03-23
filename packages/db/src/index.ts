@@ -1,5 +1,7 @@
+import { eq, inArray } from "drizzle-orm";
 import type {
   AgentIdentity,
+  ChainFamily,
   PolicyResult,
   PolicyRule,
   SignRequest,
@@ -49,6 +51,56 @@ export function toAgentIdentity(agent: Agent): DbAgentIdentity {
     createdAt: agent.createdAt,
     updatedAt: agent.updatedAt,
   };
+}
+
+/**
+ * Query all wallet addresses for a single agent from the `agent_wallets` table.
+ * Returns an empty object for legacy agents that pre-date multi-wallet support.
+ */
+export async function getAgentWalletAddresses(
+  agentId: string,
+): Promise<{ evm?: string; solana?: string }> {
+  const { getDb } = await import("./client");
+  const { agentWallets } = await import("./schema");
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(agentWallets)
+    .where(eq(agentWallets.agentId, agentId));
+
+  const result: { evm?: string; solana?: string } = {};
+  for (const row of rows) {
+    if (row.chainFamily === "evm") result.evm = row.address;
+    if (row.chainFamily === "solana") result.solana = row.address;
+  }
+  return result;
+}
+
+/**
+ * Query wallet addresses for multiple agents in a single DB round-trip.
+ * Returns a Map from agentId → { evm?, solana? }.
+ */
+export async function getAgentWalletAddressesBatch(
+  agentIds: string[],
+): Promise<Map<string, { evm?: string; solana?: string }>> {
+  if (agentIds.length === 0) return new Map();
+
+  const { getDb } = await import("./client");
+  const { agentWallets } = await import("./schema");
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(agentWallets)
+    .where(inArray(agentWallets.agentId, agentIds));
+
+  const result = new Map<string, { evm?: string; solana?: string }>();
+  for (const row of rows) {
+    if (!result.has(row.agentId)) result.set(row.agentId, {});
+    const entry = result.get(row.agentId)!;
+    if (row.chainFamily === "evm") entry.evm = row.address;
+    if (row.chainFamily === "solana") entry.solana = row.address;
+  }
+  return result;
 }
 
 export function toPolicyRule(policy: Policy): DbPolicyRule {

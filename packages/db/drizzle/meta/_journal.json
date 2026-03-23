@@ -8,6 +8,13 @@
       "when": 1773704438932,
       "tag": "0000_black_klaw",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1742748000000,
+      "tag": "0001_multi_wallet",
+      "breakpoints": true
     }
   ]
 }
