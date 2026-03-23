@@ -75,9 +75,9 @@ export interface SignMessageResult {
 
 export type CreateWalletResult = AgentIdentity;
 export type GetHistoryResult = StewardHistoryEntry[];
-export type SignTransactionResult = { txHash: string } | { signedTx: string } | StewardPendingApproval;
+export type SignTransactionResult = { txHash: string; caip2?: string } | { signedTx: string; caip2?: string } | StewardPendingApproval;
 export type SignTypedDataResult = { signature: string };
-export type SignSolanaTransactionResult = { signature: string; broadcast: boolean };
+export type SignSolanaTransactionResult = { signature: string; broadcast: boolean; chainId?: number; caip2?: string };
 export type RpcPassthroughResult = RpcResponse;
 export type StewardErrorResponse = { results?: PolicyResult[] };
 

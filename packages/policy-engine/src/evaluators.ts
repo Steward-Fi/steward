@@ -1,12 +1,14 @@
-import type {
-  PolicyRule,
-  PolicyResult,
-  SignRequest,
-  SpendingLimitConfig,
-  ApprovedAddressesConfig,
-  AutoApproveConfig,
-  RateLimitConfig,
-  TimeWindowConfig,
+import {
+  toCaip2,
+  type PolicyRule,
+  type PolicyResult,
+  type SignRequest,
+  type SpendingLimitConfig,
+  type ApprovedAddressesConfig,
+  type AutoApproveConfig,
+  type AllowedChainsConfig,
+  type RateLimitConfig,
+  type TimeWindowConfig,
 } from "@stwd/shared";
 
 export interface EvaluatorContext {
@@ -40,6 +42,8 @@ export function evaluatePolicy(
       return evaluateRateLimit(rule, ctx);
     case "time-window":
       return evaluateTimeWindow(rule, ctx);
+    case "allowed-chains":
+      return evaluateAllowedChains(rule, ctx);
     default:
       return { policyId: rule.id, type: rule.type, passed: false, reason: `Unknown policy type: ${rule.type}` };
   }
@@ -160,6 +164,39 @@ function evaluateTimeWindow(rule: PolicyRule, ctx: EvaluatorContext): PolicyResu
     if (!inWindow) {
       return { ...base, passed: false, reason: `Current hour ${hour} UTC not in allowed windows` };
     }
+  }
+
+  return { ...base, passed: true };
+}
+
+/**
+ * Allowed-chains policy: restricts transactions to a set of permitted CAIP-2 chain identifiers.
+ *
+ * Config: `{ chains: string[] }` — e.g. `{ chains: ["eip155:8453", "eip155:1"] }`
+ *
+ * The request's numeric `chainId` is converted to its CAIP-2 equivalent and checked
+ * against the allowed list. Unrecognised chain IDs always fail.
+ */
+function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+  const config = rule.config as unknown as AllowedChainsConfig;
+  const base = { policyId: rule.id, type: rule.type } as const;
+  const chainId = ctx.request.chainId;
+
+  const caip2 = toCaip2(chainId);
+  if (!caip2) {
+    return {
+      ...base,
+      passed: false,
+      reason: `Chain ID ${chainId} is not a recognised chain and cannot be verified against the allowed-chains policy`,
+    };
+  }
+
+  if (!config.chains.includes(caip2)) {
+    return {
+      ...base,
+      passed: false,
+      reason: `Chain ${caip2} (chainId ${chainId}) is not in the allowed chains list`,
+    };
   }
 
   return { ...base, passed: true };
