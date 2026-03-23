@@ -661,21 +661,50 @@ export class Vault {
    */
   async signMessage(tenantId: string, agentId: string, message: string): Promise<string> {
     const db = getDb();
-    const [stored] = await db
-      .select({
-        walletAddress: agents.walletAddress,
-        encryptedKey: encryptedKeys,
-      })
+
+    // Verify agent exists for this tenant
+    const [agentRow] = await db
+      .select({ walletAddress: agents.walletAddress })
       .from(agents)
-      .innerJoin(encryptedKeys, eq(encryptedKeys.agentId, agents.id))
       .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
-    if (!stored) {
+    if (!agentRow) {
       throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
     }
 
-    const secretKey = this.keyStore.decrypt(stored.encryptedKey as EncryptedKey);
-    const isSolana = detectChainType(stored.walletAddress) === "solana";
+    const isSolana = detectChainType(agentRow.walletAddress) === "solana";
+    const chainFamilyToUse = isSolana ? "solana" : "evm";
+
+    // Resolve signing key: prefer encryptedChainKeys (multi-wallet), fall back to legacy encryptedKeys
+    let secretKey: string;
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
+        ),
+      );
+
+    if (chainKey) {
+      secretKey = this.keyStore.decrypt({
+        ciphertext: chainKey.ciphertext,
+        iv: chainKey.iv,
+        tag: chainKey.tag,
+        salt: chainKey.salt,
+      });
+    } else {
+      // Fallback: legacy encrypted_keys table
+      const [legacyKey] = await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, agentId));
+      if (!legacyKey) {
+        throw new Error(`No signing key found for agent ${agentId}`);
+      }
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+    }
 
     if (isSolana) {
       return signSolanaMessage(secretKey, message);
@@ -694,24 +723,52 @@ export class Vault {
     request: SignTypedDataRequest
   ): Promise<string> {
     const db = getDb();
-    const [stored] = await db
-      .select({
-        walletAddress: agents.walletAddress,
-        encryptedKey: encryptedKeys,
-      })
+
+    // Verify agent exists for this tenant
+    const [agentRow] = await db
+      .select({ walletAddress: agents.walletAddress })
       .from(agents)
-      .innerJoin(encryptedKeys, eq(encryptedKeys.agentId, agents.id))
       .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
 
-    if (!stored) {
+    if (!agentRow) {
       throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
     }
 
-    if (detectChainType(stored.walletAddress) === "solana") {
+    if (detectChainType(agentRow.walletAddress) === "solana") {
       throw new Error("EIP-712 typed data signing is not supported for Solana wallets");
     }
 
-    const secretKey = this.keyStore.decrypt(stored.encryptedKey as EncryptedKey);
+    // Resolve signing key: prefer encryptedChainKeys (multi-wallet), fall back to legacy encryptedKeys
+    let secretKey: string;
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, request.agentId),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+        ),
+      );
+
+    if (chainKey) {
+      secretKey = this.keyStore.decrypt({
+        ciphertext: chainKey.ciphertext,
+        iv: chainKey.iv,
+        tag: chainKey.tag,
+        salt: chainKey.salt,
+      });
+    } else {
+      // Fallback: legacy encrypted_keys table
+      const [legacyKey] = await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, request.agentId));
+      if (!legacyKey) {
+        throw new Error(`No signing key found for agent ${request.agentId}`);
+      }
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+    }
+
     const account = privateKeyToAccount(secretKey as `0x${string}`);
 
     const signature = await account.signTypedData({
