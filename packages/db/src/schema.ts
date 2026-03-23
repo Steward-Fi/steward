@@ -23,6 +23,7 @@ export const policyTypeEnum = pgEnum("policy_type", [
   "auto-approve-threshold",
   "time-window",
   "rate-limit",
+  "allowed-chains",
 ]);
 
 export const transactionStatusEnum = pgEnum("transaction_status", [

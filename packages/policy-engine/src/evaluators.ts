@@ -176,11 +176,21 @@ function evaluateTimeWindow(rule: PolicyRule, ctx: EvaluatorContext): PolicyResu
  *
  * The request's numeric `chainId` is converted to its CAIP-2 equivalent and checked
  * against the allowed list. Unrecognised chain IDs always fail.
+ *
+ * Design decision: if `chainId` is absent (0 / undefined / null), the policy PASSES.
+ * The API allows callers to omit chainId; the vault resolves it to `DEFAULT_CHAIN_ID`
+ * before signing. Blocking at policy-evaluation time would reject valid requests that
+ * simply haven't had their chain resolved yet.
  */
 function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as AllowedChainsConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const chainId = ctx.request.chainId;
+
+  // No chainId specified yet — let the vault apply the default; don't block here.
+  if (!chainId) {
+    return { ...base, passed: true, reason: "No chainId specified; deferring chain check to vault" };
+  }
 
   const caip2 = toCaip2(chainId);
   if (!caip2) {

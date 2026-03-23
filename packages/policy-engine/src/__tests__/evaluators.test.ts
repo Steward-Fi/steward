@@ -680,6 +680,114 @@ describe("Auto-Approve Threshold Policy", () => {
   });
 });
 
+// ─── Allowed Chains Tests ─────────────────────────────────────────────────
+
+describe("Allowed Chains Policy", () => {
+  function makeAllowedChainsRule(chains: string[], id = "chains-1"): PolicyRule {
+    return { id, type: "allowed-chains", enabled: true, config: { chains } };
+  }
+
+  it("passes when request chainId matches the single allowed chain", () => {
+    const rule = makeAllowedChainsRule(["eip155:8453"]); // Base only
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: 8453 } });
+    const result = evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
+  });
+
+  it("passes when request chainId matches one of multiple allowed chains", () => {
+    const rule = makeAllowedChainsRule(["eip155:1", "eip155:56", "eip155:8453"]);
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: 56 } }); // BSC
+    const result = evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
+  });
+
+  it("fails when request chainId is not in the allowed list", () => {
+    const rule = makeAllowedChainsRule(["eip155:1"]); // Ethereum only
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: 8453 } }); // Base
+    const result = evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("eip155:8453");
+    expect(result.reason).toContain("not in the allowed chains list");
+  });
+
+  it("fails when chainId maps to a known chain not in the allowed list", () => {
+    const rule = makeAllowedChainsRule(["eip155:8453", "eip155:56"]); // Base and BSC
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: 137 } }); // Polygon
+    const result = evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("eip155:137");
+  });
+
+  it("fails when chainId is unknown/unmapped (cannot convert to CAIP-2)", () => {
+    const rule = makeAllowedChainsRule(["eip155:1", "eip155:8453"]);
+    // chainId 9999 is not in the CHAINS registry
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: 9999 } });
+    const result = evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("9999");
+    expect(result.reason).toContain("not a recognised chain");
+  });
+
+  it("passes when chainId is 0 (absent/unset) — defers check to vault", () => {
+    // Design decision: chainId=0 means the caller hasn't specified a chain yet.
+    // The vault will resolve it to DEFAULT_CHAIN_ID before signing, so we must not block here.
+    const rule = makeAllowedChainsRule(["eip155:1"]); // Ethereum only — would fail for Base
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: 0 } });
+    const result = evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
+    expect(result.reason).toContain("deferring chain check");
+  });
+
+  it("passes when chainId is undefined — defers check to vault", () => {
+    const rule = makeAllowedChainsRule(["eip155:1"]);
+    // Force undefined at runtime (type cast to exercise the JS falsy guard)
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: undefined as unknown as number } });
+    const result = evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
+    expect(result.reason).toContain("deferring chain check");
+  });
+
+  it("fails all requests when allowed chains array is empty (nothing is permitted)", () => {
+    const rule = makeAllowedChainsRule([]); // empty — nothing allowed
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: 8453 } });
+    const result = evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("not in the allowed chains list");
+  });
+
+  it("CAIP-2 matching is case-sensitive (uppercase variant does not match lowercase entry)", () => {
+    // Policy stores lowercase CAIP-2 as per the CHAINS registry.
+    // If someone stores "EIP155:8453" instead of "eip155:8453", it should NOT match.
+    const rule = makeAllowedChainsRule(["EIP155:8453"]); // wrong casing
+    const ctx = makeContext({ request: { ...makeContext().request, chainId: 8453 } });
+    const result = evaluatePolicy(rule, ctx);
+
+    // toCaip2(8453) returns "eip155:8453" (lowercase), which !== "EIP155:8453"
+    expect(result.passed).toBe(false);
+  });
+
+  it("allows ETH mainnet (eip155:1) and BSC (eip155:56) — default chain list scenario", () => {
+    const rule = makeAllowedChainsRule(["eip155:1", "eip155:56"]);
+
+    const ethCtx = makeContext({ request: { ...makeContext().request, chainId: 1 } });
+    expect(evaluatePolicy(rule, ethCtx).passed).toBe(true);
+
+    const bscCtx = makeContext({ request: { ...makeContext().request, chainId: 56 } });
+    expect(evaluatePolicy(rule, bscCtx).passed).toBe(true);
+
+    const baseCtx = makeContext({ request: { ...makeContext().request, chainId: 8453 } });
+    expect(evaluatePolicy(rule, baseCtx).passed).toBe(false);
+  });
+});
+
 // ─── Disabled Policy Tests ────────────────────────────────────────────────
 
 describe("Disabled Policies", () => {
@@ -859,6 +967,46 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.results.map(r => r.type)).toContain("spending-limit");
     expect(result.results.map(r => r.type)).toContain("rate-limit");
     expect(result.results.map(r => r.type)).toContain("auto-approve-threshold");
+  });
+
+  it("allowed-chains pass alongside other passing policies → approved", () => {
+    // Request is on Base (8453), which is in the allowed list
+    const policies: PolicyRule[] = [
+      makeSpendingRule({
+        maxPerTx: "10000000000000000000",
+        maxPerDay: "50000000000000000000",
+        maxPerWeek: "100000000000000000000",
+      }),
+      { id: "chains-1", type: "allowed-chains", enabled: true, config: { chains: ["eip155:8453", "eip155:1"] } },
+    ];
+
+    const result = engine.evaluate(policies, makeEngineCtx()); // default chainId=8453
+
+    expect(result.approved).toBe(true);
+    expect(result.requiresManualApproval).toBe(false);
+    const chainsResult = result.results.find(r => r.type === "allowed-chains");
+    expect(chainsResult?.passed).toBe(true);
+  });
+
+  it("allowed-chains fail → hard rejection even when other policies pass", () => {
+    // Request is on Base (8453), but only Ethereum is allowed
+    const policies: PolicyRule[] = [
+      makeSpendingRule({
+        maxPerTx: "10000000000000000000",
+        maxPerDay: "50000000000000000000",
+        maxPerWeek: "100000000000000000000",
+      }),
+      makeRateRule({ maxTxPerHour: 10, maxTxPerDay: 50 }),
+      { id: "chains-1", type: "allowed-chains", enabled: true, config: { chains: ["eip155:1"] } },
+    ];
+
+    const result = engine.evaluate(policies, makeEngineCtx({ request: { ...makeEngineCtx().request, chainId: 8453 } }));
+
+    expect(result.approved).toBe(false);
+    expect(result.requiresManualApproval).toBe(false);
+    const chainsResult = result.results.find(r => r.type === "allowed-chains");
+    expect(chainsResult?.passed).toBe(false);
+    expect(chainsResult?.reason).toContain("eip155:8453");
   });
 
   it("disabled policy inside engine is skipped (treated as passed)", () => {
