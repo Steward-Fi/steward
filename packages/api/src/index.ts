@@ -1149,7 +1149,9 @@ app.post("/vault/:agentId/sign", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "'value' is required (wei amount as string)" }, 400);
   }
 
-  const signRequest: SignRequest = { ...request, tenantId, agentId };
+  // Resolve chainId BEFORE policy evaluation — if omitted, use the vault default
+  const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
+  const signRequest: SignRequest = { ...request, tenantId, agentId, chainId: resolvedChainId };
   const policySet = await getPolicySet(tenantId, agentId);
   const stats = await getTransactionStats(agentId);
 
@@ -1582,13 +1584,14 @@ app.post("/vault/:agentId/sign-typed-data", async (c) => {
   // allowed-chains, and time-window policies. Use value "0" so spending-limit
   // policies treat this as a zero-value operation (correct — permit() grants
   // token allowances at the ERC-20 level, not direct ETH).
-  const chainId = typeof body.domain.chainId === "number" ? body.domain.chainId : undefined;
+  // Resolve chainId BEFORE policy evaluation — if omitted from domain, use the vault default
+  const resolvedChainId = (typeof body.domain.chainId === "number" ? body.domain.chainId : 0) || parseInt(process.env.CHAIN_ID || "8453", 10);
   const signRequest: SignRequest = {
     agentId,
     tenantId,
     to: "0x0000000000000000000000000000000000000000",
     value: "0",
-    chainId,
+    chainId: resolvedChainId,
   };
 
   const policySet = await getPolicySet(tenantId, agentId);
