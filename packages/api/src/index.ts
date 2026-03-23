@@ -129,6 +129,23 @@ function isValidAddress(value: unknown): boolean {
   return typeof value === "string" && /^0x[0-9a-fA-F]{40}$/.test(value);
 }
 
+/**
+ * Validate a Solana address: base58 encoding, 32–44 characters.
+ * Base58 excludes 0 (zero), O (capital o), I (capital i), l (lowercase L).
+ */
+function isValidSolanaAddress(value: unknown): boolean {
+  return typeof value === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+}
+
+/**
+ * Validate an address that may be either EVM or Solana.
+ * Detects by prefix: "0x" → EVM, otherwise → Solana base58.
+ */
+function isValidAnyAddress(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  return value.startsWith("0x") ? isValidAddress(value) : isValidSolanaAddress(value);
+}
+
 /** Safely parse JSON body, returning null on failure instead of throwing. */
 async function safeJsonParse<T>(c: Context): Promise<T | null> {
   try {
@@ -1121,8 +1138,12 @@ app.post("/vault/:agentId/sign", async (c) => {
   if (!isNonEmptyString(request.to)) {
     return c.json<ApiResponse>({ ok: false, error: "'to' address is required" }, 400);
   }
-  if (!isValidAddress(request.to)) {
-    return c.json<ApiResponse>({ ok: false, error: "'to' must be a valid Ethereum address (0x + 40 hex chars)" }, 400);
+  if (!isValidAnyAddress(request.to)) {
+    // Give a specific error message based on whether it looks like a malformed EVM or Solana address
+    const errMsg = request.to.startsWith("0x")
+      ? "'to' must be a valid Ethereum address (0x + 40 hex chars)"
+      : "'to' must be a valid Ethereum address (0x + 40 hex chars) or a valid Solana address (base58, 32–44 chars)";
+    return c.json<ApiResponse>({ ok: false, error: errMsg }, 400);
   }
   if (request.value === undefined || request.value === null) {
     return c.json<ApiResponse>({ ok: false, error: "'value' is required (wei amount as string)" }, 400);
@@ -1546,6 +1567,16 @@ app.post("/vault/:agentId/sign-typed-data", async (c) => {
 });
 
 // ─── Solana Transaction Signing ───────────────────────────────────────────
+//
+// NOTE: Policy enforcement mirrors the EVM /vault/:agentId/sign route exactly.
+// Every Solana signing request goes through the policy engine, is recorded in
+// the transactions table, and triggers the same webhook events.
+//
+// Optional `to` and `value` fields in the request body carry the recipient
+// address and lamport amount for policy evaluation (spending-limit,
+// approved-addresses, etc.). If omitted they default to empty/zero — callers
+// SHOULD supply them so spending-limit and approved-address policies fire
+// correctly.
 app.post("/vault/:agentId/sign-solana", async (c) => {
   if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
@@ -1562,6 +1593,10 @@ app.post("/vault/:agentId/sign-solana", async (c) => {
     transaction: string;
     chainId?: number;
     broadcast?: boolean;
+    /** Recipient address — used for approved-addresses policy evaluation. */
+    to?: string;
+    /** Transfer amount in lamports (as string) — used for spending-limit policy evaluation. */
+    value?: string;
   }>(c);
 
   if (!body) {
@@ -1572,28 +1607,185 @@ app.post("/vault/:agentId/sign-solana", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "'transaction' is required (base64-encoded serialized Solana transaction)" }, 400);
   }
 
+  // Validate optional `to` address when provided
+  if (body.to !== undefined && body.to !== "") {
+    if (!isValidSolanaAddress(body.to) && !isValidAddress(body.to)) {
+      return c.json<ApiResponse>({ ok: false, error: "'to' must be a valid Solana address (base58, 32–44 chars) or Ethereum address" }, 400);
+    }
+  }
+
+  const chainId = body.chainId ?? 101;
+  // Policy evaluation metadata — defaults preserve backward-compat while still
+  // letting rate-limit and time-window policies fire on every request.
+  const toAddress = body.to ?? "";
+  const txValue = body.value ?? "0";
+
+  // Build a SignRequest-shaped object for the policy engine.
+  const signRequest = {
+    agentId,
+    tenantId,
+    to: toAddress,
+    value: txValue,
+    chainId,
+  };
+
+  // ── 1. Fetch policies ────────────────────────────────────────────────────
+  const policySet = await getPolicySet(tenantId, agentId);
+  const stats = await getTransactionStats(agentId);
+
+  // ── 2. Evaluate policies ─────────────────────────────────────────────────
+  const evaluation = policyEngine.evaluate(policySet, {
+    request: signRequest,
+    recentTxCount1h: stats.recentTxCount1h,
+    recentTxCount24h: stats.recentTxCount24h,
+    spentToday: stats.spentToday,
+    spentThisWeek: stats.spentThisWeek,
+  });
+
+  // ── 3. Handle non-approved outcomes ─────────────────────────────────────
+  if (!evaluation.approved) {
+    const txId = crypto.randomUUID();
+
+    if (evaluation.requiresManualApproval) {
+      // Insert pending transaction record
+      await db.insert(transactions).values({
+        id: txId,
+        agentId,
+        status: "pending",
+        toAddress,
+        value: txValue,
+        chainId,
+        policyResults: evaluation.results,
+      });
+
+      await db.insert(approvalQueue).values({
+        id: crypto.randomUUID(),
+        txId,
+        agentId,
+        status: "pending",
+      });
+
+      const webhookUrlApproval = tenantConfigs.get(tenantId)?.webhookUrl;
+      if (webhookUrlApproval) {
+        webhookDispatcher
+          .dispatch(
+            { type: "approval_required", tenantId, agentId, data: { txId, results: evaluation.results }, timestamp: new Date() },
+            webhookUrlApproval
+          )
+          .catch(console.error);
+      }
+
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Transaction requires manual approval",
+          data: { txId, results: evaluation.results, status: "pending_approval" },
+        },
+        202
+      );
+    }
+
+    // Hard policy rejection
+    await db.insert(transactions).values({
+      id: txId,
+      agentId,
+      status: "rejected",
+      toAddress,
+      value: txValue,
+      chainId,
+      policyResults: evaluation.results,
+    });
+
+    const webhookUrlRejected = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlRejected) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_rejected", tenantId, agentId, data: { txId, results: evaluation.results }, timestamp: new Date() },
+          webhookUrlRejected
+        )
+        .catch(console.error);
+    }
+
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Transaction rejected by policy",
+        data: { txId, results: evaluation.results },
+      },
+      403
+    );
+  }
+
+  // ── 4. Policy approved — sign the transaction ────────────────────────────
   try {
+    const txId = crypto.randomUUID();
+
     const result = await vault.signSolanaTransaction({
       agentId,
       tenantId,
       transaction: body.transaction,
-      chainId: body.chainId,
+      chainId,
       broadcast: body.broadcast,
     });
 
-    return c.json<ApiResponse<{ signature: string; broadcast: boolean }>>({
+    // Record the completed transaction
+    await db.insert(transactions).values({
+      id: txId,
+      agentId,
+      status: "signed",
+      toAddress,
+      value: txValue,
+      chainId,
+      txHash: result.broadcast ? result.signature : undefined,
+      policyResults: evaluation.results,
+      signedAt: new Date(),
+    });
+
+    const webhookUrlSigned = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlSigned) {
+      webhookDispatcher
+        .dispatch(
+          {
+            type: "tx_signed",
+            tenantId,
+            agentId,
+            data: { txId, txHash: result.broadcast ? result.signature : undefined },
+            timestamp: new Date(),
+          },
+          webhookUrlSigned
+        )
+        .catch(console.error);
+    }
+
+    return c.json<ApiResponse<{ txId: string; signature: string; broadcast: boolean; chainId: number; caip2?: string }>>({
       ok: true,
-      data: result,
+      data: { txId, ...result },
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
     console.error(`[${requestId}] Solana sign failed for agent ${agentId}:`, e);
-    
+
+    const webhookUrlFailed = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlFailed) {
+      webhookDispatcher
+        .dispatch(
+          {
+            type: "tx_failed",
+            tenantId,
+            agentId,
+            data: { error: e instanceof Error ? e.message : "Unknown error", requestId },
+            timestamp: new Date(),
+          },
+          webhookUrlFailed
+        )
+        .catch(console.error);
+    }
+
     // Return 502 for RPC/blockchain errors with the actual error message
     if (isRpcError(e)) {
       return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
     }
-    
+
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
