@@ -7,6 +7,8 @@ AI agents need to spend money. Giving them raw private keys is insane — no lim
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Base](https://img.shields.io/badge/chain-Base-0052ff.svg)](https://base.org)
 [![API](https://img.shields.io/badge/API-live-brightgreen)](https://api.steward.fi)
+[![X](https://img.shields.io/badge/X-@Steward__Fi-black)](https://x.com/Steward_Fi)
+[![Website](https://img.shields.io/badge/website-steward.fi-blue)](https://steward.fi)
 
 ---
 
@@ -29,7 +31,7 @@ Agent/Platform  →  Steward SDK  →  Policy Engine  →  Vault (AES-256-GCM)  
 ## Quick Start
 
 ```bash
-git clone https://github.com/0xSolace/steward
+git clone https://github.com/Steward-Fi/steward
 cd steward
 cp .env.example .env  # edit with your postgres URL + master password
 docker compose up -d
