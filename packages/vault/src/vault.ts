@@ -145,51 +145,54 @@ export class Vault {
 
     const createdAt = new Date();
 
-    // ── Persist agent row (walletAddress = EVM for backward compat) ──────
-    await db.insert(agents).values({
-      id: agentId,
-      tenantId,
-      name,
-      walletAddress: evmAddress,
-      platformId,
-      createdAt,
-      updatedAt: createdAt,
-    });
+    // ── Persist all rows atomically — roll back everything on any failure ─
+    await db.transaction(async (tx) => {
+      // ── Persist agent row (walletAddress = EVM for backward compat) ────
+      await tx.insert(agents).values({
+        id: agentId,
+        tenantId,
+        name,
+        walletAddress: evmAddress,
+        platformId,
+        createdAt,
+        updatedAt: createdAt,
+      });
 
-    // ── Legacy encrypted_keys table (EVM key only, backward compat) ──────
-    await db.insert(encryptedKeys).values({
-      agentId,
-      ciphertext: evmEncrypted.ciphertext,
-      iv: evmEncrypted.iv,
-      tag: evmEncrypted.tag,
-      salt: evmEncrypted.salt,
-    });
-
-    // ── Multi-chain key storage ──────────────────────────────────────────
-    await db.insert(encryptedChainKeys).values([
-      {
+      // ── Legacy encrypted_keys table (EVM key only, backward compat) ────
+      await tx.insert(encryptedKeys).values({
         agentId,
-        chainFamily: "evm",
         ciphertext: evmEncrypted.ciphertext,
         iv: evmEncrypted.iv,
         tag: evmEncrypted.tag,
         salt: evmEncrypted.salt,
-      },
-      {
-        agentId,
-        chainFamily: "solana",
-        ciphertext: solEncrypted.ciphertext,
-        iv: solEncrypted.iv,
-        tag: solEncrypted.tag,
-        salt: solEncrypted.salt,
-      },
-    ]);
+      });
 
-    // ── Multi-chain public address storage ───────────────────────────────
-    await db.insert(agentWallets).values([
-      { agentId, chainFamily: "evm", address: evmAddress, createdAt },
-      { agentId, chainFamily: "solana", address: solanaAddress, createdAt },
-    ]);
+      // ── Multi-chain key storage ──────────────────────────────────────
+      await tx.insert(encryptedChainKeys).values([
+        {
+          agentId,
+          chainFamily: "evm",
+          ciphertext: evmEncrypted.ciphertext,
+          iv: evmEncrypted.iv,
+          tag: evmEncrypted.tag,
+          salt: evmEncrypted.salt,
+        },
+        {
+          agentId,
+          chainFamily: "solana",
+          ciphertext: solEncrypted.ciphertext,
+          iv: solEncrypted.iv,
+          tag: solEncrypted.tag,
+          salt: solEncrypted.salt,
+        },
+      ]);
+
+      // ── Multi-chain public address storage ───────────────────────────
+      await tx.insert(agentWallets).values([
+        { agentId, chainFamily: "evm", address: evmAddress, createdAt },
+        { agentId, chainFamily: "solana", address: solanaAddress, createdAt },
+      ]);
+    });
 
     return {
       id: agentId,
@@ -304,7 +307,8 @@ export class Vault {
         .from(agents)
         .where(eq(agents.id, agentId));
       if (agentRow) {
-        return [{ chainFamily: "evm", address: agentRow.walletAddress }];
+        const chainFamily = detectChainType(agentRow.walletAddress);
+        return [{ chainFamily, address: agentRow.walletAddress }];
       }
       return [];
     }
@@ -576,43 +580,77 @@ export class Vault {
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
-    if (existingAgent) {
-      // Update wallet address and replace encrypted key
-      await db
-        .update(agents)
-        .set({ walletAddress, updatedAt: now })
-        .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    // Wrap all writes atomically — roll back on any failure
+    await db.transaction(async (tx) => {
+      if (existingAgent) {
+        // Update wallet address and replace encrypted key
+        await tx
+          .update(agents)
+          .set({ walletAddress, updatedAt: now })
+          .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
-      await db
-        .delete(encryptedKeys)
-        .where(eq(encryptedKeys.agentId, agentId));
+        await tx
+          .delete(encryptedKeys)
+          .where(eq(encryptedKeys.agentId, agentId));
 
-      await db.insert(encryptedKeys).values({
-        agentId,
-        ciphertext: encryptedKey.ciphertext,
-        iv: encryptedKey.iv,
-        tag: encryptedKey.tag,
-        salt: encryptedKey.salt,
-      });
-    } else {
-      // Create new agent record
-      await db.insert(agents).values({
-        id: agentId,
-        tenantId,
-        name: agentId,
-        walletAddress,
-        createdAt: now,
-        updatedAt: now,
-      });
+        await tx.insert(encryptedKeys).values({
+          agentId,
+          ciphertext: encryptedKey.ciphertext,
+          iv: encryptedKey.iv,
+          tag: encryptedKey.tag,
+          salt: encryptedKey.salt,
+        });
+      } else {
+        // Create new agent record
+        await tx.insert(agents).values({
+          id: agentId,
+          tenantId,
+          name: agentId,
+          walletAddress,
+          createdAt: now,
+          updatedAt: now,
+        });
 
-      await db.insert(encryptedKeys).values({
-        agentId,
-        ciphertext: encryptedKey.ciphertext,
-        iv: encryptedKey.iv,
-        tag: encryptedKey.tag,
-        salt: encryptedKey.salt,
-      });
-    }
+        await tx.insert(encryptedKeys).values({
+          agentId,
+          ciphertext: encryptedKey.ciphertext,
+          iv: encryptedKey.iv,
+          tag: encryptedKey.tag,
+          salt: encryptedKey.salt,
+        });
+      }
+
+      // ── Also write to multi-wallet tables so new signing paths find the key ─
+      // Upsert into encrypted_chain_keys (replace if key already imported)
+      await tx
+        .insert(encryptedChainKeys)
+        .values({
+          agentId,
+          chainFamily,
+          ciphertext: encryptedKey.ciphertext,
+          iv: encryptedKey.iv,
+          tag: encryptedKey.tag,
+          salt: encryptedKey.salt,
+        })
+        .onConflictDoUpdate({
+          target: [encryptedChainKeys.agentId, encryptedChainKeys.chainFamily],
+          set: {
+            ciphertext: encryptedKey.ciphertext,
+            iv: encryptedKey.iv,
+            tag: encryptedKey.tag,
+            salt: encryptedKey.salt,
+          },
+        });
+
+      // Upsert into agent_wallets
+      await tx
+        .insert(agentWallets)
+        .values({ agentId, chainFamily, address: walletAddress, createdAt: now })
+        .onConflictDoUpdate({
+          target: [agentWallets.agentId, agentWallets.chainFamily],
+          set: { address: walletAddress },
+        });
+    });
 
     return { walletAddress };
   }
