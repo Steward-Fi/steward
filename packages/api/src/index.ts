@@ -1332,14 +1332,40 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
   }
 
   try {
-    const txHash = await vault.signTransaction(
-      { ...toSignRequest(transaction), tenantId },
-      {
-        txId,
-        policyResults: transaction.policyResults,
-        status: "signed",
+    // Solana transactions (chainId 101 = mainnet, 102 = devnet) must be replayed
+    // via signSolanaTransaction using the original serialized blob stored in `data`.
+    // EVM transactions use the standard signTransaction path.
+    const isSolana = transaction.chainId === 101 || transaction.chainId === 102;
+
+    let txHash: string;
+
+    if (isSolana) {
+      if (!transaction.data) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "Solana transaction blob not found — cannot replay approval" },
+          500
+        );
       }
-    );
+
+      const result = await vault.signSolanaTransaction({
+        agentId,
+        tenantId,
+        transaction: transaction.data,
+        chainId: transaction.chainId,
+        broadcast: true,
+      });
+
+      txHash = result.signature;
+    } else {
+      txHash = await vault.signTransaction(
+        { ...toSignRequest(transaction), tenantId },
+        {
+          txId,
+          policyResults: transaction.policyResults,
+          status: "signed",
+        }
+      );
+    }
 
     const resolvedAt = new Date();
 
@@ -1572,11 +1598,13 @@ app.post("/vault/:agentId/sign-typed-data", async (c) => {
 // Every Solana signing request goes through the policy engine, is recorded in
 // the transactions table, and triggers the same webhook events.
 //
-// Optional `to` and `value` fields in the request body carry the recipient
-// address and lamport amount for policy evaluation (spending-limit,
-// approved-addresses, etc.). If omitted they default to empty/zero — callers
-// SHOULD supply them so spending-limit and approved-address policies fire
-// correctly.
+// `to` and `value` are REQUIRED fields. They carry the recipient address and
+// lamport amount so that spending-limit and approved-addresses policies
+// evaluate against the real transaction intent rather than defaulting to
+// empty/zero values that would silently bypass policy checks.
+//
+// The raw base64 transaction blob is persisted in the `data` column so that
+// queued-for-approval transactions can be replayed by the approve endpoint.
 app.post("/vault/:agentId/sign-solana", async (c) => {
   if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
@@ -1614,11 +1642,24 @@ app.post("/vault/:agentId/sign-solana", async (c) => {
     }
   }
 
+  // `to` and `value` are required for policy evaluation. Without them,
+  // spending-limit policies would always pass (value = "0") and
+  // approved-addresses policies would be meaningless (empty string matches
+  // nothing), allowing the actual Solana transaction to bypass policy checks.
+  if (!body.to || !body.value) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Solana signing requires 'to' (recipient address) and 'value' (lamports as string) for policy evaluation",
+      },
+      400
+    );
+  }
+
   const chainId = body.chainId ?? 101;
-  // Policy evaluation metadata — defaults preserve backward-compat while still
-  // letting rate-limit and time-window policies fire on every request.
-  const toAddress = body.to ?? "";
-  const txValue = body.value ?? "0";
+  const toAddress = body.to;
+  const txValue = body.value;
 
   // Build a SignRequest-shaped object for the policy engine.
   const signRequest = {
@@ -1647,13 +1688,16 @@ app.post("/vault/:agentId/sign-solana", async (c) => {
     const txId = crypto.randomUUID();
 
     if (evaluation.requiresManualApproval) {
-      // Insert pending transaction record
+      // Insert pending transaction record.
+      // Store the base64 transaction blob in `data` so the approve endpoint
+      // can replay the exact transaction without re-serializing it.
       await db.insert(transactions).values({
         id: txId,
         agentId,
         status: "pending",
         toAddress,
         value: txValue,
+        data: body.transaction,
         chainId,
         policyResults: evaluation.results,
       });
