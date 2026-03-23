@@ -30,12 +30,12 @@
     "ai-agent",
     "sdk"
   ],
-  "author": "0xSolace",
+  "author": "Steward-Fi",
   "license": "MIT",
   "homepage": "https://steward.fi",
   "repository": {
     "type": "git",
-    "url": "https://github.com/0xSolace/steward"
+    "url": "https://github.com/Steward-Fi/steward"
   },
   "publishConfig": {
     "access": "public"

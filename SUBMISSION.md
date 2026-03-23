@@ -112,7 +112,7 @@ This runs on real ETH. Base mainnet. Not testnet.
 | Landing page | [steward.fi](https://steward.fi) |
 | API health | [api.steward.fi/health](https://api.steward.fi/health) |
 | npm package | [npmjs.com/package/@stwd/sdk](https://npmjs.com/package/@stwd/sdk) |
-| GitHub | [github.com/0xSolace/steward](https://github.com/0xSolace/steward) |
+| GitHub | [github.com/Steward-Fi/steward](https://github.com/Steward-Fi/steward) |
 
 ### Demo Walkthrough
 
@@ -250,7 +250,7 @@ The future is not agents OR humans controlling money. It is agents spending with
 
 ## Team
 
-Built by [0xSolace](https://github.com/0xSolace). Solo builder. ~9,000 lines of TypeScript. Everything deployed. Everything real.
+Built by [Steward-Fi](https://github.com/Steward-Fi). Solo builder. ~9,000 lines of TypeScript. Everything deployed. Everything real.
 
 ---
 
