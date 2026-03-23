@@ -1165,22 +1165,24 @@ app.post("/vault/:agentId/sign", async (c) => {
     const txId = crypto.randomUUID();
 
     if (evaluation.requiresManualApproval) {
-      await db.insert(transactions).values({
-        id: txId,
-        agentId,
-        status: "pending",
-        toAddress: signRequest.to,
-        value: signRequest.value,
-        data: signRequest.data,
-        chainId: signRequest.chainId,
-        policyResults: evaluation.results,
-      });
+      await db.transaction(async (tx) => {
+        await tx.insert(transactions).values({
+          id: txId,
+          agentId,
+          status: "pending",
+          toAddress: signRequest.to,
+          value: signRequest.value,
+          data: signRequest.data,
+          chainId: signRequest.chainId,
+          policyResults: evaluation.results,
+        });
 
-      await db.insert(approvalQueue).values({
-        id: crypto.randomUUID(),
-        txId,
-        agentId,
-        status: "pending",
+        await tx.insert(approvalQueue).values({
+          id: crypto.randomUUID(),
+          txId,
+          agentId,
+          status: "pending",
+        });
       });
 
       const webhookUrlApproval = tenantConfigs.get(tenantId)?.webhookUrl;
@@ -1372,23 +1374,25 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
 
     const resolvedAt = new Date();
 
-    await db
-      .update(approvalQueue)
-      .set({
-        status: "approved",
-        resolvedAt,
-        resolvedBy: tenantId,
-      })
-      .where(eq(approvalQueue.id, queueEntry.id));
+    await db.transaction(async (tx) => {
+      await tx
+        .update(approvalQueue)
+        .set({
+          status: "approved",
+          resolvedAt,
+          resolvedBy: tenantId,
+        })
+        .where(eq(approvalQueue.id, queueEntry.id));
 
-    await db
-      .update(transactions)
-      .set({
-        status: "signed",
-        txHash,
-        signedAt: resolvedAt,
-      })
-      .where(eq(transactions.id, txId));
+      await tx
+        .update(transactions)
+        .set({
+          status: "signed",
+          txHash,
+          signedAt: resolvedAt,
+        })
+        .where(eq(transactions.id, txId));
+    });
 
     const webhookUrlApproved = tenantConfigs.get(tenantId)?.webhookUrl;
     if (webhookUrlApproved) {
@@ -1458,21 +1462,23 @@ app.post("/vault/:agentId/reject/:txId", async (c) => {
 
   const resolvedAt = new Date();
 
-  await db
-    .update(approvalQueue)
-    .set({
-      status: "rejected",
-      resolvedAt,
-      resolvedBy: tenantId,
-    })
-    .where(eq(approvalQueue.id, queueEntry.id));
+  await db.transaction(async (tx) => {
+    await tx
+      .update(approvalQueue)
+      .set({
+        status: "rejected",
+        resolvedAt,
+        resolvedBy: tenantId,
+      })
+      .where(eq(approvalQueue.id, queueEntry.id));
 
-  await db
-    .update(transactions)
-    .set({
-      status: "rejected",
-    })
-    .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+    await tx
+      .update(transactions)
+      .set({
+        status: "rejected",
+      })
+      .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+  });
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -1606,21 +1612,23 @@ app.post("/vault/:agentId/sign-typed-data", async (c) => {
     const txId = crypto.randomUUID();
 
     if (evaluation.requiresManualApproval) {
-      await db.insert(transactions).values({
-        id: txId,
-        agentId,
-        status: "pending",
-        toAddress: signRequest.to,
-        value: signRequest.value,
-        chainId: signRequest.chainId,
-        policyResults: evaluation.results,
-      });
+      await db.transaction(async (tx) => {
+        await tx.insert(transactions).values({
+          id: txId,
+          agentId,
+          status: "pending",
+          toAddress: signRequest.to,
+          value: signRequest.value,
+          chainId: signRequest.chainId,
+          policyResults: evaluation.results,
+        });
 
-      await db.insert(approvalQueue).values({
-        id: crypto.randomUUID(),
-        txId,
-        agentId,
-        status: "pending",
+        await tx.insert(approvalQueue).values({
+          id: crypto.randomUUID(),
+          txId,
+          agentId,
+          status: "pending",
+        });
       });
 
       const webhookUrlApproval = tenantConfigs.get(tenantId)?.webhookUrl;
@@ -1826,25 +1834,27 @@ app.post("/vault/:agentId/sign-solana", async (c) => {
     const txId = crypto.randomUUID();
 
     if (evaluation.requiresManualApproval) {
-      // Insert pending transaction record.
+      // Insert pending transaction record atomically.
       // Store the base64 transaction blob in `data` so the approve endpoint
       // can replay the exact transaction without re-serializing it.
-      await db.insert(transactions).values({
-        id: txId,
-        agentId,
-        status: "pending",
-        toAddress,
-        value: txValue,
-        data: body.transaction,
-        chainId,
-        policyResults: evaluation.results,
-      });
+      await db.transaction(async (tx) => {
+        await tx.insert(transactions).values({
+          id: txId,
+          agentId,
+          status: "pending",
+          toAddress,
+          value: txValue,
+          data: body.transaction,
+          chainId,
+          policyResults: evaluation.results,
+        });
 
-      await db.insert(approvalQueue).values({
-        id: crypto.randomUUID(),
-        txId,
-        agentId,
-        status: "pending",
+        await tx.insert(approvalQueue).values({
+          id: crypto.randomUUID(),
+          txId,
+          agentId,
+          status: "pending",
+        });
       });
 
       const webhookUrlApproval = tenantConfigs.get(tenantId)?.webhookUrl;
