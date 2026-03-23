@@ -36,6 +36,96 @@ export interface AgentIdentity {
   createdAt: Date;
 }
 
+// ─── CAIP-2 Chain Identifiers ───
+
+/**
+ * A chain identifier following the CAIP-2 standard.
+ * See https://github.com/ChainAgnostic/CAIPs/blob/main/CAIPs/caip-2.md
+ */
+export interface ChainIdentifier {
+  caip2: string;
+  numericId: number;
+  family: "evm" | "solana";
+  name: string;
+  symbol: string;
+  testnet: boolean;
+}
+
+/**
+ * Registry of all supported chains, keyed by CAIP-2 identifier.
+ *
+ * CAIP-2 format:
+ *   EVM:    `eip155:{chainId}`
+ *   Solana: `solana:{genesisHashPrefix}`
+ *
+ * Solana convention IDs used internally: 101 = mainnet-beta, 102 = devnet.
+ */
+export const CHAINS: Record<string, ChainIdentifier> = {
+  "eip155:1": {
+    caip2: "eip155:1", numericId: 1, family: "evm",
+    name: "Ethereum", symbol: "ETH", testnet: false,
+  },
+  "eip155:56": {
+    caip2: "eip155:56", numericId: 56, family: "evm",
+    name: "BSC", symbol: "BNB", testnet: false,
+  },
+  "eip155:97": {
+    caip2: "eip155:97", numericId: 97, family: "evm",
+    name: "BSC Testnet", symbol: "tBNB", testnet: true,
+  },
+  "eip155:137": {
+    caip2: "eip155:137", numericId: 137, family: "evm",
+    name: "Polygon", symbol: "POL", testnet: false,
+  },
+  "eip155:8453": {
+    caip2: "eip155:8453", numericId: 8453, family: "evm",
+    name: "Base", symbol: "ETH", testnet: false,
+  },
+  "eip155:42161": {
+    caip2: "eip155:42161", numericId: 42161, family: "evm",
+    name: "Arbitrum", symbol: "ETH", testnet: false,
+  },
+  "eip155:84532": {
+    caip2: "eip155:84532", numericId: 84532, family: "evm",
+    name: "Base Sepolia", symbol: "ETH", testnet: true,
+  },
+  // Solana: genesis hash prefix used as the reference identifier
+  "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {
+    caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", numericId: 101, family: "solana",
+    name: "Solana", symbol: "SOL", testnet: false,
+  },
+  "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {
+    caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", numericId: 102, family: "solana",
+    name: "Solana Devnet", symbol: "SOL", testnet: true,
+  },
+};
+
+/** Look up a chain by its internal numeric ID. Returns undefined if not found. */
+export function chainFromNumeric(id: number): ChainIdentifier | undefined {
+  return Object.values(CHAINS).find((c) => c.numericId === id);
+}
+
+/** Look up a chain by its CAIP-2 string (e.g. `"eip155:8453"`). Returns undefined if not found. */
+export function chainFromCaip2(caip2: string): ChainIdentifier | undefined {
+  return CHAINS[caip2];
+}
+
+/**
+ * Convert an internal numeric chain ID to its CAIP-2 string.
+ * Returns undefined for unrecognised chain IDs.
+ */
+export function toCaip2(numericId: number): string | undefined {
+  return chainFromNumeric(numericId)?.caip2;
+}
+
+/**
+ * Convert a CAIP-2 string back to the internal numeric chain ID.
+ * Returns undefined for unrecognised CAIP-2 strings.
+ */
+export function fromCaip2(caip2: string): number | undefined {
+  return CHAINS[caip2]?.numericId;
+}
+
 // ─── Policies ───
 
 export type PolicyType =
@@ -43,7 +133,8 @@ export type PolicyType =
   | "approved-addresses"
   | "auto-approve-threshold"
   | "time-window"
-  | "rate-limit";
+  | "rate-limit"
+  | "allowed-chains";
 
 export interface PolicyRule {
   id: string;
@@ -75,6 +166,11 @@ export interface TimeWindowConfig {
 export interface RateLimitConfig {
   maxTxPerHour: number;
   maxTxPerDay: number;
+}
+
+export interface AllowedChainsConfig {
+  /** Array of CAIP-2 chain identifiers that are permitted. e.g. ["eip155:8453", "eip155:1"] */
+  chains: string[];
 }
 
 // ─── Transactions ───

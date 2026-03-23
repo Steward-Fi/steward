@@ -20,6 +20,7 @@ import type {
   TxStatus,
   AgentIdentity,
 } from "@stwd/shared";
+import { toCaip2 } from "@stwd/shared";
 
 import { KeyStore, type EncryptedKey } from "./keystore";
 import {
@@ -527,7 +528,7 @@ export class Vault {
    */
   async signSolanaTransaction(
     request: SignSolanaTransactionRequest
-  ): Promise<{ signature: string; broadcast: boolean }> {
+  ): Promise<{ signature: string; broadcast: boolean; chainId: number; caip2?: string }> {
     const db = getDb();
     const [stored] = await db
       .select({
@@ -575,13 +576,13 @@ export class Vault {
         "confirmed"
       );
 
-      return { signature: sig, broadcast: true };
+      return { signature: sig, broadcast: true, chainId, caip2: toCaip2(chainId) };
     }
 
     // Return serialized signed transaction as base64
     const rawBytes = tx.serialize();
     const serialized = btoa(Array.from(rawBytes, b => String.fromCharCode(b)).join(""));
-    return { signature: serialized, broadcast: false };
+    return { signature: serialized, broadcast: false, chainId, caip2: toCaip2(chainId) };
   }
 
   /**
