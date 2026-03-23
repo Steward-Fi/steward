@@ -15,6 +15,13 @@
       "when": 1742748000000,
       "tag": "0001_multi_wallet",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1742834400000,
+      "tag": "0002_allowed_chains",
+      "breakpoints": true
     }
   ]
 }
