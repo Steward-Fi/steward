@@ -24,13 +24,24 @@ export interface WebhookEvent {
   timestamp: Date;
 }
 
+// ─── Chain Family ───
+
+/** Identifies the blockchain family for a wallet key/address. */
+export type ChainFamily = "evm" | "solana";
+
 // ─── Agent Identity ───
 
 export interface AgentIdentity {
   id: string;
   tenantId: string;
   name: string;
+  /** Primary EVM address — kept for backwards compatibility. */
   walletAddress: string;
+  /**
+   * All addresses for this agent, keyed by chain family.
+   * Present for agents created with multi-wallet support.
+   */
+  walletAddresses?: { evm?: string; solana?: string };
   erc8004TokenId?: string;
   platformId?: string; // e.g. waifu.fun agent ID
   createdAt: Date;

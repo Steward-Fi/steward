@@ -1639,6 +1639,42 @@ app.post("/vault/:agentId/rpc", async (c) => {
   }
 });
 
+// ─── Multi-Wallet Address List ────────────────────────────────────────────
+/**
+ * GET /vault/:agentId/addresses
+ *
+ * Returns all wallet addresses for an agent across all chain families.
+ * For agents created with multi-wallet support, returns both EVM and Solana
+ * addresses. For legacy agents, returns only the EVM address.
+ */
+app.get("/vault/:agentId/addresses", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  try {
+    const addresses = await vault.getAddresses(tenantId, agentId);
+    return c.json<ApiResponse<{
+      agentId: string;
+      addresses: Array<{ chainFamily: "evm" | "solana"; address: string }>;
+    }>>({
+      ok: true,
+      data: { agentId, addresses },
+    });
+  } catch (e: unknown) {
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] getAddresses failed for agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
 // ─── Key Import ───────────────────────────────────────────────────────────
 app.post("/vault/:agentId/import", async (c) => {
   // Only tenant-level auth can import keys

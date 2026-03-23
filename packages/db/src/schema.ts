@@ -6,6 +6,7 @@ import {
   jsonb,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -13,6 +14,8 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 import type { PolicyResult } from "@stwd/shared";
+
+export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana"]);
 
 export const policyTypeEnum = pgEnum("policy_type", [
   "spending-limit",
@@ -90,6 +93,55 @@ export const encryptedKeys = pgTable(
   }),
 );
 
+/**
+ * Multi-chain wallet addresses for each agent.
+ * One row per (agentId, chainFamily) pair.
+ * New agents get both 'evm' and 'solana' rows from a single createAgent call.
+ * Legacy agents (EVM-only) have no rows here; fall back to agents.walletAddress.
+ */
+export const agentWallets = pgTable(
+  "agent_wallets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    chainFamily: chainFamilyEnum("chain_family").notNull(),
+    address: varchar("address", { length: 128 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    agentChainUniqueIdx: uniqueIndex("agent_wallets_agent_chain_idx").on(
+      table.agentId,
+      table.chainFamily,
+    ),
+    agentIdIdx: index("agent_wallets_agent_id_idx").on(table.agentId),
+  }),
+);
+
+/**
+ * Encrypted private keys for each agent+chainFamily combination.
+ * Composite PK: (agentId, chainFamily).
+ * New agents store both 'evm' and 'solana' rows here.
+ * Legacy agents (EVM-only) have no rows here; the vault falls back to `encryptedKeys`.
+ */
+export const encryptedChainKeys = pgTable(
+  "encrypted_chain_keys",
+  {
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    chainFamily: chainFamilyEnum("chain_family").notNull(),
+    ciphertext: text("ciphertext").notNull(),
+    iv: text("iv").notNull(),
+    tag: text("tag").notNull(),
+    salt: text("salt").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.agentId, table.chainFamily] }),
+  }),
+);
+
 export const policies = pgTable("policies", {
   id: varchar("id", { length: 64 }).primaryKey(),
   agentId: varchar("agent_id", { length: 64 })
@@ -161,6 +213,8 @@ export const agentRelations = relations(agents, ({ one, many }) => ({
     fields: [agents.id],
     references: [encryptedKeys.agentId],
   }),
+  wallets: many(agentWallets),
+  chainKeys: many(encryptedChainKeys),
   policies: many(policies),
   transactions: many(transactions),
   approvalQueueEntries: many(approvalQueue),
@@ -202,6 +256,20 @@ export const approvalQueueRelations = relations(approvalQueue, ({ one }) => ({
   }),
 }));
 
+export const agentWalletRelations = relations(agentWallets, ({ one }) => ({
+  agent: one(agents, {
+    fields: [agentWallets.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const encryptedChainKeyRelations = relations(encryptedChainKeys, ({ one }) => ({
+  agent: one(agents, {
+    fields: [encryptedChainKeys.agentId],
+    references: [agents.id],
+  }),
+}));
+
 export type Tenant = typeof tenants.$inferSelect;
 export type NewTenant = typeof tenants.$inferInsert;
 export type Agent = typeof agents.$inferSelect;
@@ -214,3 +282,7 @@ export type Transaction = typeof transactions.$inferSelect;
 export type NewTransaction = typeof transactions.$inferInsert;
 export type ApprovalQueueEntry = typeof approvalQueue.$inferSelect;
 export type NewApprovalQueueEntry = typeof approvalQueue.$inferInsert;
+export type AgentWallet = typeof agentWallets.$inferSelect;
+export type NewAgentWallet = typeof agentWallets.$inferInsert;
+export type EncryptedChainKey = typeof encryptedChainKeys.$inferSelect;
+export type NewEncryptedChainKey = typeof encryptedChainKeys.$inferInsert;

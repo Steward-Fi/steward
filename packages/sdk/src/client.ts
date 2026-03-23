@@ -2,6 +2,7 @@ import type {
   AgentBalance,
   AgentIdentity,
   ApiResponse,
+  ChainFamily,
   PolicyResult,
   PolicyRule,
   RpcRequest,
@@ -73,7 +74,16 @@ export interface SignMessageResult {
   signature: string;
 }
 
+/**
+ * Result of creating a wallet. For new agents, includes `walletAddresses`
+ * with both EVM and Solana addresses.
+ */
 export type CreateWalletResult = AgentIdentity;
+
+export interface GetAddressesResult {
+  agentId: string;
+  addresses: Array<{ chainFamily: ChainFamily; address: string }>;
+}
 export type GetHistoryResult = StewardHistoryEntry[];
 export type SignTransactionResult = { txHash: string } | { signedTx: string } | StewardPendingApproval;
 export type SignTypedDataResult = { signature: string };
@@ -294,6 +304,22 @@ export class StewardClient {
     const params = chainId ? `?chainId=${chainId}` : "";
     const response = await this.request<AgentBalance, StewardErrorResponse>(
       `/agents/${encodeURIComponent(agentId)}/balance${params}`,
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Get all wallet addresses for an agent across all chain families.
+   * New agents have both EVM and Solana addresses; legacy agents have EVM only.
+   */
+  async getAddresses(agentId: string): Promise<GetAddressesResult> {
+    const response = await this.request<GetAddressesResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/addresses`,
     );
 
     if (!response.ok) {
