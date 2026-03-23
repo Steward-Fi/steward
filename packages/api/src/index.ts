@@ -1074,7 +1074,7 @@ app.put("/agents/:agentId/policies", async (c) => {
   }
 
   // Validate each policy
-  const validPolicyTypes = ["spending-limit", "approved-addresses", "auto-approve-threshold", "time-window", "rate-limit"];
+  const validPolicyTypes = ["spending-limit", "approved-addresses", "auto-approve-threshold", "time-window", "rate-limit", "allowed-chains"];
   for (const policy of nextPolicies) {
     if (!isNonEmptyString(policy.type)) {
       return c.json<ApiResponse>({ ok: false, error: "Each policy must have a non-empty 'type' field" }, 400);
@@ -1299,6 +1299,9 @@ app.post("/vault/:agentId/sign", async (c) => {
 });
 
 app.post("/vault/:agentId/approve/:txId", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction approval requires tenant-level authentication" }, 403);
+  }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const txId = c.req.param("txId");
@@ -1400,6 +1403,9 @@ app.post("/vault/:agentId/approve/:txId", async (c) => {
 });
 
 app.post("/vault/:agentId/reject/:txId", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Transaction approval requires tenant-level authentication" }, 403);
+  }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const txId = c.req.param("txId");
@@ -1545,6 +1551,105 @@ app.post("/vault/:agentId/sign-typed-data", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "'value' is required and must be an object" }, 400);
   }
 
+  // ── Policy evaluation ────────────────────────────────────────────────────
+  // Typed data has no direct ETH value, but must still pass rate-limit,
+  // allowed-chains, and time-window policies. Use value "0" so spending-limit
+  // policies treat this as a zero-value operation (correct — permit() grants
+  // token allowances at the ERC-20 level, not direct ETH).
+  const chainId = typeof body.domain.chainId === "number" ? body.domain.chainId : undefined;
+  const signRequest: SignRequest = {
+    agentId,
+    tenantId,
+    to: "0x0000000000000000000000000000000000000000",
+    value: "0",
+    chainId,
+  };
+
+  const policySet = await getPolicySet(tenantId, agentId);
+  const stats = await getTransactionStats(agentId);
+
+  const evaluation = policyEngine.evaluate(policySet, {
+    request: signRequest,
+    recentTxCount1h: stats.recentTxCount1h,
+    recentTxCount24h: stats.recentTxCount24h,
+    spentToday: stats.spentToday,
+    spentThisWeek: stats.spentThisWeek,
+  });
+
+  if (!evaluation.approved) {
+    const txId = crypto.randomUUID();
+
+    if (evaluation.requiresManualApproval) {
+      await db.insert(transactions).values({
+        id: txId,
+        agentId,
+        status: "pending",
+        toAddress: signRequest.to,
+        value: signRequest.value,
+        chainId: signRequest.chainId,
+        policyResults: evaluation.results,
+      });
+
+      await db.insert(approvalQueue).values({
+        id: crypto.randomUUID(),
+        txId,
+        agentId,
+        status: "pending",
+      });
+
+      const webhookUrlApproval = tenantConfigs.get(tenantId)?.webhookUrl;
+      if (webhookUrlApproval) {
+        webhookDispatcher
+          .dispatch(
+            { type: "approval_required", tenantId, agentId, data: { txId, results: evaluation.results }, timestamp: new Date() },
+            webhookUrlApproval
+          )
+          .catch(console.error);
+      }
+
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Transaction requires manual approval",
+          data: { txId, results: evaluation.results, status: "pending_approval" },
+        },
+        202
+      );
+    }
+
+    await db.insert(transactions).values({
+      id: txId,
+      agentId,
+      status: "rejected",
+      toAddress: signRequest.to,
+      value: signRequest.value,
+      chainId: signRequest.chainId,
+      policyResults: evaluation.results,
+    });
+
+    const webhookUrlRejected = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlRejected) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_rejected", tenantId, agentId, data: { txId, results: evaluation.results }, timestamp: new Date() },
+          webhookUrlRejected
+        )
+        .catch(console.error);
+    }
+
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Transaction rejected by policy",
+        data: { txId, results: evaluation.results },
+      },
+      403
+    );
+  }
+
+  // ── Policy approved — sign ───────────────────────────────────────────────
+  const txId = crypto.randomUUID();
+
   try {
     const signature = await vault.signTypedData({
       agentId,
@@ -1555,13 +1660,46 @@ app.post("/vault/:agentId/sign-typed-data", async (c) => {
       value: body.value,
     });
 
-    return c.json<ApiResponse<{ signature: string }>>({
+    await db.insert(transactions).values({
+      id: txId,
+      agentId,
+      status: "signed",
+      toAddress: signRequest.to,
+      value: signRequest.value,
+      chainId: signRequest.chainId,
+      policyResults: evaluation.results,
+      signedAt: new Date(),
+    });
+
+    const webhookUrlSigned = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlSigned) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_signed", tenantId, agentId, data: { txId }, timestamp: new Date() },
+          webhookUrlSigned
+        )
+        .catch(console.error);
+    }
+
+    return c.json<ApiResponse<{ signature: string; txId: string }>>({
       ok: true,
-      data: { signature },
+      data: { signature, txId },
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
+    const rawMessage = e instanceof Error ? e.message : "Unknown error";
     console.error(`[${requestId}] Sign typed data failed for agent ${agentId}:`, e);
+
+    const webhookUrlFailed = tenantConfigs.get(tenantId)?.webhookUrl;
+    if (webhookUrlFailed) {
+      webhookDispatcher
+        .dispatch(
+          { type: "tx_failed", tenantId, agentId, data: { txId, error: rawMessage, requestId }, timestamp: new Date() },
+          webhookUrlFailed
+        )
+        .catch(console.error);
+    }
+
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
