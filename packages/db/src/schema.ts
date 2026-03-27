@@ -324,3 +324,81 @@ export type EncryptedChainKey = typeof encryptedChainKeys.$inferSelect;
 export type NewEncryptedChainKey = typeof encryptedChainKeys.$inferInsert;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 export type NewWebhookDelivery = typeof webhookDeliveries.$inferInsert;
+
+// ─── Secret Vault tables ──────────────────────────────────────────────────────
+
+export const secrets = pgTable("secrets", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description"),
+  ciphertext: text("ciphertext").notNull(),
+  iv: text("iv").notNull(),
+  authTag: text("auth_tag").notNull(),
+  salt: text("salt").notNull(),
+  version: integer("version").notNull().default(1),
+  rotatedAt: timestamp("rotated_at", { withTimezone: true }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  tenantNameVersion: uniqueIndex("secrets_tenant_name_version_idx").on(table.tenantId, table.name, table.version),
+  tenantIdx: index("secrets_tenant_idx").on(table.tenantId),
+}));
+
+export const secretRoutes = pgTable("secret_routes", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  secretId: uuid("secret_id").notNull(),
+  hostPattern: varchar("host_pattern", { length: 512 }).notNull(),
+  pathPattern: varchar("path_pattern", { length: 512 }).default("/*"),
+  method: varchar("method", { length: 10 }).default("*"),
+  injectAs: varchar("inject_as", { length: 50 }).notNull(),
+  injectKey: varchar("inject_key", { length: 255 }).notNull(),
+  injectFormat: varchar("inject_format", { length: 255 }).default("{value}"),
+  priority: integer("priority").notNull().default(0),
+  enabled: boolean("enabled").notNull().default(true),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  tenantIdx: index("secret_routes_tenant_idx").on(table.tenantId),
+  secretIdx: index("secret_routes_secret_idx").on(table.secretId),
+  hostIdx: index("secret_routes_host_idx").on(table.hostPattern),
+}));
+
+export const secretRelations = relations(secrets, ({ many }) => ({
+  routes: many(secretRoutes),
+}));
+
+export const secretRouteRelations = relations(secretRoutes, ({ one }) => ({
+  secret: one(secrets, {
+    fields: [secretRoutes.secretId],
+    references: [secrets.id],
+  }),
+}));
+
+export type Secret = typeof secrets.$inferSelect;
+export type NewSecret = typeof secrets.$inferInsert;
+export type SecretRoute = typeof secretRoutes.$inferSelect;
+export type NewSecretRoute = typeof secretRoutes.$inferInsert;
+
+// ─── Proxy Audit Log ─────────────────────────────────────────────────────────
+
+export const proxyAuditLog = pgTable("proxy_audit_log", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  agentId: text("agent_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  targetHost: varchar("target_host", { length: 512 }).notNull(),
+  targetPath: varchar("target_path", { length: 512 }).notNull(),
+  method: varchar("method", { length: 10 }).notNull(),
+  statusCode: integer("status_code").notNull(),
+  latencyMs: integer("latency_ms").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  tenantIdx: index("proxy_audit_log_tenant_idx").on(table.tenantId),
+  agentIdx: index("proxy_audit_log_agent_idx").on(table.agentId),
+  createdAtIdx: index("proxy_audit_log_created_at_idx").on(table.createdAt),
+}));
+
+export type ProxyAuditLogEntry = typeof proxyAuditLog.$inferSelect;
+export type NewProxyAuditLogEntry = typeof proxyAuditLog.$inferInsert;
