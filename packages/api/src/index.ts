@@ -16,6 +16,7 @@ import { agentRoutes } from "./routes/agents";
 import { platformRoutes } from "./routes/platform";
 import { tenantRoutes } from "./routes/tenants";
 import { userRoutes } from "./routes/user";
+import { secretsRoutes } from "./routes/secrets";
 import { vaultRoutes } from "./routes/vault";
 
 import {
@@ -119,6 +120,8 @@ const requestLogCleanupTimer = setInterval(() => {
 app.use("/agents", (c, next) => tenantAuth(c, next));
 app.use("/agents/*", (c, next) => tenantAuth(c, next));
 app.use("/vault/*", (c, next) => tenantAuth(c, next));
+app.use("/secrets", (c, next) => tenantAuth(c, next));
+app.use("/secrets/*", (c, next) => tenantAuth(c, next));
 app.use("/tenants/:id", (c, next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
 );
@@ -144,6 +147,7 @@ app.route("/platform", platformRoutes);
 app.route("/user", userRoutes);
 app.route("/agents", agentRoutes);
 app.route("/vault", vaultRoutes);
+app.route("/secrets", secretsRoutes);
 app.route("/tenants", tenantRoutes);
 
 // ─── Server ───────────────────────────────────────────────────────────────────
