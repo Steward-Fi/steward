@@ -1,43 +1,64 @@
 # Steward
 
-**Agent wallet infrastructure with policy enforcement.**
+The governance layer for autonomous AI agents.
 
-AI agents need to spend money. Giving them raw private keys is insane — no limits, no oversight, no kill switch. Steward sits between the agent and its wallet, enforcing policies you define.
+Encrypted wallets · Credential vault · API proxy · Policy enforcement · Spend tracking
 
+[![npm](https://img.shields.io/npm/v/@stwd/sdk)](https://www.npmjs.com/package/@stwd/sdk)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Base](https://img.shields.io/badge/chain-Base-0052ff.svg)](https://base.org)
 [![API](https://img.shields.io/badge/API-live-brightgreen)](https://api.steward.fi)
-[![X](https://img.shields.io/badge/X-@Steward__Fi-black)](https://x.com/Steward_Fi)
-[![Website](https://img.shields.io/badge/website-steward.fi-blue)](https://steward.fi)
+[![Docs](https://img.shields.io/badge/docs-steward.fi-blue)](https://docs.steward.fi)
 
 ---
 
-## How It Works
+## The Problem
+
+AI agents need API keys, wallet keys, database credentials. Today these sit as plaintext environment variables — one prompt injection away from exfiltration. No spending controls, no audit trail, no kill switch.
+
+## The Solution
+
+Steward sits between agents and everything they access. Three pillars:
+
+1. **Wallet Vault** — AES-256-GCM encrypted keys. Policy-enforced signing. 7 EVM chains + Solana.
+2. **Secret Vault** — Encrypted credential storage. Agents never see real API keys.
+3. **API Proxy** — Every external API call flows through Steward. Credentials injected at the proxy, not in the container. Costs tracked. Everything audited.
+
+---
+
+## Architecture
 
 ```
-Agent/Platform  →  Steward SDK  →  Policy Engine  →  Vault (AES-256-GCM)  →  Chain
-                                        ↓
-                                  Approval Queue  →  Dashboard / Webhook
+Agent Container          Steward                    External APIs
+┌─────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│ STEWARD_URL │───>│ Auth (JWT)       │    │ OpenAI           │
+│ STEWARD_JWT │    │ Policy Engine    │───>│ Anthropic        │
+│             │    │ Secret Vault     │    │ DEXs / Chains    │
+│ No API keys │    │ Wallet Vault     │    │ Any API          │
+│ No priv keys│    │ Audit Log        │    └──────────────────┘
+└─────────────┘    └──────────────────┘
 ```
 
-1. Agent requests a transaction through the Steward SDK
-2. Policy engine evaluates the request — spending limits, approved addresses, rate limits, time windows, auto-approve thresholds
-3. **All hard policies pass** → signed and broadcast immediately
-4. **Soft policy fails** (auto-approve threshold) → queued for human approval
-5. **Hard policy fails** → rejected immediately, webhook fired
+The vault encrypts each agent's private key with AES-256-GCM using a key derived from the master password + agent ID. Keys never exist in plaintext outside of a signing operation. All signing happens in-process; the raw key is never sent over the wire.
+
+Policy evaluation is stateless and synchronous. The engine receives the transaction request plus pre-fetched spend/rate context, evaluates all enabled rules, and returns per-policy pass/fail details.
 
 ---
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/Steward-Fi/steward
-cd steward
-cp .env.example .env  # edit with your postgres URL + master password
-docker compose up -d
-```
+# Clone & install
+git clone https://github.com/Steward-Fi/steward.git
+cd steward && bun install
 
-The API is now running at `http://localhost:3200`.
+# Configure
+cp .env.example .env
+# Edit .env: set STEWARD_MASTER_PASSWORD, DATABASE_URL
+
+# Start
+bun run packages/api/src/index.ts    # API on :3200
+bun run packages/proxy/src/index.ts  # Proxy on :8080
+```
 
 ---
 
@@ -49,50 +70,29 @@ npm install @stwd/sdk
 ```
 
 ```typescript
-import { StewardClient } from '@stwd/sdk';
+import { StewardClient } from "@stwd/sdk";
 
-const steward = new StewardClient({
-  baseUrl: 'http://localhost:3200',
-  tenantId: 'my-platform',
-  apiKey: 'my-key',
+const client = new StewardClient({
+  baseUrl: "http://localhost:3200",
+  apiKey: "your-tenant-key",
 });
 
-// Create a wallet for an agent
-const agent = await steward.createWallet('agent-1', 'Trading Bot');
-console.log(agent.walletAddress); // 0x...
+// Create an agent with a wallet
+const agent = await client.createWallet("my-agent", "My Trading Agent");
+// → { id, walletAddress, walletAddresses: { evm, solana } }
 
-// Set policies
-await steward.setPolicies(agent.id, [
-  {
-    id: 'limit',
-    type: 'spending-limit',
-    enabled: true,
-    config: {
-      maxPerTx:   '100000000000000000',  // 0.1 ETH
-      maxPerDay:  '1000000000000000000', // 1 ETH
-      maxPerWeek: '5000000000000000000', // 5 ETH
-    },
-  },
-  {
-    id: 'addrs',
-    type: 'approved-addresses',
-    enabled: true,
-    config: { mode: 'whitelist', addresses: ['0xDEX...'] },
-  },
-]);
-
-// Sign a transaction — returns txHash or queues for approval
-const result = await steward.signTransaction(agent.id, {
-  to: '0xDEX...',
-  value: '50000000000000000', // 0.05 ETH
-  chainId: 8453,              // Base
+// Sign a transaction (policy-enforced)
+const result = await client.signTransaction("my-agent", {
+  to: "0xDEX_ROUTER",
+  value: "100000000000000000", // 0.1 ETH
+  chainId: 8453, // Base
 });
 
-if ('txHash' in result) {
-  console.log('Signed:', result.txHash);
-} else {
-  console.log('Queued for approval:', result.status); // 'pending_approval'
-}
+// Or route API calls through the proxy
+const openai = new OpenAI({
+  baseURL: "http://steward-proxy:8080/openai/v1",
+  apiKey: "steward", // dummy, replaced by proxy
+});
 ```
 
 ---
@@ -101,13 +101,41 @@ if ('txHash' in result) {
 
 | Type | What it does |
 |------|-------------|
-| `spending-limit` | Cap per transaction, per day, per week (wei) |
+| `spending-limit` | Per-tx, daily, weekly caps |
 | `approved-addresses` | Whitelist or blocklist destination addresses |
 | `rate-limit` | Max transactions per hour / per day |
-| `time-window` | Only allow transactions during defined UTC hours |
-| `auto-approve-threshold` | Auto-sign below threshold; queue above for human review |
+| `time-window` | Only allow transactions during defined UTC hours/days |
+| `auto-approve-threshold` | Auto-approve small transactions, queue large ones for human review |
+| `api-access` | Control which APIs agents can call through the proxy |
+| `spend-limit` | Per-agent inference and API budgets |
 
-Policies are composable — mix and match. Hard policies (all except `auto-approve-threshold`) reject immediately on failure. The auto-approve threshold is the only soft gate; failure queues instead of rejects.
+Policies are composable — mix and match. Hard policies reject immediately on failure. The auto-approve threshold is the only soft gate; failure queues instead of rejects.
+
+---
+
+## Packages
+
+Bun monorepo managed with [Turborepo](https://turbo.build).
+
+| Package | Description | Status |
+|---------|-------------|--------|
+| `@stwd/api` | REST API (30+ endpoints) | ✅ Production |
+| `@stwd/proxy` | API proxy gateway | ✅ Built |
+| `@stwd/vault` | Wallet + secret encryption | ✅ Production |
+| `@stwd/policy-engine` | Composable policy evaluation | ✅ Production |
+| `@stwd/sdk` | TypeScript SDK (zero deps) | ✅ Published |
+| `@stwd/redis` | Rate limiting + spend tracking | ✅ Built |
+| `@stwd/eliza-plugin` | ElizaOS integration | ✅ Published |
+| `@stwd/db` | Schema + migrations | ✅ Production |
+| `@stwd/webhooks` | Event notifications | ✅ Production |
+| `@stwd/shared` | Types + constants | ✅ Production |
+| `web` | Dashboard + landing | ✅ Deployed |
+
+---
+
+## Supported Chains
+
+Ethereum · Base · BSC · Polygon · Arbitrum · Base Sepolia · BSC Testnet · Solana
 
 ---
 
@@ -122,80 +150,15 @@ Configure a webhook URL on your tenant and Steward will POST on every state chan
 | `tx_rejected` | Transaction rejected by a hard policy |
 | `tx_failed` | Transaction failed on-chain |
 
-```json
-{
-  "type": "approval_required",
-  "tenantId": "my-platform",
-  "agentId": "agent-1",
-  "data": {
-    "txId": "...",
-    "to": "0x...",
-    "value": "50000000000000000",
-    "policyResults": [...]
-  },
-  "timestamp": "2024-01-01T00:00:00.000Z"
-}
-```
-
 ---
 
-## Live Demo
+## Links
 
-- **Dashboard:** https://steward.fi/dashboard
-- **API:** https://api.steward.fi
-- **On-chain proof:** https://basescan.org/tx/0x8d7592b93cad0983b481451c6d0c05900a1c6d74ee7eadbcdc7533a77ae45dc0
-
----
-
-## Packages
-
-This is a Bun monorepo managed with [Turborepo](https://turbo.build).
-
-| Package | Description |
-|---------|-------------|
-| [`@stwd/api`](packages/api) | Hono REST API — agents, policies, approvals, signing |
-| [`@stwd/vault`](packages/vault) | AES-256-GCM encrypted keystore + transaction signing via viem |
-| [`@stwd/policy-engine`](packages/policy-engine) | Composable policy evaluation engine |
-| [`@stwd/sdk`](packages/sdk) | TypeScript HTTP client for agents and integrations (`npm i @stwd/sdk`) |
-| [`@stwd/db`](packages/db) | Drizzle ORM schema, migrations, and Postgres client |
-| [`@stwd/auth`](packages/auth) | Timing-safe API key validation and tenant middleware |
-| [`@stwd/webhooks`](packages/webhooks) | Webhook dispatch and retry queue |
-| [`@stwd/shared`](packages/shared) | Shared types, interfaces, and constants |
-| `web` | Next.js landing page and dashboard at steward.fi |
-
----
-
-## Development
-
-```bash
-# Install all dependencies
-bun install
-
-# Copy env and fill in values
-cp .env.example .env
-
-# Start everything (API + Postgres via Docker, web in dev mode)
-bun run dev
-```
-
-Environment variables:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DATABASE_URL` | ✅ | PostgreSQL connection string |
-| `STEWARD_MASTER_PASSWORD` | ✅ | 256-bit hex secret for vault encryption |
-| `PORT` | — | API port (default: 3200) |
-| `RPC_URL` | — | EVM RPC endpoint (default: Base mainnet) |
-| `CHAIN_ID` | — | Chain ID (default: 8453) |
-| `STEWARD_DEFAULT_TENANT_KEY` | — | Dev API key for the default tenant |
-
----
-
-## Architecture
-
-The vault encrypts each agent's private key with `AES-256-GCM` using a key derived from the master password + agent ID. Keys never exist in plaintext outside of a signing operation. All signing happens in-process; the raw key is never sent over the wire.
-
-Policy evaluation is stateless and synchronous. The engine receives the transaction request plus pre-fetched spend/rate context, evaluates all enabled rules, and returns an `EvaluationResult` with per-policy pass/fail details.
+- **Website:** [steward.fi](https://steward.fi)
+- **Docs:** [docs.steward.fi](https://docs.steward.fi)
+- **API:** [api.steward.fi](https://api.steward.fi)
+- **npm:** [@stwd/sdk](https://www.npmjs.com/package/@stwd/sdk)
+- **ElizaOS Plugin:** [@stwd/eliza-plugin](https://www.npmjs.com/package/@stwd/eliza-plugin)
 
 ---
 
