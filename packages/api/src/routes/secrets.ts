@@ -5,6 +5,9 @@
  *
  * All endpoints require tenant-level authentication.
  * Secret values are NEVER returned in responses.
+ *
+ * IMPORTANT: Route handlers for /routes/* MUST be registered before /:id
+ * handlers to prevent Hono from treating "routes" as a secret ID.
  */
 
 import { Hono } from "hono";
@@ -28,7 +31,7 @@ function getSecretVault(): SecretVault {
   return _secretVault;
 }
 
-// ─── Secret CRUD ──────────────────────────────────────────────────────────────
+// ─── Secret CRUD (collection) ─────────────────────────────────────────────────
 
 /** POST /secrets — create a new secret */
 secretsRoutes.post("/", async (c) => {
@@ -84,99 +87,9 @@ secretsRoutes.get("/", async (c) => {
   return c.json<ApiResponse>({ ok: true, data: list });
 });
 
-/** GET /secrets/:id — get secret metadata */
-secretsRoutes.get("/:id", async (c) => {
-  if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
-  }
-
-  const tenantId = c.get("tenantId");
-  const secretId = c.req.param("id");
-  const sv = getSecretVault();
-  const secret = await sv.getSecretById(tenantId, secretId);
-
-  if (!secret) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
-  }
-
-  return c.json<ApiResponse>({ ok: true, data: secret });
-});
-
-/** PUT /secrets/:id — update secret value (creates new version) */
-secretsRoutes.put("/:id", async (c) => {
-  if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
-  }
-
-  const tenantId = c.get("tenantId");
-  const secretId = c.req.param("id");
-  const body = await safeJsonParse<{ value: string }>(c);
-
-  if (!body || !isNonEmptyString(body.value)) {
-    return c.json<ApiResponse>({ ok: false, error: "'value' is required" }, 400);
-  }
-
-  const sv = getSecretVault();
-  const existing = await sv.getSecretById(tenantId, secretId);
-  if (!existing) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
-  }
-
-  try {
-    const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
-    return c.json<ApiResponse>({ ok: true, data: rotated });
-  } catch (e: unknown) {
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
-  }
-});
-
-/** DELETE /secrets/:id — soft delete */
-secretsRoutes.delete("/:id", async (c) => {
-  if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
-  }
-
-  const tenantId = c.get("tenantId");
-  const secretId = c.req.param("id");
-  const sv = getSecretVault();
-  const deleted = await sv.deleteSecret(tenantId, secretId);
-
-  if (!deleted) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
-  }
-
-  return c.json<ApiResponse>({ ok: true, data: { deleted: secretId } });
-});
-
-/** POST /secrets/:id/rotate — rotate with new value */
-secretsRoutes.post("/:id/rotate", async (c) => {
-  if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
-  }
-
-  const tenantId = c.get("tenantId");
-  const secretId = c.req.param("id");
-  const body = await safeJsonParse<{ value: string }>(c);
-
-  if (!body || !isNonEmptyString(body.value)) {
-    return c.json<ApiResponse>({ ok: false, error: "'value' is required" }, 400);
-  }
-
-  const sv = getSecretVault();
-  const existing = await sv.getSecretById(tenantId, secretId);
-  if (!existing) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
-  }
-
-  try {
-    const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
-    return c.json<ApiResponse>({ ok: true, data: rotated });
-  } catch (e: unknown) {
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
-  }
-});
-
 // ─── Route CRUD ───────────────────────────────────────────────────────────────
+// NOTE: These MUST be registered before /:id routes to avoid "routes" being
+// matched as a secret ID by the dynamic param handler.
 
 /** POST /secrets/routes — create a credential injection route */
 secretsRoutes.post("/routes", async (c) => {
@@ -308,4 +221,100 @@ secretsRoutes.delete("/routes/:id", async (c) => {
   }
 
   return c.json<ApiResponse>({ ok: true, data: { deleted: routeId } });
+});
+
+// ─── Secret CRUD (by ID) ──────────────────────────────────────────────────────
+// NOTE: These /:id handlers are registered AFTER /routes/* to avoid swallowing
+// the literal path segment "routes" as a dynamic param.
+
+/** GET /secrets/:id — get secret metadata */
+secretsRoutes.get("/:id", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+  }
+
+  const tenantId = c.get("tenantId");
+  const secretId = c.req.param("id");
+  const sv = getSecretVault();
+  const secret = await sv.getSecretById(tenantId, secretId);
+
+  if (!secret) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
+  }
+
+  return c.json<ApiResponse>({ ok: true, data: secret });
+});
+
+/** PUT /secrets/:id — update secret value (creates new version) */
+secretsRoutes.put("/:id", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+  }
+
+  const tenantId = c.get("tenantId");
+  const secretId = c.req.param("id");
+  const body = await safeJsonParse<{ value: string }>(c);
+
+  if (!body || !isNonEmptyString(body.value)) {
+    return c.json<ApiResponse>({ ok: false, error: "'value' is required" }, 400);
+  }
+
+  const sv = getSecretVault();
+  const existing = await sv.getSecretById(tenantId, secretId);
+  if (!existing) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
+  }
+
+  try {
+    const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
+    return c.json<ApiResponse>({ ok: true, data: rotated });
+  } catch (e: unknown) {
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
+/** DELETE /secrets/:id — soft delete */
+secretsRoutes.delete("/:id", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+  }
+
+  const tenantId = c.get("tenantId");
+  const secretId = c.req.param("id");
+  const sv = getSecretVault();
+  const deleted = await sv.deleteSecret(tenantId, secretId);
+
+  if (!deleted) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
+  }
+
+  return c.json<ApiResponse>({ ok: true, data: { deleted: secretId } });
+});
+
+/** POST /secrets/:id/rotate — rotate with new value */
+secretsRoutes.post("/:id/rotate", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+  }
+
+  const tenantId = c.get("tenantId");
+  const secretId = c.req.param("id");
+  const body = await safeJsonParse<{ value: string }>(c);
+
+  if (!body || !isNonEmptyString(body.value)) {
+    return c.json<ApiResponse>({ ok: false, error: "'value' is required" }, 400);
+  }
+
+  const sv = getSecretVault();
+  const existing = await sv.getSecretById(tenantId, secretId);
+  if (!existing) {
+    return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
+  }
+
+  try {
+    const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
+    return c.json<ApiResponse>({ ok: true, data: rotated });
+  } catch (e: unknown) {
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
 });
