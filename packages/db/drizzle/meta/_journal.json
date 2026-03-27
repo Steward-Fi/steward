@@ -22,6 +22,13 @@
       "when": 1742834400000,
       "tag": "0002_allowed_chains",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1774581555934,
+      "tag": "0003_safe_black_queen",
+      "breakpoints": true
     }
   ]
 }

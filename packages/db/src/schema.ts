@@ -201,6 +201,41 @@ export const approvalQueue = pgTable(
   }),
 );
 
+// ─── Webhook delivery status enum ─────────────────────────────────────────────
+
+export const webhookDeliveryStatusEnum = pgEnum("webhook_delivery_status", [
+  "pending",
+  "delivered",
+  "failed",
+  "dead",
+]);
+
+// ─── Webhook deliveries table ─────────────────────────────────────────────────
+
+export const webhookDeliveries = pgTable(
+  "webhook_deliveries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    agentId: text("agent_id"),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    url: text("url").notNull(),
+    status: webhookDeliveryStatusEnum("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(5),
+    nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+  },
+  (table) => ({
+    statusIdx: index("webhook_deliveries_status_idx").on(table.status),
+    nextRetryIdx: index("webhook_deliveries_next_retry_idx").on(table.nextRetryAt),
+    tenantIdx: index("webhook_deliveries_tenant_idx").on(table.tenantId),
+  }),
+);
+
 export const tenantRelations = relations(tenants, ({ many }) => ({
   agents: many(agents),
 }));
@@ -287,3 +322,5 @@ export type AgentWallet = typeof agentWallets.$inferSelect;
 export type NewAgentWallet = typeof agentWallets.$inferInsert;
 export type EncryptedChainKey = typeof encryptedChainKeys.$inferSelect;
 export type NewEncryptedChainKey = typeof encryptedChainKeys.$inferInsert;
+export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
+export type NewWebhookDelivery = typeof webhookDeliveries.$inferInsert;

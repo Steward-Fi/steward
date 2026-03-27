@@ -72,7 +72,7 @@
     },
     "packages/eliza-plugin": {
       "name": "@stwd/eliza-plugin",
-      "version": "0.1.0",
+      "version": "0.2.1",
       "dependencies": {
         "@stwd/sdk": "workspace:*",
       },
@@ -107,7 +107,7 @@
     },
     "packages/sdk": {
       "name": "@stwd/sdk",
-      "version": "0.2.0",
+      "version": "0.3.0",
     },
     "packages/seed": {
       "name": "@stwd/seed",
@@ -140,7 +140,9 @@
       "name": "@stwd/webhooks",
       "version": "0.1.0",
       "dependencies": {
+        "@stwd/db": "workspace:*",
         "@stwd/shared": "workspace:*",
+        "drizzle-orm": "^0.44.5",
       },
     },
     "web": {
