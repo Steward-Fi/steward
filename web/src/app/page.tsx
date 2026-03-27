@@ -45,7 +45,7 @@ function Hero() {
               transition={{ duration: 0.6, ease: easeOutExpo, delay: 0.1 }}
               className="text-sm text-text-tertiary tracking-widest uppercase mb-6"
             >
-              The policy layer for autonomous finance
+              The governance layer for autonomous AI agents
             </motion.p>
 
             <motion.h1
@@ -54,9 +54,9 @@ function Hero() {
               transition={{ duration: 0.7, ease: easeOutExpo, delay: 0.2 }}
               className="font-display text-hero font-800 leading-[0.92] tracking-[-0.03em]"
             >
-              Agents move money.
+              Agents act autonomously.
               <br />
-              <span className="text-[oklch(0.75_0.15_55)]">Steward governs how.</span>
+              <span className="text-[oklch(0.75_0.15_55)]">Steward enforces the rules.</span>
             </motion.h1>
 
             <motion.p
@@ -65,8 +65,9 @@ function Hero() {
               transition={{ duration: 0.6, ease: easeOutExpo, delay: 0.4 }}
               className="mt-8 text-lg md:text-xl text-text-secondary max-w-xl leading-relaxed"
             >
-              Policy-enforced signing. Scoped wallets. Human-in-the-loop approvals.
-              The open-source governance layer for any agent framework.
+              Encrypted vault. Policy engine. API proxy.
+              Every wallet key, every API credential, every outbound call — governed, audited, controlled.
+              Open-source. Works with any agent framework.
             </motion.p>
 
             <motion.div
@@ -101,32 +102,27 @@ function Hero() {
           >
             <div className="border border-border bg-bg-elevated">
               <CodeBlock
-                filename="configure-agent.ts"
+                filename="steward-proxy.ts"
                 language="typescript"
                 typeEffect
                 code={`import { StewardClient } from "@stwd/sdk"
 
 const steward = new StewardClient({
-  baseUrl: "https://api.steward.fi",
-  tenantId: "my-platform",
+  baseUrl: process.env.STEWARD_PROXY_URL,
+  bearerToken: process.env.STEWARD_AGENT_TOKEN,
 })
 
-const wallet = await steward.createWallet(
-  "trading-agent-01",
-  "DeFi Trading Bot"
+// Policy-enforced signing
+const tx = await steward.signTransaction(
+  agentId,
+  { to: "0xDEX...",
+    value: "100000000000000000" }
 )
 
-await steward.setPolicies(wallet.id, [
-  { type: "spending-limit",
-    config: { maxPerTx: "1e18",
-              maxPerDay: "10e18" } },
-  { type: "approved-addresses",
-    config: { addresses: [
-      "0xUniswap...",
-      "0xTreasury..."] } },
-  { type: "human-approval",
-    config: { threshold: "5e18" } },
-])`}
+// API proxy — credentials injected
+const openai = new OpenAI({
+  baseURL: \`\${steward.baseUrl}/openai/v1\`,
+})`}
               />
             </div>
           </motion.div>
@@ -138,6 +134,24 @@ await steward.setPolicies(wallet.id, [
 
 // --- Problem Statement ---
 function ProblemSection() {
+  const problems = [
+    {
+      icon: "🔓",
+      title: "Wallet keys exposed",
+      desc: "Raw private keys in env vars. One prompt injection, one hallucination — the wallet is drained. No undo on a blockchain.",
+    },
+    {
+      icon: "🔑",
+      title: "API credentials exposed",
+      desc: "Plaintext API keys for OpenAI, Anthropic, every service. Agents can exfiltrate them, overrun your bill, or leak them in logs.",
+    },
+    {
+      icon: "🚫",
+      title: "No spending controls",
+      desc: "No per-agent budgets. No rate limits. No approved address lists. Agents sign whatever they want, call whatever they want.",
+    },
+  ];
+
   return (
     <section className="relative px-6 md:px-10 py-32 md:py-44">
       <div className="max-w-[1400px] mx-auto">
@@ -148,21 +162,35 @@ function ProblemSection() {
         </Reveal>
         <Reveal direction="up" delay={0.1}>
           <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-3xl">
-            Agents sign whatever they want.
+            Raw keys in env vars.
             <br />
             That&apos;s{" "}
-            <span className="text-[oklch(0.75_0.15_55)]">the problem</span>.
+            <span className="text-[oklch(0.75_0.15_55)]">the whole security model</span>.
           </h2>
         </Reveal>
         <Reveal direction="up" delay={0.2}>
           <p className="mt-8 text-lg text-text-secondary max-w-2xl leading-relaxed">
-            Trading bots, treasury managers, prediction markets, reward systems.
-            Agents are already moving real money. But every framework ships the same thing:
-            a raw key in an env var, no spending limits, no restrictions.
-            One hallucination, one prompt injection, and the wallet is drained.
-            No undo on a blockchain.
+            Every agent framework ships the same way: private keys and API credentials
+            as plaintext environment variables. No limits. No audit trail. No isolation.
+            One compromised agent takes everything.
           </p>
         </Reveal>
+
+        <StaggerContainer staggerDelay={0.12} className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle mt-16">
+          {problems.map((problem) => (
+            <StaggerItem key={problem.title}>
+              <div className="bg-bg p-8 md:p-10 h-full">
+                <span className="text-3xl">{problem.icon}</span>
+                <h3 className="font-display text-xl font-700 mt-6 mb-3">
+                  {problem.title}
+                </h3>
+                <p className="text-sm text-text-secondary leading-relaxed">
+                  {problem.desc}
+                </p>
+              </div>
+            </StaggerItem>
+          ))}
+        </StaggerContainer>
       </div>
     </section>
   );
@@ -173,23 +201,18 @@ function HowItWorksSection() {
   const steps = [
     {
       num: "01",
-      label: "Request",
-      desc: "Agent calls steward.signTransaction() with destination, value, and calldata. Never touches the private key.",
+      label: "Vault",
+      desc: "Encrypted wallets and API credentials. AES-256-GCM at rest. Agents authenticate with scoped tokens — they never see raw keys.",
     },
     {
       num: "02",
-      label: "Evaluate",
-      desc: "Policy engine checks spending limits, approved addresses, rate limits, and time windows.",
+      label: "Policy Engine",
+      desc: "Default deny. Spending limits, rate limits, approved addresses, API access control. Every action evaluated against the agent's policy set.",
     },
     {
       num: "03",
-      label: "Decide",
-      desc: "Auto-approve below threshold, queue for human review above it, or reject outright. Webhooks fire on every state change.",
-    },
-    {
-      num: "04",
-      label: "Sign",
-      desc: "Key is decrypted in-process, transaction is signed and broadcast to Base. Key is discarded immediately.",
+      label: "Proxy Gateway",
+      desc: "Every API call flows through Steward. Credentials injected at the edge. Costs tracked per-agent. Everything audited. Agents can only reach the proxy.",
     },
   ];
 
@@ -202,7 +225,7 @@ function HowItWorksSection() {
           </p>
         </Reveal>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-px bg-border-subtle mt-12">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle mt-12">
           {steps.map((step, i) => (
             <Reveal key={step.num} delay={i * 0.1} className="bg-bg p-8 md:p-10">
               <span className="font-display text-5xl font-800 text-border tracking-tight">
@@ -229,10 +252,10 @@ function HowItWorksSection() {
 
 function FlowDiagram() {
   const nodes = [
-    { label: "Agent", sub: "SDK call" },
+    { label: "Agent", sub: "SDK / HTTP call" },
     { label: "Policy Engine", sub: "Evaluate rules" },
-    { label: "Decision", sub: "Approve / Queue / Reject" },
-    { label: "Vault", sub: "Sign & broadcast" },
+    { label: "Proxy Gateway", sub: "Inject credentials" },
+    { label: "Vault", sub: "Sign or forward" },
   ];
 
   return (
@@ -266,46 +289,126 @@ function FlowDiagram() {
   );
 }
 
+// --- What Steward Controls ---
+function ControlsSection() {
+  const controls = [
+    {
+      icon: "🔐",
+      title: "Wallet Keys",
+      desc: "Encrypted at rest. Policy-gated signing. Agents never touch raw private keys.",
+    },
+    {
+      icon: "🔑",
+      title: "API Credentials",
+      desc: "Encrypted vault for every API key. Injected at the proxy layer, never exposed to agents.",
+    },
+    {
+      icon: "💰",
+      title: "Spend Limits",
+      desc: "Per-agent daily and monthly budgets. Per-transaction caps. Across both crypto and API costs.",
+    },
+    {
+      icon: "⚡",
+      title: "Rate Limits",
+      desc: "Sliding window rate limiting per API, per agent. Prevent runaway loops and abuse.",
+    },
+    {
+      icon: "📊",
+      title: "Audit Trail",
+      desc: "Every request logged. Every transaction recorded. Full cost attribution per agent.",
+    },
+    {
+      icon: "🌐",
+      title: "Network Isolation",
+      desc: "Agents can only reach the Steward proxy. No direct outbound access. Zero trust by default.",
+    },
+  ];
+
+  return (
+    <section className="relative px-6 md:px-10 py-32 md:py-44 border-t border-border-subtle">
+      <div className="max-w-[1400px] mx-auto">
+        <Reveal>
+          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
+            What Steward controls
+          </p>
+        </Reveal>
+        <Reveal delay={0.1}>
+          <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-3xl">
+            Every secret. Every call.
+            <br />
+            <span className="text-[oklch(0.75_0.15_55)]">Every dollar.</span>
+          </h2>
+        </Reveal>
+
+        <StaggerContainer staggerDelay={0.08} className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-px bg-border-subtle mt-16">
+          {controls.map((item) => (
+            <StaggerItem key={item.title}>
+              <div className="bg-bg p-8 md:p-10 h-full">
+                <span className="text-2xl">{item.icon}</span>
+                <h3 className="font-display text-lg font-700 mt-4 mb-2">
+                  {item.title}
+                </h3>
+                <p className="text-sm text-text-secondary leading-relaxed">
+                  {item.desc}
+                </p>
+              </div>
+            </StaggerItem>
+          ))}
+        </StaggerContainer>
+      </div>
+    </section>
+  );
+}
+
 // --- SDK Section ---
 function SDKSection() {
   const snippets = [
     {
-      filename: "create-wallet.ts",
-      code: `const agent = await steward.createWallet(
-  "agent-alpha",
-  "Trading Agent"
-)
+      filename: "sign-transaction.ts",
+      code: `import { StewardClient } from "@stwd/sdk"
 
-console.log(agent.walletAddress)
-// 0x7a3f...4e2b`,
+const steward = new StewardClient({
+  baseUrl: process.env.STEWARD_PROXY_URL,
+  bearerToken: process.env.STEWARD_AGENT_TOKEN,
+})
+
+// Sign a transaction (policy-enforced)
+const tx = await steward.signTransaction(agentId, {
+  to: "0xDEX...",
+  value: "100000000000000000",
+})
+// tx.txHash or tx.status === "pending_approval"`,
     },
     {
-      filename: "sign-transaction.ts",
-      code: `const result = await steward.signTransaction(
-  "agent-alpha",
-  {
-    to: "0xdead...beef",
-    value: "500000000000000", // 0.0005 ETH
-    chainId: 8453,           // Base
-  }
-)
+      filename: "api-proxy.ts",
+      code: `// Use OpenAI through the proxy
+// Credentials injected automatically — agent never sees the key
+const openai = new OpenAI({
+  baseURL: \`\${process.env.STEWARD_PROXY_URL}/openai/v1\`,
+})
 
-// result.txHash or result.status === "pending_approval"`,
+const completion = await openai.chat.completions.create({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "..." }],
+})
+// Costs tracked, rate-limited, fully audited`,
     },
     {
       filename: "policies.ts",
-      code: `const policies = await steward.getPolicies("agent-alpha")
-
-await steward.setPolicies("agent-alpha", [
-  {
-    id: "spend-limit",
-    type: "spending-limit",
-    enabled: true,
-    config: {
-      maxPerTx: "1000000000000000",  // 0.001 ETH
-      maxPerDay: "10000000000000000", // 0.01 ETH
-    },
-  },
+      code: `await steward.setPolicies(agentId, [
+  { type: "spending-limit",
+    config: { maxPerTx: "1e18",
+              maxPerDay: "10e18" } },
+  { type: "rate-limit",
+    config: { window: "1m",
+              maxRequests: 60 } },
+  { type: "approved-addresses",
+    config: { addresses: [
+      "0xUniswap...",
+      "0xTreasury..."] } },
+  { type: "api-access",
+    config: { allowed: [
+      "openai", "anthropic"] } },
 ])`,
     },
   ];
@@ -317,20 +420,23 @@ await steward.setPolicies("agent-alpha", [
           <div className="lg:col-span-4">
             <Reveal>
               <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
-                SDK
+                SDK &amp; Proxy
               </p>
             </Reveal>
             <Reveal delay={0.1}>
               <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05]">
-                Three calls.
+                Sign transactions.
                 <br />
-                Full control.
+                Proxy APIs.
+                <br />
+                Enforce everything.
               </h2>
             </Reveal>
             <Reveal delay={0.2}>
               <p className="mt-6 text-text-secondary leading-relaxed">
-                The Steward SDK handles wallet creation, policy-checked signing,
-                and rule management. TypeScript-first. Works with any agent framework.
+                The Steward SDK handles policy-checked signing and credential management.
+                The proxy gateway lets agents call any API without seeing credentials.
+                TypeScript-first. Works with any agent framework.
               </p>
             </Reveal>
             <Reveal delay={0.3}>
@@ -361,6 +467,35 @@ await steward.setPolicies("agent-alpha", [
   );
 }
 
+// --- Stats Section ---
+function StatsSection() {
+  const stats = [
+    { value: "30+", label: "API endpoints" },
+    { value: "7 EVM + Solana", label: "Chains supported" },
+    { value: "AES-256-GCM", label: "Encryption standard" },
+    { value: "Default deny", label: "Policy model" },
+  ];
+
+  return (
+    <section className="relative px-6 md:px-10 py-24 md:py-32 border-t border-border-subtle">
+      <div className="max-w-[1400px] mx-auto">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-px bg-border-subtle">
+          {stats.map((stat, i) => (
+            <Reveal key={stat.label} delay={i * 0.1} className="bg-bg p-8 md:p-10 text-center">
+              <div className="font-display text-3xl md:text-4xl font-800 tracking-tight">
+                {stat.value}
+              </div>
+              <div className="text-sm text-text-tertiary mt-2">
+                {stat.label}
+              </div>
+            </Reveal>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 // --- For Platforms ---
 function PlatformsSection() {
   return (
@@ -370,7 +505,7 @@ function PlatformsSection() {
           <div className="lg:col-span-7">
             <Reveal>
               <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
-                Built for real operations
+                Works with any agent framework
               </p>
             </Reveal>
             <Reveal delay={0.1}>
@@ -395,8 +530,8 @@ function PlatformsSection() {
                   desc: "Trading bots, yield agents, and liquidity managers with enforced spending limits and approved counterparties",
                 },
                 {
-                  name: "Prediction Markets",
-                  desc: "Autonomous market makers with risk boundaries and position limits",
+                  name: "AI Agent Platforms",
+                  desc: "ElizaOS, LangChain, AutoGPT — any framework that needs secure wallet and API access for its agents",
                 },
                 {
                   name: "Treasuries & Rewards",
@@ -479,10 +614,18 @@ function Footer() {
             <span className="font-display text-base font-bold tracking-tight">steward</span>
           </div>
           <p className="text-xs text-text-tertiary mt-1">
-            The trust layer for autonomous finance. Open source.
+            The governance layer for autonomous AI agents. Open source.
           </p>
         </div>
         <div className="flex items-center gap-6 text-sm text-text-tertiary">
+          <a
+            href="https://docs.steward.fi"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-text transition-colors"
+          >
+            Docs
+          </a>
           <a
             href="https://github.com/0xSolace/steward"
             target="_blank"
@@ -499,14 +642,6 @@ function Footer() {
           >
             npm
           </a>
-          <a
-            href="https://docs.steward.fi"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="hover:text-text transition-colors"
-          >
-            Docs
-          </a>
         </div>
       </div>
     </footer>
@@ -521,7 +656,9 @@ export default function LandingPage() {
       <Hero />
       <ProblemSection />
       <HowItWorksSection />
+      <ControlsSection />
       <SDKSection />
+      <StatsSection />
       <PlatformsSection />
       <OpenSourceSection />
       <Footer />
