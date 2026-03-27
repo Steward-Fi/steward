@@ -401,7 +401,10 @@ export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boo
 // Re-export drizzle schemas used in route modules
 export {
   agents,
+  agentWallets,
   approvalQueue,
+  encryptedChainKeys,
+  encryptedKeys,
   policies,
   tenants,
   toPolicyRule,

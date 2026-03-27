@@ -4,13 +4,18 @@
  * Mount: app.route("/agents", agentRoutes)
  */
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import {
   type AppVariables,
   AGENT_TOKEN_EXPIRY,
+  agents,
+  agentWallets,
+  approvalQueue,
   createAgentToken,
   db,
+  encryptedChainKeys,
+  encryptedKeys,
   ensureAgentForTenant,
   isNonEmptyString,
   isValidAgentId,
@@ -18,7 +23,9 @@ import {
   requireAgentAccess,
   requireTenantLevel,
   safeJsonParse,
+  sanitizeErrorMessage,
   toPolicyRule,
+  transactions,
   vault,
   type AgentIdentity,
   type ApiResponse,
@@ -107,6 +114,46 @@ agentRoutes.get("/:agentId", async (c) => {
   return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: agent });
 });
 
+// ─── Delete agent ─────────────────────────────────────────────────────────────
+
+agentRoutes.delete("/:agentId", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent deletion requires tenant-level authentication" }, 403);
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  try {
+    await db.transaction(async (tx) => {
+      // Cascade delete in dependency order
+      await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
+      await tx.delete(transactions).where(eq(transactions.agentId, agentId));
+      await tx.delete(policies).where(eq(policies.agentId, agentId));
+      await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
+      await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+      await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
+      await tx.delete(agents).where(
+        and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)),
+      );
+    });
+
+    return c.json<ApiResponse<{ deleted: string }>>({
+      ok: true,
+      data: { deleted: agentId },
+    });
+  } catch (e: unknown) {
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Failed to delete agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
 // ─── Agent balance ────────────────────────────────────────────────────────────
 
 agentRoutes.get("/:agentId/balance", async (c) => {
@@ -137,6 +184,52 @@ agentRoutes.get("/:agentId/balance", async (c) => {
           chainId: balance.chainId,
           symbol: balance.symbol,
         },
+      },
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
+});
+
+// ─── Agent token balances (ERC-20) ────────────────────────────────────────────
+
+agentRoutes.get("/:agentId/tokens", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const chainIdParam = c.req.query("chainId");
+  const chainId = chainIdParam ? parseInt(chainIdParam, 10) : undefined;
+  const tokensParam = c.req.query("tokens");
+  const customTokens = tokensParam ? tokensParam.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
+
+  try {
+    // Fetch native balance
+    const balance = await vault.getBalance(tenantId, agentId, chainId);
+
+    // Fetch ERC-20 token balances
+    const tokenBalances = await vault.getTokenBalances(tenantId, agentId, chainId, customTokens);
+
+    return c.json<ApiResponse>({
+      ok: true,
+      data: {
+        agentId,
+        walletAddress: balance.walletAddress,
+        chainId: balance.chainId,
+        native: {
+          symbol: balance.symbol,
+          balance: balance.native.toString(),
+          formatted: balance.nativeFormatted,
+        },
+        tokens: tokenBalances,
       },
     });
   } catch (e: unknown) {
