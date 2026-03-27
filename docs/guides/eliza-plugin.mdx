@@ -1,0 +1,174 @@
+---
+title: "ElizaOS Integration"
+description: "Add Steward wallet management to your ElizaOS agent with @stwd/eliza-plugin."
+---
+
+# ElizaOS Integration
+
+The `@stwd/eliza-plugin` provides drop-in Steward wallet management for [ElizaOS](https://elizaos.ai) agents — policy-enforced signing, balance checking, and approval flows.
+
+## Installation
+
+<CodeGroup>
+```bash npm
+npm install @stwd/eliza-plugin
+```
+
+```bash pnpm
+pnpm add @stwd/eliza-plugin
+```
+
+```bash bun
+bun add @stwd/eliza-plugin
+```
+</CodeGroup>
+
+## Configuration
+
+Add the plugin to your ElizaOS character configuration:
+
+```typescript
+import { stewardPlugin } from "@stwd/eliza-plugin";
+
+const character = {
+  name: "TradingAgent",
+  plugins: [stewardPlugin],
+  settings: {
+    // ... other settings
+  },
+};
+```
+
+Set the required environment variables:
+
+```bash
+STEWARD_API_URL=https://api.steward.fi    # Steward API base URL
+STEWARD_API_KEY=stwd_your_tenant_key       # Tenant API key
+STEWARD_AGENT_ID=my-trading-agent          # Agent ID in Steward
+STEWARD_AGENT_TOKEN=stwd_jwt_...           # Agent JWT (optional, preferred over API key)
+```
+
+## What It Provides
+
+### Service
+
+The `StewardService` initializes and manages the Steward SDK connection:
+
+```typescript
+import { StewardService } from "@stwd/eliza-plugin";
+
+// The service is registered automatically when the plugin loads.
+// Access it from the runtime:
+const stewardService = runtime.getService<StewardService>("steward");
+const client = stewardService.getClient();
+```
+
+### Actions
+
+<CardGroup cols={2}>
+  <Card title="sign-transaction" icon="pen-nib">
+    Signs and broadcasts an EVM transaction through Steward's policy engine.
+  </Card>
+  <Card title="transfer" icon="paper-plane">
+    Transfer native tokens (ETH/SOL) to a specified address.
+  </Card>
+</CardGroup>
+
+**sign-transaction** — Triggered when the agent needs to sign a blockchain transaction:
+
+```
+User: "Swap 0.01 ETH for USDC on Uniswap"
+Agent: [evaluates swap parameters]
+       → calls sign-transaction action
+       → Steward evaluates policies
+       → Transaction signed and broadcast
+Agent: "Done! TX: 0x8d7592b..."
+```
+
+**transfer** — Triggered for simple token transfers:
+
+```
+User: "Send 0.05 ETH to 0x742d..."
+Agent: → calls transfer action
+       → Steward evaluates policies
+       → Transfer signed and broadcast
+Agent: "Sent 0.05 ETH. TX: 0xa1b2c3..."
+```
+
+### Providers
+
+<CardGroup cols={2}>
+  <Card title="wallet-status" icon="wallet">
+    Provides wallet address and status context to the agent's prompts.
+  </Card>
+  <Card title="balance" icon="coins">
+    Provides current balance information for the agent's wallet.
+  </Card>
+</CardGroup>
+
+These providers inject wallet context into the agent's LLM prompts, so the agent knows its wallet address and current balance without explicit queries.
+
+### Evaluator
+
+The **approval-required** evaluator checks for pending transactions in the approval queue and notifies the agent (or user) when manual approval is needed.
+
+## Example: Full ElizaOS Character
+
+```typescript
+import { stewardPlugin } from "@stwd/eliza-plugin";
+
+export const tradingAgent = {
+  name: "TradeBot",
+  description: "An autonomous trading agent with Steward-managed wallets",
+  plugins: [stewardPlugin],
+  settings: {
+    model: "gpt-4o",
+    voice: { enabled: false },
+  },
+  system: `You are a trading agent. You can:
+- Check your wallet balance
+- Sign transactions to approved DEX addresses
+- Transfer tokens to whitelisted addresses
+
+Always confirm transaction details before signing.
+Your wallet is managed by Steward with policy enforcement.`,
+};
+```
+
+## Docker Container Setup
+
+For agents running in Docker containers (e.g., on Milady Cloud), the plugin uses environment variables:
+
+```dockerfile
+# In your container configuration
+ENV STEWARD_API_URL=http://steward-api:3200
+ENV STEWARD_AGENT_TOKEN=stwd_jwt_...
+ENV STEWARD_AGENT_ID=my-agent
+```
+
+When using the [Proxy Gateway](/concepts/proxy-gateway), the agent container only needs:
+
+```dockerfile
+ENV STEWARD_PROXY_URL=http://steward-proxy:8080
+ENV STEWARD_AGENT_TOKEN=stwd_jwt_...
+```
+
+## Handling Approval Flows
+
+When a transaction exceeds the auto-approve threshold, it enters the approval queue:
+
+```typescript
+// The plugin handles this automatically. The agent receives:
+// "Transaction requires manual approval. TX ID: 550e8400-..."
+
+// A tenant admin can approve via API:
+// POST /vault/my-agent/approve/550e8400-...
+```
+
+The `approval-required` evaluator periodically checks for pending transactions and can notify users in the chat.
+
+## Related
+
+- [Agent Setup Guide](/guides/agent-setup) — Creating agents with policies
+- [SDK Reference](/sdk/eliza-plugin) — Detailed plugin API reference
+- [Milady Cloud Guide](/guides/milady-cloud) — Deploy on Milady Cloud

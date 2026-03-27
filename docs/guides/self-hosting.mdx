@@ -1,0 +1,175 @@
+---
+title: "Self-Hosting"
+description: "Deploy your own Steward instance with PostgreSQL and Bun."
+---
+
+# Self-Hosting Steward
+
+Steward is designed to be self-hosted. This guide covers deploying Steward on your own infrastructure.
+
+## Requirements
+
+- **Runtime:** [Bun](https://bun.sh) v1.0+
+- **Database:** PostgreSQL 15+ (or [Neon](https://neon.tech) for serverless)
+- **Node.js:** 18+ (for build tooling)
+- **OS:** Linux (Ubuntu 22.04+ recommended), macOS, or Windows WSL2
+
+## Quick Start
+
+```bash
+# Clone the repo
+git clone https://github.com/Steward-Fi/steward.git
+cd steward
+
+# Install dependencies
+bun install
+
+# Set up environment variables
+cp .env.example .env
+```
+
+## Environment Variables
+
+```bash
+# Required
+STEWARD_MASTER_PASSWORD=your-strong-master-password  # Encrypts all vault keys
+DATABASE_URL=postgres://user:pass@localhost:5432/steward
+
+# API Server
+STEWARD_PORT=3200
+STEWARD_BIND_HOST=0.0.0.0
+
+# Blockchain RPC
+RPC_URL=https://mainnet.base.org            # Default chain RPC
+CHAIN_ID=8453                                # Default chain ID
+
+# Optional
+STEWARD_JWT_SECRET=separate-jwt-signing-key  # Defaults to master password if not set
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+STEWARD_PLATFORM_KEY=your-platform-admin-key # For platform-level management
+```
+
+<Warning>
+  The `STEWARD_MASTER_PASSWORD` is critical — it derives the master encryption key for all wallet and secret encryption. **Never lose it.** If you lose the master password, all encrypted keys are permanently inaccessible.
+</Warning>
+
+## Database Setup
+
+Run the Drizzle migrations to set up the database schema:
+
+```bash
+# Push schema to database
+cd packages/db
+bun run drizzle-kit push
+
+# Or generate and run migrations
+bun run drizzle-kit generate
+bun run drizzle-kit migrate
+```
+
+The schema creates tables for:
+- `tenants` — Multi-tenant isolation
+- `agents` — Agent identity and metadata
+- `encrypted_keys` — AES-256-GCM encrypted wallet keys
+- `agent_wallets` — Wallet address mappings
+- `policies` — Policy rules per agent
+- `transactions` — Transaction history and audit trail
+- `approval_queue` — Manual approval queue
+- `secrets` — Encrypted API credentials
+- `secret_routes` — Credential injection routes
+
+## Running the API
+
+```bash
+# Development
+cd packages/api
+bun run dev
+
+# Production
+bun run start
+```
+
+The API starts on port 3200 by default. Verify it's running:
+
+```bash
+curl http://localhost:3200/health
+# {"ok":true,"timestamp":"2026-03-26T12:00:00Z"}
+```
+
+## Creating Your First Tenant
+
+Use the platform API or create directly:
+
+```bash
+curl -X POST http://localhost:3200/tenants \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "my-org",
+    "name": "My Organization",
+    "apiKeyHash": "your-api-key"
+  }'
+```
+
+<Note>
+  The `apiKeyHash` should be a SHA-256 hash of your API key. If you pass a non-hash string, Steward will hash it for you. The raw API key is returned once on creation.
+</Note>
+
+## Production Deployment
+
+### Systemd Service
+
+```ini
+[Unit]
+Description=Steward API
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=steward
+WorkingDirectory=/opt/steward
+ExecStart=/usr/local/bin/bun run packages/api/src/index.ts
+Restart=always
+RestartSec=5
+Environment=NODE_ENV=production
+EnvironmentFile=/opt/steward/.env
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Reverse Proxy (Nginx)
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name api.steward.fi;
+
+    ssl_certificate /etc/letsencrypt/live/api.steward.fi/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.steward.fi/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:3200;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+### Security Checklist
+
+- [ ] Set a unique `STEWARD_MASTER_PASSWORD` (32+ chars, random)
+- [ ] Set a separate `STEWARD_JWT_SECRET`
+- [ ] Use TLS for all connections (API + database)
+- [ ] Restrict database access to the Steward server only
+- [ ] Set `STEWARD_PLATFORM_KEY` for admin operations
+- [ ] Run as non-root user
+- [ ] Enable firewall (only expose ports 443 and SSH)
+- [ ] Back up the database regularly
+
+## Related
+
+- [Docker Deployment](/guides/docker) — Deploy with Docker Compose
+- [Architecture](/concepts/architecture) — System design overview
+- [API Overview](/api-reference/overview) — API authentication

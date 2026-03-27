@@ -1,0 +1,211 @@
+---
+title: "Setting Up an Agent"
+description: "Create an agent with an encrypted wallet, configure policies, and start signing transactions."
+---
+
+# Setting Up an Agent
+
+This guide walks through creating a Steward agent from scratch — wallet creation, policy configuration, and your first transaction.
+
+## Prerequisites
+
+- A Steward tenant with an API key (see [Self-Hosting](/guides/self-hosting) or contact the team)
+- Node.js 18+ or Bun
+- `@stwd/sdk` installed ([Installation](/sdk/installation))
+
+## Step 1: Initialize the Client
+
+```typescript
+import { StewardClient } from "@stwd/sdk";
+
+const steward = new StewardClient({
+  baseUrl: "https://api.steward.fi",
+  apiKey: "stwd_your_tenant_api_key",
+});
+```
+
+## Step 2: Create the Agent
+
+```typescript
+const agent = await steward.createWallet("my-trading-bot", "Trading Bot");
+
+console.log("Agent created:", agent.id);
+console.log("EVM wallet:", agent.walletAddresses.evm);
+console.log("Solana wallet:", agent.walletAddresses.solana);
+```
+
+This creates:
+- An agent record in the database
+- An encrypted EVM keypair
+- An encrypted Solana keypair
+- Wallet entries for both chain families
+
+## Step 3: Configure Policies
+
+Steward uses **default deny** — your agent can't do anything without policies. Here's a common setup for a trading agent:
+
+```typescript
+await steward.setPolicies("my-trading-bot", [
+  // Limit per-transaction and daily spending
+  {
+    id: "spending-limit",
+    type: "spending-limit",
+    enabled: true,
+    config: {
+      maxPerTransaction: "100000000000000000",  // 0.1 ETH
+      maxPerDay: "1000000000000000000",         // 1 ETH
+      maxPerWeek: "5000000000000000000",        // 5 ETH
+    },
+  },
+  // Only interact with known DEX routers
+  {
+    id: "approved-dexes",
+    type: "approved-addresses",
+    enabled: true,
+    config: {
+      addresses: [
+        "0x1111111254EEB25477B68fb85Ed929f73A960582", // 1inch
+        "0xDef1C0ded9bec7F1a1670819833240f027b25EfF", // 0x Protocol
+      ],
+    },
+  },
+  // Auto-approve small transactions
+  {
+    id: "auto-approve",
+    type: "auto-approve-threshold",
+    enabled: true,
+    config: {
+      maxValue: "50000000000000000", // 0.05 ETH
+    },
+  },
+  // Limit transaction frequency
+  {
+    id: "rate-limit",
+    type: "rate-limit",
+    enabled: true,
+    config: {
+      maxPerMinute: 5,
+      maxPerHour: 50,
+    },
+  },
+  // Only trade during market hours
+  {
+    id: "trading-hours",
+    type: "time-window",
+    enabled: true,
+    config: {
+      allowedHours: { start: 8, end: 22 },
+      timezone: "UTC",
+    },
+  },
+  // Restrict to Base mainnet
+  {
+    id: "chain-restriction",
+    type: "allowed-chains",
+    enabled: true,
+    config: {
+      chainIds: [8453],
+    },
+  },
+]);
+```
+
+<Note>
+  See the [Policies Guide](/guides/policies) for detailed explanations of each policy type and common configurations.
+</Note>
+
+## Step 4: Generate an Agent Token
+
+For the agent to authenticate its own requests, generate a scoped JWT:
+
+```typescript
+const tokenResponse = await fetch(
+  "https://api.steward.fi/agents/my-trading-bot/token",
+  {
+    method: "POST",
+    headers: {
+      "X-Steward-Key": "stwd_your_tenant_api_key",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ expiresIn: "24h" }),
+  }
+);
+
+const { data } = await tokenResponse.json();
+console.log("Agent token:", data.token);
+// This token goes into the agent container as STEWARD_AGENT_TOKEN
+```
+
+## Step 5: Use the Agent Token
+
+In your agent code, create a client with the agent token:
+
+```typescript
+const agentClient = new StewardClient({
+  baseUrl: "https://api.steward.fi",
+  bearerToken: process.env.STEWARD_AGENT_TOKEN,
+});
+
+// Sign a transaction
+const result = await agentClient.signTransaction("my-trading-bot", {
+  to: "0x1111111254EEB25477B68fb85Ed929f73A960582",
+  value: "10000000000000000", // 0.01 ETH
+  data: "0x...",              // swap calldata
+  chainId: 8453,
+});
+
+// Check balance
+const balance = await agentClient.getBalance("my-trading-bot", 8453);
+```
+
+## Step 6: Fund the Wallet
+
+Send ETH (or SOL) to the agent's wallet address:
+
+```typescript
+const addresses = await agentClient.getAddresses("my-trading-bot");
+const evmAddress = addresses.addresses.find(a => a.chainFamily === "evm")?.address;
+console.log(`Send ETH on Base to: ${evmAddress}`);
+```
+
+## Batch Creation
+
+Creating multiple agents at once:
+
+```typescript
+const batch = await steward.createWalletBatch(
+  [
+    { id: "agent-1", name: "Agent One" },
+    { id: "agent-2", name: "Agent Two" },
+    { id: "agent-3", name: "Agent Three" },
+  ],
+  // Apply the same policies to all agents
+  [
+    {
+      id: "spending-limit",
+      type: "spending-limit",
+      enabled: true,
+      config: { maxPerTransaction: "100000000000000000", maxPerDay: "500000000000000000" },
+    },
+  ]
+);
+
+console.log(`Created: ${batch.created.length}, Errors: ${batch.errors.length}`);
+```
+
+## What's Next?
+
+<CardGroup cols={2}>
+  <Card title="Policies Guide" icon="shield-check" href="/guides/policies">
+    Deep dive into policy configuration.
+  </Card>
+  <Card title="ElizaOS Plugin" icon="robot" href="/guides/eliza-plugin">
+    Integrate with ElizaOS agents.
+  </Card>
+  <Card title="Secrets Guide" icon="key" href="/guides/secrets">
+    Manage API credentials securely.
+  </Card>
+  <Card title="SDK Reference" icon="code" href="/sdk/client">
+    Full StewardClient API reference.
+  </Card>
+</CardGroup>

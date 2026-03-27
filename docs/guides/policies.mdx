@@ -1,0 +1,260 @@
+---
+title: "Configuring Policies"
+description: "Set up spending limits, address whitelists, rate limits, and more for your agents."
+---
+
+# Configuring Policies
+
+Steward's policy engine enforces rules on every agent action. This guide covers all policy types, common patterns, and best practices.
+
+## Policy Basics
+
+Policies are JSON objects with this structure:
+
+```typescript
+interface PolicyRule {
+  id: string;        // Unique identifier
+  type: string;      // Policy type (see below)
+  enabled: boolean;  // Toggle without deleting
+  config: object;    // Type-specific configuration
+}
+```
+
+Set policies via SDK or API:
+
+<CodeGroup>
+```typescript SDK
+await steward.setPolicies("my-agent", [
+  { id: "limit-1", type: "spending-limit", enabled: true, config: { ... } },
+]);
+```
+
+```bash cURL
+curl -X PUT https://api.steward.fi/agents/my-agent/policies \
+  -H "X-Steward-Key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '[{ "id": "limit-1", "type": "spending-limit", "enabled": true, "config": { ... } }]'
+```
+</CodeGroup>
+
+<Warning>
+  `setPolicies` / `PUT /agents/:id/policies` **replaces** all policies for the agent. Always include the complete policy set.
+</Warning>
+
+## Policy Types Reference
+
+### spending-limit
+
+Controls the maximum value an agent can transact.
+
+| Config Field | Type | Description |
+|-------------|------|-------------|
+| `maxPerTransaction` | string (wei) | Maximum value per single transaction |
+| `maxPerDay` | string (wei) | Maximum cumulative value per 24h rolling window |
+| `maxPerWeek` | string (wei) | Maximum cumulative value per 7-day rolling window |
+
+```json
+{
+  "id": "spending-limit",
+  "type": "spending-limit",
+  "enabled": true,
+  "config": {
+    "maxPerTransaction": "100000000000000000",
+    "maxPerDay": "1000000000000000000",
+    "maxPerWeek": "5000000000000000000"
+  }
+}
+```
+
+<Note>
+  Values are in **wei** (1 ETH = 10^18 wei). For Solana, values are in lamports (1 SOL = 10^9 lamports). Steward tracks cumulative spend per agent.
+</Note>
+
+### approved-addresses
+
+Whitelist of addresses the agent can send transactions to.
+
+| Config Field | Type | Description |
+|-------------|------|-------------|
+| `addresses` | string[] | List of allowed destination addresses |
+
+```json
+{
+  "id": "dex-whitelist",
+  "type": "approved-addresses",
+  "enabled": true,
+  "config": {
+    "addresses": [
+      "0x1111111254EEB25477B68fb85Ed929f73A960582",
+      "0xDef1C0ded9bec7F1a1670819833240f027b25EfF"
+    ]
+  }
+}
+```
+
+### auto-approve-threshold
+
+Transactions below this value are auto-approved; above enters the approval queue.
+
+| Config Field | Type | Description |
+|-------------|------|-------------|
+| `maxValue` | string (wei) | Maximum auto-approve value |
+
+```json
+{
+  "id": "auto-approve",
+  "type": "auto-approve-threshold",
+  "enabled": true,
+  "config": {
+    "maxValue": "50000000000000000"
+  }
+}
+```
+
+### rate-limit
+
+Controls transaction frequency.
+
+| Config Field | Type | Description |
+|-------------|------|-------------|
+| `maxPerMinute` | number | Max transactions per minute |
+| `maxPerHour` | number | Max transactions per hour |
+
+```json
+{
+  "id": "rate-limit",
+  "type": "rate-limit",
+  "enabled": true,
+  "config": {
+    "maxPerMinute": 10,
+    "maxPerHour": 100
+  }
+}
+```
+
+### time-window
+
+Restricts when the agent can transact.
+
+| Config Field | Type | Description |
+|-------------|------|-------------|
+| `allowedHours.start` | number (0-23) | Start hour |
+| `allowedHours.end` | number (0-23) | End hour |
+| `timezone` | string | IANA timezone (e.g., "UTC", "America/New_York") |
+
+```json
+{
+  "id": "trading-hours",
+  "type": "time-window",
+  "enabled": true,
+  "config": {
+    "allowedHours": { "start": 8, "end": 22 },
+    "timezone": "UTC"
+  }
+}
+```
+
+### allowed-chains
+
+Restricts which blockchain networks the agent can use.
+
+| Config Field | Type | Description |
+|-------------|------|-------------|
+| `chainIds` | number[] | List of allowed chain IDs |
+
+```json
+{
+  "id": "chains",
+  "type": "allowed-chains",
+  "enabled": true,
+  "config": {
+    "chainIds": [8453, 1, 42161]
+  }
+}
+```
+
+## Common Patterns
+
+<Accordion title="Conservative Trading Agent">
+```typescript
+const conservativeTrader = [
+  {
+    id: "spending", type: "spending-limit", enabled: true,
+    config: { maxPerTransaction: "50000000000000000", maxPerDay: "200000000000000000" },
+  },
+  {
+    id: "addresses", type: "approved-addresses", enabled: true,
+    config: { addresses: ["0x_UNISWAP_ROUTER"] },
+  },
+  {
+    id: "auto", type: "auto-approve-threshold", enabled: true,
+    config: { maxValue: "10000000000000000" },  // 0.01 ETH
+  },
+  {
+    id: "rate", type: "rate-limit", enabled: true,
+    config: { maxPerMinute: 2, maxPerHour: 20 },
+  },
+  {
+    id: "chains", type: "allowed-chains", enabled: true,
+    config: { chainIds: [8453] },  // Base only
+  },
+];
+```
+</Accordion>
+
+<Accordion title="Read-Only Agent (No Signing)">
+```typescript
+// An agent with no policies cannot sign anything (default deny).
+// Just create the agent and don't set policies:
+const agent = await steward.createWallet("data-agent", "Data Agent");
+// This agent can check balances and read chain data but cannot sign transactions.
+```
+</Accordion>
+
+<Accordion title="High-Frequency Agent">
+```typescript
+const hftAgent = [
+  {
+    id: "spending", type: "spending-limit", enabled: true,
+    config: { maxPerTransaction: "10000000000000000", maxPerDay: "5000000000000000000" },
+  },
+  {
+    id: "rate", type: "rate-limit", enabled: true,
+    config: { maxPerMinute: 60, maxPerHour: 1000 },
+  },
+  {
+    id: "auto", type: "auto-approve-threshold", enabled: true,
+    config: { maxValue: "10000000000000000" },  // Auto-approve all (same as max per tx)
+  },
+];
+```
+</Accordion>
+
+## Reading Policies
+
+```typescript
+const policies = await steward.getPolicies("my-agent");
+console.log(policies);
+// [
+//   { id: "spending-limit", type: "spending-limit", enabled: true, config: { ... } },
+//   { id: "approved-addrs", type: "approved-addresses", enabled: true, config: { ... } },
+// ]
+```
+
+## Disabling a Policy
+
+To temporarily disable a policy without removing it, set `enabled: false` and resubmit the full set:
+
+```typescript
+const policies = await steward.getPolicies("my-agent");
+const updated = policies.map(p =>
+  p.id === "time-window" ? { ...p, enabled: false } : p
+);
+await steward.setPolicies("my-agent", updated);
+```
+
+## Related
+
+- [Policy Engine Concepts](/concepts/policy-engine) — How the engine works
+- [Agent Setup](/guides/agent-setup) — Creating agents with policies
+- [Policies API](/api-reference/policies) — REST API reference

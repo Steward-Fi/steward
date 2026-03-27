@@ -1,0 +1,88 @@
+{
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "Steward",
+  "logo": {
+    "dark": "/logo-dark.svg",
+    "light": "/logo-light.svg"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#FF5800",
+    "light": "#FF7A33",
+    "dark": "#CC4600",
+    "anchors": {
+      "from": "#FF5800",
+      "to": "#CC4600"
+    }
+  },
+  "topbarLinks": [
+    { "name": "API Status", "url": "https://api.steward.fi/health" }
+  ],
+  "topbarCtaButton": {
+    "name": "GitHub",
+    "url": "https://github.com/Steward-Fi/steward"
+  },
+  "tabs": [
+    { "name": "API Reference", "url": "api-reference" },
+    { "name": "SDK", "url": "sdk" }
+  ],
+  "anchors": [
+    { "name": "npm", "icon": "npm", "url": "https://www.npmjs.com/package/@stwd/sdk" },
+    { "name": "Community", "icon": "discord", "url": "https://discord.gg/steward" }
+  ],
+  "navigation": [
+    {
+      "group": "Get Started",
+      "pages": ["introduction", "quickstart"]
+    },
+    {
+      "group": "Concepts",
+      "pages": [
+        "concepts/architecture",
+        "concepts/wallet-vault",
+        "concepts/secret-vault",
+        "concepts/proxy-gateway",
+        "concepts/policy-engine",
+        "concepts/audit-logging"
+      ]
+    },
+    {
+      "group": "Guides",
+      "pages": [
+        "guides/agent-setup",
+        "guides/policies",
+        "guides/secrets",
+        "guides/eliza-plugin",
+        "guides/milady-cloud",
+        "guides/self-hosting",
+        "guides/docker"
+      ]
+    },
+    {
+      "group": "API Reference",
+      "pages": [
+        "api-reference/overview",
+        "api-reference/agents",
+        "api-reference/vault",
+        "api-reference/secrets",
+        "api-reference/routes",
+        "api-reference/policies",
+        "api-reference/tenants",
+        "api-reference/proxy"
+      ]
+    },
+    {
+      "group": "SDK",
+      "pages": [
+        "sdk/installation",
+        "sdk/client",
+        "sdk/proxy-helpers",
+        "sdk/eliza-plugin"
+      ]
+    }
+  ],
+  "footerSocials": {
+    "x": "https://x.com/Steward_Fi",
+    "github": "https://github.com/Steward-Fi/steward"
+  }
+}

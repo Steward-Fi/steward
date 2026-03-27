@@ -1,0 +1,72 @@
+---
+title: "What is Steward?"
+description: "The governance layer for autonomous AI agents — encrypted wallets, credential management, and policy enforcement."
+---
+
+# What is Steward?
+
+Steward is a **governance layer for autonomous AI agents**. It provides encrypted wallet management, credential storage, policy enforcement, and audit logging — so agents can interact with blockchains and external APIs without ever touching raw private keys or API credentials.
+
+<CardGroup cols={2}>
+  <Card title="Wallet Vault" icon="vault" href="/concepts/wallet-vault">
+    AES-256-GCM encrypted key storage with multi-chain signing (EVM + Solana). Agents request signatures — they never see private keys.
+  </Card>
+  <Card title="Secret Vault" icon="key" href="/concepts/secret-vault">
+    Encrypted credential storage with automatic injection. Agents never see API keys — Steward's proxy injects them at request time.
+  </Card>
+  <Card title="Policy Engine" icon="shield-check" href="/concepts/policy-engine">
+    Declarative policies evaluated before every action. Spending limits, rate limits, address whitelists, time windows — all configurable per agent.
+  </Card>
+  <Card title="Audit Logging" icon="scroll" href="/concepts/audit-logging">
+    Every signing request, every API call, every policy decision is logged. Immutable, queryable, exportable.
+  </Card>
+</CardGroup>
+
+## The Problem
+
+Today, most agent platforms inject plaintext credentials directly into agent containers:
+
+```bash
+# What agent containers look like today 😬
+OPENAI_API_KEY=sk-proj-abc123...
+ANTHROPIC_API_KEY=sk-ant-def456...
+EVM_PRIVATE_KEY=0xdeadbeef...
+DATABASE_URL=postgres://user:pass@host/db
+```
+
+Any code running inside the container — including code triggered by prompt injection — can read these credentials, exfiltrate them, or drain wallets. There's no spending control, no audit trail, and rotating a credential means redeploying every container that uses it.
+
+## The Solution
+
+With Steward, agent containers only receive **two environment variables**:
+
+```bash
+# What agent containers look like with Steward ✅
+STEWARD_PROXY_URL=http://steward-proxy:8080
+STEWARD_AGENT_TOKEN=stwd_jwt_...
+```
+
+Every API call and every transaction flows through Steward, where it's **authenticated, policy-checked, logged, and metered** before being forwarded with the real credentials injected.
+
+## Who Uses Steward?
+
+- **[Milady Cloud](https://milady.ai)** — Production deployment managing 17+ AI agents across 6 nodes with on-chain transactions on Base mainnet.
+- **Agent developers** — Anyone building autonomous agents that need wallet access or API credential management.
+- **Platform operators** — Teams running multi-tenant agent hosting who need security, cost control, and compliance.
+
+## Quick Links
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running with Steward in 5 minutes.
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand how the three pillars work together.
+  </Card>
+  <Card title="SDK Reference" icon="code" href="/sdk/installation">
+    Install the TypeScript SDK and start building.
+  </Card>
+  <Card title="API Reference" icon="server" href="/api-reference/overview">
+    Explore the full REST API.
+  </Card>
+</CardGroup>

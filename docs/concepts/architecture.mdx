@@ -1,0 +1,134 @@
+---
+title: "Architecture"
+description: "How Steward's three pillars work together to secure autonomous agents."
+---
+
+# Architecture
+
+Steward is the single chokepoint between an AI agent and the outside world. Every API call, every transaction, every secret access flows through Steward, gets policy-checked, gets logged, gets metered.
+
+## Three Pillars
+
+<CardGroup cols={3}>
+  <Card title="Wallet Vault" icon="vault">
+    Encrypted key storage with policy-enforced signing. Agents never see private keys.
+  </Card>
+  <Card title="Secret Vault" icon="key">
+    Encrypted credential storage with an API proxy. Agents never see API keys.
+  </Card>
+  <Card title="Policy Engine" icon="shield-check">
+    Declarative policy evaluation on every action. Default deny.
+  </Card>
+</CardGroup>
+
+## High-Level Flow
+
+```
+┌──────────────────────────────────────────────────┐
+│              Agent Container                      │
+│                                                    │
+│  Agent sees ONLY:                                  │
+│    STEWARD_PROXY_URL=http://steward-proxy:8080    │
+│    STEWARD_AGENT_TOKEN=stwd_jwt_...               │
+│                                                    │
+│  No API keys. No private keys. No DB passwords.   │
+└────────────────────┬─────────────────────────────┘
+                     │ HTTP (internal network)
+┌────────────────────▼─────────────────────────────┐
+│                  STEWARD                          │
+│                                                    │
+│  ┌───────────┐  ┌──────────────┐  ┌───────────┐  │
+│  │ API Proxy │→ │ Policy Engine│→ │Secret Vault│  │
+│  │ Gateway   │  │              │  │            │  │
+│  │           │  │ - allowed?   │  │ Decrypt    │  │
+│  │ Route by  │  │ - budget?    │  │ Inject     │  │
+│  │ host/path │  │ - rate ok?   │  │ Forward    │  │
+│  └───────────┘  └──────────────┘  └───────────┘  │
+│                                                    │
+│  ┌────────────────────────────────────────────┐   │
+│  │ Wallet Vault: Encrypted keys, multi-chain  │   │
+│  │ signing, same policy engine ↑              │   │
+│  └────────────────────────────────────────────┘   │
+│                                                    │
+│  ┌────────────────────────────────────────────┐   │
+│  │ Audit Log: Every request, every decision   │   │
+│  └────────────────────────────────────────────┘   │
+└────────────────────┬─────────────────────────────┘
+                     │ HTTPS (real credentials)
+           ┌─────────▼──────────┐
+           │  External APIs     │
+           │  OpenAI, DEXs, etc │
+           └────────────────────┘
+```
+
+## Request Flow: API Proxy
+
+When an agent makes an API call (e.g., to OpenAI), here's what happens:
+
+1. **Agent sends request** to Steward proxy with its JWT
+2. **Proxy authenticates** the agent via JWT → extracts agent ID, tenant, scopes
+3. **Proxy resolves route** — matches host/path to a credential set
+4. **Policy engine evaluates** — API access, spend limit, rate limit all must pass
+5. **Secret vault decrypts** the credential (held in memory only for injection)
+6. **Proxy forwards** the request with the real credential injected
+7. **Response flows back** — cost is logged, spend tracking updated
+8. **Audit log entry** created with full request context
+
+## Request Flow: Wallet Signing
+
+When an agent needs to sign a transaction:
+
+1. **Agent sends signing request** via SDK or API
+2. **Policy engine evaluates** — spending limits, address whitelist, rate limits, time windows
+3. **Auto-approve or queue** — below threshold → auto-sign; above → approval queue
+4. **Vault decrypts** the private key, signs the transaction, optionally broadcasts
+5. **Transaction recorded** in the database with full policy evaluation results
+6. **Webhook dispatched** to notify tenant of the signing event
+
+## Deployment Topology
+
+Steward runs on the same host as agent containers, minimizing latency:
+
+```
+┌──────────────────────────────────────────────┐
+│                Host Server                    │
+│                                                │
+│  ┌──────────┐  ┌──────────┐                   │
+│  │steward-  │  │steward-  │                   │
+│  │api :3200 │  │proxy:8080│                   │
+│  └──────────┘  └──────────┘                   │
+│                                                │
+│  ┌────────┐ ┌────────┐ ┌────────┐            │
+│  │agent-1 │ │agent-2 │ │agent-3 │            │
+│  │        │ │        │ │        │  (Docker)  │
+│  │Only    │ │Only    │ │Only    │            │
+│  │reaches │ │reaches │ │reaches │            │
+│  │proxy   │ │proxy   │ │proxy   │            │
+│  └────────┘ └────────┘ └────────┘            │
+└──────────────────────────────────────────────┘
+```
+
+<Note>
+  Agent containers can be firewalled to **only reach the Steward proxy**. Even if fully compromised, an agent cannot exfiltrate data to arbitrary endpoints.
+</Note>
+
+## Multi-Tenant Isolation
+
+Steward is multi-tenant by design:
+
+- **Tenants** are isolated at the database level — each tenant's agents, secrets, and policies are scoped
+- **Agents** authenticate with JWTs scoped to their tenant and agent ID
+- **Secrets** are encrypted with per-tenant encryption keys (key hierarchy: master → tenant → secret)
+- **Policies** are evaluated per-agent within their tenant context
+
+## Tech Stack
+
+| Component | Technology |
+|-----------|-----------|
+| API Server | [Hono](https://hono.dev) on [Bun](https://bun.sh) |
+| Database | PostgreSQL (Neon) |
+| Encryption | AES-256-GCM with Argon2id key derivation |
+| EVM Signing | [viem](https://viem.sh) |
+| Solana Signing | [@solana/web3.js](https://solana-labs.github.io/solana-web3.js/) |
+| ORM | [Drizzle](https://orm.drizzle.team) |
+| SDK | TypeScript, zero dependencies |

@@ -1,0 +1,183 @@
+---
+title: "Docker Deployment"
+description: "Deploy Steward with Docker Compose — database, API, and proxy in one command."
+---
+
+# Docker Deployment
+
+Deploy Steward with Docker Compose for a production-ready setup with PostgreSQL, the Steward API, and the proxy gateway.
+
+## Docker Compose
+
+Create a `docker-compose.yml`:
+
+```yaml
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: steward
+      POSTGRES_USER: steward
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U steward"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  steward-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgres://steward:${DB_PASSWORD:-changeme}@postgres:5432/steward
+      STEWARD_MASTER_PASSWORD: ${STEWARD_MASTER_PASSWORD}
+      STEWARD_JWT_SECRET: ${STEWARD_JWT_SECRET}
+      STEWARD_PORT: "3200"
+      STEWARD_BIND_HOST: "0.0.0.0"
+      RPC_URL: ${RPC_URL:-https://mainnet.base.org}
+      CHAIN_ID: ${CHAIN_ID:-8453}
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      STEWARD_PLATFORM_KEY: ${STEWARD_PLATFORM_KEY}
+    ports:
+      - "3200:3200"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+```
+
+## Environment File
+
+Create a `.env` file:
+
+```bash
+# Database
+DB_PASSWORD=your-strong-db-password
+
+# Steward (REQUIRED)
+STEWARD_MASTER_PASSWORD=your-very-strong-master-password-32-chars-min
+STEWARD_JWT_SECRET=separate-jwt-signing-secret
+
+# Blockchain
+RPC_URL=https://mainnet.base.org
+CHAIN_ID=8453
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+
+# Platform admin (optional)
+STEWARD_PLATFORM_KEY=your-platform-admin-key
+```
+
+## Start
+
+```bash
+docker compose up -d
+
+# Check logs
+docker compose logs -f steward-api
+
+# Verify health
+curl http://localhost:3200/health
+```
+
+## Database Migrations
+
+Run migrations after the first start:
+
+```bash
+docker compose exec steward-api bun run drizzle-kit push
+```
+
+## Adding Agent Containers
+
+To run agent containers alongside Steward on the same Docker network:
+
+```yaml
+# Add to docker-compose.yml
+services:
+  # ... existing services ...
+
+  my-agent:
+    image: your-agent-image:latest
+    environment:
+      STEWARD_API_URL: http://steward-api:3200
+      STEWARD_AGENT_TOKEN: ${AGENT_TOKEN}
+      STEWARD_AGENT_ID: my-agent
+    depends_on:
+      - steward-api
+    networks:
+      - default
+```
+
+## Network Isolation
+
+For maximum security, create a separate network where agent containers can only reach the Steward proxy:
+
+```yaml
+networks:
+  steward-internal:
+    driver: bridge
+  agents-isolated:
+    driver: bridge
+    internal: true  # No internet access
+
+services:
+  steward-api:
+    networks:
+      - steward-internal
+
+  steward-proxy:
+    networks:
+      - steward-internal
+      - agents-isolated  # Bridge between agents and Steward
+
+  my-agent:
+    networks:
+      - agents-isolated  # Can ONLY reach steward-proxy
+```
+
+<Note>
+  With network isolation, agents cannot make any network requests except to the Steward proxy. The proxy handles all outbound traffic, injecting credentials and enforcing policies.
+</Note>
+
+## Updating
+
+```bash
+# Pull latest
+git pull origin develop
+
+# Rebuild
+docker compose build steward-api
+
+# Restart with zero downtime
+docker compose up -d steward-api
+```
+
+## Backup
+
+```bash
+# Database backup
+docker compose exec postgres pg_dump -U steward steward > backup.sql
+
+# Restore
+cat backup.sql | docker compose exec -T postgres psql -U steward steward
+```
+
+<Warning>
+  Always back up your database before updates. The database contains encrypted keys — if lost, all agent wallets are inaccessible.
+</Warning>
+
+## Related
+
+- [Self-Hosting](/guides/self-hosting) — Manual deployment without Docker
+- [Architecture](/concepts/architecture) — System design
+- [Milady Cloud](/guides/milady-cloud) — Production deployment reference

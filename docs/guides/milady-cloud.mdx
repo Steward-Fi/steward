@@ -1,0 +1,111 @@
+---
+title: "Milady Cloud Integration"
+description: "How Steward powers wallet management for Milady Cloud AI agents."
+---
+
+# Milady Cloud Integration
+
+[Milady Cloud](https://milady.ai) is Steward's primary production deployment — managing 17+ AI agents across 6 nodes with on-chain transactions on Base mainnet.
+
+## Architecture
+
+Milady Cloud uses Steward as the governance layer between its agent containers and the outside world:
+
+```
+┌─────────────────────────────────────────┐
+│          Milady Cloud Node               │
+│                                           │
+│  ┌──────────┐  ┌──────────┐             │
+│  │steward   │  │steward   │             │
+│  │api :3200 │  │proxy:8080│             │
+│  └──────────┘  └──────────┘             │
+│                                           │
+│  ┌────────┐ ┌────────┐ ┌────────┐      │
+│  │agent-1 │ │agent-2 │ │agent-3 │      │
+│  │(Docker) │ │(Docker) │ │(Docker) │      │
+│  └────────┘ └────────┘ └────────┘      │
+└─────────────────────────────────────────┘
+```
+
+Each Milady Cloud node runs:
+- **Steward API** on port 3200 — agent CRUD, policy management, vault operations
+- **Steward Proxy** on port 8080 — API credential injection (when enabled)
+- **Agent containers** — ElizaOS-based agents connecting to Steward
+
+## How Provisioning Works
+
+When a new agent is created on Milady Cloud:
+
+1. **Cloud provisioner** calls `POST /agents` to create the agent in Steward
+2. **Wallet generated** — encrypted EVM + Solana keypairs
+3. **Policies applied** — default policy template for the agent tier
+4. **Agent token issued** — `POST /agents/:id/token` generates a scoped JWT
+5. **Container created** with only `STEWARD_PROXY_URL` and `STEWARD_AGENT_TOKEN`
+6. **Container starts** — agent boots, connects to LLM via proxy
+
+```typescript
+// Simplified provisioning flow
+const agent = await steward.createWallet(agentId, agentName, platformId);
+await steward.setPolicies(agentId, defaultPolicies);
+const token = await generateAgentToken(agentId);
+
+// Container gets only these env vars:
+const containerEnv = {
+  STEWARD_PROXY_URL: "http://172.18.0.1:8080",
+  STEWARD_AGENT_TOKEN: token,
+};
+```
+
+## Production Stats
+
+| Metric | Value |
+|--------|-------|
+| Tenants | 4 |
+| Agents | 17+ |
+| Transactions | 70+ |
+| Nodes | 6 (milady-core-1 through milady-core-6) |
+| Uptime | 8+ days continuous |
+| On-chain proof | Base mainnet TX `0x8d7592b...` |
+
+## Container Configuration
+
+Milady Cloud agents use the `@stwd/eliza-plugin` for Steward integration. The plugin is baked into the container image:
+
+```bash
+# Container environment
+STEWARD_API_URL=http://172.18.0.1:3200
+STEWARD_AGENT_TOKEN=stwd_jwt_...
+STEWARD_AGENT_ID=agent-name
+```
+
+The `172.18.0.1` address is the Docker bridge gateway, allowing containers to reach Steward running on the host.
+
+## Network Setup
+
+Steward binds to `0.0.0.0:3200` so Docker containers can reach it via the bridge network:
+
+```bash
+# On each node
+STEWARD_BIND_HOST=0.0.0.0
+STEWARD_PORT=3200
+```
+
+<Note>
+  The `STEWARD_BIND_HOST=0.0.0.0` setting was a critical fix — without it, containers couldn't reach Steward because it was only listening on localhost.
+</Note>
+
+## Deploying on Your Own
+
+To replicate the Milady Cloud setup:
+
+1. Deploy Steward ([Self-Hosting Guide](/guides/self-hosting))
+2. Create a tenant for your platform
+3. Set up the provisioning flow (agent creation → policy → token → container)
+4. Use the ElizaOS plugin or SDK in your agent containers
+
+## Related
+
+- [Architecture](/concepts/architecture) — System design overview
+- [Self-Hosting](/guides/self-hosting) — Deploy your own instance
+- [ElizaOS Plugin](/guides/eliza-plugin) — Agent integration
+- [Docker Guide](/guides/docker) — Container deployment
