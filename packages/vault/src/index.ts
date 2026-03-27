@@ -1,6 +1,8 @@
 export { Vault } from "./vault";
 export { KeyStore } from "./keystore";
 export type { VaultConfig } from "./vault";
+export { getTokenBalances, COMMON_TOKENS, ERC20_ABI } from "./tokens";
+export type { TokenBalance, TokenDef } from "./tokens";
 export {
   generateSolanaKeypair,
   restoreSolanaKeypair,

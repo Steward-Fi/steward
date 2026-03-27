@@ -32,6 +32,7 @@ import {
   signSolanaMessage,
   signSolanaTransaction,
 } from "./solana";
+import { getTokenBalances as fetchTokenBalances, type TokenBalance, COMMON_TOKENS } from "./tokens";
 
 export interface VaultConfig {
   masterPassword: string;
@@ -540,6 +541,33 @@ export class Vault {
       symbol: chain.nativeCurrency.symbol,
       walletAddress: evmAddress,
     };
+  }
+
+  /**
+   * Get ERC-20 token balances for an agent's EVM wallet on a given chain.
+   *
+   * @param tenantId - The tenant that owns the agent
+   * @param agentId  - The agent whose wallet to query
+   * @param chainId  - EVM chain ID (defaults to config chainId or 8453)
+   * @param tokens   - Optional custom token contract addresses. If omitted, uses common tokens.
+   * @returns Array of token balances including symbol, decimals, and formatted amounts.
+   */
+  async getTokenBalances(
+    tenantId: string,
+    agentId: string,
+    chainId?: number,
+    tokens?: string[],
+  ): Promise<TokenBalance[]> {
+    const agent = await this.getAgent(tenantId, agentId);
+    if (!agent) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+
+    const resolvedChainId = chainId ?? this.config.chainId ?? 8453;
+    const evmAddress = agent.walletAddresses?.evm ?? agent.walletAddress;
+    const rpcUrl = CHAIN_RPCS[resolvedChainId] ?? this.config.rpcUrl;
+
+    return fetchTokenBalances(evmAddress, resolvedChainId, tokens, rpcUrl);
   }
 
   /**
