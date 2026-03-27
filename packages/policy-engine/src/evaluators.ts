@@ -54,17 +54,21 @@ export function evaluatePolicy(
  * Accepts both the canonical format and the simplified maxAmount/period format.
  */
 function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
-  // If already in canonical format, use as-is
+  // Use a very large default for unrestricted limits
+  const MAX_UINT = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+
+  // If already in canonical format, fill in any missing fields with MAX_UINT
   if (config.maxPerTx !== undefined) {
-    return config as unknown as SpendingLimitConfig;
+    return {
+      maxPerTx: String(config.maxPerTx ?? MAX_UINT),
+      maxPerDay: String(config.maxPerDay ?? MAX_UINT),
+      maxPerWeek: String(config.maxPerWeek ?? MAX_UINT),
+    } as unknown as SpendingLimitConfig;
   }
 
   // Convert from maxAmount/period format
   const maxAmount = String(config.maxAmount ?? "0");
   const period = String(config.period ?? "day").toLowerCase();
-
-  // Use a very large default for unrestricted limits
-  const MAX_UINT = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 
   switch (period) {
     case "tx":
