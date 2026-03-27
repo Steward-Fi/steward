@@ -7,14 +7,22 @@
   },
   "favicon": "/favicon.svg",
   "colors": {
-    "primary": "#FF5800",
-    "light": "#FF7A33",
-    "dark": "#CC4600",
+    "primary": "#D4740A",
+    "light": "#E8923A",
+    "dark": "#FF5800",
+    "background": {
+      "dark": "#0b0a09",
+      "light": "#FAFAF8"
+    },
     "anchors": {
-      "from": "#FF5800",
-      "to": "#CC4600"
+      "from": "#D4740A",
+      "to": "#FF5800"
     }
   },
+  "modeToggle": {
+    "default": "dark"
+  },
+  "css": "custom.css",
   "topbarLinks": [
     { "name": "API Status", "url": "https://api.steward.fi/health" }
   ],

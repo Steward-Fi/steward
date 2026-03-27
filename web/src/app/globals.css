@@ -43,6 +43,7 @@
   --text-3xl: 2rem;
   --text-4xl: 2.5rem;
   --text-hero: clamp(3.5rem, 8vw + 1rem, 8rem);
+  --text-hero-landing: clamp(3rem, 6vw + 0.5rem, 6rem);
   --text-hero-sm: clamp(2.5rem, 5vw + 1rem, 5rem);
   --font-display: "Avenir Next", "Segoe UI", system-ui, sans-serif;
   --font-body: "Instrument Sans", "Avenir Next", system-ui, sans-serif;
@@ -122,6 +123,12 @@
   .text-hero {
     font-size: var(--text-hero);
     line-height: 0.95;
+    letter-spacing: -0.03em;
+  }
+
+  .text-hero-landing {
+    font-size: var(--text-hero-landing);
+    line-height: 0.92;
     letter-spacing: -0.03em;
   }
 
