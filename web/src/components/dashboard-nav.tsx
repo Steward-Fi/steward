@@ -11,6 +11,9 @@ const links = [
   { href: "/dashboard/agents", label: "Agents" },
   { href: "/dashboard/approvals", label: "Approvals" },
   { href: "/dashboard/transactions", label: "Transactions" },
+  { href: "/dashboard/secrets", label: "Secrets" },
+  { href: "/dashboard/policies", label: "Policies" },
+  { href: "/dashboard/audit", label: "Audit" },
   { href: "/dashboard/settings", label: "Settings" },
 ];
 

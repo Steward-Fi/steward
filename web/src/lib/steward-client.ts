@@ -1,6 +1,120 @@
 // Inline SDK client for standalone deployment
 // Mirrors @stwd/sdk interface
 
+// ---- Secrets ----
+export interface SecretRecord {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  version: number;
+  routeCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SecretCreatePayload {
+  name: string;
+  value: string;
+  description?: string;
+}
+
+export interface SecretRotatePayload {
+  value: string;
+}
+
+// ---- Routes ----
+export interface RouteRecord {
+  id: string;
+  secretId: string;
+  hostPattern: string;
+  pathPattern?: string;
+  injectAs: "header" | "query" | "body";
+  headerName?: string;
+  queryParam?: string;
+  bodyPath?: string;
+  createdAt: string;
+}
+
+export interface RouteCreatePayload {
+  secretId: string;
+  hostPattern: string;
+  pathPattern?: string;
+  injectAs: "header" | "query" | "body";
+  headerName?: string;
+  queryParam?: string;
+  bodyPath?: string;
+}
+
+// ---- Policies ----
+export interface PolicyRecord {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  type: "api_access" | "spend_limit" | "rate_limit" | "transaction";
+  rules: Record<string, unknown>;
+  assignedAgents: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PolicyCreatePayload {
+  name: string;
+  description?: string;
+  type: PolicyRecord["type"];
+  rules: Record<string, unknown>;
+}
+
+export interface PolicySimulatePayload {
+  policyId: string;
+  agentId: string;
+  request: {
+    method?: string;
+    url?: string;
+    value?: string;
+    data?: string;
+  };
+}
+
+export interface PolicySimulateResult {
+  allowed: boolean;
+  reason?: string;
+  matchedRules: string[];
+}
+
+// ---- Audit ----
+export interface AuditEntry {
+  id: string;
+  tenantId: string;
+  agentId?: string;
+  agentName?: string;
+  action: string;
+  result: "allow" | "deny" | "error";
+  details?: Record<string, unknown>;
+  cost?: string;
+  timestamp: string;
+}
+
+export interface AuditQueryParams {
+  agentId?: string;
+  action?: string;
+  result?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface AuditSummary {
+  agentId: string;
+  agentName?: string;
+  totalActions: number;
+  totalCost: string;
+  allowCount: number;
+  denyCount: number;
+}
+
 export interface StewardClientConfig {
   baseUrl: string;
   apiKey?: string;
@@ -148,5 +262,113 @@ export class StewardClient {
 
   async reject(agentId: string, txId: string) {
     return this.request(`/vault/${agentId}/reject/${txId}`, { method: "POST" });
+  }
+
+  // ---- Secrets ----
+  async listSecrets(): Promise<SecretRecord[]> {
+    return this.request<SecretRecord[]>("/secrets");
+  }
+
+  async createSecret(payload: SecretCreatePayload): Promise<SecretRecord> {
+    return this.request<SecretRecord>("/secrets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getSecret(secretId: string): Promise<SecretRecord> {
+    return this.request<SecretRecord>(`/secrets/${secretId}`);
+  }
+
+  async rotateSecret(secretId: string, payload: SecretRotatePayload): Promise<SecretRecord> {
+    return this.request<SecretRecord>(`/secrets/${secretId}/rotate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteSecret(secretId: string): Promise<void> {
+    return this.request<void>(`/secrets/${secretId}`, { method: "DELETE" });
+  }
+
+  // ---- Routes ----
+  async listRoutes(secretId?: string): Promise<RouteRecord[]> {
+    const qs = secretId ? `?secretId=${encodeURIComponent(secretId)}` : "";
+    return this.request<RouteRecord[]>(`/routes${qs}`);
+  }
+
+  async createRoute(payload: RouteCreatePayload): Promise<RouteRecord> {
+    return this.request<RouteRecord>("/routes", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async updateRoute(routeId: string, payload: Partial<RouteCreatePayload>): Promise<RouteRecord> {
+    return this.request<RouteRecord>(`/routes/${routeId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deleteRoute(routeId: string): Promise<void> {
+    return this.request<void>(`/routes/${routeId}`, { method: "DELETE" });
+  }
+
+  // ---- Policies ----
+  async listPolicies(): Promise<PolicyRecord[]> {
+    return this.request<PolicyRecord[]>("/policies");
+  }
+
+  async createPolicy(payload: PolicyCreatePayload): Promise<PolicyRecord> {
+    return this.request<PolicyRecord>("/policies", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getPolicy(policyId: string): Promise<PolicyRecord> {
+    return this.request<PolicyRecord>(`/policies/${policyId}`);
+  }
+
+  async updatePolicy(policyId: string, payload: Partial<PolicyCreatePayload>): Promise<PolicyRecord> {
+    return this.request<PolicyRecord>(`/policies/${policyId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async deletePolicy(policyId: string): Promise<void> {
+    return this.request<void>(`/policies/${policyId}`, { method: "DELETE" });
+  }
+
+  async assignPolicy(policyId: string, agentIds: string[]): Promise<PolicyRecord> {
+    return this.request<PolicyRecord>(`/policies/${policyId}/assign`, {
+      method: "POST",
+      body: JSON.stringify({ agentIds }),
+    });
+  }
+
+  async simulatePolicy(payload: PolicySimulatePayload): Promise<PolicySimulateResult> {
+    return this.request<PolicySimulateResult>("/policies/simulate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  // ---- Audit ----
+  async getAuditLog(params?: AuditQueryParams): Promise<AuditEntry[]> {
+    const qs = params
+      ? "?" + new URLSearchParams(
+          Object.entries(params)
+            .filter(([, v]) => v !== undefined && v !== "")
+            .map(([k, v]) => [k, String(v)])
+        ).toString()
+      : "";
+    return this.request<AuditEntry[]>(`/audit${qs}`);
+  }
+
+  async getAuditSummary(): Promise<AuditSummary[]> {
+    return this.request<AuditSummary[]>("/audit/summary");
   }
 }
