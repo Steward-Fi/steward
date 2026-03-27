@@ -149,7 +149,7 @@ export const transferAction: Action = {
         };
       }
 
-      if (result.status === "pending_approval") {
+      if ("status" in result && result.status === "pending_approval") {
         return {
           success: true,
           text: `Transfer of ${params.amount} to ${params.to} requires manual approval. The wallet owner needs to approve this transaction.`,

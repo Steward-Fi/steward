@@ -99,7 +99,7 @@ export const signTransactionAction: Action = {
         };
       }
 
-      if (result.status === "pending_approval") {
+      if ("status" in result && result.status === "pending_approval") {
         return {
           success: true,
           text: "Transaction requires manual approval. Waiting for the wallet owner to approve.",
@@ -107,6 +107,14 @@ export const signTransactionAction: Action = {
             status: "pending_approval",
             policies: result.results as any,
           },
+        };
+      }
+
+      if ("signedTx" in result) {
+        return {
+          success: true,
+          text: `Transaction signed (not broadcast). Signed tx: ${result.signedTx}`,
+          data: { signedTx: result.signedTx },
         };
       }
 
