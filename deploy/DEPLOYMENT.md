@@ -357,3 +357,116 @@ Note: The root `docker-compose.yml` includes a local Postgres. For Neon, use the
 | milady-core-4 | 85.10.193.52 | ✅ Running | |
 | milady-core-5 | 136.243.47.243 | ✅ Running | |
 | milady-core-6 | 195.201.57.227 | ✅ Running | |
+
+---
+
+## Credential Routes — Proxy Injection Setup
+
+The proxy (`:8080`) requires at least one **credential route** per target API host before it can inject credentials. Without routes, all proxy requests return `403 No credential route configured`.
+
+### How it works
+
+1. Agent sends request to proxy: `Authorization: Bearer <agent-jwt>`
+2. Proxy resolves path alias (e.g. `/openai/...` → `api.openai.com`)
+3. Proxy looks up matching credential route for `(tenantId, host, path, method)`
+4. Proxy decrypts the referenced secret from the vault
+5. Credential is injected into the outbound request (header / query / body)
+6. Request is forwarded to real API; agent JWT is stripped
+
+### Named Aliases (built-in)
+
+| Alias | Target Host |
+|-------|------------|
+| `/openai/...` | `api.openai.com` |
+| `/anthropic/...` | `api.anthropic.com` |
+| `/birdeye/...` | `public-api.birdeye.so` |
+| `/coingecko/...` | `api.coingecko.com` |
+| `/helius/...` | `api.helius.xyz` |
+
+Direct proxy also works: `/proxy/<hostname>/<path>`
+
+### Creating a secret
+
+```bash
+curl -s -X POST \
+  -H "X-Steward-Tenant: <tenant-id>" \
+  -H "X-Steward-Key: <tenant-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"openai-prod","value":"sk-real-key-here","description":"OpenAI production key"}' \
+  localhost:3200/secrets
+# → {"ok":true,"data":{"id":"<secret-uuid>", ...}}
+```
+
+### Creating a credential route
+
+```bash
+# OpenAI — inject as Authorization: Bearer {value}
+curl -s -X POST \
+  -H "X-Steward-Tenant: <tenant-id>" \
+  -H "X-Steward-Key: <tenant-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "secretId": "<secret-uuid>",
+    "hostPattern": "api.openai.com",
+    "pathPattern": "/*",
+    "injectAs": "header",
+    "injectKey": "Authorization",
+    "injectFormat": "Bearer {value}",
+    "priority": 10
+  }' \
+  localhost:3200/secrets/routes
+
+# Anthropic — inject as x-api-key: {value}
+curl -s -X POST \
+  -H "X-Steward-Tenant: <tenant-id>" \
+  -H "X-Steward-Key: <tenant-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "secretId": "<secret-uuid>",
+    "hostPattern": "api.anthropic.com",
+    "pathPattern": "/*",
+    "injectAs": "header",
+    "injectKey": "x-api-key",
+    "injectFormat": "{value}",
+    "priority": 10
+  }' \
+  localhost:3200/secrets/routes
+```
+
+### Route fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `secretId` | ✅ | UUID of the secret to inject |
+| `hostPattern` | ✅ | Exact hostname or wildcard (e.g. `*.example.com`) |
+| `pathPattern` | — | Path prefix with wildcard, default `/*` |
+| `method` | — | HTTP method filter, default `*` (all) |
+| `injectAs` | ✅ | `header`, `query`, or `body` |
+| `injectKey` | ✅ | Header name or query param key |
+| `injectFormat` | — | Template with `{value}` placeholder, default `{value}` |
+| `priority` | — | Higher wins when multiple routes match, default `0` |
+| `enabled` | — | `true`/`false`, default `true` |
+
+### Testing the proxy flow
+
+```bash
+# 1. Get an agent JWT
+TOKEN=$(curl -s -X POST \
+  -H "X-Steward-Tenant: <tenant-id>" \
+  -H "X-Steward-Key: <tenant-api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{"agentId":"<agent-uuid>","scopes":["api:proxy"],"expiresIn":"1h"}' \
+  localhost:3200/agents/<agent-uuid>/token | jq -r '.data.token')
+
+# 2. Make a proxied request (credential injected automatically)
+curl -H "Authorization: Bearer $TOKEN" localhost:8080/openai/v1/models
+
+# Expected with real key: 200 + model list
+# Expected with dummy key: 401 invalid_api_key (proxy flow still worked!)
+```
+
+### Known issue fixed: GET /secrets/routes returns 500
+
+**Root cause:** In Hono, `GET /:id` was registered before `GET /routes`, causing the literal path segment "routes" to be parsed as a secret UUID — which fails PostgreSQL UUID validation and throws a 500.
+
+**Fix:** Reordered route registration in `packages/api/src/routes/secrets.ts` so all `/routes/*` handlers are declared before `/:id` handlers. **Committed in `29e8a13`.**
