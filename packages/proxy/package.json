@@ -11,6 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
+    "drizzle-orm": "^0.44.5",
     "hono": "^4",
     "jose": "^6",
     "@stwd/db": "workspace:*",
