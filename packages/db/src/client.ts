@@ -32,19 +32,51 @@ export function createDb(connectionString = getDatabaseUrl()) {
   return { client, db };
 }
 
+// ─── PGLite support ───────────────────────────────────────────────────────────
+// When running in embedded/local mode, the PGLite adapter sets these overrides
+// so all existing code that calls getDb()/closeDb() works unchanged.
+
+let pgliteOverride: {
+  db: ReturnType<typeof createDb>["db"];
+  close: () => Promise<void>;
+} | undefined;
+
+/**
+ * Set PGLite as the backing database. Called by the embedded entry point
+ * BEFORE any route code runs.
+ */
+export function setPGLiteOverride(
+  db: ReturnType<typeof createDb>["db"],
+  close: () => Promise<void>,
+) {
+  pgliteOverride = { db, close };
+}
+
+// ─── Global singleton ─────────────────────────────────────────────────────────
+
 let globalDb: ReturnType<typeof createDb> | undefined;
 
 export function getDb() {
+  if (pgliteOverride) return pgliteOverride.db;
   globalDb ??= createDb();
   return globalDb.db;
 }
 
 export function getSql() {
+  if (pgliteOverride) {
+    throw new Error("getSql() is not available in PGLite mode — use getDb() instead");
+  }
   globalDb ??= createDb();
   return globalDb.client;
 }
 
 export async function closeDb() {
+  if (pgliteOverride) {
+    await pgliteOverride.close();
+    pgliteOverride = undefined;
+    return;
+  }
+
   if (!globalDb) {
     return;
   }

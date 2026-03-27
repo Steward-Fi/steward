@@ -11,7 +11,8 @@
     "build": "turbo build",
     "lint": "turbo lint",
     "test": "turbo test",
-    "seed": "bun packages/seed/src/index.ts"
+    "seed": "bun packages/seed/src/index.ts",
+    "start:local": "bun run packages/api/src/embedded.ts"
   },
   "packageManager": "bun@1.3.9",
   "devDependencies": {

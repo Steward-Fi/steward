@@ -15,8 +15,18 @@ export {
   getDatabaseUrl,
   getDb,
   getSql,
+  setPGLiteOverride,
 } from "./client";
 export { runMigrations } from "./migrate";
+export {
+  closePGLiteDb,
+  createPGLiteDb,
+  getDataDir,
+  getPGLiteClient,
+  getPGLiteDb,
+  shouldUsePGLite,
+} from "./pglite";
+export type { PGLiteDb } from "./pglite";
 export * from "./schema";
 export * from "./schema-auth";
 

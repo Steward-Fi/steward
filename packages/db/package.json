@@ -11,6 +11,7 @@
     "generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.4.2",
     "@stwd/shared": "workspace:*",
     "drizzle-orm": "^0.44.5",
     "postgres": "^3.4.7"
