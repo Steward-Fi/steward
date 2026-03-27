@@ -19,6 +19,7 @@
     "typescript": "^5.8.0"
   },
   "dependencies": {
+    "ioredis": "^5.10.1",
     "jose": "^6.2.1",
     "siwe": "^3.0.0"
   }
