@@ -102,8 +102,18 @@ export class StewardClient {
     return this.request<AgentIdentity[]>("/agents");
   }
 
-  async getBalance(agentId: string) {
-    return this.request<{ balance: string; formatted?: string }>(`/agents/${agentId}/balance`);
+  async getBalance(agentId: string, chainId?: number) {
+    const qs = chainId ? `?chainId=${chainId}` : "";
+    return this.request<{
+      agentId: string;
+      walletAddress: string;
+      balances: {
+        native: string;
+        nativeFormatted: string;
+        chainId: number;
+        symbol: string;
+      };
+    }>(`/agents/${agentId}/balance${qs}`);
   }
 
   async getPolicies(agentId: string): Promise<PolicyRule[]> {

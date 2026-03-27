@@ -22,8 +22,14 @@ import type {
 } from "@/lib/steward-client";
 
 interface BalanceInfo {
-  balance: string;
-  formatted?: string;
+  agentId: string;
+  walletAddress: string;
+  balances: {
+    native: string;
+    nativeFormatted: string;
+    chainId: number;
+    symbol: string;
+  };
 }
 
 // All 5 canonical policy types with sensible display defaults
@@ -47,6 +53,10 @@ const ALL_POLICY_TYPES: { type: string; defaultConfig: Record<string, unknown> }
   {
     type: "rate-limit",
     defaultConfig: { maxTxPerHour: 0, maxTxPerDay: 0 },
+  },
+  {
+    type: "allowed-chains",
+    defaultConfig: { chainIds: [] },
   },
 ];
 
@@ -237,7 +247,7 @@ export default function AgentDetailPage() {
           {
             label: "Balance",
             value: balance
-              ? `${formatWei(balance.balance || "0")} ETH`
+              ? `${balance.balances.nativeFormatted || formatWei(balance.balances.native || "0")} ${balance.balances.symbol || "ETH"}`
               : "—",
           },
           { label: "Transactions", value: transactions.length },
@@ -468,6 +478,11 @@ function formatPolicyConfig(
       return `${config.maxTxPerHour || 0}/hour · ${
         config.maxTxPerDay || 0
       }/day`;
+    case "allowed-chains": {
+      const chainIds = config.chainIds as unknown;
+      const count = Array.isArray(chainIds) ? chainIds.length : 0;
+      return `${count} chain${count !== 1 ? "s" : ""} allowed`;
+    }
     default:
       return JSON.stringify(config);
   }

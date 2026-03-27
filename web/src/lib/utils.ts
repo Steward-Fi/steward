@@ -45,6 +45,7 @@ export function policyTypeLabel(type: string): string {
     "auto-approve-threshold": "Auto-Approve Threshold",
     "time-window": "Time Window",
     "rate-limit": "Rate Limit",
+    "allowed-chains": "Allowed Chains",
   };
   return map[type] || type;
 }
