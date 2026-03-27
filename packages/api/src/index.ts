@@ -9,8 +9,11 @@ import { generateNonce, SiweMessage } from "siwe";
 import { generateApiKey, hashApiKey, validateApiKey } from "@stwd/auth";
 import {
   agents,
+  agentWallets,
   approvalQueue,
   closeDb,
+  encryptedChainKeys,
+  encryptedKeys,
   getDb,
   policies,
   tenants,
@@ -937,6 +940,45 @@ app.get("/agents/:agentId", async (c) => {
   }
 
   return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: agent });
+});
+
+// ─── Agent Deletion ───────────────────────────────────────────────────────
+app.delete("/agents/:agentId", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent deletion requires tenant-level authentication" }, 403);
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  try {
+    await db.transaction(async (tx) => {
+      // Cascade delete in dependency order
+      await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
+      await tx.delete(transactions).where(eq(transactions.agentId, agentId));
+      await tx.delete(policies).where(eq(policies.agentId, agentId));
+      await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
+      await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+      await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
+      await tx.delete(agents).where(
+        and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)),
+      );
+    });
+
+    return c.json<ApiResponse<{ deleted: string }>>({
+      ok: true,
+      data: { deleted: agentId },
+    });
+  } catch (e: unknown) {
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Failed to delete agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
 });
 
 app.get("/agents/:agentId/balance", async (c) => {
