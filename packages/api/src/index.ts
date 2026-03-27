@@ -29,6 +29,7 @@ import {
   type ApiResponse,
 } from "./services/context";
 import { closeDb } from "@stwd/db";
+import { initRedis, shutdownRedis } from "./middleware/redis";
 
 // ─── App setup ────────────────────────────────────────────────────────────────
 
@@ -152,6 +153,14 @@ app.route("/tenants", tenantRoutes);
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 
+// ─── Redis initialization (non-blocking) ─────────────────────────────────────
+
+initRedis().catch((err) => {
+  console.warn("[steward] Redis initialization failed, continuing without Redis:", err);
+});
+
+// ─── Server ───────────────────────────────────────────────────────────────────
+
 const BIND_HOST = process.env.STEWARD_BIND_HOST || "127.0.0.1";
 
 const server = Bun.serve({
@@ -172,9 +181,12 @@ const shutdown = async (signal: string) => {
   requestLog.clear();
 
   try {
-    await closeDb();
+    await Promise.all([
+      closeDb(),
+      shutdownRedis(),
+    ]);
   } catch (error) {
-    console.error("Failed to close database connection cleanly", error);
+    console.error("Failed to close connections cleanly", error);
   }
 
   process.exit(0);

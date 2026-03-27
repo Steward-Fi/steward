@@ -15,6 +15,7 @@
     "hono": "^4",
     "jose": "^6",
     "@stwd/db": "workspace:*",
+    "@stwd/redis": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/shared": "workspace:*"
   },

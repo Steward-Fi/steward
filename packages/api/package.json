@@ -13,6 +13,7 @@
   "dependencies": {
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
+    "@stwd/redis": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
     "@stwd/shared": "workspace:*",
     "@stwd/vault": "workspace:*",

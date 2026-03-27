@@ -18,6 +18,7 @@ import { PROXY_PORT } from "./config";
 import { authMiddleware } from "./middleware/auth";
 import { handleProxy } from "./handlers/proxy";
 import { getAliasNames } from "./handlers/alias";
+import { initProxyRedis, shutdownProxyRedis } from "./middleware/redis-enforcement";
 
 // ─── Ensure DB is initialised ────────────────────────────────────────────────
 
@@ -54,6 +55,23 @@ app.use("*", authMiddleware);
 app.all("*", handleProxy);
 
 // ─── Start ───────────────────────────────────────────────────────────────────
+
+// ─── Redis initialization (non-blocking) ─────────────────────────────────────
+
+initProxyRedis().catch((err) => {
+  console.warn("[proxy] Redis initialization failed, continuing without Redis:", err);
+});
+
+// ─── Graceful shutdown ────────────────────────────────────────────────────────
+
+const shutdownProxy = async (signal: string) => {
+  console.log(`[proxy] Received ${signal}, shutting down...`);
+  await shutdownProxyRedis();
+  process.exit(0);
+};
+
+process.on("SIGINT", () => void shutdownProxy("SIGINT"));
+process.on("SIGTERM", () => void shutdownProxy("SIGTERM"));
 
 console.log(`🔀 Steward Proxy Gateway starting on :${PROXY_PORT}`);
 console.log(`   Aliases: ${getAliasNames().join(", ")}`);

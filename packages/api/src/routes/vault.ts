@@ -38,6 +38,7 @@ import {
   type SignRequest,
   type SignTypedDataRequest,
 } from "../services/context";
+import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
 
 export const vaultRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -76,6 +77,27 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
   const signRequest: SignRequest = { ...request, tenantId, agentId, chainId: resolvedChainId };
   const policySet = await getPolicySet(tenantId, agentId);
+
+  // ── Redis rate-limit check (before policy evaluation) ──────────────────────
+  const rateLimitResult = await enforceRateLimit(agentId, policySet);
+  if (!rateLimitResult.allowed) {
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) {
+        c.header(key, value);
+      }
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+      429,
+    );
+  }
+  // Set rate limit headers on success too
+  if (rateLimitResult.headers) {
+    for (const [key, value] of Object.entries(rateLimitResult.headers)) {
+      c.header(key, value);
+    }
+  }
+
   const stats = await getTransactionStats(agentId);
 
   const evaluation = policyEngine.evaluate(policySet, {
@@ -162,6 +184,11 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         signedAt: new Date(),
       })
       .where(eq(transactions.id, txId));
+
+    // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
+    recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
+      console.error("[vault] Failed to record spend:", err),
+    );
 
     dispatchWebhook(tenantId, agentId, "tx_signed", { txId, txHash: shouldBroadcast ? result : undefined });
 
@@ -441,6 +468,21 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   };
 
   const policySet = await getPolicySet(tenantId, agentId);
+
+  // ── Redis rate-limit check (typed data) ────────────────────────────────────
+  const rlResult = await enforceRateLimit(agentId, policySet);
+  if (!rlResult.allowed) {
+    if (rlResult.headers) {
+      for (const [key, value] of Object.entries(rlResult.headers)) {
+        c.header(key, value);
+      }
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: rlResult.reason || "Rate limit exceeded" },
+      429,
+    );
+  }
+
   const stats = await getTransactionStats(agentId);
 
   const evaluation = policyEngine.evaluate(policySet, {
@@ -600,6 +642,21 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   const signRequest = { agentId, tenantId, to: toAddress, value: txValue, chainId };
 
   const policySet = await getPolicySet(tenantId, agentId);
+
+  // ── Redis rate-limit check (Solana) ────────────────────────────────────────
+  const solRlResult = await enforceRateLimit(agentId, policySet);
+  if (!solRlResult.allowed) {
+    if (solRlResult.headers) {
+      for (const [key, value] of Object.entries(solRlResult.headers)) {
+        c.header(key, value);
+      }
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: solRlResult.reason || "Rate limit exceeded" },
+      429,
+    );
+  }
+
   const stats = await getTransactionStats(agentId);
 
   const evaluation = policyEngine.evaluate(policySet, {
@@ -689,6 +746,11 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       policyResults: evaluation.results,
       signedAt: new Date(),
     });
+
+    // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
+    recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
+      console.error("[vault] Failed to record Solana spend:", err),
+    );
 
     dispatchWebhook(tenantId, agentId, "tx_signed", { txId, txHash: result.broadcast ? result.signature : undefined });
 

@@ -19,6 +19,11 @@ import { KeyStore } from "@stwd/vault";
 import { resolveTarget } from "./alias";
 import { matchHost, matchPath } from "./matching";
 import { recordAudit } from "../middleware/audit";
+import {
+  checkProxyRateLimit,
+  trackProxySpend,
+  isProxyRedisAvailable,
+} from "../middleware/redis-enforcement";
 
 // ─── Keystore singleton ──────────────────────────────────────────────────────
 
@@ -186,6 +191,21 @@ export async function handleProxy(c: Context): Promise<Response> {
     );
   }
 
+  // 2.5. Redis rate-limit check (per agent + host)
+  const rlResult = await checkProxyRateLimit(agentId, target.host);
+  if (!rlResult.allowed) {
+    c.header("Retry-After", String(Math.ceil(rlResult.resetMs / 1000)));
+    c.header("X-RateLimit-Remaining", "0");
+    c.header("X-RateLimit-Reset", String(Math.ceil(rlResult.resetMs / 1000)));
+    return c.json(
+      {
+        ok: false,
+        error: `Rate limit exceeded for ${target.host}. Retry after ${Math.ceil(rlResult.resetMs / 1000)}s`,
+      },
+      429,
+    );
+  }
+
   // 3. Decrypt credential
   let credential: string;
   try {
@@ -275,6 +295,49 @@ export async function handleProxy(c: Context): Promise<Response> {
     latencyMs,
   });
 
+  // 7.5. Spend tracking for LLM API responses (fire-and-forget)
+  //
+  // For known LLM hosts, we need to read the response body to extract token
+  // usage for cost estimation. We buffer the response body, parse it, track
+  // the cost, and still return the body to the client.
+  //
+  // For non-LLM hosts or streaming responses, we pass through without buffering.
+  let responseBody: ReadableStream<Uint8Array> | ArrayBuffer | null = response.body;
+  const contentType = response.headers.get("content-type") || "";
+  const isJsonResponse = contentType.includes("application/json");
+  const isLLMHost = isProxyRedisAvailable() && (
+    target.host === "api.openai.com" ||
+    target.host === "api.anthropic.com"
+  );
+
+  if (isLLMHost && isJsonResponse && response.status >= 200 && response.status < 300 && response.body) {
+    try {
+      const bodyBuffer = await response.arrayBuffer();
+      const bodyText = new TextDecoder().decode(bodyBuffer);
+      const parsedResponse = JSON.parse(bodyText);
+
+      // Try to get the request body for model detection
+      // We clone what we can from the original request
+      let requestBodyParsed: any = null;
+      try {
+        // The request body may have been consumed, so we extract model from response
+        requestBodyParsed = { model: parsedResponse?.model };
+      } catch {
+        // Ignore — cost estimator handles missing request body
+      }
+
+      // Track spend asynchronously
+      trackProxySpend(agentId, tenantId, target.host, requestBodyParsed, parsedResponse).catch((err) =>
+        console.error("[proxy] Spend tracking failed:", err),
+      );
+
+      responseBody = bodyBuffer;
+    } catch {
+      // If body parsing fails, just pass through the original response body
+      // This can happen with streaming responses
+    }
+  }
+
   // 8. Build response — stream body through without buffering
   const responseHeaders = new Headers();
   const skipResponseHeaders = new Set([
@@ -292,7 +355,7 @@ export async function handleProxy(c: Context): Promise<Response> {
     }
   }
 
-  return new Response(response.body, {
+  return new Response(responseBody, {
     status: response.status,
     statusText: response.statusText,
     headers: responseHeaders,
