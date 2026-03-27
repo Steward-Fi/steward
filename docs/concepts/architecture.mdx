@@ -23,89 +23,138 @@ Steward is the single chokepoint between an AI agent and the outside world. Ever
 
 ## High-Level Flow
 
-```
-┌──────────────────────────────────────────────────┐
-│              Agent Container                      │
-│                                                    │
-│  Agent sees ONLY:                                  │
-│    STEWARD_PROXY_URL=http://steward-proxy:8080    │
-│    STEWARD_AGENT_TOKEN=stwd_jwt_...               │
-│                                                    │
-│  No API keys. No private keys. No DB passwords.   │
-└────────────────────┬─────────────────────────────┘
-                     │ HTTP (internal network)
-┌────────────────────▼─────────────────────────────┐
-│                  STEWARD                          │
-│                                                    │
-│  ┌───────────┐  ┌──────────────┐  ┌───────────┐  │
-│  │ API Proxy │→ │ Policy Engine│→ │Secret Vault│  │
-│  │ Gateway   │  │              │  │            │  │
-│  │           │  │ - allowed?   │  │ Decrypt    │  │
-│  │ Route by  │  │ - budget?    │  │ Inject     │  │
-│  │ host/path │  │ - rate ok?   │  │ Forward    │  │
-│  └───────────┘  └──────────────┘  └───────────┘  │
-│                                                    │
-│  ┌────────────────────────────────────────────┐   │
-│  │ Wallet Vault: Encrypted keys, multi-chain  │   │
-│  │ signing, same policy engine ↑              │   │
-│  └────────────────────────────────────────────┘   │
-│                                                    │
-│  ┌────────────────────────────────────────────┐   │
-│  │ Audit Log: Every request, every decision   │   │
-│  └────────────────────────────────────────────┘   │
-└────────────────────┬─────────────────────────────┘
-                     │ HTTPS (real credentials)
-           ┌─────────▼──────────┐
-           │  External APIs     │
-           │  OpenAI, DEXs, etc │
-           └────────────────────┘
+```mermaid
+flowchart TB
+    subgraph agent["Agent Container"]
+        A["Agent Runtime"]
+        ENV["STEWARD_PROXY_URL\nSTEWARD_AGENT_TOKEN\n\nNo API keys. No private keys."]
+    end
+
+    A -->|"HTTP (internal)"| PROXY
+
+    subgraph steward["STEWARD"]
+        PROXY["API Proxy Gateway"]
+        POLICY["Policy Engine\n─────\nAllowed?\nBudget?\nRate OK?"]
+        SECRET["Secret Vault\n─────\nDecrypt\nInject\nForward"]
+        WALLET["Wallet Vault\n─────\nEncrypted keys\nMulti-chain signing"]
+        AUDIT["Audit Log\n─────\nEvery request\nEvery decision"]
+
+        PROXY --> POLICY
+        POLICY --> SECRET
+        POLICY --> WALLET
+        PROXY --> AUDIT
+    end
+
+    SECRET -->|"HTTPS (real credentials)"| EXT["External APIs\nOpenAI, DEXs, etc."]
+    WALLET -->|"Signed transactions"| CHAIN["Blockchains\nBase, Ethereum, Solana"]
+
+    style agent fill:#1a1816,stroke:#2a2722,color:#e8e5e0
+    style steward fill:#141210,stroke:#D4740A,color:#e8e5e0
+    style PROXY fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
+    style POLICY fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
+    style SECRET fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
+    style WALLET fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
+    style AUDIT fill:#1c1a17,stroke:#2a2722,color:#9c9788
+    style EXT fill:#0b0a09,stroke:#6b6560,color:#9c9788
+    style CHAIN fill:#0b0a09,stroke:#6b6560,color:#9c9788
+    style A fill:#1c1a17,stroke:#2a2722,color:#e8e5e0
+    style ENV fill:none,stroke:none,color:#6b6560
 ```
 
 ## Request Flow: API Proxy
 
-When an agent makes an API call (e.g., to OpenAI), here's what happens:
+When an agent makes an API call (e.g., to OpenAI):
 
-1. **Agent sends request** to Steward proxy with its JWT
-2. **Proxy authenticates** the agent via JWT → extracts agent ID, tenant, scopes
-3. **Proxy resolves route** — matches host/path to a credential set
-4. **Policy engine evaluates** — API access, spend limit, rate limit all must pass
-5. **Secret vault decrypts** the credential (held in memory only for injection)
-6. **Proxy forwards** the request with the real credential injected
-7. **Response flows back** — cost is logged, spend tracking updated
-8. **Audit log entry** created with full request context
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Proxy as API Proxy
+    participant Policy as Policy Engine
+    participant Vault as Secret Vault
+    participant API as External API
+
+    Agent->>Proxy: Request + JWT
+    Proxy->>Proxy: Authenticate JWT → agent ID, tenant, scopes
+    Proxy->>Proxy: Resolve route (host/path → credential set)
+    Proxy->>Policy: Evaluate policies
+    Policy-->>Proxy: ✓ API access, spend limit, rate limit pass
+    Proxy->>Vault: Decrypt credential
+    Vault-->>Proxy: Real API key (in-memory only)
+    Proxy->>API: Forward request with real credential
+    API-->>Proxy: Response
+    Proxy->>Proxy: Log cost, update spend tracking
+    Proxy-->>Agent: Response (credentials stripped)
+```
 
 ## Request Flow: Wallet Signing
 
 When an agent needs to sign a transaction:
 
-1. **Agent sends signing request** via SDK or API
-2. **Policy engine evaluates** — spending limits, address whitelist, rate limits, time windows
-3. **Auto-approve or queue** — below threshold → auto-sign; above → approval queue
-4. **Vault decrypts** the private key, signs the transaction, optionally broadcasts
-5. **Transaction recorded** in the database with full policy evaluation results
-6. **Webhook dispatched** to notify tenant of the signing event
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant API as Steward API
+    participant Policy as Policy Engine
+    participant Vault as Wallet Vault
+    participant Chain as Blockchain
+
+    Agent->>API: Sign request via SDK
+    API->>Policy: Evaluate signing policies
+
+    alt Below auto-approve threshold
+        Policy-->>API: ✓ Auto-approve
+        API->>Vault: Decrypt private key
+        Vault->>Vault: Sign transaction
+        Vault-->>API: Signed TX
+
+        opt broadcast=true
+            API->>Chain: Broadcast transaction
+            Chain-->>API: TX hash
+        end
+
+        API->>API: Record TX + policy results
+        API-->>Agent: Signed TX / TX hash
+    else Above threshold
+        Policy-->>API: ⏳ Queue for approval
+        API->>API: Record pending approval state
+        Note over API: Webhook → tenant admin
+        API-->>Agent: Pending approval
+        Note over API,Vault: Signing happens later after approval
+    end
+```
 
 ## Deployment Topology
 
-Steward runs on the same host as agent containers, minimizing latency:
+```mermaid
+flowchart TB
+    subgraph host["Host Server"]
+        subgraph services["Steward Services"]
+            API["steward-api\n:3200"]
+            PRX["steward-proxy\n:8080"]
+        end
 
-```
-┌──────────────────────────────────────────────┐
-│                Host Server                    │
-│                                                │
-│  ┌──────────┐  ┌──────────┐                   │
-│  │steward-  │  │steward-  │                   │
-│  │api :3200 │  │proxy:8080│                   │
-│  └──────────┘  └──────────┘                   │
-│                                                │
-│  ┌────────┐ ┌────────┐ ┌────────┐            │
-│  │agent-1 │ │agent-2 │ │agent-3 │            │
-│  │        │ │        │ │        │  (Docker)  │
-│  │Only    │ │Only    │ │Only    │            │
-│  │reaches │ │reaches │ │reaches │            │
-│  │proxy   │ │proxy   │ │proxy   │            │
-│  └────────┘ └────────┘ └────────┘            │
-└──────────────────────────────────────────────┘
+        subgraph agents["Agent Containers (Docker)"]
+            A1["agent-1\n↓\nOnly reaches proxy"]
+            A2["agent-2\n↓\nOnly reaches proxy"]
+            A3["agent-3\n↓\nOnly reaches proxy"]
+        end
+
+        A1 -->|internal| PRX
+        A2 -->|internal| PRX
+        A3 -->|internal| PRX
+    end
+
+    PRX -->|HTTPS| EXT["External Services"]
+
+    style host fill:#0b0a09,stroke:#2a2722,color:#e8e5e0
+    style services fill:#141210,stroke:#D4740A,color:#e8e5e0
+    style agents fill:#141210,stroke:#2a2722,color:#9c9788
+    style API fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
+    style PRX fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
+    style A1 fill:#1c1a17,stroke:#2a2722,color:#9c9788
+    style A2 fill:#1c1a17,stroke:#2a2722,color:#9c9788
+    style A3 fill:#1c1a17,stroke:#2a2722,color:#9c9788
+    style EXT fill:#0b0a09,stroke:#6b6560,color:#6b6560
 ```
 
 <Note>
@@ -115,6 +164,35 @@ Steward runs on the same host as agent containers, minimizing latency:
 ## Multi-Tenant Isolation
 
 Steward is multi-tenant by design:
+
+```mermaid
+flowchart LR
+    subgraph T1["Tenant: acme-corp"]
+        A1["Agent A"] --> P1["Policies A"]
+        A2["Agent B"] --> P1
+        S1["Secrets (AES-256)"]
+        W1["Wallets"]
+    end
+
+    subgraph T2["Tenant: degen-dao"]
+        A3["Agent C"] --> P2["Policies C"]
+        S2["Secrets (AES-256)"]
+        W2["Wallets"]
+    end
+
+    MK["Master Key"] --> TK1["Tenant Key 1"]
+    MK --> TK2["Tenant Key 2"]
+    TK1 --> S1
+    TK1 --> W1
+    TK2 --> S2
+    TK2 --> W2
+
+    style T1 fill:#141210,stroke:#D4740A,color:#e8e5e0
+    style T2 fill:#141210,stroke:#D4740A,color:#e8e5e0
+    style MK fill:#1c1a17,stroke:#F5A623,color:#F5A623
+    style TK1 fill:#1c1a17,stroke:#D4740A,color:#D4740A
+    style TK2 fill:#1c1a17,stroke:#D4740A,color:#D4740A
+```
 
 - **Tenants** are isolated at the database level — each tenant's agents, secrets, and policies are scoped
 - **Agents** authenticate with JWTs scoped to their tenant and agent ID

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 36" fill="none">
+  <defs>
+    <linearGradient id="star" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#D4740A"/>
+      <stop offset="100%" stop-color="#B35A00"/>
+    </linearGradient>
+  </defs>
+  <!-- Compass star mark -->
+  <g transform="translate(0,0)">
+    <path d="M18,0 L20.15,12.8 L26.75,9.2 L23.2,15.85 L36,18 L23.2,20.15 L26.75,26.75 L20.15,23.2 L18,36 L15.85,23.2 L9.25,26.75 L12.8,20.15 L0,18 L12.8,15.85 L9.25,9.2 L15.85,12.8Z" fill="url(#star)"/>
+    <circle cx="18" cy="18" r="3.2" fill="#FAFAF8"/>
+    <circle cx="18" cy="18" r="1.4" fill="url(#star)"/>
+  </g>
+  <!-- Wordmark -->
+  <text x="46" y="24.5" font-family="'Inter', 'Instrument Sans', -apple-system, sans-serif" font-size="19" font-weight="600" letter-spacing="0.5" fill="#1a1816">Steward</text>
+</svg>

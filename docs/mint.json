@@ -36,7 +36,8 @@
   ],
   "anchors": [
     { "name": "npm", "icon": "npm", "url": "https://www.npmjs.com/package/@stwd/sdk" },
-    { "name": "Community", "icon": "discord", "url": "https://discord.gg/steward" }
+    { "name": "GitHub", "icon": "github", "url": "https://github.com/Steward-Fi/steward" },
+    { "name": "Twitter", "icon": "x-twitter", "url": "https://x.com/steward_fi" }
   ],
   "navigation": [
     {
