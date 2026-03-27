@@ -31,7 +31,7 @@ export function Nav() {
           Docs
         </a>
         <a
-          href="https://github.com/0xSolace/steward"
+          href="https://github.com/Steward-Fi/steward"
           target="_blank"
           rel="noopener noreferrer"
           className="text-sm text-text-secondary hover:text-text transition-colors"

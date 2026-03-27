@@ -82,7 +82,7 @@ function Hero() {
                 Launch Dashboard
               </a>
               <a
-                href="https://github.com/0xSolace/steward"
+                href="https://github.com/Steward-Fi/steward"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="px-6 py-3 border border-border text-text-secondary text-sm hover:text-text hover:border-text-tertiary transition-colors"
@@ -106,19 +106,22 @@ function Hero() {
                 typeEffect
                 code={`import { StewardClient } from "@stwd/sdk"
 
-const steward = new StewardClient({
-  baseUrl: process.env.STEWARD_PROXY_URL,
-  bearerToken: process.env.STEWARD_AGENT_TOKEN,
+const agent = new StewardClient({
+  proxy: process.env.STEWARD_PROXY_URL,
+  token: process.env.STEWARD_AGENT_TOKEN,
 })
 
-// Agent never sees the private key
-const tx = await steward.signTransaction(agentId, {
-  to: "0xDEX...", value: "1e18",
+// Sign a swap — no private key in memory
+await agent.sign({
+  to: "0x1inch...",
+  value: parseEther("0.5"),
+  data: swapCalldata,
 })
 
-// Agent never sees the API key
-const openai = new OpenAI({
-  baseURL: \`\${steward.baseUrl}/openai/v1\`,
+// Call OpenAI — no API key in env
+const res = await agent.proxy("openai", {
+  path: "/v1/chat/completions",
+  body: { model: "gpt-4o", messages },
 })`}
               />
             </div>
@@ -524,7 +527,7 @@ function OpenSourceSection() {
         <Reveal delay={0.3}>
           <div className="mt-10 flex items-center justify-center gap-5">
             <a
-              href="https://github.com/0xSolace/steward"
+              href="https://github.com/Steward-Fi/steward"
               target="_blank"
               rel="noopener noreferrer"
               className="px-6 py-3 border border-border text-text-secondary text-sm hover:text-text hover:border-text-tertiary transition-colors"
@@ -570,7 +573,7 @@ function Footer() {
             Docs
           </a>
           <a
-            href="https://github.com/0xSolace/steward"
+            href="https://github.com/Steward-Fi/steward"
             target="_blank"
             rel="noopener noreferrer"
             className="hover:text-text transition-colors"
