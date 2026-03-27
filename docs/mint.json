@@ -2,8 +2,9 @@
   "$schema": "https://mintlify.com/schema.json",
   "name": "Steward",
   "logo": {
-    "dark": "/logo-dark.svg",
-    "light": "/logo-light.svg"
+    "dark": "/favicon.svg",
+    "light": "/favicon.svg",
+    "href": "/"
   },
   "favicon": "/favicon.svg",
   "colors": {
@@ -24,25 +25,49 @@
   },
   "css": "custom.css",
   "topbarLinks": [
-    { "name": "API Status", "url": "https://api.steward.fi/health" }
+    {
+      "name": "API Status",
+      "url": "https://api.steward.fi/health"
+    }
   ],
   "topbarCtaButton": {
     "name": "GitHub",
     "url": "https://github.com/Steward-Fi/steward"
   },
   "tabs": [
-    { "name": "API Reference", "url": "api-reference" },
-    { "name": "SDK", "url": "sdk" }
+    {
+      "name": "API Reference",
+      "url": "api-reference"
+    },
+    {
+      "name": "SDK",
+      "url": "sdk"
+    }
   ],
   "anchors": [
-    { "name": "npm", "icon": "npm", "url": "https://www.npmjs.com/package/@stwd/sdk" },
-    { "name": "GitHub", "icon": "github", "url": "https://github.com/Steward-Fi/steward" },
-    { "name": "Twitter", "icon": "x-twitter", "url": "https://x.com/steward_fi" }
+    {
+      "name": "npm",
+      "icon": "npm",
+      "url": "https://www.npmjs.com/package/@stwd/sdk"
+    },
+    {
+      "name": "GitHub",
+      "icon": "github",
+      "url": "https://github.com/Steward-Fi/steward"
+    },
+    {
+      "name": "Twitter",
+      "icon": "x-twitter",
+      "url": "https://x.com/steward_fi"
+    }
   ],
   "navigation": [
     {
       "group": "Get Started",
-      "pages": ["introduction", "quickstart"]
+      "pages": [
+        "introduction",
+        "quickstart"
+      ]
     },
     {
       "group": "Concepts",
