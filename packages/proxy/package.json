@@ -1,0 +1,24 @@
+{
+  "name": "@stwd/proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "bun run src/index.ts",
+    "start": "bun run src/index.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "hono": "^4",
+    "jose": "^6",
+    "@stwd/db": "workspace:*",
+    "@stwd/vault": "workspace:*",
+    "@stwd/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}
