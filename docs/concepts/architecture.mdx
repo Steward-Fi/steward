@@ -26,18 +26,16 @@ Steward is the single chokepoint between an AI agent and the outside world. Ever
 ```mermaid
 flowchart TB
     subgraph agent["Agent Container"]
-        A["Agent Runtime"]
-        ENV["STEWARD_PROXY_URL\nSTEWARD_AGENT_TOKEN\n\nNo API keys. No private keys."]
+        A["Agent runtime"]
+        ENV["Proxy URL + agent token"]
     end
 
-    A -->|"HTTP (internal)"| PROXY
-
-    subgraph steward["STEWARD"]
-        PROXY["API Proxy Gateway"]
-        POLICY["Policy Engine\n─────\nAllowed?\nBudget?\nRate OK?"]
-        SECRET["Secret Vault\n─────\nDecrypt\nInject\nForward"]
-        WALLET["Wallet Vault\n─────\nEncrypted keys\nMulti-chain signing"]
-        AUDIT["Audit Log\n─────\nEvery request\nEvery decision"]
+    subgraph steward["Steward"]
+        PROXY["API proxy gateway"]
+        POLICY["Policy engine"]
+        SECRET["Secret vault"]
+        WALLET["Wallet vault"]
+        AUDIT["Audit log"]
 
         PROXY --> POLICY
         POLICY --> SECRET
@@ -45,20 +43,10 @@ flowchart TB
         PROXY --> AUDIT
     end
 
-    SECRET -->|"HTTPS (real credentials)"| EXT["External APIs\nOpenAI, DEXs, etc."]
-    WALLET -->|"Signed transactions"| CHAIN["Blockchains\nBase, Ethereum, Solana"]
+    A -->|"HTTP (internal)"| PROXY
 
-    style agent fill:#1a1816,stroke:#2a2722,color:#e8e5e0
-    style steward fill:#141210,stroke:#D4740A,color:#e8e5e0
-    style PROXY fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
-    style POLICY fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
-    style SECRET fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
-    style WALLET fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
-    style AUDIT fill:#1c1a17,stroke:#2a2722,color:#9c9788
-    style EXT fill:#0b0a09,stroke:#6b6560,color:#9c9788
-    style CHAIN fill:#0b0a09,stroke:#6b6560,color:#9c9788
-    style A fill:#1c1a17,stroke:#2a2722,color:#e8e5e0
-    style ENV fill:none,stroke:none,color:#6b6560
+    SECRET -->|"HTTPS (real credentials)"| EXT["External APIs"]
+    WALLET -->|"Signed transactions"| CHAIN["Blockchains"]
 ```
 
 ## Request Flow: API Proxy
@@ -127,34 +115,24 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-    subgraph host["Host Server"]
-        subgraph services["Steward Services"]
-            API["steward-api\n:3200"]
-            PRX["steward-proxy\n:8080"]
+    subgraph host["Host server"]
+        subgraph services["Steward services"]
+            API["steward-api (:3200)"]
+            PRX["steward-proxy (:8080)"]
         end
 
-        subgraph agents["Agent Containers (Docker)"]
-            A1["agent-1\n↓\nOnly reaches proxy"]
-            A2["agent-2\n↓\nOnly reaches proxy"]
-            A3["agent-3\n↓\nOnly reaches proxy"]
+        subgraph agents["Agent containers"]
+            A1["agent-1"]
+            A2["agent-2"]
+            A3["agent-3"]
         end
 
-        A1 -->|internal| PRX
-        A2 -->|internal| PRX
-        A3 -->|internal| PRX
+        A1 -->|"internal"| PRX
+        A2 -->|"internal"| PRX
+        A3 -->|"internal"| PRX
     end
 
-    PRX -->|HTTPS| EXT["External Services"]
-
-    style host fill:#0b0a09,stroke:#2a2722,color:#e8e5e0
-    style services fill:#141210,stroke:#D4740A,color:#e8e5e0
-    style agents fill:#141210,stroke:#2a2722,color:#9c9788
-    style API fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
-    style PRX fill:#1c1a17,stroke:#D4740A,color:#e8e5e0
-    style A1 fill:#1c1a17,stroke:#2a2722,color:#9c9788
-    style A2 fill:#1c1a17,stroke:#2a2722,color:#9c9788
-    style A3 fill:#1c1a17,stroke:#2a2722,color:#9c9788
-    style EXT fill:#0b0a09,stroke:#6b6560,color:#6b6560
+    PRX -->|"HTTPS"| EXT["External services"]
 ```
 
 <Note>
@@ -170,28 +148,22 @@ flowchart LR
     subgraph T1["Tenant: acme-corp"]
         A1["Agent A"] --> P1["Policies A"]
         A2["Agent B"] --> P1
-        S1["Secrets (AES-256)"]
+        S1["Secrets"]
         W1["Wallets"]
     end
 
     subgraph T2["Tenant: degen-dao"]
         A3["Agent C"] --> P2["Policies C"]
-        S2["Secrets (AES-256)"]
+        S2["Secrets"]
         W2["Wallets"]
     end
 
-    MK["Master Key"] --> TK1["Tenant Key 1"]
-    MK --> TK2["Tenant Key 2"]
+    MK["Master key"] --> TK1["Tenant key 1"]
+    MK --> TK2["Tenant key 2"]
     TK1 --> S1
     TK1 --> W1
     TK2 --> S2
     TK2 --> W2
-
-    style T1 fill:#141210,stroke:#D4740A,color:#e8e5e0
-    style T2 fill:#141210,stroke:#D4740A,color:#e8e5e0
-    style MK fill:#1c1a17,stroke:#F5A623,color:#F5A623
-    style TK1 fill:#1c1a17,stroke:#D4740A,color:#D4740A
-    style TK2 fill:#1c1a17,stroke:#D4740A,color:#D4740A
 ```
 
 - **Tenants** are isolated at the database level — each tenant's agents, secrets, and policies are scoped
