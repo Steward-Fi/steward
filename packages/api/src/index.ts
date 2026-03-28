@@ -11,13 +11,17 @@ import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 
 import { correlationId } from "./middleware/correlation";
+import { approvalRoutes } from "./routes/approvals";
 import { authRoutes } from "./routes/auth";
 import { agentRoutes } from "./routes/agents";
 import { platformRoutes } from "./routes/platform";
 import { tenantRoutes } from "./routes/tenants";
+import { tenantConfigRoutes } from "./routes/tenant-config";
+import { dashboardRoutes } from "./routes/dashboard";
 import { userRoutes } from "./routes/user";
 import { secretsRoutes } from "./routes/secrets";
 import { vaultRoutes } from "./routes/vault";
+import { webhookRoutes } from "./routes/webhooks";
 
 import {
   API_VERSION,
@@ -129,6 +133,17 @@ app.use("/tenants/:id", (c, next) =>
 app.use("/tenants/:id/webhook", (c, next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
 );
+app.use("/tenants/:id/config", (c, next) =>
+  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
+);
+app.use("/tenants/:id/config/*", (c, next) =>
+  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
+);
+app.use("/dashboard/*", (c, next) => tenantAuth(c, next));
+app.use("/webhooks", (c, next) => tenantAuth(c, next));
+app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
+app.use("/approvals", (c, next) => tenantAuth(c, next));
+app.use("/approvals/*", (c, next) => tenantAuth(c, next));
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
@@ -150,6 +165,10 @@ app.route("/agents", agentRoutes);
 app.route("/vault", vaultRoutes);
 app.route("/secrets", secretsRoutes);
 app.route("/tenants", tenantRoutes);
+app.route("/tenants", tenantConfigRoutes);
+app.route("/dashboard", dashboardRoutes);
+app.route("/webhooks", webhookRoutes);
+app.route("/approvals", approvalRoutes);
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 

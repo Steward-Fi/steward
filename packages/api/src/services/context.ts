@@ -18,6 +18,7 @@ import {
   getDb,
   policies,
   tenants,
+  tenantConfigs as tenantConfigsTable,
   toPolicyRule,
   toSignRequest,
   toTxRecord,
@@ -403,14 +404,18 @@ export {
   agents,
   agentWallets,
   approvalQueue,
+  autoApprovalRules,
   encryptedChainKeys,
   encryptedKeys,
   policies,
   tenants,
+  tenantConfigs,
   toPolicyRule,
   toSignRequest,
   toTxRecord,
   transactions,
+  webhookConfigs,
+  webhookDeliveries,
 } from "@stwd/db";
 
 export type {

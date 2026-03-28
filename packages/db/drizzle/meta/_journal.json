@@ -29,6 +29,13 @@
       "when": 1774581555934,
       "tag": "0003_safe_black_queen",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1774681200000,
+      "tag": "0007_webhook_configs_auto_approval",
+      "breakpoints": true
     }
   ]
 }

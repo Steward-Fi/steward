@@ -16,12 +16,51 @@ export interface TenantConfig {
   defaultPolicies?: PolicyRule[];
 }
 
+export type WebhookEventType =
+  | "tx.pending"
+  | "tx.approved"
+  | "tx.denied"
+  | "tx.signed"
+  | "spend.threshold"
+  | "policy.violation"
+  // Legacy event types (kept for backwards compat)
+  | "approval_required"
+  | "tx_signed"
+  | "tx_confirmed"
+  | "tx_failed"
+  | "tx_rejected";
+
 export interface WebhookEvent {
-  type: "approval_required" | "tx_signed" | "tx_confirmed" | "tx_failed" | "tx_rejected";
+  type: WebhookEventType;
   tenantId: string;
   agentId: string;
   data: Record<string, unknown>;
   timestamp: Date;
+}
+
+export interface WebhookConfigRecord {
+  id: string;
+  tenantId: string;
+  url: string;
+  secret: string;
+  events: WebhookEventType[];
+  enabled: boolean;
+  maxRetries: number;
+  retryBackoffMs: number;
+  description?: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface AutoApprovalRuleRecord {
+  id: string;
+  tenantId: string;
+  maxAmountWei: string;
+  autoDenyAfterHours: number | null;
+  escalateAboveWei: string | null;
+  enabled: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 // ─── Chain Family ───
@@ -290,6 +329,140 @@ export interface AgentBalance {
     chainId: number;
     symbol: string;          // e.g. "ETH", "BNB"
   };
+}
+
+// ─── Control Plane Types ───
+
+export type PolicyExposure = "visible" | "hidden" | "enforced";
+
+export interface PolicyExposureConfig {
+  "spending-limit"?: PolicyExposure;
+  "approved-addresses"?: PolicyExposure;
+  "auto-approve-threshold"?: PolicyExposure;
+  "time-window"?: PolicyExposure;
+  "rate-limit"?: PolicyExposure;
+  "allowed-chains"?: PolicyExposure;
+}
+
+export interface PolicyTemplate {
+  id: string;
+  name: string;
+  description: string;
+  icon: string;
+  policies: PolicyRule[];
+  customizableFields: CustomizableField[];
+}
+
+export interface CustomizableField {
+  path: string;
+  label: string;
+  description: string;
+  type: "currency" | "number" | "toggle" | "address-list" | "chain-select";
+  default: unknown;
+  min?: unknown;
+  max?: unknown;
+}
+
+export interface SecretRoutePreset {
+  id: string;
+  name: string;
+  hostPattern: string;
+  pathPattern: string;
+  injectAs: "header" | "query" | "bearer";
+  injectKey: string;
+  injectFormat: string;
+  provisioning: "platform" | "user";
+  platformSecretId?: string;
+}
+
+export interface ApprovalConfig {
+  notificationChannels?: ApprovalNotificationChannel[];
+  autoExpireSeconds?: number;
+  approvers?: ApproverConfig;
+  approvalWebhookUrl?: string;
+  webhookCallbackEnabled?: boolean;
+}
+
+export interface ApprovalNotificationChannel {
+  type: "webhook" | "email" | "in-app";
+  config: Record<string, string>;
+}
+
+export interface ApproverConfig {
+  mode: "owner" | "tenant-admin" | "list";
+  allowedApprovers?: string[];
+}
+
+export interface TenantFeatureFlags {
+  showFundingQR?: boolean;
+  showTransactionHistory?: boolean;
+  showSpendDashboard?: boolean;
+  showPolicyControls?: boolean;
+  showApprovalQueue?: boolean;
+  showSecretManager?: boolean;
+  enableSolana?: boolean;
+  showChainSelector?: boolean;
+  allowAddressExport?: boolean;
+}
+
+export interface TenantTheme {
+  primaryColor?: string;
+  accentColor?: string;
+  backgroundColor?: string;
+  surfaceColor?: string;
+  textColor?: string;
+  mutedColor?: string;
+  successColor?: string;
+  errorColor?: string;
+  warningColor?: string;
+  borderRadius?: number;
+  fontFamily?: string;
+  colorScheme?: "light" | "dark" | "system";
+}
+
+export interface TenantControlPlaneConfig {
+  tenantId: string;
+  displayName?: string;
+  policyExposure: PolicyExposureConfig;
+  policyTemplates: PolicyTemplate[];
+  secretRoutePresets: SecretRoutePreset[];
+  approvalConfig: ApprovalConfig;
+  featureFlags: TenantFeatureFlags;
+  theme?: TenantTheme;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+export const DEFAULT_FEATURE_FLAGS: TenantFeatureFlags = {
+  showFundingQR: true,
+  showTransactionHistory: true,
+  showSpendDashboard: true,
+  showPolicyControls: true,
+  showApprovalQueue: true,
+  showSecretManager: false,
+  enableSolana: true,
+  showChainSelector: false,
+  allowAddressExport: true,
+};
+
+/** Aggregated dashboard response for a single agent */
+export interface AgentDashboardResponse {
+  agent: AgentIdentity;
+  balances: {
+    evm?: { native: string; nativeFormatted: string; chainId: number; symbol: string };
+    solana?: { native: string; nativeFormatted: string; chainId: number; symbol: string };
+  };
+  spend: {
+    today: string;
+    thisWeek: string;
+    thisMonth: string;
+    todayFormatted: string;
+    thisWeekFormatted: string;
+    thisMonthFormatted: string;
+  };
+  policies: PolicyRule[];
+  pendingApprovals: number;
+  recentTransactions: TxRecord[];
 }
 
 // ─── Constants ───

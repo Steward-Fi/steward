@@ -13,7 +13,15 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
-import type { PolicyResult } from "@stwd/shared";
+import type {
+  PolicyResult,
+  PolicyExposureConfig,
+  PolicyTemplate,
+  SecretRoutePreset,
+  ApprovalConfig,
+  TenantFeatureFlags,
+  TenantTheme,
+} from "@stwd/shared";
 
 export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana"]);
 
@@ -55,6 +63,35 @@ export const tenants = pgTable("tenants", {
   name: varchar("name", { length: 255 }).notNull(),
   apiKeyHash: text("api_key_hash").notNull(),
   ownerAddress: varchar("owner_address", { length: 42 }),
+  ...timestamps,
+});
+
+export const tenantConfigs = pgTable("tenant_configs", {
+  tenantId: varchar("tenant_id", { length: 64 })
+    .primaryKey()
+    .references(() => tenants.id, { onDelete: "cascade" }),
+  displayName: varchar("display_name", { length: 255 }),
+  policyExposure: jsonb("policy_exposure")
+    .$type<PolicyExposureConfig>()
+    .notNull()
+    .default({}),
+  policyTemplates: jsonb("policy_templates")
+    .$type<PolicyTemplate[]>()
+    .notNull()
+    .default([]),
+  secretRoutePresets: jsonb("secret_route_presets")
+    .$type<SecretRoutePreset[]>()
+    .notNull()
+    .default([]),
+  approvalConfig: jsonb("approval_config")
+    .$type<ApprovalConfig>()
+    .notNull()
+    .default({}),
+  featureFlags: jsonb("feature_flags")
+    .$type<TenantFeatureFlags>()
+    .notNull()
+    .default({}),
+  theme: jsonb("theme").$type<TenantTheme>(),
   ...timestamps,
 });
 
@@ -201,6 +238,52 @@ export const approvalQueue = pgTable(
   }),
 );
 
+// ─── Webhook configuration table ──────────────────────────────────────────────
+
+export const webhookConfigs = pgTable(
+  "webhook_configs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    url: text("url").notNull(),
+    secret: text("secret").notNull(),
+    events: jsonb("events").$type<string[]>().notNull().default([]),
+    enabled: boolean("enabled").notNull().default(true),
+    maxRetries: integer("max_retries").notNull().default(5),
+    retryBackoffMs: integer("retry_backoff_ms").notNull().default(60000),
+    description: text("description"),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: index("webhook_configs_tenant_idx").on(table.tenantId),
+  }),
+);
+
+// ─── Auto-approval rules table ────────────────────────────────────────────────
+
+export const autoApprovalRules = pgTable(
+  "auto_approval_rules",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    /** Transactions at or below this amount (in wei) are auto-approved */
+    maxAmountWei: text("max_amount_wei").notNull().default("0"),
+    /** Auto-deny pending approvals older than N hours (null = never) */
+    autoDenyAfterHours: integer("auto_deny_after_hours"),
+    /** Transactions above this amount trigger escalation webhook (null = disabled) */
+    escalateAboveWei: text("escalate_above_wei"),
+    enabled: boolean("enabled").notNull().default(true),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: uniqueIndex("auto_approval_rules_tenant_idx").on(table.tenantId),
+  }),
+);
+
 // ─── Webhook delivery status enum ─────────────────────────────────────────────
 
 export const webhookDeliveryStatusEnum = pgEnum("webhook_delivery_status", [
@@ -236,8 +319,38 @@ export const webhookDeliveries = pgTable(
   }),
 );
 
-export const tenantRelations = relations(tenants, ({ many }) => ({
+export const webhookConfigRelations = relations(webhookConfigs, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [webhookConfigs.tenantId],
+    references: [tenants.id],
+  }),
+}));
+
+export const autoApprovalRuleRelations = relations(autoApprovalRules, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [autoApprovalRules.tenantId],
+    references: [tenants.id],
+  }),
+}));
+
+export const tenantRelations = relations(tenants, ({ many, one }) => ({
   agents: many(agents),
+  config: one(tenantConfigs, {
+    fields: [tenants.id],
+    references: [tenantConfigs.tenantId],
+  }),
+  webhookConfigs: many(webhookConfigs),
+  autoApprovalRule: one(autoApprovalRules, {
+    fields: [tenants.id],
+    references: [autoApprovalRules.tenantId],
+  }),
+}));
+
+export const tenantConfigRelations = relations(tenantConfigs, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [tenantConfigs.tenantId],
+    references: [tenants.id],
+  }),
 }));
 
 export const agentRelations = relations(agents, ({ one, many }) => ({
@@ -308,6 +421,8 @@ export const encryptedChainKeyRelations = relations(encryptedChainKeys, ({ one }
 
 export type Tenant = typeof tenants.$inferSelect;
 export type NewTenant = typeof tenants.$inferInsert;
+export type TenantConfigRow = typeof tenantConfigs.$inferSelect;
+export type NewTenantConfigRow = typeof tenantConfigs.$inferInsert;
 export type Agent = typeof agents.$inferSelect;
 export type NewAgent = typeof agents.$inferInsert;
 export type EncryptedKey = typeof encryptedKeys.$inferSelect;
@@ -324,6 +439,10 @@ export type EncryptedChainKey = typeof encryptedChainKeys.$inferSelect;
 export type NewEncryptedChainKey = typeof encryptedChainKeys.$inferInsert;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 export type NewWebhookDelivery = typeof webhookDeliveries.$inferInsert;
+export type WebhookConfig = typeof webhookConfigs.$inferSelect;
+export type NewWebhookConfig = typeof webhookConfigs.$inferInsert;
+export type AutoApprovalRule = typeof autoApprovalRules.$inferSelect;
+export type NewAutoApprovalRule = typeof autoApprovalRules.$inferInsert;
 
 // ─── Secret Vault tables ──────────────────────────────────────────────────────
 
