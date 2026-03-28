@@ -409,7 +409,6 @@ export {
   encryptedKeys,
   policies,
   tenants,
-  tenantConfigs,
   toPolicyRule,
   toSignRequest,
   toTxRecord,
