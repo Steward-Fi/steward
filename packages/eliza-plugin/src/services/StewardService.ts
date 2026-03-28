@@ -9,6 +9,9 @@ import {
   type GetBalanceResult,
   type GetHistoryResult,
   type SignMessageResult,
+  type AgentDashboardResponse,
+  type ApprovalQueueEntry,
+  type ApprovalStats,
 } from "@stwd/sdk";
 import type { StewardPluginConfig } from "../types.js";
 
@@ -148,6 +151,21 @@ export class StewardService extends Service {
   async getHistory(): Promise<GetHistoryResult> {
     this.assertConnected();
     return this.client!.getHistory(this.pluginConfig!.agentId);
+  }
+
+  async getDashboard(): Promise<AgentDashboardResponse> {
+    this.assertConnected();
+    return this.client!.getAgentDashboard(this.pluginConfig!.agentId);
+  }
+
+  async listApprovals(opts?: { status?: string; limit?: number; offset?: number }): Promise<ApprovalQueueEntry[]> {
+    this.assertConnected();
+    return this.client!.listApprovals(opts);
+  }
+
+  async getApprovalStats(): Promise<ApprovalStats> {
+    this.assertConnected();
+    return this.client!.getApprovalStats();
   }
 
   // ── Internal ────────────────────────────────────────────────────

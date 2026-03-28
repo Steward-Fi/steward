@@ -1,0 +1,202 @@
+---
+title: "Local Mode (PGLite)"
+description: "Run Steward locally without any external database using the built-in PGLite backend."
+---
+
+# Local Mode with PGLite
+
+Steward includes a PGLite backend — full PostgreSQL running in-process via WebAssembly. This means you can run a complete Steward instance with zero external dependencies: no Postgres server, no Redis, no Docker.
+
+This is ideal for:
+- **Local development** — spin up Steward in seconds, no database setup
+- **Desktop apps** — Steward as an embedded sidecar (e.g., Electrobun apps)
+- **Testing** — in-memory mode for fast, isolated tests
+- **Offline use** — full functionality without network connectivity
+
+---
+
+## Starting Local Mode
+
+```bash
+# Persistent mode — data saved to ~/.steward/data/
+bun run packages/api/src/embedded.ts
+
+# In-memory mode — resets on restart
+STEWARD_PGLITE_MEMORY=true bun run packages/api/src/embedded.ts
+
+# Custom data directory
+STEWARD_PGLITE_PATH=/path/to/data bun run packages/api/src/embedded.ts
+```
+
+On first start you'll see:
+
+```
+╔══════════════════════════════════════════╗
+║     Steward — Local / Desktop Mode       ║
+╚══════════════════════════════════════════╝
+Data directory: /home/user/.steward/data
+
+[embedded] Initializing PGLite database...
+[pglite] Applied migration: 0001_initial_schema.sql
+[pglite] Applied migration: 0002_policies.sql
+[pglite] Database ready.
+[embedded] Starting API server...
+Steward API listening on http://127.0.0.1:3200
+```
+
+Subsequent starts skip migrations that have already been applied.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STEWARD_DB_MODE` | auto-detect | Set to `pglite` to force PGLite even if `DATABASE_URL` is set |
+| `STEWARD_PGLITE_PATH` | `~/.steward/data` | Directory for persistent storage |
+| `STEWARD_PGLITE_MEMORY` | `false` | Set to `true` for in-memory (no persistence) |
+| `STEWARD_MASTER_PASSWORD` | auto-generated | Vault encryption key — auto-generated in local mode |
+| `PORT` | `3200` | API port |
+| `STEWARD_BIND_HOST` | `127.0.0.1` | Bind host — `127.0.0.1` in local mode for security |
+
+<Note>
+  In local mode, `STEWARD_MASTER_PASSWORD` is auto-generated if not provided. This is fine for development but means vault data encrypted with the generated key cannot be decrypted after restart unless you set a fixed password.
+</Note>
+
+---
+
+## Auto-Detection
+
+You can also use the regular API entry point — Steward auto-selects PGLite if:
+- `STEWARD_DB_MODE=pglite` is set, OR
+- `DATABASE_URL` is not set
+
+```bash
+# These are equivalent for local mode
+bun run packages/api/src/embedded.ts
+
+# or
+STEWARD_DB_MODE=pglite bun run packages/api/src/index.ts
+```
+
+The embedded entry point is preferred because it initializes PGLite before importing the API, ensuring the database is ready before the first request.
+
+---
+
+## Using with the SDK
+
+Local mode exposes the same REST API — point the SDK at `localhost:3200`:
+
+```typescript
+import { StewardClient } from "@stwd/sdk";
+
+const client = new StewardClient({
+  baseUrl: "http://localhost:3200",
+  apiKey: "local-dev-key",
+  tenantId: "my-app",
+});
+
+// Create a local tenant first
+await fetch("http://localhost:3200/platform/tenants", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+    "X-Steward-Platform-Key": process.env.STEWARD_PLATFORM_KEY!,
+  },
+  body: JSON.stringify({ id: "my-app", name: "My App" }),
+});
+
+// Then use the SDK normally
+const agent = await client.createWallet("agent-1", "Local Agent");
+console.log(agent.walletAddress);
+```
+
+---
+
+## Using with React Components
+
+```tsx
+import { StewardProvider, WalletOverview } from "@stwd/react";
+import { StewardClient } from "@stwd/sdk";
+import "@stwd/react/styles.css";
+
+const client = new StewardClient({
+  baseUrl: "http://localhost:3200",
+  apiKey: "local-dev-key",
+  tenantId: "my-app",
+});
+
+function App() {
+  return (
+    <StewardProvider client={client} agentId="agent-1">
+      <WalletOverview showQR />
+    </StewardProvider>
+  );
+}
+```
+
+---
+
+## Data Persistence
+
+PGLite persists data as files in the data directory:
+
+```
+~/.steward/data/
+├── PG_VERSION
+├── base/
+│   └── ... (Postgres data files)
+└── __steward_migrations   (migration tracking table)
+```
+
+To reset local data:
+```bash
+rm -rf ~/.steward/data
+```
+
+To back up local data:
+```bash
+cp -r ~/.steward/data ~/.steward/data.bak
+```
+
+---
+
+## In-Memory Mode for Tests
+
+For unit/integration tests, in-memory mode is fastest:
+
+```typescript
+// test-setup.ts
+process.env.STEWARD_PGLITE_MEMORY = "true";
+process.env.STEWARD_DB_MODE = "pglite";
+process.env.STEWARD_MASTER_PASSWORD = "test-password-32-characters-long!";
+
+// Import starts a fresh in-memory database every time
+const { app } = await import("@stwd/api");
+```
+
+Each test run starts with a clean database — no cleanup needed.
+
+---
+
+## Limitations vs Production Mode
+
+| Feature | Local (PGLite) | Production (Postgres) |
+|---------|---------------|----------------------|
+| Full SQL support | ✅ | ✅ |
+| Migrations | ✅ | ✅ |
+| Concurrent writes | Single-writer | Multi-writer |
+| Redis rate limits | ❌ (in-memory fallback) | ✅ |
+| Webhook delivery | ✅ | ✅ |
+| Performance | ~10ms queries | ~1ms queries |
+| Scale | Single process | Horizontal |
+
+PGLite is fully functional for development, testing, and light-usage desktop scenarios. For production multi-tenant deployments, use a real Postgres instance (Neon works great).
+
+---
+
+## Related
+
+- [Self-Hosting Guide](/guides/self-hosting) — Production deployment with Postgres
+- [Docker Guide](/guides/docker) — Containerized deployment
+- [SDK Reference](/sdk/installation) — Using the TypeScript SDK

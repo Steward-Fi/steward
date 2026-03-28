@@ -8,6 +8,8 @@ import type { Plugin } from "@elizaos/core";
 import { StewardService } from "./services/StewardService.js";
 import { signTransactionAction } from "./actions/sign-transaction.js";
 import { transferAction } from "./actions/transfer.js";
+import { checkSpendAction } from "./actions/check-spend.js";
+import { listApprovalsAction } from "./actions/list-approvals.js";
 import { walletStatusProvider } from "./providers/wallet-status.js";
 import { balanceProvider } from "./providers/balance.js";
 import { approvalRequiredEvaluator } from "./evaluators/approval.js";
@@ -19,7 +21,7 @@ export const stewardPlugin: Plugin = {
 
   services: [StewardService],
 
-  actions: [signTransactionAction, transferAction],
+  actions: [signTransactionAction, transferAction, checkSpendAction, listApprovalsAction],
 
   providers: [walletStatusProvider, balanceProvider],
 
@@ -33,6 +35,8 @@ export { StewardService } from "./services/StewardService.js";
 export type { StewardPluginConfig } from "./types.js";
 export { signTransactionAction } from "./actions/sign-transaction.js";
 export { transferAction } from "./actions/transfer.js";
+export { checkSpendAction } from "./actions/check-spend.js";
+export { listApprovalsAction } from "./actions/list-approvals.js";
 export { walletStatusProvider } from "./providers/wallet-status.js";
 export { balanceProvider } from "./providers/balance.js";
 export { approvalRequiredEvaluator } from "./evaluators/approval.js";

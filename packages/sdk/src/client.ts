@@ -10,6 +10,13 @@ import type {
   SignTypedDataRequest,
   TypedDataDomain,
   TypedDataField,
+  TenantControlPlaneConfig,
+  AgentDashboardResponse,
+  ApprovalQueueEntry,
+  ApprovalStats,
+  AutoApprovalRule,
+  WebhookConfig,
+  WebhookDelivery,
 } from "./types.ts";
 
 export interface BatchAgentSpec {
@@ -326,6 +333,174 @@ export class StewardClient {
       throw new StewardApiError(response.error, response.status, response.data);
     }
 
+    return response.data;
+  }
+
+  // ─── Tenant Config ─────────────────────────────────────────────
+
+  /** Get the control-plane configuration for a tenant. */
+  async getTenantConfig(tenantId: string): Promise<TenantControlPlaneConfig> {
+    const response = await this.request<TenantControlPlaneConfig, StewardErrorResponse>(
+      `/tenants/${encodeURIComponent(tenantId)}/config`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Update the control-plane configuration for a tenant. */
+  async updateTenantConfig(tenantId: string, config: Partial<TenantControlPlaneConfig>): Promise<TenantControlPlaneConfig> {
+    const response = await this.request<TenantControlPlaneConfig, StewardErrorResponse>(
+      `/tenants/${encodeURIComponent(tenantId)}/config`,
+      { method: "PUT", body: JSON.stringify(config) },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  // ─── Agent Dashboard ──────────────────────────────────────────
+
+  /** Get the aggregated dashboard for an agent (balance, spend, policies, recent tx, pending approvals). */
+  async getAgentDashboard(agentId: string): Promise<AgentDashboardResponse> {
+    const response = await this.request<AgentDashboardResponse, StewardErrorResponse>(
+      `/dashboard/${encodeURIComponent(agentId)}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  // ─── Approvals ────────────────────────────────────────────────
+
+  /** List approval queue entries for the tenant. */
+  async listApprovals(opts?: { status?: string; limit?: number; offset?: number }): Promise<ApprovalQueueEntry[]> {
+    const params = new URLSearchParams();
+    if (opts?.status) params.set("status", opts.status);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.offset) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    const response = await this.request<ApprovalQueueEntry[], StewardErrorResponse>(
+      `/approvals${qs ? `?${qs}` : ""}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Approve a pending transaction. */
+  async approveTransaction(txId: string, opts?: { comment?: string; approvedBy?: string }): Promise<ApprovalQueueEntry> {
+    const response = await this.request<ApprovalQueueEntry, StewardErrorResponse>(
+      `/approvals/${encodeURIComponent(txId)}/approve`,
+      { method: "POST", body: JSON.stringify(opts ?? {}) },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Deny a pending transaction. */
+  async denyTransaction(txId: string, reason: string, deniedBy?: string): Promise<ApprovalQueueEntry> {
+    const response = await this.request<ApprovalQueueEntry, StewardErrorResponse>(
+      `/approvals/${encodeURIComponent(txId)}/deny`,
+      { method: "POST", body: JSON.stringify({ reason, deniedBy }) },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Get approval statistics for the tenant. */
+  async getApprovalStats(): Promise<ApprovalStats> {
+    const response = await this.request<ApprovalStats, StewardErrorResponse>("/approvals/stats");
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  // ─── Auto-Approval Rules ─────────────────────────────────────
+
+  /** Get auto-approval rules for the tenant. */
+  async getAutoApprovalRules(): Promise<AutoApprovalRule | null> {
+    const response = await this.request<AutoApprovalRule | null, StewardErrorResponse>("/approvals/rules");
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Create or update auto-approval rules. */
+  async updateAutoApprovalRules(rules: Partial<AutoApprovalRule>): Promise<AutoApprovalRule> {
+    const response = await this.request<AutoApprovalRule, StewardErrorResponse>("/approvals/rules", {
+      method: "PUT",
+      body: JSON.stringify(rules),
+    });
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  // ─── Webhooks ─────────────────────────────────────────────────
+
+  /** List webhook configurations for the tenant. */
+  async listWebhooks(): Promise<WebhookConfig[]> {
+    const response = await this.request<WebhookConfig[], StewardErrorResponse>("/webhooks");
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Register a new webhook. */
+  async createWebhook(webhook: {
+    url: string;
+    events?: string[];
+    description?: string;
+    maxRetries?: number;
+    retryBackoffMs?: number;
+  }): Promise<WebhookConfig> {
+    const response = await this.request<WebhookConfig, StewardErrorResponse>("/webhooks", {
+      method: "POST",
+      body: JSON.stringify(webhook),
+    });
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Update an existing webhook. */
+  async updateWebhook(webhookId: string, updates: Partial<{
+    url: string;
+    events: string[];
+    enabled: boolean;
+    description: string;
+    maxRetries: number;
+    retryBackoffMs: number;
+  }>): Promise<WebhookConfig> {
+    const response = await this.request<WebhookConfig, StewardErrorResponse>(
+      `/webhooks/${encodeURIComponent(webhookId)}`,
+      { method: "PUT", body: JSON.stringify(updates) },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Delete a webhook. */
+  async deleteWebhook(webhookId: string): Promise<void> {
+    const response = await this.request<{ deleted: boolean }, StewardErrorResponse>(
+      `/webhooks/${encodeURIComponent(webhookId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+  }
+
+  /** Get delivery history for a webhook. */
+  async getWebhookDeliveries(webhookId: string, opts?: { limit?: number; offset?: number }): Promise<WebhookDelivery[]> {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.offset) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    const response = await this.request<WebhookDelivery[], StewardErrorResponse>(
+      `/webhooks/${encodeURIComponent(webhookId)}/deliveries${qs ? `?${qs}` : ""}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Retry a failed webhook delivery. */
+  async retryDelivery(deliveryId: string): Promise<WebhookDelivery> {
+    const response = await this.request<WebhookDelivery, StewardErrorResponse>(
+      `/webhooks/deliveries/${encodeURIComponent(deliveryId)}/retry`,
+      { method: "POST" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 

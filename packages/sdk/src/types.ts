@@ -153,6 +153,121 @@ export interface TxRecord {
   confirmedAt?: Date;
 }
 
+// ─── Tenant Config Types ──────────────────────────────────────
+
+export interface TenantControlPlaneConfig {
+  tenantId: string;
+  displayName?: string;
+  policyExposure?: Record<string, unknown>;
+  policyTemplates?: Array<{ id: string; name: string; policies: PolicyRule[] }>;
+  secretRoutePresets?: Array<{ id: string; name: string; path: string }>;
+  approvalConfig?: Record<string, unknown>;
+  featureFlags?: Record<string, boolean>;
+  theme?: Record<string, unknown>;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ─── Dashboard Types ──────────────────────────────────────────
+
+export interface AgentDashboardResponse {
+  agent: AgentIdentity;
+  balances: {
+    evm?: {
+      native: string;
+      nativeFormatted: string;
+      chainId: number;
+      symbol: string;
+    };
+  };
+  spend: {
+    today: string;
+    thisWeek: string;
+    thisMonth: string;
+    todayFormatted: string;
+    thisWeekFormatted: string;
+    thisMonthFormatted: string;
+  };
+  policies: PolicyRule[];
+  pendingApprovals: number;
+  recentTransactions: TxRecord[];
+}
+
+// ─── Approval Types ───────────────────────────────────────────
+
+export interface ApprovalQueueEntry {
+  id: string;
+  txId: string;
+  agentId: string;
+  agentName?: string;
+  status: "pending" | "approved" | "rejected";
+  requestedAt: Date;
+  resolvedAt?: Date;
+  resolvedBy?: string;
+  toAddress?: string;
+  value?: string;
+  chainId?: number;
+  txStatus?: TxStatus;
+  comment?: string;
+  reason?: string;
+}
+
+export interface ApprovalStats {
+  pending: number;
+  approved: number;
+  rejected: number;
+  total: number;
+  avgWaitSeconds: number;
+}
+
+export interface AutoApprovalRule {
+  id?: string;
+  tenantId: string;
+  maxAmountWei: string;
+  autoDenyAfterHours?: number | null;
+  escalateAboveWei?: string | null;
+  enabled: boolean;
+  createdAt?: Date;
+  updatedAt?: Date;
+}
+
+// ─── Webhook Types ────────────────────────────────────────────
+
+export type WebhookEventType =
+  | "tx.pending"
+  | "tx.approved"
+  | "tx.denied"
+  | "tx.signed"
+  | "spend.threshold"
+  | "policy.violation";
+
+export interface WebhookConfig {
+  id: string;
+  tenantId: string;
+  url: string;
+  secret?: string;
+  events: WebhookEventType[];
+  enabled: boolean;
+  maxRetries: number;
+  retryBackoffMs: number;
+  description?: string;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface WebhookDelivery {
+  id: string;
+  tenantId: string;
+  url: string;
+  event: string;
+  payload: Record<string, unknown>;
+  status: "pending" | "delivered" | "failed";
+  attempts: number;
+  nextRetryAt?: Date;
+  lastError?: string;
+  createdAt: Date;
+}
+
 export const SUPPORTED_CHAINS = {
   base: 8453,
   baseSepolia: 84532,
