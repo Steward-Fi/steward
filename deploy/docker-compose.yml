@@ -1,13 +1,10 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Steward – Docker Compose for Milady node deployment
 #
-# Usage:
-#   docker compose -f deploy/docker-compose.yml up -d
-#
-# Modes:
-#   1. Managed Postgres (default) — spins up a local PG container
-#   2. External DB (Neon, etc.)   — set DATABASE_URL in .env, comment out
-#      the `steward-db` service and the `depends_on` block
+# Services:
+#   - steward:       API server (port 3200) — agent management, vault, policies
+#   - steward-proxy: API proxy (port 8080) — intercepts LLM calls, injects keys
+#   - steward-db:    PostgreSQL (internal) — managed database
 # ──────────────────────────────────────────────────────────────────────────────
 
 services:
@@ -25,8 +22,11 @@ services:
       - "3200:3200"
     environment:
       PORT: "3200"
+      STEWARD_BIND_HOST: "0.0.0.0"
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:steward@steward-db:5432/steward}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:-}"
+      STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
       RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
       CHAIN_ID: "${CHAIN_ID:-8453}"
       STEWARD_PLATFORM_KEY: "${STEWARD_PLATFORM_KEY:-}"
@@ -41,6 +41,35 @@ services:
       interval: 30s
       timeout: 5s
       start_period: 15s
+      retries: 3
+
+  # ── Steward Proxy ────────────────────────────────────────────────────────────
+  steward-proxy:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: steward:latest
+    container_name: steward-proxy
+    restart: unless-stopped
+    networks:
+      - milady-isolated
+    ports:
+      - "8080:8080"
+    environment:
+      STEWARD_PROXY_PORT: "8080"
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:steward@steward-db:5432/steward}"
+      STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:-}"
+      NODE_ENV: production
+    command: ["bun", "run", "packages/proxy/src/index.ts"]
+    depends_on:
+      steward:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:8080/health');process.exit(r.ok?0:1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
       retries: 3
 
   # ── PostgreSQL (managed) ─────────────────────────────────────────────────────
@@ -70,7 +99,6 @@ volumes:
     driver: local
 
 # ── Networks ─────────────────────────────────────────────────────────────────
-# Use the existing milady-isolated network on the node
 networks:
   milady-isolated:
     external: true

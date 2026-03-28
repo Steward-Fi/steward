@@ -18,6 +18,7 @@ import { generateApiKey, platformAuthMiddleware } from "@stwd/auth";
 import { agents, getDb, policies, tenants, transactions } from "@stwd/db";
 import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
+import { createAgentToken } from "../services/context";
 
 // ─── Vault singleton ──────────────────────────────────────────────────────────
 // Platform routes share the same vault as the main API.
@@ -561,6 +562,54 @@ platform.get("/tenants/:id/agents", async (c) => {
   const tenantAgents = await vault().listAgentsByTenant(tenantId);
 
   return c.json<ApiResponse<AgentIdentity[]>>({ ok: true, data: tenantAgents });
+});
+
+/**
+ * POST /tenants/:id/agents/:agentId/token
+ * Body: { expiresIn?: string }
+ *
+ * Generates a scoped JWT for the specified agent.
+ * Used by platform operators (e.g. Milady Cloud provisioner) to mint
+ * agent tokens during container provisioning without needing a tenant
+ * session JWT.
+ */
+platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  const agentId = c.req.param("agentId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  // Ensure tenant exists
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  // Ensure agent belongs to tenant
+  const agent = await vault().getAgent(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found in tenant" }, 404);
+  }
+
+  const body = await safeJsonParse<{ expiresIn?: string }>(c);
+  const expiresIn = body?.expiresIn || undefined;
+
+  try {
+    const token = await createAgentToken(agentId, tenantId, expiresIn);
+    return c.json<ApiResponse<{ token: string; agentId: string; tenantId: string; scope: string }>>({
+      ok: true,
+      data: { token, agentId, tenantId, scope: "agent" },
+    });
+  } catch (e: unknown) {
+    console.error(`[platform] Failed to generate agent token for ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
+  }
 });
 
 export { platform as platformRoutes };
