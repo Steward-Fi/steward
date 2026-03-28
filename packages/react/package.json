@@ -1,0 +1,54 @@
+{
+  "name": "@stwd/react",
+  "version": "0.1.0",
+  "description": "Embeddable React components for Steward agent wallet management",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./styles.css": "./dist/styles.css"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && cp src/styles.css dist/styles.css",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0",
+    "@stwd/sdk": ">=0.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0",
+    "typescript": "^5.8.0"
+  },
+  "keywords": [
+    "steward",
+    "agent",
+    "wallet",
+    "react",
+    "components",
+    "web3",
+    "policy"
+  ],
+  "author": "Steward-Fi",
+  "license": "MIT",
+  "homepage": "https://steward.fi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Steward-Fi/steward"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
