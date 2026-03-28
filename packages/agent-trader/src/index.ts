@@ -19,7 +19,7 @@ import { logInfo, logError, logWarn } from "./logger.js";
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
-  logInfo("agent-trader starting", { version: "0.1.0" });
+  logInfo("agent-trader starting", { version: "0.3.0" });
 
   // 1. Config
   let config: ReturnType<typeof loadConfig>;

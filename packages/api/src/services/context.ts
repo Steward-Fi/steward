@@ -39,7 +39,7 @@ import { WebhookDispatcher } from "@stwd/webhooks";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-export const API_VERSION = process.env.API_VERSION || "0.1.0";
+export const API_VERSION = process.env.API_VERSION || "0.3.0";
 export const DEFAULT_TENANT_ID = "default";
 export const RATE_LIMIT_WINDOW_MS = 60_000;
 export const RATE_LIMIT_MAX_REQUESTS = 100;
