@@ -1,4 +1,4 @@
-import type { PolicyRule, PolicyResult, SignRequest } from "@stwd/shared";
+import type { PolicyRule, PolicyResult, SignRequest, PriceOracle } from "@stwd/shared";
 import { evaluatePolicy, type EvaluatorContext } from "./evaluators";
 
 export interface PolicyEvaluationContext {
@@ -7,6 +7,8 @@ export interface PolicyEvaluationContext {
   recentTxCount1h: number;
   spentToday: bigint;
   spentThisWeek: bigint;
+  /** Optional price oracle for USD-based policy evaluation */
+  priceOracle?: PriceOracle;
 }
 
 export interface EvaluationResult {
@@ -25,9 +27,11 @@ export interface EvaluationResult {
  */
 export class PolicyEngine {
   /**
-   * Evaluate all policies for an agent's transaction request
+   * Evaluate all policies for an agent's transaction request.
+   *
+   * Now async to support USD-based evaluations that require price oracle lookups.
    */
-  evaluate(policies: PolicyRule[], ctx: PolicyEvaluationContext): EvaluationResult {
+  async evaluate(policies: PolicyRule[], ctx: PolicyEvaluationContext): Promise<EvaluationResult> {
     if (policies.length === 0) {
       // No policies = everything auto-approved (dangerous but valid for testing)
       return { approved: true, results: [], requiresManualApproval: false };
@@ -39,10 +43,11 @@ export class PolicyEngine {
       recentTxCount1h: ctx.recentTxCount1h,
       spentToday: ctx.spentToday,
       spentThisWeek: ctx.spentThisWeek,
+      priceOracle: ctx.priceOracle,
     };
 
-    const results: PolicyResult[] = policies.map((policy) =>
-      evaluatePolicy(policy, evaluatorCtx)
+    const results: PolicyResult[] = await Promise.all(
+      policies.map((policy) => evaluatePolicy(policy, evaluatorCtx))
     );
 
     const hardPolicies = results.filter(

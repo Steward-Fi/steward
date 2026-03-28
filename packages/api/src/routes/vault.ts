@@ -22,6 +22,7 @@ import {
   isValidAnyAddress,
   isValidSolanaAddress,
   policyEngine,
+  priceOracle,
   requireAgentAccess,
   requireTenantLevel,
   safeJsonParse,
@@ -100,12 +101,13 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
 
   const stats = await getTransactionStats(agentId);
 
-  const evaluation = policyEngine.evaluate(policySet, {
+  const evaluation = await policyEngine.evaluate(policySet, {
     request: signRequest,
     recentTxCount1h: stats.recentTxCount1h,
     recentTxCount24h: stats.recentTxCount24h,
     spentToday: stats.spentToday,
     spentThisWeek: stats.spentThisWeek,
+    priceOracle,
   });
 
   if (!evaluation.approved) {
@@ -485,12 +487,13 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
 
   const stats = await getTransactionStats(agentId);
 
-  const evaluation = policyEngine.evaluate(policySet, {
+  const evaluation = await policyEngine.evaluate(policySet, {
     request: signRequest,
     recentTxCount1h: stats.recentTxCount1h,
     recentTxCount24h: stats.recentTxCount24h,
     spentToday: stats.spentToday,
     spentThisWeek: stats.spentThisWeek,
+    priceOracle,
   });
 
   if (!evaluation.approved) {
@@ -659,12 +662,13 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
 
   const stats = await getTransactionStats(agentId);
 
-  const evaluation = policyEngine.evaluate(policySet, {
+  const evaluation = await policyEngine.evaluate(policySet, {
     request: signRequest,
     recentTxCount1h: stats.recentTxCount1h,
     recentTxCount24h: stats.recentTxCount24h,
     spentToday: stats.spentToday,
     spentThisWeek: stats.spentThisWeek,
+    priceOracle,
   });
 
   if (!evaluation.approved) {

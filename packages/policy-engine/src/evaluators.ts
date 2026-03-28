@@ -9,6 +9,7 @@ import {
   type AllowedChainsConfig,
   type RateLimitConfig,
   type TimeWindowConfig,
+  type PriceOracle,
 } from "@stwd/shared";
 
 export interface EvaluatorContext {
@@ -17,16 +18,20 @@ export interface EvaluatorContext {
   recentTxCount1h: number;
   spentToday: bigint;
   spentThisWeek: bigint;
+  /** Optional price oracle for USD-based policy evaluation */
+  priceOracle?: PriceOracle;
 }
 
 /**
  * Evaluate a single policy rule against a transaction request.
  * Returns pass/fail with reason.
+ *
+ * Now async to support USD-based evaluations that need price lookups.
  */
-export function evaluatePolicy(
+export async function evaluatePolicy(
   rule: PolicyRule,
   ctx: EvaluatorContext
-): PolicyResult {
+): Promise<PolicyResult> {
   if (!rule.enabled) {
     return { policyId: rule.id, type: rule.type, passed: true, reason: "Policy disabled" };
   }
@@ -57,13 +62,28 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
   // Use a very large default for unrestricted limits
   const MAX_UINT = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 
-  // If already in canonical format, fill in any missing fields with MAX_UINT
-  if (config.maxPerTx !== undefined) {
+  // If already in canonical format (has any of the standard fields), fill in missing with MAX_UINT
+  if (config.maxPerTx !== undefined || config.maxPerTxUsd !== undefined) {
     return {
-      maxPerTx: String(config.maxPerTx ?? MAX_UINT),
-      maxPerDay: String(config.maxPerDay ?? MAX_UINT),
-      maxPerWeek: String(config.maxPerWeek ?? MAX_UINT),
-    } as unknown as SpendingLimitConfig;
+      maxPerTx: config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT,
+      maxPerDay: config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT,
+      maxPerWeek: config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT,
+      maxPerTxUsd: config.maxPerTxUsd as number | undefined,
+      maxPerDayUsd: config.maxPerDayUsd as number | undefined,
+      maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
+    };
+  }
+
+  // Also check if any USD field is present
+  if (config.maxPerDayUsd !== undefined || config.maxPerWeekUsd !== undefined) {
+    return {
+      maxPerTx: MAX_UINT,
+      maxPerDay: MAX_UINT,
+      maxPerWeek: MAX_UINT,
+      maxPerTxUsd: config.maxPerTxUsd as number | undefined,
+      maxPerDayUsd: config.maxPerDayUsd as number | undefined,
+      maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
+    };
   }
 
   // Convert from maxAmount/period format
@@ -86,20 +106,82 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
   }
 }
 
-function evaluateSpendingLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+/**
+ * Check if the spending limit config has any USD-based limits.
+ */
+function hasUsdLimits(config: SpendingLimitConfig): boolean {
+  return (
+    config.maxPerTxUsd !== undefined ||
+    config.maxPerDayUsd !== undefined ||
+    config.maxPerWeekUsd !== undefined
+  );
+}
+
+async function evaluateSpendingLimit(rule: PolicyRule, ctx: EvaluatorContext): Promise<PolicyResult> {
   const config = normalizeSpendingLimitConfig(rule.config);
   const txValue = BigInt(ctx.request.value);
   const base = { policyId: rule.id, type: rule.type } as const;
 
-  if (txValue > BigInt(config.maxPerTx)) {
+  // ── USD-based evaluation (preferred when available) ─────────────────────────
+  if (hasUsdLimits(config) && ctx.priceOracle) {
+    const chainId = ctx.request.chainId;
+    const txUsd = await ctx.priceOracle.weiToUsd(ctx.request.value, chainId);
+
+    if (txUsd !== null) {
+      // Per-transaction USD limit
+      if (config.maxPerTxUsd !== undefined && txUsd > config.maxPerTxUsd) {
+        return {
+          ...base,
+          passed: false,
+          reason: `Transaction value $${txUsd.toFixed(2)} exceeds per-tx USD limit $${config.maxPerTxUsd}`,
+        };
+      }
+
+      // Daily USD limit — convert spentToday from wei to USD
+      if (config.maxPerDayUsd !== undefined) {
+        const spentTodayUsd = await ctx.priceOracle.weiToUsd(ctx.spentToday.toString(), chainId);
+        if (spentTodayUsd !== null) {
+          if (spentTodayUsd + txUsd > config.maxPerDayUsd) {
+            return {
+              ...base,
+              passed: false,
+              reason: `Would exceed daily USD spending limit $${config.maxPerDayUsd} (spent today: $${spentTodayUsd.toFixed(2)} + this tx: $${txUsd.toFixed(2)})`,
+            };
+          }
+        }
+      }
+
+      // Weekly USD limit — convert spentThisWeek from wei to USD
+      if (config.maxPerWeekUsd !== undefined) {
+        const spentWeekUsd = await ctx.priceOracle.weiToUsd(ctx.spentThisWeek.toString(), chainId);
+        if (spentWeekUsd !== null) {
+          if (spentWeekUsd + txUsd > config.maxPerWeekUsd) {
+            return {
+              ...base,
+              passed: false,
+              reason: `Would exceed weekly USD spending limit $${config.maxPerWeekUsd} (spent this week: $${spentWeekUsd.toFixed(2)} + this tx: $${txUsd.toFixed(2)})`,
+            };
+          }
+        }
+      }
+
+      return { ...base, passed: true };
+    }
+
+    // Price unavailable — fall through to wei comparison with a warning
+    console.warn(`[policy] USD price unavailable for chain ${chainId}, falling back to wei comparison`);
+  }
+
+  // ── Wei-based evaluation (legacy / fallback) ────────────────────────────────
+  if (config.maxPerTx && txValue > BigInt(config.maxPerTx)) {
     return { ...base, passed: false, reason: `Transaction value ${txValue} exceeds per-tx limit ${config.maxPerTx}` };
   }
 
-  if (ctx.spentToday + txValue > BigInt(config.maxPerDay)) {
+  if (config.maxPerDay && ctx.spentToday + txValue > BigInt(config.maxPerDay)) {
     return { ...base, passed: false, reason: `Would exceed daily spending limit (${config.maxPerDay})` };
   }
 
-  if (ctx.spentThisWeek + txValue > BigInt(config.maxPerWeek)) {
+  if (config.maxPerWeek && ctx.spentThisWeek + txValue > BigInt(config.maxPerWeek)) {
     return { ...base, passed: false, reason: `Would exceed weekly spending limit (${config.maxPerWeek})` };
   }
 
@@ -125,16 +207,41 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
   return { ...base, passed: true };
 }
 
-function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Promise<PolicyResult> {
   const config = rule.config as unknown as AutoApproveConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const txValue = BigInt(ctx.request.value);
 
-  if (txValue <= BigInt(config.threshold)) {
-    return { ...base, passed: true, reason: "Below auto-approve threshold" };
+  // ── USD-based threshold (preferred) ─────────────────────────────────────────
+  if (config.thresholdUsd !== undefined && ctx.priceOracle) {
+    const chainId = ctx.request.chainId;
+    const txUsd = await ctx.priceOracle.weiToUsd(ctx.request.value, chainId);
+
+    if (txUsd !== null) {
+      if (txUsd <= config.thresholdUsd) {
+        return { ...base, passed: true, reason: `$${txUsd.toFixed(2)} is below auto-approve threshold $${config.thresholdUsd}` };
+      }
+      return {
+        ...base,
+        passed: false,
+        reason: `Value $${txUsd.toFixed(2)} exceeds auto-approve USD threshold $${config.thresholdUsd}`,
+      };
+    }
+
+    // Price unavailable — fall through to wei if available
+    console.warn(`[policy] USD price unavailable for chain ${chainId}, falling back to wei threshold`);
   }
 
-  return { ...base, passed: false, reason: `Value ${txValue} exceeds auto-approve threshold ${config.threshold}` };
+  // ── Wei-based threshold (legacy / fallback) ─────────────────────────────────
+  if (config.threshold !== undefined) {
+    if (txValue <= BigInt(config.threshold)) {
+      return { ...base, passed: true, reason: "Below auto-approve threshold" };
+    }
+    return { ...base, passed: false, reason: `Value ${txValue} exceeds auto-approve threshold ${config.threshold}` };
+  }
+
+  // No threshold configured at all — pass (policy misconfigured but don't block)
+  return { ...base, passed: true, reason: "No threshold configured" };
 }
 
 function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
@@ -175,23 +282,12 @@ function evaluateTimeWindow(rule: PolicyRule, ctx: EvaluatorContext): PolicyResu
 
 /**
  * Allowed-chains policy: restricts transactions to a set of permitted CAIP-2 chain identifiers.
- *
- * Config: `{ chains: string[] }` — e.g. `{ chains: ["eip155:8453", "eip155:1"] }`
- *
- * The request's numeric `chainId` is converted to its CAIP-2 equivalent and checked
- * against the allowed list. Unrecognised chain IDs always fail.
- *
- * Design decision: if `chainId` is absent (0 / undefined / null), the policy PASSES.
- * The API allows callers to omit chainId; the vault resolves it to `DEFAULT_CHAIN_ID`
- * before signing. Blocking at policy-evaluation time would reject valid requests that
- * simply haven't had their chain resolved yet.
  */
 function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as AllowedChainsConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const chainId = ctx.request.chainId;
 
-  // No chainId specified yet — let the vault apply the default; don't block here.
   if (!chainId) {
     return { ...base, passed: true, reason: "No chainId specified; deferring chain check to vault" };
   }

@@ -25,14 +25,16 @@ import {
   transactions,
 } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
-import type {
-  AgentBalance,
-  AgentIdentity,
-  ApiResponse,
-  PolicyRule,
-  SignRequest,
-  Tenant,
-  TenantConfig,
+import {
+  createPriceOracle,
+  type AgentBalance,
+  type AgentIdentity,
+  type ApiResponse,
+  type PolicyRule,
+  type PriceOracle,
+  type SignRequest,
+  type Tenant,
+  type TenantConfig,
 } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
@@ -193,6 +195,7 @@ export const vault = new Vault({
 });
 
 export const policyEngine = new PolicyEngine();
+export const priceOracle: PriceOracle = createPriceOracle({ cacheTtlMs: 60_000 });
 export const webhookDispatcher = new WebhookDispatcher();
 
 // ─── Tenant config cache ──────────────────────────────────────────────────────

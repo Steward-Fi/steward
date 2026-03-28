@@ -1,5 +1,10 @@
 // @stwd/shared — types, constants, utils
 
+// ─── Token Registry & Price Oracle ───
+export * from "./tokens.js";
+export { createPriceOracle } from "./price-oracle.js";
+export type { PriceOracle } from "./price-oracle.js";
+
 // ─── Tenancy ───
 
 export interface Tenant {
@@ -194,9 +199,14 @@ export interface PolicyRule {
 }
 
 export interface SpendingLimitConfig {
-  maxPerTx: string; // wei
-  maxPerDay: string;
-  maxPerWeek: string;
+  // Wei-based (legacy/direct)
+  maxPerTx?: string;
+  maxPerDay?: string;
+  maxPerWeek?: string;
+  // USD-based (preferred — takes precedence when price oracle is available)
+  maxPerTxUsd?: number;
+  maxPerDayUsd?: number;
+  maxPerWeekUsd?: number;
 }
 
 export interface ApprovedAddressesConfig {
@@ -205,7 +215,8 @@ export interface ApprovedAddressesConfig {
 }
 
 export interface AutoApproveConfig {
-  threshold: string; // wei — below this, auto-approve
+  threshold?: string;      // wei — below this, auto-approve (legacy)
+  thresholdUsd?: number;   // USD — below this, auto-approve (preferred)
 }
 
 export interface TimeWindowConfig {
