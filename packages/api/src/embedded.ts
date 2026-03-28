@@ -20,6 +20,23 @@ import { setPGLiteOverride } from "@stwd/db/src/client";
 // Force PGLite mode
 process.env.STEWARD_DB_MODE = "pglite";
 
+// Set a sentinel DATABASE_URL so context.ts's requireEnv doesn't throw.
+// PGLite overrides getDb() before any SQL runs, so this URL is never used.
+if (!process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = "pglite://embedded";
+}
+
+// Ensure STEWARD_MASTER_PASSWORD is set (context.ts requires it at module level).
+// Auto-generate a random one if not provided — the sidecar also generates one
+// and passes it via env, but standalone `bun run start:local` needs a fallback.
+if (!process.env.STEWARD_MASTER_PASSWORD) {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  process.env.STEWARD_MASTER_PASSWORD = Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 async function main() {
   const dataDir = getDataDir();
   console.log("╔══════════════════════════════════════════╗");
