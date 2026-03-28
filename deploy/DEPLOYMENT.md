@@ -4,7 +4,10 @@
 
 ## Overview
 
-Steward runs as a **systemd service** on each Milady node, built from source using Bun. It connects to a shared Neon PostgreSQL database and listens on port 3200.
+Steward runs as two **systemd services** on each Milady node, built from source using Bun. It connects to a shared Neon PostgreSQL database and an optional Redis instance for rate limiting and spend tracking.
+
+- `steward-api.service` — REST API on port 3200
+- `steward-proxy.service` — API proxy gateway on port 8080
 
 **Current production nodes:** milady-core-1 through milady-core-6 (all Hetzner dedicated servers).
 
@@ -16,13 +19,18 @@ Steward runs as a **systemd service** on each Milady node, built from source usi
 ┌──────────────────────────────────────────────────────┐
 │  Milady Core Node                                     │
 │                                                       │
-│  systemd: steward.service                             │
+│  systemd: steward-api.service                         │
 │    └─ bun run packages/api/src/index.ts               │
 │    └─ Listens: 0.0.0.0:3200                          │
 │    └─ Env: /opt/steward/.env                          │
 │                                                       │
+│  systemd: steward-proxy.service                       │
+│    └─ bun run packages/proxy/src/index.ts             │
+│    └─ Listens: 0.0.0.0:8080                          │
+│                                                       │
 │  Docker: agent containers                             │
 │    └─ Reach steward at: http://172.18.0.1:3200        │
+│    └─ Reach proxy at:   http://172.18.0.1:8080        │
 │       (Docker bridge gateway IP)                      │
 │                                                       │
 │  External: api.steward.fi → milady-core-1:3200        │
@@ -79,6 +87,12 @@ STEWARD_PLATFORM_KEYS=<platform-admin-key>
 RPC_URL=https://mainnet.base.org
 CHAIN_ID=8453
 SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+
+# Redis (optional — enables rate limiting + spend tracking)
+# REDIS_URL=redis://localhost:6379
+
+# Proxy port (if running proxy on same machine)
+# PROXY_PORT=8080
 EOF
 chmod 600 /opt/steward/.env"
 ```
@@ -91,9 +105,61 @@ chmod 600 /opt/steward/.env"
 | `STEWARD_JWT_SECRET` | JWT signing secret (separate from master password!) | Yes |
 | `STEWARD_PLATFORM_KEYS` | Platform admin API key for tenant management | Yes |
 | `STEWARD_BIND_HOST` | Must be `0.0.0.0` for Docker containers to reach it | Yes |
+| `REDIS_URL` | Redis connection string for rate limiting + spend tracking | No |
 | `RPC_URL` | EVM RPC endpoint (default: Base mainnet) | No |
 
-### Step 4: Create systemd service
+### Step 4: Create systemd services
+
+```bash
+# API service
+ssh root@${NODE_IP} "cat > /etc/systemd/system/steward-api.service << 'EOF'
+[Unit]
+Description=Steward API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/steward
+ExecStart=/root/.bun/bin/bun run packages/api/src/index.ts
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/steward/.env
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+
+# Proxy service
+ssh root@${NODE_IP} "cat > /etc/systemd/system/steward-proxy.service << 'EOF'
+[Unit]
+Description=Steward API Proxy
+After=network.target steward-api.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/steward
+ExecStart=/root/.bun/bin/bun run packages/proxy/src/index.ts
+Restart=always
+RestartSec=10
+EnvironmentFile=/opt/steward/.env
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+
+ssh root@${NODE_IP} "
+  systemctl daemon-reload
+  systemctl enable steward-api steward-proxy
+  systemctl start steward-api steward-proxy
+"
+```
+
+<details>
+<summary>Legacy single-service setup (still works)</summary>
+
+If you don't need the proxy, the original `steward.service` targeting the API only still works:
 
 ```bash
 ssh root@${NODE_IP} "cat > /etc/systemd/system/steward.service << 'EOF'
@@ -113,21 +179,24 @@ EnvironmentFile=/opt/steward/.env
 [Install]
 WantedBy=multi-user.target
 EOF
-
-systemctl daemon-reload
-systemctl enable steward
-systemctl start steward"
+systemctl daemon-reload && systemctl enable steward && systemctl start steward"
 ```
+</details>
 
 ### Step 5: Verify
 
 ```bash
-# Health check
+# API health check
 ssh root@${NODE_IP} "curl -sf http://localhost:3200/health"
 # Expected: {"status":"ok","version":"0.2.0","uptime":...}
 
-# Check it's reachable from Docker bridge
+# Proxy health check
+ssh root@${NODE_IP} "curl -sf http://localhost:8080/health"
+# Expected: {"status":"ok","proxy":true}
+
+# Check reachable from Docker bridge
 ssh root@${NODE_IP} "curl -sf http://172.18.0.1:3200/health"
+ssh root@${NODE_IP} "curl -sf http://172.18.0.1:8080/health"
 ```
 
 ### Step 6: Create milady-cloud tenant (if first time)
@@ -303,12 +372,16 @@ curl -sf -X DELETE $BASE/agents/test-1 \
 
 ### Steward won't start
 ```bash
+journalctl -u steward-api --no-pager -n 50
+journalctl -u steward-proxy --no-pager -n 50
+# Legacy single-service:
 journalctl -u steward --no-pager -n 50
 ```
 Common causes:
 - Missing `STEWARD_MASTER_PASSWORD` in `.env`
 - Database connection failure (check `DATABASE_URL`)
 - Port 3200 already in use (`ss -tlnp | grep 3200`)
+- Port 8080 already in use (`ss -tlnp | grep 8080`)
 
 ### Containers can't reach Steward
 - Verify bind host: `STEWARD_BIND_HOST=0.0.0.0` in `.env`
@@ -349,14 +422,14 @@ Note: The root `docker-compose.yml` includes a local Postgres. For Neon, use the
 
 ## Node Inventory
 
-| Node | IP | Steward | Status |
-|------|-----|---------|--------|
-| milady-core-1 | 88.99.66.168 | ✅ Running | Primary, hosts api.steward.fi |
-| milady-core-2 | 178.63.251.122 | ✅ Running | |
-| milady-core-3 | 138.201.80.125 | ✅ Running | |
-| milady-core-4 | 85.10.193.52 | ✅ Running | |
-| milady-core-5 | 136.243.47.243 | ✅ Running | |
-| milady-core-6 | 195.201.57.227 | ✅ Running | |
+| Node | IP | API (:3200) | Proxy (:8080) | Notes |
+|------|-----|------------|--------------|-------|
+| milady-core-1 | 88.99.66.168 | ✅ Running | ✅ Running | Primary, hosts api.steward.fi |
+| milady-core-2 | 178.63.251.122 | ✅ Running | ✅ Running | |
+| milady-core-3 | 138.201.80.125 | ✅ Running | ✅ Running | |
+| milady-core-4 | 85.10.193.52 | ✅ Running | ✅ Running | |
+| milady-core-5 | 136.243.47.243 | ✅ Running | ✅ Running | |
+| milady-core-6 | 195.201.57.227 | ✅ Running | ✅ Running | |
 
 ---
 
@@ -470,3 +543,122 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8080/openai/v1/models
 **Root cause:** In Hono, `GET /:id` was registered before `GET /routes`, causing the literal path segment "routes" to be parsed as a secret UUID — which fails PostgreSQL UUID validation and throws a 500.
 
 **Fix:** Reordered route registration in `packages/api/src/routes/secrets.ts` so all `/routes/*` handlers are declared before `/:id` handlers. **Committed in `29e8a13`.**
+
+---
+
+## Redis Setup (Optional)
+
+Redis enables persistent rate limiting and spend tracking that survives API restarts. Without Redis, rate limits and spend counters are in-memory only (reset on restart).
+
+### Install Redis on a node
+
+```bash
+apt-get install -y redis-server
+systemctl enable redis-server
+systemctl start redis-server
+redis-cli ping  # → PONG
+```
+
+### Configure in .env
+
+```bash
+# Add to /opt/steward/.env:
+REDIS_URL=redis://localhost:6379
+
+# Or with password:
+REDIS_URL=redis://:yourpassword@localhost:6379
+```
+
+### Verify Redis integration
+
+```bash
+# After restarting Steward, check logs for:
+# [redis] Connected to redis://localhost:6379
+journalctl -u steward-api --since "1 minute ago" | grep redis
+```
+
+Redis is used for:
+- **Rate limiting** — `rate-limit` policy counters (tx/hour, tx/day) persist across restarts
+- **Spend tracking** — daily/weekly spend totals survive restarts
+- **Webhook delivery queue** — retries are queued in Redis
+
+Without Redis, these features still work using in-memory fallbacks, but counters reset on restart.
+
+---
+
+## Webhook Configuration
+
+After deploying, configure webhooks for your tenants to receive real-time event notifications:
+
+```bash
+PK="<your-platform-key>"
+API_KEY="<tenant-api-key>"
+BASE="http://localhost:3200"
+
+# Register a webhook endpoint
+curl -sf -X POST $BASE/webhooks \
+  -H "X-Steward-Key: $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://your-app.com/webhooks/steward",
+    "events": ["tx.pending", "tx.signed", "policy.violation"],
+    "description": "Production webhook",
+    "maxRetries": 5,
+    "retryBackoffMs": 60000
+  }'
+# → Returns webhook config including "secret" (save this!)
+```
+
+**Save the `secret` field** — it's only returned on creation. Use it to verify `X-Steward-Signature` on incoming events.
+
+### Verify webhook delivery
+
+```bash
+# List recent deliveries
+WEBHOOK_ID="wh_..."
+curl -sf "$BASE/webhooks/$WEBHOOK_ID/deliveries" \
+  -H "X-Steward-Key: $API_KEY"
+```
+
+---
+
+## E2E Integration Test
+
+The repo includes a full E2E test script that validates the complete flow:
+
+```bash
+# Run against a specific node
+STEWARD_URL=http://88.99.66.168:3200 bun run scripts/e2e-integration-test.ts
+
+# Run against local
+STEWARD_URL=http://localhost:3200 bun run scripts/e2e-integration-test.ts
+
+# With proxy (default: STEWARD_URL with :3200 → :8080)
+STEWARD_URL=http://localhost:3200 PROXY_URL=http://localhost:8080 \
+  bun run scripts/e2e-integration-test.ts
+```
+
+The E2E test covers:
+1. Tenant + agent provisioning
+2. Wallet operations (balance, sign, policy enforcement)
+3. Proxy operations (credential injection, audit logging)
+4. Secret management (CRUD, rotation, credential routes)
+5. Redis enforcement (rate limits, spend tracking)
+6. Cascading cleanup
+
+Expected output on a healthy node:
+```
+✅ PASS: Create tenant
+✅ PASS: Create agent
+✅ PASS: Set policies
+✅ PASS: Get agent JWT
+✅ PASS: Check balance
+✅ PASS: Sign transaction (whitelisted address)
+✅ PASS: Policy rejection (non-whitelisted address)
+✅ PASS: Create secret
+✅ PASS: Create credential route
+✅ PASS: Proxy injection (OpenAI alias)
+✅ PASS: Cleanup
+─────────────────────────────────────────
+Passed: 11/11  Failed: 0  Skipped: 0
+```

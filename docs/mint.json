@@ -86,6 +86,7 @@
         "guides/agent-setup",
         "guides/policies",
         "guides/secrets",
+        "guides/local-mode",
         "guides/eliza-plugin",
         "guides/milady-cloud",
         "guides/self-hosting",
@@ -102,7 +103,11 @@
         "api-reference/routes",
         "api-reference/policies",
         "api-reference/tenants",
-        "api-reference/proxy"
+        "api-reference/tenant-config",
+        "api-reference/proxy",
+        "api-reference/approvals",
+        "api-reference/webhooks",
+        "api-reference/dashboard"
       ]
     },
     {
@@ -110,6 +115,7 @@
       "pages": [
         "sdk/installation",
         "sdk/client",
+        "sdk/react-components",
         "sdk/proxy-helpers",
         "sdk/eliza-plugin"
       ]
