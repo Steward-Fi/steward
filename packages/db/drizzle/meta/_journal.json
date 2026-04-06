@@ -36,6 +36,13 @@
       "when": 1774681200000,
       "tag": "0007_webhook_configs_auto_approval",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1744070400000,
+      "tag": "0008_auth_tables",
+      "breakpoints": true
     }
   ]
 }
