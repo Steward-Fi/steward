@@ -32,7 +32,8 @@ import {
   type AppVariables,
   type ApiResponse,
 } from "./services/context";
-import { closeDb } from "@stwd/db";
+import { closeDb, getDb } from "@stwd/db";
+import { sql } from "drizzle-orm";
 import { runMigrations } from "@stwd/db/src/migrate";
 import { initRedis, shutdownRedis } from "./middleware/redis";
 
@@ -40,6 +41,7 @@ import { initRedis, shutdownRedis } from "./middleware/redis";
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
 const startTime = Date.now();
+let migrationsRan = false;
 
 if (!Number.isInteger(PORT) || PORT <= 0) {
   throw new Error("PORT must be a positive integer");
@@ -88,7 +90,7 @@ app.use("*", bodyLimit({
 // ─── Rate limiting + shutdown guard ───────────────────────────────────────────
 
 app.use("*", async (c, next) => {
-  if (c.req.path === "/health") return next();
+  if (c.req.path === "/health" || c.req.path === "/ready") return next();
 
   if (isShuttingDown) {
     return c.json<ApiResponse>({ ok: false, error: "Server is shutting down" }, 503);
@@ -157,6 +159,48 @@ app.get("/health", (c) =>
   }),
 );
 
+// /ready — deep readiness check for container orchestration (k8s, ECS, etc.)
+// Returns 200 only when: database is reachable, migrations have run, vault is initialized.
+// Use /health for liveness probes, /ready for readiness probes.
+app.get("/ready", async (c) => {
+  const checks: Record<string, { ok: boolean; error?: string }> = {};
+
+  // 1. Migrations ran at startup
+  checks.migrations = { ok: migrationsRan };
+
+  // 2. Database connectivity
+  try {
+    const db = getDb();
+    // A cheap query that exercises the connection without touching app tables
+    await db.execute(sql`SELECT 1`);
+    checks.database = { ok: true };
+  } catch (err: any) {
+    checks.database = { ok: false, error: err?.message ?? "unknown" };
+  }
+
+  // 3. Vault initialized (master password present and usable)
+  try {
+    if (!process.env.STEWARD_MASTER_PASSWORD) {
+      checks.vault = { ok: false, error: "STEWARD_MASTER_PASSWORD not set" };
+    } else {
+      checks.vault = { ok: true };
+    }
+  } catch (err: any) {
+    checks.vault = { ok: false, error: err?.message ?? "unknown" };
+  }
+
+  const allOk = Object.values(checks).every((c) => c.ok);
+  return c.json(
+    {
+      status: allOk ? "ready" : "not_ready",
+      version: API_VERSION,
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+      checks,
+    },
+    allOk ? 200 : 503,
+  );
+});
+
 // ─── Route modules ────────────────────────────────────────────────────────────
 
 app.route("/auth", authRoutes);
@@ -176,6 +220,7 @@ app.route("/approvals", approvalRoutes);
 try {
   console.log("[steward] Running database migrations...");
   await runMigrations();
+  migrationsRan = true;
   console.log("[steward] Migrations complete.");
 } catch (err) {
   console.error("[steward] Migration failed — cannot start:", err);
