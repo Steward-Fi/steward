@@ -33,6 +33,7 @@ import {
   type ApiResponse,
 } from "./services/context";
 import { closeDb } from "@stwd/db";
+import { runMigrations } from "@stwd/db/src/migrate";
 import { initRedis, shutdownRedis } from "./middleware/redis";
 
 // ─── App setup ────────────────────────────────────────────────────────────────
@@ -170,7 +171,16 @@ app.route("/dashboard", dashboardRoutes);
 app.route("/webhooks", webhookRoutes);
 app.route("/approvals", approvalRoutes);
 
-// ─── Server ───────────────────────────────────────────────────────────────────
+// ─── Database migrations (blocking — must complete before serving traffic) ───
+
+try {
+  console.log("[steward] Running database migrations...");
+  await runMigrations();
+  console.log("[steward] Migrations complete.");
+} catch (err) {
+  console.error("[steward] Migration failed — cannot start:", err);
+  process.exit(1);
+}
 
 // ─── Redis initialization (non-blocking) ─────────────────────────────────────
 
