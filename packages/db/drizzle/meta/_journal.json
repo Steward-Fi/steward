@@ -33,15 +33,57 @@
     {
       "idx": 4,
       "version": "7",
-      "when": 1774681200000,
-      "tag": "0007_webhook_configs_auto_approval",
+      "when": 1774582260000,
+      "tag": "0004_secret_vault",
       "breakpoints": true
     },
     {
       "idx": 5,
       "version": "7",
-      "when": 1744070400000,
+      "when": 1774591291000,
+      "tag": "0005_proxy_audit_log",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1774648500000,
+      "tag": "0006_tenant_configs",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1774648855000,
+      "tag": "0007_webhook_configs_auto_approval",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1775066931000,
       "tag": "0008_auth_tables",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1775090735000,
+      "tag": "0009_auth_kv_store",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1775092487000,
+      "tag": "0010_per_tenant_cors",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1775093899000,
+      "tag": "0011_refresh_tokens",
       "breakpoints": true
     }
   ]
