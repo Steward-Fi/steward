@@ -17,6 +17,7 @@ import type {
   StewardAuthConfig,
   StewardAuthResult,
   StewardEmailResult,
+  StewardRefreshResult,
   StewardSession,
   StewardUser,
   SessionStorage,
@@ -25,6 +26,10 @@ import type {
 // ─── Storage key ──────────────────────────────────────────────────────────────
 
 const STORAGE_KEY = "steward_session_token";
+const REFRESH_TOKEN_KEY = "steward_refresh_token";
+
+/** Kick off a token refresh when fewer than this many seconds remain on the access token */
+const REFRESH_THRESHOLD_SECS = 120;
 
 // ─── Minimal JWT decode (no verification — server already verified) ───────────
 
@@ -186,11 +191,33 @@ export class StewardAuth {
   }
 
   /**
-   * Returns the raw JWT string, or null if not signed in.
+   * Returns true if the access token is within REFRESH_THRESHOLD_SECS of expiry.
+   * Call `refreshSession()` proactively when this returns true.
+   */
+  isNearExpiry(): boolean {
+    const session = this.getSession();
+    if (!session?.expiresAt) return false;
+    const secsRemaining = session.expiresAt - Date.now() / 1000;
+    return secsRemaining < REFRESH_THRESHOLD_SECS;
+  }
+
+  /**
+   * Returns the raw access JWT string, or null if not signed in.
+   * Automatically triggers a background refresh if the token is near expiry.
    */
   getToken(): string | null {
     const session = this.getSession();
-    return session?.token ?? null;
+    if (!session) return null;
+    // Kick off a background refresh if near expiry (non-blocking)
+    if (this.isNearExpiry()) {
+      void this.refreshSession().catch(() => { /* swallow — caller still gets old token */ });
+    }
+    return session.token;
+  }
+
+  /** Returns the stored refresh token, or null if not available. */
+  getRefreshToken(): string | null {
+    return this.storage.getItem(REFRESH_TOKEN_KEY);
   }
 
   /**
@@ -201,9 +228,53 @@ export class StewardAuth {
   }
 
   /**
-   * Clears the stored session and notifies listeners.
+   * Clears the stored session (both tokens) and notifies listeners.
    */
   signOut(): void {
+    this.clearToken();
+    this.notifyListeners(null);
+  }
+
+  /**
+   * Exchange the stored refresh token for a new access token + rotated refresh token.
+   * Stores both tokens and notifies session listeners.
+   * Returns the new session, or null if the refresh token is missing or invalid.
+   */
+  async refreshSession(): Promise<StewardSession | null> {
+    const refreshToken = this.getRefreshToken();
+    if (!refreshToken) return null;
+
+    const res = await authRequest<StewardRefreshResult>(
+      this.baseUrl,
+      "/auth/refresh",
+      { method: "POST", body: JSON.stringify({ refreshToken }) },
+    );
+
+    if (!res.ok) {
+      // Refresh token invalid/expired — sign the user out
+      this.signOut();
+      return null;
+    }
+
+    this.storage.setItem(STORAGE_KEY, res.data.token);
+    this.storage.setItem(REFRESH_TOKEN_KEY, res.data.refreshToken);
+    const session = sessionFromToken(res.data.token);
+    this.notifyListeners(session);
+    return session;
+  }
+
+  /**
+   * Revoke the stored refresh token on the server (single-device sign out).
+   * Also clears local session state.
+   */
+  async revokeSession(): Promise<void> {
+    const refreshToken = this.getRefreshToken();
+    if (refreshToken) {
+      await authRequest(this.baseUrl, "/auth/revoke", {
+        method: "POST",
+        body: JSON.stringify({ refreshToken }),
+      }).catch(() => { /* best-effort */ });
+    }
     this.clearToken();
     this.notifyListeners(null);
   }
@@ -298,7 +369,12 @@ export class StewardAuth {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
     }
 
-    return this.storeAndReturn(verifyRes.data.token, verifyRes.data.user);
+    return this.storeAndReturn(
+        verifyRes.data.token,
+        (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
+        verifyRes.data.user,
+        (verifyRes.data as { expiresIn?: number }).expiresIn,
+      );
   }
 
   private async completePasskeyRegister(
@@ -336,7 +412,12 @@ export class StewardAuth {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
     }
 
-    return this.storeAndReturn(verifyRes.data.token, verifyRes.data.user);
+    return this.storeAndReturn(
+        verifyRes.data.token,
+        (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
+        verifyRes.data.user,
+        (verifyRes.data as { expiresIn?: number }).expiresIn,
+      );
   }
 
   // ─── Email magic link ───────────────────────────────────────────────────────
@@ -381,7 +462,12 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return this.storeAndReturn(res.data.token, res.data.user);
+    return this.storeAndReturn(
+      res.data.token,
+      (res.data as { refreshToken?: string }).refreshToken ?? "",
+      res.data.user,
+      (res.data as { expiresIn?: number }).expiresIn,
+    );
   }
 
   // ─── SIWE ───────────────────────────────────────────────────────────────────
@@ -467,20 +553,32 @@ export class StewardAuth {
       walletAddress: verifyRes.data.address,
     };
 
-    return this.storeAndReturn(verifyRes.data.token, user);
+    return this.storeAndReturn(
+      verifyRes.data.token,
+      (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
+      user,
+      (verifyRes.data as { expiresIn?: number }).expiresIn,
+    );
   }
 
   // ─── Private helpers ────────────────────────────────────────────────────────
 
-  private storeAndReturn(token: string, user: StewardUser): StewardAuthResult {
+  private storeAndReturn(
+    token: string,
+    refreshToken: string,
+    user: StewardUser,
+    expiresIn = 900,
+  ): StewardAuthResult {
     this.storage.setItem(STORAGE_KEY, token);
+    this.storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
     const session = sessionFromToken(token, user);
     this.notifyListeners(session);
-    return { token, user };
+    return { token, refreshToken, expiresIn, user };
   }
 
   private clearToken(): void {
     this.storage.removeItem(STORAGE_KEY);
+    this.storage.removeItem(REFRESH_TOKEN_KEY);
   }
 
   private notifyListeners(session: StewardSession | null): void {

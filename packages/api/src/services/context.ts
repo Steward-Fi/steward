@@ -85,7 +85,7 @@ export async function createAgentToken(
 export async function verifySessionToken(token: string) {
   try {
     const { payload } = await jwtVerify(token, JWT_SECRET, { issuer: JWT_ISSUER });
-    return payload as { address: string; tenantId: string; agentId?: string; scope?: string };
+    return payload as { address: string; tenantId: string; agentId?: string; scope?: string; userId?: string; email?: string };
   } catch {
     return null;
   }
@@ -224,8 +224,9 @@ export type AppVariables = {
   tenant: Tenant;
   tenantConfig: TenantConfig;
   tenantId: string;
+  userId?: string;
   agentScope?: string;
-  authType?: "api-key" | "session-jwt" | "agent-token";
+  authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt";
 };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
@@ -328,6 +329,7 @@ export async function tenantAuth(
         c.set("tenant", jwtTenant);
         c.set("tenantConfig", tenantConfigs.get(payload.tenantId) || { id: jwtTenant.id, name: jwtTenant.name });
 
+        if (payload.userId) c.set("userId", payload.userId);
         if (payload.scope === "agent" && payload.agentId) {
           c.set("agentScope", payload.agentId);
           c.set("authType", "agent-token");
@@ -400,6 +402,45 @@ export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boo
 
 export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boolean {
   return c.get("authType") !== "agent-token";
+}
+
+/**
+ * dashboardAuthMiddleware
+ * Accepts a session JWT (Bearer token) issued by the auth routes.
+ * Extracts userId and tenantId, looks up the tenant, and sets context variables
+ * so dashboard routes can make authenticated API calls on behalf of the user.
+ *
+ * The dashboard is user-centric (not API-key-centric) so only session JWTs are
+ * accepted here — no API key fallback.
+ */
+export async function dashboardAuthMiddleware(
+  c: Context<{ Variables: AppVariables }>,
+  next: Next,
+) {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return c.json<ApiResponse>({ ok: false, error: "Authorization header required" }, 401);
+  }
+
+  const token = authHeader.slice(7);
+  const payload = await verifySessionToken(token);
+
+  if (!payload?.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
+  }
+
+  const tenant = await findTenant(payload.tenantId);
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  c.set("tenantId", payload.tenantId);
+  c.set("tenant", tenant);
+  c.set("tenantConfig", tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name });
+  c.set("authType", "dashboard-jwt");
+  if (payload.userId) c.set("userId", payload.userId);
+
+  return next();
 }
 
 // Re-export drizzle schemas used in route modules

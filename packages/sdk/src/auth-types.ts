@@ -23,7 +23,7 @@ export interface StewardUser {
 }
 
 export interface StewardSession {
-  /** Raw JWT string */
+  /** Raw JWT string (access token, 15 min) */
   token: string;
   /** Parsed token payload fields */
   address: string;
@@ -39,7 +39,12 @@ export interface StewardSession {
 // ─── Auth result types ────────────────────────────────────────────────────────
 
 export interface StewardAuthResult {
+  /** Short-lived access token (15 min) */
   token: string;
+  /** Long-lived refresh token (30 days). Store securely and never expose in URLs. */
+  refreshToken: string;
+  /** Access token lifetime in seconds (900) */
+  expiresIn: number;
   user: StewardUser;
 }
 
@@ -64,4 +69,11 @@ export interface StewardAuthConfig {
    * Receives `null` when signed out, `StewardSession` when signed in.
    */
   onSessionChange?: (session: StewardSession | null) => void;
+}
+
+/** Response shape from POST /auth/refresh */
+export interface StewardRefreshResult {
+  token: string;
+  refreshToken: string;
+  expiresIn: number;
 }

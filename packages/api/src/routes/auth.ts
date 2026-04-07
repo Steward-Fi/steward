@@ -8,6 +8,7 @@
  * GET  /nonce                       — fresh nonce for SIWE
  * POST /verify                      — SIWE signature verification, returns JWT
  * GET  /session                     — inspect current JWT session
+ * GET  /providers                   — available auth methods (passkey/email/siwe/google/discord)
  * POST /logout                      — client-side logout (no-op server side)
  *
  * POST /passkey/register/options    — { email } → WebAuthn creation options
@@ -33,6 +34,7 @@
  */
 
 import { and, eq } from "drizzle-orm";
+import { createHash, randomBytes } from "node:crypto";
 import { Hono, type Context } from "hono";
 import { SignJWT, jwtVerify } from "jose";
 import { generateNonce, SiweMessage } from "siwe";
@@ -46,8 +48,12 @@ import {
   ChallengeStore,
   TokenStore,
   buildBackend,
+  OAuthClient,
+  getProviderConfig,
+  getEnabledProviders,
+  isBuiltInProvider,
 } from "@stwd/auth";
-import { authenticators, getDb, tenants, userTenants, users } from "@stwd/db";
+import { accounts, authenticators, getDb, refreshTokens, tenants, userTenants, users } from "@stwd/db";
 import type { ApiResponse } from "@stwd/shared";
 import { Vault, provisionUserWallet } from "@stwd/vault";
 
@@ -64,7 +70,13 @@ if (!process.env.STEWARD_JWT_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
 }
 const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 const JWT_ISSUER = "steward";
-const JWT_EXPIRY = "24h";
+
+/** Access token lifetime: 15 minutes */
+const ACCESS_TOKEN_EXPIRY = "15m";
+const ACCESS_TOKEN_EXPIRY_SECONDS = 900;
+
+/** Refresh token lifetime: 30 days */
+const REFRESH_TOKEN_EXPIRY_DAYS = 30;
 
 export async function createSessionToken(
   address: string,
@@ -75,8 +87,54 @@ export async function createSessionToken(
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setIssuer(JWT_ISSUER)
-    .setExpirationTime(JWT_EXPIRY)
+    .setExpirationTime(ACCESS_TOKEN_EXPIRY)
     .sign(JWT_SECRET);
+}
+
+// ─── Refresh token helpers ────────────────────────────────────────────────────
+
+function hashToken(raw: string): string {
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+/**
+ * Generate a random refresh token, persist its hash in DB, return the raw value.
+ * The raw token is sent to the client; only the hash is stored server-side.
+ */
+async function createRefreshToken(userId: string, tenantId: string): Promise<string> {
+  const db = getDb();
+  const raw = randomBytes(40).toString("hex");
+  const id = randomBytes(16).toString("hex");
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
+  await db.insert(refreshTokens).values({ id, userId, tenantId, tokenHash: hashToken(raw), expiresAt });
+  return raw;
+}
+
+/**
+ * Validate a raw refresh token. Returns the stored record or null if missing/expired.
+ * Does NOT delete the token — caller must do that on successful use (one-time use).
+ */
+async function validateRefreshToken(
+  raw: string,
+): Promise<typeof refreshTokens.$inferSelect | null> {
+  const db = getDb();
+  const hash = hashToken(raw);
+  const [record] = await db.select().from(refreshTokens).where(eq(refreshTokens.tokenHash, hash));
+  if (!record) return null;
+  if (record.expiresAt < new Date()) {
+    await db.delete(refreshTokens).where(eq(refreshTokens.id, record.id));
+    return null;
+  }
+  return record;
+}
+
+/** Build the standard dual-token auth response. */
+function buildAuthResponse(
+  token: string,
+  refreshToken: string,
+  user: Record<string, unknown>,
+): Record<string, unknown> {
+  return { ok: true, token, refreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS, user };
 }
 
 export async function verifySessionToken(
@@ -663,8 +721,9 @@ auth.post("/passkey/register/verify", async (c) => {
     userId: user.id,
     email,
   });
+  const registerRefreshToken = await createRefreshToken(user.id, tenantId);
 
-  return c.json({ ok: true, token, user: { id: user.id, email, walletAddress } });
+  return c.json(buildAuthResponse(token, registerRefreshToken, { id: user.id, email, walletAddress }));
 });
 
 // ── Passkey authentication ────────────────────────────────────────────────────
@@ -794,8 +853,9 @@ auth.post("/passkey/login/verify", async (c) => {
     userId: user.id,
     email,
   });
+  const loginRefreshToken = await createRefreshToken(user.id, tenantId);
 
-  return c.json({ ok: true, token, user: { id: user.id, email, walletAddress } });
+  return c.json(buildAuthResponse(token, loginRefreshToken, { id: user.id, email, walletAddress }));
 });
 
 // ── Email magic link ──────────────────────────────────────────────────────────
@@ -860,12 +920,358 @@ auth.post("/email/verify", async (c) => {
     userId: user.id,
     email,
   });
+  const refreshToken = await createRefreshToken(user.id, tenantId);
 
+  return c.json(buildAuthResponse(jwtToken, refreshToken, { id: user.id, email, walletAddress }));
+});
+
+// ── OAuth providers list ─────────────────────────────────────────────────────
+
+/**
+ * GET /providers
+ * Returns which auth methods are enabled based on environment configuration.
+ * Used by the React widget to decide which login buttons to show.
+ *
+ * Response: { passkey: true, email: bool, siwe: true, google: bool, discord: bool, oauth: string[] }
+ */
+auth.get("/providers", (c) => {
+  const oauthProviders = getEnabledProviders();
   return c.json({
-    ok: true,
-    token: jwtToken,
-    user: { id: user.id, email, walletAddress },
+    passkey: true,
+    email: Boolean(process.env.RESEND_API_KEY),
+    siwe: true,
+    google: Boolean(process.env.GOOGLE_CLIENT_ID),
+    discord: Boolean(process.env.DISCORD_CLIENT_ID),
+    oauth: oauthProviders,
   });
 });
+
+// ── OAuth authorization-code flow ─────────────────────────────────────────────
+
+/**
+ * GET /oauth/:provider/authorize
+ * Query: ?redirect_uri=<url>&tenant_id=<id>
+ *
+ * Generates an OAuth authorization URL, stores the CSRF state in the challenge
+ * store (keyed as `oauth:<state>`), then redirects the user to the provider.
+ */
+auth.get("/oauth/:provider/authorize", async (c) => {
+  const providerName = c.req.param("provider");
+  if (!isBuiltInProvider(providerName)) {
+    return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
+  }
+
+  let oauthClient: OAuthClient;
+  try {
+    oauthClient = new OAuthClient(getProviderConfig(providerName));
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
+      503,
+    );
+  }
+
+  const redirectUri = c.req.query("redirect_uri");
+  const tenantId = c.req.query("tenant_id");
+
+  if (!redirectUri) {
+    return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
+  }
+
+  // Generate a cryptographically random state value
+  const stateBytes = new Uint8Array(16);
+  crypto.getRandomValues(stateBytes);
+  const state = Array.from(stateBytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+  // Store state metadata in the challenge store
+  const statePayload = JSON.stringify({ provider: providerName, tenantId, redirectUri });
+  getChallengeStore().set(`oauth:${state}`, statePayload);
+
+  const callbackUrl = buildOAuthCallbackUrl(c, providerName);
+  const authUrl = oauthClient.generateAuthUrl(state, callbackUrl);
+
+  return c.redirect(authUrl, 302);
+});
+
+/**
+ * GET /oauth/:provider/callback
+ * Handles the redirect from the OAuth provider.
+ *
+ * Flow:
+ *   1. Validate state (CSRF)
+ *   2. Exchange code for access token
+ *   3. Fetch user profile from provider
+ *   4. Find/create user by email
+ *   5. Upsert entry in `accounts` table
+ *   6. Link user to requested tenant
+ *   7. Mint JWT → redirect to app redirect_uri with ?token=<jwt>
+ */
+auth.get("/oauth/:provider/callback", async (c) => {
+  const providerName = c.req.param("provider");
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  const errorParam = c.req.query("error");
+
+  if (errorParam) {
+    return c.json<ApiResponse>({ ok: false, error: `OAuth error: ${errorParam}` }, 400);
+  }
+
+  if (!isBuiltInProvider(providerName)) {
+    return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
+  }
+
+  if (!code || !state) {
+    return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+  }
+
+  // Validate and consume the state (one-time use)
+  const rawPayload = await getChallengeStore().consume(`oauth:${state}`);
+  if (!rawPayload) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OAuth state" }, 401);
+  }
+
+  let stateData: { provider: string; tenantId?: string; redirectUri: string };
+  try {
+    stateData = JSON.parse(rawPayload) as typeof stateData;
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Malformed OAuth state payload" }, 400);
+  }
+
+  if (stateData.provider !== providerName) {
+    return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
+  }
+
+  let oauthClient: OAuthClient;
+  try {
+    oauthClient = new OAuthClient(getProviderConfig(providerName));
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
+      503,
+    );
+  }
+
+  const callbackUrl = buildOAuthCallbackUrl(c, providerName);
+
+  // Exchange code for access token
+  let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
+  try {
+    tokenResponse = await oauthClient.exchangeCode(code, callbackUrl);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
+      502,
+    );
+  }
+
+  // Fetch user info from provider
+  let providerUser: Awaited<ReturnType<OAuthClient["getUserInfo"]>>;
+  try {
+    providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Failed to fetch user info" },
+      502,
+    );
+  }
+
+  if (!providerUser.email) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Provider did not return an email address" },
+      400,
+    );
+  }
+
+  // Create/find user + provision wallet + link tenant
+  const result = await provisionOAuthUser({
+    c,
+    providerName,
+    providerUser,
+    tokenResponse,
+    tenantId: stateData.tenantId,
+  });
+
+  if (!result.ok) {
+    return c.json<ApiResponse>({ ok: false, error: result.error }, 500);
+  }
+
+  // Redirect to the app with the JWT
+  const redirectUrl = new URL(stateData.redirectUri);
+  redirectUrl.searchParams.set("token", result.token);
+  redirectUrl.searchParams.set("refreshToken", result.refreshToken);
+  return c.redirect(redirectUrl.toString(), 302);
+});
+
+/**
+ * POST /oauth/:provider/token
+ * SPA / popup flow — the client has already obtained the code.
+ *
+ * Body: { code: string; redirectUri: string; tenantId?: string }
+ * Returns: { ok: true; token: string; user: { id, email, walletAddress } }
+ */
+auth.post("/oauth/:provider/token", async (c) => {
+  const providerName = c.req.param("provider");
+  if (!isBuiltInProvider(providerName)) {
+    return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
+  }
+
+  const body = await safeJsonParse<{
+    code: string;
+    redirectUri: string;
+    tenantId?: string;
+  }>(c);
+
+  if (!body?.code || !body?.redirectUri) {
+    return c.json<ApiResponse>({ ok: false, error: "code and redirectUri are required" }, 400);
+  }
+
+  let oauthClient: OAuthClient;
+  try {
+    oauthClient = new OAuthClient(getProviderConfig(providerName));
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
+      503,
+    );
+  }
+
+  let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
+  try {
+    tokenResponse = await oauthClient.exchangeCode(body.code, body.redirectUri);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
+      502,
+    );
+  }
+
+  let providerUser: Awaited<ReturnType<OAuthClient["getUserInfo"]>>;
+  try {
+    providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Failed to fetch user info" },
+      502,
+    );
+  }
+
+  if (!providerUser.email) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Provider did not return an email address" },
+      400,
+    );
+  }
+
+  const result = await provisionOAuthUser({
+    c,
+    providerName,
+    providerUser,
+    tokenResponse,
+    tenantId: body.tenantId,
+  });
+
+  if (!result.ok) {
+    return c.json<ApiResponse>({ ok: false, error: result.error }, 500);
+  }
+
+  return c.json(buildAuthResponse(result.token, result.refreshToken, result.user as Record<string, unknown>));
+});
+
+// ─── OAuth helper: provision user + account + tenant link ─────────────────────
+
+type OAuthUserInfo = Awaited<ReturnType<OAuthClient["getUserInfo"]>>;
+type OAuthTokenResponse = Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
+
+async function provisionOAuthUser(opts: {
+  c: Context;
+  providerName: string;
+  providerUser: OAuthUserInfo;
+  tokenResponse: OAuthTokenResponse;
+  tenantId?: string;
+}): Promise<
+  | { ok: true; token: string; refreshToken: string; user: { id: string; email: string; walletAddress?: string | null } }
+  | { ok: false; error: string }
+> {
+  const { c, providerName, providerUser, tokenResponse, tenantId } = opts;
+  const db = getDb();
+  const email = providerUser.email.toLowerCase().trim();
+
+  try {
+    // 1. Find or create global user record
+    const user = await findOrCreateUser(email);
+
+    // Update name/image if we have richer data from the provider and the user doesn't have it yet
+    const updates: Partial<typeof users.$inferInsert> = {};
+    if (!user.name && providerUser.name) updates.name = providerUser.name;
+    if (!user.image && providerUser.avatar) updates.image = providerUser.avatar;
+    if (!user.emailVerified && providerUser.emailVerified) updates.emailVerified = true;
+    if (Object.keys(updates).length > 0) {
+      await db.update(users).set(updates).where(eq(users.id, user.id));
+    }
+
+    // 2. Upsert the OAuth account link (provider + providerAccountId → user)
+    await db
+      .insert(accounts)
+      .values({
+        userId: user.id,
+        provider: providerName,
+        providerAccountId: providerUser.id,
+        accessToken: tokenResponse.access_token,
+        refreshToken: tokenResponse.refresh_token ?? null,
+        expiresAt: tokenResponse.expires_in
+          ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
+          : null,
+      })
+      .onConflictDoUpdate({
+        target: [accounts.provider, accounts.providerAccountId],
+        set: {
+          userId: user.id,
+          accessToken: tokenResponse.access_token,
+          refreshToken: tokenResponse.refresh_token ?? null,
+          expiresAt: tokenResponse.expires_in
+            ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
+            : null,
+        },
+      });
+
+    // 3. Provision personal wallet (idempotent)
+    let walletAddress = user.walletAddress;
+    try {
+      const w = await provisionWalletForUser(user.id, email);
+      walletAddress = w.walletAddress;
+    } catch (err) {
+      console.error(`[OAuthAuth:${providerName}] Wallet provision failed:`, err);
+    }
+
+    // 4. Resolve requesting tenant and link user
+    const { tenantId: resolvedTenantId } = await resolveTenantForUser(c, user.id, tenantId);
+    await ensureUserTenantLink(user.id, resolvedTenantId);
+
+    // 5. Mint JWT + refresh token
+    const token = await createSessionToken(walletAddress ?? "", resolvedTenantId, {
+      userId: user.id,
+      email,
+    });
+    const oauthRefreshToken = await createRefreshToken(user.id, resolvedTenantId);
+
+    return { ok: true, token, refreshToken: oauthRefreshToken, user: { id: user.id, email, walletAddress } };
+  } catch (err) {
+    console.error(`[OAuthAuth:${providerName}] provisionOAuthUser failed:`, err);
+    return { ok: false, error: err instanceof Error ? err.message : "Internal server error" };
+  }
+}
+
+/**
+ * Build the canonical OAuth callback URL for the given provider.
+ * Uses the APP_URL env var (preferred) or reconstructs from the request host.
+ */
+function buildOAuthCallbackUrl(c: Context, providerName: string): string {
+  const appUrl = process.env.APP_URL
+    ? process.env.APP_URL.replace(/\/$/, "")
+    : `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
+  return `${appUrl}/auth/oauth/${providerName}/callback`;
+}
 
 export { auth as authRoutes };

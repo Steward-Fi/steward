@@ -29,6 +29,7 @@ import {
   RATE_LIMIT_WINDOW_MS,
   nonceCleanupTimer,
   tenantAuth,
+  dashboardAuthMiddleware,
   type AppVariables,
   type ApiResponse,
 } from "./services/context";
@@ -136,7 +137,7 @@ app.use("/tenants/:id/config", (c, next) =>
 app.use("/tenants/:id/config/*", (c, next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
 );
-app.use("/dashboard/*", (c, next) => tenantAuth(c, next));
+app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
 app.use("/webhooks", (c, next) => tenantAuth(c, next));
 app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
 app.use("/approvals", (c, next) => tenantAuth(c, next));
