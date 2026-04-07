@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import React, { Suspense, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 
@@ -102,8 +102,12 @@ function EmailCallbackInner() {
 }
 
 export default function EmailCallbackPage() {
+  const SuspenseAny = Suspense as React.ComponentType<{
+    fallback: React.ReactNode;
+    children: React.ReactNode;
+  }>;
   return (
-    <Suspense
+    <SuspenseAny
       fallback={
         <div className="min-h-screen bg-bg flex items-center justify-center">
           <span className="w-5 h-5 border border-text-tertiary border-t-accent animate-spin" />
@@ -111,6 +115,6 @@ export default function EmailCallbackPage() {
       }
     >
       <EmailCallbackInner />
-    </Suspense>
+    </SuspenseAny>
   );
 }
