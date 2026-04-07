@@ -2,6 +2,7 @@
   "name": "@stwd/eliza-plugin",
   "version": "0.3.0",
   "description": "Steward wallet management plugin for ElizaOS agents",
+  "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
