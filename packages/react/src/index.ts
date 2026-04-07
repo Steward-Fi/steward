@@ -2,6 +2,7 @@
 export { StewardProvider } from "./provider.js";
 
 // ─── Components ───
+export { StewardLogin } from "./components/StewardLogin.js";
 export { WalletOverview } from "./components/WalletOverview.js";
 export { TransactionHistory } from "./components/TransactionHistory.js";
 export { PolicyControls } from "./components/PolicyControls.js";
@@ -9,6 +10,7 @@ export { ApprovalQueue } from "./components/ApprovalQueue.js";
 export { SpendDashboard } from "./components/SpendDashboard.js";
 
 // ─── Hooks ───
+export { useAuth } from "./hooks/useAuth.js";
 export { useSteward } from "./hooks/useSteward.js";
 export { useWallet } from "./hooks/useWallet.js";
 export { useTransactions } from "./hooks/useTransactions.js";

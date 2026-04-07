@@ -115,6 +115,41 @@ export function StewardProvider({
     return authInstance?.getToken() ?? null;
   }, [authInstance]);
 
+  const signInWithPasskey = useCallback(async (email: string) => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    setAuthLoading(true);
+    try {
+      return await authInstance.signInWithPasskey(email);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authInstance]);
+
+  const signInWithEmail = useCallback(async (email: string) => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    return authInstance.signInWithEmail(email);
+  }, [authInstance]);
+
+  const verifyEmailCallback = useCallback(async (token: string, email: string) => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    setAuthLoading(true);
+    try {
+      return await authInstance.verifyEmailCallback(token, email);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authInstance]);
+
+  const signInWithSIWE = useCallback(async (address: string, signMessage: (msg: string) => Promise<string>) => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    setAuthLoading(true);
+    try {
+      return await authInstance.signInWithSIWE(address, signMessage);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authInstance]);
+
   const authContextValue = useMemo<StewardAuthContextValue | null>(() => {
     if (!authInstance) return null;
     return {
@@ -124,8 +159,12 @@ export function StewardProvider({
       session: authSession,
       signOut,
       getToken,
+      signInWithPasskey,
+      signInWithEmail,
+      verifyEmailCallback,
+      signInWithSIWE,
     };
-  }, [authInstance, authSession, authLoading, signOut, getToken]);
+  }, [authInstance, authSession, authLoading, signOut, getToken, signInWithPasskey, signInWithEmail, verifyEmailCallback, signInWithSIWE]);
 
   // ─── Tenant config ─────────────────────────────────────────────────────────
 
