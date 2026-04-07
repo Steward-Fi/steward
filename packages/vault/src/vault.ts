@@ -654,7 +654,7 @@ export class Vault {
         .insert(encryptedChainKeys)
         .values({
           agentId,
-          chainFamily,
+          chainFamily: chainType,
           ciphertext: encryptedKey.ciphertext,
           iv: encryptedKey.iv,
           tag: encryptedKey.tag,
@@ -673,7 +673,7 @@ export class Vault {
       // Upsert into agent_wallets
       await tx
         .insert(agentWallets)
-        .values({ agentId, chainFamily, address: walletAddress, createdAt: now })
+        .values({ agentId, chainFamily: chainType, address: walletAddress, createdAt: now })
         .onConflictDoUpdate({
           target: [agentWallets.agentId, agentWallets.chainFamily],
           set: { address: walletAddress },
