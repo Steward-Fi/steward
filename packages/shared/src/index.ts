@@ -440,6 +440,8 @@ export interface TenantControlPlaneConfig {
   approvalConfig: ApprovalConfig;
   featureFlags: TenantFeatureFlags;
   theme?: TenantTheme;
+  /** Allowed CORS origins for this tenant. Empty array = wildcard (*) in dev mode. */
+  allowedOrigins?: string[];
   createdAt?: Date;
   updatedAt?: Date;
 }

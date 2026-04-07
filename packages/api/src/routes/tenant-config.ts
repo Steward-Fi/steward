@@ -14,6 +14,7 @@ import {
   type ApiResponse,
 } from "../services/context";
 import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
+import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
 import type {
   TenantControlPlaneConfig,
   PolicyExposureConfig,
@@ -48,6 +49,7 @@ tenantConfigRoutes.get("/:id/config", async (c) => {
       approvalConfig: row.approvalConfig as ApprovalConfig,
       featureFlags: row.featureFlags as TenantFeatureFlags,
       theme: row.theme as TenantTheme | undefined,
+      allowedOrigins: row.allowedOrigins ?? [],
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
@@ -91,6 +93,7 @@ tenantConfigRoutes.put("/:id/config", async (c) => {
     approvalConfig: body.approvalConfig ?? {},
     featureFlags: body.featureFlags ?? {},
     theme: body.theme ?? null,
+    allowedOrigins: body.allowedOrigins ?? [],
   };
 
   const [row] = await db
@@ -106,10 +109,14 @@ tenantConfigRoutes.put("/:id/config", async (c) => {
         approvalConfig: values.approvalConfig,
         featureFlags: values.featureFlags,
         theme: values.theme,
+        allowedOrigins: values.allowedOrigins,
         updatedAt: new Date(),
       },
     })
     .returning();
+
+  // Evict the cached origins so the next request picks up the new config
+  invalidateTenantCorsCache(tenantId);
 
   const config: TenantControlPlaneConfig = {
     tenantId: row.tenantId,
@@ -120,6 +127,7 @@ tenantConfigRoutes.put("/:id/config", async (c) => {
     approvalConfig: row.approvalConfig as ApprovalConfig,
     featureFlags: row.featureFlags as TenantFeatureFlags,
     theme: row.theme as TenantTheme | undefined,
+    allowedOrigins: row.allowedOrigins ?? [],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
