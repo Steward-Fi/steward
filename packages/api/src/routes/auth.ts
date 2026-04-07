@@ -721,8 +721,9 @@ auth.post("/passkey/register/verify", async (c) => {
     userId: user.id,
     email,
   });
+  const registerRefreshToken = await createRefreshToken(user.id, tenantId);
 
-  return c.json({ ok: true, token, user: { id: user.id, email, walletAddress } });
+  return c.json(buildAuthResponse(token, registerRefreshToken, { id: user.id, email, walletAddress }));
 });
 
 // ── Passkey authentication ────────────────────────────────────────────────────
@@ -852,8 +853,9 @@ auth.post("/passkey/login/verify", async (c) => {
     userId: user.id,
     email,
   });
+  const loginRefreshToken = await createRefreshToken(user.id, tenantId);
 
-  return c.json({ ok: true, token, user: { id: user.id, email, walletAddress } });
+  return c.json(buildAuthResponse(token, loginRefreshToken, { id: user.id, email, walletAddress }));
 });
 
 // ── Email magic link ──────────────────────────────────────────────────────────
