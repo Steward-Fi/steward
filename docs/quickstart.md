@@ -11,7 +11,7 @@ Get Steward running locally in under 5 minutes using embedded mode (no external 
 ## 1. Clone and Install
 
 ```bash
-git clone https://github.com/your-org/steward-fi
+git clone https://github.com/Steward-Fi/steward
 cd steward-fi
 bun install
 ```
