@@ -22,6 +22,13 @@ export interface EmailAuthConfig {
   tokenTtlMs?: number;
   /** Path that receives the magic-link callback. Default: "/auth/callback/email" */
   callbackPath?: string;
+  /**
+   * Optional external TokenStore to use for magic-link tokens.
+   * Defaults to a fresh TokenStore backed by in-memory storage.
+   * Pass a store configured with a Redis or Postgres backend for
+   * restart-safe / multi-instance deployments.
+   */
+  tokenStore?: TokenStore;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,7 +161,7 @@ export class EmailAuth {
     this.callbackPath = config.callbackPath ?? DEFAULT_CALLBACK;
     this.tokenTtlMs = config.tokenTtlMs ?? DEFAULT_TTL_MS;
     this.provider = config.provider ?? new ConsoleProvider();
-    this.tokenStore = new TokenStore();
+    this.tokenStore = config.tokenStore ?? new TokenStore();
   }
 
   /**
@@ -186,7 +193,7 @@ export class EmailAuth {
    */
   async verifyMagicLink(token: string): Promise<{ email: string; valid: boolean }> {
     const tokenHash = hashToken(token);
-    const email = this.tokenStore.verify(tokenHash);
+    const email = await this.tokenStore.verify(tokenHash);
 
     if (!email) {
       return { email: "", valid: false };

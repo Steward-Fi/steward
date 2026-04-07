@@ -133,7 +133,7 @@ export class PasskeyAuth {
     response: RegistrationResponseJSON,
     expectedChallenge?: string,
   ) {
-    const challenge = expectedChallenge ?? this.challenges.consume(userId);
+    const challenge = expectedChallenge ?? await this.challenges.consume(userId);
     if (!challenge) {
       throw new Error(
         `No active challenge found for user "${userId}". It may have expired (>5 min) or already been used.`,
@@ -207,7 +207,7 @@ export class PasskeyAuth {
           "Either expectedChallenge or email must be provided to look up the stored challenge.",
         );
       }
-      challenge = this.challenges.consume(email);
+      challenge = await this.challenges.consume(email);
     }
     if (!challenge) {
       throw new Error(
