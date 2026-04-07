@@ -247,6 +247,14 @@ export interface StewardAuthContextValue {
   session: import("@stwd/sdk").StewardSession | null;
   signOut: () => void;
   getToken: () => string | null;
+  /** Sign in with a passkey (WebAuthn). Browser-only. */
+  signInWithPasskey: (email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  /** Send a magic link email. */
+  signInWithEmail: (email: string) => Promise<import("@stwd/sdk").StewardEmailResult>;
+  /** Verify a magic link callback token. */
+  verifyEmailCallback: (token: string, email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  /** Sign in with an Ethereum wallet via SIWE. */
+  signInWithSIWE: (address: string, signMessage: (msg: string) => Promise<string>) => Promise<import("@stwd/sdk").StewardAuthResult>;
 }
 
 // ─── Auth Component Props ───

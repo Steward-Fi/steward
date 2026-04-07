@@ -415,9 +415,16 @@ auth.post("/verify", async (c) => {
 
   const token = await createSessionToken(address, effectiveTenantId);
 
+  // For SIWE, find a user by wallet address (may not exist if SIWE-only user)
+  const [siweUser] = await db.select().from(users).where(eq(users.walletAddress, address));
+  const siweUserId = siweUser?.id ?? tenant.id; // fall back to tenant.id as a stable identifier
+  const siweRefreshToken = await createRefreshToken(siweUserId, effectiveTenantId);
+
   const responseData: Record<string, unknown> = {
     ok: true,
     token,
+    refreshToken: siweRefreshToken,
+    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
     address,
     tenant: { id: tenant.id, name: tenant.name },
   };
@@ -455,6 +462,94 @@ auth.get("/session", async (c) => {
  * JWT is stateless — client drops the token.
  */
 auth.post("/logout", (c) => c.json<ApiResponse>({ ok: true }));
+
+/**
+ * POST /refresh
+ * Body: { refreshToken: string }
+ * Validates the refresh token, rotates it (one-time use), issues new access + refresh tokens.
+ * Supports silent re-auth without user interaction when the access token nears expiry.
+ */
+auth.post("/refresh", async (c) => {
+  const body = await safeJsonParse<{ refreshToken: string }>(c);
+  if (!body?.refreshToken) {
+    return c.json<ApiResponse>({ ok: false, error: "refreshToken is required" }, 400);
+  }
+
+  const record = await validateRefreshToken(body.refreshToken);
+  if (!record) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired refresh token" }, 401);
+  }
+
+  const db = getDb();
+  // Rotate: delete old token immediately (one-time use)
+  await db.delete(refreshTokens).where(eq(refreshTokens.id, record.id));
+
+  // Fetch user for token claims
+  const [user] = await db.select().from(users).where(eq(users.id, record.userId));
+  const walletAddress = user?.walletAddress ?? "";
+  const email = user?.email ?? undefined;
+
+  // Issue new access token (15min)
+  const newAccessToken = await createSessionToken(walletAddress, record.tenantId, {
+    userId: record.userId,
+    ...(email ? { email } : {}),
+  });
+
+  // Issue new refresh token (rotation)
+  const newRefreshToken = await createRefreshToken(record.userId, record.tenantId);
+
+  return c.json({
+    ok: true,
+    token: newAccessToken,
+    refreshToken: newRefreshToken,
+    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+  });
+});
+
+/**
+ * POST /revoke
+ * Body: { refreshToken: string }
+ * Revokes a specific refresh token (sign out from this session/device).
+ */
+auth.post("/revoke", async (c) => {
+  const body = await safeJsonParse<{ refreshToken: string }>(c);
+  if (!body?.refreshToken) {
+    return c.json<ApiResponse>({ ok: false, error: "refreshToken is required" }, 400);
+  }
+
+  const db = getDb();
+  await db
+    .delete(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
+
+  return c.json<ApiResponse>({ ok: true });
+});
+
+/**
+ * DELETE /sessions
+ * Requires: Authorization: Bearer <access-token>
+ * Revokes ALL refresh tokens for the authenticated user (sign out everywhere / all devices).
+ */
+auth.delete("/sessions", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return c.json<ApiResponse>({ ok: false, error: "Authorization header required" }, 401);
+  }
+
+  const payload = await verifySessionToken(authHeader.slice(7));
+  if (!payload) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired token" }, 401);
+  }
+
+  if (!payload.userId) {
+    return c.json<ApiResponse>({ ok: false, error: "Token does not contain userId" }, 400);
+  }
+
+  const db = getDb();
+  await db.delete(refreshTokens).where(eq(refreshTokens.userId, payload.userId));
+
+  return c.json<ApiResponse>({ ok: true });
+});
 
 // ── Passkey registration ───────────────────────────────────────────────────────
 
