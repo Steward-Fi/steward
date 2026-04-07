@@ -6,7 +6,7 @@
  * Registers graceful shutdown on process exit signals.
  */
 
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 
 let instance: Redis | null = null;
 let shutdownRegistered = false;
@@ -29,7 +29,7 @@ export function getRedis(): Redis {
     });
 
     instance.on("error", (err) => {
-      console.error("[steward:redis] connection error:", err.message);
+      console.error("[steward:redis] connection error:", (err as Error).message);
     });
 
     instance.on("connect", () => {
