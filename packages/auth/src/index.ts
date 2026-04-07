@@ -9,3 +9,4 @@ export * from "./platform";
 export * from "./session";
 export * from "./token-store";
 export * from "./types";
+export * from "./oauth";
