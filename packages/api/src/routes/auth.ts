@@ -61,12 +61,73 @@ import { Vault, provisionUserWallet } from "@stwd/vault";
 
 const DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
 
+// ─── IP-based auth rate limiting ─────────────────────────────────────────────
+
+// In-memory fallback store for when Redis is unavailable
+const _authRateLimitStore = new Map<string, { count: number; resetAt: number }>();
+
+/**
+ * Check a per-IP rate limit for auth endpoints.
+ * Uses Redis sliding-window when available; falls back to in-memory counter.
+ *
+ * @param c        - Hono context (used to read client IP headers)
+ * @param endpoint - Short name used as part of the Redis/memory key
+ * @param windowMs - Window length in milliseconds
+ * @param max      - Maximum allowed requests in the window
+ */
+async function checkAuthRateLimit(
+  c: Context,
+  endpoint: string,
+  windowMs: number,
+  max: number,
+): Promise<{ allowed: boolean; retryAfterSecs?: number }> {
+  const ip =
+    (c.req.header("x-forwarded-for")?.split(",")[0].trim()) ??
+    c.req.header("x-real-ip") ??
+    "unknown";
+  const key = `ratelimit:auth:${endpoint}:${ip}:${windowMs}`;
+
+  // Try Redis first
+  try {
+    const redisMw = await import("../middleware/redis.js");
+    if (redisMw.isRedisAvailable()) {
+      const { checkRateLimit } = await import("@stwd/redis");
+      const result = await checkRateLimit(key, windowMs, max);
+      if (!result.allowed) {
+        return { allowed: false, retryAfterSecs: Math.ceil(result.resetMs / 1000) };
+      }
+      return { allowed: true };
+    }
+  } catch {
+    // Redis unavailable — fall through to in-memory
+  }
+
+  // In-memory sliding-window fallback
+  const now = Date.now();
+  const entry = _authRateLimitStore.get(key);
+  if (!entry || entry.resetAt <= now) {
+    _authRateLimitStore.set(key, { count: 1, resetAt: now + windowMs });
+    return { allowed: true };
+  }
+  if (entry.count >= max) {
+    return { allowed: false, retryAfterSecs: Math.ceil((entry.resetAt - now) / 1000) };
+  }
+  entry.count++;
+  return { allowed: true };
+}
+
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
 // JWT secret: prefer dedicated STEWARD_JWT_SECRET, fall back to master password with warning
 const jwtSecretSource = process.env.STEWARD_JWT_SECRET || process.env.STEWARD_MASTER_PASSWORD;
 if (!process.env.STEWARD_JWT_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
   console.warn("⚠️ STEWARD_JWT_SECRET not set, falling back to master password. Set a separate JWT secret for production.");
+}
+if (!jwtSecretSource) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("⛔ STEWARD_JWT_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
+  }
+  console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_JWT_SECRET before going to production!");
 }
 const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 const JWT_ISSUER = "steward";
@@ -528,6 +589,10 @@ auth.post("/logout", (c) => c.json<ApiResponse>({ ok: true }));
  * Supports silent re-auth without user interaction when the access token nears expiry.
  */
 auth.post("/refresh", async (c) => {
+  const rl = await checkAuthRateLimit(c, "refresh", 60_000, 30);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>({ ok: false, error: "Too many requests. Please try again later." }, 429);
+  }
   const body = await safeJsonParse<{ refreshToken: string }>(c);
   if (!body?.refreshToken) {
     return c.json<ApiResponse>({ ok: false, error: "refreshToken is required" }, 400);
@@ -647,6 +712,10 @@ auth.post("/passkey/register/options", async (c) => {
  * Verifies registration, stores credential, provisions wallet, returns JWT.
  */
 auth.post("/passkey/register/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "passkey-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>({ ok: false, error: "Too many requests. Please try again later." }, 429);
+  }
   const body = await safeJsonParse<{
     email: string;
     response: Record<string, unknown>;
@@ -773,6 +842,10 @@ auth.post("/passkey/login/options", async (c) => {
  * Verifies authentication, updates counter, links user to tenant, returns JWT.
  */
 auth.post("/passkey/login/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "passkey-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>({ ok: false, error: "Too many requests. Please try again later." }, 429);
+  }
   const body = await safeJsonParse<{
     email: string;
     response: { id: string; [key: string]: unknown };
@@ -866,6 +939,10 @@ auth.post("/passkey/login/verify", async (c) => {
  * Sends a magic link email, returns expiry time.
  */
 auth.post("/email/send", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-send", 60_000, 3);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>({ ok: false, error: "Too many requests. Please try again later." }, 429);
+  }
   const body = await safeJsonParse<{ email: string }>(c);
   if (!body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);

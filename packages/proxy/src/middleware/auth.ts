@@ -14,9 +14,10 @@ const jwtSecretSource =
   process.env.STEWARD_JWT_SECRET || process.env.STEWARD_MASTER_PASSWORD;
 
 if (!jwtSecretSource) {
-  console.error(
-    "⛔ STEWARD_JWT_SECRET or STEWARD_MASTER_PASSWORD must be set",
-  );
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("⛔ STEWARD_JWT_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
+  }
+  console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT verification. Set STEWARD_JWT_SECRET before going to production!");
 }
 
 const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");

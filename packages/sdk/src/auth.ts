@@ -570,7 +570,11 @@ export class StewardAuth {
     expiresIn = 900,
   ): StewardAuthResult {
     this.storage.setItem(STORAGE_KEY, token);
-    this.storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+    // Only persist the refresh token when it's a non-empty string.
+    // An empty string means the API didn't issue one (e.g. SIWE flow).
+    if (refreshToken) {
+      this.storage.setItem(REFRESH_TOKEN_KEY, refreshToken);
+    }
     const session = sessionFromToken(token, user);
     this.notifyListeners(session);
     return { token, refreshToken, expiresIn, user };

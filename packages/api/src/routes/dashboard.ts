@@ -75,7 +75,7 @@ dashboardRoutes.get("/:agentId", async (c) => {
       ),
 
     // Balance — try to get from vault
-    vault.getBalance(agentId).catch(() => null),
+    vault.getBalance(tenantId, agentId).catch(() => null),
   ]);
 
   // Get monthly spend
@@ -107,10 +107,10 @@ dashboardRoutes.get("/:agentId", async (c) => {
     balances: {
       evm: balanceResult
         ? {
-            native: balanceResult.balances.native,
-            nativeFormatted: balanceResult.balances.nativeFormatted,
-            chainId: balanceResult.balances.chainId,
-            symbol: balanceResult.balances.symbol,
+            native: balanceResult.native,
+            nativeFormatted: balanceResult.nativeFormatted,
+            chainId: balanceResult.chainId,
+            symbol: balanceResult.symbol,
           }
         : undefined,
     },

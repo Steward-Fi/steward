@@ -24,8 +24,15 @@ import { createAgentToken } from "../services/context";
 // Platform routes share the same vault as the main API.
 
 function getVault(): Vault {
+  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  if (!masterPassword) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("⛔ STEWARD_MASTER_PASSWORD must be set in production");
+    }
+    console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!");
+  }
   return new Vault({
-    masterPassword: process.env.STEWARD_MASTER_PASSWORD || "dev-secret",
+    masterPassword: masterPassword || "dev-secret",
     rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
     chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
   });
