@@ -340,7 +340,7 @@ user.post("/me/wallet/sign", async (c) => {
 
   const stats      = await getTransactionStats(agentId);
   const engine     = new PolicyEngine();
-  const evaluation = engine.evaluate(policySet, {
+  const evaluation = await engine.evaluate(policySet, {
     request:          signRequest,
     recentTxCount1h:  stats.recentTxCount1h,
     recentTxCount24h: stats.recentTxCount24h,
