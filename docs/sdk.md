@@ -31,6 +31,36 @@ const steward = new StewardClient({
 });
 ```
 
+> **Security note — JWT storage:** By default, browser-side usage stores JWTs in `localStorage`, which is accessible to any JavaScript running on the page. This creates an XSS risk: if an attacker injects a script, they can exfiltrate the token.
+>
+> For server-rendered apps (Next.js, Remix, etc.), store the JWT in an `httpOnly` cookie instead. The cookie is never accessible to JavaScript and is automatically included in requests.
+>
+> `StewardAuth` (from `@stwd/sdk/auth`) accepts a custom `storage` parameter so you can bring your own token store:
+>
+> ```typescript
+> import { StewardAuth } from "@stwd/sdk";
+>
+> // Example: memory-only storage (safest for SPAs — cleared on page unload)
+> const memStore: Record<string, string> = {};
+> const auth = new StewardAuth({
+>   baseUrl: "https://your-steward-instance.com",
+>   storage: {
+>     getItem: (key) => memStore[key] ?? null,
+>     setItem: (key, value) => { memStore[key] = value; },
+>     removeItem: (key) => { delete memStore[key]; },
+>   },
+> });
+>
+> // For server-rendered apps: set JWT in httpOnly cookie server-side,
+> // then pass bearerToken to StewardClient via SSR context.
+> // Do not read tokens from document.cookie in browser JS.
+> ```
+>
+> **Recommendation by app type:**
+> - **SPAs (React, Vue):** Use memory-only storage or sessionStorage. Pair with refresh tokens to maintain sessions across navigations.
+> - **Server-rendered (Next.js, Remix):** Store JWT in `httpOnly` cookie server-side; pass `bearerToken` to `StewardClient` via SSR.
+> - **Backend / agents:** Store in environment variables or a secrets manager.
+
 ### `StewardClientConfig`
 
 | Field | Type | Required | Description |
