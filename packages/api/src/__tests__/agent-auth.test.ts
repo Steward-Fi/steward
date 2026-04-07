@@ -1,4 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+
+// Skip all DB-dependent tests when DATABASE_URL is not configured
+const SKIP = !process.env.DATABASE_URL;
 import { SignJWT, jwtVerify } from "jose";
 import { generateApiKey, hashApiKey } from "@stwd/auth";
 import { getDb, closeDb, tenants, agents, encryptedKeys } from "@stwd/db";
@@ -47,6 +50,7 @@ async function createAgentToken(agentId: string, tenantId: string, expiresIn = "
 // ─── Setup ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (SKIP) return;
   const db = getDb();
   const apiKeyPair = generateApiKey();
   testApiKey = apiKeyPair.key;
@@ -76,6 +80,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (SKIP) return;
   // Clean up test data
   const db = getDb();
   await db.delete(encryptedKeys).where(eq(encryptedKeys.agentId, TEST_AGENT_ID));
@@ -86,7 +91,7 @@ afterAll(async () => {
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
-describe("POST /agents/:agentId/token", () => {
+describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
   it("generates a scoped JWT with tenant API key auth", async () => {
     const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
@@ -155,7 +160,7 @@ describe("POST /agents/:agentId/token", () => {
   });
 });
 
-describe("Agent-scoped JWT access to vault endpoints", () => {
+describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
   let agentToken: string;
   let otherAgentToken: string;
 
@@ -249,7 +254,7 @@ describe("Agent-scoped JWT access to vault endpoints", () => {
   });
 });
 
-describe("POST /vault/:agentId/import", () => {
+describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
   const IMPORT_AGENT_ID = "import-test-agent";
 
   afterAll(async () => {
@@ -323,7 +328,7 @@ describe("POST /vault/:agentId/import", () => {
   });
 });
 
-describe("Backward compatibility", () => {
+describe.skipIf(SKIP)("Backward compatibility", () => {
   it("tenant API key still works for all agent endpoints", async () => {
     const res = await fetch(`${BASE_URL}/agents`, {
       headers: tenantHeaders(testApiKey),
