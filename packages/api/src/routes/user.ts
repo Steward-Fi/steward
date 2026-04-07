@@ -39,11 +39,14 @@ import {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const JWT_SECRET = new TextEncoder().encode(
-  process.env.STEWARD_SESSION_SECRET ||
-  process.env.STEWARD_MASTER_PASSWORD ||
-  "dev-secret"
-);
+const _jwtSecretSrc = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+if (!_jwtSecretSrc) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
+  }
+  console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!");
+}
+const JWT_SECRET = new TextEncoder().encode(_jwtSecretSrc || "dev-secret");
 const JWT_ISSUER = "steward";
 
 // ─── Session payload types ────────────────────────────────────────────────────
