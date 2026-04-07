@@ -89,6 +89,25 @@ export const accounts = pgTable(
   }),
 );
 
+// ─── Refresh Tokens ─────────────────────────────────────────────────────────
+// Long-lived tokens (30 days) that can be exchanged for new access tokens.
+// One-time use: each refresh rotates both tokens and deletes the old refresh token.
+export const refreshTokens = pgTable(
+  "refresh_tokens",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tokenHashIdx: index("refresh_tokens_token_hash_idx").on(table.tokenHash),
+    userIdIdx: index("refresh_tokens_user_id_idx").on(table.userId),
+  }),
+);
+
 // ─── User–Tenant membership ───────────────────────────────────────────────────
 // A user can belong to multiple tenants with a per-tenant role.
 export const userTenants = pgTable(
@@ -139,6 +158,13 @@ export const accountsRelations = relations(accounts, ({ one }) => ({
   }),
 }));
 
+export const refreshTokensRelations = relations(refreshTokens, ({ one }) => ({
+  user: one(users, {
+    fields: [refreshTokens.userId],
+    references: [users.id],
+  }),
+}));
+
 export const userTenantsRelations = relations(userTenants, ({ one }) => ({
   user: one(users, {
     fields: [userTenants.userId],
@@ -166,3 +192,6 @@ export type NewAccount = typeof accounts.$inferInsert;
 
 export type UserTenant = typeof userTenants.$inferSelect;
 export type NewUserTenant = typeof userTenants.$inferInsert;
+
+export type RefreshToken = typeof refreshTokens.$inferSelect;
+export type NewRefreshToken = typeof refreshTokens.$inferInsert;
