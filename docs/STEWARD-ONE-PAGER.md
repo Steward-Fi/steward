@@ -28,7 +28,7 @@ Same API surface. Same guarantees. Same policy enforcement. You write the integr
 
 ## Auth
 
-Passkeys, email magic links, Sign-In With Ethereum — with Google and Discord social logins coming next. Users are first-class global identities. Apps are tenants. Sessions are portable across both deployment modes.
+Passkeys, email magic links, Sign-In With Ethereum, and Google and Discord social logins. Users are first-class global identities. Apps are tenants. Sessions are portable across both deployment modes.
 
 ---
 
@@ -36,7 +36,9 @@ Passkeys, email magic links, Sign-In With Ethereum — with Google and Discord s
 
 This is the thing Privy can't do. Policies are defined at the wallet level and enforced at the signing layer — not in your application code. Rules include: spending limits, approved address allowlists, rate limiting, time windows, auto-approve thresholds, and custom evaluator functions.
 
-The implication: even if your agent code is compromised, it cannot exceed its policy limits. The vault won't sign it. Policy isn't advice — it's a hard constraint at the cryptographic layer.
+The implication: even if your agent code is compromised, it cannot exceed its policy limits. The vault won't sign it. Policy isn't advice — it's a hard constraint at the cryptographic signing layer.
+
+Note: Privy now has server wallet policies, but they operate at the application layer — if the Privy server is compromised, those rules can be bypassed. Steward's policies are enforced inside the vault itself, regardless of what calls it.
 
 ---
 
@@ -48,7 +50,7 @@ This means one Steward instance manages all sensitive credentials for all your a
 
 ---
 
-## Day-One Customers
+## Building With
 
 ElizaLabs, Milady, Babylon, Hyperscape, Strata Reserve.
 
@@ -62,13 +64,13 @@ TypeScript / Hono, Postgres, AES-256-GCM vault, EVM + Solana, React SDK, ElizaOS
 
 ## What's Shipped
 
-Vault ✅ Policy engine ✅ Multi-tenant API ✅ Passkey + email auth ✅ SDK ✅ React components ✅ ElizaOS plugin ✅ Embedded mode (PGLite) ✅
+Vault ✅ Policy engine ✅ Multi-tenant API ✅ Passkey + email auth ✅ Social login (Google, Discord) ✅ Refresh tokens ✅ SDK ✅ React components ✅ ElizaOS plugin ✅ Embedded mode (PGLite) ✅ Production Docker image ✅
 
 ---
 
 ## What's Next
 
-Social login (Google, Discord), React auth widget, production Docker image, public docs, Babylon integration.
+Security audit, public docs site, Babylon integration, Strata deployment.
 
 ---
 
