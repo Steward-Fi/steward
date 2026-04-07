@@ -24,6 +24,9 @@ Steward's edge: you can `npm install @stwd/sdk`, point at a hosted instance OR r
 | **Auth: Passkeys** | ✅ Works | WebAuthn via simplewebauthn v13, register + login flows |
 | **Auth: Email magic links** | ✅ Works | Resend provider, 10min TTL, magic link callback |
 | **Auth: SIWE** | ✅ Works | Nonce generation, signature verification, JWT session |
+| **Auth: OAuth (Google, Discord)** | ✅ Works | Authorization code flow, token exchange, accounts table linked |
+| **Auth: Refresh tokens** | ✅ Works | 30-day tokens, rotation on use, revoke single/all sessions |
+| **Per-tenant CORS** | ✅ Wired | tenant-cors middleware reads allowed_origins from DB, falls back to * |
 | **SDK** (`@stwd/sdk`) | ✅ Published | npm, typed, browser + Node, all wallet/policy/approval ops |
 | **React components** (`@stwd/react`) | ✅ Built | WalletOverview, PolicyControls, ApprovalQueue, SpendDashboard, hooks |
 | **ElizaOS plugin** | ✅ Built | sign-transaction, transfer, balance, approval evaluator |
@@ -81,14 +84,14 @@ ElizaCloud needs steward as the **central auth + wallet service** replacing Priv
 |---|---|---|
 | **Replace Privy for user auth** | The whole point. Steward needs to handle cloud user signup/login. Passkeys + email + social (Google, Discord). | Large — auth backend ready, need: social login providers, React auth widget (`<StewardLogin />`), session management integration |
 | **Cross-tenant user identity** | Users should be global. Sign up on babylon, same wallet on milady. Current model creates `personal-{userId}` tenant per user. Need `user_tenants` join table for multi-app identity. | Medium — DB schema change + auth flow update |
-| **Social login (Google, Discord)** | Table stakes for privy replacement. DB `accounts` table exists, OAuth flow doesn't. | Medium — standard OAuth2 implementation, 2-3 providers |
+| ~~Social login (Google, Discord)~~ | ✅ Shipped | Google + Discord OAuth complete; wire GOOGLE_CLIENT_ID / DISCORD_CLIENT_ID env vars to enable |
 | **React auth widget** | `<StewardLogin />` drop-in component. Email input, passkey button, social buttons, handles the full flow. This is what odi needs for babylon. | Medium — UI component + SDK auth methods |
 | **Production deployment** | Dockerfile just fixed but needs testing at scale. Need: proper docker-compose for hosted mode, Redis for sessions/rate-limiting, monitoring, backup strategy for encrypted keys. | Medium |
 | **Tenant self-service** | Apps need to create their own tenant, configure CORS origins, set default policies, get API keys. Currently requires platform API key (admin-only). | Medium — dashboard UI + API |
 | **SDK auth methods** | `@stwd/sdk` has wallet ops but no auth flow (signInWithPasskey, signInWithEmail, etc.). Need these for non-React integrations. | Small-medium |
 | **Token store persistence** | Challenge stores (passkey, magic link) are in-memory. Multi-instance breaks passkeys, restart loses active magic links. Need Redis or DB-backed store. | Small |
-| **JWT refresh tokens** | 24h JWT, then re-auth. Need refresh token flow for better UX. | Small |
-| **Per-tenant CORS** | Currently wildcard `origin: *`. Each tenant needs configured allowed origins. | Small |
+| ~~JWT refresh tokens~~ | ✅ Shipped | 30-day tokens, rotation, POST /auth/refresh + POST /auth/revoke + DELETE /auth/sessions |
+| ~~Per-tenant CORS~~ | ✅ Shipped | tenant-cors middleware live; reads allowed_origins from tenant_configs, falls back to * |
 
 ### What to do for elizacloud (priority order)
 1. **`<StewardLogin />` React component** — drop-in auth widget (passkey + email). This unblocks babylon.
@@ -106,7 +109,7 @@ ElizaCloud needs steward as the **central auth + wallet service** replacing Priv
 
 | Platform | Open Source | Self-Host | Auth | Policies | Agent-Native | Credential Proxy |
 |---|---|---|---|---|---|---|
-| **Steward** | ✅ | ✅ | ✅ (passkey/email/SIWE) | ✅ (6 types) | ✅ | ✅ |
+| **Steward** | ✅ | ✅ | ✅ (passkey/email/SIWE/Google/Discord) | ✅ (6 types) | ✅ | ✅ |
 | Privy (Stripe) | ❌ | ❌ | ✅ (all methods) | Partial | Bolted on | ❌ |
 | Vincent (Lit) | ✅ | ❌ (needs Lit network) | ❌ | ✅ (on-chain) | ✅ | ❌ |
 | Turnkey | ❌ | ❌ | ❌ | ❌ | Partial | ❌ |
