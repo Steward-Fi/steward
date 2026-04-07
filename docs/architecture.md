@@ -102,7 +102,24 @@ bun packages/api/src/index.ts
 5. Server → hashes token, compares, deletes (one-time use)
 6. findOrCreateUser(email) → upserts users row
 7. provisionWalletForUser() → creates personal-{userId} tenant + EVM+Solana wallets
-8. Returns { ok: true, token: JWT, user: { id, email, walletAddress } }
+8. Creates 30-day refresh token (stored as hash in DB)
+9. Returns { ok: true, token: JWT (24h), refreshToken, user: { id, email, walletAddress } }
+```
+
+### Auth Flow (OAuth — Google / Discord)
+
+```
+1. User → GET /auth/oauth/{provider}/authorize?redirectUri=...
+2. Server → generates CSRF state, stores in ChallengeStore (5 min TTL)
+3. Redirects to provider's authorization page
+4. Provider → GET /auth/oauth/{provider}/callback?code=...&state=...
+5. Server → validates state, exchanges code for provider access token
+6. Fetches user profile from provider (email, name, provider user ID)
+7. Upserts accounts row (provider + providerUserId link)
+8. findOrCreateUser(email) → upserts users row
+9. provisionWalletForUser() on first sign-in
+10. Creates 30-day refresh token
+11. Redirects to redirectUri?token=JWT&refreshToken=... (or returns JSON for POST /token)
 ```
 
 ## Multi-Tenancy Model
@@ -163,7 +180,7 @@ users (UUID)
   ├── email, name, walletAddress, stewardWalletId
   ├── authenticators[]     — passkey credentials (1 user : N passkeys)
   ├── sessions[]           — active session records
-  ├── accounts[]           — OAuth provider accounts (schema only; OAuth not yet implemented)
+  ├── accounts[]           — OAuth provider accounts (Google, Discord; linked on first OAuth sign-in)
   └── userTenants[]        — many-to-many with tenants; includes role field
 
 tenants (varchar slug)

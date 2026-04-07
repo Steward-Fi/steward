@@ -13,8 +13,35 @@ All auth routes are mounted at `/auth`.
 | Email magic link | End users, simple onboarding | `POST /auth/email/send` + `POST /auth/email/verify` |
 | Passkeys (WebAuthn) | End users, phishing-resistant | `POST /auth/passkey/register/*` + `POST /auth/passkey/login/*` |
 | SIWE (Sign-In with Ethereum) | Crypto-native users | `GET /auth/nonce` + `POST /auth/verify` |
+| Google OAuth | Social login | `GET /auth/oauth/google/authorize` → callback |
+| Discord OAuth | Social login | `GET /auth/oauth/discord/authorize` → callback |
 | JWT Bearer | Requests after any of the above flows | `Authorization: Bearer <token>` |
 | API key headers | Tenant services, agents, backends | `X-Steward-Tenant` + `X-Steward-Key` |
+
+---
+
+## Available Providers
+
+Query which auth methods are active on a given instance:
+
+```http
+GET /auth/providers
+```
+
+**Response:**
+
+```json
+{
+  "passkey": true,
+  "email": true,
+  "siwe": true,
+  "google": true,
+  "discord": true,
+  "oauth": ["google", "discord"]
+}
+```
+
+`google` and `discord` are `true` when `GOOGLE_CLIENT_ID` and `DISCORD_CLIENT_ID` are configured respectively. Use this endpoint to dynamically render login UI buttons.
 
 ---
 
@@ -333,6 +360,76 @@ Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
 }
 ```
 
+### Refresh Tokens
+
+All auth flows return both a short-lived JWT (`token`) and a long-lived refresh token (`refreshToken`).
+
+- JWT: 24 hours
+- Refresh token: 30 days (rotated on every use — old token is invalidated, new one issued)
+
+#### Refresh an Access Token
+
+```http
+POST /auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "<refresh_token>"
+}
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "token": "eyJhbGciOiJIUzI1NiJ9...",
+  "refreshToken": "new-refresh-token...",
+  "expiresIn": 86400,
+  "user": {
+    "id": "usr_abc123",
+    "email": "user@example.com",
+    "walletAddress": "0x742d35Cc..."
+  }
+}
+```
+
+Refresh tokens are one-time use. The response always includes a new `refreshToken` — store it and discard the old one.
+
+#### Revoke a Specific Refresh Token
+
+Sign out from a specific session or device:
+
+```http
+POST /auth/revoke
+Content-Type: application/json
+
+{
+  "refreshToken": "<refresh_token>"
+}
+```
+
+**Response:**
+
+```json
+{ "ok": true }
+```
+
+#### Revoke All Sessions
+
+Sign out from all devices (revokes every refresh token for the authenticated user):
+
+```http
+DELETE /auth/sessions
+Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
+```
+
+**Response:**
+
+```json
+{ "ok": true }
+```
+
 ### Logout
 
 ```http
@@ -340,7 +437,7 @@ POST /auth/logout
 Authorization: Bearer eyJhbGciOiJIUzI1NiJ9...
 ```
 
-JWT auth is stateless — the server does not currently maintain a revocation list. Logging out means discarding the token on the client side. (Server-side revocation via a JTI blocklist is on the roadmap.)
+For a clean logout: call `POST /auth/revoke` with the refresh token to invalidate the session server-side, then discard both tokens client-side. The JWT remains technically valid until its 24h expiry, so server-side revocation via `POST /auth/revoke` is strongly recommended.
 
 ---
 
@@ -386,6 +483,113 @@ X-Steward-Key: stw_abc123...
 ```
 
 This token has an `agentScope` claim in the JWT payload. When used for vault operations, the API verifies that the requested `agentId` matches the scope — an agent cannot sign transactions for a different agent using this token.
+
+---
+
+## OAuth (Google and Discord)
+
+Steward supports Google and Discord as social login providers. Configure them by setting the required environment variables:
+
+| Variable | Provider | Required |
+|----------|----------|----------|
+| `GOOGLE_CLIENT_ID` | Google | Yes |
+| `GOOGLE_CLIENT_SECRET` | Google | Yes |
+| `DISCORD_CLIENT_ID` | Discord | Yes |
+| `DISCORD_CLIENT_SECRET` | Discord | Yes |
+| `APP_URL` | Both | Yes (for redirect URIs) |
+
+### OAuth Flow
+
+#### Step 1: Redirect to Provider
+
+```http
+GET /auth/oauth/google/authorize?redirectUri=https://your-app.com/auth/callback
+```
+
+Or for Discord:
+
+```http
+GET /auth/oauth/discord/authorize?redirectUri=https://your-app.com/auth/callback
+```
+
+Steward generates a CSRF state token, stores it in the challenge store (5-minute TTL), and redirects the user to the provider's authorization page.
+
+#### Step 2: Handle the Callback
+
+After the user authorizes, the provider redirects to Steward's callback URL. Steward validates the state, exchanges the code for an access token, fetches the user's profile, and redirects to your `redirectUri` with tokens:
+
+```
+https://your-app.com/auth/callback?token=eyJhbG...&refreshToken=<refresh>
+```
+
+#### Alternative: Token Exchange (SPAs)
+
+For single-page apps that handle the OAuth redirect themselves:
+
+```http
+POST /auth/oauth/google/token
+Content-Type: application/json
+
+{
+  "code": "<authorization_code_from_provider>",
+  "redirectUri": "https://your-app.com/auth/callback"
+}
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "token": "eyJhbGciOiJIUzI1NiJ9...",
+  "refreshToken": "...",
+  "expiresIn": 86400,
+  "user": {
+    "id": "usr_abc123",
+    "email": "user@example.com",
+    "walletAddress": "0x742d35Cc..."
+  }
+}
+```
+
+#### Callback URI Configuration
+
+Register the following callback URI with your OAuth provider:
+
+- Google: `{APP_URL}/auth/oauth/google/callback`
+- Discord: `{APP_URL}/auth/oauth/discord/callback`
+
+---
+
+## Rate Limits
+
+All auth endpoints are rate-limited per IP to prevent brute-force and enumeration attacks. These limits apply on top of the global API rate limit (100 requests / 60 seconds per IP).
+
+| Endpoint | Limit | Window | Notes |
+|----------|-------|--------|-------|
+| `POST /auth/email/send` | 5 requests | 60 seconds | Prevents magic link spam |
+| `POST /auth/email/verify` | 10 requests | 60 seconds | One-time token; rate limit is a secondary guard |
+| `POST /auth/passkey/register/options` | 10 requests | 60 seconds | |
+| `POST /auth/passkey/register/verify` | 10 requests | 60 seconds | |
+| `POST /auth/passkey/login/options` | 10 requests | 60 seconds | |
+| `POST /auth/passkey/login/verify` | 10 requests | 60 seconds | Prevents credential stuffing |
+| `GET /auth/nonce` | 20 requests | 60 seconds | |
+| `POST /auth/verify` (SIWE) | 10 requests | 60 seconds | |
+| `GET /auth/oauth/:provider/authorize` | 10 requests | 60 seconds | |
+| `POST /auth/oauth/:provider/token` | 10 requests | 60 seconds | |
+| `POST /auth/refresh` | 20 requests | 60 seconds | Higher limit for token rotation |
+| `POST /auth/revoke` | 10 requests | 60 seconds | |
+| `DELETE /auth/sessions` | 5 requests | 60 seconds | |
+
+Rate limit responses return HTTP `429 Too Many Requests` with a `Retry-After` header:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 45
+Content-Type: application/json
+
+{ "ok": false, "error": "Rate limit exceeded" }
+```
 
 ---
 

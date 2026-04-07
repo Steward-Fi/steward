@@ -9,11 +9,11 @@ Steward covers the core of what Privy does — embedded wallets, user auth, mult
 | App ID | Tenant ID + API Key | Steward uses `tenantId` + `apiKey` pair instead of a single app ID |
 | Embedded wallet | Agent wallet | AES-256-GCM encrypted, stored in Steward's vault |
 | User | User (users table) | Same concept: human who authenticates |
-| Linked accounts | accounts table | Schema exists; OAuth flows not yet implemented |
+| Linked accounts | accounts table | OAuth accounts linked on sign-in (Google, Discord) |
 | `<PrivyProvider appId="...">` | `<StewardProvider client={...}>` | Steward's provider wraps wallet UI; auth UI is separate |
 | `usePrivy()` | `useSteward()` | Similar hook, see mapping below |
-| `login()` | Auth endpoints (`/auth/email/send`, `/auth/passkey/*`, `/auth/verify`) | Call directly or build a modal |
-| `logout()` | Discard JWT client-side | Stateless; `POST /auth/logout` is a no-op |
+| `login()` | Auth endpoints (`/auth/email/send`, `/auth/passkey/*`, `/auth/verify`, `/auth/oauth/:provider/authorize`) | Call directly or build a modal |
+| `logout()` | `POST /auth/revoke` + discard tokens | Revokes the refresh token server-side; JWT expires after 24h |
 | Wallet key recovery | Not needed — vault always holds the key | No export flow (by design) |
 | Server wallets | Agents | Steward calls them "agents"; same concept |
 | Privy API | Steward REST API | Full REST API with API key auth |
@@ -25,9 +25,9 @@ Steward covers the core of what Privy does — embedded wallets, user auth, mult
 | Email magic link | ✅ | ✅ |
 | Passkeys (WebAuthn) | ✅ | ✅ |
 | Sign-In with Ethereum | ✅ | ✅ |
-| Google OAuth | ✅ | Schema only (not yet implemented) |
-| Discord OAuth | ✅ | Schema only (not yet implemented) |
-| Twitter/X OAuth | ✅ | Schema only (not yet implemented) |
+| Google OAuth | ✅ | ✅ (requires GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET) |
+| Discord OAuth | ✅ | ✅ (requires DISCORD_CLIENT_ID + DISCORD_CLIENT_SECRET) |
+| Twitter/X OAuth | ✅ | Not yet implemented |
 | Apple Sign-In | ✅ | Not yet implemented |
 | SMS / phone OTP | ✅ | Not yet implemented |
 | Custom JWT | ⚠️ | `Authorization: Bearer` accepted |
@@ -45,8 +45,8 @@ Choose a mode:
 **Self-hosted (recommended for production):**
 
 ```bash
-git clone https://github.com/your-org/steward-fi
-cd steward-fi
+git clone https://github.com/Steward-Fi/steward
+cd steward
 # Fix Dockerfile (remove non-existent packages/dashboard lines)
 sed -i '/packages\/dashboard/d' Dockerfile
 export STEWARD_MASTER_PASSWORD=$(openssl rand -hex 32)
@@ -329,7 +329,9 @@ Note: Steward generates **new keypairs** for each agent. Privy embedded wallet p
 | `POST /api/v1/apps/{appId}/wallets/{walletId}/rpc` | `POST /vault/{agentId}/sign` |
 | `POST /api/v1/apps/{appId}/wallets/{walletId}/sign` | `POST /vault/{agentId}/sign-message` |
 | `GET /api/v1/apps/{appId}/users` | `GET /agents` (agents ≈ users in the Steward model) |
-| Privy auth tokens | JWT from `/auth/email/verify`, `/auth/passkey/login/verify`, `/auth/verify` |
+| Privy auth tokens | JWT from `/auth/email/verify`, `/auth/passkey/login/verify`, `/auth/verify`, `/auth/oauth/:provider/token` |
+| Privy token refresh | `POST /auth/refresh` (one-time-use token rotation) |
+| Sign out | `POST /auth/revoke` (single session) or `DELETE /auth/sessions` (all sessions) |
 
 ---
 
@@ -337,7 +339,7 @@ Note: Steward generates **new keypairs** for each agent. Privy embedded wallet p
 
 Once you've migrated, you get:
 
-1. **Policy enforcement** — spending limits, address whitelists, rate limits, time windows. Privy has no equivalent.
+1. **Policy enforcement at the cryptographic signing layer** — spending limits, address whitelists, rate limits, time windows. Privy now has server-side wallet policies, but these operate at the application layer: if the Privy server or your integration code is compromised, those rules can be bypassed. Steward enforces policies inside the vault — the vault won't sign a transaction that violates policy, regardless of what calls it. Even compromised application code can't exceed the limits.
 2. **Approval queue** — large transactions queue for human review before execution.
 3. **Webhook events** — real-time push notifications on `tx.signed`, `tx.pending`, `policy.violation`.
 4. **Secret vault + credential injection proxy** — agents can call external APIs without ever seeing API keys.
