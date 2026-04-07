@@ -1,4 +1,13 @@
 export { StewardClient, StewardApiError } from "./client.ts";
+export { StewardAuth } from "./auth.ts";
+export type {
+  StewardAuthConfig,
+  StewardAuthResult,
+  StewardEmailResult,
+  StewardSession,
+  StewardUser,
+  SessionStorage,
+} from "./auth-types.ts";
 export type {
   BatchAgentSpec,
   BatchCreateResult,
