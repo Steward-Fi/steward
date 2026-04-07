@@ -1,76 +1,131 @@
-FROM oven/bun:1 AS base
+# ──────────────────────────────────────────────────────────────────────────────
+# Steward — Multi-stage Dockerfile
+#
+# Stages:
+#   base      common base image + workdir
+#   deps      install ALL dependencies (including dev) for building
+#   build     compile TypeScript, run turbo build
+#   runtime   production image — only prod deps + compiled output, non-root user
+#
+# Entry points:
+#   API   (default): bun packages/api/src/index.ts   — port 3200
+#   Proxy (override): bun packages/proxy/src/index.ts — port 8080
+#
+# Build:
+#   docker build -t steward:latest .
+#
+# Run API:
+#   docker run -e STEWARD_MASTER_PASSWORD=xxx -e DATABASE_URL=xxx steward:latest
+#
+# Run Proxy:
+#   docker run -e STEWARD_MASTER_PASSWORD=xxx -e DATABASE_URL=xxx \
+#     steward:latest bun packages/proxy/src/index.ts
+# ──────────────────────────────────────────────────────────────────────────────
+
+# ── Stage 0: Base ─────────────────────────────────────────────────────────────
+FROM oven/bun:1.2-alpine AS base
 
 WORKDIR /app
 
-# ─── Stage 1: Install all dependencies ───────────────────────────────────────
-
+# ── Stage 1: Dependencies (all — includes dev deps for build) ─────────────────
 FROM base AS deps
 
+# Copy manifests only — layer-cached until lockfile changes
 COPY package.json bun.lock turbo.json tsconfig.json ./
-COPY packages/api/package.json packages/api/package.json
-COPY packages/auth/package.json packages/auth/package.json
-COPY packages/db/package.json packages/db/package.json
+
+# Package manifests for every workspace package
+COPY packages/api/package.json       packages/api/package.json
+COPY packages/auth/package.json      packages/auth/package.json
+COPY packages/db/package.json        packages/db/package.json
 COPY packages/policy-engine/package.json packages/policy-engine/package.json
-COPY packages/shared/package.json packages/shared/package.json
-COPY packages/sdk/package.json packages/sdk/package.json
-COPY packages/vault/package.json packages/vault/package.json
-COPY packages/webhooks/package.json packages/webhooks/package.json
+COPY packages/proxy/package.json     packages/proxy/package.json
+COPY packages/redis/package.json     packages/redis/package.json
+COPY packages/shared/package.json    packages/shared/package.json
+COPY packages/sdk/package.json       packages/sdk/package.json
+COPY packages/vault/package.json     packages/vault/package.json
+COPY packages/webhooks/package.json  packages/webhooks/package.json
 
 RUN bun install --frozen-lockfile
 
-# ─── Stage 2: Build ───────────────────────────────────────────────────────────
-
+# ── Stage 2: Build ────────────────────────────────────────────────────────────
 FROM base AS build
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json bun.lock turbo.json tsconfig.json ./
-COPY packages/api packages/api
-COPY packages/auth packages/auth
-COPY packages/db packages/db
+
+# Copy full source for all packages needed by api + proxy
+COPY packages/api         packages/api
+COPY packages/auth        packages/auth
+COPY packages/db          packages/db
 COPY packages/policy-engine packages/policy-engine
-COPY packages/shared packages/shared
-COPY packages/sdk packages/sdk
-COPY packages/vault packages/vault
-COPY packages/webhooks packages/webhooks
+COPY packages/proxy       packages/proxy
+COPY packages/redis       packages/redis
+COPY packages/shared      packages/shared
+COPY packages/sdk         packages/sdk
+COPY packages/vault       packages/vault
+COPY packages/webhooks    packages/webhooks
 
-RUN bunx turbo run build --filter=@steward/api
+# Build api and proxy (and their deps) via turborepo
+RUN bunx turbo run build --filter=@steward/api --filter=@stwd/proxy
 
-# ─── Stage 3: Runtime ─────────────────────────────────────────────────────────
+# ── Stage 3: Runtime ──────────────────────────────────────────────────────────
+FROM oven/bun:1.2-alpine AS runtime
 
-FROM base AS runtime
+WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3200
 
-COPY package.json bun.lock turbo.json ./
-COPY packages/api/package.json packages/api/package.json
-COPY packages/auth/package.json packages/auth/package.json
-COPY packages/db/package.json packages/db/package.json
+# Install production dependencies only (no dev/build tools)
+COPY package.json bun.lock turbo.json tsconfig.json ./
+
+COPY packages/api/package.json       packages/api/package.json
+COPY packages/auth/package.json      packages/auth/package.json
+COPY packages/db/package.json        packages/db/package.json
 COPY packages/policy-engine/package.json packages/policy-engine/package.json
-COPY packages/shared/package.json packages/shared/package.json
-COPY packages/sdk/package.json packages/sdk/package.json
-COPY packages/vault/package.json packages/vault/package.json
-COPY packages/webhooks/package.json packages/webhooks/package.json
+COPY packages/proxy/package.json     packages/proxy/package.json
+COPY packages/redis/package.json     packages/redis/package.json
+COPY packages/shared/package.json    packages/shared/package.json
+COPY packages/sdk/package.json       packages/sdk/package.json
+COPY packages/vault/package.json     packages/vault/package.json
+COPY packages/webhooks/package.json  packages/webhooks/package.json
 
 RUN bun install --frozen-lockfile --production
 
-COPY --from=build /app/packages/api packages/api
-COPY --from=build /app/packages/auth packages/auth
-COPY --from=build /app/packages/db packages/db
+# Copy compiled output from build stage
+COPY --from=build /app/packages/api         packages/api
+COPY --from=build /app/packages/auth        packages/auth
+COPY --from=build /app/packages/db          packages/db
 COPY --from=build /app/packages/policy-engine packages/policy-engine
-COPY --from=build /app/packages/shared packages/shared
-COPY --from=build /app/packages/sdk packages/sdk
-COPY --from=build /app/packages/vault packages/vault
-COPY --from=build /app/packages/webhooks packages/webhooks
+COPY --from=build /app/packages/proxy       packages/proxy
+COPY --from=build /app/packages/redis       packages/redis
+COPY --from=build /app/packages/shared      packages/shared
+COPY --from=build /app/packages/sdk         packages/sdk
+COPY --from=build /app/packages/vault       packages/vault
+COPY --from=build /app/packages/webhooks    packages/webhooks
 
+# ── Non-root user ─────────────────────────────────────────────────────────────
+# bun image already has a 'bun' user (uid 1000); use it.
 USER bun
 
-EXPOSE 3200
+# ── Ports ─────────────────────────────────────────────────────────────────────
+# API: 3200   Proxy: 8080
+EXPOSE 3200 8080
 
-# /health = process alive, /ready = db + migrations + vault ready
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD bun -e "const r = await fetch('http://127.0.0.1:3200/ready'); if (!r.ok) process.exit(1);"
+# ── Health check ──────────────────────────────────────────────────────────────
+# Uses /ready for the API (deep check: db + migrations + vault).
+# Proxy overrides CMD, so it checks /health on its own port at startup.
+# The CMD-level health check targets whichever process is running:
+#   API   → check :3200/ready
+#   Proxy → check :8080/health  (set via compose healthcheck override)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=45s --retries=3 \
+  CMD bun -e "const r=await fetch('http://127.0.0.1:'+( \
+    process.env.STEWARD_PROXY_PORT \
+      ? process.env.STEWARD_PROXY_PORT \
+      : (process.env.PORT||'3200') \
+  )+(process.env.STEWARD_PROXY_PORT?'/health':'/ready') \
+  );process.exit(r.ok?0:1);"
 
-# Default: full mode with external Postgres (DATABASE_URL required).
-# For embedded/PGLite mode: override CMD with ["bun", "packages/api/src/embedded.ts"]
+# ── Default command: API server ───────────────────────────────────────────────
+# Override for proxy: CMD ["bun", "packages/proxy/src/index.ts"]
 CMD ["bun", "packages/api/src/index.ts"]
