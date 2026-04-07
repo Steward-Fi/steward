@@ -258,7 +258,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // ── Context value ───────────────────────────────────────────────────────────
 
   return (
-    <AuthContext.Provider
+    <AuthContext
       value={{
         address,
         email,
@@ -274,6 +274,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }}
     >
       {children}
-    </AuthContext.Provider>
+    </AuthContext>
   );
 }
