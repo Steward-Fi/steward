@@ -17,6 +17,19 @@
  *
  * POST /email/send                  — { email } → { ok, expiresAt }
  * POST /email/verify                — { token, email } → { token (JWT), user }
+ *
+ * Tenant context
+ * ──────────────
+ * All email/passkey routes accept an optional tenant hint via:
+ *   - Header: X-Steward-Tenant: <tenantId>
+ *   - Body field: tenantId: "<tenantId>"
+ * If neither is present the user's personal tenant (personal-<userId>) is used
+ * as the fallback so existing integrations continue to work unchanged.
+ *
+ * On each auth event (signup or login):
+ *   1. The user record is created/found globally in `users`.
+ *   2. A `user_tenants` link is upserted for the resolved tenant (role = "member").
+ *   3. The JWT's `tenantId` claim is the resolved tenant, not the personal tenant.
  */
 
 import { and, eq } from "drizzle-orm";
@@ -30,10 +43,17 @@ import {
   ResendProvider,
   generateApiKey,
   uint8ArrayToBase64url,
+  ChallengeStore,
+  TokenStore,
+  buildBackend,
 } from "@stwd/auth";
-import { authenticators, getDb, tenants, users } from "@stwd/db";
+import { authenticators, getDb, tenants, userTenants, users } from "@stwd/db";
 import type { ApiResponse } from "@stwd/shared";
 import { Vault, provisionUserWallet } from "@stwd/vault";
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
@@ -83,6 +103,51 @@ setInterval(() => {
 
 // ─── PasskeyAuth singleton ────────────────────────────────────────────────────
 
+// ─── Store backend initialization ────────────────────────────────────────────
+
+let _challengeStore: ChallengeStore | null = null;
+let _tokenStore: TokenStore | null = null;
+
+/**
+ * Initialize auth token/challenge stores with the best available backend.
+ * Call this during server startup AFTER initRedis() has been called.
+ *
+ * @param usePostgres  Pass true if the DB connection is known to be available.
+ */
+export async function initAuthStores(usePostgres = false): Promise<void> {
+  const { getRedisClient } = await import("../middleware/redis.js");
+  const redisClient = getRedisClient();
+
+  const [
+    { backend: challengeBackend, source: challengeSource },
+    { backend: tokenBackend, source: tokenSource },
+  ] = await Promise.all([
+    buildBackend("challenge", redisClient, usePostgres),
+    buildBackend("token", redisClient, usePostgres),
+  ]);
+
+  console.log(
+    `[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}`,
+  );
+
+  _challengeStore = new ChallengeStore({ backend: challengeBackend });
+  _tokenStore = new TokenStore({ backend: tokenBackend });
+
+  // Reset singletons so they pick up the new stores on next use
+  _passkeyAuth = null;
+  _emailAuth = null;
+}
+
+function getChallengeStore(): ChallengeStore {
+  _challengeStore ??= new ChallengeStore();
+  return _challengeStore;
+}
+
+function getTokenStore(): TokenStore {
+  _tokenStore ??= new TokenStore();
+  return _tokenStore;
+}
+
 let _passkeyAuth: PasskeyAuth | null = null;
 
 function getPasskeyAuth(): PasskeyAuth {
@@ -91,6 +156,7 @@ function getPasskeyAuth(): PasskeyAuth {
       rpName: process.env.PASSKEY_RP_NAME || "Steward",
       rpID: process.env.PASSKEY_RP_ID || "steward.fi",
       origin: process.env.PASSKEY_ORIGIN || "https://steward.fi",
+      challengeStore: getChallengeStore(),
     });
   }
   return _passkeyAuth;
@@ -113,6 +179,7 @@ function getEmailAuth(): EmailAuth {
       from: process.env.EMAIL_FROM || "login@steward.fi",
       baseUrl: process.env.APP_URL || "https://steward.fi",
       provider,
+      tokenStore: getTokenStore(),
     });
   }
   return _emailAuth;
@@ -130,6 +197,29 @@ function getVault(): Vault {
   });
 }
 
+// ─── Tenant resolution ────────────────────────────────────────────────────────
+
+/**
+ * Resolve the tenant the user is signing into.
+ * Priority: X-Steward-Tenant header > body.tenantId > personal-<userId> fallback.
+ * Returns null if the resolved tenant doesn't exist in the DB (caller should 404).
+ */
+async function resolveTenantForUser(
+  c: Context,
+  userId: string,
+  bodyTenantId?: string,
+): Promise<{ tenantId: string; isPersonal: boolean }> {
+  const headerTenant = c.req.header("X-Steward-Tenant");
+  const requested = headerTenant || bodyTenantId;
+
+  if (requested) {
+    return { tenantId: requested, isPersonal: false };
+  }
+
+  // Fall back to the user's personal tenant
+  return { tenantId: `personal-${userId}`, isPersonal: true };
+}
+
 // ─── User / tenant provisioning helpers ──────────────────────────────────────
 
 async function findOrCreateUser(
@@ -145,6 +235,11 @@ async function findOrCreateUser(
   return newUser;
 }
 
+/**
+ * Ensure the user's personal tenant exists.
+ * Used as a fallback when no explicit tenant is requested AND as the home for
+ * the user's provisioned wallet agent (wallet always lives under personal tenant).
+ */
 async function ensurePersonalTenant(userId: string, displayName: string): Promise<string> {
   const db = getDb();
   const tenantId = `personal-${userId}`;
@@ -156,19 +251,44 @@ async function ensurePersonalTenant(userId: string, displayName: string): Promis
   return tenantId;
 }
 
+/**
+ * Link a user to a tenant in the user_tenants junction table (idempotent).
+ * If the tenant doesn't exist yet, silently skips — caller must ensure the
+ * tenant exists before calling this.
+ */
+async function ensureUserTenantLink(
+  userId: string,
+  tenantId: string,
+  role: string = "member",
+): Promise<void> {
+  const db = getDb();
+  await db
+    .insert(userTenants)
+    .values({ userId, tenantId, role })
+    .onConflictDoNothing();
+}
+
+/**
+ * Provision the user's personal wallet (idempotent).
+ * The wallet agent always lives under `personal-<userId>` regardless of which
+ * tenant the user authenticated through — the JWT tenantId is the requesting
+ * tenant, but the wallet itself stays in the personal namespace.
+ */
 async function provisionWalletForUser(
   userId: string,
   email: string,
-): Promise<{ walletAddress: string; tenantId: string }> {
-  const tenantId = await ensurePersonalTenant(userId, email);
+): Promise<{ walletAddress: string; personalTenantId: string }> {
+  const personalTenantId = await ensurePersonalTenant(userId, email);
   const vault = getVault();
-  const result = await provisionUserWallet(vault, userId, email, tenantId);
+  const result = await provisionUserWallet(vault, userId, email, personalTenantId);
   const db = getDb();
   await db
     .update(users)
     .set({ walletAddress: result.walletAddress, stewardWalletId: result.agentId })
     .where(eq(users.id, userId));
-  return { walletAddress: result.walletAddress, tenantId };
+  // Also link user to their personal tenant
+  await ensureUserTenantLink(userId, personalTenantId, "owner");
+  return { walletAddress: result.walletAddress, personalTenantId };
 }
 
 // ─── Request body helper ──────────────────────────────────────────────────────
@@ -200,7 +320,11 @@ auth.get("/nonce", (c) => {
 /**
  * POST /verify
  * Body: { message: string; signature: string }
- * Verifies SIWE, auto-creates tenant, returns JWT.
+ * Verifies SIWE, auto-creates tenant (per wallet address), returns JWT.
+ *
+ * SIWE flow is wallet-address-centric: each unique address gets its own tenant.
+ * If X-Steward-Tenant is provided and the tenant exists, the user is also linked
+ * to that tenant and the JWT reflects the requested tenant instead.
  */
 auth.post("/verify", async (c) => {
   const db = getDb();
@@ -276,7 +400,20 @@ auth.post("/verify", async (c) => {
     }
   }
 
-  const token = await createSessionToken(address, tenant.id);
+  // If an explicit requesting tenant was provided and it exists, use that instead
+  const requestedTenantId = c.req.header("X-Steward-Tenant");
+  let effectiveTenantId = tenant.id;
+  if (requestedTenantId && requestedTenantId !== tenant.id) {
+    const [requestedTenant] = await db
+      .select()
+      .from(tenants)
+      .where(eq(tenants.id, requestedTenantId));
+    if (requestedTenant) {
+      effectiveTenantId = requestedTenantId;
+    }
+  }
+
+  const token = await createSessionToken(address, effectiveTenantId);
 
   const responseData: Record<string, unknown> = {
     ok: true,
@@ -352,13 +489,15 @@ auth.post("/passkey/register/options", async (c) => {
 
 /**
  * POST /passkey/register/verify
- * Body: { email, response }
+ * Body: { email, response, tenantId? }
+ * Headers: X-Steward-Tenant (optional)
  * Verifies registration, stores credential, provisions wallet, returns JWT.
  */
 auth.post("/passkey/register/verify", async (c) => {
   const body = await safeJsonParse<{
     email: string;
     response: Record<string, unknown>;
+    tenantId?: string;
   }>(c);
 
   if (!body?.email || !body?.response) {
@@ -412,15 +551,18 @@ auth.post("/passkey/register/verify", async (c) => {
 
   await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
 
+  // Provision the user's personal wallet (idempotent)
   let walletAddress = user.walletAddress;
-  let tenantId = `personal-${user.id}`;
   try {
     const w = await provisionWalletForUser(user.id, email);
     walletAddress = w.walletAddress;
-    tenantId = w.tenantId;
   } catch (err) {
     console.error("[PasskeyAuth] Wallet provision failed on register:", err);
   }
+
+  // Resolve which tenant this auth is for and link the user
+  const { tenantId } = await resolveTenantForUser(c, user.id, body.tenantId);
+  await ensureUserTenantLink(user.id, tenantId);
 
   const token = await createSessionToken(walletAddress ?? "", tenantId, {
     userId: user.id,
@@ -472,13 +614,15 @@ auth.post("/passkey/login/options", async (c) => {
 
 /**
  * POST /passkey/login/verify
- * Body: { email, response }
- * Verifies authentication, updates counter, returns JWT.
+ * Body: { email, response, tenantId? }
+ * Headers: X-Steward-Tenant (optional)
+ * Verifies authentication, updates counter, links user to tenant, returns JWT.
  */
 auth.post("/passkey/login/verify", async (c) => {
   const body = await safeJsonParse<{
     email: string;
     response: { id: string; [key: string]: unknown };
+    tenantId?: string;
   }>(c);
 
   if (!body?.email || !body?.response) {
@@ -535,18 +679,21 @@ auth.post("/passkey/login/verify", async (c) => {
 
   // Ensure wallet is provisioned (idempotent)
   let walletAddress = user.walletAddress;
-  let tenantId = `personal-${user.id}`;
   if (!walletAddress) {
     try {
       const w = await provisionWalletForUser(user.id, email);
       walletAddress = w.walletAddress;
-      tenantId = w.tenantId;
     } catch (err) {
       console.error("[PasskeyAuth] Wallet provision failed on login:", err);
     }
   } else {
-    tenantId = await ensurePersonalTenant(user.id, email);
+    // Wallet exists — still ensure personal tenant is in place
+    await ensurePersonalTenant(user.id, email);
   }
+
+  // Resolve the requesting tenant and auto-link if user isn't already a member
+  const { tenantId } = await resolveTenantForUser(c, user.id, body.tenantId);
+  await ensureUserTenantLink(user.id, tenantId);
 
   const token = await createSessionToken(walletAddress ?? "", tenantId, {
     userId: user.id,
@@ -580,11 +727,12 @@ auth.post("/email/send", async (c) => {
 
 /**
  * POST /email/verify
- * Body: { token, email }
- * Verifies the magic link token, provisions user + wallet, returns JWT.
+ * Body: { token, email, tenantId? }
+ * Headers: X-Steward-Tenant (optional)
+ * Verifies the magic link token, provisions user + wallet, links to tenant, returns JWT.
  */
 auth.post("/email/verify", async (c) => {
-  const body = await safeJsonParse<{ token: string; email: string }>(c);
+  const body = await safeJsonParse<{ token: string; email: string; tenantId?: string }>(c);
   if (!body?.token || !body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "token and email are required" }, 400);
   }
@@ -600,15 +748,18 @@ auth.post("/email/verify", async (c) => {
   const db = getDb();
   await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
 
+  // Provision wallet (idempotent, always under personal tenant)
   let walletAddress = user.walletAddress;
-  let tenantId = `personal-${user.id}`;
   try {
     const w = await provisionWalletForUser(user.id, email);
     walletAddress = w.walletAddress;
-    tenantId = w.tenantId;
   } catch (err) {
     console.error("[EmailAuth] Wallet provision failed:", err);
   }
+
+  // Resolve requesting tenant and link user
+  const { tenantId } = await resolveTenantForUser(c, user.id, body.tenantId);
+  await ensureUserTenantLink(user.id, tenantId);
 
   const jwtToken = await createSessionToken(walletAddress ?? "", tenantId, {
     userId: user.id,

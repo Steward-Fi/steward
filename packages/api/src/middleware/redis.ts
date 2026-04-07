@@ -55,6 +55,14 @@ export function isRedisAvailable(): boolean {
   return redisAvailable;
 }
 
+/**
+ * Return the active ioredis client, or null if Redis is not available.
+ * Call isRedisAvailable() first to check.
+ */
+export function getRedisClient(): Redis | null {
+  return redisAvailable ? redisClient : null;
+}
+
 export async function shutdownRedis(): Promise<void> {
   if (redisAvailable) {
     await disconnectRedis();

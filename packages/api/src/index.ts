@@ -7,12 +7,12 @@
 
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 
 import { correlationId } from "./middleware/correlation";
+import { tenantCors } from "./middleware/tenant-cors";
 import { approvalRoutes } from "./routes/approvals";
-import { authRoutes } from "./routes/auth";
+import { authRoutes, initAuthStores } from "./routes/auth";
 import { agentRoutes } from "./routes/agents";
 import { platformRoutes } from "./routes/platform";
 import { tenantRoutes } from "./routes/tenants";
@@ -72,13 +72,7 @@ app.notFound((c) =>
 
 // ─── Global middleware ────────────────────────────────────────────────────────
 
-app.use("*", cors({
-  origin: "*",
-  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "X-Steward-Tenant", "X-Steward-Key", "X-Steward-Platform-Key", "Authorization"],
-  exposeHeaders: ["Content-Length", "X-Request-Id"],
-  maxAge: 86400,
-}));
+app.use("*", tenantCors);
 app.use("*", logger());
 app.use("*", correlationId);
 
@@ -227,11 +221,19 @@ try {
   process.exit(1);
 }
 
-// ─── Redis initialization (non-blocking) ─────────────────────────────────────
+// ─── Redis + auth store initialization (non-blocking) ───────────────────────
 
-initRedis().catch((err) => {
-  console.warn("[steward] Redis initialization failed, continuing without Redis:", err);
-});
+initRedis()
+  .then((redisOk) => {
+    // Initialize auth stores after Redis availability is known.
+    // usePostgres=true when migrations have run, so auth_kv_store table exists.
+    const usePostgres = migrationsRan && !redisOk;
+    return initAuthStores(usePostgres);
+  })
+  .catch((err) => {
+    console.warn("[steward] Redis/auth store initialization failed, using in-memory stores:", err);
+    initAuthStores(false).catch(() => {});
+  });
 
 // ─── Server ───────────────────────────────────────────────────────────────────
 

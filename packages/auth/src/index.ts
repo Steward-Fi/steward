@@ -1,5 +1,6 @@
 export * from "./api-keys";
 export * from "./challenge-store";
+export * from "./store-backends";
 export * from "./email";
 export * from "./email-provider";
 export * from "./middleware";
