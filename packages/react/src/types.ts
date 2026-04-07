@@ -230,3 +230,42 @@ export interface SpendDashboardProps {
 
 // Re-export SDK types consumers will need
 export type { StewardClient, PolicyRule, PolicyType, TxStatus, TxRecord, AgentIdentity, AgentBalance, ChainFamily, PolicyResult };
+
+// ─── Auth Types ───
+
+export type { StewardUser, StewardSession, SessionStorage } from "@stwd/sdk";
+
+export interface StewardAuthConfig {
+  baseUrl: string;
+  storage?: import("@stwd/sdk").SessionStorage;
+}
+
+export interface StewardAuthContextValue {
+  isAuthenticated: boolean;
+  isLoading: boolean;
+  user: import("@stwd/sdk").StewardUser | null;
+  session: import("@stwd/sdk").StewardSession | null;
+  signOut: () => void;
+  getToken: () => string | null;
+}
+
+// ─── Auth Component Props ───
+
+export interface StewardLoginProps {
+  onSuccess?: (result: { token: string; user: import("@stwd/sdk").StewardUser }) => void;
+  onError?: (error: Error) => void;
+  showPasskey?: boolean;
+  showEmail?: boolean;
+  showSIWE?: boolean;
+  className?: string;
+}
+
+export interface StewardAuthGuardProps {
+  children: React.ReactNode;
+  fallback?: React.ReactNode;
+}
+
+export interface StewardUserButtonProps {
+  className?: string;
+  onSignOut?: () => void;
+}
