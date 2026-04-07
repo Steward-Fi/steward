@@ -1,4 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+
+// Skip all DB-dependent tests when DATABASE_URL is not configured
+const SKIP = !process.env.DATABASE_URL;
 import { generateApiKey } from "@stwd/auth";
 import {
   getDb,
@@ -24,6 +27,7 @@ let validApiKey: string;
 // ─── Setup ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (SKIP) return;
   const db = getDb();
   const apiKeyPair = generateApiKey();
   validApiKey = apiKeyPair.key;
@@ -85,6 +89,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (SKIP) return;
   const db = getDb();
   await db.delete(approvalQueue).where(eq(approvalQueue.agentId, TEST_AGENT));
   await db.delete(transactions).where(eq(transactions.agentId, TEST_AGENT));
@@ -103,7 +108,7 @@ function authHeaders() {
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
-describe("Approval Workflow API", () => {
+describe.skipIf(SKIP)("Approval Workflow API", () => {
   describe("GET /approvals", () => {
     it("lists pending approvals for tenant", async () => {
       const res = await fetch(`${BASE_URL}/approvals`, {
@@ -214,7 +219,7 @@ describe("Approval Workflow API", () => {
   });
 });
 
-describe("Auto-Approval Rules API", () => {
+describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
   describe("GET /approvals/rules", () => {
     it("returns null when no rules configured", async () => {
       const res = await fetch(`${BASE_URL}/approvals/rules`, {

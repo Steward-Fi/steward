@@ -1,4 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+
+// Skip all DB-dependent tests when DATABASE_URL is not configured
+const SKIP = !process.env.DATABASE_URL;
 import { generateApiKey } from "@stwd/auth";
 import { getDb, tenants, webhookConfigs } from "@stwd/db";
 import { eq } from "drizzle-orm";
@@ -13,6 +16,7 @@ let createdWebhookId: string;
 // ─── Setup ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (SKIP) return;
   const db = getDb();
   const apiKeyPair = generateApiKey();
   validApiKey = apiKeyPair.key;
@@ -28,6 +32,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (SKIP) return;
   const db = getDb();
   // Clean up webhooks first (FK constraint)
   await db.delete(webhookConfigs).where(eq(webhookConfigs.tenantId, TEST_TENANT));
@@ -44,7 +49,7 @@ function authHeaders() {
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
-describe("Webhook Configuration API", () => {
+describe.skipIf(SKIP)("Webhook Configuration API", () => {
   describe("POST /webhooks", () => {
     it("creates a webhook with valid data", async () => {
       const res = await fetch(`${BASE_URL}/webhooks`, {

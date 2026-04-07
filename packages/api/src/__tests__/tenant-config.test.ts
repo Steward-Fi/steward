@@ -1,4 +1,7 @@
 import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+
+// Skip all DB-dependent tests when DATABASE_URL is not configured
+const SKIP = !process.env.DATABASE_URL;
 import { generateApiKey } from "@stwd/auth";
 import { getDb, tenants, tenantConfigs } from "@stwd/db";
 import { eq } from "drizzle-orm";
@@ -14,6 +17,7 @@ let validApiKey: string;
 // ─── Setup ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (SKIP) return;
   const db = getDb();
   const apiKeyPair = generateApiKey();
   validApiKey = apiKeyPair.key;
@@ -29,6 +33,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (SKIP) return;
   const db = getDb();
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
   await db.delete(tenants).where(eq(tenants.id, TENANT_ID));
@@ -42,7 +47,7 @@ const headers = () => ({
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
-describe("Tenant Config API", () => {
+describe.skipIf(SKIP)("Tenant Config API", () => {
   describe("GET /tenants/:id/config", () => {
     it("returns empty config for tenant with no config set", async () => {
       const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
@@ -220,7 +225,7 @@ describe("Tenant Config API", () => {
   });
 });
 
-describe("Dashboard API", () => {
+describe.skipIf(SKIP)("Dashboard API", () => {
   it("returns 404 for non-existent agent", async () => {
     const res = await fetch(`${BASE_URL}/dashboard/nonexistent-agent`, {
       headers: headers(),
