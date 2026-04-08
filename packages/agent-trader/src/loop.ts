@@ -142,7 +142,7 @@ async function runTick(
         dataLen: builtTx.data.length,
         chainId,
       });
-    } else if (result.status === "pending_approval") {
+    } else if ("status" in result && result.status === "pending_approval") {
       logSubmission({
         agentId,
         status: "pending_approval",
@@ -155,6 +155,20 @@ async function runTick(
         "Transaction queued for human approval — will execute on approval webhook",
         { agentId, policyResults: result.results },
       );
+    } else if ("signedTx" in result) {
+      logSubmission({
+        agentId,
+        status: "signed",
+        to: builtTx.to,
+        value: builtTx.value,
+        dataLen: builtTx.data.length,
+        chainId,
+      });
+      logInfo("Transaction signed but not broadcast", {
+        agentId,
+        signedTxLength: result.signedTx.length,
+        caip2: result.caip2,
+      });
     }
   } catch (err) {
     const apiErr = err as StewardApiError;

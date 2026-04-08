@@ -2,10 +2,14 @@ import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { recordSpend, getSpend, checkSpendLimit, getSpendByHost } from "../spend-tracker.js";
 import { getRedis, disconnectRedis } from "../client.js";
 
+const runRedis = process.env.STEWARD_REDIS_TESTS === "1";
+const describeRedis = runRedis ? describe : describe.skip;
+
 const TEST_AGENT = `test-agent-${Date.now()}`;
 const TEST_TENANT = "test-tenant-1";
 
 beforeEach(async () => {
+  if (!runRedis) return;
   // Clean up test keys
   const redis = getRedis();
   let cursor = "0";
@@ -17,10 +21,11 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  if (!runRedis) return;
   await disconnectRedis();
 });
 
-describe("Spend Tracker", () => {
+describeRedis("Spend Tracker", () => {
   test("records and queries spend", async () => {
     await recordSpend(TEST_AGENT, TEST_TENANT, 0.05, "api.openai.com");
     await recordSpend(TEST_AGENT, TEST_TENANT, 0.03, "api.openai.com");

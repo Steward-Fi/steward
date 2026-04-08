@@ -1,7 +1,7 @@
 "use client";
 
+import { createElement, type ReactNode } from "react";
 import dynamic from "next/dynamic";
-import type { ReactNode } from "react";
 
 const WalletProvider = dynamic(
   () =>
@@ -12,5 +12,5 @@ const WalletProvider = dynamic(
 );
 
 export function Providers({ children }: { children: ReactNode }) {
-  return <WalletProvider>{children}</WalletProvider>;
+  return createElement(WalletProvider as any, null, children as any) as any;
 }

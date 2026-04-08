@@ -240,12 +240,14 @@ initRedis()
 
 const BIND_HOST = process.env.STEWARD_BIND_HOST || "127.0.0.1";
 
-const server = Bun.serve({
+const serverOptions = {
   hostname: BIND_HOST,
   port: PORT,
   fetch: (request) => app.fetch(request),
   idleTimeout: 30,
-});
+} as Parameters<typeof Bun.serve>[0] & { hostname?: string };
+
+const server = Bun.serve(serverOptions);
 
 const shutdown = async (signal: string) => {
   if (isShuttingDown) return;
@@ -272,4 +274,4 @@ const shutdown = async (signal: string) => {
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-console.log(`Steward API running on ${server.hostname}:${server.port}`);
+console.log(`Steward API running on ${BIND_HOST}:${server.port}`);

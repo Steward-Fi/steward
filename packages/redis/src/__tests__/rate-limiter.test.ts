@@ -2,6 +2,9 @@ import { describe, test, expect, beforeEach, afterAll } from "bun:test";
 import { checkRateLimit, getRateLimitStatus } from "../rate-limiter.js";
 import { getRedis, disconnectRedis } from "../client.js";
 
+const runRedis = process.env.STEWARD_REDIS_TESTS === "1";
+const describeRedis = runRedis ? describe : describe.skip;
+
 const TEST_PREFIX = "test:ratelimit";
 
 function testKey(suffix: string): string {
@@ -9,6 +12,7 @@ function testKey(suffix: string): string {
 }
 
 beforeEach(async () => {
+  if (!runRedis) return;
   // Clean up test keys
   const redis = getRedis();
   let cursor = "0";
@@ -20,10 +24,11 @@ beforeEach(async () => {
 });
 
 afterAll(async () => {
+  if (!runRedis) return;
   await disconnectRedis();
 });
 
-describe("Rate Limiter", () => {
+describeRedis("Rate Limiter", () => {
   test("allows requests within limit", async () => {
     const key = testKey("within-limit");
 

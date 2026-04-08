@@ -9,6 +9,7 @@
  */
 
 import {
+  createElement,
   createContext,
   useCallback,
   useContext,
@@ -101,7 +102,7 @@ function makeSdkStorage() {
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
-export function AuthProvider({ children }: { children: ReactNode }) {
+export function AuthProvider({ children }: { children: ReactNode }): any {
   // Wagmi (wallet)
   const { address, chainId, isConnected } = useAccount();
   const { signMessageAsync } = useSignMessage();
@@ -323,9 +324,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // ── Context value ───────────────────────────────────────────────────────────
 
-  return (
-    <AuthContext
-      value={{
+  return createElement(
+    AuthContext.Provider,
+    {
+      value: {
         address,
         email,
         userId,
@@ -337,9 +339,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signInWithEmail: handleEmailSignIn,
         completeEmailAuth,
         signOut,
-      }}
-    >
-      {children}
-    </AuthContext>
+      },
+    },
+    children,
   );
 }

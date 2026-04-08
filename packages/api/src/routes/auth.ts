@@ -1282,8 +1282,8 @@ async function provisionOAuthUser(opts: {
     // Update name/image if we have richer data from the provider and the user doesn't have it yet
     const updates: Partial<typeof users.$inferInsert> = {};
     if (!user.name && providerUser.name) updates.name = providerUser.name;
-    if (!user.image && providerUser.avatar) updates.image = providerUser.avatar;
-    if (!user.emailVerified && providerUser.emailVerified) updates.emailVerified = true;
+    if (!user.image && providerUser.picture) updates.image = providerUser.picture;
+    if (!user.emailVerified && providerUser.verified_email) updates.emailVerified = true;
     if (Object.keys(updates).length > 0) {
       await db.update(users).set(updates).where(eq(users.id, user.id));
     }

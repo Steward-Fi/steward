@@ -29,6 +29,15 @@ async function freshDb(dir?: string) {
   return createPGLiteDb(dir ?? "memory://");
 }
 
+function readCountRow(rows: unknown[]): number {
+  const firstRow = rows[0];
+  if (!firstRow || typeof firstRow !== "object" || !("cnt" in firstRow)) {
+    throw new Error("Expected count row");
+  }
+
+  return Number(firstRow.cnt);
+}
+
 describe("PGLite Adapter", () => {
   afterAll(async () => {
     if (tempDir) {
@@ -275,13 +284,13 @@ describe("PGLite Adapter", () => {
     // First init
     const { client: c1 } = await createPGLiteDb(dir);
     const r1 = await c1.query("SELECT COUNT(*) as cnt FROM __steward_migrations");
-    const count1 = Number(r1.rows[0].cnt);
+    const count1 = readCountRow(r1.rows);
     await c1.close();
 
     // Second init — same dir
     const { client: c2 } = await createPGLiteDb(dir);
     const r2 = await c2.query("SELECT COUNT(*) as cnt FROM __steward_migrations");
-    const count2 = Number(r2.rows[0].cnt);
+    const count2 = readCountRow(r2.rows);
     await c2.close();
 
     // Same number of migrations applied

@@ -69,6 +69,9 @@ beforeAll(() => {
       return new Response("Not Found", { status: 404 });
     },
   });
+  if (mockServer.port === undefined) {
+    throw new Error("Mock server did not bind to a port");
+  }
   mockServerPort = mockServer.port;
 });
 

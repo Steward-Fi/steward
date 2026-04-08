@@ -54,7 +54,7 @@ export function Reveal({
       }}
       className={className}
     >
-      {children}
+      {children as any}
     </motion.div>
   );
 }
@@ -106,7 +106,7 @@ export function StaggerContainer({
       viewport={{ once, amount: 0.2 }}
       className={className}
     >
-      {children}
+      {children as any}
     </motion.div>
   );
 }
@@ -120,7 +120,7 @@ export function StaggerItem({
 }) {
   return (
     <motion.div variants={itemVariants} className={className}>
-      {children}
+      {children as any}
     </motion.div>
   );
 }
@@ -147,7 +147,7 @@ export function FadeIn({
       }}
       className={className}
     >
-      {children}
+      {children as any}
     </motion.div>
   );
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { createElement, useState, type ReactNode } from "react";
 import { WagmiProvider } from "wagmi";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RainbowKitProvider, darkTheme } from "@rainbow-me/rainbowkit";
@@ -20,7 +20,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     <WagmiProvider config={config}>
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider theme={theme}>
-          <AuthProvider>{children}</AuthProvider>
+          {createElement(AuthProvider, null, children) as any}
         </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>

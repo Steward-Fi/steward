@@ -8,6 +8,9 @@ import {
 } from "../policy-cache.js";
 import { getRedis, disconnectRedis } from "../client.js";
 
+const runRedis = process.env.STEWARD_REDIS_TESTS === "1";
+const describeRedis = runRedis ? describe : describe.skip;
+
 const TEST_AGENT = `test-agent-${Date.now()}`;
 const TEST_TENANT = `test-tenant-${Date.now()}`;
 
@@ -36,15 +39,17 @@ const SAMPLE_POLICIES: CachedPolicy[] = [
 ];
 
 beforeEach(async () => {
+  if (!runRedis) return;
   const redis = getRedis();
   await redis.del(`policies:${TEST_TENANT}:${TEST_AGENT}`);
 });
 
 afterAll(async () => {
+  if (!runRedis) return;
   await disconnectRedis();
 });
 
-describe("Policy Cache", () => {
+describeRedis("Policy Cache", () => {
   test("returns null on cache miss", async () => {
     const result = await getCachedPolicies("nonexistent-agent", "nonexistent-tenant");
     expect(result).toBeNull();

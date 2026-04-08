@@ -7,6 +7,8 @@ import { eq } from "drizzle-orm";
 
 const TEST_PORT = 3299;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
+const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
 const TENANT_WITH_KEY = "test-tenant-with-key";
 const TENANT_WITHOUT_KEY = "test-tenant-no-key";
@@ -16,6 +18,9 @@ let validApiKey: string;
 // ─── Setup ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (!hasDatabaseUrl) {
+    return;
+  }
   const db = getDb();
   const apiKeyPair = generateApiKey();
   validApiKey = apiKeyPair.key;
@@ -42,6 +47,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!hasDatabaseUrl) {
+    return;
+  }
   const db = getDb();
   await db.delete(tenants).where(eq(tenants.id, TENANT_WITH_KEY));
   await db.delete(tenants).where(eq(tenants.id, TENANT_WITHOUT_KEY));
@@ -49,7 +57,7 @@ afterAll(async () => {
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
-describe("Tenant API Key Authentication", () => {
+describeWithDatabase("Tenant API Key Authentication", () => {
   describe("Tenant with API key configured", () => {
     it("allows access with valid API key", async () => {
       const res = await fetch(`${BASE_URL}/agents`, {

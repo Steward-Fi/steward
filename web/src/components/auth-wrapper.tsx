@@ -1,8 +1,8 @@
 "use client";
 
+import { createElement, type ReactNode } from "react";
 import { AuthProvider } from "@/components/auth-provider";
-import type { ReactNode } from "react";
 
 export function AuthWrapper({ children }: { children: ReactNode }) {
-  return <AuthProvider>{children}</AuthProvider>;
+  return createElement(AuthProvider, null, children) as any;
 }

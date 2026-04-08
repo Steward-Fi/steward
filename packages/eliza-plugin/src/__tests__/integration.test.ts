@@ -17,6 +17,9 @@ import { walletStatusProvider } from "../providers/wallet-status.js";
 import { balanceProvider } from "../providers/balance.js";
 import { approvalRequiredEvaluator } from "../evaluators/approval.js";
 
+const runLive = process.env.STEWARD_LIVE_TESTS === "1";
+const describeLive = runLive ? describe : describe.skip;
+
 // ── Config ──────────────────────────────────────────────────────
 
 const API_URL = "https://api.steward.fi";
@@ -60,19 +63,21 @@ function mockRuntime(service: StewardService | null, overrides: Record<string, a
 // ── Setup / Teardown ────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (!runLive) return;
   client = new StewardClient({ baseUrl: API_URL, apiKey: API_KEY, tenantId: TENANT_ID });
   agent = await client.createWallet(TEST_AGENT_ID, "Eliza Integration Test");
   console.log(`[setup] Created agent ${TEST_AGENT_ID} → ${agent.walletAddress}`);
 });
 
 afterAll(async () => {
+  if (!runLive) return;
   // Steward doesn't have a DELETE agent endpoint yet, so we just log.
   console.log(`[teardown] Test agent ${TEST_AGENT_ID} left on milady-cloud (no delete API)`);
 });
 
 // ── StewardService ──────────────────────────────────────────────
 
-describe("StewardService (real API)", () => {
+describeLive("StewardService (real API)", () => {
   let service: StewardService;
 
   beforeAll(async () => {
@@ -145,7 +150,7 @@ describe("StewardService (real API)", () => {
 
 // ── Providers ───────────────────────────────────────────────────
 
-describe("Providers (real API)", () => {
+describeLive("Providers (real API)", () => {
   let service: StewardService;
   let runtime: any;
 
@@ -210,7 +215,7 @@ describe("Providers (real API)", () => {
 
 // ── Actions ─────────────────────────────────────────────────────
 
-describe("Actions (validation + error paths)", () => {
+describeLive("Actions (validation + error paths)", () => {
   let service: StewardService;
   let runtime: any;
 

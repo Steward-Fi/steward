@@ -107,7 +107,7 @@ dashboardRoutes.get("/:agentId", async (c) => {
     balances: {
       evm: balanceResult
         ? {
-            native: balanceResult.native,
+            native: balanceResult.native.toString(),
             nativeFormatted: balanceResult.nativeFormatted,
             chainId: balanceResult.chainId,
             symbol: balanceResult.symbol,
