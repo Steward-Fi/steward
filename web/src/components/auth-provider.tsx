@@ -3,9 +3,9 @@
 /**
  * auth-provider.tsx
  *
- * Uses @stwd/sdk's StewardAuth class for passkey and email magic-link auth.
+ * Handles passkey, email magic-link, and SIWE auth for the dashboard.
  * SIWE (wallet) sign-in still uses raw fetch + wagmi because it needs chainId
- * in the SiweMessage, which the SDK's built-in signInWithSIWE doesn't carry.
+ * in the SiweMessage payload.
  */
 
 import {
@@ -14,15 +14,14 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
 import { useAccount, useDisconnect, useSignMessage } from "wagmi";
 import { SiweMessage } from "siwe";
-import { StewardAuth } from "@stwd/sdk";
 
+import { sendMagicLink, signInWithPasskey } from "@/lib/auth-api";
 import { setAuthToken, setCredentials } from "@/lib/api";
 
 const API_URL =
@@ -49,20 +48,16 @@ export interface AuthContextType {
   isLoading: boolean;
   /** SIWE wallet sign-in */
   signIn: () => Promise<void>;
-  /**
-   * Passkey sign-in/registration.
-   * Delegates to StewardAuth.signInWithPasskey from @stwd/sdk.
-   */
+  /** Passkey sign-in or registration. */
   signInWithPasskey: (email: string) => Promise<void>;
-  /**
-   * Send a magic link to the given email.
-   * Delegates to StewardAuth.signInWithEmail from @stwd/sdk.
-   */
+  /** Send a magic link to the given email. */
   signInWithEmail: (
     email: string,
   ) => Promise<{ ok: boolean; expiresAt?: string }>;
   /** Finalise a magic-link login (called by callback page) */
-  completeEmailAuth: (result: { token: string; user: { id: string; email: string } }) => void;
+  completeEmailAuth: (
+    result: { token: string; user: { id: string; email: string } },
+  ) => void;
   signOut: () => Promise<void>;
 }
 
@@ -77,27 +72,21 @@ export function useAuth() {
 /** localStorage key used across the whole app for the JWT. */
 const TOKEN_KEY = "steward_session";
 
-/**
- * Bridge StewardAuth's internal storage key to our existing TOKEN_KEY.
- * This keeps session continuity if the user already had a stored token.
- */
-function makeSdkStorage() {
-  return {
-    getItem(_key: string): string | null {
-      if (typeof localStorage === "undefined") return null;
-      return localStorage.getItem(TOKEN_KEY);
-    },
-    setItem(_key: string, value: string): void {
-      if (typeof localStorage !== "undefined") {
-        localStorage.setItem(TOKEN_KEY, value);
-      }
-    },
-    removeItem(_key: string): void {
-      if (typeof localStorage !== "undefined") {
-        localStorage.removeItem(TOKEN_KEY);
-      }
-    },
-  };
+function getStoredToken(): string | null {
+  if (typeof localStorage === "undefined") return null;
+  return localStorage.getItem(TOKEN_KEY);
+}
+
+function setStoredToken(token: string): void {
+  if (typeof localStorage !== "undefined") {
+    localStorage.setItem(TOKEN_KEY, token);
+  }
+}
+
+function clearStoredToken(): void {
+  if (typeof localStorage !== "undefined") {
+    localStorage.removeItem(TOKEN_KEY);
+  }
 }
 
 // ─── Provider ─────────────────────────────────────────────────────────────────
@@ -107,15 +96,6 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
   const { address, chainId, isConnected } = useAccount();
   const { signMessageAsync } = useSignMessage();
   const { disconnect } = useDisconnect();
-
-  /**
-   * StewardAuth SDK instance.
-   * Handles passkey (WebAuthn) and email magic-link flows end-to-end.
-   */
-  const sdkAuth = useMemo(
-    () => new StewardAuth({ baseUrl: API_URL, storage: makeSdkStorage() }),
-    [],
-  );
 
   // Auth state
   const [tenant, setTenant] = useState<TenantInfo | null>(null);
@@ -141,7 +121,7 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
   }, [isConnected]);
 
   async function validateSession() {
-    const token = sdkAuth.getToken();
+    const token = getStoredToken();
     if (!token) {
       setIsLoading(false);
       return;
@@ -182,7 +162,7 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
           setEmail(data.email);
         }
       } else {
-        sdkAuth.signOut(); // clears localStorage via our bridge
+        clearStoredToken();
       }
     } catch {
       // Session check failed — don't clear (might be a network hiccup)
@@ -192,7 +172,7 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
   }
 
   function clearSession() {
-    sdkAuth.signOut(); // removes TOKEN_KEY via our bridge
+    clearStoredToken();
     setIsAuthenticated(false);
     setTenant(null);
     setEmail(undefined);
@@ -200,9 +180,8 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
   }
 
   // ── SIWE (wallet) sign-in ───────────────────────────────────────────────────
-  // Raw fetch flow — kept because SiweMessage needs chainId context, which the
-  // SDK's built-in signInWithSIWE doesn't carry. Tenant data also comes in the
-  // SIWE verify response and is dashboard-specific.
+  // Raw fetch flow — kept because SiweMessage needs chainId context and the
+  // dashboard also consumes tenant details from the verify response.
 
   const signIn = useCallback(async () => {
     if (!address || !chainId || signingRef.current) return;
@@ -238,7 +217,7 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
       };
 
       if (verifyData.token) {
-        localStorage.setItem(TOKEN_KEY, verifyData.token);
+        setStoredToken(verifyData.token);
         setIsAuthenticated(true);
 
         if (verifyData.tenant) {
@@ -263,28 +242,27 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
     }
   }, [address, chainId, signMessageAsync]);
 
-  // ── Passkey sign-in — via StewardAuth SDK ───────────────────────────────────
+  // ── Passkey sign-in ─────────────────────────────────────────────────────────
 
   const handlePasskeySignIn = useCallback(
     async (inputEmail: string) => {
-      const result = await sdkAuth.signInWithPasskey(inputEmail);
-      // TOKEN_KEY already written by our storage bridge inside sdkAuth
+      const result = await signInWithPasskey(inputEmail);
+      setStoredToken(result.token);
       setAuthToken(result.token);
       setIsAuthenticated(true);
       setUserId(result.user.id);
       setEmail(result.user.email);
     },
-    [sdkAuth],
+    [],
   );
 
-  // ── Email magic link — via StewardAuth SDK ──────────────────────────────────
+  // ── Email magic link ────────────────────────────────────────────────────────
 
   const handleEmailSignIn = useCallback(
     async (inputEmail: string): Promise<{ ok: boolean; expiresAt?: string }> => {
-      const res = await sdkAuth.signInWithEmail(inputEmail);
-      return { ok: res.ok, expiresAt: res.expiresAt };
+      return sendMagicLink(inputEmail);
     },
-    [sdkAuth],
+    [],
   );
 
   /**
@@ -293,7 +271,7 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
    */
   const completeEmailAuth = useCallback(
     (result: { token: string; user: { id: string; email: string } }) => {
-      localStorage.setItem(TOKEN_KEY, result.token);
+      setStoredToken(result.token);
       setAuthToken(result.token);
       setIsAuthenticated(true);
       setUserId(result.user.id);
@@ -305,7 +283,7 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
   // ── Sign out ────────────────────────────────────────────────────────────────
 
   const signOut = useCallback(async () => {
-    const token = sdkAuth.getToken();
+    const token = getStoredToken();
     if (token) {
       try {
         await fetch(`${API_URL}/auth/logout`, {
@@ -320,7 +298,7 @@ export function AuthProvider({ children }: { children: ReactNode }): any {
     // Only disconnect wallet if it was the auth method
     if (tenant) disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sdkAuth, disconnect, tenant]);
+  }, [disconnect, tenant]);
 
   // ── Context value ───────────────────────────────────────────────────────────
 

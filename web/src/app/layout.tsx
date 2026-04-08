@@ -3,7 +3,17 @@ import "./globals.css";
 import "@rainbow-me/rainbowkit/styles.css";
 import { Providers } from "@/components/providers";
 
+const metadataBase = (() => {
+  const url = process.env.NEXT_PUBLIC_STEWARD_WEB_URL ?? "https://steward.fi";
+  try {
+    return new URL(url);
+  } catch {
+    return new URL("https://steward.fi");
+  }
+})();
+
 export const metadata: Metadata = {
+  metadataBase,
   title: "Steward — Agent Wallet Infrastructure",
   description:
     "Managed wallets for AI agents with policy enforcement, multi-tenant isolation, and webhook-driven approvals. Self-hosted.",
