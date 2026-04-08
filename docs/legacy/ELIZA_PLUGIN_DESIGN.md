@@ -804,7 +804,7 @@ That's it. The agent now:
   "name": "milaidy",
   "plugins": [
     "@elizaos/plugin-sql",
-    "@elizaos/plugin-knowledge",
+    "knowledge",
     "@stwd/eliza-plugin"
   ],
   "settings": {
