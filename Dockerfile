@@ -41,7 +41,6 @@ COPY packages/policy-engine/package.json packages/policy-engine/package.json
 COPY packages/proxy/package.json     packages/proxy/package.json
 COPY packages/redis/package.json     packages/redis/package.json
 COPY packages/shared/package.json    packages/shared/package.json
-COPY packages/sdk/package.json       packages/sdk/package.json
 COPY packages/vault/package.json     packages/vault/package.json
 COPY packages/webhooks/package.json  packages/webhooks/package.json
 
@@ -54,6 +53,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY package.json bun.lock turbo.json tsconfig.json ./
 
 # Copy full source for all packages needed by api + proxy
+# Note: packages/sdk and packages/dashboard are excluded via .dockerignore
+#       (browser-only packages not needed for the server build)
 COPY packages/api         packages/api
 COPY packages/auth        packages/auth
 COPY packages/db          packages/db
@@ -61,7 +62,6 @@ COPY packages/policy-engine packages/policy-engine
 COPY packages/proxy       packages/proxy
 COPY packages/redis       packages/redis
 COPY packages/shared      packages/shared
-COPY packages/sdk         packages/sdk
 COPY packages/vault       packages/vault
 COPY packages/webhooks    packages/webhooks
 
@@ -86,7 +86,6 @@ COPY packages/policy-engine/package.json packages/policy-engine/package.json
 COPY packages/proxy/package.json     packages/proxy/package.json
 COPY packages/redis/package.json     packages/redis/package.json
 COPY packages/shared/package.json    packages/shared/package.json
-COPY packages/sdk/package.json       packages/sdk/package.json
 COPY packages/vault/package.json     packages/vault/package.json
 COPY packages/webhooks/package.json  packages/webhooks/package.json
 
@@ -100,7 +99,6 @@ COPY --from=build /app/packages/policy-engine packages/policy-engine
 COPY --from=build /app/packages/proxy       packages/proxy
 COPY --from=build /app/packages/redis       packages/redis
 COPY --from=build /app/packages/shared      packages/shared
-COPY --from=build /app/packages/sdk         packages/sdk
 COPY --from=build /app/packages/vault       packages/vault
 COPY --from=build /app/packages/webhooks    packages/webhooks
 
