@@ -15,7 +15,7 @@ import { count, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { generateApiKey, platformAuthMiddleware } from "@stwd/auth";
-import { agents, getDb, policies, tenants, transactions } from "@stwd/db";
+import { agents, getDb, policies, tenants, transactions, users } from "@stwd/db";
 import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
 import { createAgentToken } from "../services/context";
@@ -617,6 +617,53 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
     console.error(`[platform] Failed to generate agent token for ${agentId}:`, e);
     return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
   }
+});
+
+/**
+ * POST /platform/users
+ * Pre-provision a user record without sending an email or requiring interaction.
+ * Intended for migration tooling (e.g. importing users from another auth provider).
+ *
+ * The route is idempotent: if a user with this email already exists, it returns
+ * the existing record's ID and isNew=false — no data is overwritten.
+ *
+ * Body: { email: string; emailVerified?: boolean; name?: string }
+ * Returns: { ok: true; userId: string; isNew: boolean }
+ */
+platform.post("/users", async (c) => {
+  const body = await safeJsonParse<{ email: string; emailVerified?: boolean; name?: string }>(c);
+  if (!body?.email || typeof body.email !== "string" || !body.email.includes("@")) {
+    return c.json<ApiResponse>({ ok: false, error: "A valid email is required" }, 400);
+  }
+
+  const db = getDb();
+  const email = body.email.toLowerCase().trim();
+
+  const [existing] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.email, email));
+
+  if (existing) {
+    return c.json<ApiResponse<{ userId: string; isNew: boolean }>>({
+      ok: true,
+      data: { userId: existing.id, isNew: false },
+    });
+  }
+
+  const [newUser] = await db
+    .insert(users)
+    .values({
+      email,
+      emailVerified: body.emailVerified ?? false,
+      name: body.name ?? null,
+    })
+    .returning({ id: users.id });
+
+  return c.json<ApiResponse<{ userId: string; isNew: boolean }>>(
+    { ok: true, data: { userId: newUser.id, isNew: true } },
+    201,
+  );
 });
 
 export { platform as platformRoutes };
