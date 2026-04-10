@@ -18,6 +18,7 @@ import type {
   StewardAuthContextValue,
 } from "./types.js";
 import type { StewardUser, StewardSession, SessionStorage } from "@stwd/sdk";
+import type { StewardProvidersState } from "./types.js";
 import { DEFAULT_THEME, mergeTheme, themeToCSS } from "./utils/theme.js";
 
 const DEFAULT_FEATURES: TenantFeatureFlags = {
@@ -150,6 +151,43 @@ export function StewardProvider({
     }
   }, [authInstance]);
 
+  const signInWithOAuth = useCallback(async (provider: string, config?: { redirectUri?: string; tenantId?: string }) => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    const authAny = authInstance as unknown as Record<string, unknown>;
+    if (typeof authAny.signInWithOAuth !== "function") {
+      throw new Error("StewardAuth.signInWithOAuth not available. Update @stwd/sdk to >=0.6.0");
+    }
+    setAuthLoading(true);
+    try {
+      const fn = authAny.signInWithOAuth as (p: string, c?: { redirectUri?: string; tenantId?: string }) => Promise<import("@stwd/sdk").StewardAuthResult>;
+      return await fn(provider, config);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authInstance]);
+
+  // ─── Provider discovery ─────────────────────────────────────────────────────
+
+  const [providers, setProviders] = useState<StewardProvidersState | null>(null);
+  const [isProvidersLoading, setIsProvidersLoading] = useState(false);
+
+  useEffect(() => {
+    if (!authInstance) return;
+    const inst = authInstance as unknown as Record<string, unknown>;
+    if (typeof inst.getProviders !== "function") return;
+    const fetchProviders = inst.getProviders as () => Promise<StewardProvidersState>;
+    let cancelled = false;
+    setIsProvidersLoading(true);
+    fetchProviders().then((result) => {
+      if (!cancelled) setProviders(result);
+    }).catch(() => {
+      // Provider discovery failed — leave null, buttons won't show
+    }).finally(() => {
+      if (!cancelled) setIsProvidersLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [authInstance]);
+
   const authContextValue = useMemo<StewardAuthContextValue | null>(() => {
     if (!authInstance) return null;
     return {
@@ -157,14 +195,17 @@ export function StewardProvider({
       isLoading: authLoading,
       user: authSession?.user ?? null,
       session: authSession,
+      providers,
+      isProvidersLoading,
       signOut,
       getToken,
       signInWithPasskey,
       signInWithEmail,
       verifyEmailCallback,
       signInWithSIWE,
+      signInWithOAuth,
     };
-  }, [authInstance, authSession, authLoading, signOut, getToken, signInWithPasskey, signInWithEmail, verifyEmailCallback, signInWithSIWE]);
+  }, [authInstance, authSession, authLoading, providers, isProvidersLoading, signOut, getToken, signInWithPasskey, signInWithEmail, verifyEmailCallback, signInWithSIWE, signInWithOAuth]);
 
   // ─── Tenant config ─────────────────────────────────────────────────────────
 

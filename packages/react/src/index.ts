@@ -22,6 +22,9 @@ export { usePolicies } from "./hooks/usePolicies.js";
 export { useApprovals } from "./hooks/useApprovals.js";
 export { useSpend } from "./hooks/useSpend.js";
 
+// ─── Icons ───
+export { GoogleIcon, DiscordIcon, PasskeyIcon, EmailIcon, EthereumIcon } from "./icons/index.js";
+
 // ─── Utilities ───
 export {
   truncateAddress,

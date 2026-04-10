@@ -1,8 +1,10 @@
 import React, { useState, useContext } from "react";
 import { StewardAuthContext } from "../provider.js";
 import type { StewardLoginProps } from "../types.js";
+import { GoogleIcon, DiscordIcon, PasskeyIcon, EmailIcon, EthereumIcon } from "../icons/index.js";
 
 type LoginStep = "idle" | "loading" | "email-sent" | "error";
+type LoadingButton = "passkey" | "email" | "google" | "discord" | "siwe" | null;
 
 /**
  * StewardLogin — Drop-in auth widget for Steward-powered apps.
@@ -13,10 +15,18 @@ type LoginStep = "idle" | "loading" | "email-sent" | "error";
  *   - Passkey (WebAuthn) — browser only
  *   - Email magic link
  *   - SIWE (Sign-In With Ethereum) — requires caller to wire in a wallet
+ *   - Google OAuth (popup)
+ *   - Discord OAuth (popup)
  *
  * @example
  * <StewardProvider client={client} agentId="..." auth={{ baseUrl: "https://api.steward.fi" }}>
- *   <StewardLogin onSuccess={({ token }) => console.log("token:", token)} />
+ *   <StewardLogin
+ *     variant="card"
+ *     title="Welcome back"
+ *     showGoogle
+ *     showDiscord
+ *     onSuccess={({ token }) => console.log("signed in:", token)}
+ *   />
  * </StewardProvider>
  */
 export function StewardLogin({
@@ -25,12 +35,19 @@ export function StewardLogin({
   showPasskey = true,
   showEmail = true,
   showSIWE = false,
+  showGoogle = true,
+  showDiscord = true,
+  variant = "card",
+  logo,
+  title,
+  subtitle,
   className,
 }: StewardLoginProps) {
   const ctx = useContext(StewardAuthContext);
 
   const [email, setEmail] = useState("");
   const [step, setStep] = useState<LoginStep>("idle");
+  const [loadingBtn, setLoadingBtn] = useState<LoadingButton>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   if (!ctx) {
@@ -44,15 +61,22 @@ export function StewardLogin({
     );
   }
 
-  // Already signed in — render nothing (parent should guard with isAuthenticated)
+  // Already signed in
   if (ctx.isAuthenticated) {
     return null;
   }
+
+  // Determine which OAuth providers to show based on API + props
+  const providers = ctx.providers;
+  const googleEnabled = showGoogle && (providers?.google ?? false);
+  const discordEnabled = showDiscord && (providers?.discord ?? false);
+  const hasOAuth = googleEnabled || discordEnabled;
 
   const handleError = (err: unknown) => {
     const error = err instanceof Error ? err : new Error(String(err));
     setErrorMsg(error.message);
     setStep("error");
+    setLoadingBtn(null);
     onError?.(error);
   };
 
@@ -63,6 +87,7 @@ export function StewardLogin({
       return;
     }
     setStep("loading");
+    setLoadingBtn("passkey");
     setErrorMsg(null);
     try {
       const result = await ctx.signInWithPasskey(email.trim());
@@ -79,55 +104,90 @@ export function StewardLogin({
       return;
     }
     setStep("loading");
+    setLoadingBtn("email");
     setErrorMsg(null);
     try {
       await ctx.signInWithEmail(email.trim());
       setStep("email-sent");
+      setLoadingBtn(null);
+    } catch (err) {
+      handleError(err);
+    }
+  };
+
+  const handleOAuth = async (provider: "google" | "discord") => {
+    setStep("loading");
+    setLoadingBtn(provider);
+    setErrorMsg(null);
+    try {
+      if (typeof ctx.signInWithOAuth !== "function") {
+        throw new Error("OAuth not available. Update @stwd/sdk.");
+      }
+      const result = await ctx.signInWithOAuth(provider);
+      onSuccess?.(result);
     } catch (err) {
       handleError(err);
     }
   };
 
   const isLoading = step === "loading" || ctx.isLoading;
+  const variantClass = variant === "card" ? "stwd-login--card" : "stwd-login--inline";
 
   if (step === "email-sent") {
     return (
-      <div className={`stwd-login stwd-login--sent ${className ?? ""}`}>
-        <p className="stwd-login__notice">
-          ✉️ Magic link sent to <strong>{email}</strong>. Check your inbox.
-        </p>
+      <div className={`stwd-login ${variantClass} stwd-login--sent ${className ?? ""}`}>
+        <div className="stwd-login__notice">
+          <span className="stwd-login__notice-icon">✉️</span>
+          <p>
+            Magic link sent to <strong>{email}</strong>
+          </p>
+          <p className="stwd-login__notice-sub">Check your inbox and click the link to sign in.</p>
+        </div>
         <button
-          className="stwd-login__back"
-          onClick={() => setStep("idle")}
+          className="stwd-login__btn stwd-login__btn--back"
+          onClick={() => { setStep("idle"); setLoadingBtn(null); }}
           type="button"
         >
-          ← Back
+          ← Back to login
         </button>
       </div>
     );
   }
 
   return (
-    <div className={`stwd-login ${className ?? ""}`}>
-      <div className="stwd-login__fields">
-        <input
-          className="stwd-login__input"
-          type="email"
-          placeholder="you@example.com"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              if (showPasskey) void handlePasskey();
-              else if (showEmail) void handleEmail();
-            }
-          }}
-          disabled={isLoading}
-          autoComplete="email webauthn"
-          aria-label="Email address"
-        />
-      </div>
+    <div className={`stwd-login ${variantClass} ${className ?? ""}`}>
+      {/* Header */}
+      {(logo || title || subtitle) && (
+        <div className="stwd-login__header">
+          {logo && <div className="stwd-login__logo">{logo}</div>}
+          {title && <h2 className="stwd-login__title">{title}</h2>}
+          {subtitle && <p className="stwd-login__subtitle">{subtitle}</p>}
+        </div>
+      )}
 
+      {/* Email input */}
+      {(showPasskey || showEmail) && (
+        <div className="stwd-login__fields">
+          <input
+            className="stwd-login__input"
+            type="email"
+            placeholder="you@example.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                if (showPasskey) void handlePasskey();
+                else if (showEmail) void handleEmail();
+              }
+            }}
+            disabled={isLoading}
+            autoComplete="email webauthn"
+            aria-label="Email address"
+          />
+        </div>
+      )}
+
+      {/* Primary auth buttons */}
       <div className="stwd-login__actions">
         {showPasskey && (
           <button
@@ -136,7 +196,12 @@ export function StewardLogin({
             disabled={isLoading}
             type="button"
           >
-            {isLoading ? "Signing in…" : "🔑 Sign in with Passkey"}
+            {loadingBtn === "passkey" ? (
+              <span className="stwd-login__spinner" />
+            ) : (
+              <PasskeyIcon size={18} />
+            )}
+            <span>Sign in with Passkey</span>
           </button>
         )}
 
@@ -147,22 +212,76 @@ export function StewardLogin({
             disabled={isLoading}
             type="button"
           >
-            {isLoading ? "Sending…" : "✉️ Send Magic Link"}
+            {loadingBtn === "email" ? (
+              <span className="stwd-login__spinner" />
+            ) : (
+              <EmailIcon size={18} />
+            )}
+            <span>Send Magic Link</span>
           </button>
         )}
+      </div>
 
-        {showSIWE && (
+      {/* Divider */}
+      {hasOAuth && (showPasskey || showEmail) && (
+        <div className="stwd-login__divider">
+          <span>or</span>
+        </div>
+      )}
+
+      {/* OAuth buttons */}
+      {hasOAuth && (
+        <div className="stwd-login__oauth">
+          {googleEnabled && (
+            <button
+              className="stwd-login__btn stwd-login__btn--google"
+              onClick={() => void handleOAuth("google")}
+              disabled={isLoading}
+              type="button"
+            >
+              {loadingBtn === "google" ? (
+                <span className="stwd-login__spinner stwd-login__spinner--dark" />
+              ) : (
+                <GoogleIcon size={18} />
+              )}
+              <span>Continue with Google</span>
+            </button>
+          )}
+
+          {discordEnabled && (
+            <button
+              className="stwd-login__btn stwd-login__btn--discord"
+              onClick={() => void handleOAuth("discord")}
+              disabled={isLoading}
+              type="button"
+            >
+              {loadingBtn === "discord" ? (
+                <span className="stwd-login__spinner" />
+              ) : (
+                <DiscordIcon size={18} />
+              )}
+              <span>Continue with Discord</span>
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* SIWE (placeholder, requires wallet integration) */}
+      {showSIWE && (
+        <div className="stwd-login__oauth">
           <button
             className="stwd-login__btn stwd-login__btn--siwe"
             disabled={true}
             type="button"
             title="Connect your wallet to sign in with Ethereum"
           >
-            🦊 Sign in with Ethereum
+            <EthereumIcon size={18} />
+            <span>Sign in with Ethereum</span>
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
+      {/* Error */}
       {step === "error" && errorMsg && (
         <p className="stwd-login__error" role="alert">
           {errorMsg}

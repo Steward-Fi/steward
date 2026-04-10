@@ -16,7 +16,7 @@
     },
     "packages/agent-trader": {
       "name": "@stwd/agent-trader",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@stwd/sdk": "workspace:*",
         "@stwd/shared": "workspace:*",
@@ -29,7 +29,7 @@
     },
     "packages/api": {
       "name": "@stwd/api",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@stwd/auth": "workspace:*",
         "@stwd/db": "workspace:*",
@@ -48,7 +48,7 @@
     },
     "packages/auth": {
       "name": "@stwd/auth",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@simplewebauthn/server": "^13",
         "@stwd/db": "workspace:*",
@@ -62,7 +62,7 @@
     },
     "packages/db": {
       "name": "@stwd/db",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@electric-sql/pglite": "^0.4.2",
         "@stwd/shared": "workspace:*",
@@ -70,14 +70,15 @@
         "postgres": "^3.4.7",
       },
       "devDependencies": {
+        "@types/node": "^22.0.0",
         "drizzle-kit": "^0.31.4",
       },
     },
     "packages/eliza-plugin": {
       "name": "@stwd/eliza-plugin",
-      "version": "0.2.1",
+      "version": "0.3.0",
       "dependencies": {
-        "@stwd/sdk": "workspace:*",
+        "@stwd/sdk": "0.4.0",
       },
       "devDependencies": {
         "@elizaos/core": "2.0.0-alpha.77",
@@ -92,7 +93,7 @@
     },
     "packages/examples/waifu-integration": {
       "name": "@stwd/example-waifu-integration",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@stwd/sdk": "workspace:*",
         "@stwd/shared": "workspace:*",
@@ -103,14 +104,14 @@
     },
     "packages/policy-engine": {
       "name": "@stwd/policy-engine",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@stwd/shared": "workspace:*",
       },
     },
     "packages/proxy": {
       "name": "@stwd/proxy",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@stwd/db": "workspace:*",
         "@stwd/redis": "workspace:*",
@@ -127,7 +128,10 @@
     },
     "packages/react": {
       "name": "@stwd/react",
-      "version": "0.1.0",
+      "version": "0.4.0",
+      "dependencies": {
+        "@stwd/sdk": "^0.5.0",
+      },
       "devDependencies": {
         "@types/react": "^18.0.0",
         "@types/react-dom": "^18.0.0",
@@ -136,14 +140,13 @@
         "typescript": "^5.8.0",
       },
       "peerDependencies": {
-        "@stwd/sdk": ">=0.1.0",
         "react": ">=18.0.0",
         "react-dom": ">=18.0.0",
       },
     },
     "packages/redis": {
       "name": "@stwd/redis",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "ioredis": "^5.6.1",
       },
@@ -154,11 +157,11 @@
     },
     "packages/sdk": {
       "name": "@stwd/sdk",
-      "version": "0.3.0",
+      "version": "0.5.0",
     },
     "packages/seed": {
       "name": "@stwd/seed",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@stwd/db": "workspace:*",
         "@stwd/vault": "workspace:*",
@@ -168,10 +171,13 @@
     "packages/shared": {
       "name": "@stwd/shared",
       "version": "0.2.0",
+      "devDependencies": {
+        "@types/bun": "latest",
+      },
     },
     "packages/vault": {
       "name": "@stwd/vault",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@solana/web3.js": "^1",
         "@stwd/db": "workspace:*",
@@ -185,7 +191,7 @@
     },
     "packages/webhooks": {
       "name": "@stwd/webhooks",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@stwd/db": "workspace:*",
         "@stwd/shared": "workspace:*",
@@ -194,10 +200,11 @@
     },
     "web": {
       "name": "@stwd/web",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "dependencies": {
         "@rainbow-me/rainbowkit": "^2.2.10",
         "@simplewebauthn/browser": "^13",
+        "@stwd/sdk": "workspace:*",
         "@tanstack/react-query": "^5.90.21",
         "framer-motion": "^12.36.0",
         "next": "^15.3.0",
@@ -1987,11 +1994,15 @@
 
     "@stwd/auth/@types/node": ["@types/node@24.12.0", "", { "dependencies": { "undici-types": "~7.16.0" } }, "sha512-GYDxsZi3ChgmckRT9HPU0WEhKLP08ev/Yfcq2AstjrDASOYCSXeyjDsHg4v5t4jOj7cyDX3vmprafKlWIG9MXQ=="],
 
+    "@stwd/eliza-plugin/@stwd/sdk": ["@stwd/sdk@0.4.0", "", {}, "sha512-q2SntFmJrT7RCpKqOi6zPG9QVHoX1qTXTw6ZNMBm5rfHGiv1yrY9Zk60rOl/qyCS+r0MgG2Pk2q+TsBSqO8ouA=="],
+
     "@stwd/eliza-plugin/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
     "@stwd/proxy/@types/bun": ["@types/bun@1.3.11", "", { "dependencies": { "bun-types": "1.3.11" } }, "sha512-5vPne5QvtpjGpsGYXiFyycfpDF2ECyPcTSsFBMa0fraoxiQyMJ3SmuQIGhzPg2WJuWxVBoxWJ2kClYTcw/4fAg=="],
 
     "@stwd/redis/@types/bun": ["@types/bun@1.3.11", "", { "dependencies": { "bun-types": "1.3.11" } }, "sha512-5vPne5QvtpjGpsGYXiFyycfpDF2ECyPcTSsFBMa0fraoxiQyMJ3SmuQIGhzPg2WJuWxVBoxWJ2kClYTcw/4fAg=="],
+
+    "@stwd/shared/@types/bun": ["@types/bun@1.3.11", "", { "dependencies": { "bun-types": "1.3.11" } }, "sha512-5vPne5QvtpjGpsGYXiFyycfpDF2ECyPcTSsFBMa0fraoxiQyMJ3SmuQIGhzPg2WJuWxVBoxWJ2kClYTcw/4fAg=="],
 
     "@stwd/vault/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
@@ -2361,6 +2372,8 @@
 
     "@stwd/redis/@types/bun/bun-types": ["bun-types@1.3.11", "", { "dependencies": { "@types/node": "*" } }, "sha512-1KGPpoxQWl9f6wcZh57LvrPIInQMn2TQ7jsgxqpRzg+l0QPOFvJVH7HmvHo/AiPgwXy+/Thf6Ov3EdVn1vOabg=="],
 
+    "@stwd/shared/@types/bun/bun-types": ["bun-types@1.3.11", "", { "dependencies": { "@types/node": "*" } }, "sha512-1KGPpoxQWl9f6wcZh57LvrPIInQMn2TQ7jsgxqpRzg+l0QPOFvJVH7HmvHo/AiPgwXy+/Thf6Ov3EdVn1vOabg=="],
+
     "@stwd/vault/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
 
     "@stwd/vault/viem/ox": ["ox@0.14.5", "", { "dependencies": { "@adraffy/ens-normalize": "^1.11.0", "@noble/ciphers": "^1.3.0", "@noble/curves": "1.9.1", "@noble/hashes": "^1.8.0", "@scure/bip32": "^1.7.0", "@scure/bip39": "^1.6.0", "abitype": "^1.2.3", "eventemitter3": "5.0.1" }, "peerDependencies": { "typescript": ">=5.4.0" }, "optionalPeers": ["typescript"] }, "sha512-HgmHmBveYO40H/R3K6TMrwYtHsx/u6TAB+GpZlgJCoW0Sq5Ttpjih0IZZiwGQw7T6vdW4IAyobYrE2mdAvyF8Q=="],
@@ -2589,6 +2602,8 @@
 
     "@stwd/redis/@types/bun/bun-types/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
 
+    "@stwd/shared/@types/bun/bun-types/@types/node": ["@types/node@25.5.0", "", { "dependencies": { "undici-types": "~7.18.0" } }, "sha512-jp2P3tQMSxWugkCUKLRPVUpGaL5MVFwF8RDuSRztfwgN1wmqJeMSbKlnEtQqU8UrhTmzEmZdu2I6v2dpp7XIxw=="],
+
     "@stwd/vault/viem/ox/@adraffy/ens-normalize": ["@adraffy/ens-normalize@1.11.1", "", {}, "sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ=="],
 
     "@stwd/web/viem/ox/@adraffy/ens-normalize": ["@adraffy/ens-normalize@1.11.1", "", {}, "sha512-nhCBV3quEgesuf7c7KYfperqSS14T8bYuvJ8PcLJp6znkZpFc0AuW4qBtr8eKVyPPe/8RSr7sglCWPU5eaxwKQ=="],
@@ -2654,6 +2669,8 @@
     "@stwd/proxy/@types/bun/bun-types/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
 
     "@stwd/redis/@types/bun/bun-types/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
+
+    "@stwd/shared/@types/bun/bun-types/@types/node/undici-types": ["undici-types@7.18.2", "", {}, "sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w=="],
 
     "@walletconnect/utils/viem/ox/@scure/bip32/@noble/curves": ["@noble/curves@1.9.1", "", { "dependencies": { "@noble/hashes": "1.8.0" } }, "sha512-k11yZxZg+t+gWvBbIswW0yoJlu8cHOC7dhunwOzoWH/mXGBiYyR4YY6hAEK/3EUs4UpB8la1RfdRpeGsFHkWsA=="],
 
