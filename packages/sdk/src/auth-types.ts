@@ -77,3 +77,43 @@ export interface StewardRefreshResult {
   refreshToken: string;
   expiresIn: number;
 }
+
+// ─── OAuth types ──────────────────────────────────────────────────────────────
+
+/**
+ * Configuration for an OAuth sign-in attempt.
+ */
+export interface StewardOAuthConfig {
+  /** OAuth provider name, e.g. "google" or "discord" */
+  provider: string;
+  /** Override the redirect URI (defaults to current page origin + /auth/callback) */
+  redirectUri?: string;
+  /** Tenant to authenticate into */
+  tenantId?: string;
+  /** Popup window width in pixels (default: 500) */
+  popupWidth?: number;
+  /** Popup window height in pixels (default: 600) */
+  popupHeight?: number;
+}
+
+/**
+ * Result from a successful OAuth sign-in.
+ */
+export interface StewardOAuthResult extends StewardAuthResult {
+  /** The OAuth provider that was used */
+  provider: string;
+}
+
+/**
+ * Discovery response from GET /auth/providers.
+ * Indicates which authentication methods are enabled on the server.
+ */
+export interface StewardProviders {
+  passkey: boolean;
+  email: boolean;
+  siwe: boolean;
+  google: boolean;
+  discord: boolean;
+  /** List of all enabled OAuth provider names */
+  oauth: string[];
+}

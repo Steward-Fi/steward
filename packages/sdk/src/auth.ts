@@ -17,6 +17,9 @@ import type {
   StewardAuthConfig,
   StewardAuthResult,
   StewardEmailResult,
+  StewardOAuthConfig,
+  StewardOAuthResult,
+  StewardProviders,
   StewardRefreshResult,
   StewardSession,
   StewardUser,
@@ -27,6 +30,8 @@ import type {
 
 const STORAGE_KEY = "steward_session_token";
 const REFRESH_TOKEN_KEY = "steward_refresh_token";
+const OAUTH_STATE_KEY = "steward_oauth_state";
+const OAUTH_VERIFIER_KEY = "steward_oauth_verifier";
 
 /** Kick off a token refresh when fewer than this many seconds remain on the access token */
 const REFRESH_THRESHOLD_SECS = 120;
@@ -561,6 +566,319 @@ export class StewardAuth {
     );
   }
 
+  // ─── OAuth / Provider Discovery ───────────────────────────────────────────
+
+  private providersCache: { data: StewardProviders; fetchedAt: number } | null = null;
+  private static readonly PROVIDERS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+  /**
+   * Fetch the list of enabled authentication providers from the server.
+   * Results are cached for 5 minutes to avoid hammering the endpoint on every render.
+   */
+  async getProviders(forceRefresh = false): Promise<StewardProviders> {
+    if (
+      !forceRefresh &&
+      this.providersCache &&
+      Date.now() - this.providersCache.fetchedAt < StewardAuth.PROVIDERS_CACHE_TTL_MS
+    ) {
+      return this.providersCache.data;
+    }
+
+    const res = await authRequest<StewardProviders>(this.baseUrl, "/auth/providers");
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    this.providersCache = { data: res.data, fetchedAt: Date.now() };
+    return res.data;
+  }
+
+  /**
+   * Sign in with an OAuth provider using a popup-based PKCE flow.
+   *
+   * In a browser environment, opens a popup to the provider's authorization page,
+   * listens for the callback, and exchanges the code for a session.
+   *
+   * In non-browser environments (Node), throws with the authorization URL.
+   * Use `handleOAuthCallback` to complete the flow after redirect.
+   *
+   * @param provider - OAuth provider name (e.g. "google", "discord")
+   * @param config   - Optional configuration overrides
+   */
+  async signInWithOAuth(
+    provider: string,
+    config?: Partial<Omit<StewardOAuthConfig, "provider">>,
+  ): Promise<StewardOAuthResult> {
+    // Generate PKCE pair
+    const codeVerifier = await generateCodeVerifier();
+    const codeChallenge = await generateCodeChallenge(codeVerifier);
+
+    // Generate random state
+    const stateBytes = new Uint8Array(16);
+    globalThis.crypto.getRandomValues(stateBytes);
+    const state = Array.from(stateBytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    // Store state + verifier for later verification
+    this.storage.setItem(OAUTH_STATE_KEY, state);
+    this.storage.setItem(OAUTH_VERIFIER_KEY, codeVerifier);
+
+    // Build the redirect URI
+    const redirectUri =
+      config?.redirectUri ??
+      (isBrowser()
+        ? `${window.location.origin}/auth/callback`
+        : "http://localhost/auth/callback");
+
+    // Build the authorization URL
+    const params = new URLSearchParams({
+      redirect_uri: redirectUri,
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+      state,
+    });
+    if (config?.tenantId) {
+      params.set("tenant_id", config.tenantId);
+    }
+    const authorizeUrl = `${this.baseUrl}/auth/oauth/${encodeURIComponent(provider)}/authorize?${params.toString()}`;
+
+    if (!isBrowser()) {
+      throw new StewardApiError(
+        `OAuth popup flow requires a browser. Redirect to: ${authorizeUrl}`,
+        0,
+      );
+    }
+
+    // Open popup
+    const popupWidth = config?.popupWidth ?? 500;
+    const popupHeight = config?.popupHeight ?? 600;
+    const left = Math.round(window.screenX + (window.outerWidth - popupWidth) / 2);
+    const top = Math.round(window.screenY + (window.outerHeight - popupHeight) / 2);
+
+    const popup = window.open(
+      authorizeUrl,
+      "steward-oauth",
+      `width=${popupWidth},height=${popupHeight},left=${left},top=${top},popup=yes`,
+    );
+
+    if (!popup) {
+      throw new StewardApiError(
+        "Failed to open OAuth popup. Check that popups are not blocked.",
+        0,
+      );
+    }
+
+    // Wait for the popup to redirect back with the code
+    const callbackParams = await this.waitForPopupCallback(popup, redirectUri);
+
+    // Validate state
+    if (callbackParams.state !== state) {
+      throw new StewardApiError("OAuth state mismatch, possible CSRF attack", 0);
+    }
+
+    if (callbackParams.error) {
+      throw new StewardApiError(`OAuth error: ${callbackParams.error}`, 0);
+    }
+
+    if (!callbackParams.code) {
+      throw new StewardApiError("No authorization code received from OAuth provider", 0);
+    }
+
+    // Exchange code for tokens via PKCE
+    return this.exchangeOAuthCode(
+      provider,
+      callbackParams.code,
+      redirectUri,
+      state,
+      codeVerifier,
+    );
+  }
+
+  /**
+   * Complete an OAuth flow from a redirect callback (non-popup flow).
+   *
+   * Call this from your callback route handler after the OAuth provider
+   * redirects back with `code` and `state` query parameters.
+   *
+   * @param provider - OAuth provider name (e.g. "google", "discord")
+   * @param params   - The URL search params from the callback (code, state, error)
+   */
+  async handleOAuthCallback(
+    provider: string,
+    params: { code?: string; state?: string; error?: string },
+  ): Promise<StewardOAuthResult> {
+    if (params.error) {
+      throw new StewardApiError(`OAuth error: ${params.error}`, 0);
+    }
+
+    if (!params.code || !params.state) {
+      throw new StewardApiError("Missing code or state in OAuth callback", 0);
+    }
+
+    // Retrieve stored state + verifier
+    const storedState = this.storage.getItem(OAUTH_STATE_KEY);
+    const storedVerifier = this.storage.getItem(OAUTH_VERIFIER_KEY);
+
+    if (!storedState || !storedVerifier) {
+      throw new StewardApiError(
+        "No OAuth state found in storage. Did you call signInWithOAuth first?",
+        0,
+      );
+    }
+
+    if (params.state !== storedState) {
+      throw new StewardApiError("OAuth state mismatch, possible CSRF attack", 0);
+    }
+
+    // Build redirect URI from current location (or fallback)
+    const redirectUri = isBrowser()
+      ? `${window.location.origin}${window.location.pathname}`
+      : "http://localhost/auth/callback";
+
+    return this.exchangeOAuthCode(
+      provider,
+      params.code,
+      redirectUri,
+      params.state,
+      storedVerifier,
+    );
+  }
+
+  /**
+   * Exchange an OAuth authorization code for session tokens via PKCE.
+   */
+  private async exchangeOAuthCode(
+    provider: string,
+    code: string,
+    redirectUri: string,
+    state: string,
+    codeVerifier: string,
+  ): Promise<StewardOAuthResult> {
+    const res = await authRequest<{
+      ok: boolean;
+      token: string;
+      refreshToken: string;
+      expiresIn: number;
+      user: StewardUser;
+    }>(
+      this.baseUrl,
+      `/auth/oauth/${encodeURIComponent(provider)}/token`,
+      {
+        method: "POST",
+        body: JSON.stringify({ code, redirectUri, state, codeVerifier }),
+      },
+    );
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    // Clean up stored PKCE state
+    this.storage.removeItem(OAUTH_STATE_KEY);
+    this.storage.removeItem(OAUTH_VERIFIER_KEY);
+
+    const result = this.storeAndReturn(
+      res.data.token,
+      res.data.refreshToken,
+      res.data.user,
+      res.data.expiresIn,
+    );
+
+    return { ...result, provider };
+  }
+
+  /**
+   * Wait for the OAuth popup to redirect back to the callback URL.
+   * Polls the popup location and listens for postMessage as a fallback.
+   */
+  private waitForPopupCallback(
+    popup: Window,
+    expectedOrigin: string,
+  ): Promise<{ code?: string; state?: string; error?: string }> {
+    return new Promise((resolve, reject) => {
+      let resolved = false;
+      const pollInterval = 200; // ms
+      const timeout = 5 * 60 * 1000; // 5 min max
+      const startTime = Date.now();
+
+      // Parse the expected origin from the redirect URI
+      let origin: string;
+      try {
+        origin = new URL(expectedOrigin).origin;
+      } catch {
+        origin = isBrowser() ? window.location.origin : "http://localhost";
+      }
+
+      // Listen for postMessage from the popup (if the callback page sends one)
+      const messageHandler = (event: MessageEvent): void => {
+        if (resolved) return;
+        if (event.origin !== origin) return;
+        const data = event.data as
+          | { type?: string; code?: string; state?: string; error?: string }
+          | undefined;
+        if (data?.type === "steward-oauth-callback") {
+          resolved = true;
+          window.removeEventListener("message", messageHandler);
+          resolve({ code: data.code, state: data.state, error: data.error });
+        }
+      };
+      window.addEventListener("message", messageHandler);
+
+      // Poll the popup location
+      const poll = setInterval(() => {
+        if (resolved) {
+          clearInterval(poll);
+          return;
+        }
+
+        // Check timeout
+        if (Date.now() - startTime > timeout) {
+          resolved = true;
+          clearInterval(poll);
+          window.removeEventListener("message", messageHandler);
+          reject(new StewardApiError("OAuth popup timed out after 5 minutes", 0));
+          return;
+        }
+
+        // Check if popup was closed by user
+        if (popup.closed) {
+          resolved = true;
+          clearInterval(poll);
+          window.removeEventListener("message", messageHandler);
+          reject(
+            new StewardApiError(
+              "OAuth popup was closed before completing sign-in",
+              0,
+            ),
+          );
+          return;
+        }
+
+        // Try to read the popup URL (cross-origin will throw)
+        try {
+          const popupUrl = popup.location.href;
+          if (popupUrl && popupUrl.startsWith(origin)) {
+            resolved = true;
+            clearInterval(poll);
+            window.removeEventListener("message", messageHandler);
+            popup.close();
+
+            const url = new URL(popupUrl);
+            resolve({
+              code: url.searchParams.get("code") ?? undefined,
+              state: url.searchParams.get("state") ?? undefined,
+              error: url.searchParams.get("error") ?? undefined,
+            });
+          }
+        } catch {
+          // Cross-origin: popup still on provider's domain, keep polling
+        }
+      }, pollInterval);
+    });
+  }
+
   // ─── Private helpers ────────────────────────────────────────────────────────
 
   private storeAndReturn(
@@ -595,3 +913,39 @@ export class StewardAuth {
     }
   }
 }
+
+// ─── PKCE Helpers (module-private) ──────────────────────────────────────────
+
+/**
+ * Generate a cryptographically random PKCE code_verifier.
+ * Returns a 43-128 character base64url string (RFC 7636 Section 4.1).
+ * Uses Web Crypto API for browser + Node 18+ compatibility.
+ */
+async function generateCodeVerifier(): Promise<string> {
+  const bytes = new Uint8Array(32); // 32 bytes → 43 base64url chars
+  globalThis.crypto.getRandomValues(bytes);
+  return base64urlEncode(bytes);
+}
+
+/**
+ * Generate a PKCE code_challenge from a code_verifier using SHA-256.
+ * Uses Web Crypto API (globalThis.crypto.subtle) for cross-platform support.
+ */
+async function generateCodeChallenge(verifier: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(verifier);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", data);
+  return base64urlEncode(new Uint8Array(digest));
+}
+
+/**
+ * Encode a Uint8Array as a base64url string (no padding).
+ */
+function base64urlEncode(bytes: Uint8Array): string {
+  // btoa is available in all browsers and Node 18+
+  const base64 = btoa(String.fromCharCode(...bytes));
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+// Export PKCE helpers for testing
+export { generateCodeVerifier as _generateCodeVerifier, generateCodeChallenge as _generateCodeChallenge };
