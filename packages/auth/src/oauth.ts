@@ -152,6 +152,11 @@ export function getProviderConfig(provider: string): OAuthProvider {
 
 // ─── PKCE helpers ─────────────────────────────────────────────────────────────
 
+function uint8ArrayToBase64url(arr: Uint8Array): string {
+  const base64 = btoa(Array.from(arr, (byte) => String.fromCharCode(byte)).join(""));
+  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
 function generateCodeVerifier(): string {
   // RFC 7636 §4.1: 43-128 unreserved chars; 32 random bytes → 64 hex chars
   return randomBytes(32).toString("hex");
@@ -159,12 +164,7 @@ function generateCodeVerifier(): string {
 
 function deriveCodeChallenge(verifier: string): string {
   // RFC 7636 §4.2: BASE64URL(SHA256(ASCII(code_verifier)))
-  const hash = createHash("sha256").update(verifier).digest();
-  return hash
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
+  return uint8ArrayToBase64url(createHash("sha256").update(verifier).digest());
 }
 
 // ─── OAuthClient ─────────────────────────────────────────────────────────────

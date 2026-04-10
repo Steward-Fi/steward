@@ -17,6 +17,12 @@ function verifyPkceChallenge(verifier: string, challenge: string): boolean {
   return expected === challenge;
 }
 
+function asFetchMock(
+  impl: (...args: any[]) => Promise<Response>,
+): typeof fetch {
+  return impl as unknown as typeof fetch;
+}
+
 // ─── isBuiltInProvider ───────────────────────────────────────────────────────
 
 describe("isBuiltInProvider", () => {
@@ -212,13 +218,13 @@ describe("OAuthClient.exchangeCode", () => {
   it("includes code_verifier in the token request body for PKCE providers", async () => {
     let capturedBody = "";
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async (url: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = asFetchMock(async (url: string | URL | Request, init?: RequestInit) => {
       capturedBody = init?.body?.toString() ?? "";
       return new Response(JSON.stringify({ access_token: "tok", token_type: "Bearer" }), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       });
-    };
+    });
 
     const client = new OAuthClient(pkceConfig);
     await client.exchangeCode("auth-code", "https://app.com/cb", "my-verifier");
@@ -228,8 +234,11 @@ describe("OAuthClient.exchangeCode", () => {
 
   it("throws on non-200 token response", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
-      new Response("invalid_client", { status: 401, headers: { "Content-Type": "text/plain" } });
+    globalThis.fetch = asFetchMock(async () =>
+      new Response("invalid_client", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      }));
     const client = new OAuthClient({ ...pkceConfig, requiresPkce: false });
     await expect(client.exchangeCode("code", "https://app.com/cb")).rejects.toThrow("Token exchange failed (401)");
     globalThis.fetch = originalFetch;
@@ -252,7 +261,7 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
 
   it("parses flat Google/Discord response shape", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
+    globalThis.fetch = asFetchMock(async () =>
       new Response(
         JSON.stringify({
           id: "google-user-id",
@@ -262,7 +271,7 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
           verified_email: true,
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
-      );
+      ));
     const client = makeClient();
     const info = await client.getUserInfo("tok");
     expect(info.id).toBe("google-user-id");
@@ -275,7 +284,7 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
   it("parses Twitter's nested data envelope — no email", async () => {
     // Twitter v2 wraps user data inside { data: { id, name, username } }
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
+    globalThis.fetch = asFetchMock(async () =>
       new Response(
         JSON.stringify({
           data: {
@@ -286,7 +295,7 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
           },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
-      );
+      ));
     const client = makeClient();
     const info = await client.getUserInfo("tok");
     expect(info.id).toBe("twitter-user-id");
@@ -299,11 +308,11 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
 
   it("falls back to username as name when name field absent (Twitter)", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
+    globalThis.fetch = asFetchMock(async () =>
       new Response(
         JSON.stringify({ data: { id: "tid", username: "handle" } }),
         { status: 200, headers: { "Content-Type": "application/json" } },
-      );
+      ));
     const client = makeClient();
     const info = await client.getUserInfo("tok");
     expect(info.name).toBe("handle");
@@ -312,8 +321,11 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
 
   it("throws on non-200 userinfo response", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () =>
-      new Response("Unauthorized", { status: 401, headers: { "Content-Type": "text/plain" } });
+    globalThis.fetch = asFetchMock(async () =>
+      new Response("Unauthorized", {
+        status: 401,
+        headers: { "Content-Type": "text/plain" },
+      }));
     const client = makeClient();
     await expect(client.getUserInfo("bad-token")).rejects.toThrow("getUserInfo failed (401)");
     globalThis.fetch = originalFetch;
