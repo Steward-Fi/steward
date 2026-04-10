@@ -7,6 +7,8 @@ export type {
   StewardOAuthConfig,
   StewardOAuthResult,
   StewardProviders,
+  StewardTenantMembership,
+  StewardTenantInfo,
   StewardSession,
   StewardUser,
   SessionStorage,

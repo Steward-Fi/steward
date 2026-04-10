@@ -69,6 +69,11 @@ export interface StewardAuthConfig {
    * Receives `null` when signed out, `StewardSession` when signed in.
    */
   onSessionChange?: (session: StewardSession | null) => void;
+  /**
+   * Default tenant to authenticate against.
+   * When set, all sign-in methods include this tenantId in requests.
+   */
+  tenantId?: string;
 }
 
 /** Response shape from POST /auth/refresh */
@@ -116,4 +121,22 @@ export interface StewardProviders {
   discord: boolean;
   /** List of all enabled OAuth provider names */
   oauth: string[];
+}
+
+// ─── Multi-tenant types ───────────────────────────────────────────────────────
+
+/** A user's membership in a tenant/app. */
+export interface StewardTenantMembership {
+  tenantId: string;
+  tenantName: string;
+  role: string;
+  joinedAt: string;
+}
+
+/** Tenant info (from admin/discovery endpoints). */
+export interface StewardTenantInfo {
+  id: string;
+  name: string;
+  joinMode: "open" | "invite" | "closed";
+  memberCount?: number;
 }

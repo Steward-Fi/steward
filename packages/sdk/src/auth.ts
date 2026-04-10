@@ -22,6 +22,7 @@ import type {
   StewardProviders,
   StewardRefreshResult,
   StewardSession,
+  StewardTenantMembership,
   StewardUser,
   SessionStorage,
 } from "./auth-types.ts";
@@ -155,10 +156,12 @@ async function authRequest<T>(
 export class StewardAuth {
   private readonly baseUrl: string;
   private readonly storage: SessionStorage;
+  private readonly tenantId: string | undefined;
   private readonly listeners: Array<(session: StewardSession | null) => void> = [];
 
-  constructor({ baseUrl, storage, onSessionChange }: StewardAuthConfig) {
+  constructor({ baseUrl, storage, onSessionChange, tenantId }: StewardAuthConfig) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.tenantId = tenantId;
 
     // Use provided storage, else localStorage when in browser, else in-memory
     if (storage) {
@@ -172,6 +175,11 @@ export class StewardAuth {
     if (onSessionChange) {
       this.listeners.push(onSessionChange);
     }
+  }
+
+  /** Returns the configured default tenantId, if any. */
+  getTenantId(): string | undefined {
+    return this.tenantId;
   }
 
   // ─── Session management ─────────────────────────────────────────────────────
@@ -333,7 +341,7 @@ export class StewardAuth {
     const loginOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/login/options",
-      { method: "POST", body: JSON.stringify({ email }) },
+      { method: "POST", body: JSON.stringify({ email, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
     );
 
     if (loginOptsRes.ok) {
@@ -367,7 +375,7 @@ export class StewardAuth {
     const verifyRes = await authRequest<{ ok: boolean; token: string; user: StewardUser }>(
       this.baseUrl,
       "/auth/passkey/login/verify",
-      { method: "POST", body: JSON.stringify({ email, response: authResponse }) },
+      { method: "POST", body: JSON.stringify({ email, response: authResponse, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
     );
 
     if (!verifyRes.ok) {
@@ -390,7 +398,7 @@ export class StewardAuth {
     const regOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/register/options",
-      { method: "POST", body: JSON.stringify({ email }) },
+      { method: "POST", body: JSON.stringify({ email, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
     );
 
     if (!regOptsRes.ok) {
@@ -410,7 +418,7 @@ export class StewardAuth {
     const verifyRes = await authRequest<{ ok: boolean; token: string; user: StewardUser }>(
       this.baseUrl,
       "/auth/passkey/register/verify",
-      { method: "POST", body: JSON.stringify({ email, response: regResponse }) },
+      { method: "POST", body: JSON.stringify({ email, response: regResponse, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
     );
 
     if (!verifyRes.ok) {
@@ -436,7 +444,7 @@ export class StewardAuth {
     const res = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/email/send",
-      { method: "POST", body: JSON.stringify({ email }) },
+      { method: "POST", body: JSON.stringify({ email, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
     );
 
     if (!res.ok) {
@@ -460,7 +468,7 @@ export class StewardAuth {
     const res = await authRequest<{ ok: boolean; token: string; user: StewardUser }>(
       this.baseUrl,
       "/auth/email/verify",
-      { method: "POST", body: JSON.stringify({ token, email }) },
+      { method: "POST", body: JSON.stringify({ token, email, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
     );
 
     if (!res.ok) {
@@ -544,6 +552,7 @@ export class StewardAuth {
       {
         method: "POST",
         body: JSON.stringify({ message: siweMessage, signature }),
+        ...(this.tenantId ? { headers: { "X-Steward-Tenant": this.tenantId } } : {}),
       },
     );
 
@@ -877,6 +886,109 @@ export class StewardAuth {
         }
       }, pollInterval);
     });
+  }
+
+  // ─── Multi-tenant ───────────────────────────────────────────────────────────
+
+  /**
+   * List all tenants/apps the current user belongs to.
+   * Requires an active session.
+   */
+  async listTenants(): Promise<StewardTenantMembership[]> {
+    const token = this.getToken();
+    if (!token) {
+      throw new StewardApiError("Not authenticated. Sign in first.", 0);
+    }
+
+    const res = await authRequest<{ data: StewardTenantMembership[] }>(
+      this.baseUrl,
+      "/user/me/tenants",
+      {},
+      token,
+    );
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    return res.data.data ?? (res.data as unknown as StewardTenantMembership[]);
+  }
+
+  /**
+   * Join an open tenant/app.
+   * Requires an active session.
+   */
+  async joinTenant(tenantId: string): Promise<StewardTenantMembership> {
+    const token = this.getToken();
+    if (!token) {
+      throw new StewardApiError("Not authenticated. Sign in first.", 0);
+    }
+
+    const res = await authRequest<StewardTenantMembership & { ok?: boolean }>(
+      this.baseUrl,
+      `/user/me/tenants/${encodeURIComponent(tenantId)}/join`,
+      { method: "POST" },
+      token,
+    );
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    return res.data;
+  }
+
+  /**
+   * Leave a tenant/app. Cannot leave your personal tenant.
+   * Requires an active session.
+   */
+  async leaveTenant(tenantId: string): Promise<void> {
+    const token = this.getToken();
+    if (!token) {
+      throw new StewardApiError("Not authenticated. Sign in first.", 0);
+    }
+
+    const res = await authRequest<{ ok: boolean }>(
+      this.baseUrl,
+      `/user/me/tenants/${encodeURIComponent(tenantId)}/leave`,
+      { method: "DELETE" },
+      token,
+    );
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+  }
+
+  /**
+   * Switch the active tenant context by refreshing the session with a new tenantId.
+   * Returns the new session, or null if the switch failed (user may need to re-auth).
+   */
+  async switchTenant(tenantId: string): Promise<StewardSession | null> {
+    const refreshToken = this.getRefreshToken();
+    if (!refreshToken) {
+      return null;
+    }
+
+    const res = await authRequest<StewardRefreshResult>(
+      this.baseUrl,
+      "/auth/refresh",
+      {
+        method: "POST",
+        body: JSON.stringify({ refreshToken, tenantId }),
+      },
+    );
+
+    if (!res.ok) {
+      // Refresh failed, user needs to re-authenticate
+      return null;
+    }
+
+    this.storage.setItem(STORAGE_KEY, res.data.token);
+    this.storage.setItem(REFRESH_TOKEN_KEY, res.data.refreshToken);
+    const session = sessionFromToken(res.data.token);
+    this.notifyListeners(session);
+    return session;
   }
 
   // ─── Private helpers ────────────────────────────────────────────────────────
