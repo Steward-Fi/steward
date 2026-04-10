@@ -53,7 +53,7 @@ import {
   getEnabledProviders,
   isBuiltInProvider,
 } from "@stwd/auth";
-import { accounts, authenticators, getDb, refreshTokens, tenants, userTenants, users } from "@stwd/db";
+import { accounts, authenticators, getDb, refreshTokens, tenants, tenantConfigs, userTenants, users } from "@stwd/db";
 import type { ApiResponse } from "@stwd/shared";
 import { Vault, provisionUserWallet } from "@stwd/vault";
 
@@ -323,21 +323,78 @@ function getVault(): Vault {
  * Priority: X-Steward-Tenant header > body.tenantId > personal-<userId> fallback.
  * Returns null if the resolved tenant doesn't exist in the DB (caller should 404).
  */
-async function resolveTenantForUser(
+type TenantResolutionOk = { ok: true; tenantId: string; isPersonal: boolean };
+type TenantResolutionErr = { ok: false; status: 403 | 404; error: string };
+type TenantResolutionResult = TenantResolutionOk | TenantResolutionErr;
+
+/**
+ * Resolve and validate the tenant a user is authenticating into.
+ *
+ * Priority: X-Steward-Tenant header > body.tenantId > personal-<userId> fallback.
+ *
+ * When an explicit tenantId is requested:
+ *   1. Verify the tenant exists in the `tenants` table (404 if not)
+ *   2. Check if user already has a user_tenants link (always allowed if so)
+ *   3. Look up join_mode from tenant_configs (default 'open')
+ *   4. If join_mode is 'open', auto-link is allowed
+ *   5. If join_mode is 'invite', 403 (must be pre-invited)
+ *   6. If join_mode is 'closed', 403 always
+ */
+async function resolveAndValidateTenant(
   c: Context,
   userId: string,
   bodyTenantId?: string,
-): Promise<{ tenantId: string; isPersonal: boolean }> {
+): Promise<TenantResolutionResult> {
   const headerTenant = c.req.header("X-Steward-Tenant");
   const requested = headerTenant || bodyTenantId;
 
-  if (requested) {
-    return { tenantId: requested, isPersonal: false };
+  if (!requested) {
+    return { ok: true, tenantId: `personal-${userId}`, isPersonal: true };
   }
 
-  // Fall back to the user's personal tenant
-  return { tenantId: `personal-${userId}`, isPersonal: true };
+  const db = getDb();
+
+  // 1. Verify the tenant exists
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, requested));
+  if (!tenant) {
+    return { ok: false, status: 404, error: `Tenant '${requested}' not found` };
+  }
+
+  // 2. Check if user already has a link (always allowed regardless of join_mode)
+  const [existingLink] = await db
+    .select({ id: userTenants.id })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, requested)));
+
+  if (existingLink) {
+    return { ok: true, tenantId: requested, isPersonal: false };
+  }
+
+  // 3. No existing link; check join_mode from tenant_configs
+  const [config] = await db
+    .select({ joinMode: tenantConfigs.joinMode })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, requested));
+
+  const joinMode = config?.joinMode ?? "open"; // default open if no config row
+
+  if (joinMode === "open") {
+    return { ok: true, tenantId: requested, isPersonal: false };
+  }
+
+  if (joinMode === "invite") {
+    return { ok: false, status: 403, error: `Tenant '${requested}' requires an invitation to join` };
+  }
+
+  // joinMode === "closed"
+  return { ok: false, status: 403, error: `Tenant '${requested}' is not accepting new members` };
 }
+
+/** @deprecated Use resolveAndValidateTenant instead */
+const resolveTenantForUser = resolveAndValidateTenant;
 
 // ─── User / tenant provisioning helpers ──────────────────────────────────────
 
@@ -783,7 +840,11 @@ auth.post("/passkey/register/verify", async (c) => {
   }
 
   // Resolve which tenant this auth is for and link the user
-  const { tenantId } = await resolveTenantForUser(c, user.id, body.tenantId);
+  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const { tenantId } = tenantResult;
   await ensureUserTenantLink(user.id, tenantId);
 
   const token = await createSessionToken(walletAddress ?? "", tenantId, {
@@ -919,7 +980,11 @@ auth.post("/passkey/login/verify", async (c) => {
   }
 
   // Resolve the requesting tenant and auto-link if user isn't already a member
-  const { tenantId } = await resolveTenantForUser(c, user.id, body.tenantId);
+  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const { tenantId } = tenantResult;
   await ensureUserTenantLink(user.id, tenantId);
 
   const token = await createSessionToken(walletAddress ?? "", tenantId, {
@@ -990,7 +1055,11 @@ auth.post("/email/verify", async (c) => {
   }
 
   // Resolve requesting tenant and link user
-  const { tenantId } = await resolveTenantForUser(c, user.id, body.tenantId);
+  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const { tenantId } = tenantResult;
   await ensureUserTenantLink(user.id, tenantId);
 
   const jwtToken = await createSessionToken(walletAddress ?? "", tenantId, {
@@ -1344,7 +1413,11 @@ async function provisionOAuthUser(opts: {
     }
 
     // 4. Resolve requesting tenant and link user
-    const { tenantId: resolvedTenantId } = await resolveTenantForUser(c, user.id, tenantId);
+    const tenantResult = await resolveAndValidateTenant(c, user.id, tenantId);
+    if (!tenantResult.ok) {
+      return { ok: false as const, error: tenantResult.error };
+    }
+    const resolvedTenantId = tenantResult.tenantId;
     await ensureUserTenantLink(user.id, resolvedTenantId);
 
     // 5. Mint JWT + refresh token

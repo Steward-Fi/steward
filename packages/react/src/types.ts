@@ -231,6 +231,15 @@ export interface SpendDashboardProps {
 // Re-export SDK types consumers will need
 export type { StewardClient, PolicyRule, PolicyType, TxStatus, TxRecord, AgentIdentity, AgentBalance, ChainFamily, PolicyResult };
 
+// ─── Multi-Tenant Types ───
+
+export interface StewardTenantMembership {
+  tenantId: string;
+  tenantName: string;
+  role: string;
+  joinedAt: string;
+}
+
 // ─── Auth Types ───
 
 export type { StewardUser, StewardSession, SessionStorage } from "@stwd/sdk";
@@ -240,11 +249,24 @@ export interface StewardAuthConfig {
   storage?: import("@stwd/sdk").SessionStorage;
 }
 
+export interface StewardProvidersState {
+  passkey: boolean;
+  email: boolean;
+  siwe: boolean;
+  google: boolean;
+  discord: boolean;
+  oauth: string[];
+}
+
 export interface StewardAuthContextValue {
   isAuthenticated: boolean;
   isLoading: boolean;
   user: import("@stwd/sdk").StewardUser | null;
   session: import("@stwd/sdk").StewardSession | null;
+  /** Available auth providers (auto-fetched on mount) */
+  providers: StewardProvidersState | null;
+  /** Whether providers are still loading */
+  isProvidersLoading: boolean;
   signOut: () => void;
   getToken: () => string | null;
   /** Sign in with a passkey (WebAuthn). Browser-only. */
@@ -255,6 +277,23 @@ export interface StewardAuthContextValue {
   verifyEmailCallback: (token: string, email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
   /** Sign in with an Ethereum wallet via SIWE. */
   signInWithSIWE: (address: string, signMessage: (msg: string) => Promise<string>) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  /** Sign in with an OAuth provider (Google, Discord, etc.) */
+  signInWithOAuth: (provider: string, config?: { redirectUri?: string; tenantId?: string }) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  // ─── Multi-Tenant ───
+  /** Currently active tenant ID from session */
+  activeTenantId: string | null;
+  /** Cached list of user's tenant memberships (null = not fetched yet) */
+  tenants: StewardTenantMembership[] | null;
+  /** Whether tenant list is currently being fetched */
+  isTenantsLoading: boolean;
+  /** Fetch or refresh the user's tenant memberships */
+  listTenants: () => Promise<StewardTenantMembership[]>;
+  /** Switch the active tenant context. Returns true on success. */
+  switchTenant: (tenantId: string) => Promise<boolean>;
+  /** Join a tenant (if open join mode). Returns the new membership. */
+  joinTenant: (tenantId: string) => Promise<StewardTenantMembership>;
+  /** Leave a tenant. Cannot leave personal tenant. */
+  leaveTenant: (tenantId: string) => Promise<void>;
 }
 
 // ─── Auth Component Props ───
@@ -265,15 +304,57 @@ export interface StewardLoginProps {
   showPasskey?: boolean;
   showEmail?: boolean;
   showSIWE?: boolean;
+  showGoogle?: boolean;
+  showDiscord?: boolean;
+  /** "card" adds bg/border/padding wrapper; "inline" renders with no container styling */
+  variant?: "card" | "inline";
+  /** Custom logo element rendered at top of the login widget */
+  logo?: React.ReactNode;
+  /** Title text (default: "Sign in") */
+  title?: string;
+  /** Subtitle text below the title */
+  subtitle?: string;
+  /** Called when an OAuth provider button is clicked (for custom handling) */
+  onProviderClick?: (provider: string) => void;
+  /** Tenant ID to authenticate against (passed through to sign-in methods) */
+  tenantId?: string;
   className?: string;
 }
 
 export interface StewardAuthGuardProps {
   children: React.ReactNode;
   fallback?: React.ReactNode;
+  loadingFallback?: React.ReactNode;
 }
 
 export interface StewardUserButtonProps {
   className?: string;
   onSignOut?: () => void;
+  showWallet?: boolean;
+  avatarSize?: number;
+  /** Show an inline tenant switcher in the dropdown (default: false) */
+  showTenantSwitcher?: boolean;
+}
+
+export interface StewardEmailCallbackProps {
+  onSuccess?: (result: { token: string; user: import("@stwd/sdk").StewardUser }) => void;
+  onError?: (error: Error) => void;
+  redirectTo?: string;
+}
+
+export interface StewardOAuthCallbackProps {
+  onSuccess?: (result: { token: string; user: import("@stwd/sdk").StewardUser } | { code: string; state: string }) => void;
+  onError?: (error: Error) => void;
+  redirectTo?: string;
+  provider?: string;
+}
+
+// ─── Tenant Picker Props ───
+
+export interface StewardTenantPickerProps {
+  /** Callback after a tenant switch completes */
+  onSwitch?: (tenantId: string) => void;
+  /** Display variant: "dropdown" (compact, click to expand) or "list" (always visible) */
+  variant?: "dropdown" | "list";
+  className?: string;
 }

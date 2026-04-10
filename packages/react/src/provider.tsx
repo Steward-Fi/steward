@@ -16,8 +16,10 @@ import type {
   TenantTheme,
   StewardAuthConfig,
   StewardAuthContextValue,
+  StewardTenantMembership,
 } from "./types.js";
 import type { StewardUser, StewardSession, SessionStorage } from "@stwd/sdk";
+import type { StewardProvidersState } from "./types.js";
 import { DEFAULT_THEME, mergeTheme, themeToCSS } from "./utils/theme.js";
 
 const DEFAULT_FEATURES: TenantFeatureFlags = {
@@ -54,11 +56,14 @@ export interface StewardProviderWithAuthProps extends StewardProviderProps {
    *   client={client}
    *   agentId="abc"
    *   auth={{ baseUrl: "https://api.steward.fi" }}
+   *   tenantId="my-app"
    * >
    *   <App />
    * </StewardProvider>
    */
   auth?: StewardAuthConfig;
+  /** Default tenant ID to authenticate against */
+  tenantId?: string;
 }
 
 // ─── Provider ────────────────────────────────────────────────────────────────
@@ -75,6 +80,7 @@ export function StewardProvider({
   theme: themeOverrides,
   pollInterval = 30000,
   auth: authConfig,
+  tenantId: tenantIdProp,
   children,
 }: StewardProviderWithAuthProps) {
   const [tenantConfig, setTenantConfig] = useState<TenantControlPlaneConfig | null>(null);
@@ -150,6 +156,148 @@ export function StewardProvider({
     }
   }, [authInstance]);
 
+  const signInWithOAuth = useCallback(async (provider: string, config?: { redirectUri?: string; tenantId?: string }) => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    const authAny = authInstance as unknown as Record<string, unknown>;
+    if (typeof authAny.signInWithOAuth !== "function") {
+      throw new Error("StewardAuth.signInWithOAuth not available. Update @stwd/sdk to >=0.6.0");
+    }
+    setAuthLoading(true);
+    try {
+      const fn = authAny.signInWithOAuth as (p: string, c?: { redirectUri?: string; tenantId?: string }) => Promise<import("@stwd/sdk").StewardAuthResult>;
+      return await fn(provider, config);
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authInstance]);
+
+  // ─── Provider discovery ─────────────────────────────────────────────────────
+
+  const [providers, setProviders] = useState<StewardProvidersState | null>(null);
+  const [isProvidersLoading, setIsProvidersLoading] = useState(false);
+
+  useEffect(() => {
+    if (!authInstance) return;
+    const inst = authInstance as unknown as Record<string, unknown>;
+    if (typeof inst.getProviders !== "function") return;
+    const fetchProviders = inst.getProviders as () => Promise<StewardProvidersState>;
+    let cancelled = false;
+    setIsProvidersLoading(true);
+    fetchProviders().then((result) => {
+      if (!cancelled) setProviders(result);
+    }).catch(() => {
+      // Provider discovery failed — leave null, buttons won't show
+    }).finally(() => {
+      if (!cancelled) setIsProvidersLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [authInstance]);
+
+  // ─── Multi-tenant state ──────────────────────────────────────────────────
+
+  const [tenants, setTenants] = useState<StewardTenantMembership[] | null>(null);
+  const [isTenantsLoading, setIsTenantsLoading] = useState(false);
+  const [activeTenantId, setActiveTenantId] = useState<string | null>(
+    tenantIdProp ?? null,
+  );
+
+  // Extract tenantId from session JWT claim when session changes
+  useEffect(() => {
+    if (authSession) {
+      // Session may carry a tenantId claim; use it as active if no prop override
+      const sessionTenant = (authSession as unknown as Record<string, unknown>).tenantId;
+      if (typeof sessionTenant === "string" && sessionTenant) {
+        setActiveTenantId(sessionTenant);
+      } else if (tenantIdProp) {
+        setActiveTenantId(tenantIdProp);
+      }
+    } else {
+      // Signed out
+      setActiveTenantId(tenantIdProp ?? null);
+      setTenants(null);
+    }
+  }, [authSession, tenantIdProp]);
+
+  const listTenants = useCallback(async (): Promise<StewardTenantMembership[]> => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    const inst = authInstance as unknown as Record<string, unknown>;
+    if (typeof inst.listTenants !== "function") {
+      throw new Error("StewardAuth.listTenants not available. Update @stwd/sdk.");
+    }
+    setIsTenantsLoading(true);
+    try {
+      const fn = inst.listTenants as () => Promise<StewardTenantMembership[]>;
+      const result = await fn();
+      setTenants(result);
+      return result;
+    } finally {
+      setIsTenantsLoading(false);
+    }
+  }, [authInstance]);
+
+  const switchTenant = useCallback(async (tenantId: string): Promise<boolean> => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    const inst = authInstance as unknown as Record<string, unknown>;
+    if (typeof inst.switchTenant !== "function") {
+      throw new Error("StewardAuth.switchTenant not available. Update @stwd/sdk.");
+    }
+    setAuthLoading(true);
+    try {
+      const fn = inst.switchTenant as (id: string) => Promise<StewardSession | null>;
+      const session = await fn(tenantId);
+      if (session) {
+        setActiveTenantId(tenantId);
+        return true;
+      }
+      return false;
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authInstance]);
+
+  const joinTenant = useCallback(async (tenantId: string): Promise<StewardTenantMembership> => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    const inst = authInstance as unknown as Record<string, unknown>;
+    if (typeof inst.joinTenant !== "function") {
+      throw new Error("StewardAuth.joinTenant not available. Update @stwd/sdk.");
+    }
+    const fn = inst.joinTenant as (id: string) => Promise<StewardTenantMembership>;
+    const membership = await fn(tenantId);
+    // Refresh tenant list after joining
+    try { await listTenants(); } catch { /* best effort */ }
+    return membership;
+  }, [authInstance, listTenants]);
+
+  const leaveTenant = useCallback(async (tenantId: string): Promise<void> => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    const inst = authInstance as unknown as Record<string, unknown>;
+    if (typeof inst.leaveTenant !== "function") {
+      throw new Error("StewardAuth.leaveTenant not available. Update @stwd/sdk.");
+    }
+    const fn = inst.leaveTenant as (id: string) => Promise<void>;
+    await fn(tenantId);
+    // Refresh tenant list after leaving
+    try { await listTenants(); } catch { /* best effort */ }
+  }, [authInstance, listTenants]);
+
+  // Auto-fetch tenants when user authenticates
+  useEffect(() => {
+    if (!authInstance || !authSession) return;
+    const inst = authInstance as unknown as Record<string, unknown>;
+    if (typeof inst.listTenants !== "function") return;
+    let cancelled = false;
+    setIsTenantsLoading(true);
+    const fn = inst.listTenants as () => Promise<StewardTenantMembership[]>;
+    fn().then((result) => {
+      if (!cancelled) setTenants(result);
+    }).catch(() => {
+      // Tenant listing failed — leave null
+    }).finally(() => {
+      if (!cancelled) setIsTenantsLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [authInstance, authSession]);
+
   const authContextValue = useMemo<StewardAuthContextValue | null>(() => {
     if (!authInstance) return null;
     return {
@@ -157,14 +305,31 @@ export function StewardProvider({
       isLoading: authLoading,
       user: authSession?.user ?? null,
       session: authSession,
+      providers,
+      isProvidersLoading,
       signOut,
       getToken,
       signInWithPasskey,
       signInWithEmail,
       verifyEmailCallback,
       signInWithSIWE,
+      signInWithOAuth,
+      // Multi-tenant
+      activeTenantId,
+      tenants,
+      isTenantsLoading,
+      listTenants,
+      switchTenant,
+      joinTenant,
+      leaveTenant,
     };
-  }, [authInstance, authSession, authLoading, signOut, getToken, signInWithPasskey, signInWithEmail, verifyEmailCallback, signInWithSIWE]);
+  }, [
+    authInstance, authSession, authLoading, providers, isProvidersLoading,
+    signOut, getToken, signInWithPasskey, signInWithEmail, verifyEmailCallback,
+    signInWithSIWE, signInWithOAuth,
+    activeTenantId, tenants, isTenantsLoading, listTenants, switchTenant,
+    joinTenant, leaveTenant,
+  ]);
 
   // ─── Tenant config ─────────────────────────────────────────────────────────
 

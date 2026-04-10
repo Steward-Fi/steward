@@ -94,6 +94,8 @@ export const tenantConfigs = pgTable("tenant_configs", {
   theme: jsonb("theme").$type<TenantTheme>(),
   /** Allowed CORS origins for this tenant. Empty = fall back to wildcard (*). */
   allowedOrigins: text("allowed_origins").array().notNull().default([]),
+  /** Controls how users can join: 'open' | 'invite' | 'closed'. Default 'open' for backward compat. */
+  joinMode: varchar("join_mode", { length: 16 }).notNull().default("open"),
   ...timestamps,
 });
 

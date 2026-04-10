@@ -3,6 +3,11 @@ export { StewardProvider } from "./provider.js";
 
 // ─── Components ───
 export { StewardLogin } from "./components/StewardLogin.js";
+export { StewardAuthGuard } from "./components/StewardAuthGuard.js";
+export { StewardUserButton } from "./components/StewardUserButton.js";
+export { StewardTenantPicker } from "./components/StewardTenantPicker.js";
+export { StewardEmailCallback } from "./components/StewardEmailCallback.js";
+export { StewardOAuthCallback } from "./components/StewardOAuthCallback.js";
 export { WalletOverview } from "./components/WalletOverview.js";
 export { TransactionHistory } from "./components/TransactionHistory.js";
 export { PolicyControls } from "./components/PolicyControls.js";
@@ -17,6 +22,9 @@ export { useTransactions } from "./hooks/useTransactions.js";
 export { usePolicies } from "./hooks/usePolicies.js";
 export { useApprovals } from "./hooks/useApprovals.js";
 export { useSpend } from "./hooks/useSpend.js";
+
+// ─── Icons ───
+export { GoogleIcon, DiscordIcon, PasskeyIcon, EmailIcon, EthereumIcon } from "./icons/index.js";
 
 // ─── Utilities ───
 export {
@@ -55,6 +63,13 @@ export type {
   // Component props
   StewardProviderProps,
   StewardContextValue,
+  StewardAuthGuardProps,
+  StewardUserButtonProps,
+  StewardLoginProps,
+  StewardTenantPickerProps,
+  StewardTenantMembership,
+  StewardEmailCallbackProps,
+  StewardOAuthCallbackProps,
   WalletOverviewProps,
   TransactionHistoryProps,
   PolicyControlsProps,
