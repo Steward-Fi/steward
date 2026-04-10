@@ -1,61 +1,289 @@
 # Quickstart
 
-Get Steward running locally in under 5 minutes using embedded mode (no external database required).
+Three paths depending on how you're integrating Steward.
 
-## Prerequisites
+---
 
-- [Bun](https://bun.sh) v1.0+
-- Node 20+ (for type-checking tools)
-- Git
+## Path A: SDK Auth Quickstart
 
-## 1. Clone and Install
+Use the TypeScript SDK to add Steward auth and wallets to any app.
+
+### 1. Install
 
 ```bash
-git clone https://github.com/Steward-Fi/steward
-cd steward-fi
-bun install
+npm install @stwd/sdk
 ```
 
-## 2. Set a Master Password
+### 2. Initialize the Client
 
-Steward uses a single master password to derive encryption keys for every agent wallet. In embedded/local mode, you can set it inline or via `.env`.
+```typescript
+import { StewardClient } from "@stwd/sdk";
 
-```bash
-export STEWARD_MASTER_PASSWORD="your-secret-password-here"
+const steward = new StewardClient({
+  baseUrl: "https://api.steward.fi", // or your self-hosted URL
+  apiKey: "stw_your_tenant_key",
+  tenantId: "my-app",
+});
 ```
 
-For development you can also copy and edit the example env:
+### 3. Passkey Login
+
+```typescript
+// Register a new passkey
+const regOptions = await steward.auth.startPasskeyRegistration({
+  email: "user@example.com",
+});
+// Browser prompts biometric/security key
+const credential = await navigator.credentials.create({ publicKey: regOptions });
+const session = await steward.auth.finishPasskeyRegistration(credential);
+// session = { accessToken, refreshToken, user: { id, email, walletAddress } }
+
+// Log in with existing passkey
+const authOptions = await steward.auth.startPasskeyLogin({ email: "user@example.com" });
+const assertion = await navigator.credentials.get({ publicKey: authOptions });
+const session = await steward.auth.finishPasskeyLogin(assertion);
+```
+
+### 4. Email Magic Link Login
+
+```typescript
+// Send magic link
+await steward.auth.sendMagicLink({ email: "user@example.com" });
+// User clicks the link in their email, which hits your callback URL
+// On callback:
+const session = await steward.auth.verifyMagicLink({ token: callbackToken });
+```
+
+### 5. Use the Wallet
+
+Every authenticated user gets an auto-provisioned embedded wallet:
+
+```typescript
+// Get wallet info
+const wallet = await steward.getWallet(session.user.walletAddress);
+console.log(wallet.walletAddresses); // { evm: "0x...", solana: "..." }
+
+// Sign a transaction (policy-enforced)
+const result = await steward.signTransaction(session.user.walletAddress, {
+  to: "0xRecipient",
+  value: "10000000000000000", // 0.01 ETH
+  chainId: 8453, // Base
+});
+
+if ("signedTx" in result) {
+  console.log("Signed:", result.signedTx);
+} else if (result.status === "pending_approval") {
+  console.log("Queued for human approval");
+}
+```
+
+### 6. Set Policies
+
+```typescript
+await steward.setPolicies(agentId, [
+  {
+    id: "spend-cap",
+    type: "spending-limit",
+    enabled: true,
+    config: { maxPerTx: "100000000000000000", maxPerDay: "500000000000000000" },
+  },
+  {
+    id: "auto-approve-small",
+    type: "auto-approve-threshold",
+    enabled: true,
+    config: { threshold: "50000000000000000" },
+  },
+  {
+    id: "safe-addresses",
+    type: "approved-addresses",
+    enabled: true,
+    config: { addresses: ["0xTrustedDEX", "0xTrustedBridge"] },
+  },
+]);
+```
+
+---
+
+## Path B: React Widget Quickstart
+
+Drop-in React components for login, wallet display, and policy management.
+
+### 1. Install
 
 ```bash
+npm install @stwd/react @stwd/sdk
+```
+
+### 2. Wrap Your App
+
+```tsx
+import { StewardProvider } from "@stwd/react";
+import { StewardClient } from "@stwd/sdk";
+import "@stwd/react/styles.css";
+
+const client = new StewardClient({
+  baseUrl: "https://api.steward.fi",
+  apiKey: "stw_your_tenant_key",
+  tenantId: "my-app",
+});
+
+function App() {
+  return (
+    <StewardProvider
+      client={client}
+      auth={{ baseUrl: "https://api.steward.fi" }}
+    >
+      <MyApp />
+    </StewardProvider>
+  );
+}
+```
+
+### 3. Add Login
+
+```tsx
+import { StewardLogin, StewardAuthGuard } from "@stwd/react";
+
+function MyApp() {
+  return (
+    <StewardAuthGuard
+      fallback={
+        <StewardLogin
+          methods={["passkey", "email", "google", "discord"]}
+          onSuccess={(session) => console.log("Logged in:", session.user.email)}
+        />
+      }
+    >
+      <Dashboard />
+    </StewardAuthGuard>
+  );
+}
+```
+
+`StewardAuthGuard` renders the `fallback` when no session exists. Once authenticated, it renders children.
+
+### 4. Show Wallet and Controls
+
+```tsx
+import {
+  StewardUserButton,
+  WalletOverview,
+  PolicyControls,
+  ApprovalQueue,
+  TransactionHistory,
+  SpendDashboard,
+} from "@stwd/react";
+
+function Dashboard() {
+  return (
+    <div>
+      <StewardUserButton />        {/* User avatar + dropdown with logout */}
+      <WalletOverview showQR />     {/* Balances, addresses, QR code */}
+      <PolicyControls />            {/* View and edit policies */}
+      <ApprovalQueue />             {/* Pending transactions needing review */}
+      <TransactionHistory />        {/* Past transactions with status */}
+      <SpendDashboard />            {/* Spend tracking charts */}
+    </div>
+  );
+}
+```
+
+### 5. Multi-Tenant Apps
+
+If your users belong to multiple tenants:
+
+```tsx
+import { StewardTenantPicker } from "@stwd/react";
+
+<StewardTenantPicker
+  onSwitch={(tenantId) => {
+    // SDK automatically switches context
+    console.log("Switched to tenant:", tenantId);
+  }}
+/>
+```
+
+### Available Hooks
+
+All components are built on public hooks you can use directly:
+
+```typescript
+import { useAuth, useWallet, usePolicies, useApprovals, useTransactions, useSpend } from "@stwd/react";
+
+const { user, session, signOut } = useAuth();
+const { wallet, balances, isLoading } = useWallet();
+const { policies, updatePolicy } = usePolicies();
+const { pending, approve, reject } = useApprovals();
+const { transactions } = useTransactions();
+const { daily, weekly, total } = useSpend();
+```
+
+---
+
+## Path C: Self-Hosting Quickstart
+
+Run the full Steward stack on your own infrastructure.
+
+### Option 1: Docker (Production)
+
+```bash
+git clone https://github.com/Steward-Fi/steward.git
+cd steward
 cp .env.example .env
-# Edit .env and set STEWARD_MASTER_PASSWORD
 ```
 
-> **Keep this password safe.** Every private key in the vault is derived from it. There is no recovery path if it is lost.
-
-## 3. Start the Server (Embedded Mode)
-
-Embedded mode uses PGLite — a Postgres-compatible database that runs entirely in memory (or on disk). No Postgres installation required.
+Edit `.env` with required values:
 
 ```bash
+# Required
+STEWARD_MASTER_PASSWORD=your-long-random-secret    # Derives all encryption keys. No recovery if lost.
+POSTGRES_PASSWORD=your-db-password
+
+# Optional (enable auth features)
+RESEND_API_KEY=re_xxx                              # Email magic links
+PASSKEY_RP_ID=yourdomain.com                       # WebAuthn relying party
+PASSKEY_ORIGIN=https://yourdomain.com              # WebAuthn origin
+GOOGLE_CLIENT_ID=xxx                               # Google OAuth
+GOOGLE_CLIENT_SECRET=xxx
+DISCORD_CLIENT_ID=xxx                              # Discord OAuth
+DISCORD_CLIENT_SECRET=xxx
+```
+
+Start everything:
+
+```bash
+docker compose up -d
+```
+
+This launches four services:
+- **steward-api** on `:3200` — REST API + vault
+- **steward-proxy** on `:8080` — Credential injection proxy
+- **postgres** — PostgreSQL 16 (internal)
+- **redis** — Rate limiting + token store (internal)
+
+Verify it's running:
+
+```bash
+curl http://localhost:3200/ready
+# → {"ok":true,"mode":"postgres"}
+```
+
+### Option 2: Embedded Mode (Development / Local Agents)
+
+No Docker, no Postgres, no Redis. Steward runs in-process with PGLite.
+
+```bash
+git clone https://github.com/Steward-Fi/steward.git
+cd steward && bun install
+
+export STEWARD_MASTER_PASSWORD="dev-secret"
 bun run start:local
+# → ✅ Steward API running on port 3200 (embedded/PGLite mode)
 ```
 
-The API starts on `http://localhost:3200`. You should see:
+Data persists to `~/.steward/data/` by default. Set `PGLITE_DATA_DIR` to change location, or `STEWARD_PGLITE_MEMORY=true` for ephemeral mode.
 
-```
-✅ Steward API running on port 3200 (embedded/PGLite mode)
-```
-
-To persist data between restarts, set a data directory:
-
-```bash
-PGLITE_DATA_DIR=~/.steward/data bun run start:local
-```
-
-## 4. Create a Tenant
-
-Tenants are the top-level isolation unit. Each tenant has its own API key, agents, and policies.
+### Create Your First Tenant
 
 ```bash
 curl -s -X POST http://localhost:3200/tenants \
@@ -63,96 +291,42 @@ curl -s -X POST http://localhost:3200/tenants \
   -d '{
     "id": "my-app",
     "name": "My App",
-    "apiKeyHash": "my-dev-api-key-plain"
+    "apiKeyHash": "my-dev-api-key"
   }' | jq
 ```
 
-Response:
-
-```json
-{
-  "ok": true,
-  "data": {
-    "id": "my-app",
-    "name": "My App",
-    "createdAt": "2026-04-06T00:00:00.000Z"
-  }
-}
-```
-
-> In the `POST /tenants` request, you can pass a raw string as `apiKeyHash` — the API will hash it for you if it doesn't look like a pre-hashed value (64 hex chars). For production you should pre-hash using PBKDF2.
-
-## 5. Create an Agent
+### Create an Agent
 
 ```bash
 curl -s -X POST http://localhost:3200/agents \
   -H "Content-Type: application/json" \
   -H "X-Steward-Tenant: my-app" \
-  -H "X-Steward-Key: my-dev-api-key-plain" \
-  -d '{
-    "id": "trading-bot",
-    "name": "Trading Bot"
-  }' | jq
+  -H "X-Steward-Key: my-dev-api-key" \
+  -d '{ "id": "trading-bot", "name": "Trading Bot" }' | jq
 ```
 
-Response:
+This auto-generates AES-256-GCM encrypted EVM and Solana keypairs. Private keys are never returned.
 
-```json
-{
-  "ok": true,
-  "data": {
-    "id": "trading-bot",
-    "name": "Trading Bot",
-    "tenantId": "my-app",
-    "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18",
-    "walletAddresses": {
-      "evm": "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18",
-      "solana": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
-    },
-    "createdAt": "2026-04-06T00:00:00.000Z"
-  }
-}
-```
-
-Steward automatically generates AES-256-GCM encrypted EVM and Solana keypairs. Private keys are never returned.
-
-## 6. Set Policies
-
-Steward uses **default-deny** — without policies, all signing requests are rejected. Set policies before trying to sign.
+### Set Policies and Sign
 
 ```bash
+# Set policies (default-deny: without policies, all signing is rejected)
 curl -s -X PUT http://localhost:3200/agents/trading-bot/policies \
   -H "Content-Type: application/json" \
   -H "X-Steward-Tenant: my-app" \
-  -H "X-Steward-Key: my-dev-api-key-plain" \
-  -d '[
-    {
-      "id": "spend-limit",
-      "type": "spending-limit",
-      "enabled": true,
-      "config": {
-        "maxPerTx": "100000000000000000",
-        "maxPerDay": "500000000000000000"
-      }
-    },
-    {
-      "id": "auto-approve",
-      "type": "auto-approve-threshold",
-      "enabled": true,
-      "config": {
-        "threshold": "50000000000000000"
-      }
-    }
-  ]' | jq
-```
+  -H "X-Steward-Key: my-dev-api-key" \
+  -d '[{
+    "id": "spend-limit",
+    "type": "spending-limit",
+    "enabled": true,
+    "config": { "maxPerTx": "100000000000000000" }
+  }]' | jq
 
-## 7. Sign a Transaction
-
-```bash
+# Sign a transaction
 curl -s -X POST http://localhost:3200/vault/trading-bot/sign \
   -H "Content-Type: application/json" \
   -H "X-Steward-Tenant: my-app" \
-  -H "X-Steward-Key: my-dev-api-key-plain" \
+  -H "X-Steward-Key: my-dev-api-key" \
   -d '{
     "to": "0xRecipientAddress",
     "value": "10000000000000000",
@@ -161,109 +335,14 @@ curl -s -X POST http://localhost:3200/vault/trading-bot/sign \
   }' | jq
 ```
 
-If the transaction passes all policies, you get back a signed tx:
-
-```json
-{
-  "ok": true,
-  "data": {
-    "signedTx": "0x02f8...",
-    "caip2": "eip155:84532"
-  }
-}
-```
-
-If the value exceeds the auto-approve threshold, you get a `202 pending_approval` response instead:
-
-```json
-{
-  "ok": false,
-  "status": "pending_approval",
-  "results": [
-    {
-      "policyId": "auto-approve",
-      "type": "auto-approve-threshold",
-      "passed": false,
-      "reason": "Value 100000000000000000 exceeds auto-approve threshold 50000000000000000"
-    }
-  ]
-}
-```
-
-## 8. Sign a Message
-
-```bash
-curl -s -X POST http://localhost:3200/vault/trading-bot/sign-message \
-  -H "Content-Type: application/json" \
-  -H "X-Steward-Tenant: my-app" \
-  -H "X-Steward-Key: my-dev-api-key-plain" \
-  -d '{
-    "message": "Hello from Steward"
-  }' | jq
-```
-
-Response:
-
-```json
-{
-  "ok": true,
-  "data": {
-    "signature": "0x..."
-  }
-}
-```
-
-## 9. Using the TypeScript SDK
-
-Instead of raw curl, install the SDK:
-
-```bash
-npm install @stwd/sdk
-# or
-bun add @stwd/sdk
-```
-
-```typescript
-import { StewardClient } from "@stwd/sdk";
-
-const steward = new StewardClient({
-  baseUrl: "http://localhost:3200",
-  apiKey: "my-dev-api-key-plain",
-  tenantId: "my-app",
-});
-
-// Create an agent
-const agent = await steward.createWallet("my-agent", "My Agent");
-console.log(agent.walletAddresses); // { evm: "0x...", solana: "..." }
-
-// Set policies
-await steward.setPolicies("my-agent", [
-  {
-    id: "spend-limit",
-    type: "spending-limit",
-    enabled: true,
-    config: { maxPerTx: "100000000000000000" },
-  },
-]);
-
-// Sign a transaction
-const result = await steward.signTransaction("my-agent", {
-  to: "0xRecipient",
-  value: "10000000000000000",
-  chainId: 84532,
-  broadcast: false,
-});
-
-if ("signedTx" in result) {
-  console.log("Signed:", result.signedTx);
-} else if (result.status === "pending_approval") {
-  console.log("Queued for approval");
-}
-```
+---
 
 ## Next Steps
 
-- [Architecture](./architecture.md) — Understand the two-mode design and package layout
-- [Authentication](./auth.md) — Add user login (passkeys, magic links, SIWE)
-- [Policy Engine](./policies.md) — Full policy reference and use-case examples
-- [Deployment](./deployment.md) — Run Steward in production with Docker
+- [Architecture](./architecture.md) — Two-mode design and package layout
+- [Authentication](./auth.md) — Full auth integration guide
+- [Policy Engine](./policies.md) — All 6 policy types with examples
+- [React Components](./react.md) — Component API reference
+- [SDK Reference](./sdk.md) — Full TypeScript SDK docs
+- [Deployment](./deployment.md) — Production setup, TLS, monitoring
+- [Privy Migration](./migration-from-privy.md) — Step-by-step migration guide

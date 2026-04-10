@@ -1,474 +1,99 @@
-# Steward — Open-Source Privy Replacement for Agents
+# Steward Vision
 
-**An open-source, agent-first auth + wallet infrastructure.**
-Passkey login. Embedded wallets. Policy enforcement. No vendor lock-in.
+## Mission
 
----
+Every agent deserves a bank account it can't be robbed of.
 
-## What Steward Becomes
+AI agents are managing real money, signing real transactions, calling paid APIs. The infrastructure securing those operations is a `.env` file with plaintext keys. One prompt injection, one leaked log, one compromised dependency, and everything is gone.
 
-Privy solves two problems: *auth* (let anyone log in) and *wallets* (give everyone a wallet without crypto knowledge). It's great, but it's closed-source, expensive at scale, and has zero policy enforcement — every RPC call is a blind passthrough.
-
-Steward replaces both, open source, with an agent-first design:
-
-| Feature | Privy | Steward |
-|---|---|---|
-| Login methods | Email, wallet, OAuth | **Passkeys**, email, wallet, OAuth |
-| Embedded wallets | ✅ (Privy KMS) | ✅ (self-custodied, AES-256-GCM) |
-| Policy enforcement | ❌ | ✅ (5 policy types, composable) |
-| Approval workflows | ❌ | ✅ (manual approval queue) |
-| Multi-tenant | ❌ (single app) | ✅ (tenant isolation, per-tenant keys) |
-| Agent-first design | ❌ (user-first) | ✅ (agents are first-class entities) |
-| Transaction history | ❌ | ✅ (full audit trail per agent) |
-| Webhooks | ❌ | ✅ (signed, retried, event-typed) |
-| Open source | ❌ | ✅ (MIT) |
-| Self-hostable | ❌ | ✅ (single binary + postgres) |
-| Vendor lock-in | Privy controls your keys | You control everything |
-
-The pitch: **"What if Privy was open-source, agent-native, and had spending limits?"**
+Steward exists to make that impossible. Not through trust, through architecture: encrypted vaults, policy enforcement at the signing layer, credential isolation at the proxy layer. Agents operate autonomously within constraints their operators define. No exceptions, no workarounds.
 
 ---
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                        @steward/auth                          │
-│                                                               │
-│  Passkeys (WebAuthn)  ·  SIWE  ·  OAuth  ·  Email/Magic Link │
-│  Session management   ·  JWT tokens  ·  User ↔ wallet mapping │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────────┐
-│                        @steward/vault                          │
-│                                                               │
-│  Key generation  ·  AES-256-GCM encryption  ·  Signing        │
-│  Multi-chain (EVM + Solana)  ·  Ephemeral decryption          │
-│  Pluggable backends: local encrypted | AWS KMS | Hashicorp    │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────────┐
-│                    @steward/policy-engine                      │
-│                                                               │
-│  spending-limit  ·  approved-addresses  ·  rate-limit         │
-│  time-window  ·  auto-approve-threshold  ·  custom evaluators │
-│  Composable: all policies must pass for auto-approval         │
-│  Manual approval queue for flagged transactions               │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────────┐
-│                        @steward/api                            │
-│                                                               │
-│  Hono REST API  ·  Multi-tenant  ·  Platform + tenant auth    │
-│  Agent CRUD  ·  Policy CRUD  ·  Vault signing  ·  Approvals   │
-│  Transaction history  ·  Webhook dispatch  ·  SIWE sessions   │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────────┐
-│                        @steward/sdk                            │
-│                                                               │
-│  TypeScript client  ·  createWallet  ·  signTransaction       │
-│  getPolicies  ·  setPolicies  ·  getBalance  ·  signMessage   │
-│  Batch operations  ·  Error handling  ·  Type-safe             │
-└──────────────────────────────────────────────────────────────┘
-```
+Four pillars. Each solves a distinct problem. Together they form a complete security and auth layer for any agent platform.
+
+### Vault
+AES-256-GCM encrypted key storage. Per-agent encryption keys derived from master password + agent ID via PBKDF2. Private keys are decrypted ephemerally for signing and never returned to callers. Supports EVM (7 chains) and Solana (Ed25519).
+
+### Policy Engine
+Composable rules evaluated synchronously before every signing operation. Six types: spending limits (per-tx, daily, weekly), approved address lists, rate limits, time windows, auto-approve thresholds, and allowed chains. Hard policies reject. Soft policies (auto-approve-threshold) queue for human review. All policies must pass for a transaction to be signed. The engine is stateless; spend and rate context are pre-fetched and injected.
+
+### Auth
+User authentication with passkeys (WebAuthn), email magic links, Sign-In With Ethereum, and OAuth (Google, Discord). JWT sessions with refresh token rotation. Users are global identities that can belong to multiple tenants. On first login, users get an auto-provisioned embedded wallet.
+
+### Proxy Gateway
+Sits between agents and any third-party API (OpenAI, exchanges, RPC providers). Agents send requests to the proxy. Steward authenticates the agent, decrypts the right credential from the vault, injects it into the outbound request, and streams the response back. The agent never touches the raw key. Full audit trail, rate limiting, and spend tracking on every call.
 
 ---
 
-## What Exists Today (Inventory)
+## Positioning
 
-### ✅ Built and Working
-- **@steward/vault** — key generation, AES-256-GCM encryption/decryption, ephemeral signing, multi-chain EVM support (7 chains), balance queries
-- **@steward/policy-engine** — 5 policy types fully implemented (spending-limit, approved-addresses, auto-approve-threshold, time-window, rate-limit), composable evaluation
-- **@steward/api** — full Hono REST API: tenant CRUD, agent CRUD, policy CRUD, vault signing, approval queue (approve/reject/pending), transaction history, webhook dispatch, SIWE auth, rate limiting, health check
-- **@steward/sdk** — TypeScript HTTP client: all CRUD + signing + batch operations + balance queries + message signing
-- **@steward/db** — Drizzle ORM schema, postgres, migrations
-- **@steward/auth** — API key generation (stw_*), hashing (SHA-256), timing-safe validation
-- **@steward/webhooks** — HMAC-signed dispatch, retry with exponential backoff, event filtering
-- **@steward/shared** — types, chain metadata, constants
-- **Waifu bridge** — integration adapter with default policy templates
-- **E2E integration example** — full lifecycle demo (provision → policy → sign → approve → reject → history → webhooks)
-- **Deployed** — API running on milady VPS as systemd service, live at api.steward.fi via cloudflared
-- **Web** — Next.js landing page deployed to Vercel at steward.fi
+The agent wallet market has fragmented into closed platforms and low-level primitives. Nobody occupies the quadrant Steward targets:
 
-### ❌ Not Built Yet
-- **Passkey auth** — WebAuthn/passkey registration + verification
-- **Email auth** — magic link or OTP flow
-- **OAuth providers** — Google, Discord, GitHub login
-- **User wallets** — currently only "agent wallets" exist; need "user wallets" that auto-create on signup
-- **Solana support** — schema + vault support EVM only; need Ed25519 keygen + signing
-- **Platform-level auth** — a master API key for platforms (like Eliza Cloud) to manage all tenants
-- **Auth.js integration** — NextAuth v5 adapter for Steward auth
-- **React components** — login widget, wallet widget, policy management UI
-- **Key storage backends** — currently only local encrypted postgres; need pluggable (AWS KMS, Hashicorp Vault)
-- **Eliza Cloud bridge** — wallet methods in the agent container bridge protocol
+**High abstraction + open source + self-hostable.**
+
+Six capabilities define the space. Most platforms cover two or three:
+
+| Capability | What it means |
+|---|---|
+| **Open source** | Audit the code. Fork it. No black boxes. |
+| **Self-hostable** | Run it on your infra. No vendor dependency. No token required. |
+| **Auth** | User login (passkeys, email, OAuth, SIWE). Not just API keys. |
+| **Policy enforcement** | Rules enforced at the vault, not the application layer. |
+| **Agent-native** | Built for autonomous operation, not retrofitted from consumer auth. |
+| **Credential proxy** | Manages all sensitive credentials, not just wallet keys. |
+
+Steward checks all six. The closest competitors each miss critical boxes: Privy is closed and hosted-only. Vincent requires the Lit MPC network. Turnkey has no auth or policies. Coinbase AgentKit is open but low-abstraction (signing primitives only, no auth/policies/proxy).
 
 ---
 
-## What Needs to Be Built
+## Two Deployment Modes
 
-### Phase 1: Auth Layer (The Privy Replacement Core)
+**Hosted** (steward.fi / your cloud): Multi-tenant, production-grade. Drop-in replacement for Privy. Your app is a tenant. Zero infra overhead.
 
-This is the biggest gap. Steward has wallet infra but no user-facing auth beyond SIWE and API keys.
+**Embedded** (PGLite): Local-first, runs in-process. Same vault, same policies, same SDK. For desktop apps, CLI agents, self-hosted deployments. No third-party database, no network dependency.
 
-#### 1a. Passkey Auth (`@steward/auth` expansion)
-
-```
-New files:
-  packages/auth/src/passkey.ts        — WebAuthn registration + verification
-  packages/auth/src/session.ts        — JWT session management (expand existing)
-  packages/db/src/schema.ts           — add: users, authenticators, sessions tables
-```
-
-**Schema additions:**
-```sql
--- Users (central identity, decoupled from tenants)
-CREATE TABLE users (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  email VARCHAR(255) UNIQUE,
-  email_verified BOOLEAN DEFAULT false,
-  name VARCHAR(255),
-  image TEXT,
-  wallet_address VARCHAR(128),           -- linked external wallet (optional)
-  steward_wallet_id VARCHAR(64),         -- auto-created embedded wallet
-  created_at TIMESTAMPTZ DEFAULT now(),
-  updated_at TIMESTAMPTZ DEFAULT now()
-);
-
--- WebAuthn credentials (passkeys)
-CREATE TABLE authenticators (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  credential_id TEXT NOT NULL UNIQUE,     -- base64url-encoded
-  credential_public_key TEXT NOT NULL,    -- base64url-encoded
-  counter INTEGER NOT NULL DEFAULT 0,
-  credential_device_type VARCHAR(32),     -- 'singleDevice' or 'multiDevice'
-  credential_backed_up BOOLEAN DEFAULT false,
-  transports TEXT[],                       -- e.g. ['internal', 'hybrid']
-  created_at TIMESTAMPTZ DEFAULT now()
-);
-
--- Sessions
-CREATE TABLE sessions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  session_token TEXT NOT NULL UNIQUE,
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT now()
-);
-
--- OAuth accounts (for Google, Discord, GitHub)
-CREATE TABLE accounts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  provider VARCHAR(64) NOT NULL,          -- 'google', 'discord', 'github'
-  provider_account_id VARCHAR(255) NOT NULL,
-  access_token TEXT,
-  refresh_token TEXT,
-  expires_at INTEGER,
-  UNIQUE(provider, provider_account_id)
-);
-```
-
-**Passkey flow:**
-```typescript
-// packages/auth/src/passkey.ts
-import {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
-  generateAuthenticationOptions,
-  verifyAuthenticationResponse,
-} from "@simplewebauthn/server";
-
-export class PasskeyAuth {
-  private rpName: string;    // "Steward" or platform name
-  private rpID: string;      // "steward.fi" or platform domain
-  private origin: string;    // "https://steward.fi"
-
-  // Registration: user enters email → browser prompts biometric → credential stored
-  async startRegistration(userId: string, email: string): Promise<RegistrationOptions> { ... }
-  async finishRegistration(userId: string, response: RegistrationResponse): Promise<void> { ... }
-
-  // Authentication: user enters email → browser prompts biometric → session created
-  async startAuthentication(email: string): Promise<AuthenticationOptions> { ... }
-  async finishAuthentication(response: AuthenticationResponse): Promise<SessionToken> { ... }
-}
-```
-
-**On successful first login, auto-create embedded wallet:**
-```typescript
-async function onUserCreated(user: User): Promise<void> {
-  const vault = getVault();
-  const agent = await vault.createAgent(
-    `user-${user.id}`,  // tenant = user themselves
-    `wallet-${user.id}`,
-    `${user.email || user.name}'s Wallet`
-  );
-  await db.update(users)
-    .set({ steward_wallet_id: agent.id })
-    .where(eq(users.id, user.id));
-}
-```
-
-#### 1b. Email Auth (Magic Link / OTP)
-
-```
-New files:
-  packages/auth/src/email.ts           — magic link or OTP generation + verification
-  packages/auth/src/email-provider.ts  — Resend/SendGrid/SMTP adapter
-```
-
-Two modes:
-- **Magic link:** generate token → email link → click → verify → session
-- **OTP:** generate 6-digit code → email → user enters code → verify → session
-
-Magic link is simpler for v1. OTP is better UX (no inbox context switch).
-
-#### 1c. OAuth Providers
-
-```
-New files:
-  packages/auth/src/oauth/google.ts
-  packages/auth/src/oauth/discord.ts
-  packages/auth/src/oauth/github.ts
-  packages/auth/src/oauth/base.ts      — shared OAuth2 flow
-```
-
-Standard OAuth2 code flow. Each provider needs:
-- Client ID + secret (env vars)
-- Authorization URL → redirect → callback → token exchange → user info → session
-
-#### 1d. Auth.js Adapter (for Next.js platforms)
-
-```
-New package:
-  packages/auth-nextjs/                — Auth.js v5 adapter
-    src/index.ts                       — DrizzleAdapter + Steward session callbacks
-    src/passkey-provider.ts            — Custom credentials provider wrapping PasskeyAuth
-```
-
-This lets any Next.js app use Steward as its auth backend with one import:
-```typescript
-import { StewardAuth } from "@steward/auth-nextjs";
-
-export const { handlers, signIn, signOut, auth } = StewardAuth({
-  stewardUrl: process.env.STEWARD_API_URL,
-  providers: ["passkey", "google", "discord"],
-  // auto-creates embedded wallet on first login
-  autoCreateWallet: true,
-});
-```
-
-### Phase 2: Wallet Enhancements
-
-#### 2a. User Wallets (vs Agent Wallets)
-
-Currently Steward only has "agent wallets" scoped to tenants. Need "user wallets" that:
-- Auto-create on first login
-- Belong to the user, not a tenant
-- Can be used across tenants (user's personal wallet)
-- Support embedded wallet UX (user never sees a private key)
-
-**Schema change:**
-```sql
-ALTER TABLE agents ADD COLUMN owner_user_id UUID REFERENCES users(id);
-ALTER TABLE agents ADD COLUMN wallet_type VARCHAR(32) DEFAULT 'agent';
--- wallet_type: 'agent' (platform-managed) | 'user' (user's embedded wallet)
-```
-
-#### 2b. Solana Support
-
-```
-Modified files:
-  packages/vault/src/vault.ts          — add Ed25519 keygen via @solana/web3.js
-  packages/vault/src/keystore.ts       — same encryption, different key format
-  packages/shared/src/index.ts         — add Solana chain metadata
-  packages/db/src/schema.ts            — chain_type field already exists
-```
-
-The vault already stores encrypted bytes. Solana just needs:
-- `Keypair.generate()` instead of `generatePrivateKey()`
-- `nacl.sign()` instead of viem signing
-- Base58 address format instead of hex
-
-#### 2c. Pluggable Key Storage
-
-```
-New files:
-  packages/vault/src/backends/local.ts    — current AES-256-GCM (default)
-  packages/vault/src/backends/aws-kms.ts  — AWS KMS integration
-  packages/vault/src/backends/hashicorp.ts — Hashicorp Vault integration
-  packages/vault/src/backend.ts            — interface definition
-```
-
-```typescript
-interface KeyStorageBackend {
-  store(agentId: string, privateKey: string): Promise<void>;
-  retrieve(agentId: string): Promise<string>;
-  delete(agentId: string): Promise<void>;
-}
-```
-
-The existing KeyStore becomes `LocalEncryptedBackend`. AWS KMS and Hashicorp become optional backends for enterprises that need HSM-grade security.
-
-### Phase 3: Platform Integration Layer
-
-#### 3a. Platform Auth (Master Key)
-
-Platforms like Eliza Cloud need a single API key to manage all their tenants:
-
-```
-Modified files:
-  packages/api/src/index.ts            — add platform auth middleware
-  packages/auth/src/platform-keys.ts   — platform key generation + validation
-```
-
-```typescript
-// Platform-level auth header
-// X-Steward-Platform-Key: stw_platform_abc123...
-// Allows: create tenants, manage tenants, provision agent wallets across tenants
-
-app.use("/platform/*", platformAuth);
-
-app.post("/platform/tenants", async (c) => { ... });
-app.post("/platform/tenants/:id/agents", async (c) => { ... });
-app.get("/platform/tenants/:id/agents", async (c) => { ... });
-```
-
-#### 3b. Eliza Cloud Bridge (Agent Container → Wallet)
-
-```
-Modified files (in milaidy repo):
-  packages/cloud-agent/src/bridge/protocol.ts  — add wallet method types
-  packages/cloud-agent/src/bridge/handlers.ts  — add wallet handlers
-  packages/cloud-agent/src/bridge/server.ts    — route wallet methods
-```
-
-New bridge methods:
-```typescript
-"wallet.getAddress"       // → returns agent's wallet address
-"wallet.getBalance"       // → returns native balance
-"wallet.sendTransaction"  // → policy check → sign → broadcast
-"wallet.signMessage"      // → sign arbitrary data
-"wallet.getPolicies"      // → view current policies
-```
-
-These get routed: container → bridge → cloud platform → Steward API → vault.
-
-#### 3c. React Components (Drop-in UI)
-
-```
-New package:
-  packages/react/
-    src/StewardProvider.tsx     — context provider
-    src/LoginButton.tsx         — passkey + OAuth login widget
-    src/WalletWidget.tsx        — balance display + send UI
-    src/PolicyManager.tsx       — policy configuration UI
-    src/ApprovalQueue.tsx       — pending approvals UI
-    src/TransactionHistory.tsx  — tx history view
-```
-
-The goal: a platform adds `<StewardProvider>` and gets auth + wallet UI out of the box, similar to Privy's `<PrivyProvider>`.
-
-### Phase 4: Eliza Cloud Migration
-
-With phases 1-3 built, migrating Eliza Cloud off Privy is surgical:
-
-```
-Modified files (in eliza-cloud repo):
-  packages/lib/providers/PrivyProvider.tsx    → DELETE, replace with StewardProvider
-  packages/lib/auth/privy-client.ts          → DELETE, replace with Steward auth
-  packages/lib/services/server-wallets.ts    → swap Privy calls → Steward SDK calls
-  packages/db/schemas/agent-server-wallets.ts → swap privy_wallet_id → steward_agent_id
-  app/api/v1/user/wallets/provision/route.ts → use Steward provisioning
-  app/api/v1/user/wallets/rpc/route.ts       → use Steward RPC routing
-  next.config.ts                              → remove Privy CSP rules
-  .env                                        → remove PRIVY_*, add STEWARD_*
-  package.json                                → remove @privy-io/*, add @steward/*
-```
+Same API surface. Same guarantees. Write the integration once.
 
 ---
 
-## Implementation Priority
+## Roadmap
 
-```
-IMMEDIATE (this week)
-├── 1. Platform auth (master key for Eliza Cloud)
-├── 2. User table + auto-wallet-on-signup
-└── 3. Passkey auth (WebAuthn registration + verification)
+### Shipped
+- Vault with AES-256-GCM encryption, EVM + Solana
+- Policy engine with 6 composable rule types
+- Multi-tenant API with full tenant isolation
+- Auth: passkeys, email magic links, SIWE, Google OAuth, Discord OAuth
+- JWT sessions with refresh token rotation
+- Cross-tenant user identity
+- TypeScript SDK (`@stwd/sdk`)
+- React components (`@stwd/react`): login, wallet, policies, approvals
+- ElizaOS plugin (`@stwd/eliza-plugin`)
+- Proxy gateway with credential injection
+- Embedded mode (PGLite)
+- Production Docker setup (API + proxy + Postgres + Redis)
+- Webhook system with HMAC-signed delivery
 
-NEXT WEEK
-├── 4. Email auth (magic link via Resend)
-├── 5. OAuth providers (Google, Discord)
-├── 6. Auth.js adapter (@steward/auth-nextjs)
-└── 7. Eliza Cloud wallet swap (Privy → Steward)
-
-FOLLOWING WEEK
-├── 8. Bridge wallet methods (agent container → Steward)
-├── 9. React components (login widget, wallet widget)
-├── 10. Solana support
-└── 11. Full Eliza Cloud migration (remove Privy entirely)
-
-LATER
-├── 12. Pluggable key backends (AWS KMS, Hashicorp)
-├── 13. Dashboard polish + docs
-├── 14. npm publish (@steward/sdk, @steward/auth-nextjs, @steward/react)
-└── 15. steward.fi hosted service (SaaS offering)
-```
+### Next
+- Milady Cloud integration (replace Privy as auth + wallet layer)
+- Dashboard self-service (tenant creation, policy configuration, API key management)
+- Production hardening (security audit, token store persistence, monitoring)
+- Babylon integration
+- Pluggable key storage backends (AWS KMS, Hashicorp Vault)
+- Strata Reserve deployment
 
 ---
 
-## Repo Structure (Target)
+## Values
 
-```
-steward-fi/
-├── packages/
-│   ├── api/              ✅ Hono REST API
-│   ├── auth/             🔧 Expand: passkeys, email, OAuth, platform keys
-│   ├── auth-nextjs/      🆕 Auth.js v5 adapter
-│   ├── db/               ✅ Drizzle schema (expand: users, authenticators, sessions, accounts)
-│   ├── policy-engine/    ✅ 5 policy types, composable
-│   ├── react/            🆕 Drop-in React components
-│   ├── sdk/              ✅ TypeScript HTTP client
-│   ├── shared/           ✅ Types, constants
-│   ├── vault/            🔧 Expand: Solana, pluggable backends
-│   └── webhooks/         ✅ HMAC-signed dispatch
-├── web/                  ✅ Landing page (steward.fi)
-├── examples/
-│   └── waifu-integration/ ✅ Full lifecycle demo
-├── docker-compose.yml
-├── Dockerfile
-└── README.md
-```
+**Open source.** MIT license. The code is the documentation. If you don't trust it, read it.
 
----
+**Developer-first.** `npm install @stwd/sdk` and you're building. No sales calls, no onboarding decks, no "contact us for pricing."
 
-## The Pitch
+**No vendor lock-in.** Self-host the entire stack. Export your data. Switch providers. Your keys, your infra, your choice.
 
-**For agent platforms (Eliza Cloud, waifu.fun, etc.):**
-"Drop-in auth + wallet infra. Passkey login, embedded wallets, spending limits. Open source. Self-host or use our hosted service. Replace Privy in a day."
+**No token required.** Steward is infrastructure, not a protocol. No governance token, no staking requirement, no on-chain dependency for basic operations.
 
-**For the ecosystem:**
-"The open-source standard for agent wallet infrastructure. Policy enforcement between agent intent and on-chain execution. No more unguarded private keys in containers."
-
-**Why it wins:**
-1. Open source — no vendor lock-in, audit the code yourself
-2. Agent-first — policies, approval queues, audit trails built for autonomous agents
-3. Passkeys — better auth than Privy (no passwords, phishing-resistant)
-4. Self-hostable — one binary + postgres, run it anywhere
-5. Cost — free to self-host, fraction of Privy's pricing for hosted
-
----
-
-## First Tenant: Eliza Cloud (Milady)
-
-Eliza Cloud is the proof case. It currently uses Privy for auth + wallets. Migrating it to Steward proves the entire stack works end-to-end:
-
-- Users log in with passkeys (or Google/Discord fallback)
-- Agent sandboxes get embedded wallets with default policies
-- Agents can request transactions through the bridge protocol
-- Policies enforce spending limits and address whitelists
-- Platform admins can approve/reject flagged transactions
-- Full audit trail for every wallet operation
-
-If it works for Eliza Cloud's scale (multi-node Docker, hundreds of agents, real money), it works for anyone.
+**Policy is architecture, not advice.** Rules are enforced at the cryptographic signing layer. Not in middleware. Not in application code. Not as suggestions. If the policy says no, the vault won't sign it.
