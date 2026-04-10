@@ -41,34 +41,21 @@ COPY packages/policy-engine/package.json packages/policy-engine/package.json
 COPY packages/proxy/package.json     packages/proxy/package.json
 COPY packages/redis/package.json     packages/redis/package.json
 COPY packages/shared/package.json    packages/shared/package.json
-COPY packages/sdk/package.json       packages/sdk/package.json
 COPY packages/vault/package.json     packages/vault/package.json
 COPY packages/webhooks/package.json  packages/webhooks/package.json
 
-RUN bun install --frozen-lockfile
+# Strip frontend/example workspaces not present in server builds
+# (web, packages/sdk, and packages/examples/* are excluded via .dockerignore)
+RUN sed -i '/"web"/d; /"packages\/examples\/\*"/d; /"packages\/sdk"/d' package.json
 
-# ── Stage 2: Build ────────────────────────────────────────────────────────────
-FROM base AS build
+# Note: --frozen-lockfile is omitted because we patched package.json above
+# (removed frontend workspaces). bun.lock still pins all versions.
+RUN bun install
 
-COPY --from=deps /app/node_modules ./node_modules
-COPY package.json bun.lock turbo.json tsconfig.json ./
-
-# Copy full source for all packages needed by api + proxy
-COPY packages/api         packages/api
-COPY packages/auth        packages/auth
-COPY packages/db          packages/db
-COPY packages/policy-engine packages/policy-engine
-COPY packages/proxy       packages/proxy
-COPY packages/redis       packages/redis
-COPY packages/shared      packages/shared
-COPY packages/sdk         packages/sdk
-COPY packages/vault       packages/vault
-COPY packages/webhooks    packages/webhooks
-
-# Build api and proxy (and their deps) via turborepo
-RUN bunx turbo run build --filter=@steward/api --filter=@stwd/proxy
-
-# ── Stage 3: Runtime ──────────────────────────────────────────────────────────
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
+# Bun executes TypeScript directly — no compilation step needed.
+# All "build" scripts in Steward packages are tsc --noEmit (type-check only),
+# not compilation, so we skip turbo build entirely.
 FROM oven/bun:1.2-alpine AS runtime
 
 WORKDIR /app
@@ -76,33 +63,23 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3200
 
-# Install production dependencies only (no dev/build tools)
+# Bring in node_modules from the deps stage
+COPY --from=deps /app/node_modules ./node_modules
+
+# Copy root manifests
 COPY package.json bun.lock turbo.json tsconfig.json ./
+RUN sed -i '/"web"/d; /"packages\/examples\/\*"/d; /"packages\/sdk"/d' package.json
 
-COPY packages/api/package.json       packages/api/package.json
-COPY packages/auth/package.json      packages/auth/package.json
-COPY packages/db/package.json        packages/db/package.json
-COPY packages/policy-engine/package.json packages/policy-engine/package.json
-COPY packages/proxy/package.json     packages/proxy/package.json
-COPY packages/redis/package.json     packages/redis/package.json
-COPY packages/shared/package.json    packages/shared/package.json
-COPY packages/sdk/package.json       packages/sdk/package.json
-COPY packages/vault/package.json     packages/vault/package.json
-COPY packages/webhooks/package.json  packages/webhooks/package.json
-
-RUN bun install --frozen-lockfile --production
-
-# Copy compiled output from build stage
-COPY --from=build /app/packages/api         packages/api
-COPY --from=build /app/packages/auth        packages/auth
-COPY --from=build /app/packages/db          packages/db
-COPY --from=build /app/packages/policy-engine packages/policy-engine
-COPY --from=build /app/packages/proxy       packages/proxy
-COPY --from=build /app/packages/redis       packages/redis
-COPY --from=build /app/packages/shared      packages/shared
-COPY --from=build /app/packages/sdk         packages/sdk
-COPY --from=build /app/packages/vault       packages/vault
-COPY --from=build /app/packages/webhooks    packages/webhooks
+# Copy source for all server packages
+COPY packages/api         packages/api
+COPY packages/auth        packages/auth
+COPY packages/db          packages/db
+COPY packages/policy-engine packages/policy-engine
+COPY packages/proxy       packages/proxy
+COPY packages/redis       packages/redis
+COPY packages/shared      packages/shared
+COPY packages/vault       packages/vault
+COPY packages/webhooks    packages/webhooks
 
 # ── Non-root user ─────────────────────────────────────────────────────────────
 # bun image already has a 'bun' user (uid 1000); use it.

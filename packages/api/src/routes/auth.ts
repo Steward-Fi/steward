@@ -1062,12 +1062,17 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 
-  // Store state metadata in the challenge store
-  const statePayload = JSON.stringify({ provider: providerName, tenantId, redirectUri });
-  getChallengeStore().set(`oauth:${state}`, statePayload);
-
   const callbackUrl = buildOAuthCallbackUrl(c, providerName);
-  const authUrl = oauthClient.generateAuthUrl(state, callbackUrl);
+  const { url: authUrl, codeVerifier } = oauthClient.generateAuthUrl(state, callbackUrl);
+
+  // Store state metadata in the challenge store — include PKCE verifier when present
+  const statePayload = JSON.stringify({
+    provider: providerName,
+    tenantId,
+    redirectUri,
+    ...(codeVerifier ? { codeVerifier } : {}),
+  });
+  getChallengeStore().set(`oauth:${state}`, statePayload);
 
   return c.redirect(authUrl, 302);
 });
@@ -1109,7 +1114,7 @@ auth.get("/oauth/:provider/callback", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OAuth state" }, 401);
   }
 
-  let stateData: { provider: string; tenantId?: string; redirectUri: string };
+  let stateData: { provider: string; tenantId?: string; redirectUri: string; codeVerifier?: string };
   try {
     stateData = JSON.parse(rawPayload) as typeof stateData;
   } catch {
@@ -1132,10 +1137,10 @@ auth.get("/oauth/:provider/callback", async (c) => {
 
   const callbackUrl = buildOAuthCallbackUrl(c, providerName);
 
-  // Exchange code for access token
+  // Exchange code for access token — pass codeVerifier for PKCE providers (e.g. Twitter)
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
-    tokenResponse = await oauthClient.exchangeCode(code, callbackUrl);
+    tokenResponse = await oauthClient.exchangeCode(code, callbackUrl, stateData.codeVerifier);
   } catch (err) {
     return c.json<ApiResponse>(
       { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
@@ -1154,11 +1159,17 @@ auth.get("/oauth/:provider/callback", async (c) => {
     );
   }
 
+  // Twitter and some providers do not return an email address.
+  // Generate a synthetic internal email so findOrCreateUser() can still work.
+  // This email is never displayed or sent — it is purely an internal identity key.
   if (!providerUser.email) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Provider did not return an email address" },
-      400,
-    );
+    if (!providerUser.id) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Provider returned neither email nor user ID" },
+        400,
+      );
+    }
+    providerUser = { ...providerUser, email: `${providerName}.${providerUser.id}@id.steward.internal` };
   }
 
   // Create/find user + provision wallet + link tenant
@@ -1185,7 +1196,7 @@ auth.get("/oauth/:provider/callback", async (c) => {
  * POST /oauth/:provider/token
  * SPA / popup flow — the client has already obtained the code.
  *
- * Body: { code: string; redirectUri: string; tenantId?: string }
+ * Body: { code: string; redirectUri: string; tenantId?: string; codeVerifier?: string }
  * Returns: { ok: true; token: string; user: { id, email, walletAddress } }
  */
 auth.post("/oauth/:provider/token", async (c) => {
@@ -1198,6 +1209,7 @@ auth.post("/oauth/:provider/token", async (c) => {
     code: string;
     redirectUri: string;
     tenantId?: string;
+    codeVerifier?: string;
   }>(c);
 
   if (!body?.code || !body?.redirectUri) {
@@ -1216,7 +1228,11 @@ auth.post("/oauth/:provider/token", async (c) => {
 
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
-    tokenResponse = await oauthClient.exchangeCode(body.code, body.redirectUri);
+    tokenResponse = await oauthClient.exchangeCode(
+      body.code,
+      body.redirectUri,
+      body.codeVerifier,
+    );
   } catch (err) {
     return c.json<ApiResponse>(
       { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
@@ -1234,11 +1250,16 @@ auth.post("/oauth/:provider/token", async (c) => {
     );
   }
 
+  // Twitter and some providers do not return an email address.
+  // Generate a synthetic internal email so findOrCreateUser() can still work.
   if (!providerUser.email) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Provider did not return an email address" },
-      400,
-    );
+    if (!providerUser.id) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Provider returned neither email nor user ID" },
+        400,
+      );
+    }
+    providerUser = { ...providerUser, email: `${providerName}.${providerUser.id}@id.steward.internal` };
   }
 
   const result = await provisionOAuthUser({
