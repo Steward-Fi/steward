@@ -794,3 +794,140 @@
   color: var(--stwd-muted);
   margin-bottom: 0.5rem;
 }
+
+/* ─── Auth Guard ─── */
+.stwd-auth-guard {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.stwd-auth-guard__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+/* ─── User Button ─── */
+.stwd-user-button {
+  position: relative;
+  display: inline-block;
+}
+
+.stwd-user-button__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.625rem;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--stwd-radius, 12px);
+  color: var(--stwd-text);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.875rem;
+  transition: background 0.15s;
+}
+.stwd-user-button__trigger:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.stwd-user-button__avatar {
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.stwd-user-button__avatar--initials {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--stwd-primary, #8B5CF6);
+  color: #fff;
+  font-weight: 600;
+  border-radius: 50%;
+}
+
+.stwd-user-button__name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stwd-user-button__dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 160px;
+  background: var(--stwd-surface, #1A1A2E);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: calc(var(--stwd-radius, 12px) / 2);
+  padding: 0.25rem 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 100;
+}
+
+.stwd-user-button__dropdown-info {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--stwd-muted);
+  font-family: "SF Mono", "Fira Code", monospace;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.stwd-user-button__dropdown-item {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: none;
+  border: none;
+  color: var(--stwd-text);
+  font-size: 0.875rem;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.stwd-user-button__dropdown-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.stwd-user-button__dropdown-item--signout {
+  color: var(--stwd-error, #EF4444);
+}
+
+/* ─── Callback Pages ─── */
+.stwd-callback {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  padding: 2rem;
+  text-align: center;
+  gap: 1rem;
+}
+
+.stwd-callback__loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+}
+
+.stwd-callback__error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.stwd-callback__success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
