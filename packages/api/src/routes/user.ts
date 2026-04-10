@@ -21,7 +21,7 @@ import { Hono, type Context, type Next } from "hono";
 import { jwtVerify } from "jose";
 import { parseEther } from "viem";
 
-import { getDb, policies, toPolicyRule, toTxRecord, transactions } from "@stwd/db";
+import { getDb, policies, tenants, tenantConfigs, toPolicyRule, toTxRecord, transactions, userTenants } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import type {
   AgentBalance,
@@ -488,5 +488,139 @@ user.post("/me/wallet/sign-message", async (c) => {
 });
 
 // ─── Export ───────────────────────────────────────────────────────────────────
+
+
+// ─── Tenant membership routes ─────────────────────────────────────────────────
+
+/**
+ * GET /me/tenants
+ * List all tenants the authenticated user belongs to.
+ */
+user.get("/me/tenants", async (c) => {
+  const userId = c.get("userId");
+  const db = getDb();
+
+  const memberships = await db
+    .select({
+      tenantId: userTenants.tenantId,
+      tenantName: tenants.name,
+      role: userTenants.role,
+      joinedAt: userTenants.createdAt,
+    })
+    .from(userTenants)
+    .innerJoin(tenants, eq(userTenants.tenantId, tenants.id))
+    .where(eq(userTenants.userId, userId));
+
+  return c.json<ApiResponse<typeof memberships>>({ ok: true, data: memberships });
+});
+
+/**
+ * GET /me/tenants/:tenantId
+ * Get single tenant membership info for the authenticated user.
+ */
+user.get("/me/tenants/:tenantId", async (c) => {
+  const userId = c.get("userId");
+  const tenantId = c.req.param("tenantId");
+  const db = getDb();
+
+  const [membership] = await db
+    .select({
+      tenantId: userTenants.tenantId,
+      tenantName: tenants.name,
+      role: userTenants.role,
+      joinedAt: userTenants.createdAt,
+    })
+    .from(userTenants)
+    .innerJoin(tenants, eq(userTenants.tenantId, tenants.id))
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+
+  if (!membership) {
+    return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 404);
+  }
+
+  return c.json<ApiResponse<typeof membership>>({ ok: true, data: membership });
+});
+
+/**
+ * POST /me/tenants/:tenantId/join
+ * Join a tenant that has join_mode = 'open'.
+ */
+user.post("/me/tenants/:tenantId/join", async (c) => {
+  const userId = c.get("userId");
+  const tenantId = c.req.param("tenantId");
+  const db = getDb();
+
+  // 1. Verify tenant exists
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  // 2. Check if already a member
+  const [existing] = await db
+    .select({ id: userTenants.id })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+
+  if (existing) {
+    return c.json({ ok: true, tenantId, role: "member", alreadyMember: true });
+  }
+
+  // 3. Check join_mode
+  const [config] = await db
+    .select({ joinMode: tenantConfigs.joinMode })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  const joinMode = config?.joinMode ?? "open";
+
+  if (joinMode !== "open") {
+    return c.json<ApiResponse>(
+      { ok: false, error: `Tenant is not open for joining (mode: ${joinMode})` },
+      403,
+    );
+  }
+
+  // 4. Create membership
+  await db
+    .insert(userTenants)
+    .values({ userId, tenantId, role: "member" })
+    .onConflictDoNothing();
+
+  return c.json({ ok: true, tenantId, role: "member" });
+});
+
+/**
+ * DELETE /me/tenants/:tenantId/leave
+ * Leave a tenant. Cannot leave personal tenant.
+ */
+user.delete("/me/tenants/:tenantId/leave", async (c) => {
+  const userId = c.get("userId");
+  const tenantId = c.req.param("tenantId");
+
+  // Cannot leave personal tenant
+  if (tenantId === `personal-${userId}`) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Cannot leave your personal tenant" },
+      400,
+    );
+  }
+
+  const db = getDb();
+  const [deleted] = await db
+    .delete(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+    .returning({ id: userTenants.id });
+
+  if (!deleted) {
+    return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 404);
+  }
+
+  return c.json<ApiResponse>({ ok: true });
+});
 
 export { user as userRoutes };

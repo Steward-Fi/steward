@@ -11,11 +11,11 @@
  *   { ok: true, data: T }  |  { ok: false, error: string }
  */
 
-import { count, eq, sql } from "drizzle-orm";
+import { and, count, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { generateApiKey, platformAuthMiddleware } from "@stwd/auth";
-import { agents, getDb, policies, tenants, transactions } from "@stwd/db";
+import { agents, getDb, policies, tenants, tenantConfigs, transactions, userTenants, users } from "@stwd/db";
 import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
 import { createAgentToken } from "../services/context";
@@ -617,6 +617,160 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
     console.error(`[platform] Failed to generate agent token for ${agentId}:`, e);
     return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
   }
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tenant member management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /tenants/:id/members
+ * List all members of a tenant.
+ */
+platform.get("/tenants/:id/members", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  // Verify tenant exists
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const members = await db
+    .select({
+      userId: userTenants.userId,
+      role: userTenants.role,
+      joinedAt: userTenants.createdAt,
+      email: users.email,
+      name: users.name,
+    })
+    .from(userTenants)
+    .innerJoin(users, eq(userTenants.userId, users.id))
+    .where(eq(userTenants.tenantId, tenantId));
+
+  return c.json<ApiResponse<typeof members>>({ ok: true, data: members });
+});
+
+/**
+ * POST /tenants/:id/members
+ * Invite a user by email to a tenant. Creates the user if they don't exist.
+ * Body: { email: string; role?: string }
+ */
+platform.post("/tenants/:id/members", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const body = await safeJsonParse<{ email: string; role?: string }>(c);
+  if (!body || !isNonEmptyString(body.email)) {
+    return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
+  }
+
+  // Verify tenant exists
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const email = body.email.toLowerCase().trim();
+  const role = body.role ?? "member";
+
+  // Find or create user
+  let [user] = await db.select().from(users).where(eq(users.email, email));
+  if (!user) {
+    const [newUser] = await db
+      .insert(users)
+      .values({ email, emailVerified: false })
+      .returning();
+    user = newUser;
+  }
+
+  // Upsert user_tenants link
+  await db
+    .insert(userTenants)
+    .values({ userId: user.id, tenantId, role })
+    .onConflictDoNothing();
+
+  return c.json<ApiResponse<{ userId: string; email: string; tenantId: string; role: string }>>(
+    { ok: true, data: { userId: user.id, email, tenantId, role } },
+    201,
+  );
+});
+
+/**
+ * DELETE /tenants/:id/members/:userId
+ * Remove a member from a tenant.
+ */
+platform.delete("/tenants/:id/members/:userId", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  const userId = c.req.param("userId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const [deleted] = await db
+    .delete(userTenants)
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
+    .returning({ id: userTenants.id });
+
+  if (!deleted) {
+    return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
+  }
+
+  return c.json<ApiResponse>({ ok: true });
+});
+
+/**
+ * PATCH /tenants/:id/members/:userId
+ * Update a member's role in a tenant.
+ * Body: { role: string }
+ */
+platform.patch("/tenants/:id/members/:userId", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  const userId = c.req.param("userId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const body = await safeJsonParse<{ role: string }>(c);
+  if (!body || !isNonEmptyString(body.role)) {
+    return c.json<ApiResponse>({ ok: false, error: "role is required" }, 400);
+  }
+
+  const [updated] = await db
+    .update(userTenants)
+    .set({ role: body.role })
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
+    .returning({ id: userTenants.id, role: userTenants.role });
+
+  if (!updated) {
+    return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
+  }
+
+  return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>(
+    { ok: true, data: { userId, tenantId, role: body.role } },
+  );
 });
 
 export { platform as platformRoutes };

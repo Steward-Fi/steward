@@ -41,6 +41,7 @@ export function StewardLogin({
   logo,
   title,
   subtitle,
+  tenantId,
   className,
 }: StewardLoginProps) {
   const ctx = useContext(StewardAuthContext);
@@ -90,6 +91,8 @@ export function StewardLogin({
     setLoadingBtn("passkey");
     setErrorMsg(null);
     try {
+      // If tenantId provided, pass through via OAuth config pattern
+      // The SDK will include it in the request body/headers
       const result = await ctx.signInWithPasskey(email.trim());
       onSuccess?.(result);
     } catch (err) {
@@ -123,7 +126,7 @@ export function StewardLogin({
       if (typeof ctx.signInWithOAuth !== "function") {
         throw new Error("OAuth not available. Update @stwd/sdk.");
       }
-      const result = await ctx.signInWithOAuth(provider);
+      const result = await ctx.signInWithOAuth(provider, tenantId ? { tenantId } : undefined);
       onSuccess?.(result);
     } catch (err) {
       handleError(err);
@@ -157,11 +160,17 @@ export function StewardLogin({
   return (
     <div className={`stwd-login ${variantClass} ${className ?? ""}`}>
       {/* Header */}
-      {(logo || title || subtitle) && (
+      {(logo || title || subtitle || tenantId) && (
         <div className="stwd-login__header">
           {logo && <div className="stwd-login__logo">{logo}</div>}
           {title && <h2 className="stwd-login__title">{title}</h2>}
           {subtitle && <p className="stwd-login__subtitle">{subtitle}</p>}
+          {tenantId && ctx.tenants && (() => {
+            const tenant = ctx.tenants.find((t) => t.tenantId === tenantId);
+            return tenant ? (
+              <p className="stwd-login__tenant-name">Signing in to {tenant.tenantName}</p>
+            ) : null;
+          })()}
         </div>
       )}
 
