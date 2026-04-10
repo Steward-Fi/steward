@@ -1196,7 +1196,7 @@ auth.get("/oauth/:provider/callback", async (c) => {
  * POST /oauth/:provider/token
  * SPA / popup flow — the client has already obtained the code.
  *
- * Body: { code: string; redirectUri: string; tenantId?: string }
+ * Body: { code: string; redirectUri: string; tenantId?: string; codeVerifier?: string }
  * Returns: { ok: true; token: string; user: { id, email, walletAddress } }
  */
 auth.post("/oauth/:provider/token", async (c) => {
@@ -1209,6 +1209,7 @@ auth.post("/oauth/:provider/token", async (c) => {
     code: string;
     redirectUri: string;
     tenantId?: string;
+    codeVerifier?: string;
   }>(c);
 
   if (!body?.code || !body?.redirectUri) {
@@ -1227,7 +1228,11 @@ auth.post("/oauth/:provider/token", async (c) => {
 
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
-    tokenResponse = await oauthClient.exchangeCode(body.code, body.redirectUri);
+    tokenResponse = await oauthClient.exchangeCode(
+      body.code,
+      body.redirectUri,
+      body.codeVerifier,
+    );
   } catch (err) {
     return c.json<ApiResponse>(
       { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
@@ -1298,8 +1303,8 @@ async function provisionOAuthUser(opts: {
     // Update name/image if we have richer data from the provider and the user doesn't have it yet
     const updates: Partial<typeof users.$inferInsert> = {};
     if (!user.name && providerUser.name) updates.name = providerUser.name;
-    if (!user.image && providerUser.avatar) updates.image = providerUser.avatar;
-    if (!user.emailVerified && providerUser.emailVerified) updates.emailVerified = true;
+    if (!user.image && providerUser.picture) updates.image = providerUser.picture;
+    if (!user.emailVerified && providerUser.verified_email) updates.emailVerified = true;
     if (Object.keys(updates).length > 0) {
       await db.update(users).set(updates).where(eq(users.id, user.id));
     }

@@ -160,7 +160,11 @@ function generateCodeVerifier(): string {
 function deriveCodeChallenge(verifier: string): string {
   // RFC 7636 §4.2: BASE64URL(SHA256(ASCII(code_verifier)))
   const hash = createHash("sha256").update(verifier).digest();
-  return hash.toString("base64url");
+  return hash
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 // ─── OAuthClient ─────────────────────────────────────────────────────────────

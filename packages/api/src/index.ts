@@ -33,7 +33,7 @@ import {
   type AppVariables,
   type ApiResponse,
 } from "./services/context";
-import { closeDb, getDb } from "@stwd/db";
+import { closeDb, getDb, shouldUsePGLite } from "@stwd/db";
 import { sql } from "drizzle-orm";
 import { runMigrations } from "@stwd/db/src/migrate";
 import { initRedis, shutdownRedis } from "./middleware/redis";
@@ -212,14 +212,19 @@ app.route("/approvals", approvalRoutes);
 
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
-try {
-  console.log("[steward] Running database migrations...");
-  await runMigrations();
+if (shouldUsePGLite()) {
   migrationsRan = true;
-  console.log("[steward] Migrations complete.");
-} catch (err) {
-  console.error("[steward] Migration failed — cannot start:", err);
-  process.exit(1);
+  console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
+} else {
+  try {
+    console.log("[steward] Running database migrations...");
+    await runMigrations();
+    migrationsRan = true;
+    console.log("[steward] Migrations complete.");
+  } catch (err) {
+    console.error("[steward] Migration failed — cannot start:", err);
+    process.exit(1);
+  }
 }
 
 // ─── Redis + auth store initialization (non-blocking) ───────────────────────
