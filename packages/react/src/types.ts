@@ -231,6 +231,15 @@ export interface SpendDashboardProps {
 // Re-export SDK types consumers will need
 export type { StewardClient, PolicyRule, PolicyType, TxStatus, TxRecord, AgentIdentity, AgentBalance, ChainFamily, PolicyResult };
 
+// ─── Multi-Tenant Types ───
+
+export interface StewardTenantMembership {
+  tenantId: string;
+  tenantName: string;
+  role: string;
+  joinedAt: string;
+}
+
 // ─── Auth Types ───
 
 export type { StewardUser, StewardSession, SessionStorage } from "@stwd/sdk";
@@ -270,6 +279,21 @@ export interface StewardAuthContextValue {
   signInWithSIWE: (address: string, signMessage: (msg: string) => Promise<string>) => Promise<import("@stwd/sdk").StewardAuthResult>;
   /** Sign in with an OAuth provider (Google, Discord, etc.) */
   signInWithOAuth: (provider: string, config?: { redirectUri?: string; tenantId?: string }) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  // ─── Multi-Tenant ───
+  /** Currently active tenant ID from session */
+  activeTenantId: string | null;
+  /** Cached list of user's tenant memberships (null = not fetched yet) */
+  tenants: StewardTenantMembership[] | null;
+  /** Whether tenant list is currently being fetched */
+  isTenantsLoading: boolean;
+  /** Fetch or refresh the user's tenant memberships */
+  listTenants: () => Promise<StewardTenantMembership[]>;
+  /** Switch the active tenant context. Returns true on success. */
+  switchTenant: (tenantId: string) => Promise<boolean>;
+  /** Join a tenant (if open join mode). Returns the new membership. */
+  joinTenant: (tenantId: string) => Promise<StewardTenantMembership>;
+  /** Leave a tenant. Cannot leave personal tenant. */
+  leaveTenant: (tenantId: string) => Promise<void>;
 }
 
 // ─── Auth Component Props ───
@@ -292,6 +316,8 @@ export interface StewardLoginProps {
   subtitle?: string;
   /** Called when an OAuth provider button is clicked (for custom handling) */
   onProviderClick?: (provider: string) => void;
+  /** Tenant ID to authenticate against (passed through to sign-in methods) */
+  tenantId?: string;
   className?: string;
 }
 
@@ -306,6 +332,8 @@ export interface StewardUserButtonProps {
   onSignOut?: () => void;
   showWallet?: boolean;
   avatarSize?: number;
+  /** Show an inline tenant switcher in the dropdown (default: false) */
+  showTenantSwitcher?: boolean;
 }
 
 export interface StewardEmailCallbackProps {
@@ -319,4 +347,14 @@ export interface StewardOAuthCallbackProps {
   onError?: (error: Error) => void;
   redirectTo?: string;
   provider?: string;
+}
+
+// ─── Tenant Picker Props ───
+
+export interface StewardTenantPickerProps {
+  /** Callback after a tenant switch completes */
+  onSwitch?: (tenantId: string) => void;
+  /** Display variant: "dropdown" (compact, click to expand) or "list" (always visible) */
+  variant?: "dropdown" | "list";
+  className?: string;
 }

@@ -48,8 +48,10 @@ export function StewardUserButton({
   onSignOut,
   showWallet = false,
   avatarSize = 32,
+  showTenantSwitcher = false,
 }: StewardUserButtonProps) {
-  const { user, signOut } = useAuth();
+  const auth = useAuth();
+  const { user, signOut } = auth;
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -122,6 +124,40 @@ export function StewardUserButton({
           {displayEmail && showWallet && displayWallet && (
             <div className="stwd-user-button__dropdown-info" role="menuitem">
               {displayWallet}
+            </div>
+          )}
+          {/* Current tenant info */}
+          {auth.activeTenantId && auth.tenants && (() => {
+            const current = auth.tenants.find((t) => t.tenantId === auth.activeTenantId);
+            return current ? (
+              <div className="stwd-user-button__dropdown-tenant" role="menuitem">
+                <span className="stwd-user-button__tenant-label">App:</span>{" "}
+                <span className="stwd-user-button__tenant-name">{current.tenantName}</span>
+              </div>
+            ) : null;
+          })()}
+          {/* Inline tenant switcher */}
+          {showTenantSwitcher && auth.tenants && auth.tenants.length > 1 && (
+            <div className="stwd-user-button__tenant-switcher">
+              <div className="stwd-user-button__tenant-switcher-label">Switch App</div>
+              {auth.tenants
+                .filter((t) => t.tenantId !== auth.activeTenantId)
+                .map((tenant) => (
+                  <button
+                    key={tenant.tenantId}
+                    className="stwd-user-button__dropdown-item stwd-user-button__dropdown-item--tenant"
+                    onClick={() => {
+                      void auth.switchTenant(tenant.tenantId).then((ok) => {
+                        if (ok) setOpen(false);
+                      });
+                    }}
+                    type="button"
+                    role="menuitem"
+                    disabled={auth.isLoading}
+                  >
+                    {tenant.tenantName}
+                  </button>
+                ))}
             </div>
           )}
           <button

@@ -1154,3 +1154,157 @@
   border-color: rgba(0, 0, 0, 0.15);
   border-top-color: #1f1f1f;
 }
+
+/* ─── Login Tenant Name ─── */
+.stwd-login__tenant-name {
+  font-size: 0.8125rem;
+  color: var(--stwd-muted, #6B7280);
+  margin-top: 0.25rem;
+}
+
+/* ─── Tenant Picker ─── */
+.stwd-tenant-picker {
+  position: relative;
+  display: inline-block;
+}
+
+.stwd-tenant-picker__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--stwd-radius, 12px);
+  color: var(--stwd-text, #FAFAFA);
+  font-size: 0.875rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.stwd-tenant-picker__trigger:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.stwd-tenant-picker__trigger-label {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stwd-tenant-picker__trigger-arrow {
+  font-size: 0.625rem;
+  color: var(--stwd-muted, #6B7280);
+}
+
+.stwd-tenant-picker__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 200px;
+  background: var(--stwd-surface, #1A1A2E);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: calc(var(--stwd-radius, 12px) / 2);
+  padding: 0.25rem;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.stwd-tenant-picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.stwd-tenant-picker__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: transparent;
+  border: none;
+  border-radius: calc(var(--stwd-radius, 12px) / 2);
+  color: var(--stwd-text, #FAFAFA);
+  font-size: 0.875rem;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+.stwd-tenant-picker__item:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+.stwd-tenant-picker__item:disabled {
+  cursor: default;
+}
+
+.stwd-tenant-picker__item--active {
+  background: rgba(139, 92, 246, 0.12);
+  color: var(--stwd-primary, #8B5CF6);
+}
+.stwd-tenant-picker__item--active:hover:not(:disabled) {
+  background: rgba(139, 92, 246, 0.16);
+}
+
+.stwd-tenant-picker__item-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stwd-tenant-picker__item-role {
+  font-size: 0.75rem;
+  color: var(--stwd-muted, #6B7280);
+  flex-shrink: 0;
+}
+
+.stwd-tenant-picker__empty {
+  padding: 1rem;
+  text-align: center;
+  color: var(--stwd-muted, #6B7280);
+  font-size: 0.875rem;
+}
+
+.stwd-tenant-picker__loading {
+  padding: 0.75rem;
+  text-align: center;
+  color: var(--stwd-muted, #6B7280);
+  font-size: 0.875rem;
+}
+
+/* ─── User Button: Tenant Extensions ─── */
+.stwd-user-button__dropdown-tenant {
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  color: var(--stwd-muted, #6B7280);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.stwd-user-button__tenant-label {
+  color: var(--stwd-muted, #6B7280);
+}
+
+.stwd-user-button__tenant-name {
+  color: var(--stwd-text, #FAFAFA);
+  font-weight: 500;
+}
+
+.stwd-user-button__tenant-switcher {
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 0.25rem;
+}
+
+.stwd-user-button__tenant-switcher-label {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.6875rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--stwd-muted, #6B7280);
+}
+
+.stwd-user-button__dropdown-item--tenant {
+  font-size: 0.8125rem;
+}
