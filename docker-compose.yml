@@ -50,6 +50,10 @@ services:
       PASSKEY_RP_NAME: "${PASSKEY_RP_NAME:-Steward}"
       PASSKEY_RP_ID: "${PASSKEY_RP_ID:-steward.fi}"
       PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.fi}"
+      GOOGLE_CLIENT_ID: "${GOOGLE_CLIENT_ID:-}"
+      GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
+      DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
+      DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
     ports:
       - "127.0.0.1:${PORT:-3200}:3200"
     healthcheck:

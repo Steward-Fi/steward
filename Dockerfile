@@ -23,7 +23,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 0: Base ─────────────────────────────────────────────────────────────
-FROM oven/bun:1.2-alpine AS base
+FROM oven/bun:1.3-alpine AS base
 
 WORKDIR /app
 
@@ -33,6 +33,9 @@ FROM base AS deps
 # Copy manifests only — layer-cached until lockfile changes
 COPY package.json bun.lock turbo.json tsconfig.json ./
 
+# Create stub for excluded workspaces so bun doesn't fail on missing references
+RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
+
 # Package manifests for every workspace package
 COPY packages/api/package.json       packages/api/package.json
 COPY packages/auth/package.json      packages/auth/package.json
@@ -41,36 +44,19 @@ COPY packages/policy-engine/package.json packages/policy-engine/package.json
 COPY packages/proxy/package.json     packages/proxy/package.json
 COPY packages/redis/package.json     packages/redis/package.json
 COPY packages/shared/package.json    packages/shared/package.json
+COPY packages/sdk/package.json       packages/sdk/package.json
 COPY packages/vault/package.json     packages/vault/package.json
 COPY packages/webhooks/package.json  packages/webhooks/package.json
 
-# Strip frontend/example workspaces not present in server builds
-# (web, packages/sdk, and packages/examples/* are excluded via .dockerignore)
-RUN sed -i '/"web"/d; /"packages\/examples\/\*"/d; /"packages\/sdk"/d' package.json
+RUN BUN_FROZEN_LOCKFILE=0 bun install
 
-# Note: --frozen-lockfile is omitted because we patched package.json above
-# (removed frontend workspaces). bun.lock still pins all versions.
-RUN bun install
+# ── Stage 2: Build ────────────────────────────────────────────────────────────
+FROM base AS build
 
-# ── Stage 2: Runtime ──────────────────────────────────────────────────────────
-# Bun executes TypeScript directly — no compilation step needed.
-# All "build" scripts in Steward packages are tsc --noEmit (type-check only),
-# not compilation, so we skip turbo build entirely.
-FROM oven/bun:1.2-alpine AS runtime
-
-WORKDIR /app
-
-ENV NODE_ENV=production
-ENV PORT=3200
-
-# Bring in node_modules from the deps stage
 COPY --from=deps /app/node_modules ./node_modules
-
-# Copy root manifests
 COPY package.json bun.lock turbo.json tsconfig.json ./
-RUN sed -i '/"web"/d; /"packages\/examples\/\*"/d; /"packages\/sdk"/d' package.json
 
-# Copy source for all server packages
+# Copy full source for all packages needed by api + proxy
 COPY packages/api         packages/api
 COPY packages/auth        packages/auth
 COPY packages/db          packages/db
@@ -78,8 +64,52 @@ COPY packages/policy-engine packages/policy-engine
 COPY packages/proxy       packages/proxy
 COPY packages/redis       packages/redis
 COPY packages/shared      packages/shared
+COPY packages/sdk         packages/sdk
 COPY packages/vault       packages/vault
 COPY packages/webhooks    packages/webhooks
+
+# Build api and proxy (and their deps) via turborepo
+RUN bunx turbo run build --filter=@stwd/api --filter=@stwd/proxy
+
+# ── Stage 3: Runtime ──────────────────────────────────────────────────────────
+FROM oven/bun:1.3-alpine AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV PORT=3200
+
+# Install production dependencies only (no dev/build tools)
+COPY package.json bun.lock turbo.json tsconfig.json ./
+
+# Create stub for excluded workspaces
+RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
+
+COPY packages/api/package.json       packages/api/package.json
+COPY packages/auth/package.json      packages/auth/package.json
+COPY packages/db/package.json        packages/db/package.json
+COPY packages/policy-engine/package.json packages/policy-engine/package.json
+COPY packages/proxy/package.json     packages/proxy/package.json
+COPY packages/redis/package.json     packages/redis/package.json
+COPY packages/shared/package.json    packages/shared/package.json
+COPY packages/sdk/package.json       packages/sdk/package.json
+COPY packages/vault/package.json     packages/vault/package.json
+COPY packages/webhooks/package.json  packages/webhooks/package.json
+
+COPY --from=deps /app/bun.lock ./bun.lock
+RUN bun install --production
+
+# Copy compiled output from build stage
+COPY --from=build /app/packages/api         packages/api
+COPY --from=build /app/packages/auth        packages/auth
+COPY --from=build /app/packages/db          packages/db
+COPY --from=build /app/packages/policy-engine packages/policy-engine
+COPY --from=build /app/packages/proxy       packages/proxy
+COPY --from=build /app/packages/redis       packages/redis
+COPY --from=build /app/packages/shared      packages/shared
+COPY --from=build /app/packages/sdk         packages/sdk
+COPY --from=build /app/packages/vault       packages/vault
+COPY --from=build /app/packages/webhooks    packages/webhooks
 
 # ── Non-root user ─────────────────────────────────────────────────────────────
 # bun image already has a 'bun' user (uid 1000); use it.

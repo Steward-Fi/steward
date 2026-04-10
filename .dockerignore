@@ -10,4 +10,5 @@ README.md
 REDESIGN-BRIEF.md
 web
 packages/dashboard
-packages/sdk
+packages/sdk/src/__tests__
+packages/sdk/dist
