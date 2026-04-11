@@ -1,5 +1,5 @@
 # Steward – Docker image (API + Proxy)
-FROM oven/bun:1.2 AS builder
+FROM oven/bun:1.3-alpine AS builder
 WORKDIR /app
 COPY package.json bun.lock* bunfig.toml* turbo.json ./
 COPY packages/ packages/
@@ -15,9 +15,9 @@ RUN sed -i '/"web"/d; /"packages\/examples/d' package.json && \
     fi
 
 RUN bun install --no-frozen-lockfile
-RUN bun run build || true
+RUN bun run build
 
-FROM oven/bun:1.2-slim
+FROM oven/bun:1.3-alpine
 WORKDIR /app
 COPY --from=builder /app/package.json /app/bun.lock* /app/bunfig.toml* /app/turbo.json ./
 COPY --from=builder /app/packages/ packages/
