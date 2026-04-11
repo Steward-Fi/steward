@@ -12,6 +12,7 @@ import { logger } from "hono/logger";
 import { correlationId } from "./middleware/correlation";
 import { tenantCors } from "./middleware/tenant-cors";
 import { approvalRoutes } from "./routes/approvals";
+import { auditRoutes } from "./routes/audit";
 import { authRoutes, initAuthStores } from "./routes/auth";
 import { agentRoutes } from "./routes/agents";
 import { platformRoutes } from "./routes/platform";
@@ -142,6 +143,8 @@ app.use("/webhooks", (c, next) => tenantAuth(c, next));
 app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
 app.use("/approvals", (c, next) => tenantAuth(c, next));
 app.use("/approvals/*", (c, next) => tenantAuth(c, next));
+app.use("/audit", (c, next) => tenantAuth(c, next));
+app.use("/audit/*", (c, next) => tenantAuth(c, next));
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
@@ -209,6 +212,7 @@ app.route("/tenants", tenantConfigRoutes);
 app.route("/dashboard", dashboardRoutes);
 app.route("/webhooks", webhookRoutes);
 app.route("/approvals", approvalRoutes);
+app.route("/audit", auditRoutes);
 
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 

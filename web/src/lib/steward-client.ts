@@ -347,19 +347,87 @@ export class StewardClient {
 
   // ---- Audit ----
   async getAuditLog(params?: AuditQueryParams): Promise<AuditEntry[]> {
-    const qs = params
-      ? "?" + new URLSearchParams(
-          Object.entries(params)
-            .filter(([, v]) => v !== undefined && v !== "")
-            .map(([k, v]) => [k, String(v)])
-        ).toString()
+    const mapped: Record<string, string> = {};
+    if (params?.agentId) mapped.agentId = params.agentId;
+    if (params?.action) mapped.action = params.action;
+    if (params?.result) mapped.status = params.result;
+    if (params?.from) mapped.dateFrom = params.from;
+    if (params?.to) mapped.dateTo = params.to;
+    if (params?.limit) mapped.limit = String(params.limit);
+    if (params?.offset !== undefined && params.limit) {
+      mapped.page = String(Math.floor(params.offset / params.limit) + 1);
+    }
+    const qs = Object.keys(mapped).length
+      ? "?" + new URLSearchParams(mapped).toString()
       : "";
-    // TODO: /audit endpoint not yet implemented
-    return [];
+    const result = await this.request<{ data: Array<{
+      id: string; timestamp: string; agentId: string; action: string;
+      status: string; details?: Record<string, unknown>;
+      policyResults?: unknown; value?: string; to?: string;
+    }>; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/audit/log${qs}`);
+    // Map API response to AuditEntry shape expected by dashboard
+    return result.data.map((e) => ({
+      id: e.id,
+      tenantId: "",
+      agentId: e.agentId,
+      action: e.action,
+      result: (e.status === "rejected" || e.status === "error" || e.status === "denied") ? "deny"
+        : e.status === "error" ? "error" : "allow" as AuditEntry["result"],
+      details: e.details,
+      cost: e.value,
+      timestamp: e.timestamp,
+    }));
   }
 
-  async getAuditSummary(): Promise<AuditSummary[]> {
-    // TODO: /audit/summary endpoint not yet implemented
-    return [];
+  async getAuditSummary(range?: "24h" | "7d" | "30d" | "all"): Promise<AuditSummary[]> {
+    const qs = range ? `?range=${range}` : "";
+    const result = await this.request<{
+      totalTransactions: number;
+      totalApprovals: number;
+      totalRejections: number;
+      totalProxyRequests: number;
+      policyViolations: number;
+      topAgents: Array<{ agentId: string; name: string; txCount: number }>;
+      dailyActivity: Array<{ date: string; txCount: number }>;
+    }>(`/audit/summary${qs}`);
+    // Map to per-agent AuditSummary[] expected by dashboard
+    return result.topAgents.map((a) => ({
+      agentId: a.agentId,
+      agentName: a.name,
+      totalActions: a.txCount,
+      totalCost: "0",
+      allowCount: a.txCount,
+      denyCount: 0,
+    }));
+  }
+
+  async getAuditSummaryFull(range?: "24h" | "7d" | "30d" | "all"): Promise<{
+    totalTransactions: number;
+    totalApprovals: number;
+    totalRejections: number;
+    totalProxyRequests: number;
+    policyViolations: number;
+    topAgents: Array<{ agentId: string; name: string; txCount: number }>;
+    dailyActivity: Array<{ date: string; txCount: number }>;
+  }> {
+    const qs = range ? `?range=${range}` : "";
+    return this.request(`/audit/summary${qs}`);
+  }
+
+  async exportAuditCsv(params?: AuditQueryParams): Promise<string> {
+    const mapped: Record<string, string> = {};
+    if (params?.agentId) mapped.agentId = params.agentId;
+    if (params?.action) mapped.action = params.action;
+    if (params?.result) mapped.status = params.result;
+    if (params?.from) mapped.dateFrom = params.from;
+    if (params?.to) mapped.dateTo = params.to;
+    const qs = Object.keys(mapped).length
+      ? "?" + new URLSearchParams(mapped).toString()
+      : "";
+    const res = await fetch(`${this.baseUrl}/audit/export${qs}`, {
+      headers: this.headers,
+    });
+    if (!res.ok) throw new Error(`Export failed: ${res.status}`);
+    return res.text();
   }
 }
