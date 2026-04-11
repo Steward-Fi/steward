@@ -294,66 +294,55 @@ export class StewardClient {
   // ---- Routes ----
   async listRoutes(secretId?: string): Promise<RouteRecord[]> {
     const qs = secretId ? `?secretId=${encodeURIComponent(secretId)}` : "";
-    return this.request<RouteRecord[]>(`/routes${qs}`);
+    return this.request<RouteRecord[]>(`/secrets/routes${qs}`);
   }
 
   async createRoute(payload: RouteCreatePayload): Promise<RouteRecord> {
-    return this.request<RouteRecord>("/routes", {
+    return this.request<RouteRecord>("/secrets/routes", {
       method: "POST",
       body: JSON.stringify(payload),
     });
   }
 
   async updateRoute(routeId: string, payload: Partial<RouteCreatePayload>): Promise<RouteRecord> {
-    return this.request<RouteRecord>(`/routes/${routeId}`, {
+    return this.request<RouteRecord>(`/secrets/routes/${routeId}`, {
       method: "PUT",
       body: JSON.stringify(payload),
     });
   }
 
   async deleteRoute(routeId: string): Promise<void> {
-    return this.request<void>(`/routes/${routeId}`, { method: "DELETE" });
+    return this.request<void>(`/secrets/routes/${routeId}`, { method: "DELETE" });
   }
 
   // ---- Policies ----
   async listPolicies(): Promise<PolicyRecord[]> {
-    return this.request<PolicyRecord[]>("/policies");
+    // TODO: /policies endpoint not yet implemented
+    return [];
   }
 
   async createPolicy(payload: PolicyCreatePayload): Promise<PolicyRecord> {
-    return this.request<PolicyRecord>("/policies", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    throw new Error("Standalone policy API not yet implemented");
   }
 
   async getPolicy(policyId: string): Promise<PolicyRecord> {
-    return this.request<PolicyRecord>(`/policies/${policyId}`);
+    throw new Error("Standalone policy API not yet implemented");
   }
 
   async updatePolicy(policyId: string, payload: Partial<PolicyCreatePayload>): Promise<PolicyRecord> {
-    return this.request<PolicyRecord>(`/policies/${policyId}`, {
-      method: "PUT",
-      body: JSON.stringify(payload),
-    });
+    throw new Error("Standalone policy API not yet implemented");
   }
 
   async deletePolicy(policyId: string): Promise<void> {
-    return this.request<void>(`/policies/${policyId}`, { method: "DELETE" });
+    throw new Error("Standalone policy API not yet implemented");
   }
 
   async assignPolicy(policyId: string, agentIds: string[]): Promise<PolicyRecord> {
-    return this.request<PolicyRecord>(`/policies/${policyId}/assign`, {
-      method: "POST",
-      body: JSON.stringify({ agentIds }),
-    });
+    throw new Error("Standalone policy API not yet implemented");
   }
 
   async simulatePolicy(payload: PolicySimulatePayload): Promise<PolicySimulateResult> {
-    return this.request<PolicySimulateResult>("/policies/simulate", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
+    throw new Error("Standalone policy API not yet implemented");
   }
 
   // ---- Audit ----
@@ -365,10 +354,12 @@ export class StewardClient {
             .map(([k, v]) => [k, String(v)])
         ).toString()
       : "";
-    return this.request<AuditEntry[]>(`/audit${qs}`);
+    // TODO: /audit endpoint not yet implemented
+    return [];
   }
 
   async getAuditSummary(): Promise<AuditSummary[]> {
-    return this.request<AuditSummary[]>("/audit/summary");
+    // TODO: /audit/summary endpoint not yet implemented
+    return [];
   }
 }
