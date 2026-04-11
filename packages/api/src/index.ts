@@ -24,6 +24,7 @@ import { secretsRoutes } from "./routes/secrets";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
+import { erc8004Routes, discoveryRoutes } from "./routes/erc8004";
 
 import {
   API_VERSION,
@@ -217,6 +218,8 @@ app.route("/webhooks", webhookRoutes);
 app.route("/approvals", approvalRoutes);
 app.route("/audit", auditRoutes);
 app.route("/policies", policiesStandaloneRoutes);
+app.route("/agents", erc8004Routes);
+app.route("/discovery", discoveryRoutes);
 
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
