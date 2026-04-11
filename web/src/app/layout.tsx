@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import "@rainbow-me/rainbowkit/styles.css";
+import "@stwd/react/styles.css";
 import { Providers } from "@/components/providers";
 
 const metadataBase = (() => {

@@ -1,8 +1,12 @@
 "use client";
 
-import { createElement, type ReactNode } from "react";
-import { AuthProvider } from "@/components/auth-provider";
+/**
+ * auth-wrapper.tsx — Deprecated. Auth is now handled by StewardProvider.
+ * Kept as a no-op for any stale imports.
+ */
+
+import { type ReactNode } from "react";
 
 export function AuthWrapper({ children }: { children: ReactNode }) {
-  return createElement(AuthProvider, null, children) as any;
+  return <>{children}</>;
 }
