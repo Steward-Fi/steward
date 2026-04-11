@@ -8,8 +8,9 @@
  * dashboard pages keep working without rewrites.
  */
 
-import { useMemo } from "react";
+import { useMemo, useEffect } from "react";
 import { useAuth as useNewAuth } from "@stwd/react";
+import { setAuthToken } from "@/lib/api";
 
 interface TenantInfo {
   tenantId: string;
@@ -33,6 +34,14 @@ export interface AuthContextType {
 
 export function useAuth(): AuthContextType {
   const auth = useNewAuth();
+
+  // Wire the JWT into the API client so dashboard pages can make authenticated calls
+  useEffect(() => {
+    const token = auth.getToken();
+    if (token) {
+      setAuthToken(token);
+    }
+  }, [auth.isAuthenticated, auth.session]);
 
   return useMemo(() => {
     const user = auth.user;
