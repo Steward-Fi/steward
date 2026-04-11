@@ -1,4 +1,4 @@
-import React, { useState, useContext } from "react";
+import React, { useState, useContext, useEffect, useRef } from "react";
 import { StewardAuthContext } from "../provider.js";
 import type { StewardLoginProps } from "../types.js";
 import { GoogleIcon, DiscordIcon, PasskeyIcon, EmailIcon, EthereumIcon } from "../icons/index.js";
@@ -61,6 +61,18 @@ export function StewardLogin({
       </div>
     );
   }
+
+  // Track whether we've already fired onSuccess to avoid double-calling
+  const didFireSuccess = useRef(false);
+
+  // When auth state changes to authenticated, fire onSuccess for redirect
+  useEffect(() => {
+    if (ctx.isAuthenticated && ctx.session?.token && onSuccess && !didFireSuccess.current) {
+      didFireSuccess.current = true;
+      const user = ctx.session.user ?? { id: "", email: "" };
+      onSuccess({ token: ctx.session.token, user });
+    }
+  }, [ctx.isAuthenticated, ctx.session, onSuccess]);
 
   // Already signed in
   if (ctx.isAuthenticated) {
