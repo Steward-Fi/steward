@@ -51,7 +51,13 @@ export function StewardUserButton({
   showTenantSwitcher = false,
 }: StewardUserButtonProps) {
   const auth = useAuth();
-  const { user, signOut } = auth;
+  const { signOut, session } = auth;
+  // Prefer auth.user, but fall back to session fields (user is null on refresh)
+  const user = auth.user ?? (session ? {
+    id: session.userId ?? session.address ?? "",
+    email: session.email ?? "",
+    walletAddress: session.address || undefined,
+  } : null);
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
