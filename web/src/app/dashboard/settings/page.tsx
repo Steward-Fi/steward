@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount } from "wagmi";
+
 import { motion } from "framer-motion";
 import { API_URL } from "@/lib/api";
 import { useAuth } from "@/components/auth-provider";
@@ -18,7 +18,7 @@ const CHAIN_NAMES: Record<number, string> = {
 
 export default function SettingsPage() {
   const { address, tenant } = useAuth();
-  const { chainId } = useAccount();
+  const chainId = 8453; // Base mainnet
   const [webhookUrl, setWebhookUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
