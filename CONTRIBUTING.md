@@ -117,6 +117,51 @@ bun test
 - **React:** BEM CSS naming with `stwd-` prefix (e.g., `stwd-login__button--active`)
 - **Error handling:** throw typed errors, don't swallow silently
 
+## Releasing
+
+Steward uses git tags to trigger the release pipeline. When a `v*` tag is pushed, CI will:
+1. Build and push a Docker image to GHCR (`ghcr.io/steward-fi/steward`)
+2. Publish `@stwd/sdk`, `@stwd/react`, and `@stwd/eliza-plugin` to npm
+3. Create a GitHub Release with auto-generated changelog
+
+### How to release
+
+The easiest way is the release script:
+
+```bash
+./scripts/release.sh 0.4.0
+```
+
+This will:
+1. Bump versions in `packages/sdk`, `packages/react`, and `packages/eliza-plugin`
+2. Update cross-dependencies (`@stwd/sdk` version in react and eliza-plugin)
+3. Commit: `chore: release v0.4.0`
+4. Tag: `v0.4.0`
+5. Push branch + tags
+
+### Manual release
+
+If you prefer to do it manually:
+
+```bash
+# 1. Bump versions in package.json files
+# packages/sdk, packages/react, packages/eliza-plugin
+
+# 2. Commit
+git add packages/*/package.json
+git commit -m "chore: release v0.4.0"
+
+# 3. Tag and push
+git tag v0.4.0
+git push origin develop --tags
+```
+
+### Required secrets
+
+The release pipeline requires these GitHub Actions secrets:
+- `NPM_TOKEN` - npm auth token with publish access to the `@stwd` org
+- `GITHUB_TOKEN` - provided automatically by GitHub Actions
+
 ## Need Help?
 
 - Open an issue if something is unclear

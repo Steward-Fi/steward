@@ -1,3 +1,5 @@
+# Build and push Docker image to GitHub Container Registry (GHCR)
+# Triggers on pushes to develop branch and version tags (v*)
 name: Docker
 
 on:
@@ -8,14 +10,18 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # packages:write is required to push to GHCR
+    # contents:read is required to checkout the repo
     permissions:
       contents: read
       packages: write
 
     steps:
+      # Checkout the repository
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Authenticate with GHCR using the automatic GITHUB_TOKEN
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -23,9 +29,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Enable BuildKit for layer caching and multi-platform builds
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Generate image tags and labels from git metadata
+      # - branch pushes get the branch name as tag (e.g. develop)
+      # - version tags get semver tags (e.g. 0.4.0, 0.4)
+      # - version tags also get "latest"
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -37,6 +48,9 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
+      # Build the image and push to GHCR
+      # provenance:false avoids multi-arch manifest issues with single-platform builds
+      # GHA cache speeds up subsequent builds by caching layers
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
