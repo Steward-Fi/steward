@@ -5,6 +5,13 @@ set -euo pipefail
 # Steward Migration Runner
 # Usage: ./scripts/migrate.sh [--dry-run]
 # Requires: DATABASE_URL env var or reads from /opt/steward/.env
+#
+# NOTE: This script runs ALL numbered SQL files every time (no tracking table).
+# This is safe because all Drizzle-generated migrations use idempotent DDL
+# (CREATE TABLE IF NOT EXISTS, DO $$ blocks with existence checks, etc.).
+# Re-running against an already-migrated database is a no-op for each file.
+#
+# If you add custom migrations, ensure they are also idempotent.
 # =============================================================================
 
 DRY_RUN=false
