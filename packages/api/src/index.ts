@@ -22,6 +22,7 @@ import { userRoutes } from "./routes/user";
 import { secretsRoutes } from "./routes/secrets";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
+import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 
 import {
   API_VERSION,
@@ -142,6 +143,8 @@ app.use("/webhooks", (c, next) => tenantAuth(c, next));
 app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
 app.use("/approvals", (c, next) => tenantAuth(c, next));
 app.use("/approvals/*", (c, next) => tenantAuth(c, next));
+app.use("/policies", (c, next) => tenantAuth(c, next));
+app.use("/policies/*", (c, next) => tenantAuth(c, next));
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
@@ -209,6 +212,7 @@ app.route("/tenants", tenantConfigRoutes);
 app.route("/dashboard", dashboardRoutes);
 app.route("/webhooks", webhookRoutes);
 app.route("/approvals", approvalRoutes);
+app.route("/policies", policiesStandaloneRoutes);
 
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
