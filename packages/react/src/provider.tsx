@@ -96,16 +96,16 @@ export function StewardProvider({
     });
   }, [authConfig?.baseUrl, authConfig?.storage]);
 
-  const [authSession, setAuthSession] = useState<StewardSession | null>(
-    () => authInstance?.getSession() ?? null,
-  );
+  const [authSession, setAuthSession] = useState<StewardSession | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
+  const [authInitialized, setAuthInitialized] = useState(false);
 
   // Subscribe to session changes from the StewardAuth instance
   useEffect(() => {
     if (!authInstance) return;
-    // Sync initial session
+    // Sync initial session (must run client-side where localStorage exists)
     setAuthSession(authInstance.getSession());
+    setAuthInitialized(true);
     // Subscribe to future changes
     const unsubscribe = authInstance.onSessionChange((session) => {
       setAuthSession(session);
@@ -302,7 +302,7 @@ export function StewardProvider({
     if (!authInstance) return null;
     return {
       isAuthenticated: authSession !== null,
-      isLoading: authLoading,
+      isLoading: authLoading || !authInitialized,
       user: authSession?.user ?? null,
       session: authSession,
       providers,
@@ -324,7 +324,7 @@ export function StewardProvider({
       leaveTenant,
     };
   }, [
-    authInstance, authSession, authLoading, providers, isProvidersLoading,
+    authInstance, authSession, authLoading, authInitialized, providers, isProvidersLoading,
     signOut, getToken, signInWithPasskey, signInWithEmail, verifyEmailCallback,
     signInWithSIWE, signInWithOAuth,
     activeTenantId, tenants, isTenantsLoading, listTenants, switchTenant,
