@@ -22,6 +22,7 @@ import { userRoutes } from "./routes/user";
 import { secretsRoutes } from "./routes/secrets";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
+import { erc8004Routes, discoveryRoutes } from "./routes/erc8004";
 
 import {
   API_VERSION,
@@ -209,6 +210,8 @@ app.route("/tenants", tenantConfigRoutes);
 app.route("/dashboard", dashboardRoutes);
 app.route("/webhooks", webhookRoutes);
 app.route("/approvals", approvalRoutes);
+app.route("/agents", erc8004Routes);
+app.route("/discovery", discoveryRoutes);
 
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
