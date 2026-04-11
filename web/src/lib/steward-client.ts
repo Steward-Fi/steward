@@ -1,4 +1,4 @@
-// Inline SDK client for standalone deployment
+// TODO: Replace this inline client with @stwd/sdk. This is a divergent copy that predates the SDK.
 // Mirrors @stwd/sdk interface
 
 // ---- Secrets ----

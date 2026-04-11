@@ -578,7 +578,7 @@ export default function PoliciesPage() {
                 </div>
 
                 {/* Metadata */}
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <div className="text-xs text-text-tertiary">Created</div>
                     <div className="text-sm font-mono text-text-secondary">{formatDate(selected.createdAt)}</div>
@@ -759,7 +759,7 @@ export default function PoliciesPage() {
                         <p className="text-xs text-violet-400 font-display font-600">Policy Simulator</p>
                         <p className="text-xs text-text-tertiary">Test whether a request would be allowed by this policy.</p>
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div>
                             <label className="text-xs text-text-tertiary block mb-1">Agent <span className="text-accent">*</span></label>
                             <select
@@ -798,7 +798,7 @@ export default function PoliciesPage() {
                           />
                         </div>
 
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div>
                             <label className="text-xs text-text-tertiary block mb-1">Value (ETH)</label>
                             <input

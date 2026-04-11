@@ -1,9 +1,6 @@
 "use client";
 
-/**
- * auth-wrapper.tsx — Deprecated. Auth is now handled by StewardProvider.
- * Kept as a no-op for any stale imports.
- */
+// DEPRECATED: Auth is now handled by @stwd/react StewardProvider. This file kept for import compatibility.
 
 import { type ReactNode } from "react";
 

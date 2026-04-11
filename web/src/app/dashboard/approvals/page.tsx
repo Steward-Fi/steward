@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { motion, AnimatePresence } from "framer-motion";
-import { steward, API_URL } from "@/lib/api";
+import { steward } from "@/lib/api";
 import { useAuth } from "@/components/auth-provider";
 import { shortenAddress, formatDate, formatWei } from "@/lib/utils";
 import { getChainSymbol } from "@/lib/chains";
@@ -34,8 +34,6 @@ interface Toast {
 
 export default function ApprovalsPage() {
   const { tenant } = useAuth();
-  const TENANT_ID = tenant?.tenantId || "";
-  const API_KEY = tenant?.apiKey || "";
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -63,16 +61,10 @@ export default function ApprovalsPage() {
 
       for (const agent of agents) {
         try {
-          const res = await fetch(`${API_URL}/vault/${agent.id}/pending`, {
-            headers: {
-              "X-Steward-Tenant": TENANT_ID,
-              "X-Steward-Key": API_KEY,
-            },
-          });
-          const data = await res.json();
-          if (data.ok && data.data) {
+          const data = await steward.getPending(agent.id);
+          if (data) {
             allPending.push(
-              ...data.data.map((item: PendingItem) => ({
+              ...data.map((item: PendingItem) => ({
                 ...item,
                 agentId: agent.id,
                 agentName: agent.name,
@@ -104,32 +96,21 @@ export default function ApprovalsPage() {
     const key = `${txId}-${action}`;
     setActionLoading(key);
     try {
-      const res = await fetch(
-        `${API_URL}/vault/${agentId}/${action}/${txId}`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Steward-Tenant": TENANT_ID,
-            "X-Steward-Key": API_KEY,
-          },
-        }
-      );
-      const data = await res.json();
-      if (data.ok) {
-        // Optimistically remove from list
-        setPending((prev) =>
-          prev.filter((item) => item.transaction?.id !== txId)
-        );
-        addToast(
-          action === "approve"
-            ? "Transaction approved and queued for signing"
-            : "Transaction rejected",
-          "success"
-        );
+      if (action === "approve") {
+        await steward.approve(agentId, txId);
       } else {
-        addToast(data.error || `Failed to ${action}`, "error");
+        await steward.reject(agentId, txId);
       }
+      // Optimistically remove from list
+      setPending((prev) =>
+        prev.filter((item) => item.transaction?.id !== txId)
+      );
+      addToast(
+        action === "approve"
+          ? "Transaction approved and queued for signing"
+          : "Transaction rejected",
+        "success"
+      );
     } catch (e: unknown) {
       addToast(
         e instanceof Error ? e.message : `Failed to ${action}`,

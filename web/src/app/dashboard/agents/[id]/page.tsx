@@ -123,7 +123,7 @@ export default function AgentDetailPage() {
     return (
       <div className="space-y-8">
         <div className="h-8 w-64 bg-bg-surface animate-pulse" />
-        <div className="grid grid-cols-3 gap-px bg-border">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-px bg-border">
           {[...Array(3)].map((_, i) => (
             <div key={i} className="bg-bg p-8 h-28 animate-pulse" />
           ))}
@@ -242,7 +242,7 @@ export default function AgentDetailPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-px bg-border">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-px bg-border">
         {[
           {
             label: "Balance",

@@ -315,9 +315,9 @@ export default function AuditPage() {
           )}
         </div>
       ) : !error ? (
-        <div>
+        <div className="overflow-x-auto">
           {/* Column headers */}
-          <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-4 px-3 py-2 text-xs text-text-tertiary uppercase tracking-wider border-b border-border-subtle">
+          <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-4 px-3 py-2 text-xs text-text-tertiary uppercase tracking-wider border-b border-border-subtle min-w-[600px]">
             <span>Action</span>
             <span className="hidden md:block">Agent</span>
             <span className="hidden md:block">Result</span>

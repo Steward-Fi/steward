@@ -121,7 +121,7 @@ export default function DashboardLayout({
     >
       <div className="min-h-screen bg-bg">
         <DashboardNav />
-        <main className="max-w-[1400px] mx-auto px-6 md:px-10 py-8 md:py-12">
+        <main className="max-w-[1400px] mx-auto px-4 md:px-6 lg:px-10 py-8 md:py-12">
           {children}
         </main>
       </div>

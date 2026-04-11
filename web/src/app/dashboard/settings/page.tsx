@@ -102,7 +102,7 @@ const policies = await steward.getPolicies("my-agent")`;
           <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
             Account
           </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-px bg-border">
             <div className="bg-bg p-5">
               <label className="text-xs text-text-tertiary block mb-2">
                 Wallet

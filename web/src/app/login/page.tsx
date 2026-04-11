@@ -23,7 +23,7 @@ export default function LoginPage() {
   const router = useRouter();
 
   return (
-    <div className="min-h-screen bg-bg flex items-center justify-center px-6">
+    <div className="min-h-screen bg-bg flex items-center justify-center px-4 sm:px-6">
       <div className="w-full max-w-sm">
         <StewardLogin
           variant="card"

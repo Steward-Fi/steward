@@ -410,7 +410,7 @@ export default function SecretsPage() {
                 </div>
 
                 {/* Metadata */}
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
                   {[
                     { label: "Version", value: `v${selected.version}` },
                     { label: "Routes", value: String(selected.routeCount) },
