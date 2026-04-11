@@ -3,6 +3,7 @@ import type {
   AgentIdentity,
   ApiResponse,
   ChainFamily,
+  ExportKeyResult,
   PolicyResult,
   PolicyRule,
   RpcRequest,
@@ -327,6 +328,40 @@ export class StewardClient {
   async getAddresses(agentId: string): Promise<GetAddressesResult> {
     const response = await this.request<GetAddressesResult, StewardErrorResponse>(
       `/vault/${encodeURIComponent(agentId)}/addresses`,
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Export the private keys for the authenticated user's personal wallet.
+   * Requires a user session token (Bearer JWT).
+   */
+  async exportUserWalletKey(): Promise<ExportKeyResult> {
+    const response = await this.request<ExportKeyResult, StewardErrorResponse>(
+      "/user/me/wallet/export",
+      { method: "POST" },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Export the private keys for a vault agent.
+   * Requires tenant-level authentication.
+   */
+  async exportAgentKey(agentId: string): Promise<ExportKeyResult> {
+    const response = await this.request<ExportKeyResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/export`,
+      { method: "POST" },
     );
 
     if (!response.ok) {

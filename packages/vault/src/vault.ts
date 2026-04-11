@@ -910,6 +910,108 @@ export class Vault {
   }
 
   /**
+   * Export the decrypted private keys for an agent.
+   * Returns both EVM and Solana keys where available.
+   * The caller is responsible for securing the returned material.
+   */
+  async exportPrivateKey(
+    tenantId: string,
+    agentId: string,
+  ): Promise<{
+    evm?: { privateKey: string; address: string };
+    solana?: { privateKey: string; address: string };
+  }> {
+    const db = getDb();
+
+    // Verify agent belongs to this tenant
+    const [agentRow] = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+
+    if (!agentRow) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+
+    const result: {
+      evm?: { privateKey: string; address: string };
+      solana?: { privateKey: string; address: string };
+    } = {};
+
+    // ── Get EVM key (prefer multi-chain table, fall back to legacy) ──────
+    const [evmChainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+        ),
+      );
+
+    if (evmChainKey) {
+      const pk = this.keyStore.decrypt({
+        ciphertext: evmChainKey.ciphertext,
+        iv: evmChainKey.iv,
+        tag: evmChainKey.tag,
+        salt: evmChainKey.salt,
+      });
+      const [evmWallet] = await db
+        .select({ address: agentWallets.address })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, agentId),
+            eq(agentWallets.chainFamily, "evm"),
+          ),
+        );
+      result.evm = { privateKey: pk, address: evmWallet?.address ?? privateKeyToAccount(pk as `0x${string}`).address };
+    } else {
+      // Legacy: encrypted_keys table (EVM only)
+      const [legacyKey] = await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, agentId));
+      if (legacyKey) {
+        const pk = this.keyStore.decrypt(legacyKey as EncryptedKey);
+        result.evm = { privateKey: pk, address: privateKeyToAccount(pk as `0x${string}`).address };
+      }
+    }
+
+    // ── Get Solana key ───────────────────────────────────────────────────
+    const [solChainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, "solana"),
+        ),
+      );
+
+    if (solChainKey) {
+      const pk = this.keyStore.decrypt({
+        ciphertext: solChainKey.ciphertext,
+        iv: solChainKey.iv,
+        tag: solChainKey.tag,
+        salt: solChainKey.salt,
+      });
+      const [solWallet] = await db
+        .select({ address: agentWallets.address })
+        .from(agentWallets)
+        .where(
+          and(
+            eq(agentWallets.agentId, agentId),
+            eq(agentWallets.chainFamily, "solana"),
+          ),
+        );
+      result.solana = { privateKey: pk, address: solWallet?.address ?? "" };
+    }
+
+    return result;
+  }
+
+  /**
    * Proxy a read-only RPC call to the appropriate chain provider.
    * Supports both EVM and Solana RPC methods.
    */

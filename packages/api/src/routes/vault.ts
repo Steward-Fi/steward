@@ -890,6 +890,42 @@ vaultRoutes.post("/:agentId/import", async (c) => {
   }
 });
 
+// ─── Key Export ──────────────────────────────────────────────────────────
+
+vaultRoutes.post("/:agentId/export", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Key export requires tenant-level authentication" }, 403);
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  try {
+    const keys = await vault.exportPrivateKey(tenantId, agentId);
+
+    return c.json<ApiResponse<{
+      evm?: { privateKey: string; address: string };
+      solana?: { privateKey: string; address: string };
+      warning: string;
+    }>>({
+      ok: true,
+      data: {
+        ...keys,
+        warning: "This key controls real funds. Store securely.",
+      },
+    });
+  } catch (e: unknown) {
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Key export failed for agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
 // ─── Webhook dispatch helper ──────────────────────────────────────────────────
 
 type WebhookEventType = "approval_required" | "tx_signed" | "tx_confirmed" | "tx_failed" | "tx_rejected";
