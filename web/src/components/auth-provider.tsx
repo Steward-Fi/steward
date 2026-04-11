@@ -6,11 +6,13 @@
  * Wraps the new @stwd/react useAuth hook to provide backward-compatible
  * properties (address, tenant, email, userId, signIn, etc.) so existing
  * dashboard pages keep working without rewrites.
+ *
+ * NOTE: Token syncing is handled by AuthTokenSync in providers.tsx.
+ * Do NOT call setAuthToken here to avoid double re-creation of the client.
  */
 
-import { useMemo, useEffect } from "react";
+import { useMemo } from "react";
 import { useAuth as useNewAuth } from "@stwd/react";
-import { setAuthToken } from "@/lib/api";
 
 interface TenantInfo {
   tenantId: string;
@@ -35,19 +37,9 @@ export interface AuthContextType {
 export function useAuth(): AuthContextType {
   const auth = useNewAuth();
 
-  // Wire the JWT into the API client so dashboard pages can make authenticated calls
-  useEffect(() => {
-    const token = auth.getToken();
-    if (token) {
-      setAuthToken(token);
-    }
-  }, [auth.isAuthenticated, auth.session]);
-
   return useMemo(() => {
     const user = auth.user;
-    const session = auth.session;
 
-    // Build backward-compatible tenant object from session
     const tenant: TenantInfo | null =
       auth.activeTenantId
         ? {
@@ -58,28 +50,24 @@ export function useAuth(): AuthContextType {
         : null;
 
     return {
-      address: (user as any)?.address ?? undefined,
+      address: (user as unknown as Record<string, unknown>)?.address as string | undefined,
       email: user?.email ?? undefined,
       userId: user?.id ?? undefined,
       tenant,
       isAuthenticated: auth.isAuthenticated,
       isLoading: auth.isLoading,
-      signIn: async () => {
-        // No-op for backward compat; SIWE is handled by StewardLogin now
-      },
+      signIn: async () => {},
       signInWithPasskey: async (email: string) => {
         await auth.signInWithPasskey(email);
       },
       signInWithEmail: async (email: string) => {
         const result = await auth.signInWithEmail(email);
-        return { ok: true, expiresAt: (result as any).expiresAt };
+        return { ok: true, expiresAt: (result as unknown as Record<string, unknown>).expiresAt as string };
       },
-      completeEmailAuth: () => {
-        // No-op; handled by StewardEmailCallback now
-      },
+      completeEmailAuth: () => {},
       signOut: async () => {
         auth.signOut();
       },
     };
-  }, [auth]);
+  }, [auth.isAuthenticated, auth.isLoading, auth.user, auth.activeTenantId]);
 }

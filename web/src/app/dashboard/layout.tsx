@@ -1,11 +1,25 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { useRouter, redirect } from "next/navigation";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "framer-motion";
 import { StewardAuthGuard, StewardUserButton } from "@stwd/react";
+import { useEffect } from "react";
+
+/** Redirect component that only fires once via useEffect (not during render) */
+function RedirectToLogin() {
+  const router = useRouter();
+  useEffect(() => {
+    router.replace("/login");
+  }, [router]);
+  return (
+    <div className="min-h-screen bg-bg flex items-center justify-center">
+      <div className="w-5 h-5 border border-text-tertiary border-t-accent animate-spin" />
+    </div>
+  );
+}
 
 const links = [
   { href: "/dashboard", label: "Overview", exact: true },
@@ -99,11 +113,9 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const router = useRouter();
-
   return (
     <StewardAuthGuard
-      fallback={<>{router.push("/login")}</>}
+      fallback={<RedirectToLogin />}
       loadingFallback={<LoadingSpinner />}
     >
       <div className="min-h-screen bg-bg">
