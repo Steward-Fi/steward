@@ -1,16 +1,16 @@
 import type { TenantTheme } from "../types.js";
 
 export const DEFAULT_THEME: TenantTheme = {
-  primaryColor: "#8B5CF6",
-  accentColor: "#A78BFA",
-  backgroundColor: "#0F0F0F",
-  surfaceColor: "#1A1A2E",
-  textColor: "#FAFAFA",
-  mutedColor: "#6B7280",
-  successColor: "#10B981",
-  errorColor: "#EF4444",
-  warningColor: "#F59E0B",
-  borderRadius: 12,
+  primaryColor: "#D4A054",
+  accentColor: "#E0B060",
+  backgroundColor: "#0B0A09",
+  surfaceColor: "#1C1A17",
+  textColor: "#E8E5E0",
+  mutedColor: "#6B6560",
+  successColor: "#4ADE80",
+  errorColor: "#F87171",
+  warningColor: "#FBBF24",
+  borderRadius: 8,
   fontFamily: "Inter, system-ui, sans-serif",
   colorScheme: "dark",
 };

@@ -1036,13 +1036,14 @@
   cursor: not-allowed;
 }
 .stwd-login__btn:focus-visible {
-  outline: 2px solid var(--stwd-primary, #8B5CF6);
+  outline: 2px solid var(--stwd-primary, #D4A054);
   outline-offset: 2px;
 }
 
 .stwd-login__btn--passkey {
-  background: var(--stwd-primary, #8B5CF6);
-  color: #fff;
+  background: var(--stwd-primary, #D4A054);
+  color: #0B0A09;
+  font-weight: 600;
 }
 
 .stwd-login__btn--email {
