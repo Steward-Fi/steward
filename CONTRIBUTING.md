@@ -117,6 +117,15 @@ bun test
 - **React:** BEM CSS naming with `stwd-` prefix (e.g., `stwd-login__button--active`)
 - **Error handling:** throw typed errors, don't swallow silently
 
+## Versioning
+
+Steward uses **independent versioning** for published vs internal packages:
+
+- **Published packages** (`@stwd/sdk`, `@stwd/react`, `@stwd/eliza-plugin`) follow semver and are bumped by the release script. These may have different versions from each other (e.g., sdk 0.7.2, react 0.6.4) based on their individual change cadence.
+- **Internal packages** (`api`, `auth`, `db`, `proxy`, `redis`, `vault`, `webhooks`, `policy-engine`, `shared`, etc.) are pinned at 0.3.0 and versioned together. They are marked `"private": true` and are never published to npm. Their version number is informational only.
+
+Do not try to synchronize published and internal package versions. They serve different audiences.
+
 ## Releasing
 
 Steward uses git tags to trigger the release pipeline. When a `v*` tag is pushed, CI will:
