@@ -327,9 +327,8 @@ export class StewardAuth {
     };
     let browserLib: SimpleWebAuthnBrowser;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-      const mod = await import("@simplewebauthn/browser" as string);
-      browserLib = mod as SimpleWebAuthnBrowser;
+      const mod = await import(/* webpackIgnore: true */ "@simplewebauthn/browser");
+      browserLib = mod as unknown as SimpleWebAuthnBrowser;
     } catch {
       throw new StewardApiError(
         "Missing peer dependency: @simplewebauthn/browser. Install it to use passkeys.",

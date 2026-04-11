@@ -157,7 +157,10 @@
     },
     "packages/sdk": {
       "name": "@stwd/sdk",
-      "version": "0.7.0",
+      "version": "0.7.1",
+      "devDependencies": {
+        "@simplewebauthn/browser": "^13.0.0",
+      },
     },
     "packages/seed": {
       "name": "@stwd/seed",
