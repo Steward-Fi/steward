@@ -1,6 +1,7 @@
 {
   "name": "@stwd/redis",
   "version": "0.3.0",
+  "private": true,
   "description": "Redis client, rate limiting, spend tracking, and policy caching for Steward",
   "type": "module",
   "main": "dist/index.js",
