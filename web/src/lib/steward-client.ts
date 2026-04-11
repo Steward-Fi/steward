@@ -317,32 +317,43 @@ export class StewardClient {
 
   // ---- Policies ----
   async listPolicies(): Promise<PolicyRecord[]> {
-    // TODO: /policies endpoint not yet implemented
-    return [];
+    return this.request<PolicyRecord[]>("/policies");
   }
 
   async createPolicy(payload: PolicyCreatePayload): Promise<PolicyRecord> {
-    throw new Error("Standalone policy API not yet implemented");
+    return this.request<PolicyRecord>("/policies", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   }
 
   async getPolicy(policyId: string): Promise<PolicyRecord> {
-    throw new Error("Standalone policy API not yet implemented");
+    return this.request<PolicyRecord>(`/policies/${policyId}`);
   }
 
   async updatePolicy(policyId: string, payload: Partial<PolicyCreatePayload>): Promise<PolicyRecord> {
-    throw new Error("Standalone policy API not yet implemented");
+    return this.request<PolicyRecord>(`/policies/${policyId}`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    });
   }
 
   async deletePolicy(policyId: string): Promise<void> {
-    throw new Error("Standalone policy API not yet implemented");
+    return this.request<void>(`/policies/${policyId}`, { method: "DELETE" });
   }
 
   async assignPolicy(policyId: string, agentIds: string[]): Promise<PolicyRecord> {
-    throw new Error("Standalone policy API not yet implemented");
+    return this.request<PolicyRecord>(`/policies/${policyId}/assign`, {
+      method: "POST",
+      body: JSON.stringify({ agentIds }),
+    });
   }
 
   async simulatePolicy(payload: PolicySimulatePayload): Promise<PolicySimulateResult> {
-    throw new Error("Standalone policy API not yet implemented");
+    return this.request<PolicySimulateResult>("/policies/simulate", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
   }
 
   // ---- Audit ----
@@ -361,5 +372,24 @@ export class StewardClient {
   async getAuditSummary(): Promise<AuditSummary[]> {
     // TODO: /audit/summary endpoint not yet implemented
     return [];
+  }
+
+  // ---- Tenants ----
+  async listTenants(): Promise<Array<{ tenantId: string; tenantName: string; role: string; joinedAt: string }>> {
+    return this.request<Array<{ tenantId: string; tenantName: string; role: string; joinedAt: string }>>("/user/me/tenants");
+  }
+
+  async createTenant(name: string, description?: string): Promise<{ tenantId: string; apiKey: string }> {
+    return this.request<{ tenantId: string; apiKey: string }>("/user/me/tenants", {
+      method: "POST",
+      body: JSON.stringify({ name, description }),
+    });
+  }
+
+  async switchTenant(tenantId: string): Promise<void> {
+    return this.request<void>("/user/me/tenants/switch", {
+      method: "POST",
+      body: JSON.stringify({ tenantId }),
+    });
   }
 }
