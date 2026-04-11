@@ -7,7 +7,7 @@ const configDir = path.dirname(fileURLToPath(import.meta.url));
 const config: NextConfig = {
   reactStrictMode: true,
   outputFileTracingRoot: path.resolve(configDir, ".."),
-  transpilePackages: ["@stwd/sdk", "@stwd/shared"],
+  transpilePackages: ["@stwd/sdk", "@stwd/shared", "@stwd/react", "@simplewebauthn/browser"],
   webpack: (config) => {
     config.resolve.fallback = {
       ...config.resolve.fallback,
