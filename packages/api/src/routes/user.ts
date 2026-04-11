@@ -487,8 +487,48 @@ user.post("/me/wallet/sign-message", async (c) => {
   }
 });
 
-// ─── Export ───────────────────────────────────────────────────────────────────
+// ─── POST /me/wallet/export ────────────────────────────────────────────────────
 
+user.post("/me/wallet/export", async (c) => {
+  const userId = c.get("userId");
+
+  let vault: Vault;
+  try {
+    vault = getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+
+  const wallet = await getUserWallet(vault, userId);
+  if (!wallet) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "No wallet found — call GET /me/wallet first to provision" },
+      404
+    );
+  }
+
+  const personalTenantId = `personal-${userId}`;
+
+  try {
+    const keys = await vault.exportPrivateKey(personalTenantId, wallet.id);
+
+    return c.json<ApiResponse<{
+      evm?: { privateKey: string; address: string };
+      solana?: { privateKey: string; address: string };
+      warning: string;
+    }>>({
+      ok: true,
+      data: {
+        ...keys,
+        warning: "This key controls real funds. Store securely.",
+      },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unknown error";
+    console.error(`[UserWallet] export failed for user "${userId}":`, e);
+    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+  }
+});
 
 // ─── Tenant membership routes ─────────────────────────────────────────────────
 

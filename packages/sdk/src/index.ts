@@ -44,7 +44,7 @@ export type {
 } from "./types.ts";
 export type { SignRequest, TxRecord, TxStatus } from "./types.ts";
 export { SUPPORTED_CHAINS } from "./types.ts";
-export type { ChainIdentifier, AllowedChainsConfig } from "./types.ts";
+export type { ChainIdentifier, AllowedChainsConfig, ExportKeyResult } from "./types.ts";
 export { CHAINS, chainFromNumeric, chainFromCaip2, toCaip2, fromCaip2 } from "./types.ts";
 // v0.4.0 — Tenant config, dashboard, approvals, webhooks
 export type {

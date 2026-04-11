@@ -290,6 +290,13 @@ export interface AllowedChainsConfig {
   chains: string[];
 }
 
+/** Result of exporting private keys from a vault agent or user wallet. */
+export interface ExportKeyResult {
+  evm?: { privateKey: string; address: string };
+  solana?: { privateKey: string; address: string };
+  warning: string;
+}
+
 /**
  * Registry of all supported chains, keyed by CAIP-2 identifier.
  *
