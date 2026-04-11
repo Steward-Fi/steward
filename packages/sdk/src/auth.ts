@@ -327,7 +327,7 @@ export class StewardAuth {
     };
     let browserLib: SimpleWebAuthnBrowser;
     try {
-      const mod = await import(/* webpackIgnore: true */ "@simplewebauthn/browser");
+      const mod = await import("@simplewebauthn/browser");
       browserLib = mod as unknown as SimpleWebAuthnBrowser;
     } catch {
       throw new StewardApiError(
