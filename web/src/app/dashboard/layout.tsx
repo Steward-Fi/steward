@@ -30,6 +30,7 @@ const links = [
   { href: "/dashboard/policies", label: "Policies" },
   { href: "/dashboard/audit", label: "Audit" },
   { href: "/dashboard/settings", label: "Settings" },
+  { href: "/dashboard/tenants", label: "Tenants" },
 ];
 
 function DashboardNav() {

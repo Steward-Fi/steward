@@ -9,6 +9,8 @@ export interface PolicyEvaluationContext {
   spentThisWeek: bigint;
   /** Optional price oracle for USD-based policy evaluation */
   priceOracle?: PriceOracle;
+  /** Optional reputation score for reputation-based policies */
+  reputationScore?: number;
 }
 
 export interface EvaluationResult {
@@ -44,6 +46,7 @@ export class PolicyEngine {
       spentToday: ctx.spentToday,
       spentThisWeek: ctx.spentThisWeek,
       priceOracle: ctx.priceOracle,
+      reputationScore: ctx.reputationScore,
     };
 
     const results: PolicyResult[] = await Promise.all(

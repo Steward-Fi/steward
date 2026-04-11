@@ -11,6 +11,8 @@ import {
   type TimeWindowConfig,
   type PriceOracle,
 } from "@stwd/shared";
+import { evaluateReputationThreshold } from "./evaluators/reputation-threshold";
+import { evaluateReputationScaling } from "./evaluators/reputation-scaling";
 
 export interface EvaluatorContext {
   request: SignRequest;
@@ -20,6 +22,8 @@ export interface EvaluatorContext {
   spentThisWeek: bigint;
   /** Optional price oracle for USD-based policy evaluation */
   priceOracle?: PriceOracle;
+  /** Optional reputation score for reputation-based policies */
+  reputationScore?: number;
 }
 
 /**
@@ -49,6 +53,13 @@ export async function evaluatePolicy(
       return evaluateTimeWindow(rule, ctx);
     case "allowed-chains":
       return evaluateAllowedChains(rule, ctx);
+    case "reputation-threshold":
+      return evaluateReputationThreshold(rule, { reputationScore: ctx.reputationScore });
+    case "reputation-scaling":
+      return evaluateReputationScaling(rule, {
+        reputationScore: ctx.reputationScore,
+        txValue: BigInt(ctx.request.value),
+      });
     default:
       return { policyId: rule.id, type: rule.type, passed: false, reason: `Unknown policy type: ${rule.type}` };
   }
