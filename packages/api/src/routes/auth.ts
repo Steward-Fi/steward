@@ -118,16 +118,17 @@ async function checkAuthRateLimit(
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
-// JWT secret: prefer dedicated STEWARD_JWT_SECRET, fall back to master password with warning
-const jwtSecretSource = process.env.STEWARD_JWT_SECRET || process.env.STEWARD_MASTER_PASSWORD;
-if (!process.env.STEWARD_JWT_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
-  console.warn("⚠️ STEWARD_JWT_SECRET not set, falling back to master password. Set a separate JWT secret for production.");
+// JWT secret: all modules MUST use STEWARD_SESSION_SECRET (with STEWARD_MASTER_PASSWORD fallback)
+// to ensure tokens minted by auth routes validate in user routes and vice versa.
+const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+if (!process.env.STEWARD_SESSION_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
+  console.warn("⚠️ STEWARD_SESSION_SECRET not set, falling back to master password. Set a separate JWT secret for production.");
 }
 if (!jwtSecretSource) {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("⛔ STEWARD_JWT_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
+    throw new Error("⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
   }
-  console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_JWT_SECRET before going to production!");
+  console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!");
 }
 const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 const JWT_ISSUER = "steward";

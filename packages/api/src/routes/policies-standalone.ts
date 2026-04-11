@@ -110,23 +110,24 @@ async function updateTemplate(
   id: string,
   body: Partial<CreateTemplateBody>,
 ): Promise<PolicyTemplate | null> {
-  const sets: string[] = [];
+  // Build parameterized update using drizzle sql template literals.
+  // Each field is set conditionally via CASE/COALESCE to avoid sql.raw() injection.
+  const hasName = body.name !== undefined;
+  const hasDesc = body.description !== undefined;
+  const hasRules = body.rules !== undefined;
+  const hasDefault = body.isDefault !== undefined;
 
-  if (body.name !== undefined) sets.push(`name = '${body.name.replace(/'/g, "''")}'`);
-  if (body.description !== undefined) sets.push(`description = '${(body.description ?? "").replace(/'/g, "''")}'`);
-  if (body.rules !== undefined) sets.push(`rules = '${JSON.stringify(body.rules)}'::jsonb`);
-  if (body.isDefault !== undefined) sets.push(`is_default = ${body.isDefault}`);
-
-  if (sets.length === 0) return getTemplate(tenantId, id);
-
-  sets.push(`updated_at = now()`);
+  if (!hasName && !hasDesc && !hasRules && !hasDefault) return getTemplate(tenantId, id);
 
   const rows = await db.execute(
-    sql.raw(
-      `UPDATE policy_templates SET ${sets.join(", ")}
-       WHERE id = '${id}'::uuid AND tenant_id = '${tenantId}'
-       RETURNING id, tenant_id, name, description, rules, is_default, created_at, updated_at`,
-    ),
+    sql`UPDATE policy_templates SET
+      name = CASE WHEN ${hasName} THEN ${body.name ?? ''} ELSE name END,
+      description = CASE WHEN ${hasDesc} THEN ${body.description ?? null} ELSE description END,
+      rules = CASE WHEN ${hasRules} THEN ${JSON.stringify(body.rules ?? [])}::jsonb ELSE rules END,
+      is_default = CASE WHEN ${hasDefault} THEN ${body.isDefault ?? false} ELSE is_default END,
+      updated_at = now()
+    WHERE id = ${id}::uuid AND tenant_id = ${tenantId}
+    RETURNING id, tenant_id, name, description, rules, is_default, created_at, updated_at`,
   );
   const row = (rows as any[])[0];
   return row ? rowToTemplate(row) : null;

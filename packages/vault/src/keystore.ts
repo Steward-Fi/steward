@@ -18,9 +18,33 @@ export interface EncryptedKey {
 export class KeyStore {
   private masterKey: Buffer;
 
-  constructor(masterPassword: string) {
-    // Derive a 256-bit key from master password
-    const salt = Buffer.from("steward-vault-v1"); // Fixed salt for deterministic derivation from same password
+  /**
+   * @param masterPassword  The master password to derive the root encryption key from.
+   * @param masterSalt      Optional salt for master key derivation. In production, set
+   *                        STEWARD_KDF_SALT env var to a unique per-deployment random hex
+   *                        string (at least 32 hex chars). Falls back to a built-in
+   *                        default for backward compatibility, but this weakens KDF
+   *                        resistance to precomputed attacks.
+   */
+  constructor(masterPassword: string, masterSalt?: string) {
+    // Derive a 256-bit root key from master password via scrypt.
+    // Each encrypt() call further derives a unique key with a random per-record salt,
+    // so the master key salt does not need to be per-record, but SHOULD be unique
+    // per deployment to resist precomputed/rainbow-table attacks on the password.
+    const envSalt = masterSalt ?? process.env.STEWARD_KDF_SALT;
+    let salt: Buffer;
+    if (envSalt) {
+      salt = Buffer.from(envSalt, "hex");
+    } else {
+      // Legacy default: deterministic but known. Acceptable because encrypt() adds
+      // per-record randomness, but a per-deployment salt is strongly recommended.
+      salt = Buffer.from("steward-vault-v1");
+      if (process.env.NODE_ENV === "production") {
+        console.warn(
+          "\u26a0\ufe0f [KeyStore] Using default KDF salt. Set STEWARD_KDF_SALT to a random hex string for production."
+        );
+      }
+    }
     this.masterKey = scryptSync(masterPassword, salt, 32) as Buffer;
   }
 

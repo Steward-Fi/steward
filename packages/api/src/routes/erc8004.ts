@@ -27,9 +27,8 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("id");
 
-  try {
-    await ensureAgentForTenant(tenantId, agentId);
-  } catch {
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
@@ -121,7 +120,14 @@ erc8004Routes.get("/:id/onchain", async (c) => {
 // Submit a feedback signal for an agent. Saves to reputation_cache for now.
 
 erc8004Routes.post("/:id/feedback", async (c) => {
+  const tenantId = c.get("tenantId");
   const agentId = c.req.param("id");
+
+  // Verify the agent belongs to the authenticated tenant before accepting feedback
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
 
   let body: {
     fromAddress?: string;

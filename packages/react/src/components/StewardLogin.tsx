@@ -51,6 +51,18 @@ export function StewardLogin({
   const [loadingBtn, setLoadingBtn] = useState<LoadingButton>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Track whether we've already fired onSuccess to avoid double-calling
+  const didFireSuccess = useRef(false);
+
+  // When auth state changes to authenticated, fire onSuccess for redirect
+  useEffect(() => {
+    if (ctx?.isAuthenticated && ctx.session?.token && onSuccess && !didFireSuccess.current) {
+      didFireSuccess.current = true;
+      const user = ctx.session.user ?? { id: "", email: "" };
+      onSuccess({ token: ctx.session.token, user });
+    }
+  }, [ctx?.isAuthenticated, ctx?.session, onSuccess]);
+
   if (!ctx) {
     return (
       <div className={`stwd-login stwd-login--error ${className ?? ""}`}>
@@ -61,18 +73,6 @@ export function StewardLogin({
       </div>
     );
   }
-
-  // Track whether we've already fired onSuccess to avoid double-calling
-  const didFireSuccess = useRef(false);
-
-  // When auth state changes to authenticated, fire onSuccess for redirect
-  useEffect(() => {
-    if (ctx.isAuthenticated && ctx.session?.token && onSuccess && !didFireSuccess.current) {
-      didFireSuccess.current = true;
-      const user = ctx.session.user ?? { id: "", email: "" };
-      onSuccess({ token: ctx.session.token, user });
-    }
-  }, [ctx.isAuthenticated, ctx.session, onSuccess]);
 
   // Already signed in
   if (ctx.isAuthenticated) {
