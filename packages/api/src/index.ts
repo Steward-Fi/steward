@@ -215,6 +215,9 @@ app.route("/approvals", approvalRoutes);
 if (shouldUsePGLite()) {
   migrationsRan = true;
   console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
+} else if (process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1") {
+  migrationsRan = true;
+  console.log("[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.");
 } else {
   try {
     console.log("[steward] Running database migrations...");
