@@ -16,49 +16,105 @@ Steward is designed to be self-hosted. This guide covers deploying Steward on yo
 
 ## Quick Start
 
-```bash
-# Clone the repo
-git clone https://github.com/Steward-Fi/steward.git
-cd steward
+<Tabs>
+  <Tab title="Docker Compose (Recommended)">
+    ```bash
+    git clone https://github.com/Steward-Fi/steward.git
+    cd steward
+    cp .env.example .env
+    # Edit .env with your values (see Environment Variables below)
+    docker compose up -d
+    ```
 
-# Install dependencies
-bun install
+    See [Docker Deployment](/guides/docker) for the full `docker-compose.yml` and network isolation.
+  </Tab>
+  <Tab title="Manual">
+    ```bash
+    git clone https://github.com/Steward-Fi/steward.git
+    cd steward
+    bun install
+    cp .env.example .env
+    # Edit .env, then:
+    cd packages/db && bun run drizzle-kit push
+    cd ../api && bun run dev
+    ```
+  </Tab>
+  <Tab title="Embedded (PGLite)">
+    For local development without PostgreSQL:
 
-# Set up environment variables
-cp .env.example .env
-```
+    ```bash
+    git clone https://github.com/Steward-Fi/steward.git
+    cd steward
+    bun install
+    STEWARD_EMBEDDED=true STEWARD_MASTER_PASSWORD=dev-password bun run packages/api/src/index.ts
+    ```
+
+    Embedded mode uses [PGLite](https://pglite.dev) (an in-process Postgres) with data stored on disk. No third-party database needed.
+
+    <Warning>
+      Embedded mode is for **local development only**. Data is stored in a local directory and is not suitable for production. Use PostgreSQL for any deployment that handles real keys.
+    </Warning>
+  </Tab>
+</Tabs>
 
 ## Environment Variables
 
+### Core (Required)
+
 ```bash
-# Required
-STEWARD_MASTER_PASSWORD=your-strong-master-password  # Encrypts all vault keys
+# Master encryption password — derives the AES-256-GCM key for all wallet/secret encryption
+# CRITICAL: If lost, all encrypted keys are permanently inaccessible
+STEWARD_MASTER_PASSWORD=your-strong-master-password-32-chars-min
+
+# PostgreSQL connection string (not needed in embedded mode)
 DATABASE_URL=postgres://user:pass@localhost:5432/steward
-
-# API Server
-STEWARD_PORT=3200
-STEWARD_BIND_HOST=0.0.0.0
-
-# Blockchain RPC
-RPC_URL=https://mainnet.base.org            # Default chain RPC
-CHAIN_ID=8453                                # Default chain ID
-
-# Optional
-STEWARD_JWT_SECRET=separate-jwt-signing-key  # Defaults to master password if not set
-SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
-STEWARD_PLATFORM_KEY=your-platform-admin-key # For platform-level management
 ```
 
-<Warning>
-  The `STEWARD_MASTER_PASSWORD` is critical — it derives the master encryption key for all wallet and secret encryption. **Never lose it.** If you lose the master password, all encrypted keys are permanently inaccessible.
-</Warning>
+### API Server
+
+```bash
+STEWARD_PORT=3200                           # API port (default: 3200)
+STEWARD_BIND_HOST=0.0.0.0                   # Bind address
+STEWARD_JWT_SECRET=separate-jwt-signing-key  # Defaults to master password if not set
+STEWARD_PLATFORM_KEY=your-platform-admin-key # For platform-level management
+STEWARD_EMBEDDED=false                       # Set true for PGLite mode
+```
+
+### Blockchain
+
+```bash
+RPC_URL=https://mainnet.base.org             # Default EVM chain RPC
+CHAIN_ID=8453                                # Default chain ID
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+```
+
+### Authentication
+
+```bash
+# Passkeys (WebAuthn)
+PASSKEY_RP_ID=myapp.com                      # Relying party ID (your domain)
+PASSKEY_ORIGIN=https://myapp.com             # Expected origin for ceremonies
+PASSKEY_RP_NAME="My App"                     # Display name in passkey dialogs
+
+# Email magic links
+RESEND_API_KEY=re_xxxxxxxxxxxx               # Resend.com API key
+EMAIL_FROM=auth@myapp.com                    # Verified sender address
+APP_URL=https://myapp.com                    # Used for magic link URLs
+
+# OAuth providers (optional, enable any combination)
+GOOGLE_CLIENT_ID=xxxx.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=GOCSPX-xxxx
+DISCORD_CLIENT_ID=1234567890
+DISCORD_CLIENT_SECRET=xxxx
+TWITTER_CLIENT_ID=xxxx
+TWITTER_CLIENT_SECRET=xxxx
+```
 
 ## Database Setup
 
 Run the Drizzle migrations to set up the database schema:
 
 ```bash
-# Push schema to database
 cd packages/db
 bun run drizzle-kit push
 
@@ -66,17 +122,6 @@ bun run drizzle-kit push
 bun run drizzle-kit generate
 bun run drizzle-kit migrate
 ```
-
-The schema creates tables for:
-- `tenants` — Multi-tenant isolation
-- `agents` — Agent identity and metadata
-- `encrypted_keys` — AES-256-GCM encrypted wallet keys
-- `agent_wallets` — Wallet address mappings
-- `policies` — Policy rules per agent
-- `transactions` — Transaction history and audit trail
-- `approval_queue` — Manual approval queue
-- `secrets` — Encrypted API credentials
-- `secret_routes` — Credential injection routes
 
 ## Running the API
 
@@ -89,7 +134,7 @@ bun run dev
 bun run start
 ```
 
-The API starts on port 3200 by default. Verify it's running:
+Verify it's running:
 
 ```bash
 curl http://localhost:3200/health
@@ -97,8 +142,6 @@ curl http://localhost:3200/health
 ```
 
 ## Creating Your First Tenant
-
-Use the platform API or create directly:
 
 ```bash
 curl -X POST http://localhost:3200/tenants \
@@ -111,7 +154,7 @@ curl -X POST http://localhost:3200/tenants \
 ```
 
 <Note>
-  The `apiKeyHash` should be a SHA-256 hash of your API key. If you pass a non-hash string, Steward will hash it for you. The raw API key is returned once on creation.
+  If you pass a non-hash string as `apiKeyHash`, Steward will SHA-256 hash it for you. The raw API key is returned once on creation.
 </Note>
 
 ## Production Deployment
@@ -142,10 +185,10 @@ WantedBy=multi-user.target
 ```nginx
 server {
     listen 443 ssl http2;
-    server_name api.steward.fi;
+    server_name api.myapp.com;
 
-    ssl_certificate /etc/letsencrypt/live/api.steward.fi/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.steward.fi/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/api.myapp.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.myapp.com/privkey.pem;
 
     location / {
         proxy_pass http://127.0.0.1:3200;
@@ -157,13 +200,15 @@ server {
 }
 ```
 
-### Security Checklist
+## Production Checklist
 
 - [ ] Set a unique `STEWARD_MASTER_PASSWORD` (32+ chars, random)
 - [ ] Set a separate `STEWARD_JWT_SECRET`
 - [ ] Use TLS for all connections (API + database)
 - [ ] Restrict database access to the Steward server only
 - [ ] Set `STEWARD_PLATFORM_KEY` for admin operations
+- [ ] Configure `PASSKEY_RP_ID` and `PASSKEY_ORIGIN` to match your domain
+- [ ] Set up email provider (Resend) for magic link auth
 - [ ] Run as non-root user
 - [ ] Enable firewall (only expose ports 443 and SSH)
 - [ ] Back up the database regularly
@@ -172,4 +217,5 @@ server {
 
 - [Docker Deployment](/guides/docker) — Deploy with Docker Compose
 - [Architecture](/concepts/architecture) — System design overview
+- [Auth Overview](/auth/overview) — Authentication configuration
 - [API Overview](/api-reference/overview) — API authentication

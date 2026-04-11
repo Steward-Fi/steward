@@ -135,6 +135,92 @@ Shows: total spent in the selected range vs. the policy limit, daily breakdown c
 
 ---
 
+## Authentication Components
+
+### `<StewardLogin>`
+
+Drop-in auth widget supporting passkeys, email magic links, and OAuth providers.
+
+```tsx
+<StewardLogin
+  showPasskey        // Show passkey button (default: true)
+  showEmail          // Show email magic link (default: true)
+  showGoogle         // Show Google OAuth (default: true)
+  showDiscord        // Show Discord OAuth (default: true)
+  showSIWE           // Show SIWE button (default: false)
+  variant="card"      // "card" (with background) or "inline"
+  logo={<MyLogo />}  // Optional logo element
+  title="Welcome"    // Header title
+  subtitle="Sign in to continue" // Header subtitle
+  tenantId="my-app"  // Scope auth to a specific tenant
+  onSuccess={(result) => console.log("Signed in:", result)}
+  onError={(err) => console.error(err)}
+/>
+```
+
+The component auto-discovers enabled providers via `GET /auth/providers` and only shows buttons for methods that are enabled on both the server and in the props.
+
+### `<StewardEmailCallback>`
+
+Mount on your `/auth/callback` route to handle magic link token verification:
+
+```tsx
+<StewardEmailCallback
+  onSuccess={(result) => navigate("/dashboard")}
+  onError={(err) => console.error(err)}
+  redirectTo="/dashboard"  // Auto-redirect after success
+/>
+```
+
+Reads `token` and `email` from URL search params automatically.
+
+### `<StewardAuthGuard>`
+
+Renders children only when the user is authenticated. Shows a login form (or custom fallback) when not authenticated.
+
+```tsx
+<StewardAuthGuard
+  fallback={<CustomLoginPage />}       // Shown when unauthenticated (default: <StewardLogin />)
+  loadingFallback={<Spinner />}        // Shown while checking auth state
+>
+  <ProtectedDashboard />
+</StewardAuthGuard>
+```
+
+### `<StewardUserButton>`
+
+User avatar and dropdown menu with sign-out and optional tenant switching:
+
+```tsx
+<StewardUserButton
+  showWallet            // Show wallet address in dropdown
+  showTenantSwitcher    // Add tenant switching to dropdown
+  avatarSize={32}       // Avatar size in pixels
+  onSignOut={() => router.push("/login")}
+/>
+```
+
+Displays the user's email or truncated wallet address. Gravatar integration for email users.
+
+### `<StewardTenantPicker>`
+
+Switch between connected apps/tenants:
+
+```tsx
+// Dropdown (compact)
+<StewardTenantPicker
+  variant="dropdown"
+  onSwitch={(tenantId) => console.log("Switched to:", tenantId)}
+/>
+
+// List (always visible, good for settings)
+<StewardTenantPicker variant="list" />
+```
+
+Shows tenant memberships with roles. Handles switching via `auth.switchTenant()` internally.
+
+---
+
 ## Hooks
 
 All components are built on public hooks — use them directly for custom UIs.
@@ -224,6 +310,37 @@ const { spend, isLoading } = useSpend("week");
 //   today: string; thisWeek: string; thisMonth: string;
 //   todayFormatted: string; thisWeekFormatted: string; thisMonthFormatted: string;
 // }
+```
+
+### `useAuth()`
+
+Access the auth context for custom auth UIs.
+
+```tsx
+import { useAuth } from "@stwd/react";
+
+const {
+  isAuthenticated,
+  isLoading,
+  user,                // StewardUser | null
+  session,             // StewardSession | null
+  providers,           // { passkey, email, siwe, google, discord, oauth[] }
+  signOut,
+  getToken,
+  signInWithPasskey,
+  signInWithEmail,
+  verifyEmailCallback,
+  signInWithSIWE,
+  signInWithOAuth,
+  // Multi-tenant
+  activeTenantId,
+  tenants,
+  isTenantsLoading,
+  listTenants,
+  switchTenant,
+  joinTenant,
+  leaveTenant,
+} = useAuth();
 ```
 
 ---

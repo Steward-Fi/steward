@@ -70,6 +70,16 @@
       ]
     },
     {
+      "group": "Authentication",
+      "pages": [
+        "auth/overview",
+        "auth/passkeys",
+        "auth/email",
+        "auth/oauth",
+        "auth/cross-tenant"
+      ]
+    },
+    {
       "group": "Concepts",
       "pages": [
         "concepts/architecture",
