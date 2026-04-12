@@ -26,7 +26,9 @@ export type PolicyType =
   | "auto-approve-threshold"
   | "time-window"
   | "rate-limit"
-  | "allowed-chains";
+  | "allowed-chains"
+  | "reputation-threshold"
+  | "reputation-scaling";
 
 export interface PolicyRule {
   id: string;

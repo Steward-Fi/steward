@@ -91,6 +91,13 @@
         "@elizaos/core": ">=2.0.0-alpha.50",
       },
     },
+    "packages/erc8004": {
+      "name": "@stwd/erc8004",
+      "version": "0.1.0",
+      "devDependencies": {
+        "typescript": "^5.0.0",
+      },
+    },
     "packages/examples/waifu-integration": {
       "name": "@stwd/example-waifu-integration",
       "version": "0.3.0",
@@ -128,7 +135,7 @@
     },
     "packages/react": {
       "name": "@stwd/react",
-      "version": "0.6.1",
+      "version": "0.6.4",
       "dependencies": {
         "@stwd/sdk": "^0.7.0",
       },
@@ -157,7 +164,7 @@
     },
     "packages/sdk": {
       "name": "@stwd/sdk",
-      "version": "0.7.1",
+      "version": "0.7.2",
       "devDependencies": {
         "@simplewebauthn/browser": "^13.0.0",
       },
@@ -702,6 +709,8 @@
     "@stwd/db": ["@stwd/db@workspace:packages/db"],
 
     "@stwd/eliza-plugin": ["@stwd/eliza-plugin@workspace:packages/eliza-plugin"],
+
+    "@stwd/erc8004": ["@stwd/erc8004@workspace:packages/erc8004"],
 
     "@stwd/example-waifu-integration": ["@stwd/example-waifu-integration@workspace:packages/examples/waifu-integration"],
 

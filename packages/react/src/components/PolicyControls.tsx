@@ -11,6 +11,8 @@ const DEFAULT_LABELS: Record<PolicyType, string> = {
   "time-window": "Time Window",
   "rate-limit": "Rate Limit",
   "allowed-chains": "Allowed Chains",
+  "reputation-threshold": "Reputation Threshold",
+  "reputation-scaling": "Reputation Scaling",
 };
 
 const POLICY_DESCRIPTIONS: Record<PolicyType, string> = {
@@ -20,7 +22,11 @@ const POLICY_DESCRIPTIONS: Record<PolicyType, string> = {
   "time-window": "Restrict transactions to specific hours and days.",
   "rate-limit": "Limit the number of transactions per hour and per day.",
   "allowed-chains": "Restrict which blockchain networks can be used.",
+  "reputation-threshold": "Require a minimum reputation score before an action can proceed.",
+  "reputation-scaling": "Scale the allowed transaction size based on the current reputation score.",
 };
+
+const ALL_POLICY_TYPES = Object.keys(DEFAULT_LABELS) as PolicyType[];
 
 /**
  * Human-friendly policy toggles. Respects tenant exposure config.
@@ -50,14 +56,7 @@ export function PolicyControls({
     return exposure?.[type] || "visible";
   };
 
-  const visibleTypes: PolicyType[] = [
-    "spending-limit",
-    "approved-addresses",
-    "auto-approve-threshold",
-    "time-window",
-    "rate-limit",
-    "allowed-chains",
-  ].filter((t) => getExposure(t as PolicyType) !== "hidden") as PolicyType[];
+  const visibleTypes = ALL_POLICY_TYPES.filter((type) => getExposure(type) !== "hidden");
 
   const findPolicy = (type: PolicyType): PolicyRule | undefined =>
     currentPolicies.find((p) => p.type === type);

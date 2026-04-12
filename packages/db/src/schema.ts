@@ -32,6 +32,8 @@ export const policyTypeEnum = pgEnum("policy_type", [
   "time-window",
   "rate-limit",
   "allowed-chains",
+  "reputation-threshold",
+  "reputation-scaling",
 ]);
 
 export const transactionStatusEnum = pgEnum("transaction_status", [

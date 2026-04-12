@@ -30,6 +30,7 @@ export type { PGLiteDb } from "./pglite";
 export * from "./schema";
 export * from "./schema-auth";
 
+import { policyTypeEnum } from "./schema";
 import type { Agent, Policy, Transaction } from "./schema";
 
 export type DbAgentIdentity = AgentIdentity & {
@@ -43,12 +44,28 @@ export type DbPolicyRule = PolicyRule & {
   updatedAt: Date;
 };
 
+export type PersistedPolicyType = (typeof policyTypeEnum.enumValues)[number];
+export type PersistedPolicyRule = Omit<PolicyRule, "type"> & {
+  type: PersistedPolicyType;
+};
+
 export type TransactionRequestFields = Pick<
   Transaction,
   "toAddress" | "value" | "data" | "chainId"
 >;
 
 export type DbTxRecord = TxRecord;
+
+export function isPersistedPolicyType(value: string): value is PersistedPolicyType {
+  return (policyTypeEnum.enumValues as readonly string[]).includes(value);
+}
+
+export function toPersistedPolicyRule(policy: PolicyRule): PersistedPolicyRule {
+  if (!isPersistedPolicyType(policy.type)) {
+    throw new Error(`Unsupported persisted policy type: ${policy.type}`);
+  }
+  return policy;
+}
 
 export function toAgentIdentity(agent: Agent): DbAgentIdentity {
   return {

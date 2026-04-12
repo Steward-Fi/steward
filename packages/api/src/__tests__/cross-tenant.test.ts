@@ -7,6 +7,8 @@ import { eq, and } from "drizzle-orm";
 
 const TEST_PORT = 3299;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
+const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
 // Tenant IDs for testing
 const OPEN_TENANT = "test-ct-open";
@@ -23,6 +25,9 @@ let testUserId: string;
 // ─── Setup ────────────────────────────────────────────────────────────────
 
 beforeAll(async () => {
+  if (!hasDatabaseUrl) {
+    return;
+  }
   const db = getDb();
 
   // Platform key from env
@@ -84,6 +89,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (!hasDatabaseUrl) {
+    return;
+  }
   const db = getDb();
   // Clean up in reverse order of dependencies
   await db.delete(userTenants).where(eq(userTenants.userId, testUserId));
@@ -109,7 +117,7 @@ async function getTestUserToken(tenantId?: string): Promise<string> {
 
 // ─── Tests: User Tenant APIs ──────────────────────────────────────────────
 
-describe("Cross-Tenant Identity", () => {
+describeWithDatabase("Cross-Tenant Identity", () => {
   describe("GET /user/me/tenants", () => {
     it("lists tenants the user belongs to", async () => {
       const token = await getTestUserToken();

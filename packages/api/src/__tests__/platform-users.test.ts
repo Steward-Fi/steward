@@ -4,6 +4,7 @@ import { eq } from "drizzle-orm";
 
 // Skip when no DB configured (CI without Postgres)
 const SKIP = !process.env.DATABASE_URL;
+const describeWithDatabase = SKIP ? describe.skip : describe;
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
 const BASE_URL = `http://localhost:${TEST_PORT}`;
@@ -36,7 +37,7 @@ afterAll(async () => {
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe("POST /platform/users", () => {
+describeWithDatabase("POST /platform/users", () => {
   it("returns 401 when platform key is missing", async () => {
     const res = await fetch(`${BASE_URL}/platform/users`, {
       method: "POST",

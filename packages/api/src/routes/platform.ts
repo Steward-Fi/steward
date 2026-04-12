@@ -15,7 +15,7 @@ import { and, count, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 
 import { generateApiKey, platformAuthMiddleware } from "@stwd/auth";
-import { agents, getDb, policies, tenants, tenantConfigs, transactions, userTenants, users } from "@stwd/db";
+import { agents, getDb, isPersistedPolicyType, policies, tenantConfigs, tenants, toPersistedPolicyRule, transactions, userTenants, users } from "@stwd/db";
 import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
 import { createAgentToken } from "../services/context";
@@ -320,6 +320,9 @@ platform.put("/tenants/:id/policies", async (c) => {
     "auto-approve-threshold",
     "time-window",
     "rate-limit",
+    "allowed-chains",
+    "reputation-threshold",
+    "reputation-scaling",
   ] as const;
 
   for (const rule of body) {
@@ -329,7 +332,7 @@ platform.put("/tenants/:id/policies", async (c) => {
         400,
       );
     }
-    if (!(validPolicyTypes as readonly string[]).includes(rule.type)) {
+    if (!isPersistedPolicyType(rule.type)) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -514,9 +517,10 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
 
       // Optionally apply default policies
       if (body.applyPolicies && body.applyPolicies.length > 0) {
+        const persistedPolicies = body.applyPolicies.map(toPersistedPolicyRule);
         await db.delete(policies).where(eq(policies.agentId, spec.id));
         await db.insert(policies).values(
-          body.applyPolicies.map((policy) => ({
+          persistedPolicies.map((policy) => ({
             id: policy.id || crypto.randomUUID(),
             agentId: spec.id,
             type: policy.type,

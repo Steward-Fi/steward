@@ -348,14 +348,7 @@ export interface AgentBalance {
 
 export type PolicyExposure = "visible" | "hidden" | "enforced";
 
-export interface PolicyExposureConfig {
-  "spending-limit"?: PolicyExposure;
-  "approved-addresses"?: PolicyExposure;
-  "auto-approve-threshold"?: PolicyExposure;
-  "time-window"?: PolicyExposure;
-  "rate-limit"?: PolicyExposure;
-  "allowed-chains"?: PolicyExposure;
-}
+export type PolicyExposureConfig = Partial<Record<PolicyType, PolicyExposure>>;
 
 export interface PolicyTemplate {
   id: string;

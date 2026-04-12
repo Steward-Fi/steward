@@ -6,6 +6,7 @@
 
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { isPersistedPolicyType, toPersistedPolicyRule } from "@stwd/db";
 import {
   type AppVariables,
   AGENT_TOKEN_EXPIRY,
@@ -278,9 +279,10 @@ agentRoutes.post("/batch", async (c) => {
       const identity = await vault.createAgent(tenantId, agentSpec.id, agentSpec.name, agentSpec.platformId);
 
       if (body.applyPolicies && body.applyPolicies.length > 0) {
+        const persistedPolicies = body.applyPolicies.map(toPersistedPolicyRule);
         await db.delete(policies).where(eq(policies.agentId, agentSpec.id));
         await db.insert(policies).values(
-          body.applyPolicies.map((policy) => ({
+          persistedPolicies.map((policy) => ({
             id: policy.id || crypto.randomUUID(),
             agentId: agentSpec.id,
             type: policy.type,
@@ -341,12 +343,21 @@ agentRoutes.put("/:agentId/policies", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Request body must be a JSON array of policies" }, 400);
   }
 
-  const validPolicyTypes = ["spending-limit", "approved-addresses", "auto-approve-threshold", "time-window", "rate-limit", "allowed-chains"];
+  const validPolicyTypes = [
+    "spending-limit",
+    "approved-addresses",
+    "auto-approve-threshold",
+    "time-window",
+    "rate-limit",
+    "allowed-chains",
+    "reputation-threshold",
+    "reputation-scaling",
+  ] as const;
   for (const policy of nextPolicies) {
     if (!isNonEmptyString(policy.type)) {
       return c.json<ApiResponse>({ ok: false, error: "Each policy must have a non-empty 'type' field" }, 400);
     }
-    if (!validPolicyTypes.includes(policy.type)) {
+    if (!isPersistedPolicyType(policy.type)) {
       return c.json<ApiResponse>(
         { ok: false, error: `Unknown policy type "${policy.type}" — supported types: ${validPolicyTypes.join(", ")}` },
         400,
@@ -363,8 +374,9 @@ agentRoutes.put("/:agentId/policies", async (c) => {
   await db.delete(policies).where(eq(policies.agentId, agentId));
 
   if (nextPolicies.length > 0) {
+    const persistedPolicies = nextPolicies.map(toPersistedPolicyRule);
     await db.insert(policies).values(
-      nextPolicies.map((policy) => ({
+      persistedPolicies.map((policy) => ({
         id: policy.id || crypto.randomUUID(),
         agentId,
         type: policy.type,

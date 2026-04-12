@@ -32,6 +32,19 @@ export interface WebhookServer {
 
 type HandlerMap = Map<string, WebhookHandler[]>;
 
+type BunServeServer = {
+  stop(): void | Promise<void>;
+};
+
+type BunServeRuntime = typeof globalThis & {
+  Bun?: {
+    serve(options: {
+      port: number;
+      fetch(req: Request): Response | Promise<Response>;
+    }): BunServeServer;
+  };
+};
+
 function buildHandlerMap(): HandlerMap {
   return new Map();
 }
@@ -103,8 +116,9 @@ export function createWebhookServer(
 
     async start(): Promise<void> {
       // Try Bun.serve first (runtime available in bun)
-      if (typeof globalThis.Bun !== "undefined") {
-        const server = globalThis.Bun.serve({
+      const bunRuntime = (globalThis as BunServeRuntime).Bun;
+      if (bunRuntime) {
+        const server = bunRuntime.serve({
           port,
           async fetch(req: Request) {
             if (req.method !== "POST") {

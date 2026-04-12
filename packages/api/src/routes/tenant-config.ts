@@ -13,7 +13,7 @@ import {
   safeJsonParse,
   type ApiResponse,
 } from "../services/context";
-import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
+import { tenantConfigs as tenantConfigsTable, toPersistedPolicyRule } from "@stwd/db";
 import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
 import type {
   TenantControlPlaneConfig,
@@ -216,14 +216,15 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", async (c) => {
 
   const insertedPolicies = [];
   for (const p of policiesToApply) {
+    const persistedPolicy = toPersistedPolicyRule(p);
     const [inserted] = await db
       .insert(policies)
       .values({
         id: `${body.agentId}-${p.type}`,
         agentId: body.agentId,
-        type: p.type,
-        enabled: p.enabled,
-        config: p.config,
+        type: persistedPolicy.type,
+        enabled: persistedPolicy.enabled,
+        config: persistedPolicy.config,
       })
       .onConflictDoNothing()
       .returning();

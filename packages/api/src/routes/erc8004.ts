@@ -19,6 +19,10 @@ import {
 
 export const erc8004Routes = new Hono<{ Variables: AppVariables }>();
 
+function getRows<T>(result: T[] | { rows?: T[] }): T[] {
+  return Array.isArray(result) ? result : result.rows ?? [];
+}
+
 // ─── POST /agents/:id/register-onchain ────────────────────────────────────────
 // Initiate on-chain registration for an agent. Creates a DB record with status
 // "pending" and returns the registration info. Actual on-chain tx is async.
@@ -65,6 +69,7 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
       DO UPDATE SET agent_card_json = ${JSON.stringify(agentCard)}::jsonb, status = 'pending', updated_at = NOW()
       RETURNING id, status, created_at
     `);
+    const rows = getRows(result);
 
     return c.json<ApiResponse>({
       ok: true,
@@ -74,7 +79,7 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
         registryAddress,
         status: "pending",
         agentCard,
-        record: result.rows?.[0] ?? null,
+        record: rows[0] ?? null,
       },
     });
   } catch (err: any) {
@@ -106,8 +111,8 @@ erc8004Routes.get("/:id/onchain", async (c) => {
     return c.json<ApiResponse>({
       ok: true,
       data: {
-        registrations: registrations.rows ?? [],
-        reputation: reputation.rows ?? [],
+        registrations: getRows(registrations),
+        reputation: getRows(reputation),
       },
     });
   } catch (err: any) {
@@ -215,7 +220,7 @@ discoveryRoutes.get("/agents", async (c) => {
     }
 
     const result = await db.execute(query);
-    return c.json<ApiResponse>({ ok: true, data: result.rows ?? [] });
+    return c.json<ApiResponse>({ ok: true, data: getRows(result) });
   } catch (err: any) {
     console.error("[erc8004] discovery/agents error:", err);
     return c.json<ApiResponse>({ ok: false, error: "Failed to query agents" }, 500);
@@ -229,7 +234,7 @@ discoveryRoutes.get("/registries", async (c) => {
     const result = await db.execute(sql`
       SELECT * FROM registry_index WHERE is_active = TRUE ORDER BY chain_id
     `);
-    return c.json<ApiResponse>({ ok: true, data: result.rows ?? [] });
+    return c.json<ApiResponse>({ ok: true, data: getRows(result) });
   } catch (err: any) {
     console.error("[erc8004] discovery/registries error:", err);
     return c.json<ApiResponse>({ ok: false, error: "Failed to query registries" }, 500);

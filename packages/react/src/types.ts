@@ -4,7 +4,7 @@ import type { StewardClient, PolicyRule, PolicyType, TxStatus, TxRecord, AgentId
 
 export type PolicyExposure = "visible" | "hidden" | "enforced";
 
-export type PolicyExposureConfig = Record<PolicyType, PolicyExposure>;
+export type PolicyExposureConfig = Partial<Record<PolicyType, PolicyExposure>>;
 
 export interface EnforcedPolicyOverride {
   type: PolicyType;

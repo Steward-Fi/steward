@@ -9,7 +9,7 @@
 import { eq } from "drizzle-orm";
 import { parseEther } from "viem";
 
-import { getDb, policies } from "@stwd/db";
+import { getDb, policies, toPersistedPolicyRule, type PersistedPolicyRule } from "@stwd/db";
 import type { AgentBalance, AgentIdentity, PolicyRule } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
 
@@ -22,7 +22,7 @@ export const WAIFU_CHAIN_ID = 56;
  * Default policy set for waifu.fun agents.
  * The portal contract address is injected at runtime via `getDefaultPolicies(portalAddress)`.
  */
-function buildDefaultPolicies(portalAddress?: string): PolicyRule[] {
+function buildDefaultPolicies(portalAddress?: string): PersistedPolicyRule[] {
   const addresses = portalAddress ? [portalAddress] : [];
 
   return [
@@ -128,9 +128,10 @@ export class WaifuBridge {
     const db = getDb();
 
     try {
+      const persistedPolicies = defaultPolicies.map(toPersistedPolicyRule);
       await db.delete(policies).where(eq(policies.agentId, waifuAgentId));
       await db.insert(policies).values(
-        defaultPolicies.map((policy) => ({
+        persistedPolicies.map((policy) => ({
           id: policy.id,
           agentId: waifuAgentId,
           type: policy.type,

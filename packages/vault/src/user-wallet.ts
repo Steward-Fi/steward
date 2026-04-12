@@ -10,7 +10,7 @@
 import { eq } from "drizzle-orm";
 import { parseEther } from "viem";
 
-import { agents, getDb, policies } from "@stwd/db";
+import { agents, getDb, policies, policyTypeEnum } from "@stwd/db";
 import type { AgentIdentity, PolicyRule } from "@stwd/shared";
 
 import type { Vault } from "./vault";
@@ -27,13 +27,16 @@ export interface UserWalletResult {
 
 // ─── Default policies ─────────────────────────────────────────────────────────
 
+type PersistedPolicyType = (typeof policyTypeEnum.enumValues)[number];
+type PersistedPolicyRule = Omit<PolicyRule, "type"> & { type: PersistedPolicyType };
+
 /**
  * Sensible default policies for a user's personal wallet.
  *
  * - Spending limits: 0.5 ETH/tx, 2 ETH/day, 10 ETH/week
  * - Rate limits: 10 tx/hr, 50 tx/day
  */
-export const USER_WALLET_DEFAULT_POLICIES: PolicyRule[] = [
+export const USER_WALLET_DEFAULT_POLICIES: PersistedPolicyRule[] = [
   {
     id: "user-spend-limit",
     type: "spending-limit",
