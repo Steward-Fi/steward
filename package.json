@@ -11,6 +11,9 @@
     "build": "turbo build",
     "lint": "turbo lint",
     "test": "turbo test",
+    "test:e2e:auth": "bun run scripts/e2e-auth-test.ts",
+    "test:e2e:integration": "bun run scripts/e2e-integration-test.ts",
+    "test:e2e:smoke": "bun run scripts/run-e2e-smoke.ts",
     "seed": "bun packages/seed/src/index.ts",
     "start:local": "bun run packages/api/src/embedded.ts"
   },

@@ -61,10 +61,10 @@ packages/eliza-plugin/
   },
   "dependencies": {
     "@stwd/sdk": "^0.1.1",
-    "@elizaos/core": "2.0.0-alpha.77"
+    "@elizaos/core": "workspace:*"
   },
   "peerDependencies": {
-    "@elizaos/core": ">=2.0.0-alpha.50"
+    "@elizaos/core": "workspace:*"
   },
   "devDependencies": {
     "tsup": "^8.0.0",

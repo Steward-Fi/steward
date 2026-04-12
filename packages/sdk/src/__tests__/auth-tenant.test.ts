@@ -1,63 +1,143 @@
-import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { StewardAuth } from "../auth.ts";
 
-// ─── Mock storage ─────────────────────────────────────────────────────────────
-
-class MockStorage {
+class TestStorage {
   private store = new Map<string, string>();
-  getItem(key: string): string | null { return this.store.get(key) ?? null; }
-  setItem(key: string, value: string): void { this.store.set(key, value); }
-  removeItem(key: string): void { this.store.delete(key); }
-  clear(): void { this.store.clear(); }
+
+  getItem(key: string): string | null {
+    return this.store.get(key) ?? null;
+  }
+
+  setItem(key: string, value: string): void {
+    this.store.set(key, value);
+  }
+
+  removeItem(key: string): void {
+    this.store.delete(key);
+  }
+
+  clear(): void {
+    this.store.clear();
+  }
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+type CapturedRequest = {
+  method: string;
+  path: string;
+  headers: IncomingMessage["headers"];
+  bodyText: string;
+  bodyJson: unknown;
+};
 
-/** Create a minimal JWT-like token with exp claim */
+type ResponsePayload = {
+  status?: number;
+  json?: unknown;
+};
+
 function fakeJwt(payload: Record<string, unknown> = {}): string {
   const header = btoa(JSON.stringify({ alg: "HS256", typ: "JWT" }));
-  const body = btoa(JSON.stringify({
-    exp: Math.floor(Date.now() / 1000) + 3600,
-    address: "0x1234",
-    tenantId: "test-tenant",
-    userId: "user-1",
-    email: "test@example.com",
-    ...payload,
-  }));
+  const body = btoa(
+    JSON.stringify({
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      address: "0x1234",
+      tenantId: "test-tenant",
+      userId: "user-1",
+      email: "test@example.com",
+      ...payload,
+    }),
+  );
   return `${header}.${body}.fake-sig`;
 }
 
-function createAuthWithSession(storage: MockStorage, tenantId?: string): StewardAuth {
+async function readRequestBody(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function startStewardServer(
+  handler: (request: CapturedRequest) => Promise<ResponsePayload> | ResponsePayload,
+): Promise<{ baseUrl: string; close: () => Promise<void> }> {
+  const server = createServer(async (req, res) => {
+    const bodyText = await readRequestBody(req);
+    const bodyJson =
+      bodyText.length > 0 ? (JSON.parse(bodyText) as unknown) : undefined;
+    const response = await handler({
+      method: req.method ?? "GET",
+      path: req.url ?? "/",
+      headers: req.headers,
+      bodyText,
+      bodyJson,
+    });
+
+    res.writeHead(response.status ?? 200, {
+      "Content-Type": "application/json",
+    });
+    res.end(JSON.stringify(response.json ?? { ok: true }));
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", (error?: Error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+
+  const { port } = server.address() as AddressInfo;
+  return {
+    baseUrl: `http://127.0.0.1:${port}`,
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+function createAuthWithSession(
+  storage: TestStorage,
+  baseUrl: string,
+  tenantId?: string,
+): StewardAuth {
   const auth = new StewardAuth({
-    baseUrl: "https://api.steward.fi",
+    baseUrl,
     storage,
     tenantId,
   });
-  // Pre-populate a session
+
   storage.setItem("steward_session_token", fakeJwt());
   storage.setItem("steward_refresh_token", "refresh-token-123");
   return auth;
 }
 
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
-const originalFetch = globalThis.fetch;
-
 describe("StewardAuth multi-tenant", () => {
-  let storage: MockStorage;
+  let storage: TestStorage;
 
   beforeEach(() => {
-    storage = new MockStorage();
+    storage = new TestStorage();
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    storage.clear();
   });
 
   describe("tenantId in config", () => {
     test("getTenantId returns configured value", () => {
       const auth = new StewardAuth({
-        baseUrl: "https://api.steward.fi",
+        baseUrl: "http://127.0.0.1:1",
         storage,
         tenantId: "my-app",
       });
@@ -66,7 +146,7 @@ describe("StewardAuth multi-tenant", () => {
 
     test("getTenantId returns undefined when not configured", () => {
       const auth = new StewardAuth({
-        baseUrl: "https://api.steward.fi",
+        baseUrl: "http://127.0.0.1:1",
         storage,
       });
       expect(auth.getTenantId()).toBeUndefined();
@@ -75,114 +155,132 @@ describe("StewardAuth multi-tenant", () => {
 
   describe("listTenants", () => {
     test("fetches user tenants with auth header", async () => {
-      const auth = createAuthWithSession(storage);
-      const mockTenants = [
-        { tenantId: "app-1", tenantName: "Babylon", role: "member", joinedAt: "2026-01-01" },
-        { tenantId: "personal-user-1", tenantName: "Personal", role: "owner", joinedAt: "2026-01-01" },
+      const tenants = [
+        {
+          tenantId: "app-1",
+          tenantName: "Babylon",
+          role: "member",
+          joinedAt: "2026-01-01",
+        },
+        {
+          tenantId: "personal-user-1",
+          tenantName: "Personal",
+          role: "owner",
+          joinedAt: "2026-01-01",
+        },
       ];
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("GET");
+        expect(request.path).toBe("/user/me/tenants");
+        expect(request.headers.authorization).toBe(
+          `Bearer ${storage.getItem("steward_session_token")}`,
+        );
+        return { json: { ok: true, data: tenants } };
+      });
 
-      globalThis.fetch = mock(async (url: string | URL | Request) => {
-        const urlStr = typeof url === "string" ? url : url.toString();
-        expect(urlStr).toBe("https://api.steward.fi/user/me/tenants");
-        return new Response(JSON.stringify({ ok: true, data: mockTenants }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }) as typeof fetch;
-
-      const result = await auth.listTenants();
-      expect(result).toHaveLength(2);
-      expect(result[0].tenantName).toBe("Babylon");
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        const result = await auth.listTenants();
+        expect(result).toHaveLength(2);
+        expect(result[0]?.tenantName).toBe("Babylon");
+      } finally {
+        await server.close();
+      }
     });
 
     test("throws when not authenticated", async () => {
       const auth = new StewardAuth({
-        baseUrl: "https://api.steward.fi",
+        baseUrl: "http://127.0.0.1:1",
         storage,
       });
-      // No session stored
+
       await expect(auth.listTenants()).rejects.toThrow("Not authenticated");
     });
   });
 
   describe("joinTenant", () => {
     test("posts to join endpoint", async () => {
-      const auth = createAuthWithSession(storage);
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/user/me/tenants/babylon/join");
+        return {
+          json: {
+            ok: true,
+            tenantId: "babylon",
+            tenantName: "Babylon",
+            role: "member",
+            joinedAt: "2026-04-10",
+          },
+        };
+      });
 
-      globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
-        const urlStr = typeof url === "string" ? url : url.toString();
-        expect(urlStr).toBe("https://api.steward.fi/user/me/tenants/babylon/join");
-        expect(init?.method).toBe("POST");
-        return new Response(JSON.stringify({
-          ok: true,
-          tenantId: "babylon",
-          tenantName: "Babylon",
-          role: "member",
-          joinedAt: "2026-04-10",
-        }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }) as typeof fetch;
-
-      const result = await auth.joinTenant("babylon");
-      expect(result.tenantId).toBe("babylon");
-      expect(result.role).toBe("member");
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        const result = await auth.joinTenant("babylon");
+        expect(result.tenantId).toBe("babylon");
+        expect(result.role).toBe("member");
+      } finally {
+        await server.close();
+      }
     });
   });
 
   describe("leaveTenant", () => {
     test("sends DELETE to leave endpoint", async () => {
-      const auth = createAuthWithSession(storage);
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("DELETE");
+        expect(request.path).toBe("/user/me/tenants/some-app/leave");
+        return { json: { ok: true } };
+      });
 
-      globalThis.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
-        const urlStr = typeof url === "string" ? url : url.toString();
-        expect(urlStr).toBe("https://api.steward.fi/user/me/tenants/some-app/leave");
-        expect(init?.method).toBe("DELETE");
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
-      }) as typeof fetch;
-
-      await expect(auth.leaveTenant("some-app")).resolves.toBeUndefined();
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        await expect(auth.leaveTenant("some-app")).resolves.toBeUndefined();
+      } finally {
+        await server.close();
+      }
     });
   });
 
   describe("switchTenant", () => {
     test("refreshes session with new tenantId", async () => {
-      const auth = createAuthWithSession(storage);
       const newToken = fakeJwt({ tenantId: "new-app" });
-
-      globalThis.fetch = mock(async (_url: string | URL | Request, init?: RequestInit) => {
-        const body = JSON.parse(init?.body as string);
-        expect(body.refreshToken).toBe("refresh-token-123");
-        expect(body.tenantId).toBe("new-app");
-        return new Response(JSON.stringify({
-          ok: true,
-          token: newToken,
-          refreshToken: "new-refresh-token",
-          expiresIn: 900,
-        }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/auth/refresh");
+        expect(request.bodyJson).toEqual({
+          refreshToken: "refresh-token-123",
+          tenantId: "new-app",
         });
-      }) as typeof fetch;
+        return {
+          json: {
+            ok: true,
+            token: newToken,
+            refreshToken: "new-refresh-token",
+            expiresIn: 900,
+          },
+        };
+      });
 
-      const session = await auth.switchTenant("new-app");
-      expect(session).not.toBeNull();
-      expect(session?.tenantId).toBe("new-app");
-      // Token should be stored
-      expect(storage.getItem("steward_session_token")).toBe(newToken);
-      expect(storage.getItem("steward_refresh_token")).toBe("new-refresh-token");
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        const session = await auth.switchTenant("new-app");
+        expect(session).not.toBeNull();
+        expect(session?.tenantId).toBe("new-app");
+        expect(storage.getItem("steward_session_token")).toBe(newToken);
+        expect(storage.getItem("steward_refresh_token")).toBe(
+          "new-refresh-token",
+        );
+      } finally {
+        await server.close();
+      }
     });
 
     test("returns null when no refresh token", async () => {
       const auth = new StewardAuth({
-        baseUrl: "https://api.steward.fi",
+        baseUrl: "http://127.0.0.1:1",
         storage,
       });
-      // Store only access token, no refresh
       storage.setItem("steward_session_token", fakeJwt());
 
       const result = await auth.switchTenant("new-app");
@@ -190,17 +288,21 @@ describe("StewardAuth multi-tenant", () => {
     });
 
     test("returns null when refresh fails", async () => {
-      const auth = createAuthWithSession(storage);
-
-      globalThis.fetch = mock(async () => {
-        return new Response(JSON.stringify({ ok: false, error: "Invalid refresh token" }), {
+      const server = await startStewardServer((request) => {
+        expect(request.path).toBe("/auth/refresh");
+        return {
           status: 401,
-          headers: { "Content-Type": "application/json" },
-        });
-      }) as typeof fetch;
+          json: { ok: false, error: "Invalid refresh token" },
+        };
+      });
 
-      const result = await auth.switchTenant("new-app");
-      expect(result).toBeNull();
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        const result = await auth.switchTenant("new-app");
+        expect(result).toBeNull();
+      } finally {
+        await server.close();
+      }
     });
   });
 });

@@ -1,4 +1,6 @@
-import { describe, expect, it, mock, beforeEach } from "bun:test";
+import { createServer, type IncomingMessage } from "node:http";
+import type { AddressInfo } from "node:net";
+import { describe, expect, it } from "bun:test";
 import type { WebhookEvent } from "@stwd/shared";
 import { RetryQueue } from "../queue";
 import { WebhookDispatcher } from "../dispatcher";
@@ -12,128 +14,190 @@ const makeEvent = (overrides: Partial<WebhookEvent> = {}): WebhookEvent => ({
   ...overrides,
 });
 
-const WEBHOOK = { url: "https://example.com/hook", secret: "test-secret" };
+type CapturedWebhookRequest = {
+  method: string;
+  path: string;
+  headers: IncomingMessage["headers"];
+  bodyText: string;
+};
+
+async function readRequestBody(req: IncomingMessage): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function startWebhookServer(statuses: number[]) {
+  const requests: CapturedWebhookRequest[] = [];
+  let responseIndex = 0;
+  const server = createServer(async (req, res) => {
+    const bodyText = await readRequestBody(req);
+    requests.push({
+      method: req.method ?? "GET",
+      path: req.url ?? "/",
+      headers: req.headers,
+      bodyText,
+    });
+
+    const status = statuses[responseIndex] ?? statuses[statuses.length - 1] ?? 200;
+    responseIndex += 1;
+    res.writeHead(status, { "Content-Type": "text/plain" });
+    res.end(status >= 200 && status < 300 ? "ok" : "error");
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.listen(0, "127.0.0.1", (error?: Error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+
+  const { port } = server.address() as AddressInfo;
+  return {
+    webhook: {
+      url: `http://127.0.0.1:${port}/hook`,
+      secret: "test-secret",
+    },
+    requests,
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+}
 
 describe("RetryQueue", () => {
-  it("should enqueue and process a delivery", async () => {
-    // Create a dispatcher that always succeeds
+  it("enqueues and delivers a webhook against a real HTTP endpoint", async () => {
     const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1000 });
-
-    // Mock fetch to simulate success
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response("ok", { status: 200 }))
-    ) as any;
+    const server = await startWebhookServer([200]);
 
     try {
-      const queue = new RetryQueue(dispatcher, { maxRetries: 3, retryDelayMs: 100 });
+      const queue = new RetryQueue(dispatcher, {
+        maxRetries: 3,
+        retryDelayMs: 100,
+      });
       const event = makeEvent();
 
-      const id = queue.enqueue(event, WEBHOOK);
+      const id = queue.enqueue(event, server.webhook);
       expect(id).toBeTruthy();
-
-      const stats = queue.getStats();
-      expect(stats.pending).toBe(1);
-      expect(stats.delivered).toBe(0);
+      expect(queue.getStats()).toMatchObject({
+        pending: 1,
+        delivered: 0,
+        failed: 0,
+      });
 
       const results = await queue.processQueue();
-      expect(results.length).toBe(1);
-      expect(results[0].success).toBe(true);
-
-      const statsAfter = queue.getStats();
-      expect(statsAfter.pending).toBe(0);
-      expect(statsAfter.delivered).toBe(1);
+      expect(results).toHaveLength(1);
+      expect(results[0]?.success).toBe(true);
+      expect(queue.getStats()).toMatchObject({
+        pending: 0,
+        delivered: 1,
+        failed: 0,
+      });
+      expect(server.requests).toHaveLength(1);
+      expect(server.requests[0]?.method).toBe("POST");
+      expect(server.requests[0]?.path).toBe("/hook");
+      expect(server.requests[0]?.headers["x-steward-event"]).toBe("tx_signed");
+      expect(server.requests[0]?.headers["x-steward-signature"]).toBeTruthy();
+      expect(JSON.parse(server.requests[0]?.bodyText ?? "{}")).toMatchObject({
+        tenantId: "test-tenant",
+        agentId: "test-agent",
+      });
     } finally {
-      globalThis.fetch = originalFetch;
+      await server.close();
     }
   });
 
-  it("should retry failed deliveries up to maxRetries", async () => {
+  it("retries failed deliveries up to maxRetries", async () => {
     const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 100 });
-
-    // Mock fetch to always fail
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response("error", { status: 500 }))
-    ) as any;
+    const server = await startWebhookServer([500, 500]);
 
     try {
-      const queue = new RetryQueue(dispatcher, { maxRetries: 2, retryDelayMs: 10 });
-      const event = makeEvent();
+      const queue = new RetryQueue(dispatcher, {
+        maxRetries: 2,
+        retryDelayMs: 10,
+      });
+      queue.enqueue(makeEvent(), server.webhook);
 
-      queue.enqueue(event, WEBHOOK);
-
-      // First attempt — fails, retries scheduled
       let results = await queue.processQueue();
-      expect(results[0].success).toBe(false);
+      expect(results[0]?.success).toBe(false);
       expect(queue.getStats().pending).toBe(1);
+      expect(server.requests).toHaveLength(1);
 
-      // Wait for retry delay
-      await new Promise((r) => setTimeout(r, 20));
+      await new Promise((resolve) => setTimeout(resolve, 20));
 
-      // Second attempt — still fails, exhausted
       results = await queue.processQueue();
-      expect(results[0].success).toBe(false);
-
-      const stats = queue.getStats();
-      expect(stats.pending).toBe(0);
-      expect(stats.failed).toBe(1);
+      expect(results[0]?.success).toBe(false);
+      expect(queue.getStats()).toMatchObject({
+        pending: 0,
+        delivered: 0,
+        failed: 1,
+      });
+      expect(server.requests).toHaveLength(2);
     } finally {
-      globalThis.fetch = originalFetch;
+      await server.close();
     }
   });
 
-  it("should not process deliveries before their retry time", async () => {
+  it("does not process deliveries before their retry time", async () => {
     const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 100 });
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response("error", { status: 500 }))
-    ) as any;
+    const server = await startWebhookServer([500, 500]);
 
     try {
-      const queue = new RetryQueue(dispatcher, { maxRetries: 3, retryDelayMs: 5000 });
-      const event = makeEvent();
+      const queue = new RetryQueue(dispatcher, {
+        maxRetries: 3,
+        retryDelayMs: 5_000,
+      });
+      queue.enqueue(makeEvent(), server.webhook);
 
-      queue.enqueue(event, WEBHOOK);
-
-      // First attempt fails
       await queue.processQueue();
       expect(queue.getStats().pending).toBe(1);
+      expect(server.requests).toHaveLength(1);
 
-      // Immediate second process — should skip because retryDelay is 5s
       const results = await queue.processQueue();
-      expect(results.length).toBe(0);
+      expect(results).toHaveLength(0);
+      expect(server.requests).toHaveLength(1);
     } finally {
-      globalThis.fetch = originalFetch;
+      await server.close();
     }
   });
 
-  it("should handle multiple enqueued events", async () => {
+  it("handles multiple enqueued events", async () => {
     const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1000 });
-
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = mock(() =>
-      Promise.resolve(new Response("ok", { status: 200 }))
-    ) as any;
+    const server = await startWebhookServer([200, 200, 200]);
 
     try {
       const queue = new RetryQueue(dispatcher, { maxRetries: 3 });
 
-      queue.enqueue(makeEvent({ agentId: "agent-1" }), WEBHOOK);
-      queue.enqueue(makeEvent({ agentId: "agent-2" }), WEBHOOK);
-      queue.enqueue(makeEvent({ agentId: "agent-3" }), WEBHOOK);
+      queue.enqueue(makeEvent({ agentId: "agent-1" }), server.webhook);
+      queue.enqueue(makeEvent({ agentId: "agent-2" }), server.webhook);
+      queue.enqueue(makeEvent({ agentId: "agent-3" }), server.webhook);
 
       expect(queue.getStats().pending).toBe(3);
 
       const results = await queue.processQueue();
-      expect(results.length).toBe(3);
-      expect(results.every((r) => r.success)).toBe(true);
-
-      expect(queue.getStats().delivered).toBe(3);
-      expect(queue.getStats().pending).toBe(0);
+      expect(results).toHaveLength(3);
+      expect(results.every((result) => result.success)).toBe(true);
+      expect(queue.getStats()).toMatchObject({
+        pending: 0,
+        delivered: 3,
+        failed: 0,
+      });
+      expect(server.requests).toHaveLength(3);
     } finally {
-      globalThis.fetch = originalFetch;
+      await server.close();
     }
   });
 });
