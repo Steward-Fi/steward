@@ -64,8 +64,18 @@ export default function ApprovalsPage() {
           const data = await steward.getPending(agent.id);
           if (data) {
             allPending.push(
-              ...data.map((item: PendingItem) => ({
-                ...item,
+              ...data.map((tx) => ({
+                queueId: tx.id,
+                status: tx.status,
+                requestedAt: tx.createdAt || new Date().toISOString(),
+                transaction: {
+                  id: tx.id,
+                  request: tx.request,
+                  toAddress: tx.toAddress,
+                  value: tx.value,
+                  chainId: tx.chainId,
+                  policyResults: tx.policyResults,
+                },
                 agentId: agent.id,
                 agentName: agent.name,
               }))

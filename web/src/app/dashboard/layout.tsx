@@ -44,9 +44,9 @@ function DashboardNav() {
 
   return (
     <header className="border-b border-border sticky top-0 z-40 bg-bg/90 backdrop-blur-sm">
-      <div className="max-w-[1400px] mx-auto px-6 md:px-10">
-        <div className="flex items-center justify-between h-14 gap-4">
-          <div className="flex items-center gap-4 md:gap-10 min-w-0 flex-1">
+      <div className="max-w-[1400px] mx-auto px-3 sm:px-6 md:px-10">
+        <div className="flex items-center justify-between h-14 gap-2 sm:gap-4">
+          <div className="flex items-center gap-2 sm:gap-4 md:gap-10 min-w-0 flex-1 overflow-hidden">
             <Link
               href="/"
               className="flex items-center gap-2 hover:opacity-80 transition-opacity flex-shrink-0"
@@ -63,14 +63,14 @@ function DashboardNav() {
               </span>
             </Link>
 
-            <nav className="flex items-center gap-1 overflow-x-auto scrollbar-hide">
+            <nav className="flex items-center gap-0.5 sm:gap-1 overflow-x-auto scrollbar-hide max-w-[calc(100vw-8rem)] sm:max-w-none">
               {links.map((link) => {
                 const active = isActive(link.href, link.exact);
                 return (
                   <Link
                     key={link.href}
                     href={link.href}
-                    className={`relative px-3 py-1.5 text-sm transition-colors whitespace-nowrap flex-shrink-0 ${
+                    className={`relative px-2 sm:px-3 py-1.5 text-xs sm:text-sm transition-colors whitespace-nowrap flex-shrink-0 ${
                       active
                         ? "text-text"
                         : "text-text-tertiary hover:text-text-secondary"
