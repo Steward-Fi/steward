@@ -3,11 +3,12 @@
   "compilerOptions": {
     "baseUrl": ".",
     "outDir": "dist",
-    "paths": {
-      "@stwd/shared": ["../shared/dist/index.d.ts"]
-    },
     "rootDir": "src"
   },
-  "include": ["src"],
-  "exclude": ["src/__tests__"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/__tests__"
+  ]
 }

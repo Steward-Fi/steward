@@ -111,6 +111,20 @@ COPY --from=build /app/packages/sdk         packages/sdk
 COPY --from=build /app/packages/vault       packages/vault
 COPY --from=build /app/packages/webhooks    packages/webhooks
 
+# Create workspace symlinks manually — bun 1.3 doesn't auto-link workspace packages
+RUN mkdir -p node_modules/@stwd && \
+    ln -sf ../../packages/shared    node_modules/@stwd/shared && \
+    ln -sf ../../packages/sdk       node_modules/@stwd/sdk && \
+    ln -sf ../../packages/auth       node_modules/@stwd/auth && \
+    ln -sf ../../packages/db         node_modules/@stwd/db && \
+    ln -sf ../../packages/vault       node_modules/@stwd/vault && \
+    ln -sf ../../packages/redis       node_modules/@stwd/redis && \
+    ln -sf ../../packages/api         node_modules/@stwd/api && \
+    ln -sf ../../packages/proxy       node_modules/@stwd/proxy && \
+    ln -sf ../../packages/webhooks    node_modules/@stwd/webhooks && \
+    ln -sf ../../packages/policy-engine node_modules/@stwd/policy-engine && \
+    ln -sf ../../packages/eliza-plugin node_modules/@stwd/eliza-plugin 2>/dev/null; true
+
 # ── Non-root user ─────────────────────────────────────────────────────────────
 # bun image already has a 'bun' user (uid 1000); use it.
 USER bun
