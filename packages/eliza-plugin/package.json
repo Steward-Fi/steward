@@ -19,10 +19,10 @@
     "@stwd/sdk": "0.4.0"
   },
   "peerDependencies": {
-    "@elizaos/core": "workspace:*"
+    "@elizaos/core": ">=2.0.0-alpha.50"
   },
   "devDependencies": {
-    "@elizaos/core": "workspace:*",
+    "@elizaos/core": "2.0.0-alpha.77",
     "@types/node": "^25.5.0",
     "tsup": "^8.0.0",
     "typescript": "^5.5.0",
