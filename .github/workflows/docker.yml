@@ -64,6 +64,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+          build-args: |
+            CACHE_BUST=${{ github.sha }}
 
       # Output the primary image tag for downstream workflows (deploy-railway)
       # For version tags: use semver (e.g. 0.5.0)

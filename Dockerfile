@@ -30,6 +30,9 @@ WORKDIR /app
 # ── Stage 1: Dependencies (all — includes dev deps for build) ─────────────────
 FROM base AS deps
 
+# Cache buster (set via build-arg in CI to force fresh install)
+ARG CACHE_BUST=1
+
 # Copy manifests only — layer-cached until lockfile changes
 COPY package.json bun.lock turbo.json tsconfig.json ./
 
