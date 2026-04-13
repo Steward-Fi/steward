@@ -36,9 +36,8 @@ import {
   type AppVariables,
   type ApiResponse,
 } from "./services/context";
-import { closeDb, getDb, shouldUsePGLite } from "@stwd/db";
+import { closeDb, getDb, runMigrations, shouldUsePGLite } from "@stwd/db";
 import { sql } from "drizzle-orm";
-import { runMigrations } from "@stwd/db/src/migrate";
 import { initRedis, shutdownRedis } from "./middleware/redis";
 
 // ─── App setup ────────────────────────────────────────────────────────────────

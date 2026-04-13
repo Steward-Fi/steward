@@ -14,8 +14,7 @@
  *   STEWARD_BIND_HOST     — bind host (default 127.0.0.1)
  */
 
-import { createPGLiteDb, getDataDir } from "@stwd/db";
-import { setPGLiteOverride } from "@stwd/db/src/client";
+import { createPGLiteDb, getDataDir, setPGLiteOverride } from "@stwd/db";
 
 // Force PGLite mode
 process.env.STEWARD_DB_MODE = "pglite";
