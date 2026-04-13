@@ -56,8 +56,25 @@ RUN BUN_FROZEN_LOCKFILE=0 bun install
 # ── Stage 2: Build ────────────────────────────────────────────────────────────
 FROM base AS build
 
-COPY --from=deps /app/node_modules ./node_modules
 COPY package.json bun.lock turbo.json tsconfig.json ./
+
+# Copy package.json files for workspace resolution
+COPY packages/api/package.json       packages/api/package.json
+COPY packages/auth/package.json      packages/auth/package.json
+COPY packages/db/package.json        packages/db/package.json
+COPY packages/policy-engine/package.json packages/policy-engine/package.json
+COPY packages/proxy/package.json     packages/proxy/package.json
+COPY packages/redis/package.json     packages/redis/package.json
+COPY packages/shared/package.json    packages/shared/package.json
+COPY packages/sdk/package.json       packages/sdk/package.json
+COPY packages/vault/package.json     packages/vault/package.json
+COPY packages/webhooks/package.json  packages/webhooks/package.json
+
+# Create stub for excluded workspaces
+RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
+
+# Install deps fresh in build stage (bun symlinks don't survive COPY --from in BuildKit)
+RUN BUN_FROZEN_LOCKFILE=0 bun install
 
 # Copy full source for all packages needed by api + proxy
 COPY packages/api         packages/api
