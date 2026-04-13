@@ -68,6 +68,18 @@ COPY packages/sdk         packages/sdk
 COPY packages/vault       packages/vault
 COPY packages/webhooks    packages/webhooks
 
+# Create workspace symlinks (Bun 1.3 doesn't auto-link in Docker)
+RUN mkdir -p node_modules/@stwd && \
+    ln -sf ../../packages/shared    node_modules/@stwd/shared && \
+    ln -sf ../../packages/sdk       node_modules/@stwd/sdk && \
+    ln -sf ../../packages/auth       node_modules/@stwd/auth && \
+    ln -sf ../../packages/db         node_modules/@stwd/db && \
+    ln -sf ../../packages/vault       node_modules/@stwd/vault && \
+    ln -sf ../../packages/redis       node_modules/@stwd/redis && \
+    ln -sf ../../packages/proxy       node_modules/@stwd/proxy && \
+    ln -sf ../../packages/webhooks    node_modules/@stwd/webhooks && \
+    ln -sf ../../packages/policy-engine node_modules/@stwd/policy-engine
+
 # Build api and proxy (and their deps) via turborepo
 RUN bunx turbo run build --filter=@stwd/api --filter=@stwd/proxy
 
