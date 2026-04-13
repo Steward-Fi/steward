@@ -10,6 +10,9 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.image-tag.outputs.tag }}
+      image_tags: ${{ steps.meta.outputs.tags }}
     # packages:write is required to push to GHCR
     # contents:read is required to checkout the repo
     permissions:
@@ -61,3 +64,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false
+
+      # Output the primary image tag for downstream workflows (deploy-railway)
+      # For version tags: use semver (e.g. 0.5.0)
+      # For branch pushes: use branch name (e.g. develop)
+      - name: Export image tag
+        id: image-tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/v}"
+          else
+            TAG="${GITHUB_REF#refs/heads/}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Primary image tag: ${TAG}"
