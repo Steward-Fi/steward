@@ -255,6 +255,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
 
   // Reset singletons so they pick up the new stores on next use
   _passkeyAuth = null;
+  _passkeyAuthByOrigin.clear();
   _emailAuth = null;
 }
 
@@ -269,17 +270,63 @@ function getTokenStore(): TokenStore {
 }
 
 let _passkeyAuth: PasskeyAuth | null = null;
+const _passkeyAuthByOrigin = new Map<string, PasskeyAuth>();
 
-function getPasskeyAuth(): PasskeyAuth {
-  if (!_passkeyAuth) {
-    _passkeyAuth = new PasskeyAuth({
-      rpName: process.env.PASSKEY_RP_NAME || "Steward",
-      rpID: process.env.PASSKEY_RP_ID || "steward.fi",
-      origin: process.env.PASSKEY_ORIGIN || "https://steward.fi",
-      challengeStore: getChallengeStore(),
-    });
+/**
+ * Get PasskeyAuth for a specific origin (multi-tenant passkey support).
+ * Derives rpID from the Origin header so passkeys work on waifu.fun,
+ * elizacloud.ai, or any other tenant domain.
+ *
+ * Allowed origins: PASSKEY_ALLOWED_ORIGINS env (comma-separated),
+ * defaults to PASSKEY_ORIGIN.
+ */
+function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
+  const defaultRpID = process.env.PASSKEY_RP_ID || "steward.fi";
+  const defaultOrigin = process.env.PASSKEY_ORIGIN || "https://steward.fi";
+  const rpName = process.env.PASSKEY_RP_NAME || "Steward";
+
+  // If no origin provided, use the default singleton
+  if (!requestOrigin) {
+    if (!_passkeyAuth) {
+      const origins = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
+        .split(",").map((o) => o.trim()).filter(Boolean);
+      _passkeyAuth = new PasskeyAuth({
+        rpName,
+        rpID: defaultRpID,
+        origin: origins.length > 1 ? origins : defaultOrigin,
+        challengeStore: getChallengeStore(),
+      });
+    }
+    return _passkeyAuth;
   }
-  return _passkeyAuth;
+
+  // Parse origin to get rpID (hostname)
+  let rpID = defaultRpID;
+  try {
+    rpID = new URL(requestOrigin).hostname;
+  } catch {
+    return getPasskeyAuth(); // invalid origin, fall back to default
+  }
+
+  // Validate against allowed origins
+  const allowed = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
+    .split(",").map((o) => o.trim()).filter(Boolean);
+  if (!allowed.includes(requestOrigin) && rpID !== defaultRpID) {
+    return getPasskeyAuth(); // not in allowed list, use default
+  }
+
+  // Cache per rpID
+  const cached = _passkeyAuthByOrigin.get(rpID);
+  if (cached) return cached;
+
+  const auth = new PasskeyAuth({
+    rpName,
+    rpID,
+    origin: requestOrigin,
+    challengeStore: getChallengeStore(),
+  });
+  _passkeyAuthByOrigin.set(rpID, auth);
+  return auth;
 }
 
 // ─── EmailAuth singleton ──────────────────────────────────────────────────────
@@ -754,7 +801,7 @@ auth.post("/passkey/register/options", async (c) => {
     .from(authenticators)
     .where(eq(authenticators.userId, user.id));
 
-  const options = await getPasskeyAuth().generateRegistrationOptions(
+  const options = await getPasskeyAuth(c.req.header("origin")).generateRegistrationOptions(
     user.id,
     email,
     existingCreds.map((cred) => cred.credentialId),
@@ -797,7 +844,7 @@ auth.post("/passkey/register/verify", async (c) => {
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyRegistration"]>>;
   try {
-    verification = await getPasskeyAuth().verifyRegistration(
+    verification = await getPasskeyAuth(c.req.header("origin")).verifyRegistration(
       user.id,
       body.response as unknown as Parameters<PasskeyAuth["verifyRegistration"]>[1],
     );
@@ -890,7 +937,7 @@ auth.post("/passkey/login/options", async (c) => {
     );
   }
 
-  const options = await getPasskeyAuth().generateAuthenticationOptions(email, {
+  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(email, {
     allowCredentials: creds.map((cred) => ({ id: cred.credentialId })),
   });
 
@@ -942,7 +989,7 @@ auth.post("/passkey/login/verify", async (c) => {
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   try {
-    verification = await getPasskeyAuth().verifyAuthentication(
+    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
       body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
       undefined,
       cred.credentialPublicKey,
