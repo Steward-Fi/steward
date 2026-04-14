@@ -87,11 +87,47 @@ jobs:
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
 
+      - name: Start API test server
+        env:
+          DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+          PORT: "3299"
+          SKIP_MIGRATIONS: "1"
+          STEWARD_BIND_HOST: "127.0.0.1"
+          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          STEWARD_PLATFORM_KEY: "ci-platform-key"
+          STEWARD_PLATFORM_KEYS: "ci-platform-key"
+          STEWARD_SESSION_SECRET: "ci-session-secret"
+        run: |
+          bun run packages/api/src/index.ts > /tmp/steward-api-integration.log 2>&1 &
+          echo $! > /tmp/steward-api-integration.pid
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:3299/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/steward-api-integration.log
+          exit 1
+
       - name: Integration tests (API)
         run: bun test packages/api
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
+          PORT: "3299"
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          STEWARD_PLATFORM_KEY: "ci-platform-key"
+          STEWARD_PLATFORM_KEYS: "ci-platform-key"
+          STEWARD_SESSION_SECRET: "ci-session-secret"
+
+      - name: Stop API test server
+        if: always()
+        run: |
+          if [ -f /tmp/steward-api-integration.pid ]; then
+            kill "$(cat /tmp/steward-api-integration.pid)" || true
+          fi
+          if [ -f /tmp/steward-api-integration.log ]; then
+            cat /tmp/steward-api-integration.log
+          fi
 
   e2e-smoke:
     name: E2E Smoke (Embedded)
@@ -114,6 +150,7 @@ jobs:
         env:
           PORT: "3200"
           STEWARD_BIND_HOST: "127.0.0.1"
+          STEWARD_PGLITE_PATH: "/tmp/steward-fi-e2e-pglite"
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_SESSION_SECRET: "ci-session-secret"

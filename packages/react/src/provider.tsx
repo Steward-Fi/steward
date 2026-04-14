@@ -1,6 +1,5 @@
 import type { StewardSession } from "@stwd/sdk";
 import { StewardAuth } from "@stwd/sdk";
-import type React from "react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type {
   StewardAuthConfig,
@@ -13,7 +12,7 @@ import type {
   TenantFeatureFlags,
   TenantTheme,
 } from "./types.js";
-import { DEFAULT_THEME, mergeTheme, themeToCSS } from "./utils/theme.js";
+import { DEFAULT_THEME, mergeTheme } from "./utils/theme.js";
 
 const DEFAULT_FEATURES: TenantFeatureFlags = {
   showFundingQR: true,
@@ -424,8 +423,6 @@ export function StewardProvider({
     return mergeTheme(base, themeOverrides);
   }, [tenantConfig, themeOverrides]);
 
-  const cssVars = useMemo(() => themeToCSS(theme), [theme]);
-
   const value = useMemo<StewardContextValue>(
     () => ({
       client,
@@ -441,11 +438,7 @@ export function StewardProvider({
 
   // ─── Render ────────────────────────────────────────────────────────────────
 
-  const inner = (
-    <StewardContext.Provider value={value}>
-      {children}
-    </StewardContext.Provider>
-  );
+  const inner = <StewardContext.Provider value={value}>{children}</StewardContext.Provider>;
 
   if (authContextValue) {
     return (

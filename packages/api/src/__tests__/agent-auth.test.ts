@@ -12,8 +12,8 @@ import { jwtVerify, SignJWT } from "jose";
 
 const TEST_PORT = 3299;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
-const MASTER_PASSWORD = process.env.STEWARD_MASTER_PASSWORD || "test-secret";
-const JWT_SECRET = new TextEncoder().encode(MASTER_PASSWORD);
+const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 const JWT_ISSUER = "steward";
 
 const TEST_TENANT_ID = "test-agent-auth";

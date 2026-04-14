@@ -85,6 +85,34 @@
       "when": 1775093899000,
       "tag": "0011_refresh_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1775094500000,
+      "tag": "0012_tenant_join_modes",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1775095100000,
+      "tag": "0013_standalone_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1775095700000,
+      "tag": "0014_erc8004_registrations",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1775096300000,
+      "tag": "0015_reputation_policy_types",
+      "breakpoints": true
     }
   ]
 }

@@ -24,8 +24,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Authenticate with GHCR using the automatic GITHUB_TOKEN
+      # Authenticate with GHCR only when publishing a tagged release image.
       - name: Login to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -51,14 +52,14 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
-      # Build the image and push to GHCR
-      # provenance:false avoids multi-arch manifest issues with single-platform builds
-      # GHA cache speeds up subsequent builds by caching layers
-      - name: Build and push
+      # Build on branch pushes and publish only on version tags. Branch builds still
+      # validate the Dockerfile, but avoid failing on repo tokens that cannot write
+      # to the org GHCR package.
+      - name: Build and optionally push
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
