@@ -21,7 +21,7 @@
     "test:e2e:smoke": "bun run scripts/run-e2e-smoke.ts",
     "test:e2e:all": "bun run test:e2e:smoke && bun run test:e2e:auth && bun run test:e2e:integration",
     "seed": "bun packages/seed/src/index.ts",
-    "start:local": "cd packages/api && bun run src/embedded.ts"
+    "start:local": "bun run scripts/start-local.ts"
   },
   "packageManager": "bun@1.3.9",
   "devDependencies": {

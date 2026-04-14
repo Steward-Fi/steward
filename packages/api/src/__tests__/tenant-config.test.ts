@@ -237,10 +237,7 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
 describe.skipIf(SKIP)("Dashboard API", () => {
   it("returns 404 for non-existent agent", async () => {
     const { createSessionToken } = await import("../routes/auth");
-    const token = await createSessionToken(
-      "0x0000000000000000000000000000000000000000",
-      TENANT_ID,
-    );
+    const token = await createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID);
     const res = await fetch(`${BASE_URL}/dashboard/nonexistent-agent`, {
       headers: { Authorization: `Bearer ${token}` },
     });
