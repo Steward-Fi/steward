@@ -443,9 +443,7 @@ export function StewardProvider({
 
   const inner = (
     <StewardContext.Provider value={value}>
-      <div className="stwd-root" style={cssVars as React.CSSProperties}>
-        {children}
-      </div>
+      {children}
     </StewardContext.Provider>
   );
 
