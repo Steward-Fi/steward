@@ -1,7 +1,6 @@
 import { StewardClient } from "./steward-client";
 
-export const API_URL =
-  process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
+export const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
 
 let _apiKey = "";
 let _tenantId = "";
@@ -41,7 +40,11 @@ const initialToken = getInitialToken();
 
 let _steward = initialToken
   ? new StewardClient({ baseUrl: API_URL, authToken: initialToken })
-  : new StewardClient({ baseUrl: API_URL, apiKey: _apiKey, tenantId: _tenantId });
+  : new StewardClient({
+      baseUrl: API_URL,
+      apiKey: _apiKey,
+      tenantId: _tenantId,
+    });
 
 // Proxy getter so components always get the latest client instance
 export const steward = new Proxy({} as StewardClient, {
@@ -50,4 +53,4 @@ export const steward = new Proxy({} as StewardClient, {
   },
 });
 
-export { _tenantId as TENANT_ID, _apiKey as API_KEY };
+export { _apiKey as API_KEY, _tenantId as TENANT_ID };

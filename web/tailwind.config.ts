@@ -39,10 +39,7 @@ const config: Config = {
         34: "8.5rem",
       },
       fontSize: {
-        hero: [
-          "clamp(3.5rem, 8vw + 1rem, 8rem)",
-          { lineHeight: "0.95", letterSpacing: "-0.03em" },
-        ],
+        hero: ["clamp(3.5rem, 8vw + 1rem, 8rem)", { lineHeight: "0.95", letterSpacing: "-0.03em" }],
         "hero-landing": [
           "clamp(3rem, 6vw + 0.5rem, 6rem)",
           { lineHeight: "0.92", letterSpacing: "-0.03em" },
@@ -55,8 +52,7 @@ const config: Config = {
       animation: {
         "fade-in": "fadeIn 0.6s var(--ease-out-quart) forwards",
         "slide-up": "slideUp 0.6s var(--ease-out-expo) forwards",
-        "slide-in-left":
-          "slideInLeft 0.6s var(--ease-out-expo) forwards",
+        "slide-in-left": "slideInLeft 0.6s var(--ease-out-expo) forwards",
       },
       keyframes: {
         fadeIn: {

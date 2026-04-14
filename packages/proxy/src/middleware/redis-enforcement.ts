@@ -6,16 +6,15 @@
  */
 
 import {
-  getRedis,
-  disconnectRedis,
   checkRateLimit,
-  recordSpend,
   checkSpendLimit,
+  disconnectRedis,
   estimateCost,
+  getRedis,
   isKnownHost,
   type RateLimitResult,
+  recordSpend,
 } from "@stwd/redis";
-import type Redis from "ioredis";
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -59,7 +58,11 @@ export async function shutdownProxyRedis(): Promise<void> {
 const DEFAULT_PROXY_RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute
 const DEFAULT_PROXY_RATE_LIMIT_MAX = 60; // 60 requests/minute per agent per host
 
-const PERMISSIVE: RateLimitResult = { allowed: true, remaining: Infinity, resetMs: 0 };
+const PERMISSIVE: RateLimitResult = {
+  allowed: true,
+  remaining: Infinity,
+  resetMs: 0,
+};
 
 /**
  * Check rate limit for a proxy request.

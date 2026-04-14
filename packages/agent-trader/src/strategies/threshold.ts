@@ -15,7 +15,7 @@
  * At least one of (buyBelowPrice, sellAbovePrice) must be provided.
  */
 
-import type { Strategy, AgentState, TradeDecision } from "./types.js";
+import type { AgentState, Strategy, TradeDecision } from "./types.js";
 
 export interface ThresholdParams {
   /** Token price threshold (native-wei per token) below which we buy */
@@ -114,9 +114,7 @@ export class ThresholdStrategy implements Strategy {
       }
 
       const spendable =
-        nativeBalance > this.minNativeReserve
-          ? nativeBalance - this.minNativeReserve
-          : 0n;
+        nativeBalance > this.minNativeReserve ? nativeBalance - this.minNativeReserve : 0n;
 
       if (spendable < this.buyAmount) {
         return {

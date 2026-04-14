@@ -7,20 +7,14 @@
  *   3. Persists data across close/reopen cycles
  */
 
-import { describe, test, expect, afterAll } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
 
 import { createPGLiteDb } from "../pglite";
-import {
-  tenants,
-  agents,
-  policies,
-  transactions,
-  encryptedKeys,
-} from "../schema";
+import { agents, encryptedKeys, policies, tenants, transactions } from "../schema";
 
 // Shared temp dir for persistence tests
 let tempDir: string;
@@ -66,9 +60,7 @@ describe("PGLite Adapter", () => {
   test("migration tracking table exists", async () => {
     const { client } = await freshDb();
 
-    const result = await client.query(
-      "SELECT tag FROM __steward_migrations ORDER BY tag",
-    );
+    const result = await client.query("SELECT tag FROM __steward_migrations ORDER BY tag");
     expect(result.rows.length).toBeGreaterThan(0);
     // Should have at least the initial migration
     const tags = result.rows.map((r: any) => r.tag);
@@ -88,10 +80,7 @@ describe("PGLite Adapter", () => {
       apiKeyHash: "hash123",
     });
 
-    const rows = await db
-      .select()
-      .from(tenants)
-      .where(eq(tenants.id, "test-tenant-1"));
+    const rows = await db.select().from(tenants).where(eq(tenants.id, "test-tenant-1"));
 
     expect(rows).toHaveLength(1);
     expect(rows[0].name).toBe("Test Tenant");
@@ -118,10 +107,7 @@ describe("PGLite Adapter", () => {
       walletAddress: "0x1234567890abcdef",
     });
 
-    const rows = await db
-      .select()
-      .from(agents)
-      .where(eq(agents.id, "agent-1"));
+    const rows = await db.select().from(agents).where(eq(agents.id, "agent-1"));
 
     expect(rows).toHaveLength(1);
     expect(rows[0].name).toBe("Test Agent");
@@ -150,10 +136,7 @@ describe("PGLite Adapter", () => {
       config: { maxAmount: "1000", period: "daily" },
     });
 
-    const rows = await db
-      .select()
-      .from(policies)
-      .where(eq(policies.agentId, "a1"));
+    const rows = await db.select().from(policies).where(eq(policies.agentId, "a1"));
 
     expect(rows).toHaveLength(1);
     expect(rows[0].type).toBe("spending-limit");
@@ -183,15 +166,9 @@ describe("PGLite Adapter", () => {
     });
 
     // Update status
-    await db
-      .update(transactions)
-      .set({ status: "approved" })
-      .where(eq(transactions.id, "tx-1"));
+    await db.update(transactions).set({ status: "approved" }).where(eq(transactions.id, "tx-1"));
 
-    const rows = await db
-      .select()
-      .from(transactions)
-      .where(eq(transactions.id, "tx-1"));
+    const rows = await db.select().from(transactions).where(eq(transactions.id, "tx-1"));
 
     expect(rows).toHaveLength(1);
     expect(rows[0].status).toBe("approved");
@@ -218,10 +195,7 @@ describe("PGLite Adapter", () => {
       salt: "salt_value",
     });
 
-    const rows = await db
-      .select()
-      .from(encryptedKeys)
-      .where(eq(encryptedKeys.agentId, "a1"));
+    const rows = await db.select().from(encryptedKeys).where(eq(encryptedKeys.agentId, "a1"));
 
     expect(rows).toHaveLength(1);
     expect(rows[0].ciphertext).toBe("encrypted_data");
@@ -258,18 +232,12 @@ describe("PGLite Adapter", () => {
     {
       const { db, client } = await createPGLiteDb(tempDir);
 
-      const tenantRows = await db
-        .select()
-        .from(tenants)
-        .where(eq(tenants.id, "persist-tenant"));
+      const tenantRows = await db.select().from(tenants).where(eq(tenants.id, "persist-tenant"));
 
       expect(tenantRows).toHaveLength(1);
       expect(tenantRows[0].name).toBe("Persistent Tenant");
 
-      const agentRows = await db
-        .select()
-        .from(agents)
-        .where(eq(agents.id, "persist-agent"));
+      const agentRows = await db.select().from(agents).where(eq(agents.id, "persist-agent"));
 
       expect(agentRows).toHaveLength(1);
       expect(agentRows[0].name).toBe("Persistent Agent");

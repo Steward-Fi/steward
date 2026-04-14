@@ -1,8 +1,7 @@
-import React from "react";
-import type { SpendDashboardProps } from "../types.js";
 import { useSpend } from "../hooks/useSpend.js";
 import { useStewardContext } from "../provider.js";
-import { truncateAddress, calcPercent } from "../utils/format.js";
+import type { SpendDashboardProps } from "../types.js";
+import { truncateAddress } from "../utils/format.js";
 
 /**
  * Spend tracking visualization with budget usage bars and breakdown.
@@ -48,11 +47,16 @@ export function SpendDashboard({
 
   const getRangeLabel = (r: string) => {
     switch (r) {
-      case "24h": return "Last 24 Hours";
-      case "7d": return "Last 7 Days";
-      case "30d": return "Last 30 Days";
-      case "all": return "All Time";
-      default: return r;
+      case "24h":
+        return "Last 24 Hours";
+      case "7d":
+        return "Last 7 Days";
+      case "30d":
+        return "Last 30 Days";
+      case "all":
+        return "All Time";
+      default:
+        return r;
     }
   };
 
@@ -142,12 +146,16 @@ export function SpendDashboard({
           <h4 className="stwd-subheading">Daily Spend</h4>
           <div className="stwd-bar-chart">
             {stats.daily.map((day) => {
-              const maxSpent = Math.max(...stats.daily.map((d) => parseFloat(d.spentFormatted) || 0));
-              const height = maxSpent > 0
-                ? (parseFloat(day.spentFormatted) / maxSpent) * 100
-                : 0;
+              const maxSpent = Math.max(
+                ...stats.daily.map((d) => parseFloat(d.spentFormatted) || 0),
+              );
+              const height = maxSpent > 0 ? (parseFloat(day.spentFormatted) / maxSpent) * 100 : 0;
               return (
-                <div key={day.date} className="stwd-bar-col" title={`${day.date}: ${day.spentFormatted} ETH (${day.txCount} txs)`}>
+                <div
+                  key={day.date}
+                  className="stwd-bar-col"
+                  title={`${day.date}: ${day.spentFormatted} ETH (${day.txCount} txs)`}
+                >
                   <div className="stwd-bar" style={{ height: `${Math.max(2, height)}%` }} />
                   <div className="stwd-bar-label">{day.date.slice(-5)}</div>
                 </div>

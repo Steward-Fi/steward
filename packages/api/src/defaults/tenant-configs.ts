@@ -2,15 +2,7 @@
  * Default tenant control plane configurations for common use cases.
  */
 
-import type {
-  TenantControlPlaneConfig,
-  PolicyExposureConfig,
-  PolicyTemplate,
-  SecretRoutePreset,
-  TenantFeatureFlags,
-  TenantTheme,
-  ApprovalConfig,
-} from "@stwd/shared";
+import type { PolicyTemplate, TenantControlPlaneConfig } from "@stwd/shared";
 
 // ─── Policy Templates ─────────────────────────────────────────────────────────
 

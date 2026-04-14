@@ -1,7 +1,6 @@
-import type { Provider, ProviderResult } from "@elizaos/core";
-import type { IAgentRuntime, Memory, State } from "@elizaos/core";
+import type { IAgentRuntime, Memory, Provider, ProviderResult, State } from "@elizaos/core";
 import type { PolicyRule } from "@stwd/sdk";
-import { StewardService } from "../services/StewardService.js";
+import type { StewardService } from "../services/StewardService.js";
 
 /**
  * Summarize a policy rule into a human-readable one-liner.
@@ -32,11 +31,7 @@ export const walletStatusProvider: Provider = {
   name: "stewardWalletStatus",
   description: "Current Steward wallet address, chain, and policy summary",
 
-  async get(
-    runtime: IAgentRuntime,
-    _message: Memory,
-    _state: State,
-  ): Promise<ProviderResult> {
+  async get(runtime: IAgentRuntime, _message: Memory, _state: State): Promise<ProviderResult> {
     const steward = runtime.getService("steward" as any) as StewardService | null;
 
     if (!steward?.isConnected()) {

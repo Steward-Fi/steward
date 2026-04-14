@@ -12,19 +12,13 @@
  * continues on the next tick.
  */
 
-import type { StewardClient, StewardApiError } from "@stwd/sdk";
+import type { StewardApiError, StewardClient } from "@stwd/sdk";
 import type { AgentTraderConfig, TraderConfig } from "./config.js";
-import type { Strategy } from "./strategies/types.js";
-import { resolveStrategy } from "./strategies/index.js";
+import { logDecision, logError, logInfo, logSubmission, logWarn } from "./logger.js";
 import { fetchAgentState } from "./state.js";
+import { resolveStrategy } from "./strategies/index.js";
+import type { AgentState, Strategy, TradeDecision } from "./strategies/types.js";
 import { buildSwapTx, toSignInput } from "./trade-builder.js";
-import {
-  logDecision,
-  logSubmission,
-  logInfo,
-  logWarn,
-  logError,
-} from "./logger.js";
 
 // ─── Loop handle ─────────────────────────────────────────────────────────────
 
@@ -37,11 +31,9 @@ export interface AgentLoop {
 
 const walletCache = new Map<string, string>(); // agentId → walletAddress
 
-async function resolveWallet(
-  steward: StewardClient,
-  agentId: string,
-): Promise<string | null> {
-  if (walletCache.has(agentId)) return walletCache.get(agentId)!;
+async function resolveWallet(steward: StewardClient, agentId: string): Promise<string | null> {
+  const cachedWallet = walletCache.get(agentId);
+  if (cachedWallet) return cachedWallet;
 
   try {
     const agent = await steward.getAgent(agentId);
@@ -69,7 +61,7 @@ async function runTick(
   if (!walletAddress) return;
 
   // 2. Fetch state
-  let state;
+  let state: AgentState;
   try {
     state = await fetchAgentState(agentConfig, walletAddress, steward);
   } catch (err) {
@@ -78,7 +70,7 @@ async function runTick(
   }
 
   // 3. Strategy evaluation
-  let decision;
+  let decision: TradeDecision;
   try {
     decision = await strategy.evaluate(state);
   } catch (err) {
@@ -151,10 +143,10 @@ async function runTick(
         dataLen: builtTx.data.length,
         chainId,
       });
-      logInfo(
-        "Transaction queued for human approval — will execute on approval webhook",
-        { agentId, policyResults: result.results },
-      );
+      logInfo("Transaction queued for human approval — will execute on approval webhook", {
+        agentId,
+        policyResults: result.results,
+      });
     } else if ("signedTx" in result) {
       logSubmission({
         agentId,
@@ -213,7 +205,9 @@ export function startAgentLoop(
     logInfo(`Agent "${agentId}" using manual strategy — loop is passive`);
     return {
       agentId,
-      stop: () => { /* nothing to stop */ },
+      stop: () => {
+        /* nothing to stop */
+      },
     };
   }
 

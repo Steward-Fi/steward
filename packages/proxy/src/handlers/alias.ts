@@ -27,9 +27,7 @@ export interface ResolvedTarget {
  */
 export function resolveTarget(requestPath: string): ResolvedTarget | null {
   // Strip leading slash and split into segments
-  const cleaned = requestPath.startsWith("/")
-    ? requestPath.slice(1)
-    : requestPath;
+  const cleaned = requestPath.startsWith("/") ? requestPath.slice(1) : requestPath;
   if (!cleaned) return null;
 
   const slashIdx = cleaned.indexOf("/");

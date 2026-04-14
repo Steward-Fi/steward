@@ -56,7 +56,7 @@ export class ConsoleProvider implements EmailProvider {
         "",
         text,
         "─────────────────────────────────────────",
-      ].join("\n")
+      ].join("\n"),
     );
   }
 }

@@ -1,9 +1,9 @@
 "use client";
 
+import { motion } from "framer-motion";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { motion } from "framer-motion";
 import { useAuth } from "@/components/auth-provider";
 
 const links = [
@@ -42,9 +42,14 @@ export function DashboardNav() {
       <div className="max-w-[1400px] mx-auto px-6 md:px-10">
         <div className="flex items-center justify-between h-14 gap-4">
           <div className="flex items-center gap-4 md:gap-10 min-w-0 flex-1">
-            <Link href="/" className="flex items-center gap-2 hover:opacity-80 transition-opacity flex-shrink-0">
+            <Link
+              href="/"
+              className="flex items-center gap-2 hover:opacity-80 transition-opacity flex-shrink-0"
+            >
               <Image src="/logo.png" alt="Steward" width={20} height={20} className="w-5 h-5" />
-              <span className="font-display text-base font-bold tracking-tight text-text">steward</span>
+              <span className="font-display text-base font-bold tracking-tight text-text">
+                steward
+              </span>
             </Link>
 
             <nav className="flex items-center gap-1 overflow-x-auto scrollbar-hide">
@@ -55,9 +60,7 @@ export function DashboardNav() {
                     key={link.href}
                     href={link.href}
                     className={`relative px-3 py-1.5 text-sm transition-colors whitespace-nowrap flex-shrink-0 ${
-                      active
-                        ? "text-text"
-                        : "text-text-tertiary hover:text-text-secondary"
+                      active ? "text-text" : "text-text-tertiary hover:text-text-secondary"
                     }`}
                   >
                     {link.label}

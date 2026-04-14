@@ -6,38 +6,23 @@
  * re-instantiate them (which would lead to duplicate connections / inconsistent state).
  */
 
-import { and, eq, gte, sql } from "drizzle-orm";
-import type { Context, Next } from "hono";
-import { SignJWT, jwtVerify } from "jose";
-import { generateNonce } from "siwe";
-
-import { generateApiKey, hashApiKey, validateApiKey } from "@stwd/auth";
-import {
-  agents,
-  approvalQueue,
-  getDb,
-  policies,
-  tenants,
-  tenantConfigs as tenantConfigsTable,
-  toPolicyRule,
-  toSignRequest,
-  toTxRecord,
-  transactions,
-} from "@stwd/db";
+import { validateApiKey } from "@stwd/auth";
+import { getDb, policies, tenants, toPolicyRule, transactions } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
-  createPriceOracle,
-  type AgentBalance,
   type AgentIdentity,
   type ApiResponse,
+  createPriceOracle,
   type PolicyRule,
   type PriceOracle,
-  type SignRequest,
   type Tenant,
   type TenantConfig,
 } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
+import { and, eq, gte, sql } from "drizzle-orm";
+import type { Context, Next } from "hono";
+import { jwtVerify, SignJWT } from "jose";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -51,22 +36,25 @@ export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 
 const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
 if (!process.env.STEWARD_SESSION_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
-  console.warn("⚠️ STEWARD_SESSION_SECRET not set, falling back to master password. Set a separate JWT secret for production.");
+  console.warn(
+    "⚠️ STEWARD_SESSION_SECRET not set, falling back to master password. Set a separate JWT secret for production.",
+  );
 }
 if (!jwtSecretSource) {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
+    throw new Error(
+      "⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production",
+    );
   }
-  console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!");
+  console.warn(
+    "⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!",
+  );
 }
 export const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 export const JWT_ISSUER = "steward";
 export const JWT_EXPIRY = "24h";
 
-export async function createSessionToken(
-  address: string,
-  tenantId: string,
-): Promise<string> {
+export async function createSessionToken(address: string, tenantId: string): Promise<string> {
   return new SignJWT({ address, tenantId })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -90,8 +78,17 @@ export async function createAgentToken(
 
 export async function verifySessionToken(token: string) {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET, { issuer: JWT_ISSUER });
-    return payload as { address: string; tenantId: string; agentId?: string; scope?: string; userId?: string; email?: string };
+    const { payload } = await jwtVerify(token, JWT_SECRET, {
+      issuer: JWT_ISSUER,
+    });
+    return payload as {
+      address: string;
+      tenantId: string;
+      agentId?: string;
+      scope?: string;
+      userId?: string;
+      email?: string;
+    };
   } catch {
     return null;
   }
@@ -101,12 +98,15 @@ export async function verifySessionToken(token: string) {
 
 export const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
 
-export const nonceCleanupTimer = setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of nonceStore.entries()) {
-    if (entry.expiresAt <= now) nonceStore.delete(key);
-  }
-}, 5 * 60 * 1000);
+export const nonceCleanupTimer = setInterval(
+  () => {
+    const now = Date.now();
+    for (const [key, entry] of nonceStore.entries()) {
+      if (entry.expiresAt <= now) nonceStore.delete(key);
+    }
+  },
+  5 * 60 * 1000,
+);
 
 // ─── Input validation helpers ─────────────────────────────────────────────────
 
@@ -158,12 +158,28 @@ export function isRpcError(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const msg = error.message.toLowerCase();
   const rpcIndicators = [
-    "insufficient funds", "insufficient balance", "nonce too low", "nonce too high",
-    "gas too low", "gas limit", "underpriced", "replacement transaction",
-    "exceeds block gas limit", "execution reverted", "out of gas", "invalid sender",
-    "invalid signature", "account not found", "blockhash not found",
-    "transaction simulation failed", "instruction error", "custom program error",
-    "rpc error", "failed to send transaction", "transaction failed", "0x",
+    "insufficient funds",
+    "insufficient balance",
+    "nonce too low",
+    "nonce too high",
+    "gas too low",
+    "gas limit",
+    "underpriced",
+    "replacement transaction",
+    "exceeds block gas limit",
+    "execution reverted",
+    "out of gas",
+    "invalid sender",
+    "invalid signature",
+    "account not found",
+    "blockhash not found",
+    "transaction simulation failed",
+    "instruction error",
+    "custom program error",
+    "rpc error",
+    "failed to send transaction",
+    "transaction failed",
+    "0x",
   ];
   return rpcIndicators.some((indicator) => msg.includes(indicator));
 }
@@ -201,7 +217,9 @@ export const vault = new Vault({
 });
 
 export const policyEngine = new PolicyEngine();
-export const priceOracle: PriceOracle = createPriceOracle({ cacheTtlMs: 60_000 });
+export const priceOracle: PriceOracle = createPriceOracle({
+  cacheTtlMs: 60_000,
+});
 export const webhookDispatcher = new WebhookDispatcher();
 
 // ─── Tenant config cache ──────────────────────────────────────────────────────
@@ -260,10 +278,7 @@ export async function ensureAgentForTenant(
 }
 
 export async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRule[]> {
-  const storedPolicies = await db
-    .select()
-    .from(policies)
-    .where(eq(policies.agentId, agentId));
+  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
   return tenantConfigs.get(tenantId)?.defaultPolicies || [];
@@ -333,7 +348,13 @@ export async function tenantAuth(
         }
         c.set("tenantId", payload.tenantId);
         c.set("tenant", jwtTenant);
-        c.set("tenantConfig", tenantConfigs.get(payload.tenantId) || { id: jwtTenant.id, name: jwtTenant.name });
+        c.set(
+          "tenantConfig",
+          tenantConfigs.get(payload.tenantId) || {
+            id: jwtTenant.id,
+            name: jwtTenant.name,
+          },
+        );
 
         if (payload.userId) c.set("userId", payload.userId);
         if (payload.scope === "agent" && payload.agentId) {
@@ -375,10 +396,7 @@ export async function tenantAuth(
   await next();
 }
 
-export async function sessionAuth(
-  c: Context<{ Variables: AppVariables }>,
-  next: Next,
-) {
+export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next: Next) {
   const authHeader = c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
     return c.json<ApiResponse>({ ok: false, error: "Authorization header required" }, 401);
@@ -395,7 +413,10 @@ export async function sessionAuth(
 
   c.set("tenantId", payload.tenantId);
   c.set("tenant", tenant);
-  c.set("tenantConfig", tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name });
+  c.set(
+    "tenantConfig",
+    tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name },
+  );
 
   await next();
 }
@@ -419,10 +440,7 @@ export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boo
  * The dashboard is user-centric (not API-key-centric) so only session JWTs are
  * accepted here — no API key fallback.
  */
-export async function dashboardAuthMiddleware(
-  c: Context<{ Variables: AppVariables }>,
-  next: Next,
-) {
+export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariables }>, next: Next) {
   const authHeader = c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
     return c.json<ApiResponse>({ ok: false, error: "Authorization header required" }, 401);
@@ -442,7 +460,10 @@ export async function dashboardAuthMiddleware(
 
   c.set("tenantId", payload.tenantId);
   c.set("tenant", tenant);
-  c.set("tenantConfig", tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name });
+  c.set(
+    "tenantConfig",
+    tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name },
+  );
   c.set("authType", "dashboard-jwt");
   if (payload.userId) c.set("userId", payload.userId);
 

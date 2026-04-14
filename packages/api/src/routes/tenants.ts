@@ -4,22 +4,22 @@
  * Mount: app.route("/tenants", tenantRoutes)
  */
 
-import { Hono } from "hono";
 import { hashApiKey } from "@stwd/auth";
+import { Hono } from "hono";
 import {
+  type ApiResponse,
   type AppVariables,
   db,
   findTenant,
   getTenantPayload,
   isNonEmptyString,
   isValidTenantId,
-  safeJsonParse,
-  tenantConfigs,
-  tenants,
-  type ApiResponse,
   type PolicyRule,
+  safeJsonParse,
   type Tenant,
   type TenantConfig,
+  tenantConfigs,
+  tenants,
 } from "../services/context";
 
 export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
@@ -39,13 +39,19 @@ tenantRoutes.post("/", async (c) => {
 
   if (!isValidTenantId(body.id)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Invalid tenant id — must be 1-64 alphanumeric characters (plus _ - . :)" },
+      {
+        ok: false,
+        error: "Invalid tenant id — must be 1-64 alphanumeric characters (plus _ - . :)",
+      },
       400,
     );
   }
 
   if (!isNonEmptyString(body.name)) {
-    return c.json<ApiResponse>({ ok: false, error: "name is required and must be a non-empty string" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "name is required and must be a non-empty string" },
+      400,
+    );
   }
 
   if (typeof body.apiKeyHash !== "string") {
@@ -95,7 +101,10 @@ tenantRoutes.get("/:id", (c) => {
 tenantRoutes.put("/:id/webhook", async (c) => {
   const tenant = c.get("tenant");
   const tenantConfig = c.get("tenantConfig");
-  const body = await safeJsonParse<{ webhookUrl?: string; defaultPolicies?: PolicyRule[] }>(c);
+  const body = await safeJsonParse<{
+    webhookUrl?: string;
+    defaultPolicies?: PolicyRule[];
+  }>(c);
 
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);

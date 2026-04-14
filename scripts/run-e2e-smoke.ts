@@ -8,16 +8,12 @@ const stewardUrl = process.env.STEWARD_URL?.trim();
 const authSmokeScript = new URL("./e2e-auth-test.ts", import.meta.url);
 
 if (skipRequested) {
-  console.log(
-    "[steward-fi] Skipping e2e smoke because MILADY_SKIP_STEWARD_FI_LIVE_SMOKE=1.",
-  );
+  console.log("[steward-fi] Skipping e2e smoke because MILADY_SKIP_STEWARD_FI_LIVE_SMOKE=1.");
   process.exit(0);
 }
 
 if (!stewardUrl) {
-  console.log(
-    "[steward-fi] Skipping e2e smoke because STEWARD_URL is not configured.",
-  );
+  console.log("[steward-fi] Skipping e2e smoke because STEWARD_URL is not configured.");
   process.exit(0);
 }
 

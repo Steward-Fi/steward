@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { KeyStore } from "../keystore";
-import { matchesGlob, globToRegex } from "../route-matcher";
+import { globToRegex, matchesGlob } from "../route-matcher";
 
 const MASTER_PASSWORD = "test-secret-vault-master";
 
@@ -77,7 +77,7 @@ describe("Secret encryption round-trip", () => {
     const value = "sk-test-key-12345";
     const encrypted = keyStore.encrypt(value);
 
-    const tampered = { ...encrypted, ciphertext: encrypted.ciphertext + "ff" };
+    const tampered = { ...encrypted, ciphertext: `${encrypted.ciphertext}ff` };
     expect(() => keyStore.decrypt(tampered)).toThrow();
   });
 

@@ -1,6 +1,13 @@
-import type { Action, ActionExample, HandlerOptions, ActionResult } from "@elizaos/core";
-import type { IAgentRuntime, Memory, State } from "@elizaos/core";
-import { StewardService } from "../services/StewardService.js";
+import type {
+  Action,
+  ActionExample,
+  ActionResult,
+  HandlerOptions,
+  IAgentRuntime,
+  Memory,
+  State,
+} from "@elizaos/core";
+import type { StewardService } from "../services/StewardService.js";
 
 /**
  * STEWARD_LIST_APPROVALS — list pending approval requests for the tenant.
@@ -23,7 +30,10 @@ export const listApprovalsAction: Action = {
       name: "status",
       description: "Filter by status: pending, approved, rejected, or all",
       required: false,
-      schema: { type: "string", enum: ["pending", "approved", "rejected", "all"] },
+      schema: {
+        type: "string",
+        enum: ["pending", "approved", "rejected", "all"],
+      },
     },
     {
       name: "limit",
@@ -68,7 +78,7 @@ export const listApprovalsAction: Action = {
       if (approvals.length === 0) {
         return {
           success: true,
-          text: `No ${status === "all" ? "" : status + " "}approvals found.`,
+          text: `No ${status === "all" ? "" : `${status} `}approvals found.`,
           data: { approvals: [] },
         };
       }

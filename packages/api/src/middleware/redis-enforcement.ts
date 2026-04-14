@@ -7,12 +7,7 @@
  */
 
 import type { PolicyRule } from "@stwd/shared";
-import {
-  checkAgentRateLimit,
-  checkAgentSpendLimit,
-  recordAgentSpend,
-  isRedisAvailable,
-} from "./redis";
+import { checkAgentRateLimit, isRedisAvailable, recordAgentSpend } from "./redis";
 
 // ─── Rate limit extraction from policies ─────────────────────────────────────
 
@@ -36,15 +31,6 @@ export function extractRateLimitPolicy(policies: PolicyRule[]): RateLimitParams 
   };
 }
 
-// ─── Spend limit extraction from policies ────────────────────────────────────
-
-interface SpendLimitParams {
-  /** Max daily spend in USD (converted from wei — caller must provide this) */
-  maxPerDayUsd?: number;
-  /** Max weekly spend in USD */
-  maxPerWeekUsd?: number;
-}
-
 /**
  * Extract spend-limit parameters from policies.
  *
@@ -54,7 +40,9 @@ interface SpendLimitParams {
  *
  * For proxy API call tracking, USD is used directly via the cost estimator.
  */
-export function extractSpendLimitPolicy(policies: PolicyRule[]): { maxPerDay: string; maxPerWeek: string } | null {
+export function extractSpendLimitPolicy(
+  policies: PolicyRule[],
+): { maxPerDay: string; maxPerWeek: string } | null {
   const slPolicy = policies.find((p) => p.type === "spending-limit" && p.enabled);
   if (!slPolicy) return null;
 

@@ -5,19 +5,19 @@
  * process restarts and use exponential backoff for retries.
  */
 
-import { and, eq, lte, sql } from "drizzle-orm";
 import { getDb, webhookDeliveries } from "@stwd/db";
 import type { WebhookEvent } from "@stwd/shared";
+import { and, eq, lte, sql } from "drizzle-orm";
 
 import { WebhookDispatcher } from "./dispatcher";
 import type { WebhookConfig, WebhookDeliveryResult } from "./types";
 
 // Exponential backoff schedule: 1min, 5min, 30min, 2hr, 12hr
 const RETRY_DELAYS_MS = [
-  1 * 60 * 1000,       // 1 minute
-  5 * 60 * 1000,       // 5 minutes
-  30 * 60 * 1000,      // 30 minutes
-  2 * 60 * 60 * 1000,  // 2 hours
+  1 * 60 * 1000, // 1 minute
+  5 * 60 * 1000, // 5 minutes
+  30 * 60 * 1000, // 30 minutes
+  2 * 60 * 60 * 1000, // 2 hours
   12 * 60 * 60 * 1000, // 12 hours
 ];
 
@@ -41,10 +41,7 @@ export class PersistentQueue {
   private readonly maxAttempts: number;
   private readonly batchSize: number;
 
-  constructor(
-    dispatcher = new WebhookDispatcher({ maxRetries: 0 }),
-    options: PersistentQueueOptions = {},
-  ) {
+  constructor(dispatcher = new WebhookDispatcher(), options: PersistentQueueOptions = {}) {
     this.dispatcher = dispatcher;
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.batchSize = options.batchSize ?? 50;
@@ -54,10 +51,7 @@ export class PersistentQueue {
    * Enqueue a webhook delivery to the database.
    * Returns the delivery ID.
    */
-  async enqueue(
-    event: WebhookEvent,
-    webhook: WebhookConfig | string,
-  ): Promise<string> {
+  async enqueue(event: WebhookEvent, webhook: WebhookConfig | string): Promise<string> {
     const db = getDb();
     const url = typeof webhook === "string" ? webhook : webhook.url;
 
@@ -74,7 +68,7 @@ export class PersistentQueue {
         maxAttempts: this.maxAttempts,
         nextRetryAt: new Date(),
       })
-      .returning({ id: webhookDeliveries.id });
+      .returning();
 
     return row.id;
   }

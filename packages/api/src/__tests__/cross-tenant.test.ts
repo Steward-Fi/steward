@@ -1,7 +1,7 @@
-import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { generateApiKey } from "@stwd/auth";
-import { getDb, tenants, tenantConfigs, userTenants, users } from "@stwd/db";
-import { eq, and } from "drizzle-orm";
+import { getDb, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
+import { eq } from "drizzle-orm";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
@@ -36,34 +36,66 @@ beforeAll(async () => {
   // Create test tenants
   const openKey = generateApiKey();
 
-  await db.insert(tenants).values({
-    id: OPEN_TENANT, name: "Open Tenant", apiKeyHash: openKey.hash,
-  }).onConflictDoNothing();
+  await db
+    .insert(tenants)
+    .values({
+      id: OPEN_TENANT,
+      name: "Open Tenant",
+      apiKeyHash: openKey.hash,
+    })
+    .onConflictDoNothing();
 
-  await db.insert(tenants).values({
-    id: INVITE_TENANT, name: "Invite Tenant", apiKeyHash: generateApiKey().hash,
-  }).onConflictDoNothing();
+  await db
+    .insert(tenants)
+    .values({
+      id: INVITE_TENANT,
+      name: "Invite Tenant",
+      apiKeyHash: generateApiKey().hash,
+    })
+    .onConflictDoNothing();
 
-  await db.insert(tenants).values({
-    id: CLOSED_TENANT, name: "Closed Tenant", apiKeyHash: generateApiKey().hash,
-  }).onConflictDoNothing();
+  await db
+    .insert(tenants)
+    .values({
+      id: CLOSED_TENANT,
+      name: "Closed Tenant",
+      apiKeyHash: generateApiKey().hash,
+    })
+    .onConflictDoNothing();
 
-  await db.insert(tenants).values({
-    id: NO_CONFIG_TENANT, name: "No Config Tenant", apiKeyHash: generateApiKey().hash,
-  }).onConflictDoNothing();
+  await db
+    .insert(tenants)
+    .values({
+      id: NO_CONFIG_TENANT,
+      name: "No Config Tenant",
+      apiKeyHash: generateApiKey().hash,
+    })
+    .onConflictDoNothing();
 
   // Create tenant configs with different join modes
-  await db.insert(tenantConfigs).values({
-    tenantId: OPEN_TENANT, joinMode: "open",
-  }).onConflictDoNothing();
+  await db
+    .insert(tenantConfigs)
+    .values({
+      tenantId: OPEN_TENANT,
+      joinMode: "open",
+    })
+    .onConflictDoNothing();
 
-  await db.insert(tenantConfigs).values({
-    tenantId: INVITE_TENANT, joinMode: "invite",
-  }).onConflictDoNothing();
+  await db
+    .insert(tenantConfigs)
+    .values({
+      tenantId: INVITE_TENANT,
+      joinMode: "invite",
+    })
+    .onConflictDoNothing();
 
-  await db.insert(tenantConfigs).values({
-    tenantId: CLOSED_TENANT, joinMode: "closed",
-  }).onConflictDoNothing();
+  await db
+    .insert(tenantConfigs)
+    .values({
+      tenantId: CLOSED_TENANT,
+      joinMode: "closed",
+    })
+    .onConflictDoNothing();
 
   // NO_CONFIG_TENANT intentionally has no config row (defaults to open)
 
@@ -127,7 +159,10 @@ describeWithDatabase("Cross-Tenant Identity", () => {
       });
 
       expect(res.status).toBe(200);
-      const body = await res.json() as { ok: boolean; data: Array<{ tenantId: string; role: string }> };
+      const body = (await res.json()) as {
+        ok: boolean;
+        data: Array<{ tenantId: string; role: string }>;
+      };
       expect(body.ok).toBe(true);
       expect(Array.isArray(body.data)).toBe(true);
 
@@ -148,7 +183,10 @@ describeWithDatabase("Cross-Tenant Identity", () => {
       });
 
       expect(res.status).toBe(200);
-      const body = await res.json() as { ok: boolean; data: { tenantId: string; role: string } };
+      const body = (await res.json()) as {
+        ok: boolean;
+        data: { tenantId: string; role: string };
+      };
       expect(body.ok).toBe(true);
       expect(body.data.tenantId).toBe(OPEN_TENANT);
     });
@@ -174,7 +212,11 @@ describeWithDatabase("Cross-Tenant Identity", () => {
       });
 
       expect(res.status).toBe(200);
-      const body = await res.json() as { ok: boolean; tenantId: string; role: string };
+      const body = (await res.json()) as {
+        ok: boolean;
+        tenantId: string;
+        role: string;
+      };
       expect(body.ok).toBe(true);
       expect(body.tenantId).toBe(NO_CONFIG_TENANT);
     });
@@ -229,20 +271,17 @@ describeWithDatabase("Cross-Tenant Identity", () => {
       });
 
       expect(res.status).toBe(200);
-      const body = await res.json() as { ok: boolean };
+      const body = (await res.json()) as { ok: boolean };
       expect(body.ok).toBe(true);
     });
 
     it("prevents leaving personal tenant", async () => {
       const token = await getTestUserToken();
 
-      const res = await fetch(
-        `${BASE_URL}/user/me/tenants/personal-${testUserId}/leave`,
-        {
-          method: "DELETE",
-          headers: { Authorization: `Bearer ${token}` },
-        },
-      );
+      const res = await fetch(`${BASE_URL}/user/me/tenants/personal-${testUserId}/leave`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
       expect(res.status).toBe(400);
     });
@@ -255,7 +294,10 @@ describeWithDatabase("Cross-Tenant Identity", () => {
       });
 
       expect(res.status).toBe(200);
-      const body = await res.json() as { ok: boolean; data: Array<{ userId: string }> };
+      const body = (await res.json()) as {
+        ok: boolean;
+        data: Array<{ userId: string }>;
+      };
       expect(body.ok).toBe(true);
       expect(Array.isArray(body.data)).toBe(true);
     });
@@ -271,7 +313,10 @@ describeWithDatabase("Cross-Tenant Identity", () => {
       });
 
       expect(res.status).toBe(201);
-      const body = await res.json() as { ok: boolean; data: { userId: string; role: string } };
+      const body = (await res.json()) as {
+        ok: boolean;
+        data: { userId: string; role: string };
+      };
       expect(body.ok).toBe(true);
       expect(body.data.role).toBe("admin");
     });
@@ -290,7 +335,10 @@ describeWithDatabase("Cross-Tenant Identity", () => {
       );
 
       expect(res.status).toBe(200);
-      const body = await res.json() as { ok: boolean; data: { role: string } };
+      const body = (await res.json()) as {
+        ok: boolean;
+        data: { role: string };
+      };
       expect(body.ok).toBe(true);
       expect(body.data.role).toBe("owner");
     });
@@ -305,7 +353,7 @@ describeWithDatabase("Cross-Tenant Identity", () => {
       );
 
       expect(res.status).toBe(200);
-      const body = await res.json() as { ok: boolean };
+      const body = (await res.json()) as { ok: boolean };
       expect(body.ok).toBe(true);
     });
 

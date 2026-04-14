@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth.js";
 import type { StewardOAuthCallbackProps } from "../types.js";
 
@@ -103,7 +103,10 @@ export function StewardOAuthCallback({
     // Flow 2: Code-in-URL (consumer handles the exchange)
     if (code) {
       setStep("success");
-      onSuccess?.({ code, state: state ?? "" } as { code: string; state: string });
+      onSuccess?.({ code, state: state ?? "" } as {
+        code: string;
+        state: string;
+      });
 
       if (redirectTo && typeof window !== "undefined") {
         window.location.href = redirectTo;
@@ -116,14 +119,12 @@ export function StewardOAuthCallback({
     setErrorMsg(msg);
     setStep("error");
     onError?.(new Error(msg));
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [auth.user, redirectTo, onSuccess, onError, auth.isAuthenticated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (step === "loading") {
     return (
       <div className="stwd-callback stwd-callback__loading">
-        <div className="stwd-loading">
-          Completing {provider ? `${provider} ` : ""}sign-in…
-        </div>
+        <div className="stwd-loading">Completing {provider ? `${provider} ` : ""}sign-in…</div>
       </div>
     );
   }
@@ -140,9 +141,7 @@ export function StewardOAuthCallback({
   return (
     <div className="stwd-callback stwd-callback__error">
       <p className="stwd-error-text">{errorMsg ?? "OAuth sign-in failed."}</p>
-      <p className="stwd-muted-text">
-        Try signing in again from the login page.
-      </p>
+      <p className="stwd-muted-text">Try signing in again from the login page.</p>
     </div>
   );
 }

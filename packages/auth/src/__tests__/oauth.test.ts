@@ -1,25 +1,15 @@
+import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { describe, expect, it, mock, beforeEach } from "bun:test";
-import {
-  OAuthClient,
-  getEnabledProviders,
-  getProviderConfig,
-  isBuiltInProvider,
-} from "../oauth";
+import { getEnabledProviders, getProviderConfig, isBuiltInProvider, OAuthClient } from "../oauth";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function verifyPkceChallenge(verifier: string, challenge: string): boolean {
-  const expected = createHash("sha256")
-    .update(verifier)
-    .digest()
-    .toString("base64url");
+  const expected = createHash("sha256").update(verifier).digest().toString("base64url");
   return expected === challenge;
 }
 
-function asFetchMock(
-  impl: (...args: any[]) => Promise<Response>,
-): typeof fetch {
+function asFetchMock(impl: (...args: any[]) => Promise<Response>): typeof fetch {
   return impl as unknown as typeof fetch;
 }
 
@@ -148,7 +138,8 @@ describe("OAuthClient.generateAuthUrl", () => {
     clientSecret: "twitter-secret",
     authorizationUrl: "https://twitter.com/i/oauth2/authorize",
     tokenUrl: "https://api.twitter.com/2/oauth2/token",
-    userInfoUrl: "https://api.twitter.com/2/users/me?user.fields=id,name,username,profile_image_url",
+    userInfoUrl:
+      "https://api.twitter.com/2/users/me?user.fields=id,name,username,profile_image_url",
     scopes: ["tweet.read", "users.read", "offline.access"],
     requiresPkce: true,
   };
@@ -176,7 +167,7 @@ describe("OAuthClient.generateAuthUrl", () => {
     expect(url).toContain("code_challenge_method=S256");
     expect(url).toContain("code_challenge=");
     expect(typeof codeVerifier).toBe("string");
-    expect(codeVerifier!.length).toBeGreaterThan(20);
+    expect(codeVerifier?.length).toBeGreaterThan(20);
   });
 
   it("PKCE code_challenge is the SHA-256 hash of the verifier (S256)", () => {
@@ -210,15 +201,15 @@ describe("OAuthClient.exchangeCode", () => {
 
   it("throws if codeVerifier is missing for a PKCE provider", async () => {
     const client = new OAuthClient(pkceConfig);
-    await expect(
-      client.exchangeCode("auth-code", "https://app.com/cb"),
-    ).rejects.toThrow("codeVerifier is required");
+    await expect(client.exchangeCode("auth-code", "https://app.com/cb")).rejects.toThrow(
+      "codeVerifier is required",
+    );
   });
 
   it("includes code_verifier in the token request body for PKCE providers", async () => {
     let capturedBody = "";
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = asFetchMock(async (url: string | URL | Request, init?: RequestInit) => {
+    globalThis.fetch = asFetchMock(async (_url: string | URL | Request, init?: RequestInit) => {
       capturedBody = init?.body?.toString() ?? "";
       return new Response(JSON.stringify({ access_token: "tok", token_type: "Bearer" }), {
         status: 200,
@@ -234,13 +225,17 @@ describe("OAuthClient.exchangeCode", () => {
 
   it("throws on non-200 token response", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = asFetchMock(async () =>
-      new Response("invalid_client", {
-        status: 401,
-        headers: { "Content-Type": "text/plain" },
-      }));
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response("invalid_client", {
+          status: 401,
+          headers: { "Content-Type": "text/plain" },
+        }),
+    );
     const client = new OAuthClient({ ...pkceConfig, requiresPkce: false });
-    await expect(client.exchangeCode("code", "https://app.com/cb")).rejects.toThrow("Token exchange failed (401)");
+    await expect(client.exchangeCode("code", "https://app.com/cb")).rejects.toThrow(
+      "Token exchange failed (401)",
+    );
     globalThis.fetch = originalFetch;
   });
 });
@@ -261,17 +256,19 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
 
   it("parses flat Google/Discord response shape", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = asFetchMock(async () =>
-      new Response(
-        JSON.stringify({
-          id: "google-user-id",
-          email: "user@gmail.com",
-          name: "Test User",
-          picture: "https://lh3.googleusercontent.com/a/photo",
-          verified_email: true,
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ));
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "google-user-id",
+            email: "user@gmail.com",
+            name: "Test User",
+            picture: "https://lh3.googleusercontent.com/a/photo",
+            verified_email: true,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
     const client = makeClient();
     const info = await client.getUserInfo("tok");
     expect(info.id).toBe("google-user-id");
@@ -284,18 +281,20 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
   it("parses Twitter's nested data envelope — no email", async () => {
     // Twitter v2 wraps user data inside { data: { id, name, username } }
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = asFetchMock(async () =>
-      new Response(
-        JSON.stringify({
-          data: {
-            id: "twitter-user-id",
-            name: "Test Twitter User",
-            username: "testuser",
-            profile_image_url: "https://pbs.twimg.com/profile.jpg",
-          },
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ));
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              id: "twitter-user-id",
+              name: "Test Twitter User",
+              username: "testuser",
+              profile_image_url: "https://pbs.twimg.com/profile.jpg",
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
     const client = makeClient();
     const info = await client.getUserInfo("tok");
     expect(info.id).toBe("twitter-user-id");
@@ -308,11 +307,13 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
 
   it("falls back to username as name when name field absent (Twitter)", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = asFetchMock(async () =>
-      new Response(
-        JSON.stringify({ data: { id: "tid", username: "handle" } }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ));
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response(JSON.stringify({ data: { id: "tid", username: "handle" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
     const client = makeClient();
     const info = await client.getUserInfo("tok");
     expect(info.name).toBe("handle");
@@ -321,11 +322,13 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
 
   it("throws on non-200 userinfo response", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = asFetchMock(async () =>
-      new Response("Unauthorized", {
-        status: 401,
-        headers: { "Content-Type": "text/plain" },
-      }));
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response("Unauthorized", {
+          status: 401,
+          headers: { "Content-Type": "text/plain" },
+        }),
+    );
     const client = makeClient();
     await expect(client.getUserInfo("bad-token")).rejects.toThrow("getUserInfo failed (401)");
     globalThis.fetch = originalFetch;

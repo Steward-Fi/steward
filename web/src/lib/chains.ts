@@ -8,13 +8,62 @@ export interface ChainMeta {
 }
 
 export const CHAIN_META: Record<number, ChainMeta> = {
-  1: { id: 1, name: "Ethereum", symbol: "ETH", explorerUrl: "https://etherscan.io", explorerTxUrl: "https://etherscan.io/tx/", color: "#627EEA" },
-  56: { id: 56, name: "BSC", symbol: "BNB", explorerUrl: "https://bscscan.com", explorerTxUrl: "https://bscscan.com/tx/", color: "#F0B90B" },
-  137: { id: 137, name: "Polygon", symbol: "POL", explorerUrl: "https://polygonscan.com", explorerTxUrl: "https://polygonscan.com/tx/", color: "#8247E5" },
-  8453: { id: 8453, name: "Base", symbol: "ETH", explorerUrl: "https://basescan.org", explorerTxUrl: "https://basescan.org/tx/", color: "#0052FF" },
-  42161: { id: 42161, name: "Arbitrum", symbol: "ETH", explorerUrl: "https://arbiscan.io", explorerTxUrl: "https://arbiscan.io/tx/", color: "#28A0F0" },
-  101: { id: 101, name: "Solana", symbol: "SOL", explorerUrl: "https://explorer.solana.com", explorerTxUrl: "https://explorer.solana.com/tx/", color: "#9945FF" },
-  102: { id: 102, name: "Solana Devnet", symbol: "SOL", explorerUrl: "https://explorer.solana.com", explorerTxUrl: "https://explorer.solana.com/tx/", color: "#9945FF" },
+  1: {
+    id: 1,
+    name: "Ethereum",
+    symbol: "ETH",
+    explorerUrl: "https://etherscan.io",
+    explorerTxUrl: "https://etherscan.io/tx/",
+    color: "#627EEA",
+  },
+  56: {
+    id: 56,
+    name: "BSC",
+    symbol: "BNB",
+    explorerUrl: "https://bscscan.com",
+    explorerTxUrl: "https://bscscan.com/tx/",
+    color: "#F0B90B",
+  },
+  137: {
+    id: 137,
+    name: "Polygon",
+    symbol: "POL",
+    explorerUrl: "https://polygonscan.com",
+    explorerTxUrl: "https://polygonscan.com/tx/",
+    color: "#8247E5",
+  },
+  8453: {
+    id: 8453,
+    name: "Base",
+    symbol: "ETH",
+    explorerUrl: "https://basescan.org",
+    explorerTxUrl: "https://basescan.org/tx/",
+    color: "#0052FF",
+  },
+  42161: {
+    id: 42161,
+    name: "Arbitrum",
+    symbol: "ETH",
+    explorerUrl: "https://arbiscan.io",
+    explorerTxUrl: "https://arbiscan.io/tx/",
+    color: "#28A0F0",
+  },
+  101: {
+    id: 101,
+    name: "Solana",
+    symbol: "SOL",
+    explorerUrl: "https://explorer.solana.com",
+    explorerTxUrl: "https://explorer.solana.com/tx/",
+    color: "#9945FF",
+  },
+  102: {
+    id: 102,
+    name: "Solana Devnet",
+    symbol: "SOL",
+    explorerUrl: "https://explorer.solana.com",
+    explorerTxUrl: "https://explorer.solana.com/tx/",
+    color: "#9945FF",
+  },
 };
 
 export function getChainMeta(chainId: number): ChainMeta | undefined {

@@ -1,14 +1,13 @@
-import React from "react";
-import type { TransactionHistoryProps } from "../types.js";
 import { useTransactions } from "../hooks/useTransactions.js";
 import { useStewardContext } from "../provider.js";
+import type { TransactionHistoryProps } from "../types.js";
 import {
-  truncateAddress,
-  formatWei,
+  copyToClipboard,
   formatRelativeTime,
+  formatWei,
   getExplorerTxUrl,
   getStatusColor,
-  copyToClipboard,
+  truncateAddress,
 } from "../utils/format.js";
 
 /**
@@ -27,12 +26,11 @@ export function TransactionHistory({
 
   if (!features.showTransactionHistory) return null;
 
-  const { transactions, isLoading, error, page, totalPages, nextPage, prevPage } =
-    useTransactions({
-      pageSize,
-      status: statusFilter,
-      chainId: chainFilter?.[0],
-    });
+  const { transactions, isLoading, error, page, totalPages, nextPage, prevPage } = useTransactions({
+    pageSize,
+    status: statusFilter,
+    chainId: chainFilter?.[0],
+  });
 
   if (isLoading) {
     return (
@@ -88,12 +86,8 @@ export function TransactionHistory({
                   </div>
 
                   <div className="stwd-tx-meta">
-                    <span className={`stwd-badge ${getStatusColor(tx.status)}`}>
-                      {tx.status}
-                    </span>
-                    <span className="stwd-tx-time">
-                      {formatRelativeTime(tx.createdAt)}
-                    </span>
+                    <span className={`stwd-badge ${getStatusColor(tx.status)}`}>{tx.status}</span>
+                    <span className="stwd-tx-time">{formatRelativeTime(tx.createdAt)}</span>
                     {tx.txHash && (
                       <a
                         className="stwd-link"

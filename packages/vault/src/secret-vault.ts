@@ -8,16 +8,9 @@
  * credential injection into proxied requests.
  */
 
+import { getDb, type Secret, type SecretRoute, secretRoutes, secrets } from "@stwd/db";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import { KeyStore, type EncryptedKey } from "./keystore";
-
-import {
-  getDb,
-  secrets,
-  secretRoutes,
-  type Secret,
-  type SecretRoute,
-} from "@stwd/db";
+import { type EncryptedKey, KeyStore } from "./keystore";
 
 export interface SecretMetadata {
   id: string;
@@ -81,13 +74,7 @@ export class SecretVault {
     const [row] = await db
       .select()
       .from(secrets)
-      .where(
-        and(
-          eq(secrets.tenantId, tenantId),
-          eq(secrets.name, name),
-          isNull(secrets.deletedAt),
-        ),
-      )
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, name), isNull(secrets.deletedAt)))
       .orderBy(desc(secrets.version))
       .limit(1);
 
@@ -103,11 +90,7 @@ export class SecretVault {
       .select()
       .from(secrets)
       .where(
-        and(
-          eq(secrets.id, secretId),
-          eq(secrets.tenantId, tenantId),
-          isNull(secrets.deletedAt),
-        ),
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
       );
 
     return row ? this.toMetadata(row) : null;
@@ -122,11 +105,7 @@ export class SecretVault {
       .select()
       .from(secrets)
       .where(
-        and(
-          eq(secrets.id, secretId),
-          eq(secrets.tenantId, tenantId),
-          isNull(secrets.deletedAt),
-        ),
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
       );
 
     if (!row) {
@@ -151,11 +130,7 @@ export class SecretVault {
   /**
    * Rotate a secret — creates a new version with updated ciphertext.
    */
-  async rotateSecret(
-    tenantId: string,
-    name: string,
-    newValue: string,
-  ): Promise<SecretMetadata> {
+  async rotateSecret(tenantId: string, name: string, newValue: string): Promise<SecretMetadata> {
     const db = getDb();
 
     // Find current version
@@ -187,12 +162,7 @@ export class SecretVault {
     await db
       .update(secrets)
       .set({ deletedAt: new Date() })
-      .where(
-        and(
-          eq(secrets.id, current.id),
-          eq(secrets.tenantId, tenantId),
-        ),
-      );
+      .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
 
     return this.toMetadata(row);
   }
@@ -207,11 +177,7 @@ export class SecretVault {
       .select()
       .from(secrets)
       .where(
-        and(
-          eq(secrets.id, secretId),
-          eq(secrets.tenantId, tenantId),
-          isNull(secrets.deletedAt),
-        ),
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
       );
 
     if (!row) return false;
@@ -221,11 +187,7 @@ export class SecretVault {
       .update(secrets)
       .set({ deletedAt: new Date(), updatedAt: new Date() })
       .where(
-        and(
-          eq(secrets.tenantId, tenantId),
-          eq(secrets.name, row.name),
-          isNull(secrets.deletedAt),
-        ),
+        and(eq(secrets.tenantId, tenantId), eq(secrets.name, row.name), isNull(secrets.deletedAt)),
       );
 
     return true;
@@ -239,12 +201,7 @@ export class SecretVault {
     const rows = await db
       .select()
       .from(secrets)
-      .where(
-        and(
-          eq(secrets.tenantId, tenantId),
-          isNull(secrets.deletedAt),
-        ),
-      )
+      .where(and(eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)))
       .orderBy(secrets.name, desc(secrets.version));
 
     // Deduplicate by name — only return latest version
@@ -316,12 +273,7 @@ export class SecretVault {
     const [row] = await db
       .select()
       .from(secretRoutes)
-      .where(
-        and(
-          eq(secretRoutes.id, routeId),
-          eq(secretRoutes.tenantId, tenantId),
-        ),
-      );
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)));
     return row ?? null;
   }
 
@@ -343,12 +295,7 @@ export class SecretVault {
     const [row] = await db
       .update(secretRoutes)
       .set(updates)
-      .where(
-        and(
-          eq(secretRoutes.id, routeId),
-          eq(secretRoutes.tenantId, tenantId),
-        ),
-      )
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
       .returning();
     return row ?? null;
   }
@@ -357,13 +304,8 @@ export class SecretVault {
     const db = getDb();
     const result = await db
       .delete(secretRoutes)
-      .where(
-        and(
-          eq(secretRoutes.id, routeId),
-          eq(secretRoutes.tenantId, tenantId),
-        ),
-      )
-      .returning({ id: secretRoutes.id });
+      .where(and(eq(secretRoutes.id, routeId), eq(secretRoutes.tenantId, tenantId)))
+      .returning();
     return result.length > 0;
   }
 

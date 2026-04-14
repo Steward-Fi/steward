@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { generateApiKey } from "@stwd/auth";
 import { getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
@@ -12,6 +12,7 @@ const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
 const TENANT_WITH_KEY = "test-tenant-with-key";
 const TENANT_WITHOUT_KEY = "test-tenant-no-key";
+type ErrorBody = { error: string };
 
 let validApiKey: string;
 
@@ -97,10 +98,10 @@ describeWithDatabase("Tenant API Key Authentication", () => {
           // No X-Steward-Key
         },
       });
-      
+
       // Should NOT allow through — must require auth
       expect(res.status).toBe(401);
-      const json = await res.json() as any;
+      const json = (await res.json()) as ErrorBody;
       expect(json.error).toContain("API key required");
     });
 
@@ -111,10 +112,10 @@ describeWithDatabase("Tenant API Key Authentication", () => {
           "X-Steward-Key": "stw_some_key",
         },
       });
-      
+
       // Tenant has no hash, so can't validate the key
       expect(res.status).toBe(403);
-      const json = await res.json() as any;
+      const json = (await res.json()) as ErrorBody;
       expect(json.error).toContain("not configured");
     });
   });

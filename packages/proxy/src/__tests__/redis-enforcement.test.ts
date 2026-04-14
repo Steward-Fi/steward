@@ -6,13 +6,13 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { estimateCost, isKnownHost } from "@stwd/redis";
 import {
   checkProxyRateLimit,
-  trackProxySpend,
   checkProxySpendLimit,
   isProxyRedisAvailable,
+  trackProxySpend,
 } from "../middleware/redis-enforcement";
-import { estimateCost, isKnownHost } from "@stwd/redis";
 
 // ─── Graceful degradation (no Redis) ─────────────────────────────────────────
 

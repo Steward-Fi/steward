@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createPrivateKey, sign as cryptoSign } from "node:crypto";
 import {
   Connection,
   Keypair,
@@ -7,13 +8,12 @@ import {
   SystemProgram,
   Transaction,
 } from "@solana/web3.js";
-import { createPrivateKey, sign as cryptoSign } from "node:crypto";
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
 
 /** Uint8Array → lowercase hex string. */
 function uint8ArrayToHex(arr: Uint8Array): string {
-  return Array.from(arr, b => b.toString(16).padStart(2, "0")).join("");
+  return Array.from(arr, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 /**
@@ -22,7 +22,7 @@ function uint8ArrayToHex(arr: Uint8Array): string {
  * introduced by @solana/web3.js bundling its own browser Buffer shim.
  */
 function uint8ArrayToBase64url(arr: Uint8Array): string {
-  const base64 = btoa(Array.from(arr, b => String.fromCharCode(b)).join(""));
+  const base64 = btoa(Array.from(arr, (b) => String.fromCharCode(b)).join(""));
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
@@ -33,7 +33,10 @@ function uint8ArrayToBase64url(arr: Uint8Array): string {
  * Returns the public key in base58 format and the secret key as a hex string
  * (64 bytes: 32-byte seed + 32-byte public key, as stored by @solana/web3.js).
  */
-export function generateSolanaKeypair(): { publicKey: string; secretKey: string } {
+export function generateSolanaKeypair(): {
+  publicKey: string;
+  secretKey: string;
+} {
   const keypair = Keypair.generate();
   return {
     publicKey: keypair.publicKey.toBase58(),
@@ -123,7 +126,7 @@ export function restoreSolanaKeypair(secretKey: string): Keypair {
   }
 
   throw new Error(
-    `Invalid Solana secret key: expected 32-byte seed or 64-byte key, got ${keyBytes.length} bytes`
+    `Invalid Solana secret key: expected 32-byte seed or 64-byte key, got ${keyBytes.length} bytes`,
   );
 }
 
@@ -137,13 +140,12 @@ export async function signSolanaTransaction(
   secretKeyHex: string,
   to: string,
   lamports: bigint,
-  rpcUrl: string
+  rpcUrl: string,
 ): Promise<string> {
   const keypair = restoreSolanaKeypair(secretKeyHex);
   const connection = new Connection(rpcUrl, "confirmed");
 
-  const { blockhash, lastValidBlockHeight } =
-    await connection.getLatestBlockhash("confirmed");
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
 
   const tx = new Transaction({
     recentBlockhash: blockhash,
@@ -153,7 +155,7 @@ export async function signSolanaTransaction(
       fromPubkey: keypair.publicKey,
       toPubkey: new PublicKey(to),
       lamports: Number(lamports),
-    })
+    }),
   );
 
   const signature = await connection.sendTransaction(tx, [keypair], {
@@ -161,10 +163,7 @@ export async function signSolanaTransaction(
     preflightCommitment: "confirmed",
   });
 
-  await connection.confirmTransaction(
-    { signature, blockhash, lastValidBlockHeight },
-    "confirmed"
-  );
+  await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
 
   return signature;
 }
@@ -176,7 +175,7 @@ export async function signSolanaTransaction(
  */
 export async function getSolanaBalance(
   address: string,
-  rpcUrl: string
+  rpcUrl: string,
 ): Promise<{ lamports: bigint; formatted: string }> {
   const connection = new Connection(rpcUrl, "confirmed");
   const balance = await connection.getBalance(new PublicKey(address));

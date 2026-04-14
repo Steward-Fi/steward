@@ -7,7 +7,7 @@
  * Kept as a no-op export for any stale imports.
  */
 
-import { type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   return <>{children}</>;

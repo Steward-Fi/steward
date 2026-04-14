@@ -1,5 +1,6 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
+import type { PGLiteDb } from "./pglite";
 
 import * as schema from "./schema";
 import * as schemaAuth from "./schema-auth";
@@ -36,17 +37,19 @@ export function createDb(connectionString = getDatabaseUrl()) {
 // When running in embedded/local mode, the PGLite adapter sets these overrides
 // so all existing code that calls getDb()/closeDb() works unchanged.
 
-let pgliteOverride: {
-  db: ReturnType<typeof createDb>["db"];
-  close: () => Promise<void>;
-} | undefined;
+let pgliteOverride:
+  | {
+      db: ReturnType<typeof createDb>["db"] | PGLiteDb;
+      close: () => Promise<void>;
+    }
+  | undefined;
 
 /**
  * Set PGLite as the backing database. Called by the embedded entry point
  * BEFORE any route code runs.
  */
 export function setPGLiteOverride(
-  db: ReturnType<typeof createDb>["db"],
+  db: ReturnType<typeof createDb>["db"] | PGLiteDb,
   close: () => Promise<void>,
 ) {
   pgliteOverride = { db, close };

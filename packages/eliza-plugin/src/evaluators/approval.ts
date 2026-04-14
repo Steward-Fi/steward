@@ -1,6 +1,5 @@
-import type { Evaluator, ActionResult } from "@elizaos/core";
-import type { IAgentRuntime, Memory, State } from "@elizaos/core";
-import { StewardService } from "../services/StewardService.js";
+import type { ActionResult, Evaluator, IAgentRuntime, Memory, State } from "@elizaos/core";
+import type { StewardService } from "../services/StewardService.js";
 
 /**
  * approvalRequired — post-action evaluator that detects when a
@@ -13,16 +12,11 @@ import { StewardService } from "../services/StewardService.js";
  */
 export const approvalRequiredEvaluator: Evaluator = {
   name: "approvalRequired",
-  description:
-    "Checks if the last transaction is pending manual approval and adjusts response",
+  description: "Checks if the last transaction is pending manual approval and adjusts response",
   alwaysRun: false,
   examples: [],
 
-  async validate(
-    _runtime: IAgentRuntime,
-    message: Memory,
-    _state?: State,
-  ): Promise<boolean> {
+  async validate(_runtime: IAgentRuntime, message: Memory, _state?: State): Promise<boolean> {
     // Only run after Steward actions
     const action = (message.content as any)?.action;
     return typeof action === "string" && action.startsWith("STEWARD_");
@@ -44,9 +38,7 @@ export const approvalRequiredEvaluator: Evaluator = {
 
     // Log for observability — in a full implementation this could
     // send a notification, create a reminder, or register a webhook.
-    console.info(
-      "[Steward] Transaction pending approval — user action required",
-    );
+    console.info("[Steward] Transaction pending approval — user action required");
 
     return {
       success: true,

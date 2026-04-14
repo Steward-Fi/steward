@@ -97,7 +97,9 @@ export function getProviderConfig(provider: string): OAuthProvider {
       const clientId = process.env.GOOGLE_CLIENT_ID;
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
       if (!clientId || !clientSecret) {
-        throw new Error("Google OAuth not configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required");
+        throw new Error(
+          "Google OAuth not configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required",
+        );
       }
       return {
         clientId,
@@ -113,7 +115,9 @@ export function getProviderConfig(provider: string): OAuthProvider {
       const clientId = process.env.DISCORD_CLIENT_ID;
       const clientSecret = process.env.DISCORD_CLIENT_SECRET;
       if (!clientId || !clientSecret) {
-        throw new Error("Discord OAuth not configured: DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET are required");
+        throw new Error(
+          "Discord OAuth not configured: DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET are required",
+        );
       }
       return {
         clientId,
@@ -139,7 +143,8 @@ export function getProviderConfig(provider: string): OAuthProvider {
         authorizationUrl: "https://twitter.com/i/oauth2/authorize",
         tokenUrl: "https://api.twitter.com/2/oauth2/token",
         // id, name, username — Twitter v2 does NOT expose email via this endpoint
-        userInfoUrl: "https://api.twitter.com/2/users/me?user.fields=id,name,username,profile_image_url",
+        userInfoUrl:
+          "https://api.twitter.com/2/users/me?user.fields=id,name,username,profile_image_url",
         scopes: ["tweet.read", "users.read", "offline.access"],
         requiresPkce: true,
       };
@@ -203,7 +208,10 @@ export class OAuthClient {
       params.set("code_challenge", deriveCodeChallenge(codeVerifier));
     }
 
-    return { url: `${this.provider.authorizationUrl}?${params.toString()}`, codeVerifier };
+    return {
+      url: `${this.provider.authorizationUrl}?${params.toString()}`,
+      codeVerifier,
+    };
   }
 
   /**
@@ -235,7 +243,10 @@ export class OAuthClient {
 
     const res = await fetch(this.provider.tokenUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
       body: body.toString(),
     });
 
@@ -261,7 +272,10 @@ export class OAuthClient {
    */
   async getUserInfo(accessToken: string): Promise<OAuthUserInfo> {
     const res = await fetch(this.provider.userInfoUrl, {
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
     });
 
     if (!res.ok) {
@@ -269,35 +283,33 @@ export class OAuthClient {
       throw new Error(`getUserInfo failed (${res.status}): ${text}`);
     }
 
-    const raw = await res.json() as Record<string, unknown>;
+    const raw = (await res.json()) as Record<string, unknown>;
 
     // Twitter v2 wraps user data in a `data` envelope
     const data: Record<string, unknown> =
-      raw["data"] != null && typeof raw["data"] === "object"
-        ? (raw["data"] as Record<string, unknown>)
+      raw.data != null && typeof raw.data === "object"
+        ? (raw.data as Record<string, unknown>)
         : raw;
 
     return {
-      id: String(data["id"] ?? data["sub"] ?? ""),
+      id: String(data.id ?? data.sub ?? ""),
       // Twitter does not expose email — leave as empty string; caller must handle
-      email: String(data["email"] ?? ""),
+      email: String(data.email ?? ""),
       name:
-        data["name"] != null
-          ? String(data["name"])
-          : data["username"] != null
-            ? String(data["username"])
+        data.name != null
+          ? String(data.name)
+          : data.username != null
+            ? String(data.username)
             : undefined,
       picture:
-        data["profile_image_url"] != null
-          ? String(data["profile_image_url"])
-          : data["picture"] != null
-            ? String(data["picture"])
-            : data["avatar"] != null
-              ? String(data["avatar"])
+        data.profile_image_url != null
+          ? String(data.profile_image_url)
+          : data.picture != null
+            ? String(data.picture)
+            : data.avatar != null
+              ? String(data.avatar)
               : undefined,
-      verified_email: Boolean(
-        data["verified_email"] ?? data["email_verified"] ?? data["verified"] ?? false,
-      ),
+      verified_email: Boolean(data.verified_email ?? data.email_verified ?? data.verified ?? false),
     };
   }
 }

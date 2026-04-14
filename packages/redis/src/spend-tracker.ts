@@ -15,8 +15,8 @@ import { getRedis } from "./client.js";
 export type SpendPeriod = "day" | "week" | "month";
 
 const TTL_SECONDS: Record<SpendPeriod, number> = {
-  day: 172800,    // 2 days
-  week: 691200,   // 8 days
+  day: 172800, // 2 days
+  week: 691200, // 8 days
   month: 2764800, // 32 days
 };
 
@@ -97,11 +97,7 @@ export async function recordSpend(
  *
  * @returns Spend in USD
  */
-export async function getSpend(
-  agentId: string,
-  period: SpendPeriod,
-  date?: Date,
-): Promise<number> {
+export async function getSpend(agentId: string, period: SpendPeriod, date?: Date): Promise<number> {
   const redis = getRedis();
   const dateKey = getDateKey(period, date || new Date());
   const key = spendKey(agentId, period, dateKey);

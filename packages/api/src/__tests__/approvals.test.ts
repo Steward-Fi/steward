@@ -1,16 +1,10 @@
-import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
 // Skip all DB-dependent tests when DATABASE_URL is not configured
 const SKIP = !process.env.DATABASE_URL;
+
 import { generateApiKey } from "@stwd/auth";
-import {
-  getDb,
-  tenants,
-  agents,
-  transactions,
-  approvalQueue,
-  autoApprovalRules,
-} from "@stwd/db";
+import { agents, approvalQueue, autoApprovalRules, getDb, tenants, transactions } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);

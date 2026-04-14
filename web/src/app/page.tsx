@@ -3,9 +3,9 @@
 import { motion, useScroll, useTransform } from "framer-motion";
 import Image from "next/image";
 import { useRef } from "react";
-import { Nav } from "@/components/nav";
-import { Reveal, StaggerContainer, StaggerItem } from "@/components/motion-wrapper";
 import { CodeBlock } from "@/components/code-block";
+import { Reveal, StaggerContainer, StaggerItem } from "@/components/motion-wrapper";
+import { Nav } from "@/components/nav";
 
 const easeOutExpo: [number, number, number, number] = [0.16, 1, 0.3, 1];
 
@@ -65,8 +65,8 @@ function Hero() {
               transition={{ duration: 0.6, ease: easeOutExpo, delay: 0.4 }}
               className="mt-8 text-lg text-text-secondary max-w-lg leading-relaxed"
             >
-              Every credential encrypted. Every call proxied. Every dollar tracked.
-              Open-source middleware that sits between your agents and everything they touch.
+              Every credential encrypted. Every call proxied. Every dollar tracked. Open-source
+              middleware that sits between your agents and everything they touch.
             </motion.p>
 
             <motion.div
@@ -156,9 +156,7 @@ function ProblemSection() {
     <section className="relative px-6 md:px-10 py-32 md:py-40">
       <div className="max-w-[1400px] mx-auto">
         <Reveal direction="up" delay={0}>
-          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
-            The problem
-          </p>
+          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">The problem</p>
         </Reveal>
         <Reveal direction="up" delay={0.1}>
           <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-3xl">
@@ -168,19 +166,18 @@ function ProblemSection() {
           </h2>
         </Reveal>
 
-        <StaggerContainer staggerDelay={0.12} className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle mt-16">
+        <StaggerContainer
+          staggerDelay={0.12}
+          className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle mt-16"
+        >
           {problems.map((problem) => (
             <StaggerItem key={problem.title}>
               <div className="bg-bg p-8 md:p-10 h-full">
                 <span className="font-display text-4xl font-800 text-border tracking-tight">
                   {problem.num}
                 </span>
-                <h3 className="font-display text-xl font-700 mt-5 mb-3">
-                  {problem.title}
-                </h3>
-                <p className="text-sm text-text-secondary leading-relaxed">
-                  {problem.desc}
-                </p>
+                <h3 className="font-display text-xl font-700 mt-5 mb-3">{problem.title}</h3>
+                <p className="text-sm text-text-secondary leading-relaxed">{problem.desc}</p>
               </div>
             </StaggerItem>
           ))}
@@ -229,9 +226,7 @@ function ArchitectureSection() {
     <section className="relative px-6 md:px-10 py-32 md:py-40 border-t border-border-subtle">
       <div className="max-w-[1400px] mx-auto">
         <Reveal>
-          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
-            Architecture
-          </p>
+          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">Architecture</p>
         </Reveal>
         <Reveal delay={0.1}>
           <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-3xl">
@@ -247,15 +242,16 @@ function ArchitectureSection() {
               <span className="font-display text-5xl font-800 text-border tracking-tight">
                 {layer.num}
               </span>
-              <h3 className="font-display text-xl font-700 mt-6 mb-1">
-                {layer.label}
-              </h3>
+              <h3 className="font-display text-xl font-700 mt-6 mb-1">{layer.label}</h3>
               <p className="text-xs text-text-tertiary tracking-wide uppercase mb-5">
                 {layer.detail}
               </p>
               <ul className="space-y-3">
                 {layer.items.map((item) => (
-                  <li key={item} className="text-sm text-text-secondary leading-relaxed flex gap-2.5">
+                  <li
+                    key={item}
+                    className="text-sm text-text-secondary leading-relaxed flex gap-2.5"
+                  >
                     <span className="text-[oklch(0.75_0.15_55)] mt-1.5 w-1 h-1 rounded-full bg-current flex-shrink-0" />
                     {item}
                   </li>
@@ -290,7 +286,11 @@ function FlowDiagram() {
             initial={{ opacity: 0, scale: 0.9 }}
             whileInView={{ opacity: 1, scale: 1 }}
             viewport={{ once: true }}
-            transition={{ delay: i * 0.15, duration: 0.4, ease: [0.25, 1, 0.5, 1] }}
+            transition={{
+              delay: i * 0.15,
+              duration: 0.4,
+              ease: [0.25, 1, 0.5, 1],
+            }}
             className="border border-border px-5 py-3 bg-bg-elevated flex-shrink-0"
           >
             <div className="text-sm font-display font-700">{node.label}</div>
@@ -301,7 +301,11 @@ function FlowDiagram() {
               initial={{ opacity: 0, scaleX: 0 }}
               whileInView={{ opacity: 1, scaleX: 1 }}
               viewport={{ once: true }}
-              transition={{ delay: i * 0.15 + 0.2, duration: 0.3, ease: [0.25, 1, 0.5, 1] }}
+              transition={{
+                delay: i * 0.15 + 0.2,
+                duration: 0.3,
+                ease: [0.25, 1, 0.5, 1],
+              }}
               className="flex-1 h-px bg-border origin-left mx-1 relative min-w-[16px]"
             >
               <div className="absolute right-0 top-1/2 -translate-y-1/2 w-0 h-0 border-t-[4px] border-t-transparent border-b-[4px] border-b-transparent border-l-[6px] border-l-border" />
@@ -367,9 +371,7 @@ const completion = await openai.chat.completions.create({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-16">
           <div className="lg:col-span-4">
             <Reveal>
-              <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
-                SDK
-              </p>
+              <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">SDK</p>
             </Reveal>
             <Reveal delay={0.1}>
               <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05]">
@@ -388,9 +390,7 @@ const completion = await openai.chat.completions.create({
             </Reveal>
             <Reveal delay={0.3}>
               <div className="mt-8">
-                <code className="text-xs text-text-tertiary font-mono">
-                  npm i @stwd/sdk
-                </code>
+                <code className="text-xs text-text-tertiary font-mono">npm i @stwd/sdk</code>
               </div>
             </Reveal>
           </div>
@@ -462,9 +462,9 @@ function PlatformsSection() {
             </Reveal>
             <Reveal delay={0.2}>
               <p className="mt-6 text-lg text-text-secondary leading-relaxed max-w-xl">
-                One Steward instance for thousands of agents across isolated tenants.
-                Each tenant gets its own policies, credentials, and webhook endpoints.
-                Self-hosted. No per-transaction toll.
+                One Steward instance for thousands of agents across isolated tenants. Each tenant
+                gets its own policies, credentials, and webhook endpoints. Self-hosted. No
+                per-transaction toll.
               </p>
             </Reveal>
           </div>
@@ -510,9 +510,7 @@ function OpenSourceSection() {
     <section className="relative px-6 md:px-10 py-32 md:py-40 border-t border-border-subtle">
       <div className="max-w-[1400px] mx-auto text-center">
         <Reveal>
-          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
-            Open source
-          </p>
+          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">Open source</p>
         </Reveal>
         <Reveal delay={0.1}>
           <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-2xl mx-auto">
@@ -556,7 +554,13 @@ function Footer() {
       <div className="max-w-[1400px] mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
         <div>
           <div className="flex items-center gap-2">
-            <Image src="/logo.png" alt="" width={18} height={18} className="w-[18px] h-[18px] opacity-60" />
+            <Image
+              src="/logo.png"
+              alt=""
+              width={18}
+              height={18}
+              className="w-[18px] h-[18px] opacity-60"
+            />
             <span className="font-display text-base font-bold tracking-tight">steward</span>
           </div>
           <p className="text-xs text-text-tertiary mt-1">

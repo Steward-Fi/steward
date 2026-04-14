@@ -1,7 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-
-import { createMiddleware } from "hono/factory";
 import type { ApiResponse } from "@stwd/shared";
+import { createMiddleware } from "hono/factory";
 
 /**
  * Platform-level authentication middleware.
@@ -87,10 +86,7 @@ export function platformAuthMiddleware() {
     }
 
     if (!isValidPlatformKey(key)) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "Invalid platform key" },
-        403,
-      );
+      return c.json<ApiResponse>({ ok: false, error: "Invalid platform key" }, 403);
     }
 
     await next();

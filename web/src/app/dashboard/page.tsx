@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
-import { motion, AnimatePresence } from "framer-motion";
-import { steward } from "@/lib/api";
-import { shortenAddress, formatDate, formatWei, statusColor } from "@/lib/utils";
-import { getChainSymbol } from "@/lib/chains";
-import { StatusBadge } from "@/components/status-badge";
+import { useEffect, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
+import { StatusBadge } from "@/components/status-badge";
+import { steward } from "@/lib/api";
+import { getChainSymbol } from "@/lib/chains";
 import type { AgentIdentity, TxRecord } from "@/lib/steward-client";
+import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
@@ -25,7 +25,7 @@ export default function DashboardOverview() {
 
   useEffect(() => {
     loadDashboard();
-  }, []);
+  }, [loadDashboard]);
 
   async function loadDashboard() {
     try {
@@ -42,7 +42,7 @@ export default function DashboardOverview() {
               ...tx,
               agentId: agent.id,
               agentName: agent.name,
-            }))
+            })),
           );
         } catch {
           /* agent may not have history */
@@ -50,9 +50,7 @@ export default function DashboardOverview() {
       }
 
       allTx.sort(
-        (a, b) =>
-          new Date(b.createdAt || 0).getTime() -
-          new Date(a.createdAt || 0).getTime()
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime(),
       );
 
       setData({
@@ -107,12 +105,8 @@ export default function DashboardOverview() {
     >
       {/* Header */}
       <div>
-        <h1 className="font-display text-2xl font-700 tracking-tight">
-          Overview
-        </h1>
-        <p className="text-sm text-text-tertiary mt-1">
-          Agent wallet infrastructure
-        </p>
+        <h1 className="font-display text-2xl font-700 tracking-tight">Overview</h1>
+        <p className="text-sm text-text-tertiary mt-1">Agent wallet infrastructure</p>
       </div>
 
       {/* Key Stats */}
@@ -133,9 +127,7 @@ export default function DashboardOverview() {
             transition={{ delay: i * 0.08, ease: easeOutQuart, duration: 0.4 }}
             className="bg-bg p-6 md:p-8"
           >
-            <div className="text-xs text-text-tertiary tracking-wider uppercase">
-              {stat.label}
-            </div>
+            <div className="text-xs text-text-tertiary tracking-wider uppercase">{stat.label}</div>
             <div
               className={`font-display text-3xl font-700 mt-2 tabular-nums ${
                 stat.accent ? "text-amber-400" : ""
@@ -162,8 +154,7 @@ export default function DashboardOverview() {
               <div className="flex items-center gap-3">
                 <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
                 <span className="text-sm text-text">
-                  {pendingCount} transaction{pendingCount !== 1 && "s"} awaiting
-                  review
+                  {pendingCount} transaction{pendingCount !== 1 && "s"} awaiting review
                 </span>
               </div>
               <span className="text-xs text-text-tertiary group-hover:text-text-secondary transition-colors">
@@ -189,9 +180,7 @@ export default function DashboardOverview() {
         {recentTx.length === 0 ? (
           <div className="py-16 text-center border border-border-subtle">
             <p className="text-text-tertiary text-sm">No transactions yet</p>
-            <p className="text-text-tertiary text-xs mt-1">
-              Create an agent to get started
-            </p>
+            <p className="text-text-tertiary text-xs mt-1">Create an agent to get started</p>
             <Link
               href="/dashboard/agents"
               className="inline-block mt-4 text-xs px-4 py-2 bg-accent text-bg hover:bg-accent-hover transition-colors"
@@ -218,19 +207,17 @@ export default function DashboardOverview() {
                   >
                     {tx.agentName || tx.agentId}
                   </Link>
-                  <span className="text-text-tertiary text-xs hidden sm:inline">
-                    to
-                  </span>
+                  <span className="text-text-tertiary text-xs hidden sm:inline">to</span>
                   <span className="font-mono text-xs text-text-tertiary hidden sm:inline">
-                    {shortenAddress(
-                      tx.request?.to || tx.toAddress || "0x0",
-                      4
-                    )}
+                    {shortenAddress(tx.request?.to || tx.toAddress || "0x0", 4)}
                   </span>
                 </div>
                 <div className="flex items-center gap-6 flex-shrink-0">
                   <span className="text-sm tabular-nums text-text-secondary">
-                    {formatWei(tx.request?.value || tx.value || "0", getChainSymbol(tx.request?.chainId || tx.chainId || 8453))}
+                    {formatWei(
+                      tx.request?.value || tx.value || "0",
+                      getChainSymbol(tx.request?.chainId || tx.chainId || 8453),
+                    )}
                   </span>
                   <span className="text-xs text-text-tertiary hidden md:inline">
                     {tx.createdAt ? formatDate(tx.createdAt) : ""}

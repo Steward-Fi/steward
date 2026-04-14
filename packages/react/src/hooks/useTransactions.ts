@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
 import type { TxRecord, TxStatus } from "@stwd/sdk";
+import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
 
 interface UseTransactionsOpts {
@@ -32,9 +32,12 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
       if (status?.length) params.set("status", status.join(","));
       if (chainId) params.set("chainId", String(chainId));
 
-      const res = await fetch(`${baseUrl}/agents/${encodeURIComponent(agentId)}/transactions?${params}`, {
-        headers: { Accept: "application/json" },
-      });
+      const res = await fetch(
+        `${baseUrl}/agents/${encodeURIComponent(agentId)}/transactions?${params}`,
+        {
+          headers: { Accept: "application/json" },
+        },
+      );
 
       if (res.ok) {
         const json = await res.json();
@@ -52,7 +55,13 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
         id: `tx-${i}`,
         agentId,
         status: "confirmed" as TxStatus,
-        request: { agentId, tenantId: "", to: "", value: entry.value, chainId: chainId || 8453 },
+        request: {
+          agentId,
+          tenantId: "",
+          to: "",
+          value: entry.value,
+          chainId: chainId || 8453,
+        },
         policyResults: [],
         createdAt: new Date(entry.timestamp * 1000),
       }));

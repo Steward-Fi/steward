@@ -7,13 +7,13 @@
  *   3. Add it to the map below
  */
 
-import type { Strategy } from "./types.js";
 import type { StrategyName } from "../config.js";
-import { createRebalanceStrategy } from "./rebalance.js";
 import { createDCAStrategy } from "./dca.js";
+import { createRebalanceStrategy } from "./rebalance.js";
 import { createThresholdStrategy } from "./threshold.js";
+import type { Strategy } from "./types.js";
 
-export type { Strategy, AgentState, TradeDecision } from "./types.js";
+export type { AgentState, Strategy, TradeDecision } from "./types.js";
 
 type StrategyFactory = (params: Record<string, unknown>) => Strategy;
 

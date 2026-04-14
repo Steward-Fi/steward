@@ -11,8 +11,8 @@
  * Do NOT call setAuthToken here to avoid double re-creation of the client.
  */
 
-import { useMemo } from "react";
 import { useAuth as useNewAuth } from "@stwd/react";
+import { useMemo } from "react";
 
 interface TenantInfo {
   tenantId: string;
@@ -40,14 +40,13 @@ export function useAuth(): AuthContextType {
   return useMemo(() => {
     const user = auth.user;
 
-    const tenant: TenantInfo | null =
-      auth.activeTenantId
-        ? {
-            tenantId: auth.activeTenantId,
-            tenantName: auth.activeTenantId,
-            apiKey: undefined,
-          }
-        : null;
+    const tenant: TenantInfo | null = auth.activeTenantId
+      ? {
+          tenantId: auth.activeTenantId,
+          tenantName: auth.activeTenantId,
+          apiKey: undefined,
+        }
+      : null;
 
     return {
       address: (user as unknown as Record<string, unknown>)?.address as string | undefined,
@@ -62,12 +61,23 @@ export function useAuth(): AuthContextType {
       },
       signInWithEmail: async (email: string) => {
         const result = await auth.signInWithEmail(email);
-        return { ok: true, expiresAt: (result as unknown as Record<string, unknown>).expiresAt as string };
+        return {
+          ok: true,
+          expiresAt: (result as unknown as Record<string, unknown>).expiresAt as string,
+        };
       },
       completeEmailAuth: () => {},
       signOut: async () => {
         auth.signOut();
       },
     };
-  }, [auth.isAuthenticated, auth.isLoading, auth.user, auth.activeTenantId]);
+  }, [
+    auth.isAuthenticated,
+    auth.isLoading,
+    auth.user,
+    auth.activeTenantId,
+    auth.signOut,
+    auth.signInWithPasskey,
+    auth.signInWithEmail,
+  ]);
 }

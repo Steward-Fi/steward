@@ -14,9 +14,7 @@
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const STEWARD_URL = (
-  process.env.STEWARD_URL || "https://api.steward.fi"
-).replace(/\/$/, "");
+const STEWARD_URL = (process.env.STEWARD_URL || "https://api.steward.fi").replace(/\/$/, "");
 
 const PLATFORM_KEY = process.env.PLATFORM_KEY || "";
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -146,7 +144,10 @@ async function testHealthAndReady() {
   try {
     const { status, data } = await api("GET", "/ready");
     if (status === 200 && (data?.status === "ok" || data?.status === "ready")) {
-      pass("Ready check", `db=${data.checks?.database?.ok ? "✓" : "✗"}, vault=${data.checks?.vault?.ok ? "✓" : "✗"}`);
+      pass(
+        "Ready check",
+        `db=${data.checks?.database?.ok ? "✓" : "✗"}, vault=${data.checks?.vault?.ok ? "✓" : "✗"}`,
+      );
     } else if (status === 503) {
       const failedChecks = data?.checks
         ? Object.entries(data.checks)
@@ -194,9 +195,7 @@ async function testProviderDiscovery() {
       return;
     }
 
-    const enabledStr = requiredBools
-      .map((k) => `${k}=${data[k]}`)
-      .join(", ");
+    const enabledStr = requiredBools.map((k) => `${k}=${data[k]}`).join(", ");
     pass("Provider discovery", enabledStr);
   } catch (e: any) {
     fail("Provider discovery", e.message);
@@ -217,7 +216,10 @@ async function testPasskeyRegistrationOptions() {
       return;
     }
     if (status !== 200) {
-      fail("Passkey registration options", `status=${status}: ${data?.error || JSON.stringify(data)}`);
+      fail(
+        "Passkey registration options",
+        `status=${status}: ${data?.error || JSON.stringify(data)}`,
+      );
       return;
     }
 
@@ -227,7 +229,10 @@ async function testPasskeyRegistrationOptions() {
     const hasUser = data.user && typeof data.user.name === "string";
 
     if (hasChallenge && hasRp && hasUser) {
-      pass("Passkey registration options", `rp=${data.rp.name}, challenge=${data.challenge.slice(0, 12)}...`);
+      pass(
+        "Passkey registration options",
+        `rp=${data.rp.name}, challenge=${data.challenge.slice(0, 12)}...`,
+      );
     } else {
       fail(
         "Passkey registration options",
@@ -381,7 +386,10 @@ async function testCrossTenant() {
       // Already exists (from a previous failed run), that's fine
       tenantCreated = true;
     } else {
-      fail(testName, `tenant create failed: status=${createRes.status}, ${createRes.data?.error || JSON.stringify(createRes.data)}`);
+      fail(
+        testName,
+        `tenant create failed: status=${createRes.status}, ${createRes.data?.error || JSON.stringify(createRes.data)}`,
+      );
       return;
     }
 
@@ -447,7 +455,9 @@ async function testUserEndpointsRequireAuth() {
 async function main() {
   console.log(`\n${C.bold}=== Steward Auth E2E Tests ===${C.reset}`);
   console.log(`${C.dim}Target: ${STEWARD_URL}${C.reset}`);
-  console.log(`${C.dim}Platform key: ${PLATFORM_KEY ? "provided" : "not provided (tenant tests will skip)"}${C.reset}\n`);
+  console.log(
+    `${C.dim}Platform key: ${PLATFORM_KEY ? "provided" : "not provided (tenant tests will skip)"}${C.reset}\n`,
+  );
 
   const startTime = Date.now();
 

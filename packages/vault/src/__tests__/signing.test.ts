@@ -1,13 +1,6 @@
-import { describe, expect, it, beforeAll } from "bun:test";
+import { describe, expect, it } from "bun:test";
+import { keccak256, recoverAddress, recoverMessageAddress, toHex, verifyTypedData } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import {
-  verifyTypedData,
-  recoverMessageAddress,
-  recoverAddress,
-  keccak256,
-  toHex,
-  toBytes,
-} from "viem";
 
 import { KeyStore } from "../keystore";
 import { generateSolanaKeypair, restoreSolanaKeypair } from "../solana";
@@ -89,8 +82,8 @@ describe("KeyStore", () => {
     // Flip the first byte of the ciphertext
     const corruptedCiphertext =
       encrypted.ciphertext.slice(0, 1) === "a"
-        ? "b" + encrypted.ciphertext.slice(1)
-        : "a" + encrypted.ciphertext.slice(1);
+        ? `b${encrypted.ciphertext.slice(1)}`
+        : `a${encrypted.ciphertext.slice(1)}`;
 
     const corrupted = { ...encrypted, ciphertext: corruptedCiphertext };
 
@@ -104,8 +97,8 @@ describe("KeyStore", () => {
     // Flip the first byte of the tag → auth verification fails
     const corruptedTag =
       encrypted.tag.slice(0, 1) === "a"
-        ? "b" + encrypted.tag.slice(1)
-        : "a" + encrypted.tag.slice(1);
+        ? `b${encrypted.tag.slice(1)}`
+        : `a${encrypted.tag.slice(1)}`;
 
     const corrupted = { ...encrypted, tag: corruptedTag };
 
@@ -213,7 +206,10 @@ describe("Sign Message — personal_sign, verify recovery", () => {
     const signature = await account.signMessage({ message: signedMessage });
 
     // Recovering with different message gives a different (wrong) address
-    const recovered = await recoverMessageAddress({ message: differentMessage, signature });
+    const recovered = await recoverMessageAddress({
+      message: differentMessage,
+      signature,
+    });
     expect(recovered.toLowerCase()).not.toBe(account.address.toLowerCase());
   });
 });
@@ -341,7 +337,7 @@ describe("Multi-Chain Routing", () => {
     const solAddress = generateSolanaKeypair().publicKey;
 
     // Vault's detectChainType logic (mirrored here for clarity)
-    const detectChainType = (addr: string) => addr.startsWith("0x") ? "evm" : "solana";
+    const detectChainType = (addr: string) => (addr.startsWith("0x") ? "evm" : "solana");
 
     expect(detectChainType(evmAddress)).toBe("evm");
     expect(detectChainType(solAddress)).toBe("solana");
@@ -386,7 +382,7 @@ describe("Solana Keypair", () => {
 
     // Encode as base58 (same alphabet as Solana uses)
     const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    let num = BigInt("0x" + hexBytes.toString("hex"));
+    let num = BigInt(`0x${hexBytes.toString("hex")}`);
     let base58 = "";
     while (num > 0n) {
       const remainder = Number(num % 58n);
@@ -395,7 +391,7 @@ describe("Solana Keypair", () => {
     }
     // Add leading '1's for leading zero bytes
     for (let i = 0; i < hexBytes.length && hexBytes[i] === 0; i++) {
-      base58 = "1" + base58;
+      base58 = `1${base58}`;
     }
 
     const restored = restoreSolanaKeypair(base58);

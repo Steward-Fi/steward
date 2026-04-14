@@ -5,7 +5,7 @@
  * If no score is available in context, falls back to the configured fallbackAction.
  */
 
-import type { PolicyRule, PolicyResult } from "@stwd/shared";
+import type { PolicyResult, PolicyRule } from "@stwd/shared";
 
 export interface ReputationThresholdConfig {
   minScore: number;

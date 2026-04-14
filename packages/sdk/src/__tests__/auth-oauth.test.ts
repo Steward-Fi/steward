@@ -1,7 +1,7 @@
-import { describe, expect, it, beforeEach, afterEach } from "bun:test";
-import { StewardAuth, _generateCodeVerifier, _generateCodeChallenge } from "../auth";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { _generateCodeChallenge, _generateCodeVerifier, StewardAuth } from "../auth";
+import type { SessionStorage, StewardProviders } from "../auth-types";
 import { StewardApiError } from "../client";
-import type { StewardProviders, SessionStorage } from "../auth-types";
 
 // ─── Fetch Mocking Helpers ────────────────────────────────────────────────
 
@@ -141,8 +141,8 @@ describe("getProviders", () => {
     const result = await auth.getProviders();
 
     expect(lastCapture).not.toBeNull();
-    expect(lastCapture!.url).toBe(`${BASE_URL}/auth/providers`);
-    expect(lastCapture!.method).toBe("GET");
+    expect(lastCapture?.url).toBe(`${BASE_URL}/auth/providers`);
+    expect(lastCapture?.method).toBe("GET");
     expect(result).toEqual(mockProviders);
   });
 
@@ -153,7 +153,14 @@ describe("getProviders", () => {
     expect(first).toEqual(mockProviders);
 
     // Install a different mock to verify cache is used
-    installMockFetch({ passkey: false, email: false, siwe: false, google: false, discord: false, oauth: [] });
+    installMockFetch({
+      passkey: false,
+      email: false,
+      siwe: false,
+      google: false,
+      discord: false,
+      oauth: [],
+    });
     const second = await auth.getProviders();
     expect(second).toEqual(mockProviders); // still the cached result
   });
@@ -162,7 +169,11 @@ describe("getProviders", () => {
     installMockFetch(mockProviders);
     await auth.getProviders();
 
-    const updated: StewardProviders = { ...mockProviders, discord: true, oauth: ["google", "discord"] };
+    const updated: StewardProviders = {
+      ...mockProviders,
+      discord: true,
+      oauth: ["google", "discord"],
+    };
     installMockFetch(updated);
     const result = await auth.getProviders(true);
     expect(result).toEqual(updated);
@@ -202,10 +213,7 @@ describe("handleOAuthCallback", () => {
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/, "");
-    const sig = btoa("fakesig")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/, "");
+    const sig = btoa("fakesig").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
     return `${header}.${payload}.${sig}`;
   }
 
@@ -224,7 +232,10 @@ describe("handleOAuthCallback", () => {
     storage.setItem("steward_oauth_verifier", "test-verifier");
 
     try {
-      await auth.handleOAuthCallback("google", { code: "abc", state: "wrong-state" });
+      await auth.handleOAuthCallback("google", {
+        code: "abc",
+        state: "wrong-state",
+      });
       expect(true).toBe(false);
     } catch (err) {
       expect(err).toBeInstanceOf(StewardApiError);
@@ -264,7 +275,11 @@ describe("handleOAuthCallback", () => {
       token: jwt,
       refreshToken: "rt-123",
       expiresIn: 900,
-      user: { id: "user-1", email: "test@example.com", walletAddress: "0x1234" },
+      user: {
+        id: "user-1",
+        email: "test@example.com",
+        walletAddress: "0x1234",
+      },
     });
 
     const result = await auth.handleOAuthCallback("google", {
@@ -274,9 +289,9 @@ describe("handleOAuthCallback", () => {
 
     // Verify the token exchange request
     expect(lastCapture).not.toBeNull();
-    expect(lastCapture!.url).toBe(`${BASE_URL}/auth/oauth/google/token`);
-    expect(lastCapture!.method).toBe("POST");
-    expect(lastCapture!.body).toEqual({
+    expect(lastCapture?.url).toBe(`${BASE_URL}/auth/oauth/google/token`);
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.body).toEqual({
       code: "auth-code-789",
       redirectUri: "http://localhost/auth/callback", // non-browser fallback
       state,

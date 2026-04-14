@@ -14,7 +14,7 @@
  *  - Native balance minus gas reserve is below the buy amount
  */
 
-import type { Strategy, AgentState, TradeDecision } from "./types.js";
+import type { AgentState, Strategy, TradeDecision } from "./types.js";
 
 export interface DCAParams {
   /** Native-wei to spend per buy tick */
@@ -56,9 +56,7 @@ export class DCAStrategy implements Strategy {
 
     // Ensure we have enough to buy + keep gas reserve
     const spendable =
-      nativeBalance > this.minNativeReserve
-        ? nativeBalance - this.minNativeReserve
-        : 0n;
+      nativeBalance > this.minNativeReserve ? nativeBalance - this.minNativeReserve : 0n;
 
     if (spendable < this.buyAmount) {
       return {

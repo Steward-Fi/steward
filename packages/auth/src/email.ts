@@ -48,7 +48,12 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function buildMagicLink(baseUrl: string, callbackPath: string, token: string, email: string): string {
+function buildMagicLink(
+  baseUrl: string,
+  callbackPath: string,
+  token: string,
+  email: string,
+): string {
   const url = new URL(callbackPath, baseUrl);
   url.searchParams.set("token", token);
   url.searchParams.set("email", email);

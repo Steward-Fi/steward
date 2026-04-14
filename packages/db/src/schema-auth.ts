@@ -74,7 +74,9 @@ export const accounts = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     provider: varchar("provider", { length: 64 }).notNull(),
-    providerAccountId: varchar("provider_account_id", { length: 255 }).notNull(),
+    providerAccountId: varchar("provider_account_id", {
+      length: 255,
+    }).notNull(),
     accessToken: text("access_token"),
     refreshToken: text("refresh_token"),
     // Unix timestamp integer — matches OAuth provider convention

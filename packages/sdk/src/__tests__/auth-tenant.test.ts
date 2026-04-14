@@ -1,6 +1,6 @@
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { StewardAuth } from "../auth.ts";
 
 class TestStorage {
@@ -64,8 +64,7 @@ async function startStewardServer(
 ): Promise<{ baseUrl: string; close: () => Promise<void> }> {
   const server = createServer(async (req, res) => {
     const bodyText = await readRequestBody(req);
-    const bodyJson =
-      bodyText.length > 0 ? (JSON.parse(bodyText) as unknown) : undefined;
+    const bodyJson = bodyText.length > 0 ? (JSON.parse(bodyText) as unknown) : undefined;
     const response = await handler({
       method: req.method ?? "GET",
       path: req.url ?? "/",
@@ -268,9 +267,7 @@ describe("StewardAuth multi-tenant", () => {
         expect(session).not.toBeNull();
         expect(session?.tenantId).toBe("new-app");
         expect(storage.getItem("steward_session_token")).toBe(newToken);
-        expect(storage.getItem("steward_refresh_token")).toBe(
-          "new-refresh-token",
-        );
+        expect(storage.getItem("steward_refresh_token")).toBe("new-refresh-token");
       } finally {
         await server.close();
       }

@@ -1,9 +1,9 @@
 // @stwd/shared — types, constants, utils
 
+export type { PriceOracle } from "./price-oracle.js";
+export { createPriceOracle } from "./price-oracle.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
-export { createPriceOracle } from "./price-oracle.js";
-export type { PriceOracle } from "./price-oracle.js";
 
 // ─── Tenancy ───
 
@@ -117,41 +117,77 @@ export interface ChainIdentifier {
  */
 export const CHAINS: Record<string, ChainIdentifier> = {
   "eip155:1": {
-    caip2: "eip155:1", numericId: 1, family: "evm",
-    name: "Ethereum", symbol: "ETH", testnet: false,
+    caip2: "eip155:1",
+    numericId: 1,
+    family: "evm",
+    name: "Ethereum",
+    symbol: "ETH",
+    testnet: false,
   },
   "eip155:56": {
-    caip2: "eip155:56", numericId: 56, family: "evm",
-    name: "BSC", symbol: "BNB", testnet: false,
+    caip2: "eip155:56",
+    numericId: 56,
+    family: "evm",
+    name: "BSC",
+    symbol: "BNB",
+    testnet: false,
   },
   "eip155:97": {
-    caip2: "eip155:97", numericId: 97, family: "evm",
-    name: "BSC Testnet", symbol: "tBNB", testnet: true,
+    caip2: "eip155:97",
+    numericId: 97,
+    family: "evm",
+    name: "BSC Testnet",
+    symbol: "tBNB",
+    testnet: true,
   },
   "eip155:137": {
-    caip2: "eip155:137", numericId: 137, family: "evm",
-    name: "Polygon", symbol: "POL", testnet: false,
+    caip2: "eip155:137",
+    numericId: 137,
+    family: "evm",
+    name: "Polygon",
+    symbol: "POL",
+    testnet: false,
   },
   "eip155:8453": {
-    caip2: "eip155:8453", numericId: 8453, family: "evm",
-    name: "Base", symbol: "ETH", testnet: false,
+    caip2: "eip155:8453",
+    numericId: 8453,
+    family: "evm",
+    name: "Base",
+    symbol: "ETH",
+    testnet: false,
   },
   "eip155:42161": {
-    caip2: "eip155:42161", numericId: 42161, family: "evm",
-    name: "Arbitrum", symbol: "ETH", testnet: false,
+    caip2: "eip155:42161",
+    numericId: 42161,
+    family: "evm",
+    name: "Arbitrum",
+    symbol: "ETH",
+    testnet: false,
   },
   "eip155:84532": {
-    caip2: "eip155:84532", numericId: 84532, family: "evm",
-    name: "Base Sepolia", symbol: "ETH", testnet: true,
+    caip2: "eip155:84532",
+    numericId: 84532,
+    family: "evm",
+    name: "Base Sepolia",
+    symbol: "ETH",
+    testnet: true,
   },
   // Solana: genesis hash prefix used as the reference identifier
   "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {
-    caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", numericId: 101, family: "solana",
-    name: "Solana", symbol: "SOL", testnet: false,
+    caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    numericId: 101,
+    family: "solana",
+    name: "Solana",
+    symbol: "SOL",
+    testnet: false,
   },
   "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {
-    caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", numericId: 102, family: "solana",
-    name: "Solana Devnet", symbol: "SOL", testnet: true,
+    caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    numericId: 102,
+    family: "solana",
+    name: "Solana Devnet",
+    symbol: "SOL",
+    testnet: true,
   },
 };
 
@@ -217,8 +253,8 @@ export interface ApprovedAddressesConfig {
 }
 
 export interface AutoApproveConfig {
-  threshold?: string;      // wei — below this, auto-approve (legacy)
-  thresholdUsd?: number;   // USD — below this, auto-approve (preferred)
+  threshold?: string; // wei — below this, auto-approve (legacy)
+  thresholdUsd?: number; // USD — below this, auto-approve (preferred)
 }
 
 export interface TimeWindowConfig {
@@ -238,7 +274,14 @@ export interface AllowedChainsConfig {
 
 // ─── Transactions ───
 
-export type TxStatus = "pending" | "approved" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
+export type TxStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "signed"
+  | "broadcast"
+  | "confirmed"
+  | "failed";
 
 export interface SignRequest {
   agentId: string;
@@ -337,10 +380,10 @@ export interface AgentBalance {
   agentId: string;
   walletAddress: string;
   balances: {
-    native: string;          // wei as string
+    native: string; // wei as string
     nativeFormatted: string; // human-readable (e.g. "0.005")
     chainId: number;
-    symbol: string;          // e.g. "ETH", "BNB"
+    symbol: string; // e.g. "ETH", "BNB"
   };
 }
 
@@ -457,8 +500,18 @@ export const DEFAULT_FEATURE_FLAGS: TenantFeatureFlags = {
 export interface AgentDashboardResponse {
   agent: AgentIdentity;
   balances: {
-    evm?: { native: string; nativeFormatted: string; chainId: number; symbol: string };
-    solana?: { native: string; nativeFormatted: string; chainId: number; symbol: string };
+    evm?: {
+      native: string;
+      nativeFormatted: string;
+      chainId: number;
+      symbol: string;
+    };
+    solana?: {
+      native: string;
+      nativeFormatted: string;
+      chainId: number;
+      symbol: string;
+    };
   };
   spend: {
     today: string;
@@ -501,16 +554,70 @@ export interface ChainMeta {
 }
 
 export const CHAIN_META: Record<number, ChainMeta> = {
-  1: { id: 1, name: "Ethereum", symbol: "ETH", explorerUrl: "https://etherscan.io", explorerTxUrl: "https://etherscan.io/tx/" },
-  56: { id: 56, name: "BSC", symbol: "BNB", explorerUrl: "https://bscscan.com", explorerTxUrl: "https://bscscan.com/tx/" },
-  97: { id: 97, name: "BSC Testnet", symbol: "tBNB", explorerUrl: "https://testnet.bscscan.com", explorerTxUrl: "https://testnet.bscscan.com/tx/" },
-  137: { id: 137, name: "Polygon", symbol: "POL", explorerUrl: "https://polygonscan.com", explorerTxUrl: "https://polygonscan.com/tx/" },
-  8453: { id: 8453, name: "Base", symbol: "ETH", explorerUrl: "https://basescan.org", explorerTxUrl: "https://basescan.org/tx/" },
-  42161: { id: 42161, name: "Arbitrum", symbol: "ETH", explorerUrl: "https://arbiscan.io", explorerTxUrl: "https://arbiscan.io/tx/" },
-  84532: { id: 84532, name: "Base Sepolia", symbol: "ETH", explorerUrl: "https://sepolia.basescan.org", explorerTxUrl: "https://sepolia.basescan.org/tx/" },
+  1: {
+    id: 1,
+    name: "Ethereum",
+    symbol: "ETH",
+    explorerUrl: "https://etherscan.io",
+    explorerTxUrl: "https://etherscan.io/tx/",
+  },
+  56: {
+    id: 56,
+    name: "BSC",
+    symbol: "BNB",
+    explorerUrl: "https://bscscan.com",
+    explorerTxUrl: "https://bscscan.com/tx/",
+  },
+  97: {
+    id: 97,
+    name: "BSC Testnet",
+    symbol: "tBNB",
+    explorerUrl: "https://testnet.bscscan.com",
+    explorerTxUrl: "https://testnet.bscscan.com/tx/",
+  },
+  137: {
+    id: 137,
+    name: "Polygon",
+    symbol: "POL",
+    explorerUrl: "https://polygonscan.com",
+    explorerTxUrl: "https://polygonscan.com/tx/",
+  },
+  8453: {
+    id: 8453,
+    name: "Base",
+    symbol: "ETH",
+    explorerUrl: "https://basescan.org",
+    explorerTxUrl: "https://basescan.org/tx/",
+  },
+  42161: {
+    id: 42161,
+    name: "Arbitrum",
+    symbol: "ETH",
+    explorerUrl: "https://arbiscan.io",
+    explorerTxUrl: "https://arbiscan.io/tx/",
+  },
+  84532: {
+    id: 84532,
+    name: "Base Sepolia",
+    symbol: "ETH",
+    explorerUrl: "https://sepolia.basescan.org",
+    explorerTxUrl: "https://sepolia.basescan.org/tx/",
+  },
   // Solana
-  101: { id: 101, name: "Solana", symbol: "SOL", explorerUrl: "https://explorer.solana.com", explorerTxUrl: "https://explorer.solana.com/tx/" },
-  102: { id: 102, name: "Solana Devnet", symbol: "SOL", explorerUrl: "https://explorer.solana.com?cluster=devnet", explorerTxUrl: "https://explorer.solana.com/tx/" },
+  101: {
+    id: 101,
+    name: "Solana",
+    symbol: "SOL",
+    explorerUrl: "https://explorer.solana.com",
+    explorerTxUrl: "https://explorer.solana.com/tx/",
+  },
+  102: {
+    id: 102,
+    name: "Solana Devnet",
+    symbol: "SOL",
+    explorerUrl: "https://explorer.solana.com?cluster=devnet",
+    explorerTxUrl: "https://explorer.solana.com/tx/",
+  },
 };
 
 export function getChainMeta(chainId: number): ChainMeta | undefined {

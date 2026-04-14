@@ -1,12 +1,11 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { StewardAuthGuard, StewardUserButton } from "@stwd/react";
+import { AnimatePresence, motion } from "framer-motion";
 import Image from "next/image";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { motion, AnimatePresence } from "framer-motion";
-import { StewardAuthGuard, StewardUserButton } from "@stwd/react";
-import { useEffect, useState, useRef, useCallback } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 function RedirectToLogin() {
   const router = useRouter();
@@ -60,7 +59,7 @@ function DashboardNav() {
   // Close menu on navigation
   useEffect(() => {
     setMenuOpen(false);
-  }, [pathname]);
+  }, []);
 
   const activeLabel = links.find((l) => isActive(l.href, l.exact))?.label ?? "Dashboard";
 
@@ -96,7 +95,11 @@ function DashboardNav() {
                     <motion.div
                       layoutId="dashboard-nav-indicator"
                       className="absolute bottom-0 left-0 right-0 h-[2px] bg-accent"
-                      transition={{ type: "tween", duration: 0.25, ease: [0.25, 1, 0.5, 1] }}
+                      transition={{
+                        type: "tween",
+                        duration: 0.25,
+                        ease: [0.25, 1, 0.5, 1],
+                      }}
                     />
                   )}
                 </Link>
@@ -113,9 +116,15 @@ function DashboardNav() {
             >
               {/* Hamburger icon */}
               <div className="flex flex-col gap-[3px]">
-                <span className={`block w-4 h-[1.5px] bg-current transition-transform ${menuOpen ? "rotate-45 translate-y-[5px]" : ""}`} />
-                <span className={`block w-4 h-[1.5px] bg-current transition-opacity ${menuOpen ? "opacity-0" : ""}`} />
-                <span className={`block w-4 h-[1.5px] bg-current transition-transform ${menuOpen ? "-rotate-45 -translate-y-[5px]" : ""}`} />
+                <span
+                  className={`block w-4 h-[1.5px] bg-current transition-transform ${menuOpen ? "rotate-45 translate-y-[5px]" : ""}`}
+                />
+                <span
+                  className={`block w-4 h-[1.5px] bg-current transition-opacity ${menuOpen ? "opacity-0" : ""}`}
+                />
+                <span
+                  className={`block w-4 h-[1.5px] bg-current transition-transform ${menuOpen ? "-rotate-45 -translate-y-[5px]" : ""}`}
+                />
               </div>
               <span className="text-xs text-text-tertiary truncate">{activeLabel}</span>
             </button>
@@ -168,16 +177,9 @@ function LoadingSpinner() {
   );
 }
 
-export default function DashboardLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   return (
-    <StewardAuthGuard
-      fallback={<RedirectToLogin />}
-      loadingFallback={<LoadingSpinner />}
-    >
+    <StewardAuthGuard fallback={<RedirectToLogin />} loadingFallback={<LoadingSpinner />}>
       <div className="min-h-screen bg-bg">
         <DashboardNav />
         <main className="max-w-[1400px] mx-auto px-4 md:px-6 lg:px-10 py-6 md:py-8 lg:py-12">

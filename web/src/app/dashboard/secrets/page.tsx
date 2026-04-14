@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
+import { useCallback, useEffect, useState } from "react";
 import { steward } from "@/lib/api";
+import type { RouteCreatePayload, RouteRecord, SecretRecord } from "@/lib/steward-client";
 import { formatDate } from "@/lib/utils";
-import type { SecretRecord, RouteRecord, RouteCreatePayload } from "@/lib/steward-client";
 
 const ease: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
@@ -14,7 +14,10 @@ interface Toast {
   kind: "success" | "error";
 }
 
-const INJECT_OPTIONS: { value: RouteCreatePayload["injectAs"]; label: string }[] = [
+const INJECT_OPTIONS: {
+  value: RouteCreatePayload["injectAs"];
+  label: string;
+}[] = [
   { value: "header", label: "HTTP Header" },
   { value: "query", label: "Query Param" },
   { value: "body", label: "Request Body" },
@@ -30,7 +33,11 @@ export default function SecretsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [createForm, setCreateForm] = useState({ name: "", value: "", description: "" });
+  const [createForm, setCreateForm] = useState({
+    name: "",
+    value: "",
+    description: "",
+  });
 
   // Detail / selected secret
   const [selected, setSelected] = useState<SecretRecord | null>(null);
@@ -91,7 +98,7 @@ export default function SecretsPage() {
 
   useEffect(() => {
     loadSecrets();
-  }, []);
+  }, [loadSecrets]);
 
   useEffect(() => {
     if (selected) loadRoutes(selected.id);
@@ -125,12 +132,14 @@ export default function SecretsPage() {
     if (!selected || !rotateValue) return;
     setRotating(true);
     try {
-      const updated = await steward.rotateSecret(selected.id, { value: rotateValue });
+      const updated = await steward.rotateSecret(selected.id, {
+        value: rotateValue,
+      });
       setSecrets((p) => p.map((s) => (s.id === updated.id ? updated : s)));
       setSelected(updated);
       setShowRotate(false);
       setRotateValue("");
-      toast("Secret rotated to version " + updated.version, "success");
+      toast(`Secret rotated to version ${updated.version}`, "success");
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : "Failed to rotate secret", "error");
     } finally {
@@ -158,10 +167,20 @@ export default function SecretsPage() {
     if (!selected || !routeForm.hostPattern) return;
     setAddingRoute(true);
     try {
-      const route = await steward.createRoute({ ...routeForm, secretId: selected.id });
+      const route = await steward.createRoute({
+        ...routeForm,
+        secretId: selected.id,
+      });
       setRoutes((p) => [...p, route]);
       setShowAddRoute(false);
-      setRouteForm({ hostPattern: "", pathPattern: "", injectAs: "header", headerName: "", queryParam: "", bodyPath: "" });
+      setRouteForm({
+        hostPattern: "",
+        pathPattern: "",
+        injectAs: "header",
+        headerName: "",
+        queryParam: "",
+        bodyPath: "",
+      });
       toast("Route added", "success");
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : "Failed to add route", "error");
@@ -252,13 +271,16 @@ export default function SecretsPage() {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-text-tertiary block mb-1.5">
-                    Description
-                  </label>
+                  <label className="text-xs text-text-tertiary block mb-1.5">Description</label>
                   <input
                     type="text"
                     value={createForm.description}
-                    onChange={(e) => setCreateForm({ ...createForm, description: e.target.value })}
+                    onChange={(e) =>
+                      setCreateForm({
+                        ...createForm,
+                        description: e.target.value,
+                      })
+                    }
                     placeholder="OpenAI key for GPT-4 calls"
                     className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                   />
@@ -301,7 +323,10 @@ export default function SecretsPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => { setShowCreate(false); setCreateError(null); }}
+                  onClick={() => {
+                    setShowCreate(false);
+                    setCreateError(null);
+                  }}
                   className="px-4 py-2 text-sm text-text-tertiary hover:text-text transition-colors"
                 >
                   Cancel
@@ -317,7 +342,10 @@ export default function SecretsPage() {
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
           <p className="text-text-secondary text-sm mb-1">Failed to load secrets</p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
-          <button onClick={loadSecrets} className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors">
+          <button
+            onClick={loadSecrets}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+          >
             Retry
           </button>
         </div>
@@ -329,7 +357,9 @@ export default function SecretsPage() {
         <div className="lg:col-span-2">
           {loading ? (
             <div className="space-y-px bg-border">
-              {[...Array(3)].map((_, i) => <div key={i} className="bg-bg h-16 animate-pulse" />)}
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="bg-bg h-16 animate-pulse" />
+              ))}
             </div>
           ) : secrets.length === 0 && !error ? (
             <div className="py-16 text-center border border-border-subtle">
@@ -337,7 +367,10 @@ export default function SecretsPage() {
               <p className="text-sm text-text-tertiary mt-1 max-w-xs mx-auto">
                 Store API keys and credentials that agents can use in their requests.
               </p>
-              <button onClick={() => setShowCreate(true)} className="mt-4 px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors">
+              <button
+                onClick={() => setShowCreate(true)}
+                className="mt-4 px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+              >
                 Create First Secret
               </button>
             </div>
@@ -353,13 +386,13 @@ export default function SecretsPage() {
                     transition={{ duration: 0.25, ease }}
                     onClick={() => setSelected(selected?.id === secret.id ? null : secret)}
                     className={`w-full text-left flex items-center justify-between py-4 px-3 border-b border-border-subtle transition-colors group ${
-                      selected?.id === secret.id
-                        ? "bg-accent-bg"
-                        : "hover:bg-bg-elevated/40"
+                      selected?.id === secret.id ? "bg-accent-bg" : "hover:bg-bg-elevated/40"
                     }`}
                   >
                     <div className="min-w-0">
-                      <div className={`font-display font-600 text-sm truncate ${selected?.id === secret.id ? "text-accent" : "group-hover:text-accent transition-colors"}`}>
+                      <div
+                        className={`font-display font-600 text-sm truncate ${selected?.id === secret.id ? "text-accent" : "group-hover:text-accent transition-colors"}`}
+                      >
                         {secret.name}
                       </div>
                       <div className="text-xs text-text-tertiary mt-0.5 truncate">
@@ -367,10 +400,13 @@ export default function SecretsPage() {
                       </div>
                     </div>
                     <div className="flex items-center gap-3 flex-shrink-0 ml-3">
-                      <span className="text-xs font-mono text-text-tertiary">v{secret.version}</span>
+                      <span className="text-xs font-mono text-text-tertiary">
+                        v{secret.version}
+                      </span>
                       {secret.routeCount > 0 && (
                         <span className="text-xs px-1.5 py-0.5 bg-accent-bg text-[oklch(0.75_0.15_55)] font-medium">
-                          {secret.routeCount} route{secret.routeCount !== 1 ? "s" : ""}
+                          {secret.routeCount} route
+                          {secret.routeCount !== 1 ? "s" : ""}
                         </span>
                       )}
                     </div>
@@ -419,7 +455,9 @@ export default function SecretsPage() {
                   ].map(({ label, value }) => (
                     <div key={label} className="space-y-1">
                       <div className="text-xs text-text-tertiary">{label}</div>
-                      <div className="text-sm font-mono tabular-nums text-text-secondary">{value}</div>
+                      <div className="text-sm font-mono tabular-nums text-text-secondary">
+                        {value}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -459,7 +497,8 @@ export default function SecretsPage() {
                     >
                       <div className="border border-amber-400/20 bg-amber-400/5 p-4 space-y-3">
                         <p className="text-xs text-amber-400 font-medium">
-                          Rotation creates a new version. Previous version is immediately invalidated.
+                          Rotation creates a new version. Previous version is immediately
+                          invalidated.
                         </p>
                         <input
                           type="password"
@@ -478,7 +517,10 @@ export default function SecretsPage() {
                           </button>
                           <button
                             type="button"
-                            onClick={() => { setShowRotate(false); setRotateValue(""); }}
+                            onClick={() => {
+                              setShowRotate(false);
+                              setRotateValue("");
+                            }}
                             className="px-3 py-2 text-xs text-text-tertiary hover:text-text transition-colors"
                           >
                             Cancel
@@ -501,7 +543,8 @@ export default function SecretsPage() {
                     >
                       <div className="border border-red-400/20 bg-red-400/5 p-4 space-y-3">
                         <p className="text-xs text-red-400 font-medium">
-                          Delete "{selected.name}"? This cannot be undone. Any routes using this secret will stop working.
+                          Delete "{selected.name}"? This cannot be undone. Any routes using this
+                          secret will stop working.
                         </p>
                         <div className="flex gap-3">
                           <button
@@ -555,17 +598,29 @@ export default function SecretsPage() {
                               <input
                                 type="text"
                                 value={routeForm.hostPattern}
-                                onChange={(e) => setRouteForm({ ...routeForm, hostPattern: e.target.value })}
+                                onChange={(e) =>
+                                  setRouteForm({
+                                    ...routeForm,
+                                    hostPattern: e.target.value,
+                                  })
+                                }
                                 placeholder="api.openai.com"
                                 className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                               />
                             </div>
                             <div>
-                              <label className="text-xs text-text-tertiary block mb-1">Path Pattern</label>
+                              <label className="text-xs text-text-tertiary block mb-1">
+                                Path Pattern
+                              </label>
                               <input
                                 type="text"
                                 value={routeForm.pathPattern}
-                                onChange={(e) => setRouteForm({ ...routeForm, pathPattern: e.target.value })}
+                                onChange={(e) =>
+                                  setRouteForm({
+                                    ...routeForm,
+                                    pathPattern: e.target.value,
+                                  })
+                                }
                                 placeholder="/v1/*"
                                 className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                               />
@@ -573,24 +628,40 @@ export default function SecretsPage() {
                           </div>
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
-                              <label className="text-xs text-text-tertiary block mb-1">Inject As</label>
+                              <label className="text-xs text-text-tertiary block mb-1">
+                                Inject As
+                              </label>
                               <select
                                 value={routeForm.injectAs}
-                                onChange={(e) => setRouteForm({ ...routeForm, injectAs: e.target.value as RouteCreatePayload["injectAs"] })}
+                                onChange={(e) =>
+                                  setRouteForm({
+                                    ...routeForm,
+                                    injectAs: e.target.value as RouteCreatePayload["injectAs"],
+                                  })
+                                }
                                 className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
                               >
                                 {INJECT_OPTIONS.map((o) => (
-                                  <option key={o.value} value={o.value}>{o.label}</option>
+                                  <option key={o.value} value={o.value}>
+                                    {o.label}
+                                  </option>
                                 ))}
                               </select>
                             </div>
                             {routeForm.injectAs === "header" && (
                               <div>
-                                <label className="text-xs text-text-tertiary block mb-1">Header Name</label>
+                                <label className="text-xs text-text-tertiary block mb-1">
+                                  Header Name
+                                </label>
                                 <input
                                   type="text"
                                   value={routeForm.headerName}
-                                  onChange={(e) => setRouteForm({ ...routeForm, headerName: e.target.value })}
+                                  onChange={(e) =>
+                                    setRouteForm({
+                                      ...routeForm,
+                                      headerName: e.target.value,
+                                    })
+                                  }
                                   placeholder="Authorization"
                                   className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                                 />
@@ -598,11 +669,18 @@ export default function SecretsPage() {
                             )}
                             {routeForm.injectAs === "query" && (
                               <div>
-                                <label className="text-xs text-text-tertiary block mb-1">Query Param</label>
+                                <label className="text-xs text-text-tertiary block mb-1">
+                                  Query Param
+                                </label>
                                 <input
                                   type="text"
                                   value={routeForm.queryParam}
-                                  onChange={(e) => setRouteForm({ ...routeForm, queryParam: e.target.value })}
+                                  onChange={(e) =>
+                                    setRouteForm({
+                                      ...routeForm,
+                                      queryParam: e.target.value,
+                                    })
+                                  }
                                   placeholder="api_key"
                                   className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                                 />
@@ -610,11 +688,18 @@ export default function SecretsPage() {
                             )}
                             {routeForm.injectAs === "body" && (
                               <div>
-                                <label className="text-xs text-text-tertiary block mb-1">Body Path</label>
+                                <label className="text-xs text-text-tertiary block mb-1">
+                                  Body Path
+                                </label>
                                 <input
                                   type="text"
                                   value={routeForm.bodyPath}
-                                  onChange={(e) => setRouteForm({ ...routeForm, bodyPath: e.target.value })}
+                                  onChange={(e) =>
+                                    setRouteForm({
+                                      ...routeForm,
+                                      bodyPath: e.target.value,
+                                    })
+                                  }
                                   placeholder="auth.token"
                                   className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                                 />
@@ -645,7 +730,9 @@ export default function SecretsPage() {
                   {/* Routes list */}
                   {routesLoading ? (
                     <div className="space-y-px">
-                      {[...Array(2)].map((_, i) => <div key={i} className="bg-bg h-12 animate-pulse" />)}
+                      {[...Array(2)].map((_, i) => (
+                        <div key={i} className="bg-bg h-12 animate-pulse" />
+                      ))}
                     </div>
                   ) : routes.length === 0 ? (
                     <div className="py-8 text-center border border-border-subtle">
@@ -662,15 +749,24 @@ export default function SecretsPage() {
                         >
                           <div className="min-w-0 space-y-0.5">
                             <div className="font-mono text-xs text-text truncate">
-                              {route.hostPattern}{route.pathPattern && <span className="text-text-tertiary">{route.pathPattern}</span>}
+                              {route.hostPattern}
+                              {route.pathPattern && (
+                                <span className="text-text-tertiary">{route.pathPattern}</span>
+                              )}
                             </div>
                             <div className="flex items-center gap-2 text-xs text-text-tertiary">
                               <span className="px-1.5 py-0.5 bg-bg text-text-tertiary border border-border-subtle">
                                 {route.injectAs}
                               </span>
-                              {route.headerName && <span className="font-mono">{route.headerName}</span>}
-                              {route.queryParam && <span className="font-mono">?{route.queryParam}</span>}
-                              {route.bodyPath && <span className="font-mono">.{route.bodyPath}</span>}
+                              {route.headerName && (
+                                <span className="font-mono">{route.headerName}</span>
+                              )}
+                              {route.queryParam && (
+                                <span className="font-mono">?{route.queryParam}</span>
+                              )}
+                              {route.bodyPath && (
+                                <span className="font-mono">.{route.bodyPath}</span>
+                              )}
                             </div>
                           </div>
                           <button

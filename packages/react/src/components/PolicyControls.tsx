@@ -1,8 +1,8 @@
-import React, { useState, useCallback } from "react";
 import type { PolicyRule, PolicyType } from "@stwd/sdk";
-import type { PolicyControlsProps, PolicyExposure } from "../types.js";
+import { useState } from "react";
 import { usePolicies } from "../hooks/usePolicies.js";
 import { useStewardContext } from "../provider.js";
+import type { PolicyControlsProps, PolicyExposure } from "../types.js";
 
 const DEFAULT_LABELS: Record<PolicyType, string> = {
   "spending-limit": "Spending Limits",
@@ -142,7 +142,11 @@ export function PolicyControls({
               <div className="stwd-policy-item-header">
                 <div className="stwd-policy-info">
                   <div className="stwd-policy-name">
-                    {isEnforced && <span className="stwd-lock-icon" title="Set by platform">🔒</span>}
+                    {isEnforced && (
+                      <span className="stwd-lock-icon" title="Set by platform">
+                        🔒
+                      </span>
+                    )}
                     {labels[type]}
                   </div>
                   <div className="stwd-policy-desc">{POLICY_DESCRIPTIONS[type]}</div>
@@ -187,11 +191,7 @@ export function PolicyControls({
           >
             Cancel
           </button>
-          <button
-            className="stwd-btn stwd-btn-primary"
-            onClick={handleSave}
-            disabled={isSaving}
-          >
+          <button className="stwd-btn stwd-btn-primary" onClick={handleSave} disabled={isSaving}>
             {isSaving ? "Saving..." : "Save Policies"}
           </button>
         </div>
@@ -244,7 +244,9 @@ function PolicyConfigEditor({ type, config, readOnly, onConfigChange }: PolicyCo
     case "spending-limit":
       return <SpendingLimitEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
     case "approved-addresses":
-      return <ApprovedAddressesEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
+      return (
+        <ApprovedAddressesEditor config={config} readOnly={readOnly} onChange={onConfigChange} />
+      );
     case "auto-approve-threshold":
       return <AutoApproveEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
     case "time-window":
@@ -346,7 +348,10 @@ function ApprovedAddressesEditor({
   };
 
   const removeAddress = (idx: number) => {
-    onChange("addresses", addresses.filter((_, i) => i !== idx));
+    onChange(
+      "addresses",
+      addresses.filter((_, i) => i !== idx),
+    );
   };
 
   return (
@@ -454,9 +459,10 @@ function TimeWindowEditor({
   readOnly: boolean;
   onChange: (key: string, value: unknown) => void;
 }) {
-  const allowedHours = (config.allowedHours as Array<{ start: number; end: number }>) || [
-    { start: 9, end: 17 },
-  ];
+  const allowedHours = (config.allowedHours as Array<{
+    start: number;
+    end: number;
+  }>) || [{ start: 9, end: 17 }];
   const allowedDays = (config.allowedDays as number[]) || [1, 2, 3, 4, 5];
   const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -468,9 +474,7 @@ function TimeWindowEditor({
   };
 
   const updateHours = (index: number, field: "start" | "end", value: number) => {
-    const newHours = allowedHours.map((h, i) =>
-      i === index ? { ...h, [field]: value } : h,
-    );
+    const newHours = allowedHours.map((h, i) => (i === index ? { ...h, [field]: value } : h));
     onChange("allowedHours", newHours);
   };
 
@@ -487,7 +491,7 @@ function TimeWindowEditor({
               className="stwd-input stwd-input-sm"
               value={hours.start}
               disabled={readOnly}
-              onChange={(e) => updateHours(i, "start", parseInt(e.target.value))}
+              onChange={(e) => updateHours(i, "start", parseInt(e.target.value, 10))}
             />
             <span>to</span>
             <input
@@ -497,7 +501,7 @@ function TimeWindowEditor({
               className="stwd-input stwd-input-sm"
               value={hours.end}
               disabled={readOnly}
-              onChange={(e) => updateHours(i, "end", parseInt(e.target.value))}
+              onChange={(e) => updateHours(i, "end", parseInt(e.target.value, 10))}
             />
           </div>
         ))}
@@ -541,7 +545,7 @@ function RateLimitEditor({
           className="stwd-input"
           value={(config.maxTxPerHour as number) || 10}
           disabled={readOnly}
-          onChange={(e) => onChange("maxTxPerHour", parseInt(e.target.value))}
+          onChange={(e) => onChange("maxTxPerHour", parseInt(e.target.value, 10))}
         />
       </div>
       <div className="stwd-config-field">
@@ -552,7 +556,7 @@ function RateLimitEditor({
           className="stwd-input"
           value={(config.maxTxPerDay as number) || 100}
           disabled={readOnly}
-          onChange={(e) => onChange("maxTxPerDay", parseInt(e.target.value))}
+          onChange={(e) => onChange("maxTxPerDay", parseInt(e.target.value, 10))}
         />
       </div>
     </div>
@@ -576,7 +580,11 @@ function AllowedChainsEditor({
     { caip2: "eip155:137", name: "Polygon", symbol: "POL" },
     { caip2: "eip155:42161", name: "Arbitrum", symbol: "ETH" },
     { caip2: "eip155:56", name: "BSC", symbol: "BNB" },
-    { caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", name: "Solana", symbol: "SOL" },
+    {
+      caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      name: "Solana",
+      symbol: "SOL",
+    },
   ];
 
   const toggleChain = (caip2: string) => {

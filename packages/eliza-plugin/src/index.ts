@@ -5,14 +5,14 @@
  * Drop-in plugin: add to your character's plugins array and set STEWARD_API_URL.
  */
 import type { Plugin } from "@elizaos/core";
-import { StewardService } from "./services/StewardService.js";
-import { signTransactionAction } from "./actions/sign-transaction.js";
-import { transferAction } from "./actions/transfer.js";
 import { checkSpendAction } from "./actions/check-spend.js";
 import { listApprovalsAction } from "./actions/list-approvals.js";
-import { walletStatusProvider } from "./providers/wallet-status.js";
-import { balanceProvider } from "./providers/balance.js";
+import { signTransactionAction } from "./actions/sign-transaction.js";
+import { transferAction } from "./actions/transfer.js";
 import { approvalRequiredEvaluator } from "./evaluators/approval.js";
+import { balanceProvider } from "./providers/balance.js";
+import { walletStatusProvider } from "./providers/wallet-status.js";
+import { StewardService } from "./services/StewardService.js";
 
 export const stewardPlugin: Plugin = {
   name: "@stwd/eliza-plugin",
@@ -30,13 +30,13 @@ export const stewardPlugin: Plugin = {
 
 export default stewardPlugin;
 
+export { checkSpendAction } from "./actions/check-spend.js";
+export { listApprovalsAction } from "./actions/list-approvals.js";
+export { signTransactionAction } from "./actions/sign-transaction.js";
+export { transferAction } from "./actions/transfer.js";
+export { approvalRequiredEvaluator } from "./evaluators/approval.js";
+export { balanceProvider } from "./providers/balance.js";
+export { walletStatusProvider } from "./providers/wallet-status.js";
 // Re-exports for consumers
 export { StewardService } from "./services/StewardService.js";
 export type { StewardPluginConfig } from "./types.js";
-export { signTransactionAction } from "./actions/sign-transaction.js";
-export { transferAction } from "./actions/transfer.js";
-export { checkSpendAction } from "./actions/check-spend.js";
-export { listApprovalsAction } from "./actions/list-approvals.js";
-export { walletStatusProvider } from "./providers/wallet-status.js";
-export { balanceProvider } from "./providers/balance.js";
-export { approvalRequiredEvaluator } from "./evaluators/approval.js";

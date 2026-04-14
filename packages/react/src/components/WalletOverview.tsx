@@ -1,8 +1,13 @@
-import React, { useState } from "react";
-import type { WalletOverviewProps } from "../types.js";
+import { useState } from "react";
 import { useWallet } from "../hooks/useWallet.js";
 import { useStewardContext } from "../provider.js";
-import { truncateAddress, formatBalance, copyToClipboard, getExplorerAddressUrl } from "../utils/format.js";
+import type { WalletOverviewProps } from "../types.js";
+import {
+  copyToClipboard,
+  formatBalance,
+  getExplorerAddressUrl,
+  truncateAddress,
+} from "../utils/format.js";
 
 /**
  * Displays agent wallet address, balances, chain info, and optional funding QR.
@@ -101,9 +106,7 @@ export function WalletOverview({
               ? `${balance.balances.nativeFormatted} ${balance.balances.symbol}`
               : formatBalance(balance.balances.native, balance.balances.symbol)}
           </div>
-          <div className="stwd-balance-chain">
-            Chain ID: {balance.balances.chainId}
-          </div>
+          <div className="stwd-balance-chain">Chain ID: {balance.balances.chainId}</div>
         </div>
       )}
 

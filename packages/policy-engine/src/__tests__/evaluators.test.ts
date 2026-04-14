@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { evaluatePolicy, type EvaluatorContext } from "../evaluators";
-import { PolicyEngine } from "../engine";
 import type { PolicyRule, SignRequest } from "@stwd/shared";
+import { PolicyEngine } from "../engine";
+import { type EvaluatorContext, evaluatePolicy } from "../evaluators";
 
 // ─── Test Helpers ─────────────────────────────────────────────────────────
 
@@ -41,7 +41,12 @@ function makeTimeWindowRule(config: Record<string, unknown>, id = "time-1"): Pol
 }
 
 function makeAutoApproveRule(threshold: string, id = "auto-1"): PolicyRule {
-  return { id, type: "auto-approve-threshold", enabled: true, config: { threshold } };
+  return {
+    id,
+    type: "auto-approve-threshold",
+    enabled: true,
+    config: { threshold },
+  };
 }
 
 // ─── Spending Limit Tests ─────────────────────────────────────────────────
@@ -49,13 +54,13 @@ function makeAutoApproveRule(threshold: string, id = "auto-1"): PolicyRule {
 describe("Spending Limit Policy", () => {
   it("passes when value is under all limits (canonical format)", async () => {
     const rule = makeSpendingRule({
-      maxPerTx: "2000000000000000000",    // 2 ETH
-      maxPerDay: "10000000000000000000",  // 10 ETH
+      maxPerTx: "2000000000000000000", // 2 ETH
+      maxPerDay: "10000000000000000000", // 10 ETH
       maxPerWeek: "50000000000000000000", // 50 ETH
     });
 
     const ctx = makeContext({
-      request: { ...makeContext().request, value: "1000000000000000000" } // 1 ETH
+      request: { ...makeContext().request, value: "1000000000000000000" }, // 1 ETH
     });
     const result = await evaluatePolicy(rule, ctx);
 
@@ -64,7 +69,7 @@ describe("Spending Limit Policy", () => {
 
   it("fails when value exceeds per-tx limit", async () => {
     const rule = makeSpendingRule({
-      maxPerTx: "500000000000000000",     // 0.5 ETH
+      maxPerTx: "500000000000000000", // 0.5 ETH
       maxPerDay: "10000000000000000000",
       maxPerWeek: "50000000000000000000",
     });
@@ -79,7 +84,7 @@ describe("Spending Limit Policy", () => {
   it("fails when value would exceed daily limit", async () => {
     const rule = makeSpendingRule({
       maxPerTx: "10000000000000000000",
-      maxPerDay: "5000000000000000000",   // 5 ETH daily
+      maxPerDay: "5000000000000000000", // 5 ETH daily
       maxPerWeek: "50000000000000000000",
     });
 
@@ -233,10 +238,13 @@ describe("Spending Limit Policy", () => {
   // ─── maxAmount/period format tests ────────────────────────────────────
 
   it("accepts maxAmount/period=tx format", async () => {
-    const rule = makeSpendingRule({
-      maxAmount: "2000000000000000000", // 2 ETH per tx
-      period: "tx",
-    }, "spending-2");
+    const rule = makeSpendingRule(
+      {
+        maxAmount: "2000000000000000000", // 2 ETH per tx
+        period: "tx",
+      },
+      "spending-2",
+    );
 
     const ctx = makeContext({
       request: { ...makeContext().request, value: "1000000000000000000" }, // 1 ETH
@@ -247,10 +255,13 @@ describe("Spending Limit Policy", () => {
   });
 
   it("accepts maxAmount/period=day format", async () => {
-    const rule = makeSpendingRule({
-      maxAmount: "5000000000000000000", // 5 ETH per day
-      period: "day",
-    }, "spending-3");
+    const rule = makeSpendingRule(
+      {
+        maxAmount: "5000000000000000000", // 5 ETH per day
+        period: "day",
+      },
+      "spending-3",
+    );
 
     const ctx = makeContext({
       request: { ...makeContext().request, value: "1000000000000000000" },
@@ -262,10 +273,13 @@ describe("Spending Limit Policy", () => {
   });
 
   it("fails maxAmount/period=day when over limit", async () => {
-    const rule = makeSpendingRule({
-      maxAmount: "5000000000000000000", // 5 ETH per day
-      period: "day",
-    }, "spending-4");
+    const rule = makeSpendingRule(
+      {
+        maxAmount: "5000000000000000000", // 5 ETH per day
+        period: "day",
+      },
+      "spending-4",
+    );
 
     const ctx = makeContext({
       request: { ...makeContext().request, value: "2000000000000000000" }, // 2 ETH
@@ -278,10 +292,13 @@ describe("Spending Limit Policy", () => {
   });
 
   it("accepts maxAmount/period=week format", async () => {
-    const rule = makeSpendingRule({
-      maxAmount: "10000000000000000000", // 10 ETH per week
-      period: "week",
-    }, "spending-5");
+    const rule = makeSpendingRule(
+      {
+        maxAmount: "10000000000000000000", // 10 ETH per week
+        period: "week",
+      },
+      "spending-5",
+    );
 
     const ctx = makeContext({
       request: { ...makeContext().request, value: "1000000000000000000" },
@@ -293,10 +310,13 @@ describe("Spending Limit Policy", () => {
   });
 
   it("fails maxAmount/period=week when over limit", async () => {
-    const rule = makeSpendingRule({
-      maxAmount: "10000000000000000000", // 10 ETH per week
-      period: "weekly",
-    }, "spending-6");
+    const rule = makeSpendingRule(
+      {
+        maxAmount: "10000000000000000000", // 10 ETH per week
+        period: "weekly",
+      },
+      "spending-6",
+    );
 
     const ctx = makeContext({
       request: { ...makeContext().request, value: "3000000000000000000" }, // 3 ETH
@@ -553,7 +573,7 @@ describe("Time Window Policy", () => {
   it("fails when today's day of week is excluded from allowedDays", async () => {
     // Compute all days except today — deterministic for this test run
     const today = new Date().getUTCDay();
-    const allDaysExceptToday = [0, 1, 2, 3, 4, 5, 6].filter(d => d !== today);
+    const allDaysExceptToday = [0, 1, 2, 3, 4, 5, 6].filter((d) => d !== today);
 
     const rule = makeTimeWindowRule({
       allowedHours: [{ start: 0, end: 24 }],
@@ -602,7 +622,7 @@ describe("Time Window Policy", () => {
     const rule = makeTimeWindowRule({
       allowedHours: [
         { start: 24, end: 25 }, // never matches
-        { start: 0, end: 24 },  // always matches
+        { start: 0, end: 24 }, // always matches
       ],
       allowedDays: [],
     });
@@ -689,7 +709,9 @@ describe("Allowed Chains Policy", () => {
 
   it("passes when request chainId matches the single allowed chain", async () => {
     const rule = makeAllowedChainsRule(["eip155:8453"]); // Base only
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: 8453 } });
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 8453 },
+    });
     const result = await evaluatePolicy(rule, ctx);
 
     expect(result.passed).toBe(true);
@@ -697,7 +719,9 @@ describe("Allowed Chains Policy", () => {
 
   it("passes when request chainId matches one of multiple allowed chains", async () => {
     const rule = makeAllowedChainsRule(["eip155:1", "eip155:56", "eip155:8453"]);
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: 56 } }); // BSC
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 56 },
+    }); // BSC
     const result = await evaluatePolicy(rule, ctx);
 
     expect(result.passed).toBe(true);
@@ -705,7 +729,9 @@ describe("Allowed Chains Policy", () => {
 
   it("fails when request chainId is not in the allowed list", async () => {
     const rule = makeAllowedChainsRule(["eip155:1"]); // Ethereum only
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: 8453 } }); // Base
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 8453 },
+    }); // Base
     const result = await evaluatePolicy(rule, ctx);
 
     expect(result.passed).toBe(false);
@@ -715,7 +741,9 @@ describe("Allowed Chains Policy", () => {
 
   it("fails when chainId maps to a known chain not in the allowed list", async () => {
     const rule = makeAllowedChainsRule(["eip155:8453", "eip155:56"]); // Base and BSC
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: 137 } }); // Polygon
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 137 },
+    }); // Polygon
     const result = await evaluatePolicy(rule, ctx);
 
     expect(result.passed).toBe(false);
@@ -725,7 +753,9 @@ describe("Allowed Chains Policy", () => {
   it("fails when chainId is unknown/unmapped (cannot convert to CAIP-2)", async () => {
     const rule = makeAllowedChainsRule(["eip155:1", "eip155:8453"]);
     // chainId 9999 is not in the CHAINS registry
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: 9999 } });
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 9999 },
+    });
     const result = await evaluatePolicy(rule, ctx);
 
     expect(result.passed).toBe(false);
@@ -737,7 +767,9 @@ describe("Allowed Chains Policy", () => {
     // Design decision: chainId=0 means the caller hasn't specified a chain yet.
     // The vault will resolve it to DEFAULT_CHAIN_ID before signing, so we must not block here.
     const rule = makeAllowedChainsRule(["eip155:1"]); // Ethereum only — would fail for Base
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: 0 } });
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 0 },
+    });
     const result = await evaluatePolicy(rule, ctx);
 
     expect(result.passed).toBe(true);
@@ -747,7 +779,12 @@ describe("Allowed Chains Policy", () => {
   it("passes when chainId is undefined — defers check to vault", async () => {
     const rule = makeAllowedChainsRule(["eip155:1"]);
     // Force undefined at runtime (type cast to exercise the JS falsy guard)
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: undefined as unknown as number } });
+    const ctx = makeContext({
+      request: {
+        ...makeContext().request,
+        chainId: undefined as unknown as number,
+      },
+    });
     const result = await evaluatePolicy(rule, ctx);
 
     expect(result.passed).toBe(true);
@@ -756,7 +793,9 @@ describe("Allowed Chains Policy", () => {
 
   it("fails all requests when allowed chains array is empty (nothing is permitted)", async () => {
     const rule = makeAllowedChainsRule([]); // empty — nothing allowed
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: 8453 } });
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 8453 },
+    });
     const result = await evaluatePolicy(rule, ctx);
 
     expect(result.passed).toBe(false);
@@ -767,7 +806,9 @@ describe("Allowed Chains Policy", () => {
     // Policy stores lowercase CAIP-2 as per the CHAINS registry.
     // If someone stores "EIP155:8453" instead of "eip155:8453", it should NOT match.
     const rule = makeAllowedChainsRule(["EIP155:8453"]); // wrong casing
-    const ctx = makeContext({ request: { ...makeContext().request, chainId: 8453 } });
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 8453 },
+    });
     const result = await evaluatePolicy(rule, ctx);
 
     // toCaip2(8453) returns "eip155:8453" (lowercase), which !== "EIP155:8453"
@@ -777,13 +818,19 @@ describe("Allowed Chains Policy", () => {
   it("allows ETH mainnet (eip155:1) and BSC (eip155:56) — default chain list scenario", async () => {
     const rule = makeAllowedChainsRule(["eip155:1", "eip155:56"]);
 
-    const ethCtx = makeContext({ request: { ...makeContext().request, chainId: 1 } });
+    const ethCtx = makeContext({
+      request: { ...makeContext().request, chainId: 1 },
+    });
     expect((await evaluatePolicy(rule, ethCtx)).passed).toBe(true);
 
-    const bscCtx = makeContext({ request: { ...makeContext().request, chainId: 56 } });
+    const bscCtx = makeContext({
+      request: { ...makeContext().request, chainId: 56 },
+    });
     expect((await evaluatePolicy(rule, bscCtx)).passed).toBe(true);
 
-    const baseCtx = makeContext({ request: { ...makeContext().request, chainId: 8453 } });
+    const baseCtx = makeContext({
+      request: { ...makeContext().request, chainId: 8453 },
+    });
     expect((await evaluatePolicy(rule, baseCtx)).passed).toBe(false);
   });
 });
@@ -855,7 +902,7 @@ describe("PolicyEngine.evaluate()", () => {
 
     expect(result.approved).toBe(true);
     expect(result.requiresManualApproval).toBe(false);
-    expect(result.results.every(r => r.passed)).toBe(true);
+    expect(result.results.every((r) => r.passed)).toBe(true);
   });
 
   it("one hard policy fails → rejected (approved=false, requiresManualApproval=false)", async () => {
@@ -867,8 +914,12 @@ describe("PolicyEngine.evaluate()", () => {
       }),
       // This will fail — spending limit 0.1 ETH when tx is 1 ETH
       makeSpendingRule(
-        { maxPerTx: "100000000000000000", maxPerDay: "1000000000000000000", maxPerWeek: "5000000000000000000" },
-        "spending-2"
+        {
+          maxPerTx: "100000000000000000",
+          maxPerDay: "1000000000000000000",
+          maxPerWeek: "5000000000000000000",
+        },
+        "spending-2",
       ),
     ];
 
@@ -882,8 +933,12 @@ describe("PolicyEngine.evaluate()", () => {
     const policies: PolicyRule[] = [
       // Hard fail: per-tx limit too low
       makeSpendingRule(
-        { maxPerTx: "100000000000000000", maxPerDay: "100000000000000000000", maxPerWeek: "100000000000000000000" },
-        "spending-hard"
+        {
+          maxPerTx: "100000000000000000",
+          maxPerDay: "100000000000000000000",
+          maxPerWeek: "100000000000000000000",
+        },
+        "spending-hard",
       ),
       // Auto-approve: 2 ETH threshold — tx is 1 ETH so this would pass
       makeAutoApproveRule("2000000000000000000"),
@@ -950,13 +1005,17 @@ describe("PolicyEngine.evaluate()", () => {
 
     expect(result.approved).toBe(false);
     expect(result.requiresManualApproval).toBe(false);
-    const failedResult = result.results.find(r => r.type === "approved-addresses");
+    const failedResult = result.results.find((r) => r.type === "approved-addresses");
     expect(failedResult?.passed).toBe(false);
   });
 
   it("results array contains one entry per policy evaluated", async () => {
     const policies: PolicyRule[] = [
-      makeSpendingRule({ maxPerTx: "10000000000000000000", maxPerDay: "100000000000000000000", maxPerWeek: "100000000000000000000" }),
+      makeSpendingRule({
+        maxPerTx: "10000000000000000000",
+        maxPerDay: "100000000000000000000",
+        maxPerWeek: "100000000000000000000",
+      }),
       makeRateRule({ maxTxPerHour: 10, maxTxPerDay: 50 }),
       makeAutoApproveRule("2000000000000000000"),
     ];
@@ -964,9 +1023,9 @@ describe("PolicyEngine.evaluate()", () => {
     const result = await engine.evaluate(policies, makeEngineCtx());
 
     expect(result.results).toHaveLength(3);
-    expect(result.results.map(r => r.type)).toContain("spending-limit");
-    expect(result.results.map(r => r.type)).toContain("rate-limit");
-    expect(result.results.map(r => r.type)).toContain("auto-approve-threshold");
+    expect(result.results.map((r) => r.type)).toContain("spending-limit");
+    expect(result.results.map((r) => r.type)).toContain("rate-limit");
+    expect(result.results.map((r) => r.type)).toContain("auto-approve-threshold");
   });
 
   it("allowed-chains pass alongside other passing policies → approved", async () => {
@@ -977,14 +1036,19 @@ describe("PolicyEngine.evaluate()", () => {
         maxPerDay: "50000000000000000000",
         maxPerWeek: "100000000000000000000",
       }),
-      { id: "chains-1", type: "allowed-chains", enabled: true, config: { chains: ["eip155:8453", "eip155:1"] } },
+      {
+        id: "chains-1",
+        type: "allowed-chains",
+        enabled: true,
+        config: { chains: ["eip155:8453", "eip155:1"] },
+      },
     ];
 
     const result = await engine.evaluate(policies, makeEngineCtx()); // default chainId=8453
 
     expect(result.approved).toBe(true);
     expect(result.requiresManualApproval).toBe(false);
-    const chainsResult = result.results.find(r => r.type === "allowed-chains");
+    const chainsResult = result.results.find((r) => r.type === "allowed-chains");
     expect(chainsResult?.passed).toBe(true);
   });
 
@@ -997,14 +1061,22 @@ describe("PolicyEngine.evaluate()", () => {
         maxPerWeek: "100000000000000000000",
       }),
       makeRateRule({ maxTxPerHour: 10, maxTxPerDay: 50 }),
-      { id: "chains-1", type: "allowed-chains", enabled: true, config: { chains: ["eip155:1"] } },
+      {
+        id: "chains-1",
+        type: "allowed-chains",
+        enabled: true,
+        config: { chains: ["eip155:1"] },
+      },
     ];
 
-    const result = await engine.evaluate(policies, makeEngineCtx({ request: { ...makeEngineCtx().request, chainId: 8453 } }));
+    const result = await engine.evaluate(
+      policies,
+      makeEngineCtx({ request: { ...makeEngineCtx().request, chainId: 8453 } }),
+    );
 
     expect(result.approved).toBe(false);
     expect(result.requiresManualApproval).toBe(false);
-    const chainsResult = result.results.find(r => r.type === "allowed-chains");
+    const chainsResult = result.results.find((r) => r.type === "allowed-chains");
     expect(chainsResult?.passed).toBe(false);
     expect(chainsResult?.reason).toContain("eip155:8453");
   });

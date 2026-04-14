@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth.js";
 import type { StewardEmailCallbackProps } from "../types.js";
 
@@ -72,7 +72,7 @@ export function StewardEmailCallback({
         onError?.(error);
       }
     })();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onError, verifyEmailCallback, redirectTo, onSuccess, isAuthenticated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleRetry = () => {
     attemptedRef.current = false;
@@ -127,11 +127,7 @@ export function StewardEmailCallback({
   return (
     <div className="stwd-callback stwd-callback__error">
       <p className="stwd-error-text">{errorMsg ?? "Verification failed."}</p>
-      <button
-        className="stwd-btn stwd-btn-secondary"
-        onClick={handleRetry}
-        type="button"
-      >
+      <button className="stwd-btn stwd-btn-secondary" onClick={handleRetry} type="button">
         Retry
       </button>
     </div>

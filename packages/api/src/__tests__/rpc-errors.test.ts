@@ -112,7 +112,9 @@ describe("RPC Error Detection", () => {
     });
 
     it("extracts inner message when present", () => {
-      const error = new Error('RPC error: {"code":-32000,"message":"insufficient funds for transfer"}');
+      const error = new Error(
+        'RPC error: {"code":-32000,"message":"insufficient funds for transfer"}',
+      );
       const result = extractRpcErrorMessage(error);
       expect(result).toContain("insufficient funds");
     });
@@ -131,10 +133,10 @@ describe("RPC Error HTTP Status", () => {
     // When an RPC error occurs (e.g., insufficient funds),
     // the API should return 502 Bad Gateway with the actual error message,
     // not 500 Internal Server Error with a generic message.
-    
+
     // The actual integration test would require a running server
     // and a way to trigger an RPC error (e.g., sending without funds).
-    
+
     // For now, we verify the detection logic works correctly.
     const rpcError = new Error("insufficient funds for gas * price + value");
     expect(isRpcError(rpcError)).toBe(true);

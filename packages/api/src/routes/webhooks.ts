@@ -4,10 +4,11 @@
  * Mount: app.route("/webhooks", webhookRoutes)
  */
 
-import { and, eq, desc, sql } from "drizzle-orm";
-import { Hono } from "hono";
 import { randomBytes } from "node:crypto";
+import { and, desc, eq } from "drizzle-orm";
+import { Hono } from "hono";
 import {
+  type ApiResponse,
   type AppVariables,
   db,
   isNonEmptyString,
@@ -15,7 +16,6 @@ import {
   safeJsonParse,
   webhookConfigs,
   webhookDeliveries,
-  type ApiResponse,
 } from "../services/context";
 
 export const webhookRoutes = new Hono<{ Variables: AppVariables }>();
@@ -77,17 +77,26 @@ webhookRoutes.post("/", async (c) => {
     );
     if (invalidEvents.length > 0) {
       return c.json<ApiResponse>(
-        { ok: false, error: `Invalid events: ${invalidEvents.join(", ")}. Valid: ${VALID_EVENTS.join(", ")}` },
+        {
+          ok: false,
+          error: `Invalid events: ${invalidEvents.join(", ")}. Valid: ${VALID_EVENTS.join(", ")}`,
+        },
         400,
       );
     }
   }
 
-  if (body.maxRetries !== undefined && (typeof body.maxRetries !== "number" || body.maxRetries < 0 || body.maxRetries > 10)) {
+  if (
+    body.maxRetries !== undefined &&
+    (typeof body.maxRetries !== "number" || body.maxRetries < 0 || body.maxRetries > 10)
+  ) {
     return c.json<ApiResponse>({ ok: false, error: "maxRetries must be 0-10" }, 400);
   }
 
-  if (body.retryBackoffMs !== undefined && (typeof body.retryBackoffMs !== "number" || body.retryBackoffMs < 1000)) {
+  if (
+    body.retryBackoffMs !== undefined &&
+    (typeof body.retryBackoffMs !== "number" || body.retryBackoffMs < 1000)
+  ) {
     return c.json<ApiResponse>({ ok: false, error: "retryBackoffMs must be >= 1000" }, 400);
   }
 
@@ -106,10 +115,13 @@ webhookRoutes.post("/", async (c) => {
     })
     .returning();
 
-  return c.json<ApiResponse>({
-    ok: true,
-    data: webhook,
-  }, 201);
+  return c.json<ApiResponse>(
+    {
+      ok: true,
+      data: webhook,
+    },
+    201,
+  );
 });
 
 // ─── List webhooks ────────────────────────────────────────────────────────────
@@ -258,12 +270,7 @@ webhookRoutes.get("/:id/deliveries", async (c) => {
   const deliveries = await db
     .select()
     .from(webhookDeliveries)
-    .where(
-      and(
-        eq(webhookDeliveries.tenantId, tenantId),
-        eq(webhookDeliveries.url, webhook.url),
-      ),
-    )
+    .where(and(eq(webhookDeliveries.tenantId, tenantId), eq(webhookDeliveries.url, webhook.url)))
     .orderBy(desc(webhookDeliveries.createdAt))
     .limit(limit)
     .offset(offset);
@@ -284,12 +291,7 @@ webhookRoutes.post("/deliveries/:id/retry", async (c) => {
   const [delivery] = await db
     .select()
     .from(webhookDeliveries)
-    .where(
-      and(
-        eq(webhookDeliveries.id, deliveryId),
-        eq(webhookDeliveries.tenantId, tenantId),
-      ),
-    );
+    .where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.tenantId, tenantId)));
 
   if (!delivery) {
     return c.json<ApiResponse>({ ok: false, error: "Delivery not found" }, 404);

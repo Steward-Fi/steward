@@ -11,10 +11,10 @@
 
 import { StewardClient } from "@stwd/sdk";
 import { loadConfig } from "./config.js";
-import { startAgentLoop } from "./loop.js";
+import { logError, logInfo, logWarn } from "./logger.js";
 import type { AgentLoop } from "./loop.js";
+import { startAgentLoop } from "./loop.js";
 import { createWebhookServer, registerDefaultHandlers } from "./webhook.js";
-import { logInfo, logError, logWarn } from "./logger.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -78,18 +78,12 @@ async function main(): Promise<void> {
       const loop = startAgentLoop(agentConfig, steward, config);
       loops.push(loop);
     } catch (err) {
-      logError(
-        `Failed to start loop for agent "${agentConfig.agentId}"`,
-        err,
-      );
+      logError(`Failed to start loop for agent "${agentConfig.agentId}"`, err);
     }
   }
 
   // 4. Webhook receiver
-  const webhookServer = createWebhookServer(
-    config.webhookPort,
-    config.webhookSecret,
-  );
+  const webhookServer = createWebhookServer(config.webhookPort, config.webhookSecret);
   registerDefaultHandlers(webhookServer);
 
   try {
@@ -130,14 +124,21 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  process.on("SIGINT", () => { void shutdown("SIGINT"); });
-  process.on("SIGTERM", () => { void shutdown("SIGTERM"); });
+  process.on("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+  process.on("SIGTERM", () => {
+    void shutdown("SIGTERM");
+  });
   process.on("uncaughtException", (err: Error) => {
     logError("Uncaught exception", err);
     void shutdown("uncaughtException");
   });
   process.on("unhandledRejection", (reason: unknown) => {
-    logError("Unhandled promise rejection", reason instanceof Error ? reason : new Error(String(reason)));
+    logError(
+      "Unhandled promise rejection",
+      reason instanceof Error ? reason : new Error(String(reason)),
+    );
   });
 }
 

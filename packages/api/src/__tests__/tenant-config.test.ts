@@ -1,9 +1,10 @@
-import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
 // Skip all DB-dependent tests when DATABASE_URL is not configured
 const SKIP = !process.env.DATABASE_URL;
+
 import { generateApiKey } from "@stwd/auth";
-import { getDb, tenants, tenantConfigs } from "@stwd/db";
+import { getDb, tenantConfigs, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
@@ -68,7 +69,11 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       const apiKeyPair = generateApiKey();
       await db
         .insert(tenants)
-        .values({ id: "milady-cloud", name: "Milady Cloud", apiKeyHash: apiKeyPair.hash })
+        .values({
+          id: "milady-cloud",
+          name: "Milady Cloud",
+          apiKeyHash: apiKeyPair.hash,
+        })
         .onConflictDoNothing();
 
       const res = await fetch(`${BASE_URL}/tenants/milady-cloud/config`, {
@@ -108,7 +113,11 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
                 id: "tpl-spend",
                 type: "spending-limit",
                 enabled: true,
-                config: { maxPerTx: "100", maxPerDay: "1000", maxPerWeek: "5000" },
+                config: {
+                  maxPerTx: "100",
+                  maxPerDay: "1000",
+                  maxPerWeek: "5000",
+                },
               },
             ],
             customizableFields: [],

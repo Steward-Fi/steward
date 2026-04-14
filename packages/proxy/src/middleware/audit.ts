@@ -6,8 +6,7 @@
  * so audit never blocks the response path.
  */
 
-import { getDb } from "@stwd/db";
-import { proxyAuditLog } from "@stwd/db";
+import { getDb, proxyAuditLog } from "@stwd/db";
 
 export interface AuditEntry {
   agentId: string;

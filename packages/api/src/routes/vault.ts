@@ -7,7 +7,9 @@
 
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
 import {
+  type ApiResponse,
   type AppVariables,
   approvalQueue,
   db,
@@ -23,8 +25,12 @@ import {
   isValidSolanaAddress,
   policyEngine,
   priceOracle,
+  type RpcRequest,
+  type RpcResponse,
   requireAgentAccess,
   requireTenantLevel,
+  type SignRequest,
+  type SignTypedDataRequest,
   safeJsonParse,
   sanitizeErrorMessage,
   tenantConfigs,
@@ -33,13 +39,7 @@ import {
   transactions,
   vault,
   webhookDispatcher,
-  type ApiResponse,
-  type RpcRequest,
-  type RpcResponse,
-  type SignRequest,
-  type SignTypedDataRequest,
 } from "../services/context";
-import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
 
 export const vaultRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -47,7 +47,10 @@ export const vaultRoutes = new Hono<{ Variables: AppVariables }>();
 
 vaultRoutes.post("/:agentId/sign", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -72,11 +75,19 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: errMsg }, 400);
   }
   if (request.value === undefined || request.value === null) {
-    return c.json<ApiResponse>({ ok: false, error: "'value' is required (wei amount as string)" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'value' is required (wei amount as string)" },
+      400,
+    );
   }
 
   const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
-  const signRequest: SignRequest = { ...request, tenantId, agentId, chainId: resolvedChainId };
+  const signRequest: SignRequest = {
+    ...request,
+    tenantId,
+    agentId,
+    chainId: resolvedChainId,
+  };
   const policySet = await getPolicySet(tenantId, agentId);
 
   // ── Redis rate-limit check (before policy evaluation) ──────────────────────
@@ -133,13 +144,20 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         });
       });
 
-      dispatchWebhook(tenantId, agentId, "approval_required", { txId, results: evaluation.results });
+      dispatchWebhook(tenantId, agentId, "approval_required", {
+        txId,
+        results: evaluation.results,
+      });
 
       return c.json<ApiResponse>(
         {
           ok: false,
           error: "Transaction requires manual approval",
-          data: { txId, results: evaluation.results, status: "pending_approval" },
+          data: {
+            txId,
+            results: evaluation.results,
+            status: "pending_approval",
+          },
         },
         202,
       );
@@ -156,7 +174,10 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       policyResults: evaluation.results,
     });
 
-    dispatchWebhook(tenantId, agentId, "tx_rejected", { txId, results: evaluation.results });
+    dispatchWebhook(tenantId, agentId, "tx_rejected", {
+      txId,
+      results: evaluation.results,
+    });
 
     return c.json<ApiResponse>(
       {
@@ -192,7 +213,10 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       console.error("[vault] Failed to record spend:", err),
     );
 
-    dispatchWebhook(tenantId, agentId, "tx_signed", { txId, txHash: shouldBroadcast ? result : undefined });
+    dispatchWebhook(tenantId, agentId, "tx_signed", {
+      txId,
+      txHash: shouldBroadcast ? result : undefined,
+    });
 
     if (shouldBroadcast) {
       return c.json<ApiResponse<{ txId: string; txHash: string }>>({
@@ -210,7 +234,10 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
     console.error(`[${requestId}] Sign transaction failed for agent ${agentId}:`, e);
 
-    dispatchWebhook(tenantId, agentId, "tx_failed", { error: rawMessage, requestId });
+    dispatchWebhook(tenantId, agentId, "tx_failed", {
+      error: rawMessage,
+      requestId,
+    });
 
     if (isRpcError(e)) {
       return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
@@ -223,7 +250,13 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
 
 vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Transaction approval requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Transaction approval requires tenant-level authentication",
+      },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -253,10 +286,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         eq(approvalQueue.status, "pending"),
       ),
     )
-    .returning({ id: approvalQueue.id });
+    .returning();
 
   if (claimResult.length === 0) {
-    return c.json<ApiResponse>({ ok: false, error: "Transaction already processed or not found" }, 409);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction already processed or not found" },
+      409,
+    );
   }
 
   try {
@@ -266,7 +302,10 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     if (isSolana) {
       if (!transaction.data) {
         return c.json<ApiResponse>(
-          { ok: false, error: "Solana transaction blob not found — cannot replay approval" },
+          {
+            ok: false,
+            error: "Solana transaction blob not found — cannot replay approval",
+          },
           500,
         );
       }
@@ -307,7 +346,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
     console.error(`[${requestId}] Approve transaction failed for agent ${agentId}, tx ${txId}:`, e);
 
-    dispatchWebhook(tenantId, agentId, "tx_failed", { txId, error: rawMessage, requestId });
+    dispatchWebhook(tenantId, agentId, "tx_failed", {
+      txId,
+      error: rawMessage,
+      requestId,
+    });
 
     if (isRpcError(e)) {
       return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
@@ -320,7 +363,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
 vaultRoutes.post("/:agentId/reject/:txId", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Transaction approval requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Transaction approval requires tenant-level authentication",
+      },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -341,10 +390,13 @@ vaultRoutes.post("/:agentId/reject/:txId", async (c) => {
         eq(approvalQueue.status, "pending"),
       ),
     )
-    .returning({ id: approvalQueue.id });
+    .returning();
 
   if (rejectResult.length === 0) {
-    return c.json<ApiResponse>({ ok: false, error: "Transaction already processed or not found" }, 409);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction already processed or not found" },
+      409,
+    );
   }
 
   await db
@@ -359,7 +411,10 @@ vaultRoutes.post("/:agentId/reject/:txId", async (c) => {
 
 vaultRoutes.get("/:agentId/pending", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -401,7 +456,10 @@ vaultRoutes.get("/:agentId/pending", async (c) => {
 
 vaultRoutes.get("/:agentId/history", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -411,10 +469,7 @@ vaultRoutes.get("/:agentId/history", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const history = await db
-    .select()
-    .from(transactions)
-    .where(eq(transactions.agentId, agentId));
+  const history = await db.select().from(transactions).where(eq(transactions.agentId, agentId));
 
   return c.json<ApiResponse>({
     ok: true,
@@ -426,7 +481,10 @@ vaultRoutes.get("/:agentId/history", async (c) => {
 
 vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -448,19 +506,30 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   }
 
   if (!body.domain || typeof body.domain !== "object") {
-    return c.json<ApiResponse>({ ok: false, error: "'domain' is required and must be an object" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'domain' is required and must be an object" },
+      400,
+    );
   }
   if (!body.types || typeof body.types !== "object") {
-    return c.json<ApiResponse>({ ok: false, error: "'types' is required and must be an object" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'types' is required and must be an object" },
+      400,
+    );
   }
   if (!isNonEmptyString(body.primaryType)) {
     return c.json<ApiResponse>({ ok: false, error: "'primaryType' is required" }, 400);
   }
   if (!body.value || typeof body.value !== "object") {
-    return c.json<ApiResponse>({ ok: false, error: "'value' is required and must be an object" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'value' is required and must be an object" },
+      400,
+    );
   }
 
-  const resolvedChainId = (typeof body.domain.chainId === "number" ? body.domain.chainId : 0) || parseInt(process.env.CHAIN_ID || "8453", 10);
+  const resolvedChainId =
+    (typeof body.domain.chainId === "number" ? body.domain.chainId : 0) ||
+    parseInt(process.env.CHAIN_ID || "8453", 10);
   const signRequest: SignRequest = {
     agentId,
     tenantId,
@@ -479,10 +548,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
         c.header(key, value);
       }
     }
-    return c.json<ApiResponse>(
-      { ok: false, error: rlResult.reason || "Rate limit exceeded" },
-      429,
-    );
+    return c.json<ApiResponse>({ ok: false, error: rlResult.reason || "Rate limit exceeded" }, 429);
   }
 
   const stats = await getTransactionStats(agentId);
@@ -518,13 +584,20 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
         });
       });
 
-      dispatchWebhook(tenantId, agentId, "approval_required", { txId, results: evaluation.results });
+      dispatchWebhook(tenantId, agentId, "approval_required", {
+        txId,
+        results: evaluation.results,
+      });
 
       return c.json<ApiResponse>(
         {
           ok: false,
           error: "Transaction requires manual approval",
-          data: { txId, results: evaluation.results, status: "pending_approval" },
+          data: {
+            txId,
+            results: evaluation.results,
+            status: "pending_approval",
+          },
         },
         202,
       );
@@ -540,7 +613,10 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       policyResults: evaluation.results,
     });
 
-    dispatchWebhook(tenantId, agentId, "tx_rejected", { txId, results: evaluation.results });
+    dispatchWebhook(tenantId, agentId, "tx_rejected", {
+      txId,
+      results: evaluation.results,
+    });
 
     return c.json<ApiResponse>(
       {
@@ -586,7 +662,11 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
     console.error(`[${requestId}] Sign typed data failed for agent ${agentId}:`, e);
 
-    dispatchWebhook(tenantId, agentId, "tx_failed", { txId, error: rawMessage, requestId });
+    dispatchWebhook(tenantId, agentId, "tx_failed", {
+      txId,
+      error: rawMessage,
+      requestId,
+    });
 
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
@@ -596,7 +676,10 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
 
 vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -619,12 +702,24 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   }
 
   if (!isNonEmptyString(body.transaction)) {
-    return c.json<ApiResponse>({ ok: false, error: "'transaction' is required (base64-encoded serialized Solana transaction)" }, 400);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "'transaction' is required (base64-encoded serialized Solana transaction)",
+      },
+      400,
+    );
   }
 
   if (body.to !== undefined && body.to !== "") {
     if (!isValidSolanaAddress(body.to) && !isValidAddress(body.to)) {
-      return c.json<ApiResponse>({ ok: false, error: "'to' must be a valid Solana address (base58, 32–44 chars) or Ethereum address" }, 400);
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "'to' must be a valid Solana address (base58, 32–44 chars) or Ethereum address",
+        },
+        400,
+      );
     }
   }
 
@@ -632,7 +727,8 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Solana signing requires 'to' (recipient address) and 'value' (lamports as string) for policy evaluation",
+        error:
+          "Solana signing requires 'to' (recipient address) and 'value' (lamports as string) for policy evaluation",
       },
       400,
     );
@@ -642,7 +738,13 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   const toAddress = body.to;
   const txValue = body.value;
 
-  const signRequest = { agentId, tenantId, to: toAddress, value: txValue, chainId };
+  const signRequest = {
+    agentId,
+    tenantId,
+    to: toAddress,
+    value: txValue,
+    chainId,
+  };
 
   const policySet = await getPolicySet(tenantId, agentId);
 
@@ -694,13 +796,20 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         });
       });
 
-      dispatchWebhook(tenantId, agentId, "approval_required", { txId, results: evaluation.results });
+      dispatchWebhook(tenantId, agentId, "approval_required", {
+        txId,
+        results: evaluation.results,
+      });
 
       return c.json<ApiResponse>(
         {
           ok: false,
           error: "Transaction requires manual approval",
-          data: { txId, results: evaluation.results, status: "pending_approval" },
+          data: {
+            txId,
+            results: evaluation.results,
+            status: "pending_approval",
+          },
         },
         202,
       );
@@ -716,7 +825,10 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       policyResults: evaluation.results,
     });
 
-    dispatchWebhook(tenantId, agentId, "tx_rejected", { txId, results: evaluation.results });
+    dispatchWebhook(tenantId, agentId, "tx_rejected", {
+      txId,
+      results: evaluation.results,
+    });
 
     return c.json<ApiResponse>(
       {
@@ -756,9 +868,20 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       console.error("[vault] Failed to record Solana spend:", err),
     );
 
-    dispatchWebhook(tenantId, agentId, "tx_signed", { txId, txHash: result.broadcast ? result.signature : undefined });
+    dispatchWebhook(tenantId, agentId, "tx_signed", {
+      txId,
+      txHash: result.broadcast ? result.signature : undefined,
+    });
 
-    return c.json<ApiResponse<{ txId: string; signature: string; broadcast: boolean; chainId: number; caip2?: string }>>({
+    return c.json<
+      ApiResponse<{
+        txId: string;
+        signature: string;
+        broadcast: boolean;
+        chainId: number;
+        caip2?: string;
+      }>
+    >({
       ok: true,
       data: { txId, ...result },
     });
@@ -766,7 +889,10 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     const requestId = c.get("requestId") || "unknown";
     console.error(`[${requestId}] Solana sign failed for agent ${agentId}:`, e);
 
-    dispatchWebhook(tenantId, agentId, "tx_failed", { error: e instanceof Error ? e.message : "Unknown error", requestId });
+    dispatchWebhook(tenantId, agentId, "tx_failed", {
+      error: e instanceof Error ? e.message : "Unknown error",
+      requestId,
+    });
 
     if (isRpcError(e)) {
       return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
@@ -779,7 +905,10 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
 
 vaultRoutes.post("/:agentId/rpc", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -800,7 +929,10 @@ vaultRoutes.post("/:agentId/rpc", async (c) => {
   }
 
   if (!body.chainId || typeof body.chainId !== "number") {
-    return c.json<ApiResponse>({ ok: false, error: "'chainId' is required and must be a number" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'chainId' is required and must be a number" },
+      400,
+    );
   }
 
   try {
@@ -821,7 +953,10 @@ vaultRoutes.post("/:agentId/rpc", async (c) => {
 
 vaultRoutes.get("/:agentId/addresses", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -833,10 +968,12 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
 
   try {
     const addresses = await vault.getAddresses(tenantId, agentId);
-    return c.json<ApiResponse<{
-      agentId: string;
-      addresses: Array<{ chainFamily: "evm" | "solana"; address: string }>;
-    }>>({
+    return c.json<
+      ApiResponse<{
+        agentId: string;
+        addresses: Array<{ chainFamily: "evm" | "solana"; address: string }>;
+      }>
+    >({
       ok: true,
       data: { agentId, addresses },
     });
@@ -851,7 +988,10 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
 
 vaultRoutes.post("/:agentId/import", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Key import requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key import requires tenant-level authentication" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -859,12 +999,18 @@ vaultRoutes.post("/:agentId/import", async (c) => {
 
   if (!isValidAgentId(agentId)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)" },
+      {
+        ok: false,
+        error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)",
+      },
       400,
     );
   }
 
-  const body = await safeJsonParse<{ privateKey: string; chain: "evm" | "solana" }>(c);
+  const body = await safeJsonParse<{
+    privateKey: string;
+    chain: "evm" | "solana";
+  }>(c);
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
@@ -894,7 +1040,10 @@ vaultRoutes.post("/:agentId/import", async (c) => {
 
 vaultRoutes.post("/:agentId/export", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Key export requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export requires tenant-level authentication" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -908,11 +1057,13 @@ vaultRoutes.post("/:agentId/export", async (c) => {
   try {
     const keys = await vault.exportPrivateKey(tenantId, agentId);
 
-    return c.json<ApiResponse<{
-      evm?: { privateKey: string; address: string };
-      solana?: { privateKey: string; address: string };
-      warning: string;
-    }>>({
+    return c.json<
+      ApiResponse<{
+        evm?: { privateKey: string; address: string };
+        solana?: { privateKey: string; address: string };
+        warning: string;
+      }>
+    >({
       ok: true,
       data: {
         ...keys,
@@ -928,9 +1079,19 @@ vaultRoutes.post("/:agentId/export", async (c) => {
 
 // ─── Webhook dispatch helper ──────────────────────────────────────────────────
 
-type WebhookEventType = "approval_required" | "tx_signed" | "tx_confirmed" | "tx_failed" | "tx_rejected";
+type WebhookEventType =
+  | "approval_required"
+  | "tx_signed"
+  | "tx_confirmed"
+  | "tx_failed"
+  | "tx_rejected";
 
-function dispatchWebhook(tenantId: string, agentId: string, type: WebhookEventType, data: Record<string, unknown>) {
+function dispatchWebhook(
+  tenantId: string,
+  agentId: string,
+  type: WebhookEventType,
+  data: Record<string, unknown>,
+) {
   const webhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
   if (webhookUrl) {
     webhookDispatcher

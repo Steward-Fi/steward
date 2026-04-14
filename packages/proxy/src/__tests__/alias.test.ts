@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { resolveTarget, getAliasNames, isAlias } from "../handlers/alias";
+import { getAliasNames, isAlias, resolveTarget } from "../handlers/alias";
 
 describe("resolveTarget", () => {
   // ─── Named aliases ──────────────────────────────────────────────────────────

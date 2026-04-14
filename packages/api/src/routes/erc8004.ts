@@ -8,19 +8,14 @@
  * so tenantAuth is already applied by the parent middleware.
  */
 
-import { Hono } from "hono";
 import { sql } from "drizzle-orm";
-import {
-  db,
-  type AppVariables,
-  type ApiResponse,
-  ensureAgentForTenant,
-} from "../services/context";
+import { Hono } from "hono";
+import { type ApiResponse, type AppVariables, db, ensureAgentForTenant } from "../services/context";
 
 export const erc8004Routes = new Hono<{ Variables: AppVariables }>();
 
 function getRows<T>(result: T[] | { rows?: T[] }): T[] {
-  return Array.isArray(result) ? result : result.rows ?? [];
+  return Array.isArray(result) ? result : (result.rows ?? []);
 }
 
 // ─── POST /agents/:id/register-onchain ────────────────────────────────────────

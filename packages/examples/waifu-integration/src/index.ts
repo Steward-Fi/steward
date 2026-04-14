@@ -1,4 +1,4 @@
-import { StewardApiError, StewardClient, type PolicyRule, type TxRecord } from "@stwd/sdk";
+import { type PolicyRule, StewardApiError, StewardClient, type TxRecord } from "@stwd/sdk";
 import type { ApiResponse, WebhookEvent } from "@stwd/shared";
 
 const BASE_CHAIN_ID = 8453;
@@ -91,10 +91,16 @@ async function signWebhookPayload(payload: string, secret: string): Promise<stri
     ["sign"],
   );
   const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
-async function verifyWebhookPayload(payload: string, secret: string, signature: string): Promise<boolean> {
+async function verifyWebhookPayload(
+  payload: string,
+  secret: string,
+  signature: string,
+): Promise<boolean> {
   const expected = await signWebhookPayload(payload, secret);
   return expected === signature;
 }
@@ -172,7 +178,9 @@ async function registerOrUpdateTenant(defaultPolicies: PolicyRule[]) {
     }),
   });
 
-  const tenant = await requestJson<TenantPayload>(`/tenants/${encodeURIComponent(config.tenantId)}`);
+  const tenant = await requestJson<TenantPayload>(
+    `/tenants/${encodeURIComponent(config.tenantId)}`,
+  );
   detail("tenant", `${tenant.id} (reused)`);
   detail("webhook", tenant.webhookUrl ?? "not set");
 }
@@ -275,11 +283,7 @@ function buildDefaultPolicies(agentWalletAddress: string): PolicyRule[] {
       // so the reference flow can execute against a funded test wallet without swap calldata.
       config: {
         mode: "whitelist",
-        addresses: [
-          UNISWAP_UNIVERSAL_ROUTER,
-          USDC_ADDRESS,
-          agentWalletAddress,
-        ],
+        addresses: [UNISWAP_UNIVERSAL_ROUTER, USDC_ADDRESS, agentWalletAddress],
       },
     },
     {
@@ -299,10 +303,15 @@ function printPolicySummary(policies: PolicyRule[]) {
   }
 }
 
-function printPolicyResults(label: string, results: Array<{ type: string; passed: boolean; reason?: string }>) {
+function printPolicyResults(
+  label: string,
+  results: Array<{ type: string; passed: boolean; reason?: string }>,
+) {
   console.log(label);
   for (const result of results) {
-    console.log(`  ${result.passed ? "PASS" : "FAIL"} ${result.type}${result.reason ? ` - ${result.reason}` : ""}`);
+    console.log(
+      `  ${result.passed ? "PASS" : "FAIL"} ${result.type}${result.reason ? ` - ${result.reason}` : ""}`,
+    );
   }
 }
 
@@ -356,7 +365,9 @@ async function main() {
     detail("signature", signature.signature);
 
     section("Transaction Flow");
-    console.log("Steward enforces policy at the wallet backend. waifu.fun decides when to auto-approve or escalate.");
+    console.log(
+      "Steward enforces policy at the wallet backend. waifu.fun decides when to auto-approve or escalate.",
+    );
 
     const smallTxValue = parseEther("0.005").toString();
     try {
@@ -393,7 +404,9 @@ async function main() {
 
     // The current SDK response omits txId for pending approvals, so the platform checks the pending queue.
     const pendingApprovals = await fetchPendingApprovals(agent.id);
-    const mediumPending = pendingApprovals.find((entry) => entry.transaction.request.value === mediumTxValue);
+    const mediumPending = pendingApprovals.find(
+      (entry) => entry.transaction.request.value === mediumTxValue,
+    );
     if (!mediumPending) {
       throw new Error("Could not find the pending approval for the medium transaction");
     }
@@ -432,7 +445,9 @@ async function main() {
       console.log(`Large tx (${weiToEthLabel(largeTxValue)}) was rejected before signing.`);
       printPolicyResults(
         "Policy engine result:",
-        (error.data?.results as Array<{ type: string; passed: boolean; reason?: string }> | undefined) ?? [],
+        (error.data?.results as
+          | Array<{ type: string; passed: boolean; reason?: string }>
+          | undefined) ?? [],
       );
     }
 
@@ -456,6 +471,6 @@ async function main() {
 
 await main().catch((error) => {
   console.error("\nWaifu integration example failed.");
-  console.error(error instanceof Error ? error.stack ?? error.message : error);
+  console.error(error instanceof Error ? (error.stack ?? error.message) : error);
   process.exitCode = 1;
 });

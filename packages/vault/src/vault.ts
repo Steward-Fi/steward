@@ -1,11 +1,6 @@
-import { and, eq, inArray } from "drizzle-orm";
-import { createPublicClient, createWalletClient, formatEther, http, type Chain, type TransactionSerializable } from "viem";
-import { generatePrivateKey, privateKeyToAccount, signTransaction as viemSignTransaction } from "viem/accounts";
-import { arbitrum, base, baseSepolia, bsc, bscTestnet, mainnet, polygon } from "viem/chains";
-
 import {
-  agentWallets,
   agents,
+  agentWallets,
   encryptedChainKeys,
   encryptedKeys,
   getDb,
@@ -15,16 +10,27 @@ import {
 import type {
   AgentIdentity,
   PolicyResult,
-  SignRequest,
-  SignTypedDataRequest,
-  SignSolanaTransactionRequest,
   RpcRequest,
   RpcResponse,
+  SignRequest,
+  SignSolanaTransactionRequest,
+  SignTypedDataRequest,
   TxStatus,
 } from "@stwd/shared";
 import { toCaip2 } from "@stwd/shared";
+import { and, eq, inArray } from "drizzle-orm";
+import {
+  type Chain,
+  createPublicClient,
+  createWalletClient,
+  formatEther,
+  http,
+  type TransactionSerializable,
+} from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { arbitrum, base, baseSepolia, bsc, bscTestnet, mainnet, polygon } from "viem/chains";
 
-import { KeyStore, type EncryptedKey } from "./keystore";
+import { type EncryptedKey, KeyStore } from "./keystore";
 import {
   generateSolanaKeypair,
   getSolanaBalance,
@@ -32,7 +38,7 @@ import {
   signSolanaMessage,
   signSolanaTransaction,
 } from "./solana";
-import { getTokenBalances as fetchTokenBalances, type TokenBalance, COMMON_TOKENS } from "./tokens";
+import { getTokenBalances as fetchTokenBalances, type TokenBalance } from "./tokens";
 
 export interface VaultConfig {
   masterPassword: string;
@@ -41,12 +47,12 @@ export interface VaultConfig {
 }
 
 const CHAINS: Record<number, Chain> = {
-  1: mainnet,        // Ethereum
-  56: bsc,           // BSC
-  97: bscTestnet,    // BSC Testnet
-  137: polygon,      // Polygon
-  8453: base,        // Base
-  42161: arbitrum,    // Arbitrum
+  1: mainnet, // Ethereum
+  56: bsc, // BSC
+  97: bscTestnet, // BSC Testnet
+  137: polygon, // Polygon
+  8453: base, // Base
+  42161: arbitrum, // Arbitrum
   84532: baseSepolia, // Base Sepolia
 };
 
@@ -220,10 +226,7 @@ export class Vault {
     if (!agent) return undefined;
 
     const identity = toAgentIdentity(agent) as AgentIdentity;
-    const wallets = await db
-      .select()
-      .from(agentWallets)
-      .where(eq(agentWallets.agentId, agentId));
+    const wallets = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
 
     if (wallets.length > 0) {
       const addresses: { evm?: string; solana?: string } = {};
@@ -296,10 +299,7 @@ export class Vault {
       throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
     }
 
-    const wallets = await db
-      .select()
-      .from(agentWallets)
-      .where(eq(agentWallets.agentId, agentId));
+    const wallets = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
 
     // For legacy agents with no rows in agent_wallets, fall back to agents.walletAddress
     if (wallets.length === 0) {
@@ -378,39 +378,33 @@ export class Vault {
         .from(encryptedKeys)
         .where(eq(encryptedKeys.agentId, request.agentId));
       if (!legacyKey) {
-        throw new Error(`No signing key found for agent ${request.agentId} on chain family ${chainFamilyToUse}`);
+        throw new Error(
+          `No signing key found for agent ${request.agentId} on chain family ${chainFamilyToUse}`,
+        );
       }
       secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
     }
 
     // Also resolve the wallet address for this chain (for Solana tx signing)
-    let walletAddress: string = agentRow.walletAddress; // default EVM
+    let _walletAddress: string = agentRow.walletAddress; // default EVM
     if (isSolana) {
       const [solWallet] = await db
         .select({ address: agentWallets.address })
         .from(agentWallets)
         .where(
-          and(
-            eq(agentWallets.agentId, request.agentId),
-            eq(agentWallets.chainFamily, "solana"),
-          ),
+          and(eq(agentWallets.agentId, request.agentId), eq(agentWallets.chainFamily, "solana")),
         );
-      if (solWallet) walletAddress = solWallet.address;
-      else walletAddress = detectChainType(agentRow.walletAddress) === "solana"
-        ? agentRow.walletAddress
-        : ""; // no solana wallet
+      if (solWallet) _walletAddress = solWallet.address;
+      else
+        _walletAddress =
+          detectChainType(agentRow.walletAddress) === "solana" ? agentRow.walletAddress : ""; // no solana wallet
     }
 
     let hash: string;
 
     if (isSolana) {
       const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(chainId);
-      hash = await signSolanaTransaction(
-        secretKey,
-        request.to,
-        BigInt(request.value),
-        rpcUrl
-      );
+      hash = await signSolanaTransaction(secretKey, request.to, BigInt(request.value), rpcUrl);
     } else {
       const account = privateKeyToAccount(secretKey as `0x${string}`);
       const chain = CHAINS[chainId];
@@ -434,8 +428,15 @@ export class Vault {
       } else {
         // Sign without broadcasting — return the serialized signed transaction
         const rpcUrl = CHAIN_RPCS[chainId] ?? this.config.rpcUrl;
-        const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
-        const nonce = request.nonce ?? await publicClient.getTransactionCount({ address: account.address });
+        const publicClient = createPublicClient({
+          chain,
+          transport: http(rpcUrl),
+        });
+        const nonce =
+          request.nonce ??
+          (await publicClient.getTransactionCount({
+            address: account.address,
+          }));
         const gasPrice = await publicClient.getGasPrice();
 
         const txRequest: TransactionSerializable = {
@@ -496,8 +497,14 @@ export class Vault {
   async getBalance(
     tenantId: string,
     agentId: string,
-    chainId?: number
-  ): Promise<{ native: bigint; nativeFormatted: string; chainId: number; symbol: string; walletAddress: string }> {
+    chainId?: number,
+  ): Promise<{
+    native: bigint;
+    nativeFormatted: string;
+    chainId: number;
+    symbol: string;
+    walletAddress: string;
+  }> {
     const agent = await this.getAgent(tenantId, agentId);
     if (!agent) {
       throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
@@ -506,9 +513,12 @@ export class Vault {
     // For multi-wallet agents, chainId 101/102 requests Solana balance
     // For legacy agents, fall back to detecting from walletAddress format
     const requestedSolana = chainId === 101 || chainId === 102;
-    const solanaAddress = agent.walletAddresses?.solana
-      ?? (detectChainType(agent.walletAddress) === "solana" ? agent.walletAddress : undefined);
-    const isSolana = requestedSolana || (!chainId && Boolean(solanaAddress) && detectChainType(agent.walletAddress) === "solana");
+    const solanaAddress =
+      agent.walletAddresses?.solana ??
+      (detectChainType(agent.walletAddress) === "solana" ? agent.walletAddress : undefined);
+    const isSolana =
+      requestedSolana ||
+      (!chainId && Boolean(solanaAddress) && detectChainType(agent.walletAddress) === "solana");
 
     if (isSolana && solanaAddress) {
       const resolvedChainId = chainId ?? 101;
@@ -532,7 +542,9 @@ export class Vault {
     const evmAddress = agent.walletAddresses?.evm ?? agent.walletAddress;
     const rpcUrl = CHAIN_RPCS[resolvedChainId] ?? this.config.rpcUrl;
     const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
-    const native = await publicClient.getBalance({ address: evmAddress as `0x${string}` });
+    const native = await publicClient.getBalance({
+      address: evmAddress as `0x${string}`,
+    });
 
     return {
       native,
@@ -581,7 +593,7 @@ export class Vault {
     tenantId: string,
     agentId: string,
     privateKey: string,
-    chainType: "evm" | "solana"
+    chainType: "evm" | "solana",
   ): Promise<{ walletAddress: string }> {
     const db = getDb();
 
@@ -617,9 +629,7 @@ export class Vault {
           .set({ walletAddress, updatedAt: now })
           .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
-        await tx
-          .delete(encryptedKeys)
-          .where(eq(encryptedKeys.agentId, agentId));
+        await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
 
         await tx.insert(encryptedKeys).values({
           agentId,
@@ -673,7 +683,12 @@ export class Vault {
       // Upsert into agent_wallets
       await tx
         .insert(agentWallets)
-        .values({ agentId, chainFamily: chainType, address: walletAddress, createdAt: now })
+        .values({
+          agentId,
+          chainFamily: chainType,
+          address: walletAddress,
+          createdAt: now,
+        })
         .onConflictDoUpdate({
           target: [agentWallets.agentId, agentWallets.chainFamily],
           set: { address: walletAddress },
@@ -747,9 +762,7 @@ export class Vault {
    * Sign EIP-712 typed data (`eth_signTypedData_v4`).
    * Used for DEX approvals, ERC-20 permits, and structured data signatures.
    */
-  async signTypedData(
-    request: SignTypedDataRequest
-  ): Promise<string> {
+  async signTypedData(request: SignTypedDataRequest): Promise<string> {
     const db = getDb();
 
     // Verify agent exists for this tenant
@@ -822,9 +835,12 @@ export class Vault {
    *
    * Works for both multi-wallet agents (new) and legacy Solana-only agents.
    */
-  async signSolanaTransaction(
-    request: SignSolanaTransactionRequest,
-  ): Promise<{ signature: string; broadcast: boolean; chainId: number; caip2?: string }> {
+  async signSolanaTransaction(request: SignSolanaTransactionRequest): Promise<{
+    signature: string;
+    broadcast: boolean;
+    chainId: number;
+    caip2?: string;
+  }> {
     const db = getDb();
 
     // Verify agent exists
@@ -860,7 +876,9 @@ export class Vault {
     } else {
       // Legacy path: only works if the walletAddress is a Solana address
       if (detectChainType(agentRow.walletAddress) !== "solana") {
-        throw new Error("Solana transaction signing requires a Solana wallet. This agent only has an EVM wallet.");
+        throw new Error(
+          "Solana transaction signing requires a Solana wallet. This agent only has an EVM wallet.",
+        );
       }
       const [legacyKey] = await db
         .select()
@@ -879,7 +897,7 @@ export class Vault {
 
     // Deserialize the transaction from base64
     const { Transaction: SolTransaction, Connection } = await import("@solana/web3.js");
-    const txBytes = Uint8Array.from(atob(request.transaction), c => c.charCodeAt(0));
+    const txBytes = Uint8Array.from(atob(request.transaction), (c) => c.charCodeAt(0));
     const tx = SolTransaction.from(txBytes);
 
     // Sign the transaction
@@ -893,20 +911,29 @@ export class Vault {
         preflightCommitment: "confirmed",
       });
 
-      const { blockhash, lastValidBlockHeight } =
-        await connection.getLatestBlockhash("confirmed");
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
       await connection.confirmTransaction(
         { signature: sig, blockhash, lastValidBlockHeight },
-        "confirmed"
+        "confirmed",
       );
 
-      return { signature: sig, broadcast: true, chainId, caip2: toCaip2(chainId) };
+      return {
+        signature: sig,
+        broadcast: true,
+        chainId,
+        caip2: toCaip2(chainId),
+      };
     }
 
     // Return serialized signed transaction as base64
     const rawBytes = tx.serialize();
-    const serialized = btoa(Array.from(rawBytes, b => String.fromCharCode(b)).join(""));
-    return { signature: serialized, broadcast: false, chainId, caip2: toCaip2(chainId) };
+    const serialized = btoa(Array.from(rawBytes, (b) => String.fromCharCode(b)).join(""));
+    return {
+      signature: serialized,
+      broadcast: false,
+      chainId,
+      caip2: toCaip2(chainId),
+    };
   }
 
   /**
@@ -943,10 +970,7 @@ export class Vault {
       .select()
       .from(encryptedChainKeys)
       .where(
-        and(
-          eq(encryptedChainKeys.agentId, agentId),
-          eq(encryptedChainKeys.chainFamily, "evm"),
-        ),
+        and(eq(encryptedChainKeys.agentId, agentId), eq(encryptedChainKeys.chainFamily, "evm")),
       );
 
     if (evmChainKey) {
@@ -959,13 +983,11 @@ export class Vault {
       const [evmWallet] = await db
         .select({ address: agentWallets.address })
         .from(agentWallets)
-        .where(
-          and(
-            eq(agentWallets.agentId, agentId),
-            eq(agentWallets.chainFamily, "evm"),
-          ),
-        );
-      result.evm = { privateKey: pk, address: evmWallet?.address ?? privateKeyToAccount(pk as `0x${string}`).address };
+        .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.chainFamily, "evm")));
+      result.evm = {
+        privateKey: pk,
+        address: evmWallet?.address ?? privateKeyToAccount(pk as `0x${string}`).address,
+      };
     } else {
       // Legacy: encrypted_keys table (EVM only)
       const [legacyKey] = await db
@@ -974,7 +996,10 @@ export class Vault {
         .where(eq(encryptedKeys.agentId, agentId));
       if (legacyKey) {
         const pk = this.keyStore.decrypt(legacyKey as EncryptedKey);
-        result.evm = { privateKey: pk, address: privateKeyToAccount(pk as `0x${string}`).address };
+        result.evm = {
+          privateKey: pk,
+          address: privateKeyToAccount(pk as `0x${string}`).address,
+        };
       }
     }
 
@@ -983,10 +1008,7 @@ export class Vault {
       .select()
       .from(encryptedChainKeys)
       .where(
-        and(
-          eq(encryptedChainKeys.agentId, agentId),
-          eq(encryptedChainKeys.chainFamily, "solana"),
-        ),
+        and(eq(encryptedChainKeys.agentId, agentId), eq(encryptedChainKeys.chainFamily, "solana")),
       );
 
     if (solChainKey) {
@@ -999,12 +1021,7 @@ export class Vault {
       const [solWallet] = await db
         .select({ address: agentWallets.address })
         .from(agentWallets)
-        .where(
-          and(
-            eq(agentWallets.agentId, agentId),
-            eq(agentWallets.chainFamily, "solana"),
-          ),
-        );
+        .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.chainFamily, "solana")));
       result.solana = { privateKey: pk, address: solWallet?.address ?? "" };
     }
 
@@ -1041,7 +1058,9 @@ export class Vault {
       "sendTransaction",
     ];
     if (blockedMethods.includes(request.method)) {
-      throw new Error(`Method ${request.method} is not allowed via RPC passthrough — use the signing endpoints`);
+      throw new Error(
+        `Method ${request.method} is not allowed via RPC passthrough — use the signing endpoints`,
+      );
     }
 
     const response = await fetch(rpcUrl, {

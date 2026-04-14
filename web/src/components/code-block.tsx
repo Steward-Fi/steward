@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
 import { motion, useInView } from "framer-motion";
+import { useEffect, useRef, useState } from "react";
 import { CopyButton } from "./copy-button";
 
 interface CodeBlockProps {
@@ -18,7 +18,10 @@ function tokenize(code: string): { text: string; type: string }[] {
   const patterns: [RegExp, string][] = [
     [/^(\/\/.*)/m, "comment"],
     [/^(["'`](?:[^"'`\\]|\\.)*["'`])/, "string"],
-    [/^(\b(?:import|from|export|const|let|var|function|async|await|return|new|type|interface|class|extends|implements)\b)/, "keyword"],
+    [
+      /^(\b(?:import|from|export|const|let|var|function|async|await|return|new|type|interface|class|extends|implements)\b)/,
+      "keyword",
+    ],
     [/^(\b(?:true|false|null|undefined|void)\b)/, "literal"],
     [/^(\b\d[\d_.]*\b)/, "number"],
     [/^([{}()[\];:,.<>=!+\-*/&|?@])/, "punctuation"],

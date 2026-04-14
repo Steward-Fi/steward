@@ -4,9 +4,10 @@
  * Mount: app.route("/approvals", approvalRoutes)
  */
 
-import { and, eq, sql, desc } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import {
+  type ApiResponse,
   type AppVariables,
   agents,
   approvalQueue,
@@ -15,7 +16,6 @@ import {
   requireTenantLevel,
   safeJsonParse,
   transactions,
-  type ApiResponse,
 } from "../services/context";
 
 export const approvalRoutes = new Hono<{ Variables: AppVariables }>();
@@ -55,7 +55,9 @@ approvalRoutes.get("/", async (c) => {
     .where(
       and(
         eq(agents.tenantId, tenantId),
-        statusFilter !== "all" ? eq(approvalQueue.status, statusFilter as "pending" | "approved" | "rejected") : undefined,
+        statusFilter !== "all"
+          ? eq(approvalQueue.status, statusFilter as "pending" | "approved" | "rejected")
+          : undefined,
       ),
     )
     .orderBy(desc(approvalQueue.requestedAt))
@@ -128,22 +130,14 @@ approvalRoutes.post("/:txId/approve", async (c) => {
     })
     .from(approvalQueue)
     .innerJoin(agents, eq(approvalQueue.agentId, agents.id))
-    .where(
-      and(
-        eq(approvalQueue.txId, txId),
-        eq(agents.tenantId, tenantId),
-      ),
-    );
+    .where(and(eq(approvalQueue.txId, txId), eq(agents.tenantId, tenantId)));
 
   if (!entry) {
     return c.json<ApiResponse>({ ok: false, error: "Approval not found" }, 404);
   }
 
   if (entry.status !== "pending") {
-    return c.json<ApiResponse>(
-      { ok: false, error: `Approval already ${entry.status}` },
-      400,
-    );
+    return c.json<ApiResponse>({ ok: false, error: `Approval already ${entry.status}` }, 400);
   }
 
   const resolvedBy = body?.approvedBy || "tenant-admin";
@@ -160,10 +154,7 @@ approvalRoutes.post("/:txId/approve", async (c) => {
     .returning();
 
   // Update transaction status to approved
-  await db
-    .update(transactions)
-    .set({ status: "approved" })
-    .where(eq(transactions.id, txId));
+  await db.update(transactions).set({ status: "approved" }).where(eq(transactions.id, txId));
 
   return c.json<ApiResponse>({
     ok: true,
@@ -186,7 +177,7 @@ approvalRoutes.post("/:txId/deny", async (c) => {
 
   const body = await safeJsonParse<{ reason: string; deniedBy?: string }>(c);
 
-  if (!body || !body.reason || typeof body.reason !== "string" || body.reason.trim().length === 0) {
+  if (!body?.reason || typeof body.reason !== "string" || body.reason.trim().length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "reason is required" }, 400);
   }
 
@@ -201,22 +192,14 @@ approvalRoutes.post("/:txId/deny", async (c) => {
     })
     .from(approvalQueue)
     .innerJoin(agents, eq(approvalQueue.agentId, agents.id))
-    .where(
-      and(
-        eq(approvalQueue.txId, txId),
-        eq(agents.tenantId, tenantId),
-      ),
-    );
+    .where(and(eq(approvalQueue.txId, txId), eq(agents.tenantId, tenantId)));
 
   if (!entry) {
     return c.json<ApiResponse>({ ok: false, error: "Approval not found" }, 404);
   }
 
   if (entry.status !== "pending") {
-    return c.json<ApiResponse>(
-      { ok: false, error: `Approval already ${entry.status}` },
-      400,
-    );
+    return c.json<ApiResponse>({ ok: false, error: `Approval already ${entry.status}` }, 400);
   }
 
   const resolvedBy = body.deniedBy || "tenant-admin";
@@ -233,10 +216,7 @@ approvalRoutes.post("/:txId/deny", async (c) => {
     .returning();
 
   // Update transaction status to rejected
-  await db
-    .update(transactions)
-    .set({ status: "rejected" })
-    .where(eq(transactions.id, txId));
+  await db.update(transactions).set({ status: "rejected" }).where(eq(transactions.id, txId));
 
   return c.json<ApiResponse>({
     ok: true,
@@ -286,13 +266,25 @@ approvalRoutes.put("/rules", async (c) => {
     try {
       if (BigInt(body.maxAmountWei) < 0n) throw new Error();
     } catch {
-      return c.json<ApiResponse>({ ok: false, error: "maxAmountWei must be a non-negative integer string" }, 400);
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "maxAmountWei must be a non-negative integer string",
+        },
+        400,
+      );
     }
   }
 
   if (body.autoDenyAfterHours !== undefined && body.autoDenyAfterHours !== null) {
     if (typeof body.autoDenyAfterHours !== "number" || body.autoDenyAfterHours <= 0) {
-      return c.json<ApiResponse>({ ok: false, error: "autoDenyAfterHours must be a positive number or null" }, 400);
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "autoDenyAfterHours must be a positive number or null",
+        },
+        400,
+      );
     }
   }
 

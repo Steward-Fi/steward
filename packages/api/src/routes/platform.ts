@@ -11,13 +11,22 @@
  *   { ok: true, data: T }  |  { ok: false, error: string }
  */
 
-import { and, count, eq, sql } from "drizzle-orm";
-import { Hono } from "hono";
-
 import { generateApiKey, platformAuthMiddleware } from "@stwd/auth";
-import { agents, getDb, isPersistedPolicyType, policies, tenantConfigs, tenants, toPersistedPolicyRule, transactions, userTenants, users } from "@stwd/db";
+import {
+  agents,
+  getDb,
+  isPersistedPolicyType,
+  policies,
+  tenants,
+  toPersistedPolicyRule,
+  transactions,
+  users,
+  userTenants,
+} from "@stwd/db";
 import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/shared";
 import { Vault } from "@stwd/vault";
+import { and, count, eq } from "drizzle-orm";
+import { Hono } from "hono";
 import { createAgentToken } from "../services/context";
 
 // ─── Vault singleton ──────────────────────────────────────────────────────────
@@ -29,7 +38,9 @@ function getVault(): Vault {
     if (process.env.NODE_ENV === "production") {
       throw new Error("⛔ STEWARD_MASTER_PASSWORD must be set in production");
     }
-    console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!");
+    console.warn(
+      "⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!",
+    );
   }
   return new Vault({
     masterPassword: masterPassword || "dev-secret",
@@ -172,7 +183,13 @@ platform.post("/tenants", async (c) => {
   }
 
   return c.json<
-    ApiResponse<Tenant & { apiKey: string; webhookUrl?: string; defaultPolicies?: PolicyRule[] }>
+    ApiResponse<
+      Tenant & {
+        apiKey: string;
+        webhookUrl?: string;
+        defaultPolicies?: PolicyRule[];
+      }
+    >
   >(
     {
       ok: true,
@@ -308,7 +325,10 @@ platform.put("/tenants/:id/policies", async (c) => {
   const body = await safeJsonParse<PolicyRule[]>(c);
   if (!body || !Array.isArray(body)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Request body must be a JSON array of PolicyRule objects" },
+      {
+        ok: false,
+        error: "Request body must be a JSON array of PolicyRule objects",
+      },
       400,
     );
   }
@@ -343,17 +363,19 @@ platform.put("/tenants/:id/policies", async (c) => {
     }
     if (typeof rule.enabled !== "boolean") {
       return c.json<ApiResponse>(
-        { ok: false, error: `Policy "${rule.id ?? rule.type}": enabled must be a boolean` },
+        {
+          ok: false,
+          error: `Policy "${rule.id ?? rule.type}": enabled must be a boolean`,
+        },
         400,
       );
     }
-    if (
-      typeof rule.config !== "object" ||
-      rule.config === null ||
-      Array.isArray(rule.config)
-    ) {
+    if (typeof rule.config !== "object" || rule.config === null || Array.isArray(rule.config)) {
       return c.json<ApiResponse>(
-        { ok: false, error: `Policy "${rule.id ?? rule.type}": config must be a plain object` },
+        {
+          ok: false,
+          error: `Policy "${rule.id ?? rule.type}": config must be a plain object`,
+        },
         400,
       );
     }
@@ -399,7 +421,11 @@ platform.post("/tenants/:id/agents", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
   }
 
-  const body = await safeJsonParse<{ id: string; name: string; platformId?: string }>(c);
+  const body = await safeJsonParse<{
+    id: string;
+    name: string;
+    platformId?: string;
+  }>(c);
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
@@ -422,12 +448,7 @@ platform.post("/tenants/:id/agents", async (c) => {
   }
 
   try {
-    const identity = await vault().createAgent(
-      tenantId,
-      body.id,
-      body.name,
-      body.platformId,
-    );
+    const identity = await vault().createAgent(tenantId, body.id, body.name, body.platformId);
     return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity }, 201);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -496,10 +517,7 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
       );
     }
     if (!isNonEmptyString(spec.name)) {
-      return c.json<ApiResponse>(
-        { ok: false, error: `Agent "${spec.id}" is missing a name` },
-        400,
-      );
+      return c.json<ApiResponse>({ ok: false, error: `Agent "${spec.id}" is missing a name` }, 400);
     }
   }
 
@@ -508,12 +526,7 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
 
   for (const spec of body.agents) {
     try {
-      const identity = await vault().createAgent(
-        tenantId,
-        spec.id,
-        spec.name,
-        spec.platformId,
-      );
+      const identity = await vault().createAgent(tenantId, spec.id, spec.name, spec.platformId);
 
       // Optionally apply default policies
       if (body.applyPolicies && body.applyPolicies.length > 0) {
@@ -613,7 +626,14 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
 
   try {
     const token = await createAgentToken(agentId, tenantId, expiresIn);
-    return c.json<ApiResponse<{ token: string; agentId: string; tenantId: string; scope: string }>>({
+    return c.json<
+      ApiResponse<{
+        token: string;
+        agentId: string;
+        tenantId: string;
+        scope: string;
+      }>
+    >({
       ok: true,
       data: { token, agentId, tenantId, scope: "agent" },
     });
@@ -635,7 +655,11 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
  * Returns: { ok: true; userId: string; isNew: boolean }
  */
 platform.post("/users", async (c) => {
-  const body = await safeJsonParse<{ email: string; emailVerified?: boolean; name?: string }>(c);
+  const body = await safeJsonParse<{
+    email: string;
+    emailVerified?: boolean;
+    name?: string;
+  }>(c);
   if (!body?.email || typeof body.email !== "string" || !body.email.includes("@")) {
     return c.json<ApiResponse>({ ok: false, error: "A valid email is required" }, 400);
   }
@@ -643,10 +667,7 @@ platform.post("/users", async (c) => {
   const db = getDb();
   const email = body.email.toLowerCase().trim();
 
-  const [existing] = await db
-    .select({ id: users.id })
-    .from(users)
-    .where(eq(users.email, email));
+  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, email));
 
   if (existing) {
     return c.json<ApiResponse<{ userId: string; isNew: boolean }>>({
@@ -662,14 +683,13 @@ platform.post("/users", async (c) => {
       emailVerified: body.emailVerified ?? false,
       name: body.name ?? null,
     })
-    .returning({ id: users.id });
+    .returning();
 
   return c.json<ApiResponse<{ userId: string; isNew: boolean }>>(
     { ok: true, data: { userId: newUser.id, isNew: true } },
     201,
   );
 });
-
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tenant member management
@@ -746,23 +766,21 @@ platform.post("/tenants/:id/members", async (c) => {
   // Find or create user
   let [user] = await db.select().from(users).where(eq(users.email, email));
   if (!user) {
-    const [newUser] = await db
-      .insert(users)
-      .values({ email, emailVerified: false })
-      .returning();
+    const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
     user = newUser;
   }
 
   // Upsert user_tenants link
-  await db
-    .insert(userTenants)
-    .values({ userId: user.id, tenantId, role })
-    .onConflictDoNothing();
+  await db.insert(userTenants).values({ userId: user.id, tenantId, role }).onConflictDoNothing();
 
-  return c.json<ApiResponse<{ userId: string; email: string; tenantId: string; role: string }>>(
-    { ok: true, data: { userId: user.id, email, tenantId, role } },
-    201,
-  );
+  return c.json<
+    ApiResponse<{
+      userId: string;
+      email: string;
+      tenantId: string;
+      role: string;
+    }>
+  >({ ok: true, data: { userId: user.id, email, tenantId, role } }, 201);
 });
 
 /**
@@ -781,7 +799,7 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   const [deleted] = await db
     .delete(userTenants)
     .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
-    .returning({ id: userTenants.id });
+    .returning();
 
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
@@ -813,15 +831,16 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
     .update(userTenants)
     .set({ role: body.role })
     .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
-    .returning({ id: userTenants.id, role: userTenants.role });
+    .returning();
 
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
-  return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>(
-    { ok: true, data: { userId, tenantId, role: body.role } },
-  );
+  return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>({
+    ok: true,
+    data: { userId, tenantId, role: body.role },
+  });
 });
 
 export { platform as platformRoutes };

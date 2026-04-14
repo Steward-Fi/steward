@@ -1,7 +1,7 @@
 "use client";
 
 import { motion, type Variants } from "framer-motion";
-import { type ReactNode } from "react";
+import type { ReactNode } from "react";
 
 type CubicBezier = [number, number, number, number];
 
@@ -66,7 +66,7 @@ interface StaggerContainerProps {
   once?: boolean;
 }
 
-const containerVariants: Variants = {
+const _containerVariants: Variants = {
   hidden: {},
   visible: {
     transition: {
@@ -82,7 +82,7 @@ const itemVariants: Variants = {
     y: 0,
     transition: {
       duration: 0.5,
-      ease: easeOutQuart ,
+      ease: easeOutQuart,
     },
   },
 };
@@ -111,13 +111,7 @@ export function StaggerContainer({
   );
 }
 
-export function StaggerItem({
-  children,
-  className,
-}: {
-  children: ReactNode;
-  className?: string;
-}) {
+export function StaggerItem({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <motion.div variants={itemVariants} className={className}>
       {children as any}
@@ -143,7 +137,7 @@ export function FadeIn({
       transition={{
         duration,
         delay,
-        ease: easeOutQuart ,
+        ease: easeOutQuart,
       }}
       className={className}
     >

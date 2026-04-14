@@ -11,19 +11,19 @@
  *   7. Zero credential from memory
  */
 
-import type { Context } from "hono";
-import { and, eq, desc } from "drizzle-orm";
-import { getDb, secretRoutes, secrets } from "@stwd/db";
 import type { SecretRoute } from "@stwd/db";
+import { getDb, secretRoutes, secrets } from "@stwd/db";
 import { KeyStore } from "@stwd/vault";
-import { resolveTarget } from "./alias";
-import { matchHost, matchPath } from "./matching";
+import { and, desc, eq } from "drizzle-orm";
+import type { Context } from "hono";
 import { recordAudit } from "../middleware/audit";
 import {
   checkProxyRateLimit,
-  trackProxySpend,
   isProxyRedisAvailable,
+  trackProxySpend,
 } from "../middleware/redis-enforcement";
+import { resolveTarget } from "./alias";
+import { matchHost, matchPath } from "./matching";
 
 // ─── Keystore singleton ──────────────────────────────────────────────────────
 
@@ -66,12 +66,7 @@ async function findMatchingRoute(
   const routes = await db
     .select()
     .from(secretRoutes)
-    .where(
-      and(
-        eq(secretRoutes.tenantId, tenantId),
-        eq(secretRoutes.enabled, true),
-      ),
-    )
+    .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.enabled, true)))
     .orderBy(desc(secretRoutes.priority));
 
   // Match in priority order (first match wins)
@@ -95,11 +90,7 @@ async function findMatchingRoute(
  */
 async function decryptSecret(secretId: string): Promise<string> {
   const db = getDb();
-  const [secret] = await db
-    .select()
-    .from(secrets)
-    .where(eq(secrets.id, secretId))
-    .limit(1);
+  const [secret] = await db.select().from(secrets).where(eq(secrets.id, secretId)).limit(1);
 
   if (!secret) {
     throw new Error(`Secret ${secretId} not found`);
@@ -173,7 +164,8 @@ export async function handleProxy(c: Context): Promise<Response> {
     return c.json(
       {
         ok: false,
-        error: "Could not resolve target from request path. Use a named alias (e.g. /openai/...) or /proxy/hostname/path",
+        error:
+          "Could not resolve target from request path. Use a named alias (e.g. /openai/...) or /proxy/hostname/path",
       },
       400,
     );
@@ -212,10 +204,7 @@ export async function handleProxy(c: Context): Promise<Response> {
     credential = await decryptSecret(route.secretId);
   } catch (err) {
     console.error(`[proxy] Failed to decrypt secret ${route.secretId}:`, err);
-    return c.json(
-      { ok: false, error: "Failed to decrypt credential" },
-      500,
-    );
+    return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
   }
 
   // 4. Build outbound request
@@ -271,10 +260,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       latencyMs,
     });
 
-    return c.json(
-      { ok: false, error: "Upstream request failed" },
-      502,
-    );
+    return c.json({ ok: false, error: "Upstream request failed" }, 502);
   } finally {
     // 6. Zero credential from memory
     // In JS we can't truly zero strings, but we can dereference immediately.
@@ -305,12 +291,17 @@ export async function handleProxy(c: Context): Promise<Response> {
   let responseBody: ReadableStream<Uint8Array> | ArrayBuffer | null = response.body;
   const contentType = response.headers.get("content-type") || "";
   const isJsonResponse = contentType.includes("application/json");
-  const isLLMHost = isProxyRedisAvailable() && (
-    target.host === "api.openai.com" ||
-    target.host === "api.anthropic.com"
-  );
+  const isLLMHost =
+    isProxyRedisAvailable() &&
+    (target.host === "api.openai.com" || target.host === "api.anthropic.com");
 
-  if (isLLMHost && isJsonResponse && response.status >= 200 && response.status < 300 && response.body) {
+  if (
+    isLLMHost &&
+    isJsonResponse &&
+    response.status >= 200 &&
+    response.status < 300 &&
+    response.body
+  ) {
     try {
       const bodyBuffer = await response.arrayBuffer();
       const bodyText = new TextDecoder().decode(bodyBuffer);
@@ -327,8 +318,8 @@ export async function handleProxy(c: Context): Promise<Response> {
       }
 
       // Track spend asynchronously
-      trackProxySpend(agentId, tenantId, target.host, requestBodyParsed, parsedResponse).catch((err) =>
-        console.error("[proxy] Spend tracking failed:", err),
+      trackProxySpend(agentId, tenantId, target.host, requestBodyParsed, parsedResponse).catch(
+        (err) => console.error("[proxy] Spend tracking failed:", err),
       );
 
       responseBody = bodyBuffer;

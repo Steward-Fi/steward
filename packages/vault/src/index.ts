@@ -1,23 +1,28 @@
-export { Vault } from "./vault";
 export { KeyStore } from "./keystore";
-export type { VaultConfig } from "./vault";
-export { getTokenBalances, COMMON_TOKENS, ERC20_ABI } from "./tokens";
-export type { TokenBalance, TokenDef } from "./tokens";
+export type { MatchedRoute } from "./route-matcher";
+export {
+  findMatchingRoute,
+  findMatchingRoutes,
+  globToRegex,
+  matchesGlob,
+} from "./route-matcher";
+export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
+export { SecretVault } from "./secret-vault";
 export {
   generateSolanaKeypair,
-  restoreSolanaKeypair,
-  signSolanaTransaction,
   getSolanaBalance,
+  restoreSolanaKeypair,
   signSolanaMessage,
+  signSolanaTransaction,
 } from "./solana";
+export type { TokenBalance, TokenDef } from "./tokens";
+export { COMMON_TOKENS, ERC20_ABI, getTokenBalances } from "./tokens";
+export type { UserWalletResult } from "./user-wallet";
 export {
-  provisionUserWallet,
-  getUserWallet,
   applyUserWalletDefaults,
+  getUserWallet,
+  provisionUserWallet,
   USER_WALLET_DEFAULT_POLICIES,
 } from "./user-wallet";
-export type { UserWalletResult } from "./user-wallet";
-export { SecretVault } from "./secret-vault";
-export type { SecretMetadata, CreateSecretOptions } from "./secret-vault";
-export { findMatchingRoute, findMatchingRoutes, matchesGlob, globToRegex } from "./route-matcher";
-export type { MatchedRoute } from "./route-matcher";
+export type { VaultConfig } from "./vault";
+export { Vault } from "./vault";

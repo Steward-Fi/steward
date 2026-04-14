@@ -1,5 +1,5 @@
 import { getDefaultConfig } from "@rainbow-me/rainbowkit";
-import { base, mainnet, polygon, arbitrum, bsc } from "wagmi/chains";
+import { arbitrum, base, bsc, mainnet, polygon } from "wagmi/chains";
 
 export const config = getDefaultConfig({
   appName: "Steward",

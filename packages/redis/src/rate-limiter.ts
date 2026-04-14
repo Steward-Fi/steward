@@ -52,11 +52,11 @@ export async function checkRateLimit(
   // 4. Get the oldest entry (for reset time)
   // 5. Set TTL on the key
   const pipeline = redis.multi();
-  pipeline.zremrangebyscore(key, 0, windowStart);   // 1. prune old
-  pipeline.zadd(key, now, member);                  // 2. add new
-  pipeline.zcard(key);                              // 3. count
-  pipeline.zrange(key, 0, 0, "WITHSCORES");         // 4. oldest entry
-  pipeline.pexpire(key, windowMs + 1000);            // 5. TTL = window + 1s buffer
+  pipeline.zremrangebyscore(key, 0, windowStart); // 1. prune old
+  pipeline.zadd(key, now, member); // 2. add new
+  pipeline.zcard(key); // 3. count
+  pipeline.zrange(key, 0, 0, "WITHSCORES"); // 4. oldest entry
+  pipeline.pexpire(key, windowMs + 1000); // 5. TTL = window + 1s buffer
 
   const results = await pipeline.exec();
   if (!results) {
@@ -64,10 +64,10 @@ export async function checkRateLimit(
   }
 
   // results[2] = [null, count]
-  const currentCount = results[2]![1] as number;
+  const currentCount = results[2]?.[1] as number;
 
   // results[3] = [null, [member, score]] or [null, []]
-  const oldestEntry = results[3]![1] as string[];
+  const oldestEntry = results[3]?.[1] as string[];
   const oldestTimestamp = oldestEntry.length >= 2 ? Number(oldestEntry[1]) : now;
   const resetMs = Math.max(0, oldestTimestamp + windowMs - now);
 

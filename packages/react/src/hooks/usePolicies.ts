@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
 import type { PolicyRule } from "@stwd/sdk";
+import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
 
 /**
@@ -52,7 +52,7 @@ export function usePolicies() {
         throw new Error(`Template "${templateId}" not found`);
       }
 
-      let policies = structuredClone(template.policies);
+      const policies = structuredClone(template.policies);
 
       // Apply field overrides
       if (overrides) {

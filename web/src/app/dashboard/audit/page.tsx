@@ -1,10 +1,15 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
+import { useCallback, useEffect, useState } from "react";
 import { steward } from "@/lib/api";
+import type {
+  AgentIdentity,
+  AuditEntry,
+  AuditQueryParams,
+  AuditSummary,
+} from "@/lib/steward-client";
 import { formatDate } from "@/lib/utils";
-import type { AuditEntry, AuditSummary, AgentIdentity, AuditQueryParams } from "@/lib/steward-client";
 
 const ease: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
@@ -32,7 +37,7 @@ function resultColor(result: AuditEntry["result"]) {
 function formatCost(cost?: string): string {
   if (!cost || cost === "0") return "--";
   const n = parseFloat(cost);
-  if (isNaN(n)) return cost;
+  if (Number.isNaN(n)) return cost;
   return n < 0.0001 ? "<$0.0001" : `$${n.toFixed(4)}`;
 }
 
@@ -63,7 +68,7 @@ export default function AuditPage() {
     setError(null);
     try {
       const clean: AuditQueryParams = Object.fromEntries(
-        Object.entries(params).filter(([, v]) => v !== "" && v !== undefined && v !== 0)
+        Object.entries(params).filter(([, v]) => v !== "" && v !== undefined && v !== 0),
       ) as AuditQueryParams;
       if (!clean.limit) clean.limit = 50;
 
@@ -93,27 +98,43 @@ export default function AuditPage() {
   }
 
   function clearFilters() {
-    const empty: AuditQueryParams = { agentId: "", action: "", result: "", from: "", to: "", limit: 50, offset: 0 };
+    const empty: AuditQueryParams = {
+      agentId: "",
+      action: "",
+      result: "",
+      from: "",
+      to: "",
+      limit: 50,
+      offset: 0,
+    };
     setFilters(empty);
     setApplied({});
     loadData({});
   }
 
-  const agentName = useCallback((id?: string): string => {
-    if (!id) return "System";
-    const a = agents.find((ag) => ag.id === id);
-    return a?.name || id;
-  }, [agents]);
+  const agentName = useCallback(
+    (id?: string): string => {
+      if (!id) return "System";
+      const a = agents.find((ag) => ag.id === id);
+      return a?.name || id;
+    },
+    [agents],
+  );
 
-  const summaryByAgent = useCallback((agentId: string): AuditSummary | undefined => {
-    return summary.find((s) => s.agentId === agentId);
-  }, [summary]);
+  const summaryByAgent = useCallback(
+    (agentId: string): AuditSummary | undefined => {
+      return summary.find((s) => s.agentId === agentId);
+    },
+    [summary],
+  );
 
   const totalCost = summary.reduce((acc, s) => acc + (parseFloat(s.totalCost) || 0), 0);
   const totalActions = summary.reduce((acc, s) => acc + s.totalActions, 0);
   const totalDenied = summary.reduce((acc, s) => acc + s.denyCount, 0);
 
-  const activeFilters = Object.entries(applied).filter(([k, v]) => v !== "" && v !== undefined && k !== "limit" && k !== "offset").length;
+  const activeFilters = Object.entries(applied).filter(
+    ([k, v]) => v !== "" && v !== undefined && k !== "limit" && k !== "offset",
+  ).length;
 
   return (
     <motion.div
@@ -142,14 +163,32 @@ export default function AuditPage() {
       {!loading && !error && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { label: "Total Actions", value: totalActions.toLocaleString(), accent: false },
-            { label: "Denied", value: totalDenied.toLocaleString(), accent: totalDenied > 0 },
-            { label: "Total Cost", value: formatCost(totalCost.toString()), accent: false },
-            { label: "Active Agents", value: summary.length.toString(), accent: false },
+            {
+              label: "Total Actions",
+              value: totalActions.toLocaleString(),
+              accent: false,
+            },
+            {
+              label: "Denied",
+              value: totalDenied.toLocaleString(),
+              accent: totalDenied > 0,
+            },
+            {
+              label: "Total Cost",
+              value: formatCost(totalCost.toString()),
+              accent: false,
+            },
+            {
+              label: "Active Agents",
+              value: summary.length.toString(),
+              accent: false,
+            },
           ].map(({ label, value, accent }) => (
             <div key={label} className="border border-border bg-bg-elevated p-4 space-y-1">
               <div className="text-xs text-text-tertiary">{label}</div>
-              <div className={`font-display text-xl font-700 tabular-nums ${accent ? "text-red-400" : "text-text"}`}>
+              <div
+                className={`font-display text-xl font-700 tabular-nums ${accent ? "text-red-400" : "text-text"}`}
+              >
                 {value}
               </div>
             </div>
@@ -163,13 +202,18 @@ export default function AuditPage() {
           <h3 className="text-xs text-text-tertiary uppercase tracking-wider">Spend by Agent</h3>
           <div className="border-t border-border-subtle">
             {summary.map((s) => (
-              <div key={s.agentId} className="flex items-center justify-between py-3 border-b border-border-subtle">
+              <div
+                key={s.agentId}
+                className="flex items-center justify-between py-3 border-b border-border-subtle"
+              >
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="w-7 h-7 flex items-center justify-center bg-accent-bg font-display font-700 text-xs text-[oklch(0.75_0.15_55)] flex-shrink-0">
                     {(s.agentName || s.agentId).charAt(0).toUpperCase()}
                   </div>
                   <div className="min-w-0">
-                    <div className="text-sm font-display font-600 truncate">{s.agentName || s.agentId}</div>
+                    <div className="text-sm font-display font-600 truncate">
+                      {s.agentName || s.agentId}
+                    </div>
                     <div className="text-xs text-text-tertiary font-mono truncate">{s.agentId}</div>
                   </div>
                 </div>
@@ -183,7 +227,9 @@ export default function AuditPage() {
                     <div className="text-text-tertiary">allowed</div>
                   </div>
                   <div className="text-right hidden md:block">
-                    <div className={s.denyCount > 0 ? "text-red-400" : "text-text-tertiary"}>{s.denyCount.toLocaleString()}</div>
+                    <div className={s.denyCount > 0 ? "text-red-400" : "text-text-tertiary"}>
+                      {s.denyCount.toLocaleString()}
+                    </div>
                     <div className="text-text-tertiary">denied</div>
                   </div>
                   <div className="text-right">
@@ -209,7 +255,9 @@ export default function AuditPage() {
             >
               <option value="">All agents</option>
               {agents.map((a) => (
-                <option key={a.id} value={a.id}>{a.name}</option>
+                <option key={a.id} value={a.id}>
+                  {a.name}
+                </option>
               ))}
             </select>
           </div>
@@ -218,11 +266,18 @@ export default function AuditPage() {
             <label className="text-xs text-text-tertiary block mb-1">Action Type</label>
             <select
               value={filters.action}
-              onChange={(e) => setFilters({ ...filters, action: e.target.value === "all" ? "" : e.target.value })}
+              onChange={(e) =>
+                setFilters({
+                  ...filters,
+                  action: e.target.value === "all" ? "" : e.target.value,
+                })
+              }
               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
             >
               {ACTION_TYPES.map((a) => (
-                <option key={a} value={a}>{a === "all" ? "All actions" : a.replace("_", " ")}</option>
+                <option key={a} value={a}>
+                  {a === "all" ? "All actions" : a.replace("_", " ")}
+                </option>
               ))}
             </select>
           </div>
@@ -289,7 +344,10 @@ export default function AuditPage() {
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
           <p className="text-text-secondary text-sm mb-1">Failed to load audit log</p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
-          <button onClick={() => loadData(applied)} className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors">
+          <button
+            onClick={() => loadData(applied)}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+          >
             Retry
           </button>
         </div>
@@ -298,7 +356,9 @@ export default function AuditPage() {
       {/* Log table */}
       {loading ? (
         <div className="space-y-px bg-border">
-          {[...Array(6)].map((_, i) => <div key={i} className="bg-bg h-14 animate-pulse" />)}
+          {[...Array(6)].map((_, i) => (
+            <div key={i} className="bg-bg h-14 animate-pulse" />
+          ))}
         </div>
       ) : !error && entries.length === 0 ? (
         <div className="py-20 text-center border border-border-subtle">
@@ -309,7 +369,10 @@ export default function AuditPage() {
               : "Audit events will appear here as agents take actions."}
           </p>
           {activeFilters > 0 && (
-            <button onClick={clearFilters} className="mt-4 px-4 py-2 text-sm border border-border text-text-tertiary hover:text-text transition-colors">
+            <button
+              onClick={clearFilters}
+              className="mt-4 px-4 py-2 text-sm border border-border text-text-tertiary hover:text-text transition-colors"
+            >
               Clear Filters
             </button>
           )}
@@ -338,9 +401,11 @@ export default function AuditPage() {
                   onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}
                   className="w-full text-left"
                 >
-                  <div className={`grid grid-cols-[1fr_auto_auto_auto_auto] gap-4 px-3 py-3.5 border-b border-border-subtle transition-colors items-center ${
-                    expanded === entry.id ? "bg-bg-elevated" : "hover:bg-bg-elevated/30"
-                  }`}>
+                  <div
+                    className={`grid grid-cols-[1fr_auto_auto_auto_auto] gap-4 px-3 py-3.5 border-b border-border-subtle transition-colors items-center ${
+                      expanded === entry.id ? "bg-bg-elevated" : "hover:bg-bg-elevated/30"
+                    }`}
+                  >
                     <div className="min-w-0">
                       <span className="text-sm font-mono text-text-secondary truncate block">
                         {entry.action}
@@ -350,7 +415,9 @@ export default function AuditPage() {
                       {agentName(entry.agentId)}
                     </div>
                     <div className="hidden md:block">
-                      <span className={`text-xs px-1.5 py-0.5 font-medium ${resultColor(entry.result)}`}>
+                      <span
+                        className={`text-xs px-1.5 py-0.5 font-medium ${resultColor(entry.result)}`}
+                      >
                         {entry.result}
                       </span>
                     </div>
@@ -382,11 +449,17 @@ export default function AuditPage() {
                           </div>
                           <div className="space-y-0.5">
                             <div className="text-text-tertiary">Result</div>
-                            <span className={`px-1.5 py-0.5 font-medium ${resultColor(entry.result)}`}>{entry.result}</span>
+                            <span
+                              className={`px-1.5 py-0.5 font-medium ${resultColor(entry.result)}`}
+                            >
+                              {entry.result}
+                            </span>
                           </div>
                           <div className="space-y-0.5">
                             <div className="text-text-tertiary">Cost</div>
-                            <div className="font-mono text-text-secondary">{formatCost(entry.cost)}</div>
+                            <div className="font-mono text-text-secondary">
+                              {formatCost(entry.cost)}
+                            </div>
                           </div>
                         </div>
 
@@ -401,22 +474,30 @@ export default function AuditPage() {
                         )}
 
                         {/* Entry ID */}
-                        <div className="text-xs text-text-tertiary font-mono">
-                          ID: {entry.id}
-                        </div>
+                        <div className="text-xs text-text-tertiary font-mono">ID: {entry.id}</div>
 
                         {/* Agent summary inline */}
-                        {entry.agentId && summaryByAgent(entry.agentId) && (
-                          <div className="flex items-center gap-4 text-xs text-text-tertiary border-t border-border-subtle pt-3">
-                            <span>Agent totals:</span>
-                            <span>{summaryByAgent(entry.agentId)!.totalActions} actions</span>
-                            <span className="text-emerald-400">{summaryByAgent(entry.agentId)!.allowCount} allowed</span>
-                            {summaryByAgent(entry.agentId)!.denyCount > 0 && (
-                              <span className="text-red-400">{summaryByAgent(entry.agentId)!.denyCount} denied</span>
-                            )}
-                            <span>{formatCost(summaryByAgent(entry.agentId)!.totalCost)} total cost</span>
-                          </div>
-                        )}
+                        {(() => {
+                          if (!entry.agentId) return null;
+                          const agentSummary = summaryByAgent(entry.agentId);
+                          if (!agentSummary) return null;
+
+                          return (
+                            <div className="flex items-center gap-4 text-xs text-text-tertiary border-t border-border-subtle pt-3">
+                              <span>Agent totals:</span>
+                              <span>{agentSummary.totalActions} actions</span>
+                              <span className="text-emerald-400">
+                                {agentSummary.allowCount} allowed
+                              </span>
+                              {agentSummary.denyCount > 0 && (
+                                <span className="text-red-400">
+                                  {agentSummary.denyCount} denied
+                                </span>
+                              )}
+                              <span>{formatCost(agentSummary.totalCost)} total cost</span>
+                            </div>
+                          );
+                        })()}
                       </div>
                     </motion.div>
                   )}
@@ -430,7 +511,10 @@ export default function AuditPage() {
             <div className="pt-4 flex justify-center">
               <button
                 onClick={() => {
-                  const next = { ...applied, offset: (applied.offset || 0) + (applied.limit || 50) };
+                  const next = {
+                    ...applied,
+                    offset: (applied.offset || 0) + (applied.limit || 50),
+                  };
                   setApplied(next);
                   loadData(next);
                 }}

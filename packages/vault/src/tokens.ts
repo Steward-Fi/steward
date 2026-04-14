@@ -2,7 +2,7 @@
  * Common ERC-20 token addresses per chain, plus helpers for querying token balances.
  */
 
-import { createPublicClient, formatUnits, http, type Chain } from "viem";
+import { type Chain, createPublicClient, formatUnits, http } from "viem";
 import { arbitrum, base, baseSepolia, bsc, mainnet, polygon } from "viem/chains";
 
 // ─── ERC-20 ABI (minimal for balance queries) ────────────────────────────────
@@ -40,10 +40,10 @@ export interface TokenDef {
 }
 
 export interface TokenBalance {
-  token: string;      // contract address
+  token: string; // contract address
   symbol: string;
-  balance: string;    // raw wei/unit string
-  formatted: string;  // human-readable
+  balance: string; // raw wei/unit string
+  formatted: string; // human-readable
   decimals: number;
 }
 
@@ -52,34 +52,98 @@ export interface TokenBalance {
 export const COMMON_TOKENS: Record<number, TokenDef[]> = {
   // Ethereum mainnet
   1: [
-    { address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", symbol: "USDC", decimals: 6 },
-    { address: "0xdAC17F958D2ee523a2206206994597C13D831ec7", symbol: "USDT", decimals: 6 },
-    { address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", symbol: "WETH", decimals: 18 },
-    { address: "0x6B175474E89094C44Da98b954EedeAC495271d0F", symbol: "DAI", decimals: 18 },
+    {
+      address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+      symbol: "USDC",
+      decimals: 6,
+    },
+    {
+      address: "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+      symbol: "USDT",
+      decimals: 6,
+    },
+    {
+      address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      symbol: "WETH",
+      decimals: 18,
+    },
+    {
+      address: "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+      symbol: "DAI",
+      decimals: 18,
+    },
   ],
   // BSC
   56: [
-    { address: "0x55d398326f99059fF775485246999027B3197955", symbol: "USDT", decimals: 18 },
-    { address: "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56", symbol: "BUSD", decimals: 18 },
-    { address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", symbol: "WBNB", decimals: 18 },
+    {
+      address: "0x55d398326f99059fF775485246999027B3197955",
+      symbol: "USDT",
+      decimals: 18,
+    },
+    {
+      address: "0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56",
+      symbol: "BUSD",
+      decimals: 18,
+    },
+    {
+      address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c",
+      symbol: "WBNB",
+      decimals: 18,
+    },
   ],
   // Base
   8453: [
-    { address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", symbol: "USDC", decimals: 6 },
-    { address: "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA", symbol: "USDbC", decimals: 6 },
-    { address: "0x4200000000000000000000000000000000000006", symbol: "WETH", decimals: 18 },
+    {
+      address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      symbol: "USDC",
+      decimals: 6,
+    },
+    {
+      address: "0xd9aAEc86B65D86f6A7B5B1b0c42FFA531710b6CA",
+      symbol: "USDbC",
+      decimals: 6,
+    },
+    {
+      address: "0x4200000000000000000000000000000000000006",
+      symbol: "WETH",
+      decimals: 18,
+    },
   ],
   // Polygon
   137: [
-    { address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", symbol: "USDC", decimals: 6 },
-    { address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F", symbol: "USDT", decimals: 6 },
-    { address: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619", symbol: "WETH", decimals: 18 },
+    {
+      address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359",
+      symbol: "USDC",
+      decimals: 6,
+    },
+    {
+      address: "0xc2132D05D31c914a87C6611C10748AEb04B58e8F",
+      symbol: "USDT",
+      decimals: 6,
+    },
+    {
+      address: "0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619",
+      symbol: "WETH",
+      decimals: 18,
+    },
   ],
   // Arbitrum
   42161: [
-    { address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", symbol: "USDC", decimals: 6 },
-    { address: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9", symbol: "USDT", decimals: 6 },
-    { address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", symbol: "WETH", decimals: 18 },
+    {
+      address: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+      symbol: "USDC",
+      decimals: 6,
+    },
+    {
+      address: "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+      symbol: "USDT",
+      decimals: 6,
+    },
+    {
+      address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+      symbol: "WETH",
+      decimals: 18,
+    },
   ],
 };
 
@@ -156,7 +220,11 @@ export async function getTokenBalances(
               functionName: "decimals",
             }),
           ]);
-          return { address: tokenAddress, symbol: symbol as string, decimals: Number(decimals) };
+          return {
+            address: tokenAddress,
+            symbol: symbol as string,
+            decimals: Number(decimals),
+          };
         } catch {
           // If we can't read metadata, return with unknown
           return { address: tokenAddress, symbol: "UNKNOWN", decimals: 18 };

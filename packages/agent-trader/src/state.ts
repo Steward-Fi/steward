@@ -13,14 +13,13 @@
  *   3. Fallback: 0n (strategies should handle this gracefully)
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-import { createPublicClient, http } from "viem";
-import type { PublicClient } from "viem";
-import { base } from "viem/chains";
 import type { StewardClient } from "@stwd/sdk";
-import type { AgentState } from "./strategies/types.js";
+import type { PublicClient } from "viem";
+import { createPublicClient, http } from "viem";
+import { base } from "viem/chains";
 import type { AgentTraderConfig } from "./config.js";
 import { logWarn } from "./logger.js";
+import type { AgentState } from "./strategies/types.js";
 
 // ─── Minimal ABIs ─────────────────────────────────────────────────────────────
 
@@ -57,15 +56,11 @@ const UNISWAP_V2_PAIR_ABI = [
 
 // ─── Client cache ────────────────────────────────────────────────────────────
 
-// Use `any` here deliberately: viem's PublicClient type is extremely wide and
-// differs between chain specialisations.  All call-sites use it via its public
-// contract methods (getBalance / readContract) which are stable across chains.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const clientCache = new Map<number, any>();
+const clientCache = new Map<number, PublicClient>();
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function getPublicClient(chainId: number): any {
-  if (clientCache.has(chainId)) return clientCache.get(chainId);
+function getPublicClient(chainId: number): PublicClient {
+  const cachedClient = clientCache.get(chainId);
+  if (cachedClient) return cachedClient;
 
   const rpcUrl =
     process.env[`RPC_URL_${chainId}`] ??
@@ -83,10 +78,7 @@ function getPublicClient(chainId: number): any {
 
 // ─── Balances ────────────────────────────────────────────────────────────────
 
-async function getNativeBalance(
-  walletAddress: string,
-  chainId: number,
-): Promise<bigint> {
+async function getNativeBalance(walletAddress: string, chainId: number): Promise<bigint> {
   const client = getPublicClient(chainId);
   return client.getBalance({ address: walletAddress as `0x${string}` });
 }
@@ -107,14 +99,10 @@ async function getTokenBalance(
 
 // ─── Token price ──────────────────────────────────────────────────────────────
 
-async function getTokenPrice(
-  tokenAddress: string,
-  chainId: number,
-): Promise<bigint> {
+async function getTokenPrice(tokenAddress: string, chainId: number): Promise<bigint> {
   // 1. External price oracle (env: PRICE_ORACLE_URL or per-token override)
   const oracleUrl =
-    process.env[`PRICE_ORACLE_${tokenAddress.toLowerCase()}`] ??
-    process.env.PRICE_ORACLE_URL;
+    process.env[`PRICE_ORACLE_${tokenAddress.toLowerCase()}`] ?? process.env.PRICE_ORACLE_URL;
 
   if (oracleUrl) {
     try {
@@ -133,8 +121,7 @@ async function getTokenPrice(
 
   // 2. DEX pair reserve ratio
   const pairAddress =
-    process.env[`DEX_PAIR_${tokenAddress.toLowerCase()}`] ??
-    process.env.DEX_PAIR_ADDRESS;
+    process.env[`DEX_PAIR_${tokenAddress.toLowerCase()}`] ?? process.env.DEX_PAIR_ADDRESS;
 
   if (pairAddress) {
     try {
@@ -153,8 +140,7 @@ async function getTokenPrice(
       ]);
 
       const [reserve0, reserve1] = reserves;
-      const isToken0 =
-        token0.toLowerCase() === tokenAddress.toLowerCase();
+      const isToken0 = token0.toLowerCase() === tokenAddress.toLowerCase();
 
       // price = nativeReserve / tokenReserve  (scaled to 1e18)
       const tokenReserve = isToken0 ? reserve0 : reserve1;
@@ -178,21 +164,15 @@ async function getTokenPrice(
 
 // ─── Steward history helpers ──────────────────────────────────────────────────
 
-function secondsSinceLastTrade(
-  history: Array<{ timestamp: number; value: string }>,
-): number {
+function secondsSinceLastTrade(history: Array<{ timestamp: number; value: string }>): number {
   if (history.length === 0) return Infinity;
   const latestTs = Math.max(...history.map((h) => h.timestamp));
   return Math.floor(Date.now() / 1000) - latestTs;
 }
 
-function dailyVolume(
-  history: Array<{ timestamp: number; value: string }>,
-): bigint {
+function dailyVolume(history: Array<{ timestamp: number; value: string }>): bigint {
   const cutoff = Math.floor(Date.now() / 1000) - 86400;
-  return history
-    .filter((h) => h.timestamp >= cutoff)
-    .reduce((acc, h) => acc + BigInt(h.value), 0n);
+  return history.filter((h) => h.timestamp >= cutoff).reduce((acc, h) => acc + BigInt(h.value), 0n);
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
@@ -204,42 +184,38 @@ export async function fetchAgentState(
 ): Promise<AgentState> {
   const chainId = agentConfig.chainId ?? 8453;
 
-  const [nativeBalance, tokenBalance, tokenPrice, history] =
-    await Promise.all([
-      getNativeBalance(walletAddress, chainId).catch((err) => {
-        logWarn("Failed to fetch native balance", {
-          agentId: agentConfig.agentId,
-          error: String(err),
-        });
-        return 0n;
-      }),
-      getTokenBalance(walletAddress, agentConfig.tokenAddress, chainId).catch(
-        (err) => {
-          logWarn("Failed to fetch token balance", {
-            agentId: agentConfig.agentId,
-            error: String(err),
-          });
-          return 0n;
-        },
-      ),
-      getTokenPrice(agentConfig.tokenAddress, chainId).catch((err) => {
-        logWarn("Failed to fetch token price", {
-          agentId: agentConfig.agentId,
-          error: String(err),
-        });
-        return 0n;
-      }),
-      steward.getHistory(agentConfig.agentId).catch((err) => {
-        logWarn("Failed to fetch Steward history", {
-          agentId: agentConfig.agentId,
-          error: String(err),
-        });
-        return [];
-      }),
-    ]);
+  const [nativeBalance, tokenBalance, tokenPrice, history] = await Promise.all([
+    getNativeBalance(walletAddress, chainId).catch((err) => {
+      logWarn("Failed to fetch native balance", {
+        agentId: agentConfig.agentId,
+        error: String(err),
+      });
+      return 0n;
+    }),
+    getTokenBalance(walletAddress, agentConfig.tokenAddress, chainId).catch((err) => {
+      logWarn("Failed to fetch token balance", {
+        agentId: agentConfig.agentId,
+        error: String(err),
+      });
+      return 0n;
+    }),
+    getTokenPrice(agentConfig.tokenAddress, chainId).catch((err) => {
+      logWarn("Failed to fetch token price", {
+        agentId: agentConfig.agentId,
+        error: String(err),
+      });
+      return 0n;
+    }),
+    steward.getHistory(agentConfig.agentId).catch((err) => {
+      logWarn("Failed to fetch Steward history", {
+        agentId: agentConfig.agentId,
+        error: String(err),
+      });
+      return [];
+    }),
+  ]);
 
-  const tokenValueInNative =
-    tokenPrice > 0n ? (tokenBalance * tokenPrice) / BigInt(1e18) : 0n;
+  const tokenValueInNative = tokenPrice > 0n ? (tokenBalance * tokenPrice) / BigInt(1e18) : 0n;
   const treasuryValue = nativeBalance + tokenValueInNative;
 
   return {

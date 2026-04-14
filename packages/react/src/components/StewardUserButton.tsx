@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth.js";
 import type { StewardUserButtonProps } from "../types.js";
 
@@ -53,11 +53,15 @@ export function StewardUserButton({
   const auth = useAuth();
   const { signOut, session } = auth;
   // Prefer auth.user, but fall back to session fields (user is null on refresh)
-  const user = auth.user ?? (session ? {
-    id: session.userId ?? session.address ?? "",
-    email: session.email ?? "",
-    walletAddress: session.address || undefined,
-  } : null);
+  const user =
+    auth.user ??
+    (session
+      ? {
+          id: session.userId ?? session.address ?? "",
+          email: session.email ?? "",
+          walletAddress: session.address || undefined,
+        }
+      : null);
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -89,10 +93,7 @@ export function StewardUserButton({
   };
 
   return (
-    <div
-      className={`stwd-user-button ${className ?? ""}`}
-      ref={containerRef}
-    >
+    <div className={`stwd-user-button ${className ?? ""}`} ref={containerRef}>
       <button
         className="stwd-user-button__trigger"
         onClick={() => setOpen((prev) => !prev)}
@@ -115,7 +116,11 @@ export function StewardUserButton({
         ) : (
           <span
             className="stwd-user-button__avatar stwd-user-button__avatar--initials"
-            style={{ width: avatarSize, height: avatarSize, fontSize: avatarSize * 0.45 }}
+            style={{
+              width: avatarSize,
+              height: avatarSize,
+              fontSize: avatarSize * 0.45,
+            }}
           >
             {getInitials(displayName)}
           </span>
@@ -133,15 +138,17 @@ export function StewardUserButton({
             </div>
           )}
           {/* Current tenant info */}
-          {auth.activeTenantId && auth.tenants && (() => {
-            const current = auth.tenants.find((t) => t.tenantId === auth.activeTenantId);
-            return current ? (
-              <div className="stwd-user-button__dropdown-tenant" role="menuitem">
-                <span className="stwd-user-button__tenant-label">App:</span>{" "}
-                <span className="stwd-user-button__tenant-name">{current.tenantName}</span>
-              </div>
-            ) : null;
-          })()}
+          {auth.activeTenantId &&
+            auth.tenants &&
+            (() => {
+              const current = auth.tenants.find((t) => t.tenantId === auth.activeTenantId);
+              return current ? (
+                <div className="stwd-user-button__dropdown-tenant" role="menuitem">
+                  <span className="stwd-user-button__tenant-label">App:</span>{" "}
+                  <span className="stwd-user-button__tenant-name">{current.tenantName}</span>
+                </div>
+              ) : null;
+            })()}
           {/* Inline tenant switcher */}
           {showTenantSwitcher && auth.tenants && auth.tenants.length > 1 && (
             <div className="stwd-user-button__tenant-switcher">

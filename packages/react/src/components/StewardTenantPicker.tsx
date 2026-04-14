@@ -1,6 +1,6 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth.js";
-import type { StewardTenantPickerProps, StewardTenantMembership } from "../types.js";
+import type { StewardTenantMembership, StewardTenantPickerProps } from "../types.js";
 
 /**
  * StewardTenantPicker — Switch between connected apps/tenants.
@@ -28,8 +28,7 @@ export function StewardTenantPicker({
 
   // Check if tenant methods are available
   const hasTenantSupport =
-    typeof auth.listTenants === "function" &&
-    typeof auth.switchTenant === "function";
+    typeof auth.listTenants === "function" && typeof auth.switchTenant === "function";
 
   // Click-outside to close dropdown
   const handleClickOutside = useCallback((e: MouseEvent) => {
@@ -107,9 +106,7 @@ export function StewardTenantPicker({
           role="menuitem"
           aria-current={isActive ? "true" : undefined}
         >
-          <span className="stwd-tenant-picker__item-name">
-            {tenant.tenantName}
-          </span>
+          <span className="stwd-tenant-picker__item-name">{tenant.tenantName}</span>
           <span className="stwd-tenant-picker__item-role">
             {isSwitching ? "Switching…" : tenant.role}
           </span>

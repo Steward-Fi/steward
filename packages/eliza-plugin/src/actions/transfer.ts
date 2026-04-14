@@ -1,6 +1,13 @@
-import type { Action, ActionExample, HandlerOptions, ActionResult } from "@elizaos/core";
-import type { IAgentRuntime, Memory, State } from "@elizaos/core";
-import { StewardService } from "../services/StewardService.js";
+import type {
+  Action,
+  ActionExample,
+  ActionResult,
+  HandlerOptions,
+  IAgentRuntime,
+  Memory,
+  State,
+} from "@elizaos/core";
+import type { StewardService } from "../services/StewardService.js";
 
 /** Known chain name → chainId mapping */
 const CHAIN_IDS: Record<string, number> = {
@@ -26,7 +33,7 @@ function parseAmount(amountStr: string): { valueWei: string; symbol: string } {
   const numericValue = parseFloat(match[1]);
   const symbol = (match[2] ?? "ETH").toUpperCase();
 
-  if (isNaN(numericValue) || numericValue <= 0) {
+  if (Number.isNaN(numericValue) || numericValue <= 0) {
     throw new Error(`Invalid amount: ${numericValue}`);
   }
 
@@ -45,15 +52,7 @@ function parseAmount(amountStr: string): { valueWei: string; symbol: string } {
 export const transferAction: Action = {
   name: "STEWARD_TRANSFER",
   description: "Send tokens to an address using the Steward-managed wallet",
-  similes: [
-    "send tokens",
-    "transfer",
-    "send ETH",
-    "send SOL",
-    "send BNB",
-    "pay",
-    "wire",
-  ],
+  similes: ["send tokens", "transfer", "send ETH", "send SOL", "send BNB", "pay", "wire"],
 
   parameters: [
     {
@@ -123,7 +122,7 @@ export const transferAction: Action = {
     }
 
     try {
-      const { valueWei, symbol } = parseAmount(params.amount as string);
+      const { valueWei } = parseAmount(params.amount as string);
       const chainName = (params.chain as string) ?? "base";
       const chainId = CHAIN_IDS[chainName.toLowerCase()];
 
@@ -145,7 +144,11 @@ export const transferAction: Action = {
         return {
           success: true,
           text: `Sent ${params.amount} to ${params.to}. Transaction hash: ${result.txHash}`,
-          data: { txHash: result.txHash, amount: params.amount as string, to: params.to as string },
+          data: {
+            txHash: result.txHash,
+            amount: params.amount as string,
+            to: params.to as string,
+          },
         };
       }
 

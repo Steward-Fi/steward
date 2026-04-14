@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { getDb, users } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
@@ -24,7 +24,11 @@ beforeAll(async () => {
   const db = getDb();
   await db
     .insert(users)
-    .values({ email: TEST_EMAIL_EXISTING, emailVerified: true, name: "Pre-existing" })
+    .values({
+      email: TEST_EMAIL_EXISTING,
+      emailVerified: true,
+      name: "Pre-existing",
+    })
     .onConflictDoNothing();
 });
 
@@ -103,7 +107,10 @@ describeWithDatabase("POST /platform/users", () => {
       }),
     });
     expect(res.status).toBe(201);
-    const data = (await res.json()) as { ok: boolean; data: { userId: string; isNew: boolean } };
+    const data = (await res.json()) as {
+      ok: boolean;
+      data: { userId: string; isNew: boolean };
+    };
     expect(data.ok).toBe(true);
     expect(data.data.isNew).toBe(true);
     expect(typeof data.data.userId).toBe("string");
@@ -124,7 +131,10 @@ describeWithDatabase("POST /platform/users", () => {
       }),
     });
     expect(res.status).toBe(200);
-    const data = (await res.json()) as { ok: boolean; data: { userId: string; isNew: boolean } };
+    const data = (await res.json()) as {
+      ok: boolean;
+      data: { userId: string; isNew: boolean };
+    };
     expect(data.ok).toBe(true);
     expect(data.data.isNew).toBe(false);
     expect(typeof data.data.userId).toBe("string");
@@ -171,7 +181,7 @@ describeWithDatabase("POST /platform/users", () => {
       body: JSON.stringify({ email: mixedCaseEmail }),
     });
     expect(res.status).toBe(201);
-    const data = (await res.json()) as { ok: boolean; data: { userId: string } };
+    await res.json();
     const [row] = await db
       .select({ email: users.email })
       .from(users)

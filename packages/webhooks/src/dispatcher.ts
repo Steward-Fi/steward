@@ -1,19 +1,13 @@
 import type { WebhookEvent } from "@stwd/shared";
 
-import type {
-  WebhookConfig,
-  WebhookDeliveryResult,
-  WebhookDispatcherOptions,
-} from "./types";
+import type { WebhookConfig, WebhookDeliveryResult, WebhookDispatcherOptions } from "./types";
 
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
 const DEFAULT_TIMEOUT_MS = 5_000;
 
 function toHex(buffer: ArrayBuffer): string {
-  return Array.from(new Uint8Array(buffer), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  return Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function signPayload(payload: string, secret: string): Promise<string> {
@@ -45,9 +39,8 @@ function normalizeWebhook(webhook: WebhookConfig | string): WebhookConfig {
     return webhook;
   }
 
-  const secret = (
-    globalThis as { process?: { env?: Record<string, string | undefined> } }
-  ).process?.env?.STEWARD_WEBHOOK_SECRET;
+  const secret = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process
+    ?.env?.STEWARD_WEBHOOK_SECRET;
   if (!secret) {
     throw new Error(
       "Webhook secret is required. Pass a WebhookConfig or set STEWARD_WEBHOOK_SECRET.",

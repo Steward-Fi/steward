@@ -41,10 +41,7 @@ export class IdentityRegistryClient {
    * The flow will be: upload AgentCard JSON to IPFS, call registry.register(tokenURI),
    * then return the minted token ID and tx hash.
    */
-  async register(
-    agentCard: AgentCard,
-    _privateKey?: string,
-  ): Promise<RegistrationResult> {
+  async register(_agentCard: AgentCard, _privateKey?: string): Promise<RegistrationResult> {
     // TODO: Implement actual on-chain registration
     const mockTokenId = `0x${Date.now().toString(16)}`;
     return {

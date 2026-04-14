@@ -5,10 +5,7 @@
  * All network calls go to the API server (NEXT_PUBLIC_STEWARD_API_URL).
  */
 
-import {
-  startAuthentication,
-  startRegistration,
-} from "@simplewebauthn/browser";
+import { startAuthentication, startRegistration } from "@simplewebauthn/browser";
 
 import { API_URL } from "@/lib/api";
 
@@ -77,29 +74,26 @@ async function getPasskeyLoginOptions(email: string) {
   });
   const json = await res.json();
   if (json.ok === false) throw new Error(json.error || "Failed to get login options");
-  return json as { allowCredentials?: Array<{ id: string }>; [key: string]: unknown };
+  return json as {
+    allowCredentials?: Array<{ id: string }>;
+    [key: string]: unknown;
+  };
 }
 
-async function verifyPasskeyRegistration(
-  email: string,
-  response: unknown,
-): Promise<AuthResult> {
-  const result = await apiPost<AuthResult>(
-    "/auth/passkey/register/verify",
-    { email, response },
-  );
+async function verifyPasskeyRegistration(email: string, response: unknown): Promise<AuthResult> {
+  const result = await apiPost<AuthResult>("/auth/passkey/register/verify", {
+    email,
+    response,
+  });
   if (!result.ok) throw new Error(result.error);
   return result.data;
 }
 
-async function verifyPasskeyLogin(
-  email: string,
-  response: unknown,
-): Promise<AuthResult> {
-  const result = await apiPost<AuthResult>(
-    "/auth/passkey/login/verify",
-    { email, response },
-  );
+async function verifyPasskeyLogin(email: string, response: unknown): Promise<AuthResult> {
+  const result = await apiPost<AuthResult>("/auth/passkey/login/verify", {
+    email,
+    response,
+  });
   if (!result.ok) throw new Error(result.error);
   return result.data;
 }
@@ -113,7 +107,10 @@ async function verifyPasskeyLogin(
  */
 export async function signInWithPasskey(email: string): Promise<AuthResult> {
   // Try authentication first (existing user with passkeys)
-  let authOpts: { allowCredentials?: Array<{ id: string }>; [key: string]: unknown } | null = null;
+  let authOpts: {
+    allowCredentials?: Array<{ id: string }>;
+    [key: string]: unknown;
+  } | null = null;
   try {
     authOpts = await getPasskeyLoginOptions(email);
   } catch {
@@ -148,9 +145,7 @@ export async function signInWithPasskey(email: string): Promise<AuthResult> {
  * Send a magic link to the given email address.
  * Returns the expiry time so the UI can show a countdown.
  */
-export async function sendMagicLink(
-  email: string,
-): Promise<{ ok: boolean; expiresAt?: string }> {
+export async function sendMagicLink(email: string): Promise<{ ok: boolean; expiresAt?: string }> {
   const result = await apiPost<{ expiresAt: string }>("/auth/email/send", {
     email,
   });
@@ -162,10 +157,7 @@ export async function sendMagicLink(
  * Verify the raw token from the magic link URL.
  * Called by the /auth/callback/email page after the user clicks the link.
  */
-export async function verifyMagicLink(
-  token: string,
-  email: string,
-): Promise<AuthResult> {
+export async function verifyMagicLink(token: string, email: string): Promise<AuthResult> {
   const result = await apiPost<AuthResult>("/auth/email/verify", {
     token,
     email,

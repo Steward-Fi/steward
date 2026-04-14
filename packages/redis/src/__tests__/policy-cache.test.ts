@@ -1,12 +1,12 @@
-import { describe, test, expect, beforeEach, afterAll } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { disconnectRedis, getRedis } from "../client.js";
 import {
+  type CachedPolicy,
   getCachedPolicies,
-  setCachedPolicies,
   invalidateCache,
   invalidateTenantCache,
-  type CachedPolicy,
+  setCachedPolicies,
 } from "../policy-cache.js";
-import { getRedis, disconnectRedis } from "../client.js";
 
 const runRedis = process.env.STEWARD_REDIS_TESTS === "1";
 const describeRedis = runRedis ? describe : describe.skip;
@@ -60,9 +60,9 @@ describeRedis("Policy Cache", () => {
 
     const cached = await getCachedPolicies(TEST_AGENT, TEST_TENANT);
     expect(cached).not.toBeNull();
-    expect(cached!.length).toBe(2);
-    expect(cached![0]!.type).toBe("api_access");
-    expect(cached![1]!.name).toBe("daily-budget");
+    expect(cached?.length).toBe(2);
+    expect(cached?.[0]?.type).toBe("api_access");
+    expect(cached?.[1]?.name).toBe("daily-budget");
   });
 
   test("invalidate specific agent cache", async () => {

@@ -32,18 +32,10 @@ declare module "crypto" {
   export function scryptSync(
     password: string | Buffer,
     salt: string | Buffer,
-    keylen: number
+    keylen: number,
   ): Buffer;
-  export function createCipheriv(
-    algorithm: string,
-    key: Buffer,
-    iv: Buffer
-  ): CipherGCM;
-  export function createDecipheriv(
-    algorithm: string,
-    key: Buffer,
-    iv: Buffer
-  ): DecipherGCM;
+  export function createCipheriv(algorithm: string, key: Buffer, iv: Buffer): CipherGCM;
+  export function createDecipheriv(algorithm: string, key: Buffer, iv: Buffer): DecipherGCM;
 }
 
 declare class Buffer extends Uint8Array {

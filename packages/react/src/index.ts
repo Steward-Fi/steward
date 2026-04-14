@@ -1,88 +1,91 @@
 // ─── Provider ───
-export { StewardProvider } from "./provider.js";
 
+export { ApprovalQueue } from "./components/ApprovalQueue.js";
+export { PolicyControls } from "./components/PolicyControls.js";
+export { SpendDashboard } from "./components/SpendDashboard.js";
+export { StewardAuthGuard } from "./components/StewardAuthGuard.js";
+export { StewardEmailCallback } from "./components/StewardEmailCallback.js";
 // ─── Components ───
 export { StewardLogin } from "./components/StewardLogin.js";
-export { StewardAuthGuard } from "./components/StewardAuthGuard.js";
-export { StewardUserButton } from "./components/StewardUserButton.js";
-export { StewardTenantPicker } from "./components/StewardTenantPicker.js";
-export { StewardEmailCallback } from "./components/StewardEmailCallback.js";
 export { StewardOAuthCallback } from "./components/StewardOAuthCallback.js";
-export { WalletOverview } from "./components/WalletOverview.js";
+export { StewardTenantPicker } from "./components/StewardTenantPicker.js";
+export { StewardUserButton } from "./components/StewardUserButton.js";
 export { TransactionHistory } from "./components/TransactionHistory.js";
-export { PolicyControls } from "./components/PolicyControls.js";
-export { ApprovalQueue } from "./components/ApprovalQueue.js";
-export { SpendDashboard } from "./components/SpendDashboard.js";
+export { WalletOverview } from "./components/WalletOverview.js";
+export { useApprovals } from "./hooks/useApprovals.js";
 
 // ─── Hooks ───
 export { useAuth } from "./hooks/useAuth.js";
-export { useSteward } from "./hooks/useSteward.js";
-export { useWallet } from "./hooks/useWallet.js";
-export { useTransactions } from "./hooks/useTransactions.js";
 export { usePolicies } from "./hooks/usePolicies.js";
-export { useApprovals } from "./hooks/useApprovals.js";
 export { useSpend } from "./hooks/useSpend.js";
-
+export { useSteward } from "./hooks/useSteward.js";
+export { useTransactions } from "./hooks/useTransactions.js";
+export { useWallet } from "./hooks/useWallet.js";
 // ─── Icons ───
-export { GoogleIcon, DiscordIcon, PasskeyIcon, EmailIcon, EthereumIcon } from "./icons/index.js";
-
-// ─── Utilities ───
 export {
-  truncateAddress,
-  formatWei,
-  formatBalance,
-  formatTimestamp,
-  formatRelativeTime,
-  copyToClipboard,
-  getExplorerTxUrl,
-  getExplorerAddressUrl,
-  getStatusColor,
-  calcPercent,
-} from "./utils/format.js";
-export { themeToCSS, mergeTheme, DEFAULT_THEME } from "./utils/theme.js";
-
+  DiscordIcon,
+  EmailIcon,
+  EthereumIcon,
+  GoogleIcon,
+  PasskeyIcon,
+} from "./icons/index.js";
+export { StewardProvider } from "./provider.js";
 // ─── Types ───
 export type {
+  AgentBalance,
+  // Component data
+  AgentDashboardResponse,
+  AgentIdentity,
+  ApprovalConfig,
+  ApprovalQueueEntry,
+  ApprovalQueueProps,
+  ApproverConfig,
+  ChainFamily,
+  CustomizableField,
+  EnforcedPolicyOverride,
+  PaginatedTransactionsResponse,
+  PolicyControlsProps,
+  PolicyExposure,
+  PolicyExposureConfig,
+  PolicyResult,
+  PolicyRule,
+  PolicyTemplate,
+  PolicyType,
+  SecretRoutePreset,
+  SpendDashboardProps,
+  SpendStats,
+  StewardAuthGuardProps,
+  // Re-exported SDK types
+  StewardClient,
+  StewardContextValue,
+  StewardEmailCallbackProps,
+  StewardLoginProps,
+  StewardOAuthCallbackProps,
+  // Component props
+  StewardProviderProps,
+  StewardTenantMembership,
+  StewardTenantPickerProps,
+  StewardUserButtonProps,
   // Tenant config
   TenantControlPlaneConfig,
   TenantFeatureFlags,
   TenantTheme,
-  PolicyExposure,
-  PolicyExposureConfig,
-  PolicyTemplate,
-  CustomizableField,
-  EnforcedPolicyOverride,
-  ApprovalConfig,
-  ApproverConfig,
-  SecretRoutePreset,
-  // Component data
-  AgentDashboardResponse,
-  PaginatedTransactionsResponse,
-  SpendStats,
-  ApprovalQueueEntry,
-  // Component props
-  StewardProviderProps,
-  StewardContextValue,
-  StewardAuthGuardProps,
-  StewardUserButtonProps,
-  StewardLoginProps,
-  StewardTenantPickerProps,
-  StewardTenantMembership,
-  StewardEmailCallbackProps,
-  StewardOAuthCallbackProps,
-  WalletOverviewProps,
   TransactionHistoryProps,
-  PolicyControlsProps,
-  ApprovalQueueProps,
-  SpendDashboardProps,
-  // Re-exported SDK types
-  StewardClient,
-  PolicyRule,
-  PolicyType,
-  TxStatus,
   TxRecord,
-  AgentIdentity,
-  AgentBalance,
-  ChainFamily,
-  PolicyResult,
+  TxStatus,
+  WalletOverviewProps,
 } from "./types.js";
+// ─── Utilities ───
+export {
+  calcPercent,
+  copyToClipboard,
+  formatBalance,
+  formatRelativeTime,
+  formatTimestamp,
+  formatWei,
+  getExplorerAddressUrl,
+  getExplorerTxUrl,
+  getStatusColor,
+  truncateAddress,
+} from "./utils/format.js";
+export { DEFAULT_THEME, mergeTheme, themeToCSS } from "./utils/theme.js";

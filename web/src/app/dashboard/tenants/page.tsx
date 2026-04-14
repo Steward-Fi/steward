@@ -1,10 +1,10 @@
 "use client";
 
+import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { CopyButton } from "@/components/copy-button";
 import { steward } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
-import { CopyButton } from "@/components/copy-button";
 
 interface TenantInfo {
   tenantId: string;
@@ -39,7 +39,7 @@ export default function TenantsPage() {
       const stored = localStorage.getItem("steward_active_tenant");
       if (stored) setActiveTenantId(stored);
     } catch {}
-  }, []);
+  }, [loadTenants]);
 
   async function loadTenants() {
     try {
@@ -77,10 +77,7 @@ export default function TenantsPage() {
     setCreateError(null);
     try {
       setCreating(true);
-      const result = await steward.createTenant(
-        form.name,
-        form.description || undefined
-      );
+      const result = await steward.createTenant(form.name, form.description || undefined);
       setCreated(result);
       // Add to list
       setTenants((prev) => [
@@ -93,9 +90,7 @@ export default function TenantsPage() {
         },
       ]);
     } catch (err: unknown) {
-      setCreateError(
-        err instanceof Error ? err.message : "Failed to create tenant"
-      );
+      setCreateError(err instanceof Error ? err.message : "Failed to create tenant");
     } finally {
       setCreating(false);
     }
@@ -131,9 +126,7 @@ export default function TenantsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-700 tracking-tight">
-            Tenants
-          </h1>
+          <h1 className="font-display text-2xl font-700 tracking-tight">Tenants</h1>
           <p className="text-sm text-text-tertiary mt-1">
             Manage your organizations and switch between them
           </p>
@@ -162,18 +155,13 @@ export default function TenantsPage() {
             {created ? (
               /* Success state: show credentials */
               <div className="border border-border bg-bg-elevated p-6 space-y-5">
-                <h3 className="font-display text-sm font-600 text-emerald-400">
-                  Tenant Created
-                </h3>
+                <h3 className="font-display text-sm font-600 text-emerald-400">Tenant Created</h3>
                 <p className="text-xs text-text-tertiary">
-                  Save these credentials now. The API key won&apos;t be shown
-                  again.
+                  Save these credentials now. The API key won&apos;t be shown again.
                 </p>
                 <div className="space-y-3">
                   <div>
-                    <label className="text-xs text-text-tertiary block mb-1">
-                      Tenant ID
-                    </label>
+                    <label className="text-xs text-text-tertiary block mb-1">Tenant ID</label>
                     <div className="flex items-center gap-2 bg-bg border border-border px-3 py-2">
                       <span className="font-mono text-sm text-text flex-1 truncate">
                         {created.tenantId}
@@ -182,9 +170,7 @@ export default function TenantsPage() {
                     </div>
                   </div>
                   <div>
-                    <label className="text-xs text-text-tertiary block mb-1">
-                      API Key
-                    </label>
+                    <label className="text-xs text-text-tertiary block mb-1">API Key</label>
                     <div className="flex items-center gap-2 bg-bg border border-border px-3 py-2">
                       <span className="font-mono text-sm text-text flex-1 truncate">
                         {created.apiKey}
@@ -205,9 +191,7 @@ export default function TenantsPage() {
               /* Create form */
               <form onSubmit={createTenant}>
                 <div className="border border-border bg-bg-elevated p-6 space-y-5">
-                  <h3 className="font-display text-sm font-600">
-                    Create Tenant
-                  </h3>
+                  <h3 className="font-display text-sm font-600">Create Tenant</h3>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <label className="text-xs text-text-tertiary block mb-1.5">
@@ -216,24 +200,19 @@ export default function TenantsPage() {
                       <input
                         type="text"
                         value={form.name}
-                        onChange={(e) =>
-                          setForm({ ...form, name: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, name: e.target.value })}
                         placeholder="My Organization"
                         className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                       />
                     </div>
                     <div>
                       <label className="text-xs text-text-tertiary block mb-1.5">
-                        Description{" "}
-                        <span className="text-text-tertiary">(optional)</span>
+                        Description <span className="text-text-tertiary">(optional)</span>
                       </label>
                       <input
                         type="text"
                         value={form.description}
-                        onChange={(e) =>
-                          setForm({ ...form, description: e.target.value })
-                        }
+                        onChange={(e) => setForm({ ...form, description: e.target.value })}
                         placeholder="Production trading org"
                         className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                       />
@@ -279,9 +258,7 @@ export default function TenantsPage() {
       {/* Error state */}
       {error && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
-          <p className="text-text-secondary text-sm mb-1">
-            Failed to load tenants
-          </p>
+          <p className="text-text-secondary text-sm mb-1">Failed to load tenants</p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
           <button
             onClick={loadTenants}
@@ -301,12 +278,10 @@ export default function TenantsPage() {
         </div>
       ) : error ? null : tenants.length === 0 ? (
         <div className="py-20 text-center border border-border-subtle">
-          <p className="font-display text-lg font-600 text-text-secondary">
-            No tenants yet
-          </p>
+          <p className="font-display text-lg font-600 text-text-secondary">No tenants yet</p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
-            Create your first tenant to start managing agents, policies, and
-            secrets within an isolated organization.
+            Create your first tenant to start managing agents, policies, and secrets within an
+            isolated organization.
           </p>
           <button
             onClick={() => setShowCreate(true)}
@@ -338,9 +313,7 @@ export default function TenantsPage() {
                     <div className="flex items-center gap-4 min-w-0">
                       <div
                         className={`w-9 h-9 flex items-center justify-center font-display font-700 text-sm flex-shrink-0 ${
-                          isActive
-                            ? "bg-accent text-bg"
-                            : "bg-accent-bg text-[oklch(0.75_0.15_55)]"
+                          isActive ? "bg-accent text-bg" : "bg-accent-bg text-[oklch(0.75_0.15_55)]"
                         }`}
                       >
                         {tenant.tenantName?.charAt(0)?.toUpperCase() || "T"}
@@ -379,9 +352,7 @@ export default function TenantsPage() {
                           disabled={switching === tenant.tenantId}
                           className="px-3 py-1.5 text-xs border border-border text-text-secondary hover:text-text hover:border-accent transition-colors disabled:opacity-40"
                         >
-                          {switching === tenant.tenantId
-                            ? "Switching..."
-                            : "Switch"}
+                          {switching === tenant.tenantId ? "Switching..." : "Switch"}
                         </button>
                       )}
                     </div>

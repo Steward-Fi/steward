@@ -86,7 +86,14 @@ export interface RateLimitConfig {
   maxTxPerDay: number;
 }
 
-export type TxStatus = "pending" | "approved" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
+export type TxStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "signed"
+  | "broadcast"
+  | "confirmed"
+  | "failed";
 
 export interface SignRequest {
   agentId: string;
@@ -307,20 +314,77 @@ export interface ExportKeyResult {
  *   Solana: `solana:{genesisHashPrefix}`
  */
 export const CHAINS: Record<string, ChainIdentifier> = {
-  "eip155:1": { caip2: "eip155:1", numericId: 1, family: "evm", name: "Ethereum", symbol: "ETH", testnet: false },
-  "eip155:56": { caip2: "eip155:56", numericId: 56, family: "evm", name: "BSC", symbol: "BNB", testnet: false },
-  "eip155:97": { caip2: "eip155:97", numericId: 97, family: "evm", name: "BSC Testnet", symbol: "tBNB", testnet: true },
-  "eip155:137": { caip2: "eip155:137", numericId: 137, family: "evm", name: "Polygon", symbol: "POL", testnet: false },
-  "eip155:8453": { caip2: "eip155:8453", numericId: 8453, family: "evm", name: "Base", symbol: "ETH", testnet: false },
-  "eip155:42161": { caip2: "eip155:42161", numericId: 42161, family: "evm", name: "Arbitrum", symbol: "ETH", testnet: false },
-  "eip155:84532": { caip2: "eip155:84532", numericId: 84532, family: "evm", name: "Base Sepolia", symbol: "ETH", testnet: true },
+  "eip155:1": {
+    caip2: "eip155:1",
+    numericId: 1,
+    family: "evm",
+    name: "Ethereum",
+    symbol: "ETH",
+    testnet: false,
+  },
+  "eip155:56": {
+    caip2: "eip155:56",
+    numericId: 56,
+    family: "evm",
+    name: "BSC",
+    symbol: "BNB",
+    testnet: false,
+  },
+  "eip155:97": {
+    caip2: "eip155:97",
+    numericId: 97,
+    family: "evm",
+    name: "BSC Testnet",
+    symbol: "tBNB",
+    testnet: true,
+  },
+  "eip155:137": {
+    caip2: "eip155:137",
+    numericId: 137,
+    family: "evm",
+    name: "Polygon",
+    symbol: "POL",
+    testnet: false,
+  },
+  "eip155:8453": {
+    caip2: "eip155:8453",
+    numericId: 8453,
+    family: "evm",
+    name: "Base",
+    symbol: "ETH",
+    testnet: false,
+  },
+  "eip155:42161": {
+    caip2: "eip155:42161",
+    numericId: 42161,
+    family: "evm",
+    name: "Arbitrum",
+    symbol: "ETH",
+    testnet: false,
+  },
+  "eip155:84532": {
+    caip2: "eip155:84532",
+    numericId: 84532,
+    family: "evm",
+    name: "Base Sepolia",
+    symbol: "ETH",
+    testnet: true,
+  },
   "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {
-    caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", numericId: 101, family: "solana",
-    name: "Solana", symbol: "SOL", testnet: false,
+    caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    numericId: 101,
+    family: "solana",
+    name: "Solana",
+    symbol: "SOL",
+    testnet: false,
   },
   "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {
-    caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", numericId: 102, family: "solana",
-    name: "Solana Devnet", symbol: "SOL", testnet: true,
+    caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
+    numericId: 102,
+    family: "solana",
+    name: "Solana Devnet",
+    symbol: "SOL",
+    testnet: true,
   },
 };
 

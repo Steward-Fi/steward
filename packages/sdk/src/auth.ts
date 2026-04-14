@@ -12,8 +12,8 @@
  *   const client = new StewardClient({ baseUrl, bearerToken: auth.getToken() });
  */
 
-import { StewardApiError } from "./client.ts";
 import type {
+  SessionStorage,
   StewardAuthConfig,
   StewardAuthResult,
   StewardEmailResult,
@@ -24,8 +24,8 @@ import type {
   StewardSession,
   StewardTenantMembership,
   StewardUser,
-  SessionStorage,
 } from "./auth-types.ts";
+import { StewardApiError } from "./client.ts";
 
 // ─── Storage key ──────────────────────────────────────────────────────────────
 
@@ -123,10 +123,7 @@ async function authRequest<T>(
       headers,
     });
   } catch (err) {
-    throw new StewardApiError(
-      err instanceof Error ? err.message : "Network request failed",
-      0,
-    );
+    throw new StewardApiError(err instanceof Error ? err.message : "Network request failed", 0);
   }
 
   const text = await response.text();
@@ -223,7 +220,9 @@ export class StewardAuth {
     if (!session) return null;
     // Kick off a background refresh if near expiry (non-blocking)
     if (this.isNearExpiry()) {
-      void this.refreshSession().catch(() => { /* swallow — caller still gets old token */ });
+      void this.refreshSession().catch(() => {
+        /* swallow — caller still gets old token */
+      });
     }
     return session.token;
   }
@@ -257,11 +256,10 @@ export class StewardAuth {
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) return null;
 
-    const res = await authRequest<StewardRefreshResult>(
-      this.baseUrl,
-      "/auth/refresh",
-      { method: "POST", body: JSON.stringify({ refreshToken }) },
-    );
+    const res = await authRequest<StewardRefreshResult>(this.baseUrl, "/auth/refresh", {
+      method: "POST",
+      body: JSON.stringify({ refreshToken }),
+    });
 
     if (!res.ok) {
       // Refresh token invalid/expired — sign the user out
@@ -286,7 +284,9 @@ export class StewardAuth {
       await authRequest(this.baseUrl, "/auth/revoke", {
         method: "POST",
         body: JSON.stringify({ refreshToken }),
-      }).catch(() => { /* best-effort */ });
+      }).catch(() => {
+        /* best-effort */
+      });
     }
     this.clearToken();
     this.notifyListeners(null);
@@ -340,7 +340,13 @@ export class StewardAuth {
     const loginOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/login/options",
-      { method: "POST", body: JSON.stringify({ email, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+        }),
+      },
     );
 
     if (loginOptsRes.ok) {
@@ -371,22 +377,29 @@ export class StewardAuth {
       );
     }
 
-    const verifyRes = await authRequest<{ ok: boolean; token: string; user: StewardUser }>(
-      this.baseUrl,
-      "/auth/passkey/login/verify",
-      { method: "POST", body: JSON.stringify({ email, response: authResponse, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
-    );
+    const verifyRes = await authRequest<{
+      ok: boolean;
+      token: string;
+      user: StewardUser;
+    }>(this.baseUrl, "/auth/passkey/login/verify", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        response: authResponse,
+        ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+      }),
+    });
 
     if (!verifyRes.ok) {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
     }
 
     return this.storeAndReturn(
-        verifyRes.data.token,
-        (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
-        verifyRes.data.user,
-        (verifyRes.data as { expiresIn?: number }).expiresIn,
-      );
+      verifyRes.data.token,
+      (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
+      verifyRes.data.user,
+      (verifyRes.data as { expiresIn?: number }).expiresIn,
+    );
   }
 
   private async completePasskeyRegister(
@@ -397,7 +410,13 @@ export class StewardAuth {
     const regOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/register/options",
-      { method: "POST", body: JSON.stringify({ email, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+        }),
+      },
     );
 
     if (!regOptsRes.ok) {
@@ -414,22 +433,29 @@ export class StewardAuth {
       );
     }
 
-    const verifyRes = await authRequest<{ ok: boolean; token: string; user: StewardUser }>(
-      this.baseUrl,
-      "/auth/passkey/register/verify",
-      { method: "POST", body: JSON.stringify({ email, response: regResponse, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
-    );
+    const verifyRes = await authRequest<{
+      ok: boolean;
+      token: string;
+      user: StewardUser;
+    }>(this.baseUrl, "/auth/passkey/register/verify", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        response: regResponse,
+        ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+      }),
+    });
 
     if (!verifyRes.ok) {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
     }
 
     return this.storeAndReturn(
-        verifyRes.data.token,
-        (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
-        verifyRes.data.user,
-        (verifyRes.data as { expiresIn?: number }).expiresIn,
-      );
+      verifyRes.data.token,
+      (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
+      verifyRes.data.user,
+      (verifyRes.data as { expiresIn?: number }).expiresIn,
+    );
   }
 
   // ─── Email magic link ───────────────────────────────────────────────────────
@@ -440,11 +466,13 @@ export class StewardAuth {
    */
   async signInWithEmail(email: string): Promise<StewardEmailResult> {
     // API shape: { ok: true, data: { expiresAt: string } }
-    const res = await authRequest<Record<string, unknown>>(
-      this.baseUrl,
-      "/auth/email/send",
-      { method: "POST", body: JSON.stringify({ email, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
-    );
+    const res = await authRequest<Record<string, unknown>>(this.baseUrl, "/auth/email/send", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+      }),
+    });
 
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);
@@ -464,11 +492,18 @@ export class StewardAuth {
    * Call this from the callback URL handler with the `token` and `email` query params.
    */
   async verifyEmailCallback(token: string, email: string): Promise<StewardAuthResult> {
-    const res = await authRequest<{ ok: boolean; token: string; user: StewardUser }>(
-      this.baseUrl,
-      "/auth/email/verify",
-      { method: "POST", body: JSON.stringify({ token, email, ...(this.tenantId ? { tenantId: this.tenantId } : {}) }) },
-    );
+    const res = await authRequest<{
+      ok: boolean;
+      token: string;
+      user: StewardUser;
+    }>(this.baseUrl, "/auth/email/verify", {
+      method: "POST",
+      body: JSON.stringify({
+        token,
+        email,
+        ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+      }),
+    });
 
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);
@@ -499,10 +534,7 @@ export class StewardAuth {
     signMessage: (msg: string) => Promise<string>,
   ): Promise<StewardAuthResult> {
     // 1. Fetch a fresh nonce
-    const nonceRes = await authRequest<{ nonce: string }>(
-      this.baseUrl,
-      "/auth/nonce",
-    );
+    const nonceRes = await authRequest<{ nonce: string }>(this.baseUrl, "/auth/nonce");
 
     if (!nonceRes.ok) {
       throw new StewardApiError(nonceRes.error, nonceRes.status);
@@ -545,15 +577,11 @@ export class StewardAuth {
       token: string;
       address: string;
       tenant: { id: string; name: string; apiKey?: string };
-    }>(
-      this.baseUrl,
-      "/auth/verify",
-      {
-        method: "POST",
-        body: JSON.stringify({ message: siweMessage, signature }),
-        ...(this.tenantId ? { headers: { "X-Steward-Tenant": this.tenantId } } : {}),
-      },
-    );
+    }>(this.baseUrl, "/auth/verify", {
+      method: "POST",
+      body: JSON.stringify({ message: siweMessage, signature }),
+      ...(this.tenantId ? { headers: { "X-Steward-Tenant": this.tenantId } } : {}),
+    });
 
     if (!verifyRes.ok) {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
@@ -636,9 +664,7 @@ export class StewardAuth {
     // Build the redirect URI
     const redirectUri =
       config?.redirectUri ??
-      (isBrowser()
-        ? `${window.location.origin}/auth/callback`
-        : "http://localhost/auth/callback");
+      (isBrowser() ? `${window.location.origin}/auth/callback` : "http://localhost/auth/callback");
 
     // Build the authorization URL
     const params = new URLSearchParams({
@@ -695,13 +721,7 @@ export class StewardAuth {
     }
 
     // Exchange code for tokens via PKCE
-    return this.exchangeOAuthCode(
-      provider,
-      callbackParams.code,
-      redirectUri,
-      state,
-      codeVerifier,
-    );
+    return this.exchangeOAuthCode(provider, callbackParams.code, redirectUri, state, codeVerifier);
   }
 
   /**
@@ -745,13 +765,7 @@ export class StewardAuth {
       ? `${window.location.origin}${window.location.pathname}`
       : "http://localhost/auth/callback";
 
-    return this.exchangeOAuthCode(
-      provider,
-      params.code,
-      redirectUri,
-      params.state,
-      storedVerifier,
-    );
+    return this.exchangeOAuthCode(provider, params.code, redirectUri, params.state, storedVerifier);
   }
 
   /**
@@ -770,14 +784,10 @@ export class StewardAuth {
       refreshToken: string;
       expiresIn: number;
       user: StewardUser;
-    }>(
-      this.baseUrl,
-      `/auth/oauth/${encodeURIComponent(provider)}/token`,
-      {
-        method: "POST",
-        body: JSON.stringify({ code, redirectUri, state, codeVerifier }),
-      },
-    );
+    }>(this.baseUrl, `/auth/oauth/${encodeURIComponent(provider)}/token`, {
+      method: "POST",
+      body: JSON.stringify({ code, redirectUri, state, codeVerifier }),
+    });
 
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);
@@ -855,19 +865,14 @@ export class StewardAuth {
           resolved = true;
           clearInterval(poll);
           window.removeEventListener("message", messageHandler);
-          reject(
-            new StewardApiError(
-              "OAuth popup was closed before completing sign-in",
-              0,
-            ),
-          );
+          reject(new StewardApiError("OAuth popup was closed before completing sign-in", 0));
           return;
         }
 
         // Try to read the popup URL (cross-origin will throw)
         try {
           const popupUrl = popup.location.href;
-          if (popupUrl && popupUrl.startsWith(origin)) {
+          if (popupUrl?.startsWith(origin)) {
             resolved = true;
             clearInterval(poll);
             window.removeEventListener("message", messageHandler);
@@ -969,14 +974,10 @@ export class StewardAuth {
       return null;
     }
 
-    const res = await authRequest<StewardRefreshResult>(
-      this.baseUrl,
-      "/auth/refresh",
-      {
-        method: "POST",
-        body: JSON.stringify({ refreshToken, tenantId }),
-      },
-    );
+    const res = await authRequest<StewardRefreshResult>(this.baseUrl, "/auth/refresh", {
+      method: "POST",
+      body: JSON.stringify({ refreshToken, tenantId }),
+    });
 
     if (!res.ok) {
       // Refresh failed, user needs to re-authenticate
@@ -1059,4 +1060,7 @@ function base64urlEncode(bytes: Uint8Array): string {
 }
 
 // Export PKCE helpers for testing
-export { generateCodeVerifier as _generateCodeVerifier, generateCodeChallenge as _generateCodeChallenge };
+export {
+  generateCodeChallenge as _generateCodeChallenge,
+  generateCodeVerifier as _generateCodeVerifier,
+};

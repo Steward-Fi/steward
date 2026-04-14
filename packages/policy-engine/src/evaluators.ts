@@ -1,18 +1,18 @@
 import {
-  toCaip2,
-  type PolicyRule,
-  type PolicyResult,
-  type SignRequest,
-  type SpendingLimitConfig,
+  type AllowedChainsConfig,
   type ApprovedAddressesConfig,
   type AutoApproveConfig,
-  type AllowedChainsConfig,
-  type RateLimitConfig,
-  type TimeWindowConfig,
+  type PolicyResult,
+  type PolicyRule,
   type PriceOracle,
+  type RateLimitConfig,
+  type SignRequest,
+  type SpendingLimitConfig,
+  type TimeWindowConfig,
+  toCaip2,
 } from "@stwd/shared";
-import { evaluateReputationThreshold } from "./evaluators/reputation-threshold";
 import { evaluateReputationScaling } from "./evaluators/reputation-scaling";
+import { evaluateReputationThreshold } from "./evaluators/reputation-threshold";
 
 export interface EvaluatorContext {
   request: SignRequest;
@@ -34,10 +34,15 @@ export interface EvaluatorContext {
  */
 export async function evaluatePolicy(
   rule: PolicyRule,
-  ctx: EvaluatorContext
+  ctx: EvaluatorContext,
 ): Promise<PolicyResult> {
   if (!rule.enabled) {
-    return { policyId: rule.id, type: rule.type, passed: true, reason: "Policy disabled" };
+    return {
+      policyId: rule.id,
+      type: rule.type,
+      passed: true,
+      reason: "Policy disabled",
+    };
   }
 
   switch (rule.type) {
@@ -54,14 +59,21 @@ export async function evaluatePolicy(
     case "allowed-chains":
       return evaluateAllowedChains(rule, ctx);
     case "reputation-threshold":
-      return evaluateReputationThreshold(rule, { reputationScore: ctx.reputationScore });
+      return evaluateReputationThreshold(rule, {
+        reputationScore: ctx.reputationScore,
+      });
     case "reputation-scaling":
       return evaluateReputationScaling(rule, {
         reputationScore: ctx.reputationScore,
         txValue: BigInt(ctx.request.value),
       });
     default:
-      return { policyId: rule.id, type: rule.type, passed: false, reason: `Unknown policy type: ${rule.type}` };
+      return {
+        policyId: rule.id,
+        type: rule.type,
+        passed: false,
+        reason: `Unknown policy type: ${rule.type}`,
+      };
   }
 }
 
@@ -107,10 +119,18 @@ function normalizeSpendingLimitConfig(config: Record<string, unknown>): Spending
       return { maxPerTx: maxAmount, maxPerDay: MAX_UINT, maxPerWeek: MAX_UINT };
     case "day":
     case "daily":
-      return { maxPerTx: maxAmount, maxPerDay: maxAmount, maxPerWeek: MAX_UINT };
+      return {
+        maxPerTx: maxAmount,
+        maxPerDay: maxAmount,
+        maxPerWeek: MAX_UINT,
+      };
     case "week":
     case "weekly":
-      return { maxPerTx: maxAmount, maxPerDay: MAX_UINT, maxPerWeek: maxAmount };
+      return {
+        maxPerTx: maxAmount,
+        maxPerDay: MAX_UINT,
+        maxPerWeek: maxAmount,
+      };
     default:
       // Fallback: treat as per-tx limit
       return { maxPerTx: maxAmount, maxPerDay: MAX_UINT, maxPerWeek: MAX_UINT };
@@ -128,7 +148,10 @@ function hasUsdLimits(config: SpendingLimitConfig): boolean {
   );
 }
 
-async function evaluateSpendingLimit(rule: PolicyRule, ctx: EvaluatorContext): Promise<PolicyResult> {
+async function evaluateSpendingLimit(
+  rule: PolicyRule,
+  ctx: EvaluatorContext,
+): Promise<PolicyResult> {
   const config = normalizeSpendingLimitConfig(rule.config);
   const txValue = BigInt(ctx.request.value);
   const base = { policyId: rule.id, type: rule.type } as const;
@@ -180,20 +203,34 @@ async function evaluateSpendingLimit(rule: PolicyRule, ctx: EvaluatorContext): P
     }
 
     // Price unavailable — fall through to wei comparison with a warning
-    console.warn(`[policy] USD price unavailable for chain ${chainId}, falling back to wei comparison`);
+    console.warn(
+      `[policy] USD price unavailable for chain ${chainId}, falling back to wei comparison`,
+    );
   }
 
   // ── Wei-based evaluation (legacy / fallback) ────────────────────────────────
   if (config.maxPerTx && txValue > BigInt(config.maxPerTx)) {
-    return { ...base, passed: false, reason: `Transaction value ${txValue} exceeds per-tx limit ${config.maxPerTx}` };
+    return {
+      ...base,
+      passed: false,
+      reason: `Transaction value ${txValue} exceeds per-tx limit ${config.maxPerTx}`,
+    };
   }
 
   if (config.maxPerDay && ctx.spentToday + txValue > BigInt(config.maxPerDay)) {
-    return { ...base, passed: false, reason: `Would exceed daily spending limit (${config.maxPerDay})` };
+    return {
+      ...base,
+      passed: false,
+      reason: `Would exceed daily spending limit (${config.maxPerDay})`,
+    };
   }
 
   if (config.maxPerWeek && ctx.spentThisWeek + txValue > BigInt(config.maxPerWeek)) {
-    return { ...base, passed: false, reason: `Would exceed weekly spending limit (${config.maxPerWeek})` };
+    return {
+      ...base,
+      passed: false,
+      reason: `Would exceed weekly spending limit (${config.maxPerWeek})`,
+    };
   }
 
   return { ...base, passed: true };
@@ -207,11 +244,19 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
 
   if (config.mode === "whitelist") {
     if (!listed.includes(target)) {
-      return { ...base, passed: false, reason: `Address ${ctx.request.to} not in whitelist` };
+      return {
+        ...base,
+        passed: false,
+        reason: `Address ${ctx.request.to} not in whitelist`,
+      };
     }
   } else {
     if (listed.includes(target)) {
-      return { ...base, passed: false, reason: `Address ${ctx.request.to} is blacklisted` };
+      return {
+        ...base,
+        passed: false,
+        reason: `Address ${ctx.request.to} is blacklisted`,
+      };
     }
   }
 
@@ -230,7 +275,11 @@ async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Pro
 
     if (txUsd !== null) {
       if (txUsd <= config.thresholdUsd) {
-        return { ...base, passed: true, reason: `$${txUsd.toFixed(2)} is below auto-approve threshold $${config.thresholdUsd}` };
+        return {
+          ...base,
+          passed: true,
+          reason: `$${txUsd.toFixed(2)} is below auto-approve threshold $${config.thresholdUsd}`,
+        };
       }
       return {
         ...base,
@@ -240,7 +289,9 @@ async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Pro
     }
 
     // Price unavailable — fall through to wei if available
-    console.warn(`[policy] USD price unavailable for chain ${chainId}, falling back to wei threshold`);
+    console.warn(
+      `[policy] USD price unavailable for chain ${chainId}, falling back to wei threshold`,
+    );
   }
 
   // ── Wei-based threshold (legacy / fallback) ─────────────────────────────────
@@ -248,7 +299,11 @@ async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Pro
     if (txValue <= BigInt(config.threshold)) {
       return { ...base, passed: true, reason: "Below auto-approve threshold" };
     }
-    return { ...base, passed: false, reason: `Value ${txValue} exceeds auto-approve threshold ${config.threshold}` };
+    return {
+      ...base,
+      passed: false,
+      reason: `Value ${txValue} exceeds auto-approve threshold ${config.threshold}`,
+    };
   }
 
   // No threshold configured at all — pass (policy misconfigured but don't block)
@@ -260,17 +315,25 @@ function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResul
   const base = { policyId: rule.id, type: rule.type } as const;
 
   if (ctx.recentTxCount1h >= config.maxTxPerHour) {
-    return { ...base, passed: false, reason: `Hourly tx limit reached (${config.maxTxPerHour})` };
+    return {
+      ...base,
+      passed: false,
+      reason: `Hourly tx limit reached (${config.maxTxPerHour})`,
+    };
   }
 
   if (ctx.recentTxCount24h >= config.maxTxPerDay) {
-    return { ...base, passed: false, reason: `Daily tx limit reached (${config.maxTxPerDay})` };
+    return {
+      ...base,
+      passed: false,
+      reason: `Daily tx limit reached (${config.maxTxPerDay})`,
+    };
   }
 
   return { ...base, passed: true };
 }
 
-function evaluateTimeWindow(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as TimeWindowConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const now = new Date();
@@ -278,13 +341,21 @@ function evaluateTimeWindow(rule: PolicyRule, ctx: EvaluatorContext): PolicyResu
   const day = now.getUTCDay();
 
   if (config.allowedDays.length > 0 && !config.allowedDays.includes(day)) {
-    return { ...base, passed: false, reason: `Transactions not allowed on day ${day}` };
+    return {
+      ...base,
+      passed: false,
+      reason: `Transactions not allowed on day ${day}`,
+    };
   }
 
   if (config.allowedHours.length > 0) {
     const inWindow = config.allowedHours.some((w) => hour >= w.start && hour < w.end);
     if (!inWindow) {
-      return { ...base, passed: false, reason: `Current hour ${hour} UTC not in allowed windows` };
+      return {
+        ...base,
+        passed: false,
+        reason: `Current hour ${hour} UTC not in allowed windows`,
+      };
     }
   }
 
@@ -300,7 +371,11 @@ function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyR
   const chainId = ctx.request.chainId;
 
   if (!chainId) {
-    return { ...base, passed: true, reason: "No chainId specified; deferring chain check to vault" };
+    return {
+      ...base,
+      passed: true,
+      reason: "No chainId specified; deferring chain check to vault",
+    };
   }
 
   const caip2 = toCaip2(chainId);

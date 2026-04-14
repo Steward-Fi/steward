@@ -1,6 +1,6 @@
-import { describe, test, expect, beforeEach, afterAll } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { disconnectRedis, getRedis } from "../client.js";
 import { checkRateLimit, getRateLimitStatus } from "../rate-limiter.js";
-import { getRedis, disconnectRedis } from "../client.js";
 
 const runRedis = process.env.STEWARD_REDIS_TESTS === "1";
 const describeRedis = runRedis ? describe : describe.skip;

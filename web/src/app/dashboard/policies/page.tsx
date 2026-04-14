@@ -1,15 +1,15 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
+import { useCallback, useEffect, useState } from "react";
 import { steward } from "@/lib/api";
-import { formatDate } from "@/lib/utils";
 import type {
-  PolicyRecord,
-  PolicyCreatePayload,
   AgentIdentity,
+  PolicyCreatePayload,
+  PolicyRecord,
   PolicySimulatePayload,
 } from "@/lib/steward-client";
+import { formatDate } from "@/lib/utils";
 
 const ease: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
@@ -19,14 +19,42 @@ interface Toast {
   kind: "success" | "error";
 }
 
-const POLICY_TYPES: { value: PolicyRecord["type"]; label: string; description: string }[] = [
-  { value: "api_access", label: "API Access", description: "Control which external APIs agents can call" },
-  { value: "spend_limit", label: "Spend Limit", description: "Cap daily or per-transaction spend" },
-  { value: "rate_limit", label: "Rate Limit", description: "Throttle request frequency" },
-  { value: "transaction", label: "Transaction", description: "Rules for on-chain transactions" },
+const POLICY_TYPES: {
+  value: PolicyRecord["type"];
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "api_access",
+    label: "API Access",
+    description: "Control which external APIs agents can call",
+  },
+  {
+    value: "spend_limit",
+    label: "Spend Limit",
+    description: "Cap daily or per-transaction spend",
+  },
+  {
+    value: "rate_limit",
+    label: "Rate Limit",
+    description: "Throttle request frequency",
+  },
+  {
+    value: "transaction",
+    label: "Transaction",
+    description: "Rules for on-chain transactions",
+  },
 ];
 
-const TEMPLATES: Record<string, { name: string; description: string; type: PolicyRecord["type"]; rules: Record<string, unknown> }> = {
+const TEMPLATES: Record<
+  string,
+  {
+    name: string;
+    description: string;
+    type: PolicyRecord["type"];
+    rules: Record<string, unknown>;
+  }
+> = {
   "standard-agent": {
     name: "Standard Agent",
     description: "Balanced limits for general-purpose agents",
@@ -111,8 +139,18 @@ export default function PoliciesPage() {
 
   // Simulate
   const [showSimulate, setShowSimulate] = useState(false);
-  const [simForm, setSimForm] = useState({ agentId: "", method: "GET", url: "", value: "", data: "" });
-  const [simResult, setSimResult] = useState<{ allowed: boolean; reason?: string; matchedRules: string[] } | null>(null);
+  const [simForm, setSimForm] = useState({
+    agentId: "",
+    method: "GET",
+    url: "",
+    value: "",
+    data: "",
+  });
+  const [simResult, setSimResult] = useState<{
+    allowed: boolean;
+    reason?: string;
+    matchedRules: string[];
+  } | null>(null);
   const [simulating, setSimulating] = useState(false);
 
   // Delete
@@ -139,7 +177,9 @@ export default function PoliciesPage() {
     }
   }
 
-  useEffect(() => { loadAll(); }, []);
+  useEffect(() => {
+    loadAll();
+  }, [loadAll]);
 
   const openDetail = useCallback((policy: PolicyRecord) => {
     setSelected(policy);
@@ -176,7 +216,10 @@ export default function PoliciesPage() {
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
     const rules = validateJson(rulesJson);
-    if (!rules) { setRulesError("Invalid JSON"); return; }
+    if (!rules) {
+      setRulesError("Invalid JSON");
+      return;
+    }
     if (!createForm.name) return;
     setCreating(true);
     setCreateError(null);
@@ -186,7 +229,12 @@ export default function PoliciesPage() {
       setShowCreate(false);
       setCreateStep("template");
       setSelectedTemplate(null);
-      setCreateForm({ name: "", description: "", type: "transaction", rules: {} });
+      setCreateForm({
+        name: "",
+        description: "",
+        type: "transaction",
+        rules: {},
+      });
       setRulesJson("{}");
       toast("Policy created", "success");
     } catch (e: unknown) {
@@ -199,7 +247,10 @@ export default function PoliciesPage() {
   async function handleSaveEdit() {
     if (!selected) return;
     const rules = validateJson(editJson);
-    if (!rules) { setEditJsonError("Invalid JSON"); return; }
+    if (!rules) {
+      setEditJsonError("Invalid JSON");
+      return;
+    }
     setSaving(true);
     try {
       const updated = await steward.updatePolicy(selected.id, { rules });
@@ -308,7 +359,10 @@ export default function PoliciesPage() {
           </p>
         </div>
         <button
-          onClick={() => { setShowCreate(!showCreate); setCreateStep("template"); }}
+          onClick={() => {
+            setShowCreate(!showCreate);
+            setCreateStep("template");
+          }}
           className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors font-medium"
         >
           New Policy
@@ -342,7 +396,9 @@ export default function PoliciesPage() {
                       >
                         <div className="font-display text-sm font-600">{tmpl.name}</div>
                         <div className="text-xs text-text-tertiary">{tmpl.description}</div>
-                        <span className={`inline-block text-xs px-1.5 py-0.5 rounded-sm mt-1 ${typeColor(tmpl.type)}`}>
+                        <span
+                          className={`inline-block text-xs px-1.5 py-0.5 rounded-sm mt-1 ${typeColor(tmpl.type)}`}
+                        >
                           {tmpl.type.replace("_", " ")}
                         </span>
                       </button>
@@ -350,18 +406,28 @@ export default function PoliciesPage() {
                     <button
                       onClick={() => {
                         setSelectedTemplate(null);
-                        setCreateForm({ name: "", description: "", type: "transaction", rules: {} });
+                        setCreateForm({
+                          name: "",
+                          description: "",
+                          type: "transaction",
+                          rules: {},
+                        });
                         setRulesJson("{}");
                         setCreateStep("edit");
                       }}
                       className="text-left p-4 border border-border hover:border-accent/60 hover:bg-bg-surface transition-colors space-y-1.5"
                     >
                       <div className="font-display text-sm font-600">Custom</div>
-                      <div className="text-xs text-text-tertiary">Start from scratch with your own rules</div>
+                      <div className="text-xs text-text-tertiary">
+                        Start from scratch with your own rules
+                      </div>
                     </button>
                   </div>
                   <button
-                    onClick={() => { setShowCreate(false); setCreateStep("template"); }}
+                    onClick={() => {
+                      setShowCreate(false);
+                      setCreateStep("template");
+                    }}
                     className="text-xs text-text-tertiary hover:text-text transition-colors"
                   >
                     Cancel
@@ -397,11 +463,18 @@ export default function PoliciesPage() {
                       <label className="text-xs text-text-tertiary block mb-1.5">Type</label>
                       <select
                         value={createForm.type}
-                        onChange={(e) => setCreateForm({ ...createForm, type: e.target.value as PolicyRecord["type"] })}
+                        onChange={(e) =>
+                          setCreateForm({
+                            ...createForm,
+                            type: e.target.value as PolicyRecord["type"],
+                          })
+                        }
                         className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
                       >
                         {POLICY_TYPES.map((t) => (
-                          <option key={t.value} value={t.value}>{t.label}</option>
+                          <option key={t.value} value={t.value}>
+                            {t.label}
+                          </option>
                         ))}
                       </select>
                     </div>
@@ -412,19 +485,25 @@ export default function PoliciesPage() {
                     <input
                       type="text"
                       value={createForm.description}
-                      onChange={(e) => setCreateForm({ ...createForm, description: e.target.value })}
+                      onChange={(e) =>
+                        setCreateForm({
+                          ...createForm,
+                          description: e.target.value,
+                        })
+                      }
                       placeholder="Describe what this policy does..."
                       className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                     />
                   </div>
 
                   <div>
-                    <label className="text-xs text-text-tertiary block mb-1.5">
-                      Rules (JSON)
-                    </label>
+                    <label className="text-xs text-text-tertiary block mb-1.5">Rules (JSON)</label>
                     <textarea
                       value={rulesJson}
-                      onChange={(e) => { setRulesJson(e.target.value); setRulesError(null); }}
+                      onChange={(e) => {
+                        setRulesJson(e.target.value);
+                        setRulesError(null);
+                      }}
                       rows={8}
                       spellCheck={false}
                       className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors font-mono resize-none"
@@ -467,7 +546,10 @@ export default function PoliciesPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => { setShowCreate(false); setCreateStep("template"); }}
+                      onClick={() => {
+                        setShowCreate(false);
+                        setCreateStep("template");
+                      }}
                       className="px-4 py-2 text-sm text-text-tertiary hover:text-text transition-colors"
                     >
                       Cancel
@@ -485,7 +567,12 @@ export default function PoliciesPage() {
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
           <p className="text-text-secondary text-sm mb-1">Failed to load policies</p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
-          <button onClick={loadAll} className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors">Retry</button>
+          <button
+            onClick={loadAll}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -495,7 +582,9 @@ export default function PoliciesPage() {
         <div className="lg:col-span-2">
           {loading ? (
             <div className="space-y-px bg-border">
-              {[...Array(3)].map((_, i) => <div key={i} className="bg-bg h-16 animate-pulse" />)}
+              {[...Array(3)].map((_, i) => (
+                <div key={i} className="bg-bg h-16 animate-pulse" />
+              ))}
             </div>
           ) : policies.length === 0 && !error ? (
             <div className="py-16 text-center border border-border-subtle">
@@ -503,7 +592,10 @@ export default function PoliciesPage() {
               <p className="text-sm text-text-tertiary mt-1 max-w-xs mx-auto">
                 Create policies to control what your agents are allowed to do.
               </p>
-              <button onClick={() => setShowCreate(true)} className="mt-4 px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors">
+              <button
+                onClick={() => setShowCreate(true)}
+                className="mt-4 px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+              >
                 Create First Policy
               </button>
             </div>
@@ -523,11 +615,15 @@ export default function PoliciesPage() {
                     }`}
                   >
                     <div className="min-w-0">
-                      <div className={`font-display font-600 text-sm truncate ${selected?.id === policy.id ? "text-accent" : "group-hover:text-accent transition-colors"}`}>
+                      <div
+                        className={`font-display font-600 text-sm truncate ${selected?.id === policy.id ? "text-accent" : "group-hover:text-accent transition-colors"}`}
+                      >
                         {policy.name}
                       </div>
                       {policy.description && (
-                        <div className="text-xs text-text-tertiary mt-0.5 truncate">{policy.description}</div>
+                        <div className="text-xs text-text-tertiary mt-0.5 truncate">
+                          {policy.description}
+                        </div>
                       )}
                       <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                         <span className={`text-xs px-1.5 py-0.5 ${typeColor(policy.type)}`}>
@@ -535,7 +631,8 @@ export default function PoliciesPage() {
                         </span>
                         {policy.assignedAgents?.length > 0 && (
                           <span className="text-xs text-text-tertiary">
-                            {policy.assignedAgents.length} agent{policy.assignedAgents.length !== 1 ? "s" : ""}
+                            {policy.assignedAgents.length} agent
+                            {policy.assignedAgents.length !== 1 ? "s" : ""}
                           </span>
                         )}
                       </div>
@@ -572,7 +669,10 @@ export default function PoliciesPage() {
                       <p className="text-sm text-text-tertiary mt-0.5">{selected.description}</p>
                     )}
                   </div>
-                  <button onClick={() => setSelected(null)} className="text-text-tertiary hover:text-text transition-colors text-lg leading-none">
+                  <button
+                    onClick={() => setSelected(null)}
+                    className="text-text-tertiary hover:text-text transition-colors text-lg leading-none"
+                  >
                     &times;
                   </button>
                 </div>
@@ -581,7 +681,9 @@ export default function PoliciesPage() {
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1">
                     <div className="text-xs text-text-tertiary">Created</div>
-                    <div className="text-sm font-mono text-text-secondary">{formatDate(selected.createdAt)}</div>
+                    <div className="text-sm font-mono text-text-secondary">
+                      {formatDate(selected.createdAt)}
+                    </div>
                   </div>
                   <div className="space-y-1">
                     <div className="text-xs text-text-tertiary">Assigned Agents</div>
@@ -594,13 +696,19 @@ export default function PoliciesPage() {
                 {/* Actions */}
                 <div className="flex gap-2 flex-wrap">
                   <button
-                    onClick={() => { setEditMode(!editMode); if (!editMode) setEditJson(JSON.stringify(selected.rules, null, 2)); }}
+                    onClick={() => {
+                      setEditMode(!editMode);
+                      if (!editMode) setEditJson(JSON.stringify(selected.rules, null, 2));
+                    }}
                     className="px-3 py-1.5 text-xs font-medium border border-border text-text-secondary hover:border-accent hover:text-accent transition-colors"
                   >
                     {editMode ? "Cancel Edit" : "Edit Rules"}
                   </button>
                   <button
-                    onClick={() => { setShowAssign(!showAssign); setAssignSelected(new Set(selected.assignedAgents || [])); }}
+                    onClick={() => {
+                      setShowAssign(!showAssign);
+                      setAssignSelected(new Set(selected.assignedAgents || []));
+                    }}
                     className="px-3 py-1.5 text-xs font-medium border border-border text-text-secondary hover:border-accent hover:text-accent transition-colors"
                   >
                     Assign Agents
@@ -631,7 +739,8 @@ export default function PoliciesPage() {
                     >
                       <div className="border border-red-400/20 bg-red-400/5 p-4 space-y-3">
                         <p className="text-xs text-red-400 font-medium">
-                          Delete "{selected.name}"? Agents using this policy will lose its protections.
+                          Delete "{selected.name}"? Agents using this policy will lose its
+                          protections.
                         </p>
                         <div className="flex gap-3">
                           <button
@@ -641,7 +750,10 @@ export default function PoliciesPage() {
                           >
                             {deleting ? "Deleting..." : "Delete Policy"}
                           </button>
-                          <button onClick={() => setConfirmDelete(null)} className="px-3 py-2 text-xs text-text-tertiary hover:text-text transition-colors">
+                          <button
+                            onClick={() => setConfirmDelete(null)}
+                            className="px-3 py-2 text-xs text-text-tertiary hover:text-text transition-colors"
+                          >
                             Cancel
                           </button>
                         </div>
@@ -667,7 +779,10 @@ export default function PoliciesPage() {
                   <textarea
                     value={editMode ? editJson : JSON.stringify(selected.rules, null, 2)}
                     onChange={(e) => {
-                      if (editMode) { setEditJson(e.target.value); setEditJsonError(null); }
+                      if (editMode) {
+                        setEditJson(e.target.value);
+                        setEditJsonError(null);
+                      }
                     }}
                     readOnly={!editMode}
                     rows={10}
@@ -710,7 +825,10 @@ export default function PoliciesPage() {
                         ) : (
                           <div className="space-y-1.5 max-h-40 overflow-y-auto">
                             {agents.map((a) => (
-                              <label key={a.id} className="flex items-center gap-2 cursor-pointer group">
+                              <label
+                                key={a.id}
+                                className="flex items-center gap-2 cursor-pointer group"
+                              >
                                 <input
                                   type="checkbox"
                                   checked={assignSelected.has(a.id)}
@@ -722,7 +840,9 @@ export default function PoliciesPage() {
                                   }}
                                   className="accent-amber-400"
                                 />
-                                <span className="text-sm text-text-secondary group-hover:text-text transition-colors">{a.name}</span>
+                                <span className="text-sm text-text-secondary group-hover:text-text transition-colors">
+                                  {a.name}
+                                </span>
                                 <span className="text-xs text-text-tertiary font-mono">{a.id}</span>
                               </label>
                             ))}
@@ -736,7 +856,10 @@ export default function PoliciesPage() {
                           >
                             {assigning ? "Saving..." : "Save Assignments"}
                           </button>
-                          <button onClick={() => setShowAssign(false)} className="px-3 py-2 text-xs text-text-tertiary hover:text-text transition-colors">
+                          <button
+                            onClick={() => setShowAssign(false)}
+                            className="px-3 py-2 text-xs text-text-tertiary hover:text-text transition-colors"
+                          >
                             Cancel
                           </button>
                         </div>
@@ -755,21 +878,37 @@ export default function PoliciesPage() {
                       transition={{ duration: 0.2, ease }}
                       className="overflow-hidden"
                     >
-                      <form onSubmit={handleSimulate} className="border border-violet-400/20 bg-violet-400/5 p-4 space-y-4">
-                        <p className="text-xs text-violet-400 font-display font-600">Policy Simulator</p>
-                        <p className="text-xs text-text-tertiary">Test whether a request would be allowed by this policy.</p>
+                      <form
+                        onSubmit={handleSimulate}
+                        className="border border-violet-400/20 bg-violet-400/5 p-4 space-y-4"
+                      >
+                        <p className="text-xs text-violet-400 font-display font-600">
+                          Policy Simulator
+                        </p>
+                        <p className="text-xs text-text-tertiary">
+                          Test whether a request would be allowed by this policy.
+                        </p>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div>
-                            <label className="text-xs text-text-tertiary block mb-1">Agent <span className="text-accent">*</span></label>
+                            <label className="text-xs text-text-tertiary block mb-1">
+                              Agent <span className="text-accent">*</span>
+                            </label>
                             <select
                               value={simForm.agentId}
-                              onChange={(e) => setSimForm({ ...simForm, agentId: e.target.value })}
+                              onChange={(e) =>
+                                setSimForm({
+                                  ...simForm,
+                                  agentId: e.target.value,
+                                })
+                              }
                               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-violet-400 transition-colors"
                             >
                               <option value="">Select agent...</option>
                               {agents.map((a) => (
-                                <option key={a.id} value={a.id}>{a.name}</option>
+                                <option key={a.id} value={a.id}>
+                                  {a.name}
+                                </option>
                               ))}
                             </select>
                           </div>
@@ -777,11 +916,18 @@ export default function PoliciesPage() {
                             <label className="text-xs text-text-tertiary block mb-1">Method</label>
                             <select
                               value={simForm.method}
-                              onChange={(e) => setSimForm({ ...simForm, method: e.target.value })}
+                              onChange={(e) =>
+                                setSimForm({
+                                  ...simForm,
+                                  method: e.target.value,
+                                })
+                              }
                               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-violet-400 transition-colors"
                             >
                               {["GET", "POST", "PUT", "DELETE", "PATCH"].map((m) => (
-                                <option key={m} value={m}>{m}</option>
+                                <option key={m} value={m}>
+                                  {m}
+                                </option>
                               ))}
                             </select>
                           </div>
@@ -800,17 +946,26 @@ export default function PoliciesPage() {
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div>
-                            <label className="text-xs text-text-tertiary block mb-1">Value (ETH)</label>
+                            <label className="text-xs text-text-tertiary block mb-1">
+                              Value (ETH)
+                            </label>
                             <input
                               type="text"
                               value={simForm.value}
-                              onChange={(e) => setSimForm({ ...simForm, value: e.target.value })}
+                              onChange={(e) =>
+                                setSimForm({
+                                  ...simForm,
+                                  value: e.target.value,
+                                })
+                              }
                               placeholder="0.0"
                               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-violet-400 transition-colors font-mono"
                             />
                           </div>
                           <div>
-                            <label className="text-xs text-text-tertiary block mb-1">Calldata</label>
+                            <label className="text-xs text-text-tertiary block mb-1">
+                              Calldata
+                            </label>
                             <input
                               type="text"
                               value={simForm.data}
@@ -843,7 +998,9 @@ export default function PoliciesPage() {
                               }`}
                             >
                               <div className="flex items-center gap-2">
-                                <span className={`text-sm font-display font-700 ${simResult.allowed ? "text-emerald-400" : "text-red-400"}`}>
+                                <span
+                                  className={`text-sm font-display font-700 ${simResult.allowed ? "text-emerald-400" : "text-red-400"}`}
+                                >
                                   {simResult.allowed ? "ALLOWED" : "DENIED"}
                                 </span>
                               </div>
@@ -853,7 +1010,10 @@ export default function PoliciesPage() {
                               {simResult.matchedRules.length > 0 && (
                                 <div className="flex flex-wrap gap-1.5">
                                   {simResult.matchedRules.map((rule, i) => (
-                                    <span key={i} className="text-xs px-1.5 py-0.5 bg-bg border border-border font-mono text-text-tertiary">
+                                    <span
+                                      key={i}
+                                      className="text-xs px-1.5 py-0.5 bg-bg border border-border font-mono text-text-tertiary"
+                                    >
                                       {rule}
                                     </span>
                                   ))}

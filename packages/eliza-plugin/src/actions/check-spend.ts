@@ -1,6 +1,13 @@
-import type { Action, ActionExample, HandlerOptions, ActionResult } from "@elizaos/core";
-import type { IAgentRuntime, Memory, State } from "@elizaos/core";
-import { StewardService } from "../services/StewardService.js";
+import type {
+  Action,
+  ActionExample,
+  ActionResult,
+  HandlerOptions,
+  IAgentRuntime,
+  Memory,
+  State,
+} from "@elizaos/core";
+import type { StewardService } from "../services/StewardService.js";
 
 /**
  * STEWARD_CHECK_SPEND — query the agent's spending stats via the dashboard endpoint.

@@ -7,10 +7,7 @@ export function ChainBadge({ chainId, compact }: { chainId: number; compact?: bo
 
   return (
     <span className="inline-flex items-center gap-1 text-xs font-mono">
-      <span
-        className="inline-block w-2 h-2 rounded-full"
-        style={{ backgroundColor: meta.color }}
-      />
+      <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: meta.color }} />
       {compact ? meta.symbol : meta.name}
     </span>
   );

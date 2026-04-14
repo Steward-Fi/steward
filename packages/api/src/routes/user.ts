@@ -16,12 +16,16 @@
  *       This file exports a Hono route group ready for mounting.
  */
 
-import { and, eq, sql } from "drizzle-orm";
-import { Hono, type Context, type Next } from "hono";
-import { jwtVerify } from "jose";
-import { parseEther } from "viem";
-
-import { getDb, policies, tenants, tenantConfigs, toPolicyRule, toTxRecord, transactions, userTenants } from "@stwd/db";
+import {
+  getDb,
+  policies,
+  tenantConfigs,
+  tenants,
+  toPolicyRule,
+  toTxRecord,
+  transactions,
+  userTenants,
+} from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import type {
   AgentBalance,
@@ -36,15 +40,22 @@ import {
   USER_WALLET_DEFAULT_POLICIES,
   Vault,
 } from "@stwd/vault";
+import { and, eq, sql } from "drizzle-orm";
+import { type Context, Hono, type Next } from "hono";
+import { jwtVerify } from "jose";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const _jwtSecretSrc = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
 if (!_jwtSecretSrc) {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
+    throw new Error(
+      "⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production",
+    );
   }
-  console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!");
+  console.warn(
+    "⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!",
+  );
 }
 const JWT_SECRET = new TextEncoder().encode(_jwtSecretSrc || "dev-secret");
 const JWT_ISSUER = "steward";
@@ -90,20 +101,20 @@ function getVault(): Vault {
   }
   return new Vault({
     masterPassword,
-    rpcUrl:  process.env.RPC_URL  || "https://sepolia.base.org",
+    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
     chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
   });
 }
 
 async function getTransactionStats(agentId: string) {
-  const db         = getDb();
-  const now        = new Date();
+  const db = getDb();
+  const now = new Date();
   const oneHourAgo = new Date(now.getTime() - 3_600_000);
-  const oneDayAgo  = new Date(now.getTime() - 86_400_000);
+  const oneDayAgo = new Date(now.getTime() - 86_400_000);
   const oneWeekAgo = new Date(now.getTime() - 604_800_000);
 
   const oneHourAgoStr = oneHourAgo.toISOString();
-  const oneDayAgoStr  = oneDayAgo.toISOString();
+  const oneDayAgoStr = oneDayAgo.toISOString();
 
   const [stats] = await db
     .select({
@@ -127,15 +138,15 @@ async function getTransactionStats(agentId: string) {
       and(
         eq(transactions.agentId, agentId),
         sql`${transactions.createdAt} >= ${oneWeekAgo.toISOString()}::timestamptz`,
-        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`
-      )
+        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+      ),
     );
 
   return {
-    recentTxCount1h:  Number(stats?.recentTxCount1h  ?? 0),
+    recentTxCount1h: Number(stats?.recentTxCount1h ?? 0),
     recentTxCount24h: Number(stats?.recentTxCount24h ?? 0),
-    spentToday:       BigInt(stats?.spentToday   ?? "0"),
-    spentThisWeek:    BigInt(stats?.spentThisWeek ?? "0"),
+    spentToday: BigInt(stats?.spentToday ?? "0"),
+    spentThisWeek: BigInt(stats?.spentThisWeek ?? "0"),
   };
 }
 
@@ -153,13 +164,13 @@ async function getTransactionStats(agentId: string) {
  */
 async function userSessionAuth(
   c: Context<{ Variables: UserVariables }>,
-  next: Next
-): Promise<Response | void> {
+  next: Next,
+): Promise<Response | undefined> {
   const authHeader = c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
     return c.json<ApiResponse>(
       { ok: false, error: "Authorization: Bearer <token> header is required" },
-      401
+      401,
     );
   }
 
@@ -170,10 +181,7 @@ async function userSessionAuth(
     const result = await jwtVerify(token, JWT_SECRET, { issuer: JWT_ISSUER });
     payload = result.payload as unknown as UserSessionPayload;
   } catch {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Invalid or expired session token" },
-      401
-    );
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
   }
 
   // Support both userId (new) and address (SIWE legacy)
@@ -181,11 +189,11 @@ async function userSessionAuth(
   if (!userId) {
     return c.json<ApiResponse>(
       { ok: false, error: "Session token missing userId or address claim" },
-      401
+      401,
     );
   }
 
-  c.set("userId",      userId);
+  c.set("userId", userId);
   c.set("userSession", { ...payload, userId });
 
   await next();
@@ -202,12 +210,12 @@ user.use("*", userSessionAuth);
 
 user.get("/me", async (c) => {
   const session = c.get("userSession");
-  const userId  = c.get("userId");
+  const userId = c.get("userId");
 
   // Check if the user already has a wallet provisioned
   let walletInfo: { address: string; agentId: string } | null = null;
   try {
-    const vault  = getVault();
+    const vault = getVault();
     const wallet = await getUserWallet(vault, userId);
     if (wallet) {
       walletInfo = { address: wallet.walletAddress, agentId: wallet.id };
@@ -216,18 +224,20 @@ user.get("/me", async (c) => {
     // Non-fatal — wallet may not be provisioned yet
   }
 
-  return c.json<ApiResponse<{
-    userId: string;
-    address?: string;
-    email?: string;
-    wallet: { address: string; agentId: string } | null;
-  }>>({
+  return c.json<
+    ApiResponse<{
+      userId: string;
+      address?: string;
+      email?: string;
+      wallet: { address: string; agentId: string } | null;
+    }>
+  >({
     ok: true,
     data: {
       userId,
       address: session.address as string | undefined,
-      email:   session.email   as string | undefined,
-      wallet:  walletInfo,
+      email: session.email as string | undefined,
+      wallet: walletInfo,
     },
   });
 });
@@ -240,7 +250,7 @@ user.get("/me/wallet", async (c) => {
   let vault: Vault;
   try {
     vault = getVault();
-  } catch (e) {
+  } catch (_e) {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
@@ -248,10 +258,10 @@ user.get("/me/wallet", async (c) => {
   let wallet: AgentIdentity | null = await getUserWallet(vault, userId);
   if (!wallet) {
     try {
-      const session     = c.get("userSession");
+      const session = c.get("userSession");
       const displayName = (session.address as string | undefined) ?? userId;
-      const result      = await provisionUserWallet(vault, userId, displayName);
-      wallet            = await getUserWallet(vault, userId);
+      const _result = await provisionUserWallet(vault, userId, displayName);
+      wallet = await getUserWallet(vault, userId);
       if (!wallet) throw new Error("Provision succeeded but agent not found");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
@@ -260,25 +270,21 @@ user.get("/me/wallet", async (c) => {
   }
 
   const chainIdParam = c.req.query("chainId");
-  const chainId      = chainIdParam ? parseInt(chainIdParam, 10) : undefined;
+  const chainId = chainIdParam ? parseInt(chainIdParam, 10) : undefined;
 
   try {
-    const balance = await vault.getBalance(
-      `personal-${userId}`,
-      wallet.id,
-      chainId
-    );
+    const balance = await vault.getBalance(`personal-${userId}`, wallet.id, chainId);
 
     return c.json<ApiResponse<AgentBalance>>({
-      ok:   true,
+      ok: true,
       data: {
-        agentId:       wallet.id,
+        agentId: wallet.id,
         walletAddress: wallet.walletAddress,
         balances: {
-          native:          balance.native.toString(),
+          native: balance.native.toString(),
           nativeFormatted: balance.nativeFormatted,
-          chainId:         balance.chainId,
-          symbol:          balance.symbol,
+          chainId: balance.chainId,
+          symbol: balance.symbol,
         },
       },
     });
@@ -303,8 +309,11 @@ user.post("/me/wallet/sign", async (c) => {
   const wallet = await getUserWallet(vault, userId);
   if (!wallet) {
     return c.json<ApiResponse>(
-      { ok: false, error: "No wallet found — call GET /me/wallet first to provision" },
-      404
+      {
+        ok: false,
+        error: "No wallet found — call GET /me/wallet first to provision",
+      },
+      404,
     );
   }
 
@@ -318,52 +327,54 @@ user.post("/me/wallet/sign", async (c) => {
   }
   if (!isValidAddress(body.to)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "'to' must be a valid Ethereum address (0x + 40 hex chars)" },
-      400
+      {
+        ok: false,
+        error: "'to' must be a valid Ethereum address (0x + 40 hex chars)",
+      },
+      400,
     );
   }
   if (body.value === undefined || body.value === null) {
-    return c.json<ApiResponse>({ ok: false, error: "'value' is required (wei amount as string)" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'value' is required (wei amount as string)" },
+      400,
+    );
   }
 
-  const tenantId    = `personal-${userId}`;
-  const agentId     = wallet.id;
+  const tenantId = `personal-${userId}`;
+  const agentId = wallet.id;
   const signRequest: SignRequest = { ...body, tenantId, agentId };
 
   // Fetch active policies
-  const db          = getDb();
-  const storedPolicies = await db
-    .select()
-    .from(policies)
-    .where(eq(policies.agentId, agentId));
+  const db = getDb();
+  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
 
-  const policySet: PolicyRule[] = storedPolicies.length > 0
-    ? storedPolicies.map(toPolicyRule)
-    : USER_WALLET_DEFAULT_POLICIES;
+  const policySet: PolicyRule[] =
+    storedPolicies.length > 0 ? storedPolicies.map(toPolicyRule) : USER_WALLET_DEFAULT_POLICIES;
 
-  const stats      = await getTransactionStats(agentId);
-  const engine     = new PolicyEngine();
+  const stats = await getTransactionStats(agentId);
+  const engine = new PolicyEngine();
   const evaluation = await engine.evaluate(policySet, {
-    request:          signRequest,
-    recentTxCount1h:  stats.recentTxCount1h,
+    request: signRequest,
+    recentTxCount1h: stats.recentTxCount1h,
     recentTxCount24h: stats.recentTxCount24h,
-    spentToday:       stats.spentToday,
-    spentThisWeek:    stats.spentThisWeek,
+    spentToday: stats.spentToday,
+    spentThisWeek: stats.spentThisWeek,
   });
 
   if (!evaluation.approved) {
     return c.json<ApiResponse>(
       {
-        ok:    false,
+        ok: false,
         error: "Transaction rejected by policy",
-        data:  { results: evaluation.results },
+        data: { results: evaluation.results },
       },
-      403
+      403,
     );
   }
 
   try {
-    const txId   = crypto.randomUUID();
+    const txId = crypto.randomUUID();
     const txHash = await vault.signTransaction(signRequest, {
       txId,
       policyResults: evaluation.results,
@@ -371,7 +382,7 @@ user.post("/me/wallet/sign", async (c) => {
     });
 
     return c.json<ApiResponse<{ txId: string; txHash: string }>>({
-      ok:   true,
+      ok: true,
       data: { txId, txHash },
     });
   } catch (e) {
@@ -398,14 +409,11 @@ user.get("/me/wallet/history", async (c) => {
     return c.json<ApiResponse<[]>>({ ok: true, data: [] });
   }
 
-  const db      = getDb();
-  const history = await db
-    .select()
-    .from(transactions)
-    .where(eq(transactions.agentId, wallet.id));
+  const db = getDb();
+  const history = await db.select().from(transactions).where(eq(transactions.agentId, wallet.id));
 
   return c.json<ApiResponse>({
-    ok:   true,
+    ok: true,
     data: history.map(toTxRecord),
   });
 });
@@ -426,20 +434,16 @@ user.get("/me/wallet/policies", async (c) => {
   if (!wallet) {
     // No wallet yet — return the defaults so the user can preview them
     return c.json<ApiResponse<PolicyRule[]>>({
-      ok:   true,
+      ok: true,
       data: USER_WALLET_DEFAULT_POLICIES,
     });
   }
 
-  const db             = getDb();
-  const storedPolicies = await db
-    .select()
-    .from(policies)
-    .where(eq(policies.agentId, wallet.id));
+  const db = getDb();
+  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, wallet.id));
 
-  const activePolicies: PolicyRule[] = storedPolicies.length > 0
-    ? storedPolicies.map(toPolicyRule)
-    : USER_WALLET_DEFAULT_POLICIES;
+  const activePolicies: PolicyRule[] =
+    storedPolicies.length > 0 ? storedPolicies.map(toPolicyRule) : USER_WALLET_DEFAULT_POLICIES;
 
   return c.json<ApiResponse<PolicyRule[]>>({ ok: true, data: activePolicies });
 });
@@ -459,25 +463,30 @@ user.post("/me/wallet/sign-message", async (c) => {
   const wallet = await getUserWallet(vault, userId);
   if (!wallet) {
     return c.json<ApiResponse>(
-      { ok: false, error: "No wallet found — call GET /me/wallet first to provision" },
-      404
+      {
+        ok: false,
+        error: "No wallet found — call GET /me/wallet first to provision",
+      },
+      404,
     );
   }
 
   const body = await safeJsonParse<{ message: string }>(c);
   if (!body || !isNonEmptyString(body.message)) {
-    return c.json<ApiResponse>({ ok: false, error: "'message' is required and must be a non-empty string" }, 400);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "'message' is required and must be a non-empty string",
+      },
+      400,
+    );
   }
 
   try {
-    const signature = await vault.signMessage(
-      `personal-${userId}`,
-      wallet.id,
-      body.message
-    );
+    const signature = await vault.signMessage(`personal-${userId}`, wallet.id, body.message);
 
     return c.json<ApiResponse<{ signature: string; address: string }>>({
-      ok:   true,
+      ok: true,
       data: { signature, address: wallet.walletAddress },
     });
   } catch (e) {
@@ -502,8 +511,11 @@ user.post("/me/wallet/export", async (c) => {
   const wallet = await getUserWallet(vault, userId);
   if (!wallet) {
     return c.json<ApiResponse>(
-      { ok: false, error: "No wallet found — call GET /me/wallet first to provision" },
-      404
+      {
+        ok: false,
+        error: "No wallet found — call GET /me/wallet first to provision",
+      },
+      404,
     );
   }
 
@@ -512,11 +524,13 @@ user.post("/me/wallet/export", async (c) => {
   try {
     const keys = await vault.exportPrivateKey(personalTenantId, wallet.id);
 
-    return c.json<ApiResponse<{
-      evm?: { privateKey: string; address: string };
-      solana?: { privateKey: string; address: string };
-      warning: string;
-    }>>({
+    return c.json<
+      ApiResponse<{
+        evm?: { privateKey: string; address: string };
+        solana?: { privateKey: string; address: string };
+        warning: string;
+      }>
+    >({
       ok: true,
       data: {
         ...keys,
@@ -551,7 +565,10 @@ user.get("/me/tenants", async (c) => {
     .innerJoin(tenants, eq(userTenants.tenantId, tenants.id))
     .where(eq(userTenants.userId, userId));
 
-  return c.json<ApiResponse<typeof memberships>>({ ok: true, data: memberships });
+  return c.json<ApiResponse<typeof memberships>>({
+    ok: true,
+    data: memberships,
+  });
 });
 
 /**
@@ -620,16 +637,16 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
 
   if (joinMode !== "open") {
     return c.json<ApiResponse>(
-      { ok: false, error: `Tenant is not open for joining (mode: ${joinMode})` },
+      {
+        ok: false,
+        error: `Tenant is not open for joining (mode: ${joinMode})`,
+      },
       403,
     );
   }
 
   // 4. Create membership
-  await db
-    .insert(userTenants)
-    .values({ userId, tenantId, role: "member" })
-    .onConflictDoNothing();
+  await db.insert(userTenants).values({ userId, tenantId, role: "member" }).onConflictDoNothing();
 
   return c.json({ ok: true, tenantId, role: "member" });
 });
@@ -644,17 +661,14 @@ user.delete("/me/tenants/:tenantId/leave", async (c) => {
 
   // Cannot leave personal tenant
   if (tenantId === `personal-${userId}`) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Cannot leave your personal tenant" },
-      400,
-    );
+    return c.json<ApiResponse>({ ok: false, error: "Cannot leave your personal tenant" }, 400);
   }
 
   const db = getDb();
   const [deleted] = await db
     .delete(userTenants)
     .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
-    .returning({ id: userTenants.id });
+    .returning();
 
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 404);

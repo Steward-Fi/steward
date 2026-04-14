@@ -1,14 +1,13 @@
 "use client";
 
-import { createElement, useEffect, useRef, type ReactNode } from "react";
 import { StewardProvider, useAuth } from "@stwd/react";
-import { steward, setAuthToken } from "@/lib/api";
+import { createElement, type ReactNode, useEffect, useRef } from "react";
+import { setAuthToken, steward } from "@/lib/api";
 
 // Pre-import @simplewebauthn/browser so it's in the client bundle.
 import "@simplewebauthn/browser";
 
-const API_URL =
-  process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
+const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
 
 /**
  * Syncs the Steward auth JWT into the legacy API client once.
@@ -28,7 +27,7 @@ function AuthTokenSync({ children }: { children: ReactNode }) {
       lastToken.current = token;
       setAuthToken(token);
     }
-  }, [auth.isAuthenticated, auth.session]);
+  }, [auth.isAuthenticated, auth.getToken]);
 
   return <>{children}</>;
 }

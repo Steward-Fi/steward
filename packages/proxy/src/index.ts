@@ -15,9 +15,9 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { PROXY_PORT } from "./config";
-import { authMiddleware } from "./middleware/auth";
-import { handleProxy } from "./handlers/proxy";
 import { getAliasNames } from "./handlers/alias";
+import { handleProxy } from "./handlers/proxy";
+import { authMiddleware } from "./middleware/auth";
 import { initProxyRedis, shutdownProxyRedis } from "./middleware/redis-enforcement";
 
 // ─── Ensure DB is initialised ────────────────────────────────────────────────

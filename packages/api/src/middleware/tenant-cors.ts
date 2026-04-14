@@ -13,9 +13,9 @@
  *   app.use("*", tenantCors);
  */
 
-import type { Context, Next } from "hono";
-import { eq } from "drizzle-orm";
 import { getDb, tenantConfigs as tenantConfigsTable } from "@stwd/db";
+import { eq } from "drizzle-orm";
+import type { Context, Next } from "hono";
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
@@ -58,7 +58,7 @@ const MAX_AGE = "86400";
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-export async function tenantCors(c: Context, next: Next): Promise<Response | void> {
+export async function tenantCors(c: Context, next: Next): Promise<Response | undefined> {
   const origin = c.req.header("origin") ?? "";
   const tenantId = c.req.header("X-Steward-Tenant");
 

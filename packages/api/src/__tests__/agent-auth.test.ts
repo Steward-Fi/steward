@@ -1,11 +1,12 @@
-import { describe, expect, it, beforeAll, afterAll } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
 // Skip all DB-dependent tests when DATABASE_URL is not configured
 const SKIP = !process.env.DATABASE_URL;
-import { SignJWT, jwtVerify } from "jose";
-import { generateApiKey, hashApiKey } from "@stwd/auth";
-import { getDb, closeDb, tenants, agents, encryptedKeys } from "@stwd/db";
-import { eq, and } from "drizzle-orm";
+
+import { generateApiKey } from "@stwd/auth";
+import { agents, encryptedKeys, getDb, tenants } from "@stwd/db";
+import { and, eq } from "drizzle-orm";
+import { jwtVerify, SignJWT } from "jose";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
@@ -100,7 +101,7 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
     });
 
     expect(res.status).toBe(200);
-    const json = await res.json() as any;
+    const json = (await res.json()) as any;
     expect(json.ok).toBe(true);
     expect(json.data.token).toBeDefined();
     expect(json.data.agentId).toBe(TEST_AGENT_ID);
@@ -108,7 +109,9 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
     expect(json.data.scope).toBe("agent");
 
     // Verify the JWT payload
-    const { payload } = await jwtVerify(json.data.token, JWT_SECRET, { issuer: JWT_ISSUER });
+    const { payload } = await jwtVerify(json.data.token, JWT_SECRET, {
+      issuer: JWT_ISSUER,
+    });
     expect(payload.agentId).toBe(TEST_AGENT_ID);
     expect(payload.tenantId).toBe(TEST_TENANT_ID);
     expect(payload.scope).toBe("agent");
@@ -143,7 +146,7 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
     });
 
     expect(res.status).toBe(403);
-    const json = await res.json() as any;
+    const json = (await res.json()) as any;
     expect(json.error).toContain("cannot generate");
   });
 
@@ -155,14 +158,14 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
     });
 
     expect(res.status).toBe(200);
-    const json = await res.json() as any;
+    const json = (await res.json()) as any;
     expect(json.data.expiresIn).toBe("7d");
   });
 });
 
 describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
   let agentToken: string;
-  let otherAgentToken: string;
+  let _otherAgentToken: string;
 
   beforeAll(async () => {
     // Generate tokens via the API
@@ -171,7 +174,7 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
       headers: tenantHeaders(testApiKey),
       body: JSON.stringify({}),
     });
-    const json1 = await res1.json() as any;
+    const json1 = (await res1.json()) as any;
     agentToken = json1.data.token;
 
     const res2 = await fetch(`${BASE_URL}/agents/${OTHER_AGENT_ID}/token`, {
@@ -179,8 +182,8 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
       headers: tenantHeaders(testApiKey),
       body: JSON.stringify({}),
     });
-    const json2 = await res2.json() as any;
-    otherAgentToken = json2.data.token;
+    const json2 = (await res2.json()) as any;
+    _otherAgentToken = json2.data.token;
   });
 
   describe("GET /agents/:agentId/balance", () => {
@@ -197,7 +200,7 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
         headers: agentBearerHeaders(agentToken),
       });
       expect(res.status).toBe(403);
-      const json = await res.json() as any;
+      const json = (await res.json()) as any;
       expect(json.error).toContain("scope does not match");
     });
 
@@ -247,7 +250,7 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
       const res = await fetch(`${BASE_URL}/vault/${OTHER_AGENT_ID}/sign`, {
         method: "POST",
         headers: agentBearerHeaders(agentToken),
-        body: JSON.stringify({ to: "0x" + "a".repeat(40), value: "1000" }),
+        body: JSON.stringify({ to: `0x${"a".repeat(40)}`, value: "1000" }),
       });
       expect(res.status).toBe(403);
     });
@@ -260,12 +263,14 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
   afterAll(async () => {
     const db = getDb();
     await db.delete(encryptedKeys).where(eq(encryptedKeys.agentId, IMPORT_AGENT_ID));
-    await db.delete(agents).where(and(eq(agents.id, IMPORT_AGENT_ID), eq(agents.tenantId, TEST_TENANT_ID)));
+    await db
+      .delete(agents)
+      .where(and(eq(agents.id, IMPORT_AGENT_ID), eq(agents.tenantId, TEST_TENANT_ID)));
   });
 
   it("imports an EVM private key and returns derived address", async () => {
     // Generate a test private key (deterministic for testing)
-    const testPrivateKey = "0x" + "ab".repeat(32);
+    const testPrivateKey = `0x${"ab".repeat(32)}`;
 
     const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
       method: "POST",
@@ -274,7 +279,7 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
     });
 
     expect(res.status).toBe(200);
-    const json = await res.json() as any;
+    const json = (await res.json()) as any;
     expect(json.ok).toBe(true);
     expect(json.data.agentId).toBe(IMPORT_AGENT_ID);
     expect(json.data.walletAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
@@ -287,11 +292,14 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
     const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
       method: "POST",
       headers: agentBearerHeaders(agentToken),
-      body: JSON.stringify({ privateKey: "0x" + "cd".repeat(32), chain: "evm" }),
+      body: JSON.stringify({
+        privateKey: `0x${"cd".repeat(32)}`,
+        chain: "evm",
+      }),
     });
 
     expect(res.status).toBe(403);
-    const json = await res.json() as any;
+    const json = (await res.json()) as any;
     expect(json.error).toContain("tenant-level");
   });
 
@@ -309,11 +317,14 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
     const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
       method: "POST",
       headers: tenantHeaders(testApiKey),
-      body: JSON.stringify({ privateKey: "0x" + "ab".repeat(32), chain: "bitcoin" }),
+      body: JSON.stringify({
+        privateKey: `0x${"ab".repeat(32)}`,
+        chain: "bitcoin",
+      }),
     });
 
     expect(res.status).toBe(400);
-    const json = await res.json() as any;
+    const json = (await res.json()) as any;
     expect(json.error).toContain("chain must be");
   });
 
@@ -321,7 +332,10 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
     const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
       method: "POST",
       headers: tenantHeaders("stw_bad_key"),
-      body: JSON.stringify({ privateKey: "0x" + "ab".repeat(32), chain: "evm" }),
+      body: JSON.stringify({
+        privateKey: `0x${"ab".repeat(32)}`,
+        chain: "evm",
+      }),
     });
 
     expect(res.status).toBe(403);
@@ -334,7 +348,7 @@ describe.skipIf(SKIP)("Backward compatibility", () => {
       headers: tenantHeaders(testApiKey),
     });
     expect(res.status).toBe(200);
-    const json = await res.json() as any;
+    const json = (await res.json()) as any;
     expect(json.ok).toBe(true);
   });
 

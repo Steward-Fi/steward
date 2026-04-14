@@ -6,16 +6,16 @@
  *
  * Run with: npx vitest run src/__tests__/integration.test.ts
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { StewardClient, StewardApiError } from "@stwd/sdk";
-import type { AgentIdentity } from "@stwd/sdk";
 
-import { StewardService } from "../services/StewardService.js";
+import type { AgentIdentity } from "@stwd/sdk";
+import { StewardApiError, StewardClient } from "@stwd/sdk";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { signTransactionAction } from "../actions/sign-transaction.js";
 import { transferAction } from "../actions/transfer.js";
-import { walletStatusProvider } from "../providers/wallet-status.js";
-import { balanceProvider } from "../providers/balance.js";
 import { approvalRequiredEvaluator } from "../evaluators/approval.js";
+import { balanceProvider } from "../providers/balance.js";
+import { walletStatusProvider } from "../providers/wallet-status.js";
+import { StewardService } from "../services/StewardService.js";
 
 const runLive = process.env.STEWARD_LIVE_TESTS === "1";
 const describeLive = runLive ? describe : describe.skip;
@@ -64,7 +64,11 @@ function mockRuntime(service: StewardService | null, overrides: Record<string, a
 
 beforeAll(async () => {
   if (!runLive) return;
-  client = new StewardClient({ baseUrl: API_URL, apiKey: API_KEY, tenantId: TENANT_ID });
+  client = new StewardClient({
+    baseUrl: API_URL,
+    apiKey: API_KEY,
+    tenantId: TENANT_ID,
+  });
   agent = await client.createWallet(TEST_AGENT_ID, "Eliza Integration Test");
   console.log(`[setup] Created agent ${TEST_AGENT_ID} → ${agent.walletAddress}`);
 });
@@ -92,9 +96,9 @@ describeLive("StewardService (real API)", () => {
   it("resolves config from runtime character settings", () => {
     const cfg = service.getConfig();
     expect(cfg).not.toBeNull();
-    expect(cfg!.apiUrl).toBe(API_URL);
-    expect(cfg!.agentId).toBe(TEST_AGENT_ID);
-    expect(cfg!.tenantId).toBe(TENANT_ID);
+    expect(cfg?.apiUrl).toBe(API_URL);
+    expect(cfg?.agentId).toBe(TEST_AGENT_ID);
+    expect(cfg?.tenantId).toBe(TENANT_ID);
   });
 
   it("getAgent returns identity with wallet address", async () => {
@@ -242,46 +246,41 @@ describeLive("Actions (validation + error paths)", () => {
     });
 
     it("returns error for missing params", async () => {
-      const result = await signTransactionAction.handler(
-        runtime, {} as any, undefined, { parameters: {} },
-      );
-      expect(result!.success).toBe(false);
-      expect(result!.error).toContain("Missing required parameters");
+      const result = await signTransactionAction.handler(runtime, {} as any, undefined, {
+        parameters: {},
+      });
+      expect(result?.success).toBe(false);
+      expect(result?.error).toContain("Missing required parameters");
     });
 
     it("returns error for missing 'to'", async () => {
-      const result = await signTransactionAction.handler(
-        runtime, {} as any, undefined,
-        { parameters: { value: "1000" } },
-      );
-      expect(result!.success).toBe(false);
-      expect(result!.error).toContain("Missing required parameters");
+      const result = await signTransactionAction.handler(runtime, {} as any, undefined, {
+        parameters: { value: "1000" },
+      });
+      expect(result?.success).toBe(false);
+      expect(result?.error).toContain("Missing required parameters");
     });
 
     it("returns error for missing 'value'", async () => {
-      const result = await signTransactionAction.handler(
-        runtime, {} as any, undefined,
-        { parameters: { to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" } },
-      );
-      expect(result!.success).toBe(false);
+      const result = await signTransactionAction.handler(runtime, {} as any, undefined, {
+        parameters: { to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
+      });
+      expect(result?.success).toBe(false);
     });
 
     it("handles unfunded transaction attempt", async () => {
-      const result = await signTransactionAction.handler(
-        runtime, {} as any, undefined,
-        {
-          parameters: {
-            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-            value: "1000000000000000",
-            chainId: 84532,
-          },
+      const result = await signTransactionAction.handler(runtime, {} as any, undefined, {
+        parameters: {
+          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          value: "1000000000000000",
+          chainId: 84532,
         },
-      );
+      });
       // Should either fail (insufficient funds) or succeed with pending_approval
       expect(result).toBeDefined();
-      if (!result!.success) {
-        expect(result!.error).toBeDefined();
-        expect(typeof result!.error).toBe("string");
+      if (!result?.success) {
+        expect(result?.error).toBeDefined();
+        expect(typeof result?.error).toBe("string");
       }
     });
   });
@@ -293,71 +292,59 @@ describeLive("Actions (validation + error paths)", () => {
     });
 
     it("returns error for missing params", async () => {
-      const result = await transferAction.handler(
-        runtime, {} as any, undefined, { parameters: {} },
-      );
-      expect(result!.success).toBe(false);
-      expect(result!.error).toContain("Missing required parameters");
+      const result = await transferAction.handler(runtime, {} as any, undefined, {
+        parameters: {},
+      });
+      expect(result?.success).toBe(false);
+      expect(result?.error).toContain("Missing required parameters");
     });
 
     it("returns error for unknown chain", async () => {
-      const result = await transferAction.handler(
-        runtime, {} as any, undefined,
-        {
-          parameters: {
-            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-            amount: "0.01 ETH",
-            chain: "avalanche",
-          },
+      const result = await transferAction.handler(runtime, {} as any, undefined, {
+        parameters: {
+          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          amount: "0.01 ETH",
+          chain: "avalanche",
         },
-      );
-      expect(result!.success).toBe(false);
-      expect(result!.error).toContain("Unknown chain");
+      });
+      expect(result?.success).toBe(false);
+      expect(result?.error).toContain("Unknown chain");
     });
 
     it("returns error for invalid amount format", async () => {
-      const result = await transferAction.handler(
-        runtime, {} as any, undefined,
-        {
-          parameters: {
-            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-            amount: "not-a-number",
-          },
+      const result = await transferAction.handler(runtime, {} as any, undefined, {
+        parameters: {
+          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          amount: "not-a-number",
         },
-      );
-      expect(result!.success).toBe(false);
-      expect(result!.text).toContain("Transfer failed");
+      });
+      expect(result?.success).toBe(false);
+      expect(result?.text).toContain("Transfer failed");
     });
 
     it("parses 0.1 ETH correctly and hits API", async () => {
-      const result = await transferAction.handler(
-        runtime, {} as any, undefined,
-        {
-          parameters: {
-            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-            amount: "0.1 ETH",
-            chain: "base-sepolia",
-          },
+      const result = await transferAction.handler(runtime, {} as any, undefined, {
+        parameters: {
+          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          amount: "0.1 ETH",
+          chain: "base-sepolia",
         },
-      );
+      });
       // Will fail (no funds) but should reach the API
       expect(result).toBeDefined();
-      if (!result!.success) {
-        expect(typeof result!.error).toBe("string");
+      if (!result?.success) {
+        expect(typeof result?.error).toBe("string");
       }
     });
 
     it("parses amount without symbol (defaults to ETH)", async () => {
-      const result = await transferAction.handler(
-        runtime, {} as any, undefined,
-        {
-          parameters: {
-            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-            amount: "0.5",
-            chain: "base",
-          },
+      const result = await transferAction.handler(runtime, {} as any, undefined, {
+        parameters: {
+          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          amount: "0.5",
+          chain: "base",
         },
-      );
+      });
       expect(result).toBeDefined();
     });
   });
@@ -367,7 +354,9 @@ describeLive("Actions (validation + error paths)", () => {
 
 describe("approvalRequiredEvaluator", () => {
   it("validates only for STEWARD_ actions", async () => {
-    const stewardMsg = { content: { action: "STEWARD_SIGN_TRANSACTION" } } as any;
+    const stewardMsg = {
+      content: { action: "STEWARD_SIGN_TRANSACTION" },
+    } as any;
     expect(await approvalRequiredEvaluator.validate({} as any, stewardMsg)).toBe(true);
 
     const otherMsg = { content: { action: "SOME_OTHER_ACTION" } } as any;
@@ -400,9 +389,9 @@ describe("approvalRequiredEvaluator", () => {
 
     const result = await approvalRequiredEvaluator.handler(runtime, {} as any, state as any);
     expect(result).toBeDefined();
-    expect(result!.success).toBe(true);
-    expect(result!.data?.pendingApproval).toBe(true);
-    expect(result!.text).toContain("approval");
+    expect(result?.success).toBe(true);
+    expect(result?.data?.pendingApproval).toBe(true);
+    expect(result?.text).toContain("approval");
   });
 
   it("returns undefined when service is disconnected", async () => {
@@ -429,28 +418,27 @@ describe("Amount parsing (via transfer handler)", () => {
     it(`${shouldFail ? "rejects" : "accepts"} "${input}"`, async () => {
       const service = {
         isConnected: () => true,
-        signTransaction: async () => { throw new Error("mock: no funds"); },
+        signTransaction: async () => {
+          throw new Error("mock: no funds");
+        },
       } as any;
       const runtime = { getService: () => service } as any;
 
-      const result = await transferAction.handler(
-        runtime, {} as any, undefined,
-        {
-          parameters: {
-            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-            amount: input,
-            chain: "base",
-          },
+      const result = await transferAction.handler(runtime, {} as any, undefined, {
+        parameters: {
+          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+          amount: input,
+          chain: "base",
         },
-      );
+      });
 
       if (shouldFail) {
-        expect(result!.success).toBe(false);
+        expect(result?.success).toBe(false);
       } else {
         // Either API error (mock throws) or success — amount parsed OK
         expect(result).toBeDefined();
-        if (!result!.success) {
-          expect(result!.error).toContain("mock: no funds");
+        if (!result?.success) {
+          expect(result?.error).toContain("mock: no funds");
         }
       }
     });

@@ -12,8 +12,8 @@
  * portals are expected to implement the same interface.
  */
 
-import { encodeFunctionData } from "viem";
 import type { SignTransactionInput } from "@stwd/sdk";
+import { encodeFunctionData } from "viem";
 
 // ─── Portal ABI ───────────────────────────────────────────────────────────────
 
@@ -46,8 +46,7 @@ export const PORTAL_ABI = [
 ] as const;
 
 // Sentinel used when the input currency is native (ETH/BNB)
-export const NATIVE_TOKEN_ADDRESS =
-  "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as const;
+export const NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as const;
 
 // ─── Built transaction type ────────────────────────────────────────────────────
 
@@ -62,11 +61,7 @@ export interface BuiltTx {
 
 // ─── Builders ─────────────────────────────────────────────────────────────────
 
-export function buildNativeTransfer(
-  to: string,
-  amountWei: string,
-  chainId: number,
-): BuiltTx {
+export function buildNativeTransfer(to: string, amountWei: string, chainId: number): BuiltTx {
   return {
     to,
     value: amountWei,

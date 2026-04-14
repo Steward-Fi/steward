@@ -9,29 +9,29 @@
  * In production you should swap this for a Redis-backed store.
  */
 
-import {
-  generateRegistrationOptions as swGenReg,
-  verifyRegistrationResponse as swVerifyReg,
-  generateAuthenticationOptions as swGenAuth,
-  verifyAuthenticationResponse as swVerifyAuth,
-} from "@simplewebauthn/server";
-
 import type {
+  AuthenticationResponseJSON,
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON,
-  AuthenticationResponseJSON,
+} from "@simplewebauthn/server";
+import {
+  generateAuthenticationOptions as swGenAuth,
+  generateRegistrationOptions as swGenReg,
+  verifyAuthenticationResponse as swVerifyAuth,
+  verifyRegistrationResponse as swVerifyReg,
 } from "@simplewebauthn/server";
 
 export type {
-  RegistrationResponseJSON,
+  VerifiedAuthenticationResponse,
+  VerifiedRegistrationResponse,
+} from "@simplewebauthn/server";
+export type {
   AuthenticationResponseJSON,
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
 };
-
-export type { VerifiedRegistrationResponse } from "@simplewebauthn/server";
-export type { VerifiedAuthenticationResponse } from "@simplewebauthn/server";
 
 import { ChallengeStore } from "./challenge-store";
 
@@ -133,7 +133,7 @@ export class PasskeyAuth {
     response: RegistrationResponseJSON,
     expectedChallenge?: string,
   ) {
-    const challenge = expectedChallenge ?? await this.challenges.consume(userId);
+    const challenge = expectedChallenge ?? (await this.challenges.consume(userId));
     if (!challenge) {
       throw new Error(
         `No active challenge found for user "${userId}". It may have expired (>5 min) or already been used.`,
@@ -248,10 +248,14 @@ function base64urlToUint8Array(base64url: string): Uint8Array<ArrayBuffer> {
   const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
   const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
   // Use hex as intermediate to avoid TypeScript encoding type issues across @types/node versions
-  const hexStr = [...atob(padded)].map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join("");
+  const hexStr = [...atob(padded)]
+    .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+    .join("");
   const buf = Buffer.from(hexStr, "hex");
   // Slice to produce a plain ArrayBuffer (not a SharedArrayBuffer slice)
-  return new Uint8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength)) as Uint8Array<ArrayBuffer>;
+  return new Uint8Array(
+    buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+  ) as Uint8Array<ArrayBuffer>;
 }
 
 /**
@@ -260,7 +264,11 @@ function base64urlToUint8Array(base64url: string): Uint8Array<ArrayBuffer> {
 export function uint8ArrayToBase64url(bytes: Uint8Array): string {
   // Build hex string without Buffer.from(Uint8Array) which has type issues across @types/node versions
   const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-  const raw = hex.match(/.{1,2}/g)!.map(byte => String.fromCharCode(parseInt(byte, 16))).join("");
+  const raw =
+    hex
+      .match(/.{1,2}/g)
+      ?.map((byte) => String.fromCharCode(parseInt(byte, 16)))
+      .join("") ?? "";
   const base64 = btoa(raw);
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }

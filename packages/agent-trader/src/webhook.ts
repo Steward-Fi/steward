@@ -13,8 +13,9 @@
  *   tx_rejected        — policy or manual rejection
  */
 
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { WebhookEvent } from "@stwd/shared";
-import { logWebhook, logError, logInfo } from "./logger.js";
+import { logError, logInfo, logWebhook } from "./logger.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -82,10 +83,7 @@ async function parseBody(body: string): Promise<WebhookEvent | null> {
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
-export function createWebhookServer(
-  port: number,
-  secret?: string,
-): WebhookServer {
+export function createWebhookServer(port: number, _secret?: string): WebhookServer {
   const handlers = buildHandlerMap();
   let stopFn: (() => Promise<void>) | null = null;
 
@@ -127,7 +125,10 @@ export function createWebhookServer(
             const body = await req.text();
             const result = await handleRequest(body);
             return new Response(
-              JSON.stringify({ ok: result.status === 200, message: result.message }),
+              JSON.stringify({
+                ok: result.status === 200,
+                message: result.message,
+              }),
               {
                 status: result.status,
                 headers: { "Content-Type": "application/json" },
@@ -145,7 +146,7 @@ export function createWebhookServer(
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const http = await import("node:http");
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const srv = http.createServer(async (req: any, res: any) => {
+      const srv = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
         if (req.method !== "POST") {
           res.writeHead(405);
           res.end("Method Not Allowed");
@@ -153,19 +154,27 @@ export function createWebhookServer(
         }
 
         let body = "";
-        req.on("data", (chunk: { toString(): string }) => { body += chunk.toString(); });
+        req.on("data", (chunk: { toString(): string }) => {
+          body += chunk.toString();
+        });
         req.on("end", async () => {
           const result = await handleRequest(body);
-          res.writeHead(result.status, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ ok: result.status === 200, message: result.message }));
+          res.writeHead(result.status, {
+            "Content-Type": "application/json",
+          });
+          res.end(
+            JSON.stringify({
+              ok: result.status === 200,
+              message: result.message,
+            }),
+          );
         });
       });
 
       await new Promise<void>((resolve) => srv.listen(port, resolve));
       stopFn = () =>
         new Promise<void>((resolve, reject) =>
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          srv.close((err: any) => (err ? reject(err) : resolve())),
+          srv.close((err?: Error) => (err ? reject(err) : resolve())),
         );
       logInfo(`Webhook server listening on port ${port} (Node http)`);
     },

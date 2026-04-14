@@ -14,7 +14,7 @@
  *   minNativeReserve      — wei kept back for gas                   (default 0.01 ETH)
  */
 
-import type { Strategy, AgentState, TradeDecision } from "./types.js";
+import type { AgentState, Strategy, TradeDecision } from "./types.js";
 
 export interface RebalanceParams {
   targetNativePercent?: number;
@@ -70,37 +70,29 @@ export class RebalanceStrategy implements Strategy {
 
     // Current allocation percentages
     const tokenValueInNative = (tokenBalance * tokenPrice) / BigInt(1e18);
-    const actualNativePct =
-      Number((nativeBalance * 10000n) / treasuryValue) / 100;
-    const actualTokenPct =
-      Number((tokenValueInNative * 10000n) / treasuryValue) / 100;
+    const actualNativePct = Number((nativeBalance * 10000n) / treasuryValue) / 100;
+    const actualTokenPct = Number((tokenValueInNative * 10000n) / treasuryValue) / 100;
 
     const nativeDrift = actualNativePct - this.targetNative;
     const tokenDrift = actualTokenPct - this.targetToken;
 
-    if (
-      Math.abs(nativeDrift) < this.threshold &&
-      Math.abs(tokenDrift) < this.threshold
-    ) {
+    if (Math.abs(nativeDrift) < this.threshold && Math.abs(tokenDrift) < this.threshold) {
       return HOLD;
     }
 
     // We need more token → buy
     if (tokenDrift < -this.threshold) {
-      const targetTokenValue =
-        (treasuryValue * BigInt(Math.round(this.targetToken))) / 100n;
+      const targetTokenValue = (treasuryValue * BigInt(Math.round(this.targetToken))) / 100n;
       const currentTokenValue = tokenValueInNative;
       const deficit = targetTokenValue - currentTokenValue;
 
       // Cap trade size
       const maxTrade = (treasuryValue * BigInt(this.maxTradePct)) / 100n;
-      const buyAmount =
-        deficit > maxTrade ? maxTrade : deficit;
+      const buyAmount = deficit > maxTrade ? maxTrade : deficit;
 
       // Don't drain native reserves below gas threshold
-      const spendable = nativeBalance > this.minNativeReserve
-        ? nativeBalance - this.minNativeReserve
-        : 0n;
+      const spendable =
+        nativeBalance > this.minNativeReserve ? nativeBalance - this.minNativeReserve : 0n;
 
       if (spendable === 0n || buyAmount === 0n) {
         return {
@@ -123,8 +115,7 @@ export class RebalanceStrategy implements Strategy {
 
     // We have too much token → sell
     if (tokenDrift > this.threshold) {
-      const targetTokenValue =
-        (treasuryValue * BigInt(Math.round(this.targetToken))) / 100n;
+      const targetTokenValue = (treasuryValue * BigInt(Math.round(this.targetToken))) / 100n;
       const surplus = tokenValueInNative - targetTokenValue;
 
       // Cap trade size

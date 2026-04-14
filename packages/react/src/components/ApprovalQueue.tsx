@@ -1,8 +1,8 @@
-import React, { useState } from "react";
-import type { ApprovalQueueProps } from "../types.js";
+import { useState } from "react";
 import { useApprovals } from "../hooks/useApprovals.js";
 import { useStewardContext } from "../provider.js";
-import { truncateAddress, formatWei, formatRelativeTime, getStatusColor } from "../utils/format.js";
+import type { ApprovalQueueProps } from "../types.js";
+import { formatRelativeTime, formatWei, getStatusColor, truncateAddress } from "../utils/format.js";
 
 /**
  * Pending transactions awaiting human review.
@@ -15,7 +15,10 @@ export function ApprovalQueue({
 }: ApprovalQueueProps) {
   const { features } = useStewardContext();
   const { pending, isLoading, error, approve, reject, isResolving } = useApprovals(refreshInterval);
-  const [confirmAction, setConfirmAction] = useState<{ txId: string; action: "approve" | "reject" } | null>(null);
+  const [confirmAction, setConfirmAction] = useState<{
+    txId: string;
+    action: "approve" | "reject";
+  } | null>(null);
 
   if (!features.showApprovalQueue) return null;
 
@@ -72,16 +75,10 @@ export function ApprovalQueue({
                 <div className="stwd-approval-to">
                   To: <code>{truncateAddress(entry.to)}</code>
                 </div>
-                <div className="stwd-approval-value">
-                  {formatWei(entry.value)} ETH
-                </div>
+                <div className="stwd-approval-value">{formatWei(entry.value)} ETH</div>
                 <div className="stwd-approval-meta">
-                  <span className="stwd-badge stwd-badge-muted">
-                    Chain {entry.chainId}
-                  </span>
-                  <span className="stwd-approval-time">
-                    {formatRelativeTime(entry.createdAt)}
-                  </span>
+                  <span className="stwd-badge stwd-badge-muted">Chain {entry.chainId}</span>
+                  <span className="stwd-approval-time">{formatRelativeTime(entry.createdAt)}</span>
                 </div>
               </div>
 
@@ -143,7 +140,11 @@ export function ApprovalQueue({
                 onClick={handleConfirm}
                 disabled={isResolving}
               >
-                {isResolving ? "Processing..." : confirmAction.action === "approve" ? "Approve" : "Deny"}
+                {isResolving
+                  ? "Processing..."
+                  : confirmAction.action === "approve"
+                    ? "Approve"
+                    : "Deny"}
               </button>
             </div>
           </div>

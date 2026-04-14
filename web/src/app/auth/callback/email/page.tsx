@@ -1,8 +1,9 @@
 "use client";
 
-import React, { Suspense } from "react";
-import { useRouter } from "next/navigation";
 import { StewardEmailCallback } from "@stwd/react";
+import { useRouter } from "next/navigation";
+import type React from "react";
+import { Suspense } from "react";
 
 function EmailCallbackInner() {
   const router = useRouter();

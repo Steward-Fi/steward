@@ -1,9 +1,9 @@
-import { describe, expect, it, beforeEach, afterEach } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
-  StewardClient,
-  StewardApiError,
-  type StewardClientConfig,
   type SignTransactionInput,
+  StewardApiError,
+  StewardClient,
+  type StewardClientConfig,
 } from "../client";
 import type { PolicyRule } from "../types";
 
@@ -24,11 +24,18 @@ let lastCapture: CapturedRequest | null = null;
 
 function installMockFetch(responseBody: object, status = 200): void {
   global.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
     const headers: Record<string, string> = {};
     if (init?.headers) {
       const h = new Headers(init.headers);
-      h.forEach((v, k) => { headers[k] = v; });
+      h.forEach((v, k) => {
+        headers[k] = v;
+      });
     }
     lastCapture = {
       url,
@@ -137,7 +144,7 @@ describe("Request headers", () => {
   it("always sends Accept: application/json", async () => {
     installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient().listAgents();
-    expect(lastCapture?.headers["accept"]).toBe("application/json");
+    expect(lastCapture?.headers.accept).toBe("application/json");
   });
 
   it("sends X-Steward-Key header when apiKey is set", async () => {
@@ -151,7 +158,7 @@ describe("Request headers", () => {
     installMockFetch({ ok: true, data: [mockAgent] });
     const client = makeClient({ bearerToken: "my-jwt-token" });
     await client.listAgents();
-    expect(lastCapture?.headers["authorization"]).toBe("Bearer my-jwt-token");
+    expect(lastCapture?.headers.authorization).toBe("Bearer my-jwt-token");
   });
 
   it("bearerToken takes priority over apiKey when both are set", async () => {
@@ -161,7 +168,7 @@ describe("Request headers", () => {
       bearerToken: "my-bearer",
     });
     await client.listAgents();
-    expect(lastCapture?.headers["authorization"]).toBe("Bearer my-bearer");
+    expect(lastCapture?.headers.authorization).toBe("Bearer my-bearer");
     // apiKey should not be sent when bearerToken is present
     expect(lastCapture?.headers["x-steward-key"]).toBeUndefined();
   });
@@ -176,7 +183,7 @@ describe("Request headers", () => {
   it("does not send auth header when neither apiKey nor bearerToken is set", async () => {
     installMockFetch({ ok: true, data: [mockAgent] });
     await makeClient().listAgents();
-    expect(lastCapture?.headers["authorization"]).toBeUndefined();
+    expect(lastCapture?.headers.authorization).toBeUndefined();
     expect(lastCapture?.headers["x-steward-key"]).toBeUndefined();
   });
 });
@@ -219,7 +226,11 @@ describe("HTTP request building", () => {
   it("createWallet without platformId sends undefined/omitted field", async () => {
     installMockFetch({ ok: true, data: mockAgent });
     await makeClient().createWallet("agent-1", "Test Agent");
-    expect(lastCapture?.body).toEqual({ id: "agent-1", name: "Test Agent", platformId: undefined });
+    expect(lastCapture?.body).toEqual({
+      id: "agent-1",
+      name: "Test Agent",
+      platformId: undefined,
+    });
   });
 
   it("signTransaction → POST /vault/:agentId/sign", async () => {
@@ -271,7 +282,12 @@ describe("HTTP request building", () => {
       data: {
         agentId: "agent-1",
         walletAddress: "0xabc",
-        balances: { native: "0", nativeFormatted: "0", chainId: 8453, symbol: "ETH" },
+        balances: {
+          native: "0",
+          nativeFormatted: "0",
+          chainId: 8453,
+          symbol: "ETH",
+        },
       },
     });
     await makeClient().getBalance("agent-1");
@@ -284,7 +300,12 @@ describe("HTTP request building", () => {
       data: {
         agentId: "agent-1",
         walletAddress: "0xabc",
-        balances: { native: "0", nativeFormatted: "0", chainId: 1, symbol: "ETH" },
+        balances: {
+          native: "0",
+          nativeFormatted: "0",
+          chainId: 1,
+          symbol: "ETH",
+        },
       },
     });
     await makeClient().getBalance("agent-1", 1);
@@ -296,7 +317,9 @@ describe("HTTP request building", () => {
     await makeClient().createWalletBatch([{ id: "a1", name: "Agent 1" }]);
     expect(lastCapture?.method).toBe("POST");
     expect(lastCapture?.url).toBe("https://api.steward.example/agents/batch");
-    expect((lastCapture?.body as Record<string, unknown>)?.agents).toEqual([{ id: "a1", name: "Agent 1" }]);
+    expect((lastCapture?.body as Record<string, unknown>)?.agents).toEqual([
+      { id: "a1", name: "Agent 1" },
+    ]);
   });
 });
 
@@ -325,7 +348,9 @@ describe("Error handling", () => {
   });
 
   it("StewardApiError carries response data payload", async () => {
-    const errorData = { results: [{ policyId: "p1", type: "spending-limit", passed: false }] };
+    const errorData = {
+      results: [{ policyId: "p1", type: "spending-limit", passed: false }],
+    };
     installMockFetch({ ok: false, error: "Policy rejected", data: errorData }, 403);
     const client = makeClient();
     let caught: StewardApiError | null = null;
@@ -435,7 +460,7 @@ describe("Response parsing", () => {
           results: [{ policyId: "p1", type: "auto-approve-threshold", passed: false }],
         },
       },
-      202
+      202,
     );
     const result = await makeClient().signTransaction("agent-1", {
       to: "0x1234567890123456789012345678901234567890",
@@ -445,7 +470,8 @@ describe("Response parsing", () => {
   });
 
   it("signMessage returns signature string", async () => {
-    const sig = "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
+    const sig =
+      "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890";
     installMockFetch({ ok: true, data: { signature: sig } });
     const result = await makeClient().signMessage("agent-1", "test");
     expect(result.signature).toBe(sig);
@@ -473,7 +499,9 @@ describe("Response parsing", () => {
 
 describe("StewardApiError", () => {
   it("constructs with message, status, and optional data", () => {
-    const err = new StewardApiError("Something went wrong", 500, { detail: "internal" });
+    const err = new StewardApiError("Something went wrong", 500, {
+      detail: "internal",
+    });
     expect(err.message).toBe("Something went wrong");
     expect(err.status).toBe(500);
     expect(err.data).toEqual({ detail: "internal" });

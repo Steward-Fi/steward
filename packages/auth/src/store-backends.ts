@@ -96,7 +96,10 @@ export interface RedisLike {
  * Pass a connected ioredis client (e.g. from packages/redis `getRedis()`).
  */
 export class RedisBackend implements StoreBackend {
-  constructor(private readonly client: RedisLike, private readonly prefix = "auth:") {}
+  constructor(
+    private readonly client: RedisLike,
+    private readonly prefix = "auth:",
+  ) {}
 
   async set(key: string, value: string, ttlMs: number): Promise<void> {
     await this.client.set(this.prefix + key, value, "PX", ttlMs);

@@ -241,7 +241,10 @@ export class StewardClient {
     });
   }
 
-  async signTransaction(agentId: string, tx: { to: string; value: string; data?: string; chainId?: number }) {
+  async signTransaction(
+    agentId: string,
+    tx: { to: string; value: string; data?: string; chainId?: number },
+  ) {
     return this.request(`/vault/${agentId}/sign`, {
       method: "POST",
       body: JSON.stringify(tx),
@@ -257,7 +260,9 @@ export class StewardClient {
   }
 
   async approve(agentId: string, txId: string) {
-    return this.request(`/vault/${agentId}/approve/${txId}`, { method: "POST" });
+    return this.request(`/vault/${agentId}/approve/${txId}`, {
+      method: "POST",
+    });
   }
 
   async reject(agentId: string, txId: string) {
@@ -312,7 +317,9 @@ export class StewardClient {
   }
 
   async deleteRoute(routeId: string): Promise<void> {
-    return this.request<void>(`/secrets/routes/${routeId}`, { method: "DELETE" });
+    return this.request<void>(`/secrets/routes/${routeId}`, {
+      method: "DELETE",
+    });
   }
 
   // ---- Policies ----
@@ -331,7 +338,10 @@ export class StewardClient {
     return this.request<PolicyRecord>(`/policies/${policyId}`);
   }
 
-  async updatePolicy(policyId: string, payload: Partial<PolicyCreatePayload>): Promise<PolicyRecord> {
+  async updatePolicy(
+    policyId: string,
+    payload: Partial<PolicyCreatePayload>,
+  ): Promise<PolicyRecord> {
     return this.request<PolicyRecord>(`/policies/${policyId}`, {
       method: "PUT",
       body: JSON.stringify(payload),
@@ -368,22 +378,38 @@ export class StewardClient {
     if (params?.offset !== undefined && params.limit) {
       mapped.page = String(Math.floor(params.offset / params.limit) + 1);
     }
-    const qs = Object.keys(mapped).length
-      ? "?" + new URLSearchParams(mapped).toString()
-      : "";
-    const result = await this.request<{ data: Array<{
-      id: string; timestamp: string; agentId: string; action: string;
-      status: string; details?: Record<string, unknown>;
-      policyResults?: unknown; value?: string; to?: string;
-    }>; pagination: { page: number; limit: number; total: number; totalPages: number } }>(`/audit/log${qs}`);
+    const qs = Object.keys(mapped).length ? `?${new URLSearchParams(mapped).toString()}` : "";
+    const result = await this.request<{
+      data: Array<{
+        id: string;
+        timestamp: string;
+        agentId: string;
+        action: string;
+        status: string;
+        details?: Record<string, unknown>;
+        policyResults?: unknown;
+        value?: string;
+        to?: string;
+      }>;
+      pagination: {
+        page: number;
+        limit: number;
+        total: number;
+        totalPages: number;
+      };
+    }>(`/audit/log${qs}`);
     // Map API response to AuditEntry shape expected by dashboard
     return result.data.map((e) => ({
       id: e.id,
       tenantId: "",
       agentId: e.agentId,
       action: e.action,
-      result: (e.status === "rejected" || e.status === "error" || e.status === "denied") ? "deny"
-        : e.status === "error" ? "error" : "allow" as AuditEntry["result"],
+      result:
+        e.status === "rejected" || e.status === "error" || e.status === "denied"
+          ? "deny"
+          : e.status === "error"
+            ? "error"
+            : ("allow" as AuditEntry["result"]),
       details: e.details,
       cost: e.value,
       timestamp: e.timestamp,
@@ -432,9 +458,7 @@ export class StewardClient {
     if (params?.result) mapped.status = params.result;
     if (params?.from) mapped.dateFrom = params.from;
     if (params?.to) mapped.dateTo = params.to;
-    const qs = Object.keys(mapped).length
-      ? "?" + new URLSearchParams(mapped).toString()
-      : "";
+    const qs = Object.keys(mapped).length ? `?${new URLSearchParams(mapped).toString()}` : "";
     const res = await fetch(`${this.baseUrl}/audit/export${qs}`, {
       headers: this.headers,
     });
@@ -443,11 +467,28 @@ export class StewardClient {
   }
 
   // ---- Tenants ----
-  async listTenants(): Promise<Array<{ tenantId: string; tenantName: string; role: string; joinedAt: string }>> {
-    return this.request<Array<{ tenantId: string; tenantName: string; role: string; joinedAt: string }>>("/user/me/tenants");
+  async listTenants(): Promise<
+    Array<{
+      tenantId: string;
+      tenantName: string;
+      role: string;
+      joinedAt: string;
+    }>
+  > {
+    return this.request<
+      Array<{
+        tenantId: string;
+        tenantName: string;
+        role: string;
+        joinedAt: string;
+      }>
+    >("/user/me/tenants");
   }
 
-  async createTenant(name: string, description?: string): Promise<{ tenantId: string; apiKey: string }> {
+  async createTenant(
+    name: string,
+    description?: string,
+  ): Promise<{ tenantId: string; apiKey: string }> {
     return this.request<{ tenantId: string; apiKey: string }>("/user/me/tenants", {
       method: "POST",
       body: JSON.stringify({ name, description }),

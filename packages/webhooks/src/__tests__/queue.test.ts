@@ -1,9 +1,9 @@
+import { describe, expect, it } from "bun:test";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
-import { describe, expect, it } from "bun:test";
 import type { WebhookEvent } from "@stwd/shared";
-import { RetryQueue } from "../queue";
 import { WebhookDispatcher } from "../dispatcher";
+import { RetryQueue } from "../queue";
 
 const makeEvent = (overrides: Partial<WebhookEvent> = {}): WebhookEvent => ({
   type: "tx_signed",
@@ -80,7 +80,10 @@ async function startWebhookServer(statuses: number[]) {
 
 describe("RetryQueue", () => {
   it("enqueues and delivers a webhook against a real HTTP endpoint", async () => {
-    const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1000 });
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      timeoutMs: 1000,
+    });
     const server = await startWebhookServer([200]);
 
     try {
@@ -175,7 +178,10 @@ describe("RetryQueue", () => {
   });
 
   it("handles multiple enqueued events", async () => {
-    const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1000 });
+    const dispatcher = new WebhookDispatcher({
+      maxRetries: 0,
+      timeoutMs: 1000,
+    });
     const server = await startWebhookServer([200, 200, 200]);
 
     try {

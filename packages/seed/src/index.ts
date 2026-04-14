@@ -1,6 +1,6 @@
-import crypto from "node:crypto";
-import { createHash } from "node:crypto";
-
+import crypto, { createHash } from "node:crypto";
+import { encodeFunctionData, parseAbi } from "viem";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import {
   agents,
   approvalQueue,
@@ -13,11 +13,6 @@ import {
   transactions,
 } from "../../db/src/index.ts";
 import { KeyStore } from "../../vault/src/index.ts";
-import {
-  encodeFunctionData,
-  parseAbi,
-} from "viem";
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /*  Constants                                                                  */
@@ -34,18 +29,18 @@ const ERC20_ABI = parseAbi(["function transfer(address to, uint256 amount)"]);
 /* ──────────────────────────────────────────────────────────────────────────── */
 
 const ADDR = {
-  pancakeSwap:    "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4" as const,
-  teamMultisig:   "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" as const,
-  elizaCloud:     "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD88" as const,
-  aerodrome:      "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" as const,
-  polymarketCTF:  "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const,
-  usdcPolygon:    "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" as const,
-  hyperliquid:    "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7" as const,
+  pancakeSwap: "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4" as const,
+  teamMultisig: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" as const,
+  elizaCloud: "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD88" as const,
+  aerodrome: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43" as const,
+  polymarketCTF: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E" as const,
+  usdcPolygon: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359" as const,
+  hyperliquid: "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7" as const,
   // addresses used in rejection scenarios
-  deadAddress:    "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead" as const,
-  uniswapRouter:  "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D" as const,
+  deadAddress: "0xdeaddeaddeaddeaddeaddeaddeaddeaddeaddead" as const,
+  uniswapRouter: "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D" as const,
   randomContract: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" as const,
-  wrongAddress:   "0x1111111111111111111111111111111111111111" as const,
+  wrongAddress: "0x1111111111111111111111111111111111111111" as const,
   unauthorizedBridge: "0x3333333333333333333333333333333333333333" as const,
 };
 
@@ -55,7 +50,12 @@ const ADDR = {
 
 type PolicyResultSeed = {
   policyId: string;
-  type: "spending-limit" | "approved-addresses" | "auto-approve-threshold" | "time-window" | "rate-limit";
+  type:
+    | "spending-limit"
+    | "approved-addresses"
+    | "auto-approve-threshold"
+    | "time-window"
+    | "rate-limit";
   passed: boolean;
   reason?: string;
 };
@@ -171,11 +171,31 @@ async function seed() {
   /* ════════════════════════════════════════════════════════════════════════ */
 
   const agentDefs = [
-    { id: "agent-treasury-ops",     name: "treasury-ops",       platformId: "waifu-platform-treasury" },
-    { id: "agent-dex-trader",       name: "dex-trader",         platformId: "waifu-dex-alpha" },
-    { id: "agent-prediction-agent", name: "prediction-agent",   platformId: "waifu-oracle-v1" },
-    { id: "agent-perp-trader",      name: "perp-trader",        platformId: "waifu-perp-alpha" },
-    { id: "agent-hosting-payer",    name: "hosting-payer",      platformId: "waifu-infra-billing" },
+    {
+      id: "agent-treasury-ops",
+      name: "treasury-ops",
+      platformId: "waifu-platform-treasury",
+    },
+    {
+      id: "agent-dex-trader",
+      name: "dex-trader",
+      platformId: "waifu-dex-alpha",
+    },
+    {
+      id: "agent-prediction-agent",
+      name: "prediction-agent",
+      platformId: "waifu-oracle-v1",
+    },
+    {
+      id: "agent-perp-trader",
+      name: "perp-trader",
+      platformId: "waifu-perp-alpha",
+    },
+    {
+      id: "agent-hosting-payer",
+      name: "hosting-payer",
+      platformId: "waifu-infra-billing",
+    },
   ];
 
   const agentRows = [];
@@ -205,7 +225,10 @@ async function seed() {
   }
 
   await db.insert(agents).values(agentRows).onConflictDoNothing({ target: agents.id });
-  await db.insert(encryptedKeys).values(encryptedKeyRows).onConflictDoNothing({ target: encryptedKeys.agentId });
+  await db
+    .insert(encryptedKeys)
+    .values(encryptedKeyRows)
+    .onConflictDoNothing({ target: encryptedKeys.agentId });
 
   /* ════════════════════════════════════════════════════════════════════════ */
   /*  POLICIES                                                               */
@@ -219,11 +242,12 @@ async function seed() {
       type: "spending-limit" as const,
       enabled: true,
       config: {
-        maxPerTx:   "2000000000000000000",   // 2 BNB
-        maxPerDay:  "10000000000000000000",   // 10 BNB
-        maxPerWeek: "50000000000000000000",   // 50 BNB
+        maxPerTx: "2000000000000000000", // 2 BNB
+        maxPerDay: "10000000000000000000", // 10 BNB
+        maxPerWeek: "50000000000000000000", // 50 BNB
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-treasury-addresses",
@@ -234,7 +258,8 @@ async function seed() {
         addresses: [ADDR.pancakeSwap, ADDR.teamMultisig, ADDR.elizaCloud],
         mode: "whitelist",
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-treasury-auto",
@@ -242,7 +267,8 @@ async function seed() {
       type: "auto-approve-threshold" as const,
       enabled: true,
       config: { threshold: "500000000000000000" }, // 0.5 BNB
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-treasury-rate",
@@ -250,7 +276,8 @@ async function seed() {
       type: "rate-limit" as const,
       enabled: true,
       config: { maxTxPerHour: 20, maxTxPerDay: 100 },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
 
     /* ── dex-trader ────────────────────────────────────────────────────── */
@@ -260,11 +287,12 @@ async function seed() {
       type: "spending-limit" as const,
       enabled: true,
       config: {
-        maxPerTx:   "1000000000000000000",   // 1 ETH/BNB
-        maxPerDay:  "5000000000000000000",    // 5
-        maxPerWeek: "20000000000000000000",   // 20
+        maxPerTx: "1000000000000000000", // 1 ETH/BNB
+        maxPerDay: "5000000000000000000", // 5
+        maxPerWeek: "20000000000000000000", // 20
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-dex-addresses",
@@ -275,7 +303,8 @@ async function seed() {
         addresses: [ADDR.pancakeSwap, ADDR.aerodrome],
         mode: "whitelist",
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-dex-auto",
@@ -283,7 +312,8 @@ async function seed() {
       type: "auto-approve-threshold" as const,
       enabled: true,
       config: { threshold: "200000000000000000" }, // 0.2
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-dex-window",
@@ -294,7 +324,8 @@ async function seed() {
         allowedHours: [{ start: 6, end: 22 }],
         allowedDays: [1, 2, 3, 4, 5],
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-dex-rate",
@@ -302,7 +333,8 @@ async function seed() {
       type: "rate-limit" as const,
       enabled: true,
       config: { maxTxPerHour: 50, maxTxPerDay: 200 },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
 
     /* ── prediction-agent ──────────────────────────────────────────────── */
@@ -312,11 +344,12 @@ async function seed() {
       type: "spending-limit" as const,
       enabled: true,
       config: {
-        maxPerTx:   "150000000000000000000",  // 150 POL
-        maxPerDay:  "500000000000000000000",   // 500 POL
-        maxPerWeek: "2000000000000000000000",  // 2000 POL
+        maxPerTx: "150000000000000000000", // 150 POL
+        maxPerDay: "500000000000000000000", // 500 POL
+        maxPerWeek: "2000000000000000000000", // 2000 POL
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-pred-addresses",
@@ -327,7 +360,8 @@ async function seed() {
         addresses: [ADDR.polymarketCTF, ADDR.usdcPolygon],
         mode: "whitelist",
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-pred-auto",
@@ -335,7 +369,8 @@ async function seed() {
       type: "auto-approve-threshold" as const,
       enabled: true,
       config: { threshold: "20000000000000000000" }, // 20 POL
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-pred-rate",
@@ -343,7 +378,8 @@ async function seed() {
       type: "rate-limit" as const,
       enabled: true,
       config: { maxTxPerHour: 30, maxTxPerDay: 100 },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
 
     /* ── perp-trader ───────────────────────────────────────────────────── */
@@ -353,11 +389,12 @@ async function seed() {
       type: "spending-limit" as const,
       enabled: true,
       config: {
-        maxPerTx:   "500000000000000000",    // 0.5 ETH
-        maxPerDay:  "2000000000000000000",   // 2 ETH
-        maxPerWeek: "10000000000000000000",  // 10 ETH
+        maxPerTx: "500000000000000000", // 0.5 ETH
+        maxPerDay: "2000000000000000000", // 2 ETH
+        maxPerWeek: "10000000000000000000", // 10 ETH
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-perp-addresses",
@@ -368,7 +405,8 @@ async function seed() {
         addresses: [ADDR.hyperliquid],
         mode: "whitelist",
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-perp-auto",
@@ -376,7 +414,8 @@ async function seed() {
       type: "auto-approve-threshold" as const,
       enabled: true,
       config: { threshold: "50000000000000000" }, // 0.05 ETH
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-perp-rate",
@@ -384,7 +423,8 @@ async function seed() {
       type: "rate-limit" as const,
       enabled: true,
       config: { maxTxPerHour: 100, maxTxPerDay: 500 },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
 
     /* ── hosting-payer ─────────────────────────────────────────────────── */
@@ -394,11 +434,12 @@ async function seed() {
       type: "spending-limit" as const,
       enabled: true,
       config: {
-        maxPerTx:   "500000000000000000",    // 0.5 BNB
-        maxPerDay:  "1000000000000000000",   // 1 BNB
-        maxPerWeek: "2000000000000000000",   // 2 BNB
+        maxPerTx: "500000000000000000", // 0.5 BNB
+        maxPerDay: "1000000000000000000", // 1 BNB
+        maxPerWeek: "2000000000000000000", // 2 BNB
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-hosting-addresses",
@@ -409,7 +450,8 @@ async function seed() {
         addresses: [ADDR.elizaCloud],
         mode: "whitelist",
       },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-hosting-auto",
@@ -417,7 +459,8 @@ async function seed() {
       type: "auto-approve-threshold" as const,
       enabled: true,
       config: { threshold: "100000000000000000" }, // 0.1 BNB
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
     {
       id: "pol-hosting-rate",
@@ -425,7 +468,8 @@ async function seed() {
       type: "rate-limit" as const,
       enabled: true,
       config: { maxTxPerHour: 5, maxTxPerDay: 10 },
-      createdAt, updatedAt,
+      createdAt,
+      updatedAt,
     },
   ];
 
@@ -438,47 +482,95 @@ async function seed() {
   // Helper to build all-pass policy results for a given agent
   function treasuryAllPass(): PolicyResultSeed[] {
     return [
-      { policyId: "pol-treasury-spending",  type: "spending-limit",          passed: true },
-      { policyId: "pol-treasury-addresses", type: "approved-addresses",      passed: true },
-      { policyId: "pol-treasury-auto",      type: "auto-approve-threshold",  passed: true },
-      { policyId: "pol-treasury-rate",      type: "rate-limit",              passed: true },
+      {
+        policyId: "pol-treasury-spending",
+        type: "spending-limit",
+        passed: true,
+      },
+      {
+        policyId: "pol-treasury-addresses",
+        type: "approved-addresses",
+        passed: true,
+      },
+      {
+        policyId: "pol-treasury-auto",
+        type: "auto-approve-threshold",
+        passed: true,
+      },
+      { policyId: "pol-treasury-rate", type: "rate-limit", passed: true },
     ];
   }
 
   function dexAllPass(): PolicyResultSeed[] {
     return [
-      { policyId: "pol-dex-spending",  type: "spending-limit",          passed: true },
-      { policyId: "pol-dex-addresses", type: "approved-addresses",      passed: true },
-      { policyId: "pol-dex-auto",      type: "auto-approve-threshold",  passed: true },
-      { policyId: "pol-dex-window",    type: "time-window",             passed: true },
-      { policyId: "pol-dex-rate",      type: "rate-limit",              passed: true },
+      { policyId: "pol-dex-spending", type: "spending-limit", passed: true },
+      {
+        policyId: "pol-dex-addresses",
+        type: "approved-addresses",
+        passed: true,
+      },
+      {
+        policyId: "pol-dex-auto",
+        type: "auto-approve-threshold",
+        passed: true,
+      },
+      { policyId: "pol-dex-window", type: "time-window", passed: true },
+      { policyId: "pol-dex-rate", type: "rate-limit", passed: true },
     ];
   }
 
   function predAllPass(): PolicyResultSeed[] {
     return [
-      { policyId: "pol-pred-spending",  type: "spending-limit",          passed: true },
-      { policyId: "pol-pred-addresses", type: "approved-addresses",      passed: true },
-      { policyId: "pol-pred-auto",      type: "auto-approve-threshold",  passed: true },
-      { policyId: "pol-pred-rate",      type: "rate-limit",              passed: true },
+      { policyId: "pol-pred-spending", type: "spending-limit", passed: true },
+      {
+        policyId: "pol-pred-addresses",
+        type: "approved-addresses",
+        passed: true,
+      },
+      {
+        policyId: "pol-pred-auto",
+        type: "auto-approve-threshold",
+        passed: true,
+      },
+      { policyId: "pol-pred-rate", type: "rate-limit", passed: true },
     ];
   }
 
   function perpAllPass(): PolicyResultSeed[] {
     return [
-      { policyId: "pol-perp-spending",  type: "spending-limit",          passed: true },
-      { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: true },
-      { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: true },
-      { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+      { policyId: "pol-perp-spending", type: "spending-limit", passed: true },
+      {
+        policyId: "pol-perp-addresses",
+        type: "approved-addresses",
+        passed: true,
+      },
+      {
+        policyId: "pol-perp-auto",
+        type: "auto-approve-threshold",
+        passed: true,
+      },
+      { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
     ];
   }
 
   function hostingAllPass(): PolicyResultSeed[] {
     return [
-      { policyId: "pol-hosting-spending",  type: "spending-limit",          passed: true },
-      { policyId: "pol-hosting-addresses", type: "approved-addresses",      passed: true },
-      { policyId: "pol-hosting-auto",      type: "auto-approve-threshold",  passed: true },
-      { policyId: "pol-hosting-rate",      type: "rate-limit",              passed: true },
+      {
+        policyId: "pol-hosting-spending",
+        type: "spending-limit",
+        passed: true,
+      },
+      {
+        policyId: "pol-hosting-addresses",
+        type: "approved-addresses",
+        passed: true,
+      },
+      {
+        policyId: "pol-hosting-auto",
+        type: "auto-approve-threshold",
+        passed: true,
+      },
+      { policyId: "pol-hosting-rate", type: "rate-limit", passed: true },
     ];
   }
 
@@ -493,11 +585,11 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.teamMultisig,
-      value: "300000000000000000",  // 0.3 BNB
+      value: "300000000000000000", // 0.3 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: treasuryAllPass(),
-      createdAt: hoursAgo(156),  // ~6.5 days ago
+      createdAt: hoursAgo(156), // ~6.5 days ago
       signedAt: hoursAgo(155.9),
       confirmedAt: hoursAgo(155.8),
     },
@@ -506,11 +598,11 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.teamMultisig,
-      value: "350000000000000000",  // 0.35 BNB
+      value: "350000000000000000", // 0.35 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: treasuryAllPass(),
-      createdAt: hoursAgo(132),  // ~5.5 days ago
+      createdAt: hoursAgo(132), // ~5.5 days ago
       signedAt: hoursAgo(131.9),
       confirmedAt: hoursAgo(131.7),
     },
@@ -519,11 +611,11 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.teamMultisig,
-      value: "400000000000000000",  // 0.4 BNB
+      value: "400000000000000000", // 0.4 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: treasuryAllPass(),
-      createdAt: hoursAgo(108),  // ~4.5 days ago
+      createdAt: hoursAgo(108), // ~4.5 days ago
       signedAt: hoursAgo(107.9),
       confirmedAt: hoursAgo(107.7),
     },
@@ -532,11 +624,11 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.teamMultisig,
-      value: "320000000000000000",  // 0.32 BNB
+      value: "320000000000000000", // 0.32 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: treasuryAllPass(),
-      createdAt: hoursAgo(84),  // ~3.5 days ago
+      createdAt: hoursAgo(84), // ~3.5 days ago
       signedAt: hoursAgo(83.9),
       confirmedAt: hoursAgo(83.7),
     },
@@ -545,11 +637,11 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.teamMultisig,
-      value: "380000000000000000",  // 0.38 BNB
+      value: "380000000000000000", // 0.38 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: treasuryAllPass(),
-      createdAt: hoursAgo(36),  // ~1.5 days ago
+      createdAt: hoursAgo(36), // ~1.5 days ago
       signedAt: hoursAgo(35.9),
       confirmedAt: hoursAgo(35.7),
     },
@@ -560,16 +652,29 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.pancakeSwap,
-      value: "800000000000000000",  // 0.8 BNB
+      value: "800000000000000000", // 0.8 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-treasury-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-treasury-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-treasury-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.8 BNB exceeds auto-approve threshold of 0.5 BNB" },
-        { policyId: "pol-treasury-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-treasury-spending",
+          type: "spending-limit",
+          passed: true,
+        },
+        {
+          policyId: "pol-treasury-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-treasury-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.8 BNB exceeds auto-approve threshold of 0.5 BNB",
+        },
+        { policyId: "pol-treasury-rate", type: "rate-limit", passed: true },
       ],
-      createdAt: hoursAgo(120),  // 5 days ago
+      createdAt: hoursAgo(120), // 5 days ago
       signedAt: hoursAgo(119.5),
       confirmedAt: hoursAgo(119.3),
     },
@@ -578,16 +683,29 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.pancakeSwap,
-      value: "1200000000000000000",  // 1.2 BNB
+      value: "1200000000000000000", // 1.2 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-treasury-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-treasury-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-treasury-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 1.2 BNB exceeds auto-approve threshold of 0.5 BNB" },
-        { policyId: "pol-treasury-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-treasury-spending",
+          type: "spending-limit",
+          passed: true,
+        },
+        {
+          policyId: "pol-treasury-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-treasury-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 1.2 BNB exceeds auto-approve threshold of 0.5 BNB",
+        },
+        { policyId: "pol-treasury-rate", type: "rate-limit", passed: true },
       ],
-      createdAt: hoursAgo(60),  // 2.5 days ago
+      createdAt: hoursAgo(60), // 2.5 days ago
       signedAt: hoursAgo(59.5),
       confirmedAt: hoursAgo(59.3),
     },
@@ -598,15 +716,28 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "rejected",
       toAddress: ADDR.deadAddress,
-      value: "500000000000000000",  // 0.5 BNB
+      value: "500000000000000000", // 0.5 BNB
       chainId: 56,
       policyResults: [
-        { policyId: "pol-treasury-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-treasury-addresses", type: "approved-addresses",      passed: false, reason: "destination 0xdead...dead not on whitelist" },
-        { policyId: "pol-treasury-auto",      type: "auto-approve-threshold",  passed: true },
-        { policyId: "pol-treasury-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-treasury-spending",
+          type: "spending-limit",
+          passed: true,
+        },
+        {
+          policyId: "pol-treasury-addresses",
+          type: "approved-addresses",
+          passed: false,
+          reason: "destination 0xdead...dead not on whitelist",
+        },
+        {
+          policyId: "pol-treasury-auto",
+          type: "auto-approve-threshold",
+          passed: true,
+        },
+        { policyId: "pol-treasury-rate", type: "rate-limit", passed: true },
       ],
-      createdAt: hoursAgo(96),  // 4 days ago
+      createdAt: hoursAgo(96), // 4 days ago
     },
 
     // 1x rejected: exceeded daily limit (tried 8 BNB after spending 5)
@@ -615,15 +746,29 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "rejected",
       toAddress: ADDR.teamMultisig,
-      value: "8000000000000000000",  // 8 BNB
+      value: "8000000000000000000", // 8 BNB
       chainId: 56,
       policyResults: [
-        { policyId: "pol-treasury-spending",  type: "spending-limit",          passed: false, reason: "daily spend 5.0 BNB + requested 8.0 BNB exceeds 10 BNB daily limit" },
-        { policyId: "pol-treasury-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-treasury-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 8.0 BNB exceeds auto-approve threshold of 0.5 BNB" },
-        { policyId: "pol-treasury-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-treasury-spending",
+          type: "spending-limit",
+          passed: false,
+          reason: "daily spend 5.0 BNB + requested 8.0 BNB exceeds 10 BNB daily limit",
+        },
+        {
+          policyId: "pol-treasury-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-treasury-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 8.0 BNB exceeds auto-approve threshold of 0.5 BNB",
+        },
+        { policyId: "pol-treasury-rate", type: "rate-limit", passed: true },
       ],
-      createdAt: hoursAgo(48),  // 2 days ago
+      createdAt: hoursAgo(48), // 2 days ago
     },
 
     // 1x pending: large withdrawal 1.8 BNB to team multisig (above auto-approve)
@@ -632,13 +777,27 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "pending",
       toAddress: ADDR.teamMultisig,
-      value: "1800000000000000000",  // 1.8 BNB
+      value: "1800000000000000000", // 1.8 BNB
       chainId: 56,
       policyResults: [
-        { policyId: "pol-treasury-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-treasury-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-treasury-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 1.8 BNB exceeds auto-approve threshold of 0.5 BNB — requires human approval" },
-        { policyId: "pol-treasury-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-treasury-spending",
+          type: "spending-limit",
+          passed: true,
+        },
+        {
+          policyId: "pol-treasury-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-treasury-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason:
+            "value 1.8 BNB exceeds auto-approve threshold of 0.5 BNB — requires human approval",
+        },
+        { policyId: "pol-treasury-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(3),
     },
@@ -649,11 +808,11 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.elizaCloud,
-      value: "150000000000000000",  // 0.15 BNB
+      value: "150000000000000000", // 0.15 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: treasuryAllPass(),
-      createdAt: hoursAgo(144),  // 6 days ago
+      createdAt: hoursAgo(144), // 6 days ago
       signedAt: hoursAgo(143.9),
       confirmedAt: hoursAgo(143.7),
     },
@@ -662,11 +821,11 @@ async function seed() {
       agentId: "agent-treasury-ops",
       status: "confirmed",
       toAddress: ADDR.elizaCloud,
-      value: "150000000000000000",  // 0.15 BNB
+      value: "150000000000000000", // 0.15 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: treasuryAllPass(),
-      createdAt: hoursAgo(24),  // 1 day ago
+      createdAt: hoursAgo(24), // 1 day ago
       signedAt: hoursAgo(23.9),
       confirmedAt: hoursAgo(23.7),
     },
@@ -681,7 +840,7 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.pancakeSwap,
-      value: "50000000000000000",  // 0.05 BNB
+      value: "50000000000000000", // 0.05 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -694,7 +853,7 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.aerodrome,
-      value: "120000000000000000",  // 0.12 ETH
+      value: "120000000000000000", // 0.12 ETH
       chainId: 8453,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -707,7 +866,7 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.pancakeSwap,
-      value: "80000000000000000",  // 0.08 BNB
+      value: "80000000000000000", // 0.08 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -720,7 +879,7 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.aerodrome,
-      value: "180000000000000000",  // 0.18 ETH
+      value: "180000000000000000", // 0.18 ETH
       chainId: 8453,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -733,7 +892,7 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.pancakeSwap,
-      value: "150000000000000000",  // 0.15 BNB
+      value: "150000000000000000", // 0.15 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -746,7 +905,7 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.aerodrome,
-      value: "70000000000000000",  // 0.07 ETH
+      value: "70000000000000000", // 0.07 ETH
       chainId: 8453,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -759,7 +918,7 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.pancakeSwap,
-      value: "100000000000000000",  // 0.1 BNB
+      value: "100000000000000000", // 0.1 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -772,7 +931,7 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.aerodrome,
-      value: "160000000000000000",  // 0.16 ETH
+      value: "160000000000000000", // 0.16 ETH
       chainId: 8453,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -787,15 +946,24 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.pancakeSwap,
-      value: "500000000000000000",  // 0.5 BNB
+      value: "500000000000000000", // 0.5 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-dex-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-dex-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-dex-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.5 BNB exceeds auto-approve threshold of 0.2 BNB" },
-        { policyId: "pol-dex-window",    type: "time-window",             passed: true },
-        { policyId: "pol-dex-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-dex-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-dex-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-dex-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.5 BNB exceeds auto-approve threshold of 0.2 BNB",
+        },
+        { policyId: "pol-dex-window", type: "time-window", passed: true },
+        { policyId: "pol-dex-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(100),
       signedAt: hoursAgo(99.5),
@@ -806,15 +974,24 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "confirmed",
       toAddress: ADDR.aerodrome,
-      value: "700000000000000000",  // 0.7 ETH
+      value: "700000000000000000", // 0.7 ETH
       chainId: 8453,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-dex-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-dex-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-dex-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.7 ETH exceeds auto-approve threshold of 0.2 ETH" },
-        { policyId: "pol-dex-window",    type: "time-window",             passed: true },
-        { policyId: "pol-dex-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-dex-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-dex-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-dex-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.7 ETH exceeds auto-approve threshold of 0.2 ETH",
+        },
+        { policyId: "pol-dex-window", type: "time-window", passed: true },
+        { policyId: "pol-dex-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(56),
       signedAt: hoursAgo(55.5),
@@ -827,16 +1004,29 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "rejected",
       toAddress: ADDR.pancakeSwap,
-      value: "150000000000000000",  // 0.15 BNB
+      value: "150000000000000000", // 0.15 BNB
       chainId: 56,
       policyResults: [
-        { policyId: "pol-dex-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-dex-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-dex-auto",      type: "auto-approve-threshold",  passed: true },
-        { policyId: "pol-dex-window",    type: "time-window",             passed: false, reason: "transaction submitted on Saturday — trading restricted to weekdays (Mon-Fri)" },
-        { policyId: "pol-dex-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-dex-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-dex-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-dex-auto",
+          type: "auto-approve-threshold",
+          passed: true,
+        },
+        {
+          policyId: "pol-dex-window",
+          type: "time-window",
+          passed: false,
+          reason: "transaction submitted on Saturday — trading restricted to weekdays (Mon-Fri)",
+        },
+        { policyId: "pol-dex-rate", type: "rate-limit", passed: true },
       ],
-      createdAt: hoursAgo(42),  // ~1.75 days ago
+      createdAt: hoursAgo(42), // ~1.75 days ago
     },
 
     // 1x rejected: tried Uniswap (address not whitelisted)
@@ -845,14 +1035,24 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "rejected",
       toAddress: ADDR.uniswapRouter,
-      value: "300000000000000000",  // 0.3 ETH
+      value: "300000000000000000", // 0.3 ETH
       chainId: 8453,
       policyResults: [
-        { policyId: "pol-dex-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-dex-addresses", type: "approved-addresses",      passed: false, reason: "destination 0x7a250d56...488D (Uniswap Router) not on approved whitelist" },
-        { policyId: "pol-dex-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.3 ETH exceeds auto-approve threshold of 0.2 ETH" },
-        { policyId: "pol-dex-window",    type: "time-window",             passed: true },
-        { policyId: "pol-dex-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-dex-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-dex-addresses",
+          type: "approved-addresses",
+          passed: false,
+          reason: "destination 0x7a250d56...488D (Uniswap Router) not on approved whitelist",
+        },
+        {
+          policyId: "pol-dex-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.3 ETH exceeds auto-approve threshold of 0.2 ETH",
+        },
+        { policyId: "pol-dex-window", type: "time-window", passed: true },
+        { policyId: "pol-dex-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(18),
     },
@@ -863,14 +1063,24 @@ async function seed() {
       agentId: "agent-dex-trader",
       status: "pending",
       toAddress: ADDR.aerodrome,
-      value: "900000000000000000",  // 0.9 ETH
+      value: "900000000000000000", // 0.9 ETH
       chainId: 8453,
       policyResults: [
-        { policyId: "pol-dex-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-dex-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-dex-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.9 ETH exceeds auto-approve threshold of 0.2 ETH — requires human approval" },
-        { policyId: "pol-dex-window",    type: "time-window",             passed: true },
-        { policyId: "pol-dex-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-dex-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-dex-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-dex-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason:
+            "value 0.9 ETH exceeds auto-approve threshold of 0.2 ETH — requires human approval",
+        },
+        { policyId: "pol-dex-window", type: "time-window", passed: true },
+        { policyId: "pol-dex-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(2),
     },
@@ -882,7 +1092,7 @@ async function seed() {
       status: "confirmed",
       toAddress: ADDR.pancakeSwap,
       value: "0",
-      data: erc20Transfer(ADDR.pancakeSwap, 500000000000000000n),  // 0.5 token (18 dec)
+      data: erc20Transfer(ADDR.pancakeSwap, 500000000000000000n), // 0.5 token (18 dec)
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -896,7 +1106,7 @@ async function seed() {
       status: "confirmed",
       toAddress: ADDR.aerodrome,
       value: "0",
-      data: erc20Transfer(ADDR.aerodrome, 250000000000000000n),  // 0.25 token
+      data: erc20Transfer(ADDR.aerodrome, 250000000000000000n), // 0.25 token
       chainId: 8453,
       txHash: randomTxHash(),
       policyResults: dexAllPass(),
@@ -915,7 +1125,7 @@ async function seed() {
       agentId: "agent-prediction-agent",
       status: "confirmed",
       toAddress: ADDR.polymarketCTF,
-      value: "5000000000000000000",  // 5 POL
+      value: "5000000000000000000", // 5 POL
       chainId: 137,
       txHash: randomTxHash(),
       policyResults: predAllPass(),
@@ -929,7 +1139,7 @@ async function seed() {
       status: "confirmed",
       toAddress: ADDR.usdcPolygon,
       value: "0",
-      data: erc20Transfer(ADDR.polymarketCTF, 10000000n),  // 10 USDC (6 decimals)
+      data: erc20Transfer(ADDR.polymarketCTF, 10000000n), // 10 USDC (6 decimals)
       chainId: 137,
       txHash: randomTxHash(),
       policyResults: predAllPass(),
@@ -942,7 +1152,7 @@ async function seed() {
       agentId: "agent-prediction-agent",
       status: "confirmed",
       toAddress: ADDR.polymarketCTF,
-      value: "12000000000000000000",  // 12 POL
+      value: "12000000000000000000", // 12 POL
       chainId: 137,
       txHash: randomTxHash(),
       policyResults: predAllPass(),
@@ -955,7 +1165,7 @@ async function seed() {
       agentId: "agent-prediction-agent",
       status: "confirmed",
       toAddress: ADDR.polymarketCTF,
-      value: "8000000000000000000",  // 8 POL
+      value: "8000000000000000000", // 8 POL
       chainId: 137,
       txHash: randomTxHash(),
       policyResults: predAllPass(),
@@ -969,7 +1179,7 @@ async function seed() {
       status: "confirmed",
       toAddress: ADDR.usdcPolygon,
       value: "0",
-      data: erc20Transfer(ADDR.polymarketCTF, 15000000n),  // 15 USDC
+      data: erc20Transfer(ADDR.polymarketCTF, 15000000n), // 15 USDC
       chainId: 137,
       txHash: randomTxHash(),
       policyResults: predAllPass(),
@@ -984,14 +1194,23 @@ async function seed() {
       agentId: "agent-prediction-agent",
       status: "confirmed",
       toAddress: ADDR.polymarketCTF,
-      value: "80000000000000000000",  // 80 POL
+      value: "80000000000000000000", // 80 POL
       chainId: 137,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-pred-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-pred-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-pred-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 80 POL exceeds auto-approve threshold of 20 POL" },
-        { policyId: "pol-pred-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-pred-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-pred-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-pred-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 80 POL exceeds auto-approve threshold of 20 POL",
+        },
+        { policyId: "pol-pred-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(70),
       signedAt: hoursAgo(69.2),
@@ -1002,14 +1221,23 @@ async function seed() {
       agentId: "agent-prediction-agent",
       status: "confirmed",
       toAddress: ADDR.polymarketCTF,
-      value: "120000000000000000000",  // 120 POL
+      value: "120000000000000000000", // 120 POL
       chainId: 137,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-pred-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-pred-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-pred-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 120 POL exceeds auto-approve threshold of 20 POL" },
-        { policyId: "pol-pred-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-pred-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-pred-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-pred-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 120 POL exceeds auto-approve threshold of 20 POL",
+        },
+        { policyId: "pol-pred-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(30),
       signedAt: hoursAgo(29.5),
@@ -1022,13 +1250,23 @@ async function seed() {
       agentId: "agent-prediction-agent",
       status: "rejected",
       toAddress: ADDR.randomContract,
-      value: "25000000000000000000",  // 25 POL
+      value: "25000000000000000000", // 25 POL
       chainId: 137,
       policyResults: [
-        { policyId: "pol-pred-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-pred-addresses", type: "approved-addresses",      passed: false, reason: "destination 0xA0b86991...eB48 not on approved whitelist" },
-        { policyId: "pol-pred-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 25 POL exceeds auto-approve threshold of 20 POL" },
-        { policyId: "pol-pred-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-pred-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-pred-addresses",
+          type: "approved-addresses",
+          passed: false,
+          reason: "destination 0xA0b86991...eB48 not on approved whitelist",
+        },
+        {
+          policyId: "pol-pred-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 25 POL exceeds auto-approve threshold of 20 POL",
+        },
+        { policyId: "pol-pred-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(44),
     },
@@ -1039,13 +1277,22 @@ async function seed() {
       agentId: "agent-prediction-agent",
       status: "pending",
       toAddress: ADDR.polymarketCTF,
-      value: "90000000000000000000",  // 90 POL
+      value: "90000000000000000000", // 90 POL
       chainId: 137,
       policyResults: [
-        { policyId: "pol-pred-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-pred-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-pred-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 90 POL exceeds auto-approve threshold of 20 POL — requires human approval" },
-        { policyId: "pol-pred-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-pred-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-pred-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-pred-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 90 POL exceeds auto-approve threshold of 20 POL — requires human approval",
+        },
+        { policyId: "pol-pred-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(4),
     },
@@ -1056,7 +1303,7 @@ async function seed() {
       agentId: "agent-prediction-agent",
       status: "failed",
       toAddress: ADDR.polymarketCTF,
-      value: "15000000000000000000",  // 15 POL
+      value: "15000000000000000000", // 15 POL
       chainId: 137,
       txHash: randomTxHash(),
       policyResults: predAllPass(),
@@ -1074,7 +1321,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "10000000000000000",  // 0.01 ETH
+      value: "10000000000000000", // 0.01 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1087,7 +1334,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "25000000000000000",  // 0.025 ETH
+      value: "25000000000000000", // 0.025 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1100,7 +1347,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "40000000000000000",  // 0.04 ETH
+      value: "40000000000000000", // 0.04 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1113,7 +1360,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "15000000000000000",  // 0.015 ETH
+      value: "15000000000000000", // 0.015 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1126,7 +1373,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "30000000000000000",  // 0.03 ETH
+      value: "30000000000000000", // 0.03 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1139,7 +1386,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "20000000000000000",  // 0.02 ETH
+      value: "20000000000000000", // 0.02 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1152,7 +1399,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "35000000000000000",  // 0.035 ETH
+      value: "35000000000000000", // 0.035 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1165,7 +1412,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "12000000000000000",  // 0.012 ETH
+      value: "12000000000000000", // 0.012 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1178,7 +1425,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "45000000000000000",  // 0.045 ETH
+      value: "45000000000000000", // 0.045 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1191,7 +1438,7 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "18000000000000000",  // 0.018 ETH
+      value: "18000000000000000", // 0.018 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: perpAllPass(),
@@ -1206,14 +1453,23 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "100000000000000000",  // 0.1 ETH
+      value: "100000000000000000", // 0.1 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-perp-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.1 ETH exceeds auto-approve threshold of 0.05 ETH" },
-        { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-perp-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-perp-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-perp-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.1 ETH exceeds auto-approve threshold of 0.05 ETH",
+        },
+        { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(120),
       signedAt: hoursAgo(119.2),
@@ -1224,14 +1480,23 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "200000000000000000",  // 0.2 ETH
+      value: "200000000000000000", // 0.2 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-perp-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.2 ETH exceeds auto-approve threshold of 0.05 ETH" },
-        { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-perp-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-perp-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-perp-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.2 ETH exceeds auto-approve threshold of 0.05 ETH",
+        },
+        { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(68),
       signedAt: hoursAgo(67.5),
@@ -1242,14 +1507,23 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "confirmed",
       toAddress: ADDR.hyperliquid,
-      value: "300000000000000000",  // 0.3 ETH
+      value: "300000000000000000", // 0.3 ETH
       chainId: 42161,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-perp-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.3 ETH exceeds auto-approve threshold of 0.05 ETH" },
-        { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-perp-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-perp-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-perp-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.3 ETH exceeds auto-approve threshold of 0.05 ETH",
+        },
+        { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(24),
       signedAt: hoursAgo(23.3),
@@ -1262,13 +1536,27 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "rejected",
       toAddress: ADDR.hyperliquid,
-      value: "400000000000000000",  // 0.4 ETH
+      value: "400000000000000000", // 0.4 ETH
       chainId: 42161,
       policyResults: [
-        { policyId: "pol-perp-spending",  type: "spending-limit",          passed: false, reason: "daily spend 1.8 ETH + requested 0.4 ETH exceeds 2 ETH daily limit" },
-        { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.4 ETH exceeds auto-approve threshold of 0.05 ETH" },
-        { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-perp-spending",
+          type: "spending-limit",
+          passed: false,
+          reason: "daily spend 1.8 ETH + requested 0.4 ETH exceeds 2 ETH daily limit",
+        },
+        {
+          policyId: "pol-perp-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-perp-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.4 ETH exceeds auto-approve threshold of 0.05 ETH",
+        },
+        { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(40),
     },
@@ -1277,13 +1565,27 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "rejected",
       toAddress: ADDR.hyperliquid,
-      value: "450000000000000000",  // 0.45 ETH
+      value: "450000000000000000", // 0.45 ETH
       chainId: 42161,
       policyResults: [
-        { policyId: "pol-perp-spending",  type: "spending-limit",          passed: false, reason: "daily spend 1.7 ETH + requested 0.45 ETH exceeds 2 ETH daily limit" },
-        { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.45 ETH exceeds auto-approve threshold of 0.05 ETH" },
-        { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-perp-spending",
+          type: "spending-limit",
+          passed: false,
+          reason: "daily spend 1.7 ETH + requested 0.45 ETH exceeds 2 ETH daily limit",
+        },
+        {
+          policyId: "pol-perp-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-perp-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.45 ETH exceeds auto-approve threshold of 0.05 ETH",
+        },
+        { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(16),
     },
@@ -1294,13 +1596,24 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "rejected",
       toAddress: ADDR.unauthorizedBridge,
-      value: "150000000000000000",  // 0.15 ETH
+      value: "150000000000000000", // 0.15 ETH
       chainId: 42161,
       policyResults: [
-        { policyId: "pol-perp-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: false, reason: "destination 0x3333...3333 not on approved whitelist — only Hyperliquid Bridge allowed" },
-        { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.15 ETH exceeds auto-approve threshold of 0.05 ETH" },
-        { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-perp-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-perp-addresses",
+          type: "approved-addresses",
+          passed: false,
+          reason:
+            "destination 0x3333...3333 not on approved whitelist — only Hyperliquid Bridge allowed",
+        },
+        {
+          policyId: "pol-perp-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.15 ETH exceeds auto-approve threshold of 0.05 ETH",
+        },
+        { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(50),
     },
@@ -1311,13 +1624,23 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "pending",
       toAddress: ADDR.hyperliquid,
-      value: "200000000000000000",  // 0.2 ETH
+      value: "200000000000000000", // 0.2 ETH
       chainId: 42161,
       policyResults: [
-        { policyId: "pol-perp-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.2 ETH exceeds auto-approve threshold of 0.05 ETH — requires human approval" },
-        { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-perp-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-perp-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-perp-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason:
+            "value 0.2 ETH exceeds auto-approve threshold of 0.05 ETH — requires human approval",
+        },
+        { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(5),
     },
@@ -1326,13 +1649,23 @@ async function seed() {
       agentId: "agent-perp-trader",
       status: "pending",
       toAddress: ADDR.hyperliquid,
-      value: "350000000000000000",  // 0.35 ETH
+      value: "350000000000000000", // 0.35 ETH
       chainId: 42161,
       policyResults: [
-        { policyId: "pol-perp-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-perp-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-perp-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.35 ETH exceeds auto-approve threshold of 0.05 ETH — requires human approval" },
-        { policyId: "pol-perp-rate",      type: "rate-limit",              passed: true },
+        { policyId: "pol-perp-spending", type: "spending-limit", passed: true },
+        {
+          policyId: "pol-perp-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-perp-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason:
+            "value 0.35 ETH exceeds auto-approve threshold of 0.05 ETH — requires human approval",
+        },
+        { policyId: "pol-perp-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(1.5),
     },
@@ -1347,11 +1680,11 @@ async function seed() {
       agentId: "agent-hosting-payer",
       status: "confirmed",
       toAddress: ADDR.elizaCloud,
-      value: "50000000000000000",  // 0.05 BNB
+      value: "50000000000000000", // 0.05 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: hostingAllPass(),
-      createdAt: hoursAgo(162),  // ~6.75 days ago
+      createdAt: hoursAgo(162), // ~6.75 days ago
       signedAt: hoursAgo(161.9),
       confirmedAt: hoursAgo(161.7),
     },
@@ -1360,11 +1693,11 @@ async function seed() {
       agentId: "agent-hosting-payer",
       status: "confirmed",
       toAddress: ADDR.elizaCloud,
-      value: "65000000000000000",  // 0.065 BNB
+      value: "65000000000000000", // 0.065 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: hostingAllPass(),
-      createdAt: hoursAgo(130),  // ~5.4 days ago
+      createdAt: hoursAgo(130), // ~5.4 days ago
       signedAt: hoursAgo(129.9),
       confirmedAt: hoursAgo(129.7),
     },
@@ -1373,11 +1706,11 @@ async function seed() {
       agentId: "agent-hosting-payer",
       status: "confirmed",
       toAddress: ADDR.elizaCloud,
-      value: "70000000000000000",  // 0.07 BNB
+      value: "70000000000000000", // 0.07 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: hostingAllPass(),
-      createdAt: hoursAgo(98),  // ~4.1 days ago
+      createdAt: hoursAgo(98), // ~4.1 days ago
       signedAt: hoursAgo(97.9),
       confirmedAt: hoursAgo(97.7),
     },
@@ -1386,11 +1719,11 @@ async function seed() {
       agentId: "agent-hosting-payer",
       status: "confirmed",
       toAddress: ADDR.elizaCloud,
-      value: "80000000000000000",  // 0.08 BNB
+      value: "80000000000000000", // 0.08 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: hostingAllPass(),
-      createdAt: hoursAgo(66),  // ~2.75 days ago
+      createdAt: hoursAgo(66), // ~2.75 days ago
       signedAt: hoursAgo(65.9),
       confirmedAt: hoursAgo(65.7),
     },
@@ -1399,11 +1732,11 @@ async function seed() {
       agentId: "agent-hosting-payer",
       status: "confirmed",
       toAddress: ADDR.elizaCloud,
-      value: "60000000000000000",  // 0.06 BNB
+      value: "60000000000000000", // 0.06 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: hostingAllPass(),
-      createdAt: hoursAgo(34),  // ~1.4 days ago
+      createdAt: hoursAgo(34), // ~1.4 days ago
       signedAt: hoursAgo(33.9),
       confirmedAt: hoursAgo(33.7),
     },
@@ -1414,15 +1747,28 @@ async function seed() {
       agentId: "agent-hosting-payer",
       status: "rejected",
       toAddress: ADDR.wrongAddress,
-      value: "75000000000000000",  // 0.075 BNB
+      value: "75000000000000000", // 0.075 BNB
       chainId: 56,
       policyResults: [
-        { policyId: "pol-hosting-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-hosting-addresses", type: "approved-addresses",      passed: false, reason: "destination 0x1111...1111 not on whitelist — only Eliza Cloud address allowed" },
-        { policyId: "pol-hosting-auto",      type: "auto-approve-threshold",  passed: true },
-        { policyId: "pol-hosting-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-hosting-spending",
+          type: "spending-limit",
+          passed: true,
+        },
+        {
+          policyId: "pol-hosting-addresses",
+          type: "approved-addresses",
+          passed: false,
+          reason: "destination 0x1111...1111 not on whitelist — only Eliza Cloud address allowed",
+        },
+        {
+          policyId: "pol-hosting-auto",
+          type: "auto-approve-threshold",
+          passed: true,
+        },
+        { policyId: "pol-hosting-rate", type: "rate-limit", passed: true },
       ],
-      createdAt: hoursAgo(78),  // ~3.25 days ago
+      createdAt: hoursAgo(78), // ~3.25 days ago
     },
 
     // 1x pending: larger-than-usual bill 0.3 BNB awaiting approval
@@ -1431,13 +1777,27 @@ async function seed() {
       agentId: "agent-hosting-payer",
       status: "pending",
       toAddress: ADDR.elizaCloud,
-      value: "300000000000000000",  // 0.3 BNB
+      value: "300000000000000000", // 0.3 BNB
       chainId: 56,
       policyResults: [
-        { policyId: "pol-hosting-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-hosting-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-hosting-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.3 BNB exceeds auto-approve threshold of 0.1 BNB — requires human approval" },
-        { policyId: "pol-hosting-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-hosting-spending",
+          type: "spending-limit",
+          passed: true,
+        },
+        {
+          policyId: "pol-hosting-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-hosting-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason:
+            "value 0.3 BNB exceeds auto-approve threshold of 0.1 BNB — requires human approval",
+        },
+        { policyId: "pol-hosting-rate", type: "rate-limit", passed: true },
       ],
       createdAt: hoursAgo(6),
     },
@@ -1448,16 +1808,29 @@ async function seed() {
       agentId: "agent-hosting-payer",
       status: "confirmed",
       toAddress: ADDR.elizaCloud,
-      value: "400000000000000000",  // 0.4 BNB
+      value: "400000000000000000", // 0.4 BNB
       chainId: 56,
       txHash: randomTxHash(),
       policyResults: [
-        { policyId: "pol-hosting-spending",  type: "spending-limit",          passed: true },
-        { policyId: "pol-hosting-addresses", type: "approved-addresses",      passed: true },
-        { policyId: "pol-hosting-auto",      type: "auto-approve-threshold",  passed: false, reason: "value 0.4 BNB exceeds auto-approve threshold of 0.1 BNB" },
-        { policyId: "pol-hosting-rate",      type: "rate-limit",              passed: true },
+        {
+          policyId: "pol-hosting-spending",
+          type: "spending-limit",
+          passed: true,
+        },
+        {
+          policyId: "pol-hosting-addresses",
+          type: "approved-addresses",
+          passed: true,
+        },
+        {
+          policyId: "pol-hosting-auto",
+          type: "auto-approve-threshold",
+          passed: false,
+          reason: "value 0.4 BNB exceeds auto-approve threshold of 0.1 BNB",
+        },
+        { policyId: "pol-hosting-rate", type: "rate-limit", passed: true },
       ],
-      createdAt: hoursAgo(150),  // ~6.25 days ago
+      createdAt: hoursAgo(150), // ~6.25 days ago
       signedAt: hoursAgo(149.2),
       confirmedAt: hoursAgo(149),
     },
@@ -1619,7 +1992,10 @@ async function seed() {
     },
   ];
 
-  await db.insert(approvalQueue).values(approvalSeeds).onConflictDoNothing({ target: approvalQueue.id });
+  await db
+    .insert(approvalQueue)
+    .values(approvalSeeds)
+    .onConflictDoNothing({ target: approvalQueue.id });
 
   /* ── Summary ───────────────────────────────────────────────────────────── */
   console.log(`\nSeeded tenant: ${TENANT_ID}`);

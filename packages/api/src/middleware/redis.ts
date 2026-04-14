@@ -6,17 +6,13 @@
  * return permissive defaults so the API still works without Redis.
  */
 
-import type { Context, Next } from "hono";
 import {
-  getRedis,
-  disconnectRedis,
   checkRateLimit,
-  getRateLimitStatus,
-  recordSpend,
-  getSpend,
   checkSpendLimit,
-  estimateCost,
+  disconnectRedis,
+  getRedis,
   type RateLimitResult,
+  recordSpend,
   type SpendPeriod,
 } from "@stwd/redis";
 import type Redis from "ioredis";
@@ -40,12 +36,15 @@ export async function initRedis(): Promise<boolean> {
   try {
     redisClient = getRedis();
     // Ping to verify the connection
-    await redisClient!.ping();
+    await redisClient?.ping();
     redisAvailable = true;
     console.log("[steward:redis] Redis connected — rate limiting and spend tracking enabled");
     return true;
   } catch (err) {
-    console.warn("[steward:redis] Failed to connect — Redis enforcement disabled:", (err as Error).message);
+    console.warn(
+      "[steward:redis] Failed to connect — Redis enforcement disabled:",
+      (err as Error).message,
+    );
     redisAvailable = false;
     return false;
   }
@@ -95,7 +94,10 @@ export async function checkAgentRateLimit(
     const key = `ratelimit:vault:${agentId}:${windowMs}`;
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
-    console.error("[steward:redis] Rate limit check failed, allowing request:", (err as Error).message);
+    console.error(
+      "[steward:redis] Rate limit check failed, allowing request:",
+      (err as Error).message,
+    );
     return PERMISSIVE_RATE_LIMIT;
   }
 }
@@ -117,7 +119,10 @@ export async function checkProxyRateLimit(
     const key = `ratelimit:proxy:${agentId}:${host}:${windowMs}`;
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
-    console.error("[steward:redis] Proxy rate limit check failed, allowing request:", (err as Error).message);
+    console.error(
+      "[steward:redis] Proxy rate limit check failed, allowing request:",
+      (err as Error).message,
+    );
     return PERMISSIVE_RATE_LIMIT;
   }
 }
@@ -137,7 +142,10 @@ export async function checkAgentSpendLimit(
   try {
     return await checkSpendLimit(agentId, limitUsd, period);
   } catch (err) {
-    console.error("[steward:redis] Spend limit check failed, allowing request:", (err as Error).message);
+    console.error(
+      "[steward:redis] Spend limit check failed, allowing request:",
+      (err as Error).message,
+    );
     return { allowed: true, spent: 0, remaining: limitUsd };
   }
 }

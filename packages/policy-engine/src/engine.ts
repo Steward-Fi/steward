@@ -1,5 +1,5 @@
-import type { PolicyRule, PolicyResult, SignRequest, PriceOracle } from "@stwd/shared";
-import { evaluatePolicy, type EvaluatorContext } from "./evaluators";
+import type { PolicyResult, PolicyRule, PriceOracle, SignRequest } from "@stwd/shared";
+import { type EvaluatorContext, evaluatePolicy } from "./evaluators";
 
 export interface PolicyEvaluationContext {
   request: SignRequest;
@@ -50,15 +50,11 @@ export class PolicyEngine {
     };
 
     const results: PolicyResult[] = await Promise.all(
-      policies.map((policy) => evaluatePolicy(policy, evaluatorCtx))
+      policies.map((policy) => evaluatePolicy(policy, evaluatorCtx)),
     );
 
-    const hardPolicies = results.filter(
-      (r) => r.type !== "auto-approve-threshold"
-    );
-    const autoApproveResult = results.find(
-      (r) => r.type === "auto-approve-threshold"
-    );
+    const hardPolicies = results.filter((r) => r.type !== "auto-approve-threshold");
+    const autoApproveResult = results.find((r) => r.type === "auto-approve-threshold");
 
     const allHardPass = hardPolicies.every((r) => r.passed);
     const autoApprovePass = autoApproveResult ? autoApproveResult.passed : true;

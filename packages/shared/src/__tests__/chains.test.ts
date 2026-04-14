@@ -1,11 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import {
-  CHAINS,
-  chainFromNumeric,
-  chainFromCaip2,
-  toCaip2,
-  fromCaip2,
-} from "../index";
+import { CHAINS, chainFromCaip2, chainFromNumeric, fromCaip2, toCaip2 } from "../index";
 
 // ─── CHAINS registry ─────────────────────────────────────────────────────────
 
@@ -142,8 +136,8 @@ describe("chainFromNumeric", () => {
   it("returns the ChainIdentifier for a known chain ID", () => {
     const chain = chainFromNumeric(8453);
     expect(chain).toBeDefined();
-    expect(chain!.caip2).toBe("eip155:8453");
-    expect(chain!.name).toBe("Base");
+    expect(chain?.caip2).toBe("eip155:8453");
+    expect(chain?.name).toBe("Base");
   });
 
   it("returns undefined for an unknown chain ID", () => {
@@ -153,8 +147,8 @@ describe("chainFromNumeric", () => {
   it("finds Solana by convention ID 101", () => {
     const chain = chainFromNumeric(101);
     expect(chain).toBeDefined();
-    expect(chain!.family).toBe("solana");
-    expect(chain!.caip2).toBe("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
+    expect(chain?.family).toBe("solana");
+    expect(chain?.caip2).toBe("solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp");
   });
 });
 
@@ -164,8 +158,8 @@ describe("chainFromCaip2", () => {
   it("returns the ChainIdentifier for a known CAIP-2 string", () => {
     const chain = chainFromCaip2("eip155:137");
     expect(chain).toBeDefined();
-    expect(chain!.numericId).toBe(137);
-    expect(chain!.name).toBe("Polygon");
+    expect(chain?.numericId).toBe(137);
+    expect(chain?.name).toBe("Polygon");
   });
 
   it("returns undefined for an unknown CAIP-2 string", () => {
@@ -175,8 +169,8 @@ describe("chainFromCaip2", () => {
   it("finds Solana devnet by CAIP-2", () => {
     const chain = chainFromCaip2("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1");
     expect(chain).toBeDefined();
-    expect(chain!.numericId).toBe(102);
-    expect(chain!.testnet).toBe(true);
+    expect(chain?.numericId).toBe(102);
+    expect(chain?.testnet).toBe(true);
   });
 });
 

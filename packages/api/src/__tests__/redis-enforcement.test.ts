@@ -7,13 +7,13 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import type { PolicyRule } from "@stwd/shared";
 import {
+  enforceRateLimit,
   extractRateLimitPolicy,
   extractSpendLimitPolicy,
-  enforceRateLimit,
   recordVaultSpend,
 } from "../middleware/redis-enforcement";
-import type { PolicyRule } from "@stwd/shared";
 
 // ─── Policy extraction tests ─────────────────────────────────────────────────
 
@@ -24,7 +24,11 @@ describe("extractRateLimitPolicy", () => {
         id: "p1",
         type: "spending-limit",
         enabled: true,
-        config: { maxPerDay: "1000000", maxPerWeek: "5000000", maxPerTx: "100000" },
+        config: {
+          maxPerDay: "1000000",
+          maxPerWeek: "5000000",
+          maxPerTx: "100000",
+        },
       },
     ];
     expect(extractRateLimitPolicy(policies)).toBeNull();
@@ -88,7 +92,11 @@ describe("extractSpendLimitPolicy", () => {
         id: "p1",
         type: "spending-limit",
         enabled: true,
-        config: { maxPerDay: "1000000", maxPerWeek: "5000000", maxPerTx: "100000" },
+        config: {
+          maxPerDay: "1000000",
+          maxPerWeek: "5000000",
+          maxPerTx: "100000",
+        },
       },
     ];
     const result = extractSpendLimitPolicy(policies);
@@ -105,7 +113,9 @@ describe("extractSpendLimitPolicy", () => {
       },
     ];
     const result = extractSpendLimitPolicy(policies);
-    expect(result!.maxPerDay).toBe("500000");
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("Expected spend-limit policy");
+    expect(result.maxPerDay).toBe("500000");
   });
 
   it("handles simplified period format (week)", () => {
@@ -118,7 +128,9 @@ describe("extractSpendLimitPolicy", () => {
       },
     ];
     const result = extractSpendLimitPolicy(policies);
-    expect(result!.maxPerWeek).toBe("2000000");
+    expect(result).not.toBeNull();
+    if (!result) throw new Error("Expected spend-limit policy");
+    expect(result.maxPerWeek).toBe("2000000");
   });
 });
 

@@ -4,10 +4,7 @@ declare const process: {
 };
 
 declare const Bun: {
-  serve(options: {
-    port: number;
-    fetch(request: Request): Response | Promise<Response>;
-  }): {
+  serve(options: { port: number; fetch(request: Request): Response | Promise<Response> }): {
     stop(): void;
   };
 };

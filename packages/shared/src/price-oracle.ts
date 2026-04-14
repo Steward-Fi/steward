@@ -6,7 +6,7 @@
  * - Graceful degradation: returns null on failure so callers can fall back to wei comparison
  */
 
-import { getWrappedNativeAddress, getNativeDecimals, getTokenDecimals } from "./tokens.js";
+import { getNativeDecimals, getTokenDecimals, getWrappedNativeAddress } from "./tokens.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -82,7 +82,7 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
     try {
       const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`;
       const res = await fetch(url, {
-        headers: { "Accept": "application/json" },
+        headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(5000),
       });
 
@@ -137,7 +137,11 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
       return getPrice(chainId, tokenAddress);
     },
 
-    async weiToUsd(weiValue: string, chainId: number, tokenAddress?: string): Promise<number | null> {
+    async weiToUsd(
+      weiValue: string,
+      chainId: number,
+      tokenAddress?: string,
+    ): Promise<number | null> {
       const isNative = !tokenAddress || tokenAddress === "native" || tokenAddress === "";
       const price = isNative
         ? await oracle.getNativeUsdPrice(chainId)
@@ -161,7 +165,11 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
       return tokenAmount * price;
     },
 
-    async usdToWei(usdValue: number, chainId: number, tokenAddress?: string): Promise<string | null> {
+    async usdToWei(
+      usdValue: number,
+      chainId: number,
+      tokenAddress?: string,
+    ): Promise<string | null> {
       const isNative = !tokenAddress || tokenAddress === "native" || tokenAddress === "";
       const price = isNative
         ? await oracle.getNativeUsdPrice(chainId)

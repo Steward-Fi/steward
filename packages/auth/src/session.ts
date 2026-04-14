@@ -5,7 +5,7 @@
  * available to all packages via the monorepo workspace.
  */
 
-import { SignJWT, jwtVerify, type JWTPayload } from "jose";
+import { type JWTPayload, jwtVerify, SignJWT } from "jose";
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -53,10 +53,7 @@ export class SessionManager {
    * @param extra   Optional additional claims to embed in the token
    * @returns       A compact JWT string suitable for use as a session token
    */
-  async createSession(
-    userId: string,
-    extra?: Record<string, unknown>,
-  ): Promise<string> {
+  async createSession(userId: string, extra?: Record<string, unknown>): Promise<string> {
     const now = Math.floor(Date.now() / 1000);
 
     const builder = new SignJWT({
@@ -87,7 +84,7 @@ export class SessionManager {
       });
 
       // Sanity-check our custom claim is present
-      if (typeof payload["userId"] !== "string") {
+      if (typeof payload.userId !== "string") {
         return null;
       }
 

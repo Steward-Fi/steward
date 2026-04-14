@@ -6,12 +6,11 @@
  * wallet infrastructure, applying sensible default policies for every provisioned agent.
  */
 
+import { getDb, type PersistedPolicyRule, policies, toPersistedPolicyRule } from "@stwd/db";
+import type { AgentBalance, AgentIdentity, PolicyRule } from "@stwd/shared";
+import type { Vault } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { parseEther } from "viem";
-
-import { getDb, policies, toPersistedPolicyRule, type PersistedPolicyRule } from "@stwd/db";
-import type { AgentBalance, AgentIdentity, PolicyRule } from "@stwd/shared";
-import { Vault } from "@stwd/vault";
 
 const AGENT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,128}$/;
 
@@ -31,8 +30,8 @@ function buildDefaultPolicies(portalAddress?: string): PersistedPolicyRule[] {
       type: "spending-limit",
       enabled: true,
       config: {
-        maxPerTx: parseEther("0.1").toString(),  // 0.1 BNB per trade
-        maxPerDay: parseEther("1.0").toString(),  // 1 BNB daily
+        maxPerTx: parseEther("0.1").toString(), // 0.1 BNB per trade
+        maxPerDay: parseEther("1.0").toString(), // 1 BNB daily
         maxPerWeek: parseEther("5.0").toString(), // 5 BNB weekly
       },
     },
@@ -42,7 +41,7 @@ function buildDefaultPolicies(portalAddress?: string): PersistedPolicyRule[] {
       enabled: true,
       config: {
         mode: "whitelist",
-        addresses,  // Portal address injected at runtime
+        addresses, // Portal address injected at runtime
       },
     },
     {
@@ -93,10 +92,12 @@ export class WaifuBridge {
     waifuAgentId: string,
     name: string,
     platformId: string,
-    portalAddress?: string
+    portalAddress?: string,
   ): Promise<ProvisionAgentResult> {
     if (!waifuAgentId || !AGENT_ID_RE.test(waifuAgentId)) {
-      throw new Error(`Invalid agent ID "${waifuAgentId}" — must be 1-128 alphanumeric characters (plus _ - . :)`);
+      throw new Error(
+        `Invalid agent ID "${waifuAgentId}" — must be 1-128 alphanumeric characters (plus _ - . :)`,
+      );
     }
     if (!name || name.trim().length === 0) {
       throw new Error("Agent name is required");
@@ -105,17 +106,14 @@ export class WaifuBridge {
       throw new Error("platformId is required for waifu.fun provisioning");
     }
 
-    console.log(`[WaifuBridge] Provisioning agent "${waifuAgentId}" (${name}) for tenant ${this.tenantId}`);
+    console.log(
+      `[WaifuBridge] Provisioning agent "${waifuAgentId}" (${name}) for tenant ${this.tenantId}`,
+    );
 
     // Create the Steward wallet
     let agent: AgentIdentity;
     try {
-      agent = await this.vault.createAgent(
-        this.tenantId,
-        waifuAgentId,
-        name,
-        platformId
-      );
+      agent = await this.vault.createAgent(this.tenantId, waifuAgentId, name, platformId);
     } catch (err) {
       console.error(`[WaifuBridge] Failed to create agent "${waifuAgentId}":`, err);
       throw err;
@@ -137,15 +135,22 @@ export class WaifuBridge {
           type: policy.type,
           enabled: policy.enabled,
           config: policy.config,
-        }))
+        })),
       );
     } catch (err) {
-      console.error(`[WaifuBridge] Failed to apply default policies for agent "${waifuAgentId}":`, err);
+      console.error(
+        `[WaifuBridge] Failed to apply default policies for agent "${waifuAgentId}":`,
+        err,
+      );
       // Agent was created but policies failed — caller should retry policy setup
-      throw new Error(`Agent created but policy setup failed: ${err instanceof Error ? err.message : String(err)}`);
+      throw new Error(
+        `Agent created but policy setup failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
-    console.log(`[WaifuBridge] Default policies applied for agent "${waifuAgentId}" (${defaultPolicies.length} rules)`);
+    console.log(
+      `[WaifuBridge] Default policies applied for agent "${waifuAgentId}" (${defaultPolicies.length} rules)`,
+    );
 
     return { agent, policies: defaultPolicies };
   }
@@ -185,7 +190,10 @@ export class WaifuBridge {
         },
       };
     } catch (err) {
-      console.error(`[WaifuBridge] Failed to sync balance for agent "${agentId}" on chain ${resolvedChainId}:`, err);
+      console.error(
+        `[WaifuBridge] Failed to sync balance for agent "${agentId}" on chain ${resolvedChainId}:`,
+        err,
+      );
       throw err;
     }
   }

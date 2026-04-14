@@ -50,7 +50,7 @@ async function main() {
   console.log("[embedded] Database ready.");
 
   // Register PGLite as the backing database for getDb()/closeDb()
-  setPGLiteOverride(db as any, () => client.close());
+  setPGLiteOverride(db, () => client.close());
 
   // Now boot the API
   console.log("[embedded] Starting API server...");

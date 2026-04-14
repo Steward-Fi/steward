@@ -42,9 +42,9 @@ export interface WebhookLog {
 function emit(level: LogLevel, tag: string, payload: Record<string, unknown>): void {
   const line = JSON.stringify({ level, tag, ...payload });
   if (level === "error") {
-    process.stderr.write(line + "\n");
+    process.stderr.write(`${line}\n`);
   } else {
-    process.stdout.write(line + "\n");
+    process.stdout.write(`${line}\n`);
   }
 }
 
@@ -65,11 +65,19 @@ export function logWebhook(entry: Omit<WebhookLog, "timestamp">): void {
 }
 
 export function logInfo(message: string, meta?: Record<string, unknown>): void {
-  emit("info", "info", { timestamp: new Date().toISOString(), message, ...meta });
+  emit("info", "info", {
+    timestamp: new Date().toISOString(),
+    message,
+    ...meta,
+  });
 }
 
 export function logWarn(message: string, meta?: Record<string, unknown>): void {
-  emit("warn", "warn", { timestamp: new Date().toISOString(), message, ...meta });
+  emit("warn", "warn", {
+    timestamp: new Date().toISOString(),
+    message,
+    ...meta,
+  });
 }
 
 export function logError(message: string, error?: unknown, meta?: Record<string, unknown>): void {

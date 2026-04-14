@@ -1,6 +1,13 @@
-import type { Action, ActionExample, HandlerOptions, ActionResult } from "@elizaos/core";
-import type { IAgentRuntime, Memory, State } from "@elizaos/core";
-import { StewardService } from "../services/StewardService.js";
+import type {
+  Action,
+  ActionExample,
+  ActionResult,
+  HandlerOptions,
+  IAgentRuntime,
+  Memory,
+  State,
+} from "@elizaos/core";
+import type { StewardService } from "../services/StewardService.js";
 
 /**
  * STEWARD_SIGN_TRANSACTION — routes a transaction through Steward's
@@ -15,12 +22,7 @@ export const signTransactionAction: Action = {
   name: "STEWARD_SIGN_TRANSACTION",
   description:
     "Sign and broadcast a transaction through Steward's managed wallet with policy enforcement",
-  similes: [
-    "sign transaction",
-    "send transaction",
-    "execute transaction",
-    "broadcast transaction",
-  ],
+  similes: ["sign transaction", "send transaction", "execute transaction", "broadcast transaction"],
 
   parameters: [
     {

@@ -9,8 +9,8 @@
  * When multiple routes match, returns the one with the highest priority.
  */
 
+import { getDb, type SecretRoute, secretRoutes } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
-import { getDb, secretRoutes, type SecretRoute } from "@stwd/db";
 
 export interface MatchedRoute {
   route: SecretRoute;
@@ -29,9 +29,7 @@ export interface MatchedRoute {
 export function globToRegex(pattern: string): RegExp {
   if (pattern === "*") return /^.*$/;
 
-  const escaped = pattern
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*/g, ".*");
+  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
 
   return new RegExp(`^${escaped}$`);
 }
@@ -59,12 +57,7 @@ export async function findMatchingRoutes(
   const routes = await db
     .select()
     .from(secretRoutes)
-    .where(
-      and(
-        eq(secretRoutes.tenantId, tenantId),
-        eq(secretRoutes.enabled, true),
-      ),
-    );
+    .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.enabled, true)));
 
   const matches: MatchedRoute[] = [];
 
@@ -73,10 +66,12 @@ export async function findMatchingRoutes(
     if (!matchesGlob(host, route.hostPattern)) continue;
 
     // Check path pattern
-    if (route.pathPattern && route.pathPattern !== "/*" && !matchesGlob(path, route.pathPattern)) continue;
+    if (route.pathPattern && route.pathPattern !== "/*" && !matchesGlob(path, route.pathPattern))
+      continue;
 
     // Check method
-    if (route.method && route.method !== "*" && route.method.toUpperCase() !== method.toUpperCase()) continue;
+    if (route.method && route.method !== "*" && route.method.toUpperCase() !== method.toUpperCase())
+      continue;
 
     matches.push({
       route,

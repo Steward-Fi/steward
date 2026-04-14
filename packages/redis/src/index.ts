@@ -1,23 +1,27 @@
 // @stwd/redis — Redis client, rate limiting, spend tracking, policy caching
 
-export { getRedis, disconnectRedis } from "./client.js";
-export { checkRateLimit, getRateLimitStatus, type RateLimitResult } from "./rate-limiter.js";
-export {
-  recordSpend,
-  getSpend,
-  checkSpendLimit,
-  getSpendByHost,
-  type SpendPeriod,
-} from "./spend-tracker.js";
+export { disconnectRedis, getRedis } from "./client.js";
 export {
   estimateCost,
   getPricingTable,
   isKnownHost,
 } from "./cost-estimator.js";
 export {
+  type CachedPolicy,
   getCachedPolicies,
-  setCachedPolicies,
   invalidateCache,
   invalidateTenantCache,
-  type CachedPolicy,
+  setCachedPolicies,
 } from "./policy-cache.js";
+export {
+  checkRateLimit,
+  getRateLimitStatus,
+  type RateLimitResult,
+} from "./rate-limiter.js";
+export {
+  checkSpendLimit,
+  getSpend,
+  getSpendByHost,
+  recordSpend,
+  type SpendPeriod,
+} from "./spend-tracker.js";

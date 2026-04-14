@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { COMMON_TOKENS, ERC20_ABI, type TokenDef } from "../tokens";
+import { COMMON_TOKENS, ERC20_ABI } from "../tokens";
 
 describe("Token constants", () => {
   it("should have common tokens for Base (8453)", () => {
@@ -9,16 +9,16 @@ describe("Token constants", () => {
 
     const usdc = baseTokens.find((t) => t.symbol === "USDC");
     expect(usdc).toBeDefined();
-    expect(usdc!.address).toBe("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
-    expect(usdc!.decimals).toBe(6);
+    expect(usdc?.address).toBe("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
+    expect(usdc?.decimals).toBe(6);
 
     const usdbc = baseTokens.find((t) => t.symbol === "USDbC");
     expect(usdbc).toBeDefined();
-    expect(usdbc!.decimals).toBe(6);
+    expect(usdbc?.decimals).toBe(6);
 
     const weth = baseTokens.find((t) => t.symbol === "WETH");
     expect(weth).toBeDefined();
-    expect(weth!.decimals).toBe(18);
+    expect(weth?.decimals).toBe(18);
   });
 
   it("should have common tokens for Ethereum (1)", () => {
@@ -57,7 +57,7 @@ describe("Token constants", () => {
   });
 
   it("all token addresses should be valid checksummed addresses", () => {
-    for (const [chainId, tokens] of Object.entries(COMMON_TOKENS)) {
+    for (const [_chainId, tokens] of Object.entries(COMMON_TOKENS)) {
       for (const token of tokens) {
         expect(token.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
         expect(token.symbol.length).toBeGreaterThan(0);

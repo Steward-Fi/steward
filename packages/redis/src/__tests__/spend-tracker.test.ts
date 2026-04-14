@@ -1,6 +1,6 @@
-import { describe, test, expect, beforeEach, afterAll } from "bun:test";
-import { recordSpend, getSpend, checkSpendLimit, getSpendByHost } from "../spend-tracker.js";
-import { getRedis, disconnectRedis } from "../client.js";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { disconnectRedis, getRedis } from "../client.js";
+import { checkSpendLimit, getSpend, getSpendByHost, recordSpend } from "../spend-tracker.js";
 
 const runRedis = process.env.STEWARD_REDIS_TESTS === "1";
 const describeRedis = runRedis ? describe : describe.skip;
@@ -14,7 +14,13 @@ beforeEach(async () => {
   const redis = getRedis();
   let cursor = "0";
   do {
-    const [newCursor, keys] = await redis.scan(cursor, "MATCH", `spend:${TEST_AGENT}:*`, "COUNT", 100);
+    const [newCursor, keys] = await redis.scan(
+      cursor,
+      "MATCH",
+      `spend:${TEST_AGENT}:*`,
+      "COUNT",
+      100,
+    );
     cursor = newCursor;
     if (keys.length > 0) await redis.del(...keys);
   } while (cursor !== "0");
@@ -41,7 +47,7 @@ describeRedis("Spend Tracker", () => {
   });
 
   test("tracks per-host breakdown", async () => {
-    await recordSpend(TEST_AGENT, TEST_TENANT, 0.10, "api.openai.com");
+    await recordSpend(TEST_AGENT, TEST_TENANT, 0.1, "api.openai.com");
     await recordSpend(TEST_AGENT, TEST_TENANT, 0.05, "api.anthropic.com");
     await recordSpend(TEST_AGENT, TEST_TENANT, 0.02, "api.openai.com");
 

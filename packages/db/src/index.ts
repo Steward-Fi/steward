@@ -1,12 +1,5 @@
+import type { AgentIdentity, PolicyRule, SignRequest, TxRecord } from "@stwd/shared";
 import { eq, inArray } from "drizzle-orm";
-import type {
-  AgentIdentity,
-  ChainFamily,
-  PolicyResult,
-  PolicyRule,
-  SignRequest,
-  TxRecord,
-} from "@stwd/shared";
 
 export {
   closeDb,
@@ -18,6 +11,7 @@ export {
   setPGLiteOverride,
 } from "./client";
 export { runMigrations } from "./migrate";
+export type { PGLiteDb } from "./pglite";
 export {
   closePGLiteDb,
   createPGLiteDb,
@@ -26,12 +20,11 @@ export {
   getPGLiteDb,
   shouldUsePGLite,
 } from "./pglite";
-export type { PGLiteDb } from "./pglite";
 export * from "./schema";
 export * from "./schema-auth";
 
-import { policyTypeEnum } from "./schema";
 import type { Agent, Policy, Transaction } from "./schema";
+import { policyTypeEnum } from "./schema";
 
 export type DbAgentIdentity = AgentIdentity & {
   tenantId: string;
@@ -90,10 +83,7 @@ export async function getAgentWalletAddresses(
   const { getDb } = await import("./client");
   const { agentWallets } = await import("./schema");
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(agentWallets)
-    .where(eq(agentWallets.agentId, agentId));
+  const rows = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
 
   const result: { evm?: string; solana?: string } = {};
   for (const row of rows) {
@@ -115,10 +105,7 @@ export async function getAgentWalletAddressesBatch(
   const { getDb } = await import("./client");
   const { agentWallets } = await import("./schema");
   const db = getDb();
-  const rows = await db
-    .select()
-    .from(agentWallets)
-    .where(inArray(agentWallets.agentId, agentIds));
+  const rows = await db.select().from(agentWallets).where(inArray(agentWallets.agentId, agentIds));
 
   const result = new Map<string, { evm?: string; solana?: string }>();
   for (const row of rows) {

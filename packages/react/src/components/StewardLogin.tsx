@@ -1,7 +1,7 @@
-import React, { useState, useContext, useEffect, useRef } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { DiscordIcon, EmailIcon, EthereumIcon, GoogleIcon, PasskeyIcon } from "../icons/index.js";
 import { StewardAuthContext } from "../provider.js";
 import type { StewardLoginProps } from "../types.js";
-import { GoogleIcon, DiscordIcon, PasskeyIcon, EmailIcon, EthereumIcon } from "../icons/index.js";
 
 type LoginStep = "idle" | "loading" | "email-sent" | "error";
 type LoadingButton = "passkey" | "email" | "google" | "discord" | "siwe" | null;
@@ -67,8 +67,7 @@ export function StewardLogin({
     return (
       <div className={`stwd-login stwd-login--error ${className ?? ""}`}>
         <p className="stwd-login__error">
-          StewardLogin must be used inside a &lt;StewardProvider&gt; with an{" "}
-          <code>auth</code> prop.
+          StewardLogin must be used inside a &lt;StewardProvider&gt; with an <code>auth</code> prop.
         </p>
       </div>
     );
@@ -160,7 +159,10 @@ export function StewardLogin({
         </div>
         <button
           className="stwd-login__btn stwd-login__btn--back"
-          onClick={() => { setStep("idle"); setLoadingBtn(null); }}
+          onClick={() => {
+            setStep("idle");
+            setLoadingBtn(null);
+          }}
           type="button"
         >
           ← Back to login
@@ -177,12 +179,14 @@ export function StewardLogin({
           {logo && <div className="stwd-login__logo">{logo}</div>}
           {title && <h2 className="stwd-login__title">{title}</h2>}
           {subtitle && <p className="stwd-login__subtitle">{subtitle}</p>}
-          {tenantId && ctx.tenants && (() => {
-            const tenant = ctx.tenants.find((t) => t.tenantId === tenantId);
-            return tenant ? (
-              <p className="stwd-login__tenant-name">Signing in to {tenant.tenantName}</p>
-            ) : null;
-          })()}
+          {tenantId &&
+            ctx.tenants &&
+            (() => {
+              const tenant = ctx.tenants.find((t) => t.tenantId === tenantId);
+              return tenant ? (
+                <p className="stwd-login__tenant-name">Signing in to {tenant.tenantName}</p>
+              ) : null;
+            })()}
         </div>
       )}
 

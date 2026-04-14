@@ -5,17 +5,17 @@
  * Mount: app.route("/audit", auditRoutes)
  */
 
-import { and, eq, gte, lte, desc, sql, inArray, count } from "drizzle-orm";
+import { proxyAuditLog } from "@stwd/db";
+import { and, count, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import {
+  type ApiResponse,
   type AppVariables,
   agents,
   approvalQueue,
   db,
   transactions,
-  type ApiResponse,
 } from "../services/context";
-import { proxyAuditLog } from "@stwd/db";
 
 export const auditRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -34,10 +34,7 @@ function parseLimit(raw: string | undefined): number {
 
 /** Resolve the set of agentIds belonging to the authenticated tenant. */
 async function tenantAgentIds(tenantId: string): Promise<string[]> {
-  const rows = await db
-    .select({ id: agents.id })
-    .from(agents)
-    .where(eq(agents.tenantId, tenantId));
+  const rows = await db.select({ id: agents.id }).from(agents).where(eq(agents.tenantId, tenantId));
   return rows.map((r) => r.id);
 }
 
@@ -70,7 +67,9 @@ auditRoutes.get("/log", async (c) => {
 
   // Narrow to a single agent if filter provided
   const relevantAgentIds = filterAgentId
-    ? agentIds.includes(filterAgentId) ? [filterAgentId] : []
+    ? agentIds.includes(filterAgentId)
+      ? [filterAgentId]
+      : []
     : agentIds;
 
   if (relevantAgentIds.length === 0) {
@@ -119,10 +118,7 @@ auditRoutes.get("/log", async (c) => {
     const txWhere = and(...txConditions);
 
     // Count
-    const [txCount] = await db
-      .select({ count: count() })
-      .from(transactions)
-      .where(txWhere);
+    const [txCount] = await db.select({ count: count() }).from(transactions).where(txWhere);
 
     // Fetch with left join to approval_queue
     const txRows = await db
@@ -153,7 +149,8 @@ auditRoutes.get("/log", async (c) => {
       let action: string;
       if (row.aqStatus === "approved") action = "approve";
       else if (row.aqStatus === "rejected" || row.status === "rejected") action = "reject";
-      else if (row.status === "signed" || row.status === "broadcast" || row.status === "confirmed") action = "sign";
+      else if (row.status === "signed" || row.status === "broadcast" || row.status === "confirmed")
+        action = "sign";
       else action = "sign"; // pending, failed, etc.
 
       if (filterAction && action !== filterAction) continue;
@@ -201,10 +198,7 @@ auditRoutes.get("/log", async (c) => {
 
     const proxyWhere = and(...proxyConditions);
 
-    const [proxyCount] = await db
-      .select({ count: count() })
-      .from(proxyAuditLog)
-      .where(proxyWhere);
+    const [proxyCount] = await db.select({ count: count() }).from(proxyAuditLog).where(proxyWhere);
 
     const proxyRows = await db
       .select()
@@ -342,7 +336,12 @@ auditRoutes.get("/summary", async (c) => {
     const agentRows = await db
       .select({ id: agents.id, name: agents.name })
       .from(agents)
-      .where(inArray(agents.id, topAgentsRows.map((r) => r.agentId)));
+      .where(
+        inArray(
+          agents.id,
+          topAgentsRows.map((r) => r.agentId),
+        ),
+      );
     for (const a of agentRows) agentNameMap.set(a.id, a.name);
   }
 
@@ -402,7 +401,9 @@ auditRoutes.get("/export", async (c) => {
   }
 
   const relevantAgentIds = filterAgentId
-    ? agentIds.includes(filterAgentId) ? [filterAgentId] : []
+    ? agentIds.includes(filterAgentId)
+      ? [filterAgentId]
+      : []
     : agentIds;
 
   const rows: string[] = [];
@@ -429,16 +430,18 @@ auditRoutes.get("/export", async (c) => {
       if (row.status === "rejected") action = "reject";
       if (filterAction && action !== filterAction) continue;
 
-      rows.push(csvRow([
-        row.id,
-        (row.createdAt as Date).toISOString(),
-        row.agentId,
-        action,
-        row.status,
-        row.toAddress,
-        row.value,
-        `chainId=${row.chainId}${row.txHash ? ` txHash=${row.txHash}` : ""}`,
-      ]));
+      rows.push(
+        csvRow([
+          row.id,
+          (row.createdAt as Date).toISOString(),
+          row.agentId,
+          action,
+          row.status,
+          row.toAddress,
+          row.value,
+          `chainId=${row.chainId}${row.txHash ? ` txHash=${row.txHash}` : ""}`,
+        ]),
+      );
     }
   }
 
@@ -456,30 +459,34 @@ auditRoutes.get("/export", async (c) => {
       .limit(10000);
 
     for (const row of proxyRows) {
-      rows.push(csvRow([
-        row.id,
-        (row.createdAt as Date).toISOString(),
-        row.agentId,
-        "proxy",
-        row.statusCode < 400 ? "success" : "error",
-        `${row.targetHost}${row.targetPath}`,
-        "",
-        `method=${row.method} status=${row.statusCode} latency=${row.latencyMs}ms`,
-      ]));
+      rows.push(
+        csvRow([
+          row.id,
+          (row.createdAt as Date).toISOString(),
+          row.agentId,
+          "proxy",
+          row.statusCode < 400 ? "success" : "error",
+          `${row.targetHost}${row.targetPath}`,
+          "",
+          `method=${row.method} status=${row.statusCode} latency=${row.latencyMs}ms`,
+        ]),
+      );
     }
   }
 
   c.header("Content-Type", "text/csv");
   c.header("Content-Disposition", 'attachment; filename="audit-export.csv"');
-  return c.body(rows.join("\n") + "\n");
+  return c.body(`${rows.join("\n")}\n`);
 });
 
 function csvRow(fields: string[]): string {
-  return fields.map((f) => {
-    const s = String(f ?? "");
-    if (s.includes(",") || s.includes('"') || s.includes("\n")) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
-  }).join(",");
+  return fields
+    .map((f) => {
+      const s = String(f ?? "");
+      if (s.includes(",") || s.includes('"') || s.includes("\n")) {
+        return `"${s.replace(/"/g, '""')}"`;
+      }
+      return s;
+    })
+    .join(",");
 }

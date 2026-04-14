@@ -1,12 +1,11 @@
 "use client";
 
-import { useState } from "react";
-
 import { motion } from "framer-motion";
-import { API_URL } from "@/lib/api";
+import { useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
+import { API_URL } from "@/lib/api";
 
 const CHAIN_NAMES: Record<number, string> = {
   1: "Ethereum",
@@ -88,12 +87,8 @@ const policies = await steward.getPolicies("my-agent")`;
     >
       {/* Header */}
       <div>
-        <h1 className="font-display text-2xl font-700 tracking-tight">
-          Settings
-        </h1>
-        <p className="text-sm text-text-tertiary mt-1">
-          Tenant configuration and integration
-        </p>
+        <h1 className="font-display text-2xl font-700 tracking-tight">Settings</h1>
+        <p className="text-sm text-text-tertiary mt-1">Tenant configuration and integration</p>
       </div>
 
       {/* Account */}
@@ -104,25 +99,17 @@ const policies = await steward.getPolicies("my-agent")`;
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-px bg-border">
             <div className="bg-bg p-5">
-              <label className="text-xs text-text-tertiary block mb-2">
-                Wallet
-              </label>
-              <span className="font-mono text-sm text-text-secondary break-all">
-                {address}
-              </span>
+              <label className="text-xs text-text-tertiary block mb-2">Wallet</label>
+              <span className="font-mono text-sm text-text-secondary break-all">{address}</span>
             </div>
             <div className="bg-bg p-5">
-              <label className="text-xs text-text-tertiary block mb-2">
-                Chain
-              </label>
+              <label className="text-xs text-text-tertiary block mb-2">Chain</label>
               <span className="font-mono text-sm text-text-secondary">
-                {chainId ? (CHAIN_NAMES[chainId] || `Chain ${chainId}`) : "\u2014"}
+                {chainId ? CHAIN_NAMES[chainId] || `Chain ${chainId}` : "\u2014"}
               </span>
             </div>
             <div className="bg-bg p-5">
-              <label className="text-xs text-text-tertiary block mb-2">
-                Workspace
-              </label>
+              <label className="text-xs text-text-tertiary block mb-2">Workspace</label>
               <span className="font-mono text-sm text-text-secondary">
                 {tenant?.tenantName || "\u2014"}
               </span>
@@ -138,32 +125,22 @@ const policies = await steward.getPolicies("my-agent")`;
         </h2>
         <div className="space-y-px bg-border">
           <div className="bg-bg p-5">
-            <label className="text-xs text-text-tertiary block mb-2">
-              API Endpoint
-            </label>
+            <label className="text-xs text-text-tertiary block mb-2">API Endpoint</label>
             <div className="flex items-center justify-between gap-2">
-              <span className="font-mono text-sm text-text-secondary truncate">
-                {API_URL}
-              </span>
+              <span className="font-mono text-sm text-text-secondary truncate">{API_URL}</span>
               <CopyButton text={API_URL} />
             </div>
           </div>
           <div className="bg-bg p-5">
-            <label className="text-xs text-text-tertiary block mb-2">
-              Tenant ID
-            </label>
+            <label className="text-xs text-text-tertiary block mb-2">Tenant ID</label>
             <div className="flex items-center justify-between gap-2">
-              <span className="font-mono text-sm text-text-secondary truncate">
-                {TENANT_ID}
-              </span>
+              <span className="font-mono text-sm text-text-secondary truncate">{TENANT_ID}</span>
               <CopyButton text={TENANT_ID} />
             </div>
           </div>
           {API_KEY && (
             <div className="bg-bg p-5">
-              <label className="text-xs text-text-tertiary block mb-2">
-                API Key
-              </label>
+              <label className="text-xs text-text-tertiary block mb-2">API Key</label>
               <div className="flex items-center justify-between gap-2">
                 <span className="font-mono text-sm text-text-secondary truncate">
                   {showKey ? API_KEY : `${API_KEY.slice(0, 8)}${"•".repeat(32)}`}
@@ -189,14 +166,11 @@ const policies = await steward.getPolicies("my-agent")`;
           Webhooks
         </h2>
         <p className="text-xs text-text-tertiary max-w-lg">
-          Receive POST requests when transactions need approval or change
-          status. Events include: approval_required, tx_signed, tx_confirmed,
-          tx_failed.
+          Receive POST requests when transactions need approval or change status. Events include:
+          approval_required, tx_signed, tx_confirmed, tx_failed.
         </p>
         <div>
-          <label className="text-xs text-text-tertiary block mb-1.5">
-            Webhook URL
-          </label>
+          <label className="text-xs text-text-tertiary block mb-1.5">Webhook URL</label>
           <input
             type="url"
             value={webhookUrl}
@@ -235,18 +209,12 @@ const policies = await steward.getPolicies("my-agent")`;
         </p>
         <div className="border border-border bg-bg-elevated max-w-3xl">
           <div className="px-4 py-2.5 border-b border-border-subtle flex items-center justify-between">
-            <span className="text-xs text-text-tertiary font-mono">
-              npm i @stwd/sdk
-            </span>
+            <span className="text-xs text-text-tertiary font-mono">npm i @stwd/sdk</span>
             <CopyButton text="npm i @stwd/sdk" />
           </div>
         </div>
         <div className="border border-border bg-bg-elevated max-w-3xl">
-          <CodeBlock
-            filename="example.ts"
-            language="typescript"
-            code={sdkSnippet}
-          />
+          <CodeBlock filename="example.ts" language="typescript" code={sdkSnippet} />
         </div>
       </div>
     </motion.div>

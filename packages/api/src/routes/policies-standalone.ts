@@ -4,22 +4,21 @@
  * Mount: app.route("/policies", policiesStandaloneRoutes)
  */
 
-import { eq } from "drizzle-orm";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import {
-  type AppVariables,
   type ApiResponse,
-  type PolicyRule,
+  type AppVariables,
   db,
+  ensureAgentForTenant,
+  isNonEmptyString,
+  type PolicyRule,
   policies,
   policyEngine,
   priceOracle,
-  safeJsonParse,
-  isNonEmptyString,
-  ensureAgentForTenant,
-  toPolicyRule,
   requireTenantLevel,
+  safeJsonParse,
+  toPolicyRule,
 } from "../services/context";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -68,8 +67,10 @@ function rowToTemplate(row: any): PolicyTemplate {
     description: row.description,
     rules: typeof row.rules === "string" ? JSON.parse(row.rules) : row.rules,
     isDefault: row.is_default,
-    createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
-    updatedAt: row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
+    createdAt:
+      row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    updatedAt:
+      row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
   };
 }
 
@@ -93,10 +94,7 @@ async function getTemplate(tenantId: string, id: string): Promise<PolicyTemplate
   return row ? rowToTemplate(row) : null;
 }
 
-async function insertTemplate(
-  tenantId: string,
-  body: CreateTemplateBody,
-): Promise<PolicyTemplate> {
+async function insertTemplate(tenantId: string, body: CreateTemplateBody): Promise<PolicyTemplate> {
   const rows = await db.execute(
     sql`INSERT INTO policy_templates (tenant_id, name, description, rules, is_default)
         VALUES (${tenantId}, ${body.name}, ${body.description ?? null}, ${JSON.stringify(body.rules ?? [])}::jsonb, ${body.isDefault ?? false})
@@ -121,7 +119,7 @@ async function updateTemplate(
 
   const rows = await db.execute(
     sql`UPDATE policy_templates SET
-      name = CASE WHEN ${hasName} THEN ${body.name ?? ''} ELSE name END,
+      name = CASE WHEN ${hasName} THEN ${body.name ?? ""} ELSE name END,
       description = CASE WHEN ${hasDesc} THEN ${body.description ?? null} ELSE description END,
       rules = CASE WHEN ${hasRules} THEN ${JSON.stringify(body.rules ?? [])}::jsonb ELSE rules END,
       is_default = CASE WHEN ${hasDefault} THEN ${body.isDefault ?? false} ELSE is_default END,
@@ -156,7 +154,10 @@ policiesStandaloneRoutes.post("/", async (c) => {
   const tenantId = c.get("tenantId");
 
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent tokens cannot create policy templates" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent tokens cannot create policy templates" },
+      403,
+    );
   }
 
   const body = await safeJsonParse<CreateTemplateBody>(c);
@@ -165,7 +166,10 @@ policiesStandaloneRoutes.post("/", async (c) => {
   }
 
   if (!isNonEmptyString(body.name)) {
-    return c.json<ApiResponse>({ ok: false, error: "name is required and must be a non-empty string" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "name is required and must be a non-empty string" },
+      400,
+    );
   }
 
   if (!Array.isArray(body.rules)) {
@@ -200,7 +204,10 @@ policiesStandaloneRoutes.put("/:id", async (c) => {
   const id = c.req.param("id");
 
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent tokens cannot update policy templates" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent tokens cannot update policy templates" },
+      403,
+    );
   }
 
   const body = await safeJsonParse<Partial<CreateTemplateBody>>(c);
@@ -230,7 +237,10 @@ policiesStandaloneRoutes.delete("/:id", async (c) => {
   const id = c.req.param("id");
 
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent tokens cannot delete policy templates" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent tokens cannot delete policy templates" },
+      403,
+    );
   }
 
   const deleted = await deleteTemplate(tenantId, id);
@@ -247,7 +257,10 @@ policiesStandaloneRoutes.post("/:id/assign", async (c) => {
   const id = c.req.param("id");
 
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent tokens cannot assign policy templates" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent tokens cannot assign policy templates" },
+      403,
+    );
   }
 
   const body = await safeJsonParse<AssignBody>(c);
@@ -296,7 +309,11 @@ policiesStandaloneRoutes.post("/:id/assign", async (c) => {
 
   return c.json<ApiResponse>({
     ok: true,
-    data: { templateId: id, assignedAgents: assigned, rulesApplied: template.rules.length },
+    data: {
+      templateId: id,
+      assignedAgents: assigned,
+      rulesApplied: template.rules.length,
+    },
   });
 });
 
@@ -310,7 +327,10 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
   }
 
   if (!body.request?.to || !body.request?.value) {
-    return c.json<ApiResponse>({ ok: false, error: "request.to and request.value are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "request.to and request.value are required" },
+      400,
+    );
   }
 
   // Get rules: from inline, a template, or agent's current policies

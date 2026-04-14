@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "crypto";
+import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 
 /**
  * Encrypted keystore. Private keys are encrypted at rest using AES-256-GCM.
@@ -41,7 +41,7 @@ export class KeyStore {
       salt = Buffer.from("steward-vault-v1");
       if (process.env.NODE_ENV === "production") {
         console.warn(
-          "\u26a0\ufe0f [KeyStore] Using default KDF salt. Set STEWARD_KDF_SALT to a random hex string for production."
+          "\u26a0\ufe0f [KeyStore] Using default KDF salt. Set STEWARD_KDF_SALT to a random hex string for production.",
         );
       }
     }

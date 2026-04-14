@@ -33,33 +33,41 @@
  *   3. The JWT's `tenantId` claim is the resolved tenant, not the personal tenant.
  */
 
-import { and, eq } from "drizzle-orm";
 import { createHash, randomBytes } from "node:crypto";
-import { Hono, type Context } from "hono";
-import { SignJWT, jwtVerify } from "jose";
-import { generateNonce, SiweMessage } from "siwe";
-
 import {
+  buildBackend,
+  ChallengeStore,
   EmailAuth,
+  generateApiKey,
+  getEnabledProviders,
+  getProviderConfig,
+  isBuiltInProvider,
+  OAuthClient,
   PasskeyAuth,
   ResendProvider,
-  generateApiKey,
-  uint8ArrayToBase64url,
-  ChallengeStore,
   TokenStore,
-  buildBackend,
-  OAuthClient,
-  getProviderConfig,
-  getEnabledProviders,
-  isBuiltInProvider,
+  uint8ArrayToBase64url,
 } from "@stwd/auth";
-import { accounts, authenticators, getDb, refreshTokens, tenants, tenantConfigs, userTenants, users } from "@stwd/db";
+import {
+  accounts,
+  authenticators,
+  getDb,
+  refreshTokens,
+  tenantConfigs,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import type { ApiResponse } from "@stwd/shared";
-import { Vault, provisionUserWallet } from "@stwd/vault";
+import { provisionUserWallet, Vault } from "@stwd/vault";
+import { and, eq } from "drizzle-orm";
+import { type Context, Hono } from "hono";
+import { jwtVerify, SignJWT } from "jose";
+import { generateNonce, SiweMessage } from "siwe";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
+const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
 
 // ─── IP-based auth rate limiting ─────────────────────────────────────────────
 
@@ -82,9 +90,7 @@ async function checkAuthRateLimit(
   max: number,
 ): Promise<{ allowed: boolean; retryAfterSecs?: number }> {
   const ip =
-    (c.req.header("x-forwarded-for")?.split(",")[0].trim()) ??
-    c.req.header("x-real-ip") ??
-    "unknown";
+    c.req.header("x-forwarded-for")?.split(",")[0].trim() ?? c.req.header("x-real-ip") ?? "unknown";
   const key = `ratelimit:auth:${endpoint}:${ip}:${windowMs}`;
 
   // Try Redis first
@@ -94,7 +100,10 @@ async function checkAuthRateLimit(
       const { checkRateLimit } = await import("@stwd/redis");
       const result = await checkRateLimit(key, windowMs, max);
       if (!result.allowed) {
-        return { allowed: false, retryAfterSecs: Math.ceil(result.resetMs / 1000) };
+        return {
+          allowed: false,
+          retryAfterSecs: Math.ceil(result.resetMs / 1000),
+        };
       }
       return { allowed: true };
     }
@@ -110,7 +119,10 @@ async function checkAuthRateLimit(
     return { allowed: true };
   }
   if (entry.count >= max) {
-    return { allowed: false, retryAfterSecs: Math.ceil((entry.resetAt - now) / 1000) };
+    return {
+      allowed: false,
+      retryAfterSecs: Math.ceil((entry.resetAt - now) / 1000),
+    };
   }
   entry.count++;
   return { allowed: true };
@@ -122,13 +134,19 @@ async function checkAuthRateLimit(
 // to ensure tokens minted by auth routes validate in user routes and vice versa.
 const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
 if (!process.env.STEWARD_SESSION_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
-  console.warn("⚠️ STEWARD_SESSION_SECRET not set, falling back to master password. Set a separate JWT secret for production.");
+  console.warn(
+    "⚠️ STEWARD_SESSION_SECRET not set, falling back to master password. Set a separate JWT secret for production.",
+  );
 }
 if (!jwtSecretSource) {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
+    throw new Error(
+      "⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production",
+    );
   }
-  console.warn("⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!");
+  console.warn(
+    "⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!",
+  );
 }
 const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 const JWT_ISSUER = "steward";
@@ -168,7 +186,9 @@ async function createRefreshToken(userId: string, tenantId: string): Promise<str
   const raw = randomBytes(40).toString("hex");
   const id = randomBytes(16).toString("hex");
   const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
-  await db.insert(refreshTokens).values({ id, userId, tenantId, tokenHash: hashToken(raw), expiresAt });
+  await db
+    .insert(refreshTokens)
+    .values({ id, userId, tenantId, tokenHash: hashToken(raw), expiresAt });
   return raw;
 }
 
@@ -196,15 +216,31 @@ function buildAuthResponse(
   refreshToken: string,
   user: Record<string, unknown>,
 ): Record<string, unknown> {
-  return { ok: true, token, refreshToken, expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS, user };
+  return {
+    ok: true,
+    token,
+    refreshToken,
+    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    user,
+  };
 }
 
-export async function verifySessionToken(
-  token: string,
-): Promise<{ address: string; tenantId: string; userId?: string; email?: string } | null> {
+export async function verifySessionToken(token: string): Promise<{
+  address: string;
+  tenantId: string;
+  userId?: string;
+  email?: string;
+} | null> {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET, { issuer: JWT_ISSUER });
-    return payload as { address: string; tenantId: string; userId?: string; email?: string };
+    const { payload } = await jwtVerify(token, JWT_SECRET, {
+      issuer: JWT_ISSUER,
+    });
+    return payload as {
+      address: string;
+      tenantId: string;
+      userId?: string;
+      email?: string;
+    };
   } catch {
     return null;
   }
@@ -214,12 +250,15 @@ export async function verifySessionToken(
 
 const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of nonceStore.entries()) {
-    if (entry.expiresAt <= now) nonceStore.delete(key);
-  }
-}, 5 * 60 * 1000);
+setInterval(
+  () => {
+    const now = Date.now();
+    for (const [key, entry] of nonceStore.entries()) {
+      if (entry.expiresAt <= now) nonceStore.delete(key);
+    }
+  },
+  5 * 60 * 1000,
+);
 
 // ─── PasskeyAuth singleton ────────────────────────────────────────────────────
 
@@ -246,9 +285,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
     buildBackend("token", redisClient, usePostgres),
   ]);
 
-  console.log(
-    `[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}`,
-  );
+  console.log(`[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}`);
 
   _challengeStore = new ChallengeStore({ backend: challengeBackend });
   _tokenStore = new TokenStore({ backend: tokenBackend });
@@ -289,7 +326,9 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   if (!requestOrigin) {
     if (!_passkeyAuth) {
       const origins = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
-        .split(",").map((o) => o.trim()).filter(Boolean);
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean);
       _passkeyAuth = new PasskeyAuth({
         rpName,
         rpID: defaultRpID,
@@ -310,7 +349,9 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 
   // Validate against allowed origins
   const allowed = (process.env.PASSKEY_ALLOWED_ORIGINS || defaultOrigin)
-    .split(",").map((o) => o.trim()).filter(Boolean);
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
   if (!allowed.includes(requestOrigin) && rpID !== defaultRpID) {
     return getPasskeyAuth(); // not in allowed list, use default
   }
@@ -434,28 +475,31 @@ async function resolveAndValidateTenant(
   }
 
   if (joinMode === "invite") {
-    return { ok: false, status: 403, error: `Tenant '${requested}' requires an invitation to join` };
+    return {
+      ok: false,
+      status: 403,
+      error: `Tenant '${requested}' requires an invitation to join`,
+    };
   }
 
   // joinMode === "closed"
-  return { ok: false, status: 403, error: `Tenant '${requested}' is not accepting new members` };
+  return {
+    ok: false,
+    status: 403,
+    error: `Tenant '${requested}' is not accepting new members`,
+  };
 }
 
 /** @deprecated Use resolveAndValidateTenant instead */
-const resolveTenantForUser = resolveAndValidateTenant;
+const _resolveTenantForUser = resolveAndValidateTenant;
 
 // ─── User / tenant provisioning helpers ──────────────────────────────────────
 
-async function findOrCreateUser(
-  email: string,
-): Promise<typeof users.$inferSelect> {
+async function findOrCreateUser(email: string): Promise<typeof users.$inferSelect> {
   const db = getDb();
   const [existing] = await db.select().from(users).where(eq(users.email, email));
   if (existing) return existing;
-  const [newUser] = await db
-    .insert(users)
-    .values({ email, emailVerified: false })
-    .returning();
+  const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
   return newUser;
 }
 
@@ -486,10 +530,7 @@ async function ensureUserTenantLink(
   role: string = "member",
 ): Promise<void> {
   const db = getDb();
-  await db
-    .insert(userTenants)
-    .values({ userId, tenantId, role })
-    .onConflictDoNothing();
+  await db.insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
 }
 
 /**
@@ -508,7 +549,10 @@ async function provisionWalletForUser(
   const db = getDb();
   await db
     .update(users)
-    .set({ walletAddress: result.walletAddress, stewardWalletId: result.agentId })
+    .set({
+      walletAddress: result.walletAddress,
+      stewardWalletId: result.agentId,
+    })
     .where(eq(users.id, userId));
   // Also link user to their personal tenant
   await ensureUserTenantLink(userId, personalTenantId, "owner");
@@ -583,10 +627,7 @@ auth.post("/verify", async (c) => {
   let isNewTenant = false;
   let rawApiKey: string | undefined;
 
-  const [existingTenant] = await db
-    .select()
-    .from(tenants)
-    .where(eq(tenants.ownerAddress, address));
+  const [existingTenant] = await db.select().from(tenants).where(eq(tenants.ownerAddress, address));
 
   let tenant = existingTenant;
 
@@ -696,7 +737,10 @@ auth.post("/logout", (c) => c.json<ApiResponse>({ ok: true }));
 auth.post("/refresh", async (c) => {
   const rl = await checkAuthRateLimit(c, "refresh", 60_000, 30);
   if (!rl.allowed) {
-    return c.json<ApiResponse>({ ok: false, error: "Too many requests. Please try again later." }, 429);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
   }
   const body = await safeJsonParse<{ refreshToken: string }>(c);
   if (!body?.refreshToken) {
@@ -746,9 +790,7 @@ auth.post("/revoke", async (c) => {
   }
 
   const db = getDb();
-  await db
-    .delete(refreshTokens)
-    .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
+  await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -819,7 +861,10 @@ auth.post("/passkey/register/options", async (c) => {
 auth.post("/passkey/register/verify", async (c) => {
   const rl = await checkAuthRateLimit(c, "passkey-verify", 60_000, 10);
   if (!rl.allowed) {
-    return c.json<ApiResponse>({ ok: false, error: "Too many requests. Please try again later." }, 429);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
   }
   const body = await safeJsonParse<{
     email: string;
@@ -837,7 +882,10 @@ auth.post("/passkey/register/verify", async (c) => {
   const [user] = await db.select().from(users).where(eq(users.email, email));
   if (!user) {
     return c.json<ApiResponse>(
-      { ok: false, error: "User not found — call /passkey/register/options first" },
+      {
+        ok: false,
+        error: "User not found — call /passkey/register/options first",
+      },
       404,
     );
   }
@@ -850,7 +898,10 @@ auth.post("/passkey/register/verify", async (c) => {
     );
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Verification failed" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Verification failed",
+      },
       400,
     );
   }
@@ -859,8 +910,7 @@ auth.post("/passkey/register/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Registration verification failed" }, 400);
   }
 
-  const { credential, credentialDeviceType, credentialBackedUp } =
-    verification.registrationInfo;
+  const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
 
   await db
     .insert(authenticators)
@@ -901,7 +951,13 @@ auth.post("/passkey/register/verify", async (c) => {
   });
   const registerRefreshToken = await createRefreshToken(user.id, tenantId);
 
-  return c.json(buildAuthResponse(token, registerRefreshToken, { id: user.id, email, walletAddress }));
+  return c.json(
+    buildAuthResponse(token, registerRefreshToken, {
+      id: user.id,
+      email,
+      walletAddress,
+    }),
+  );
 });
 
 // ── Passkey authentication ────────────────────────────────────────────────────
@@ -931,15 +987,15 @@ auth.post("/passkey/login/options", async (c) => {
     .where(eq(authenticators.userId, user.id));
 
   if (creds.length === 0) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "No passkeys registered for this email" },
-      404,
-    );
+    return c.json<ApiResponse>({ ok: false, error: "No passkeys registered for this email" }, 404);
   }
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(email, {
-    allowCredentials: creds.map((cred) => ({ id: cred.credentialId })),
-  });
+  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
+    email,
+    {
+      allowCredentials: creds.map((cred) => ({ id: cred.credentialId })),
+    },
+  );
 
   return c.json(options);
 });
@@ -953,7 +1009,10 @@ auth.post("/passkey/login/options", async (c) => {
 auth.post("/passkey/login/verify", async (c) => {
   const rl = await checkAuthRateLimit(c, "passkey-verify", 60_000, 10);
   if (!rl.allowed) {
-    return c.json<ApiResponse>({ ok: false, error: "Too many requests. Please try again later." }, 429);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
   }
   const body = await safeJsonParse<{
     email: string;
@@ -977,10 +1036,7 @@ auth.post("/passkey/login/verify", async (c) => {
     .select()
     .from(authenticators)
     .where(
-      and(
-        eq(authenticators.userId, user.id),
-        eq(authenticators.credentialId, body.response.id),
-      ),
+      and(eq(authenticators.userId, user.id), eq(authenticators.credentialId, body.response.id)),
     );
 
   if (!cred) {
@@ -998,7 +1054,10 @@ auth.post("/passkey/login/verify", async (c) => {
     );
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Authentication failed" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Authentication failed",
+      },
       400,
     );
   }
@@ -1041,7 +1100,13 @@ auth.post("/passkey/login/verify", async (c) => {
   });
   const loginRefreshToken = await createRefreshToken(user.id, tenantId);
 
-  return c.json(buildAuthResponse(token, loginRefreshToken, { id: user.id, email, walletAddress }));
+  return c.json(
+    buildAuthResponse(token, loginRefreshToken, {
+      id: user.id,
+      email,
+      walletAddress,
+    }),
+  );
 });
 
 // ── Email magic link ──────────────────────────────────────────────────────────
@@ -1054,7 +1119,10 @@ auth.post("/passkey/login/verify", async (c) => {
 auth.post("/email/send", async (c) => {
   const rl = await checkAuthRateLimit(c, "email-send", 60_000, 3);
   if (!rl.allowed) {
-    return c.json<ApiResponse>({ ok: false, error: "Too many requests. Please try again later." }, 429);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
   }
   const body = await safeJsonParse<{ email: string }>(c);
   if (!body?.email) {
@@ -1077,7 +1145,11 @@ auth.post("/email/send", async (c) => {
  * Verifies the magic link token, provisions user + wallet, links to tenant, returns JWT.
  */
 auth.post("/email/verify", async (c) => {
-  const body = await safeJsonParse<{ token: string; email: string; tenantId?: string }>(c);
+  const body = await safeJsonParse<{
+    token: string;
+    email: string;
+    tenantId?: string;
+  }>(c);
   if (!body?.token || !body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "token and email are required" }, 400);
   }
@@ -1116,7 +1188,13 @@ auth.post("/email/verify", async (c) => {
   });
   const refreshToken = await createRefreshToken(user.id, tenantId);
 
-  return c.json(buildAuthResponse(jwtToken, refreshToken, { id: user.id, email, walletAddress }));
+  return c.json(
+    buildAuthResponse(jwtToken, refreshToken, {
+      id: user.id,
+      email,
+      walletAddress,
+    }),
+  );
 });
 
 // ── OAuth providers list ─────────────────────────────────────────────────────
@@ -1160,7 +1238,10 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Provider not configured",
+      },
       503,
     );
   }
@@ -1231,7 +1312,12 @@ auth.get("/oauth/:provider/callback", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OAuth state" }, 401);
   }
 
-  let stateData: { provider: string; tenantId?: string; redirectUri: string; codeVerifier?: string };
+  let stateData: {
+    provider: string;
+    tenantId?: string;
+    redirectUri: string;
+    codeVerifier?: string;
+  };
   try {
     stateData = JSON.parse(rawPayload) as typeof stateData;
   } catch {
@@ -1247,7 +1333,10 @@ auth.get("/oauth/:provider/callback", async (c) => {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Provider not configured",
+      },
       503,
     );
   }
@@ -1260,7 +1349,10 @@ auth.get("/oauth/:provider/callback", async (c) => {
     tokenResponse = await oauthClient.exchangeCode(code, callbackUrl, stateData.codeVerifier);
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Token exchange failed",
+      },
       502,
     );
   }
@@ -1271,7 +1363,10 @@ auth.get("/oauth/:provider/callback", async (c) => {
     providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Failed to fetch user info" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Failed to fetch user info",
+      },
       502,
     );
   }
@@ -1286,7 +1381,10 @@ auth.get("/oauth/:provider/callback", async (c) => {
         400,
       );
     }
-    providerUser = { ...providerUser, email: `${providerName}.${providerUser.id}@id.steward.internal` };
+    providerUser = {
+      ...providerUser,
+      email: `${providerName}.${providerUser.id}@id.steward.internal`,
+    };
   }
 
   // Create/find user + provision wallet + link tenant
@@ -1338,21 +1436,23 @@ auth.post("/oauth/:provider/token", async (c) => {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Provider not configured" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Provider not configured",
+      },
       503,
     );
   }
 
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
-    tokenResponse = await oauthClient.exchangeCode(
-      body.code,
-      body.redirectUri,
-      body.codeVerifier,
-    );
+    tokenResponse = await oauthClient.exchangeCode(body.code, body.redirectUri, body.codeVerifier);
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Token exchange failed" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Token exchange failed",
+      },
       502,
     );
   }
@@ -1362,7 +1462,10 @@ auth.post("/oauth/:provider/token", async (c) => {
     providerUser = await oauthClient.getUserInfo(tokenResponse.access_token);
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Failed to fetch user info" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Failed to fetch user info",
+      },
       502,
     );
   }
@@ -1376,7 +1479,10 @@ auth.post("/oauth/:provider/token", async (c) => {
         400,
       );
     }
-    providerUser = { ...providerUser, email: `${providerName}.${providerUser.id}@id.steward.internal` };
+    providerUser = {
+      ...providerUser,
+      email: `${providerName}.${providerUser.id}@id.steward.internal`,
+    };
   }
 
   const result = await provisionOAuthUser({
@@ -1391,7 +1497,9 @@ auth.post("/oauth/:provider/token", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: result.error }, 500);
   }
 
-  return c.json(buildAuthResponse(result.token, result.refreshToken, result.user as Record<string, unknown>));
+  return c.json(
+    buildAuthResponse(result.token, result.refreshToken, result.user as Record<string, unknown>),
+  );
 });
 
 // ─── OAuth helper: provision user + account + tenant link ─────────────────────
@@ -1406,7 +1514,12 @@ async function provisionOAuthUser(opts: {
   tokenResponse: OAuthTokenResponse;
   tenantId?: string;
 }): Promise<
-  | { ok: true; token: string; refreshToken: string; user: { id: string; email: string; walletAddress?: string | null } }
+  | {
+      ok: true;
+      token: string;
+      refreshToken: string;
+      user: { id: string; email: string; walletAddress?: string | null };
+    }
   | { ok: false; error: string }
 > {
   const { c, providerName, providerUser, tokenResponse, tenantId } = opts;
@@ -1475,10 +1588,18 @@ async function provisionOAuthUser(opts: {
     });
     const oauthRefreshToken = await createRefreshToken(user.id, resolvedTenantId);
 
-    return { ok: true, token, refreshToken: oauthRefreshToken, user: { id: user.id, email, walletAddress } };
+    return {
+      ok: true,
+      token,
+      refreshToken: oauthRefreshToken,
+      user: { id: user.id, email, walletAddress },
+    };
   } catch (err) {
     console.error(`[OAuthAuth:${providerName}] provisionOAuthUser failed:`, err);
-    return { ok: false, error: err instanceof Error ? err.message : "Internal server error" };
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Internal server error",
+    };
   }
 }
 

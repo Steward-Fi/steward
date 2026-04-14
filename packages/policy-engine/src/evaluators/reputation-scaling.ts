@@ -5,7 +5,7 @@
  * agent's reputation score. Higher reputation = higher limit.
  */
 
-import type { PolicyRule, PolicyResult } from "@stwd/shared";
+import type { PolicyResult, PolicyRule } from "@stwd/shared";
 
 export interface ReputationScalingConfig {
   /** Base per-tx limit in wei (score = 0) */
@@ -24,10 +24,7 @@ export interface ReputationScalingContext {
 /**
  * Compute the effective limit for a given reputation score and config.
  */
-export function computeScaledLimit(
-  config: ReputationScalingConfig,
-  score: number,
-): bigint {
+export function computeScaledLimit(config: ReputationScalingConfig, score: number): bigint {
   const base = BigInt(config.baseMaxPerTx);
   const max = BigInt(config.maxMaxPerTx);
   const clampedScore = Math.max(0, Math.min(score, 100));

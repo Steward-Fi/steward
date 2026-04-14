@@ -10,16 +10,16 @@
  * handlers to prevent Hono from treating "routes" as a secret ID.
  */
 
-import { Hono } from "hono";
 import { SecretVault } from "@stwd/vault";
+import { Hono } from "hono";
 import {
+  type ApiResponse,
   type AppVariables,
-  MASTER_PASSWORD,
   isNonEmptyString,
+  MASTER_PASSWORD,
   requireTenantLevel,
   safeJsonParse,
   sanitizeErrorMessage,
-  type ApiResponse,
 } from "../services/context";
 
 export const secretsRoutes = new Hono<{ Variables: AppVariables }>();
@@ -36,7 +36,13 @@ function getSecretVault(): SecretVault {
 /** POST /secrets — create a new secret */
 secretsRoutes.post("/", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Secret management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -78,7 +84,13 @@ secretsRoutes.post("/", async (c) => {
 /** GET /secrets — list all secrets (metadata only) */
 secretsRoutes.get("/", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Secret management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -94,7 +106,13 @@ secretsRoutes.get("/", async (c) => {
 /** POST /secrets/routes — create a credential injection route */
 secretsRoutes.post("/routes", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Route management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Route management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -125,7 +143,13 @@ secretsRoutes.post("/routes", async (c) => {
   }
   const validInjectAs = ["header", "query", "body"];
   if (!validInjectAs.includes(body.injectAs)) {
-    return c.json<ApiResponse>({ ok: false, error: `'injectAs' must be one of: ${validInjectAs.join(", ")}` }, 400);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `'injectAs' must be one of: ${validInjectAs.join(", ")}`,
+      },
+      400,
+    );
   }
   if (!isNonEmptyString(body.injectKey)) {
     return c.json<ApiResponse>({ ok: false, error: "'injectKey' is required" }, 400);
@@ -156,7 +180,13 @@ secretsRoutes.post("/routes", async (c) => {
 /** GET /secrets/routes — list all routes */
 secretsRoutes.get("/routes", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Route management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Route management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -168,7 +198,13 @@ secretsRoutes.get("/routes", async (c) => {
 /** PUT /secrets/routes/:id — update route */
 secretsRoutes.put("/routes/:id", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Route management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Route management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -191,7 +227,13 @@ secretsRoutes.put("/routes/:id", async (c) => {
   if (body.injectAs) {
     const validInjectAs = ["header", "query", "body"];
     if (!validInjectAs.includes(body.injectAs)) {
-      return c.json<ApiResponse>({ ok: false, error: `'injectAs' must be one of: ${validInjectAs.join(", ")}` }, 400);
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `'injectAs' must be one of: ${validInjectAs.join(", ")}`,
+        },
+        400,
+      );
     }
   }
 
@@ -208,7 +250,13 @@ secretsRoutes.put("/routes/:id", async (c) => {
 /** DELETE /secrets/routes/:id — delete route */
 secretsRoutes.delete("/routes/:id", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Route management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Route management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -230,7 +278,13 @@ secretsRoutes.delete("/routes/:id", async (c) => {
 /** GET /secrets/:id — get secret metadata */
 secretsRoutes.get("/:id", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Secret management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -248,7 +302,13 @@ secretsRoutes.get("/:id", async (c) => {
 /** PUT /secrets/:id — update secret value (creates new version) */
 secretsRoutes.put("/:id", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Secret management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -276,7 +336,13 @@ secretsRoutes.put("/:id", async (c) => {
 /** DELETE /secrets/:id — soft delete */
 secretsRoutes.delete("/:id", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Secret management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -294,7 +360,13 @@ secretsRoutes.delete("/:id", async (c) => {
 /** POST /secrets/:id/rotate — rotate with new value */
 secretsRoutes.post("/:id/rotate", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Secret management requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Secret management requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");

@@ -7,11 +7,10 @@
  * default policies pre-applied.
  */
 
+import { agents, getDb, policies, type policyTypeEnum } from "@stwd/db";
+import type { AgentIdentity, PolicyRule } from "@stwd/shared";
 import { eq } from "drizzle-orm";
 import { parseEther } from "viem";
-
-import { agents, getDb, policies, policyTypeEnum } from "@stwd/db";
-import type { AgentIdentity, PolicyRule } from "@stwd/shared";
 
 import type { Vault } from "./vault";
 
@@ -19,8 +18,8 @@ import type { Vault } from "./vault";
 
 export interface UserWalletResult {
   userId: string;
-  agentId: string;        // Steward agent ID backing this wallet
-  tenantId: string;       // personal tenant scoping this wallet
+  agentId: string; // Steward agent ID backing this wallet
+  tenantId: string; // personal tenant scoping this wallet
   walletAddress: string;
   chainType: "evm";
 }
@@ -28,7 +27,9 @@ export interface UserWalletResult {
 // ─── Default policies ─────────────────────────────────────────────────────────
 
 type PersistedPolicyType = (typeof policyTypeEnum.enumValues)[number];
-type PersistedPolicyRule = Omit<PolicyRule, "type"> & { type: PersistedPolicyType };
+type PersistedPolicyRule = Omit<PolicyRule, "type"> & {
+  type: PersistedPolicyType;
+};
 
 /**
  * Sensible default policies for a user's personal wallet.
@@ -42,9 +43,9 @@ export const USER_WALLET_DEFAULT_POLICIES: PersistedPolicyRule[] = [
     type: "spending-limit",
     enabled: true,
     config: {
-      maxPerTx:   parseEther("0.5").toString(),   // 0.5 ETH per transaction
-      maxPerDay:  parseEther("2.0").toString(),   // 2 ETH daily
-      maxPerWeek: parseEther("10.0").toString(),  // 10 ETH weekly
+      maxPerTx: parseEther("0.5").toString(), // 0.5 ETH per transaction
+      maxPerDay: parseEther("2.0").toString(), // 2 ETH daily
+      maxPerWeek: parseEther("10.0").toString(), // 10 ETH weekly
     },
   },
   {
@@ -53,7 +54,7 @@ export const USER_WALLET_DEFAULT_POLICIES: PersistedPolicyRule[] = [
     enabled: true,
     config: {
       maxTxPerHour: 10,
-      maxTxPerDay:  50,
+      maxTxPerDay: 50,
     },
   },
 ];
@@ -88,7 +89,7 @@ export async function provisionUserWallet(
   vault: Vault,
   userId: string,
   displayName: string,
-  tenantId?: string
+  tenantId?: string,
 ): Promise<UserWalletResult> {
   if (!userId || userId.trim().length === 0) {
     throw new Error("userId is required");
@@ -97,7 +98,7 @@ export async function provisionUserWallet(
     throw new Error("displayName is required");
   }
 
-  const agentId   = agentIdFor(userId);
+  const agentId = agentIdFor(userId);
   const resolvedTenantId = tenantIdFor(userId, tenantId);
 
   let agent: AgentIdentity;
@@ -108,23 +109,29 @@ export async function provisionUserWallet(
       resolvedTenantId,
       agentId,
       `${displayName}'s Wallet`,
-      `user:${userId}`
+      `user:${userId}`,
     );
 
     // Apply default policies for newly-provisioned wallet
     await applyUserWalletDefaults(userId, resolvedTenantId);
 
-    console.log(`[UserWallet] Provisioned wallet for user "${userId}" — address ${agent.walletAddress}`);
+    console.log(
+      `[UserWallet] Provisioned wallet for user "${userId}" — address ${agent.walletAddress}`,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (message.includes("already exists")) {
       // Wallet exists — fetch it
       const existing = await vault.getAgent(resolvedTenantId, agentId);
       if (!existing) {
-        throw new Error(`User wallet agent "${agentId}" reported as existing but could not be fetched`);
+        throw new Error(
+          `User wallet agent "${agentId}" reported as existing but could not be fetched`,
+        );
       }
       agent = existing;
-      console.log(`[UserWallet] Existing wallet found for user "${userId}" — address ${agent.walletAddress}`);
+      console.log(
+        `[UserWallet] Existing wallet found for user "${userId}" — address ${agent.walletAddress}`,
+      );
     } else {
       throw err;
     }
@@ -132,10 +139,10 @@ export async function provisionUserWallet(
 
   return {
     userId,
-    agentId:       agent.id,
-    tenantId:      resolvedTenantId,
+    agentId: agent.id,
+    tenantId: resolvedTenantId,
     walletAddress: agent.walletAddress,
-    chainType:     "evm",
+    chainType: "evm",
   };
 }
 
@@ -151,9 +158,9 @@ export async function provisionUserWallet(
 export async function getUserWallet(
   vault: Vault,
   userId: string,
-  tenantId?: string
+  tenantId?: string,
 ): Promise<AgentIdentity | null> {
-  const agentId          = agentIdFor(userId);
+  const agentId = agentIdFor(userId);
   const resolvedTenantId = tenantIdFor(userId, tenantId);
 
   const agent = await vault.getAgent(resolvedTenantId, agentId);
@@ -167,18 +174,12 @@ export async function getUserWallet(
  * @param userId    The application user ID.
  * @param tenantId  Optional override tenant (defaults to `personal-<userId>`).
  */
-export async function applyUserWalletDefaults(
-  userId: string,
-  tenantId?: string
-): Promise<void> {
+export async function applyUserWalletDefaults(userId: string, _tenantId?: string): Promise<void> {
   const agentId = agentIdFor(userId);
-  const db      = getDb();
+  const db = getDb();
 
   // Ensure the agent exists in the DB before inserting policies
-  const [agentRow] = await db
-    .select({ id: agents.id })
-    .from(agents)
-    .where(eq(agents.id, agentId));
+  const [agentRow] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId));
 
   if (!agentRow) {
     throw new Error(`Cannot apply default policies: agent "${agentId}" not found in database`);
@@ -188,13 +189,15 @@ export async function applyUserWalletDefaults(
   await db.delete(policies).where(eq(policies.agentId, agentId));
   await db.insert(policies).values(
     USER_WALLET_DEFAULT_POLICIES.map((policy) => ({
-      id:      `${policy.id}-${userId}`,  // unique per user to avoid PK collisions
+      id: `${policy.id}-${userId}`, // unique per user to avoid PK collisions
       agentId,
-      type:    policy.type,
+      type: policy.type,
       enabled: policy.enabled,
-      config:  policy.config,
-    }))
+      config: policy.config,
+    })),
   );
 
-  console.log(`[UserWallet] Default policies applied for user "${userId}" (${USER_WALLET_DEFAULT_POLICIES.length} rules)`);
+  console.log(
+    `[UserWallet] Default policies applied for user "${userId}" (${USER_WALLET_DEFAULT_POLICIES.length} rules)`,
+  );
 }

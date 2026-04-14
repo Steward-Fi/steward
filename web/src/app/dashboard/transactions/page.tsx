@@ -1,25 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import Link from "next/link";
 import { motion } from "framer-motion";
-import { steward } from "@/lib/api";
-import { shortenAddress, formatDate, formatWei } from "@/lib/utils";
-import { getChainSymbol, getExplorerTxLink } from "@/lib/chains";
-import { StatusBadge } from "@/components/status-badge";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
+import { StatusBadge } from "@/components/status-badge";
+import { steward } from "@/lib/api";
+import { getChainSymbol, getExplorerTxLink } from "@/lib/chains";
 import type { TxRecord } from "@/lib/steward-client";
+import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 type TxWithAgent = TxRecord & { agentName?: string };
 
-const FILTERS = [
-  "all",
-  "signed",
-  "confirmed",
-  "pending",
-  "rejected",
-  "failed",
-] as const;
+const FILTERS = ["all", "signed", "confirmed", "pending", "rejected", "failed"] as const;
 
 export default function TransactionsPage() {
   const [transactions, setTransactions] = useState<TxWithAgent[]>([]);
@@ -29,7 +22,7 @@ export default function TransactionsPage() {
 
   useEffect(() => {
     loadTransactions();
-  }, []);
+  }, [loadTransactions]);
 
   async function loadTransactions() {
     try {
@@ -46,7 +39,7 @@ export default function TransactionsPage() {
               ...tx,
               agentId: agent.id,
               agentName: agent.name,
-            }))
+            })),
           );
         } catch {
           /* skip individual agent */
@@ -54,9 +47,7 @@ export default function TransactionsPage() {
       }
 
       allTx.sort(
-        (a, b) =>
-          new Date(b.createdAt || 0).getTime() -
-          new Date(a.createdAt || 0).getTime()
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime(),
       );
       setTransactions(allTx);
     } catch (e: unknown) {
@@ -67,16 +58,14 @@ export default function TransactionsPage() {
   }
 
   const filtered =
-    filter === "all"
-      ? transactions
-      : transactions.filter((tx) => tx.status === filter);
+    filter === "all" ? transactions : transactions.filter((tx) => tx.status === filter);
 
   const counts = transactions.reduce(
     (acc: Record<string, number>, tx) => {
       acc[tx.status] = (acc[tx.status] || 0) + 1;
       return acc;
     },
-    {} as Record<string, number>
+    {} as Record<string, number>,
   );
 
   if (loading) {
@@ -97,12 +86,8 @@ export default function TransactionsPage() {
     >
       {/* Header */}
       <div>
-        <h1 className="font-display text-2xl font-700 tracking-tight">
-          Transactions
-        </h1>
-        <p className="text-sm text-text-tertiary mt-1">
-          All transactions across agents
-        </p>
+        <h1 className="font-display text-2xl font-700 tracking-tight">Transactions</h1>
+        <p className="text-sm text-text-tertiary mt-1">All transactions across agents</p>
       </div>
 
       {/* Error state */}
@@ -143,9 +128,7 @@ export default function TransactionsPage() {
       {error ? null : filtered.length === 0 ? (
         <div className="py-16 text-center border border-border-subtle">
           <p className="text-text-tertiary text-sm">
-            {filter === "all"
-              ? "No transactions yet"
-              : `No ${filter} transactions`}
+            {filter === "all" ? "No transactions yet" : `No ${filter} transactions`}
           </p>
           {filter === "all" && (
             <p className="text-text-tertiary text-xs mt-1">
@@ -190,21 +173,23 @@ export default function TransactionsPage() {
               </div>
               <div className="w-36">
                 <span className="font-mono text-xs text-text-tertiary">
-                  {shortenAddress(
-                    tx.request?.to || tx.toAddress || "0x0",
-                    6
-                  )}
+                  {shortenAddress(tx.request?.to || tx.toAddress || "0x0", 6)}
                 </span>
               </div>
               <div className="w-28 text-right">
                 <span className="text-sm tabular-nums text-text-secondary">
-                  {formatWei(tx.request?.value || tx.value || "0", getChainSymbol(tx.request?.chainId || tx.chainId || 8453))}
+                  {formatWei(
+                    tx.request?.value || tx.value || "0",
+                    getChainSymbol(tx.request?.chainId || tx.chainId || 8453),
+                  )}
                 </span>
               </div>
               <div className="w-36 text-right">
                 {tx.txHash ? (
                   <a
-                    href={getExplorerTxLink(tx.request?.chainId || tx.chainId || 8453, tx.txHash) || "#"}
+                    href={
+                      getExplorerTxLink(tx.request?.chainId || tx.chainId || 8453, tx.txHash) || "#"
+                    }
                     target="_blank"
                     rel="noopener noreferrer"
                     className="font-mono text-xs text-text-tertiary hover:text-text-secondary transition-colors"

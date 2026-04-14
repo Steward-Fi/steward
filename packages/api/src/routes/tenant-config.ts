@@ -5,26 +5,21 @@
  * These extend the existing tenant routes with config management.
  */
 
-import { eq } from "drizzle-orm";
-import { Hono } from "hono";
-import {
-  type AppVariables,
-  db,
-  safeJsonParse,
-  type ApiResponse,
-} from "../services/context";
 import { tenantConfigs as tenantConfigsTable, toPersistedPolicyRule } from "@stwd/db";
-import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
 import type {
-  TenantControlPlaneConfig,
+  ApprovalConfig,
   PolicyExposureConfig,
   PolicyTemplate,
   SecretRoutePreset,
-  ApprovalConfig,
+  TenantControlPlaneConfig,
   TenantFeatureFlags,
   TenantTheme,
 } from "@stwd/shared";
+import { eq } from "drizzle-orm";
+import { Hono } from "hono";
 import { DEFAULT_TENANT_CONFIGS } from "../defaults/tenant-configs";
+import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
+import { type ApiResponse, type AppVariables, db, safeJsonParse } from "../services/context";
 
 export const tenantConfigRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -53,13 +48,19 @@ tenantConfigRoutes.get("/:id/config", async (c) => {
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
-    return c.json<ApiResponse<TenantControlPlaneConfig>>({ ok: true, data: config });
+    return c.json<ApiResponse<TenantControlPlaneConfig>>({
+      ok: true,
+      data: config,
+    });
   }
 
   // Fall back to defaults
   const defaultConfig = DEFAULT_TENANT_CONFIGS[tenantId];
   if (defaultConfig) {
-    return c.json<ApiResponse<TenantControlPlaneConfig>>({ ok: true, data: defaultConfig });
+    return c.json<ApiResponse<TenantControlPlaneConfig>>({
+      ok: true,
+      data: defaultConfig,
+    });
   }
 
   // Return empty config
@@ -71,7 +72,10 @@ tenantConfigRoutes.get("/:id/config", async (c) => {
     approvalConfig: {},
     featureFlags: {},
   };
-  return c.json<ApiResponse<TenantControlPlaneConfig>>({ ok: true, data: emptyConfig });
+  return c.json<ApiResponse<TenantControlPlaneConfig>>({
+    ok: true,
+    data: emptyConfig,
+  });
 });
 
 // ─── PUT /tenants/:id/config — update tenant control plane config ─────────────
@@ -132,7 +136,10 @@ tenantConfigRoutes.put("/:id/config", async (c) => {
     updatedAt: row.updatedAt,
   };
 
-  return c.json<ApiResponse<TenantControlPlaneConfig>>({ ok: true, data: config });
+  return c.json<ApiResponse<TenantControlPlaneConfig>>({
+    ok: true,
+    data: config,
+  });
 });
 
 // ─── GET /tenants/:id/config/templates — list policy templates ────────────────
@@ -195,7 +202,7 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", async (c) => {
   }
 
   // Apply overrides to template policies
-  let policiesToApply = structuredClone(template.policies);
+  const policiesToApply = structuredClone(template.policies);
 
   if (body.overrides) {
     for (const [path, value] of Object.entries(body.overrides)) {
@@ -209,7 +216,6 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", async (c) => {
 
   // Import policies table and save
   const { policies } = await import("@stwd/db");
-  const { nanoid } = await import("../services/context").then(() => ({ nanoid: () => crypto.randomUUID().slice(0, 16) }));
 
   // Delete existing policies for this agent, then insert template ones
   await db.delete(policies).where(eq(policies.agentId, body.agentId));

@@ -168,9 +168,9 @@ async function testCloudProvisioning() {
         type: "spending-limit",
         enabled: true,
         config: {
-          maxPerTx: "100000000000000000",       // 0.1 ETH per tx
-          maxPerDay: "1000000000000000000",      // 1 ETH per day
-          maxPerWeek: "5000000000000000000",     // 5 ETH per week
+          maxPerTx: "100000000000000000", // 0.1 ETH per tx
+          maxPerDay: "1000000000000000000", // 1 ETH per day
+          maxPerWeek: "5000000000000000000", // 5 ETH per week
         },
       },
       {
@@ -201,7 +201,12 @@ async function testCloudProvisioning() {
 
   // 1f. Get agent policies
   try {
-    const { status, data } = await api("GET", `/agents/${AGENT_ID}/policies`, undefined, tenantHeaders());
+    const { status, data } = await api(
+      "GET",
+      `/agents/${AGENT_ID}/policies`,
+      undefined,
+      tenantHeaders(),
+    );
     if (status === 200 && data.ok && data.data?.length === 3) {
       pass("Get agent policies (3 policies confirmed)");
     } else {
@@ -243,14 +248,14 @@ async function testWalletOperations() {
 
   // 2a. Check wallet balance (native)
   try {
-    const { status, data } = await api(
-      "GET",
-      `/agents/${AGENT_ID}/balance`,
-      undefined,
-      { ...tenantHeaders(), ...agentHeaders() },
-    );
+    const { status, data } = await api("GET", `/agents/${AGENT_ID}/balance`, undefined, {
+      ...tenantHeaders(),
+      ...agentHeaders(),
+    });
     if (status === 200 && data.ok && data.data?.walletAddress) {
-      pass(`Check native balance (${data.data.balances?.nativeFormatted || "0"} ${data.data.balances?.symbol || "ETH"})`);
+      pass(
+        `Check native balance (${data.data.balances?.nativeFormatted || "0"} ${data.data.balances?.symbol || "ETH"})`,
+      );
     } else {
       fail("Check native balance", `${data.error || JSON.stringify(data)}`);
     }
@@ -260,12 +265,10 @@ async function testWalletOperations() {
 
   // 2b. Check ERC-20 token balances
   try {
-    const { status, data } = await api(
-      "GET",
-      `/agents/${AGENT_ID}/tokens`,
-      undefined,
-      { ...tenantHeaders(), ...agentHeaders() },
-    );
+    const { status, data } = await api("GET", `/agents/${AGENT_ID}/tokens`, undefined, {
+      ...tenantHeaders(),
+      ...agentHeaders(),
+    });
     if (status === 200 && data.ok && data.data?.walletAddress) {
       const tokenCount = data.data.tokens?.length ?? 0;
       pass(`Check ERC-20 token balances (${tokenCount} tokens)`);
@@ -278,12 +281,10 @@ async function testWalletOperations() {
 
   // 2c. Get wallet addresses (multi-chain)
   try {
-    const { status, data } = await api(
-      "GET",
-      `/vault/${AGENT_ID}/addresses`,
-      undefined,
-      { ...tenantHeaders(), ...agentHeaders() },
-    );
+    const { status, data } = await api("GET", `/vault/${AGENT_ID}/addresses`, undefined, {
+      ...tenantHeaders(),
+      ...agentHeaders(),
+    });
     if (status === 200 && data.ok && Array.isArray(data.data?.addresses)) {
       const chains = data.data.addresses.map((a: any) => a.chainFamily).join(", ");
       pass(`Get multi-chain addresses (${chains})`);
@@ -301,7 +302,7 @@ async function testWalletOperations() {
       `/vault/${AGENT_ID}/sign`,
       {
         to: WHITELISTED_ADDR,
-        value: "1000000000000",  // 0.000001 ETH in wei
+        value: "1000000000000", // 0.000001 ETH in wei
         broadcast: false,
       },
       { ...tenantHeaders(), ...agentHeaders() },
@@ -312,7 +313,10 @@ async function testWalletOperations() {
       pass("Sign tx to whitelisted address (signed)");
     } else {
       // Could fail if RPC is down — that's OK, policy should still evaluate
-      fail("Sign tx to whitelisted address", `status=${status}: ${data.error || JSON.stringify(data)}`);
+      fail(
+        "Sign tx to whitelisted address",
+        `status=${status}: ${data.error || JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Sign tx to whitelisted address", e.message);
@@ -336,7 +340,10 @@ async function testWalletOperations() {
       // Requires manual approval — still a pass (policy caught it)
       pass("Non-whitelisted address requires manual approval (202)");
     } else {
-      fail("Deny non-whitelisted address", `Expected 403/202, got ${status}: ${JSON.stringify(data)}`);
+      fail(
+        "Deny non-whitelisted address",
+        `Expected 403/202, got ${status}: ${JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Deny non-whitelisted address", e.message);
@@ -349,7 +356,7 @@ async function testWalletOperations() {
     // We set maxTxPerHour=5, so after ~5 requests we should get 429
     for (let i = 0; i < 8; i++) {
       attempts++;
-      const { status, data } = await api(
+      const { status } = await api(
         "POST",
         `/vault/${AGENT_ID}/sign`,
         {
@@ -376,12 +383,10 @@ async function testWalletOperations() {
 
   // 2g. Transaction history
   try {
-    const { status, data } = await api(
-      "GET",
-      `/vault/${AGENT_ID}/history`,
-      undefined,
-      { ...tenantHeaders(), ...agentHeaders() },
-    );
+    const { status, data } = await api("GET", `/vault/${AGENT_ID}/history`, undefined, {
+      ...tenantHeaders(),
+      ...agentHeaders(),
+    });
     if (status === 200 && data.ok && Array.isArray(data.data)) {
       pass(`Transaction history (${data.data.length} entries)`);
     } else {
@@ -498,7 +503,7 @@ async function testSecretManagement() {
   }
 
   // 3f. Rotate secret (new version — creates a new row with new ID)
-  let oldSecretId = secretId;
+  const oldSecretId = secretId;
   try {
     const { status, data } = await api(
       "POST",
@@ -508,7 +513,7 @@ async function testSecretManagement() {
     );
     if (status === 200 && data.ok && data.data?.id) {
       const oldId = secretId.slice(0, 8);
-      secretId = data.data.id;  // Update to new version's ID
+      secretId = data.data.id; // Update to new version's ID
       const newVersion = data.data.version ?? "unknown";
       pass(`Rotate secret (v${newVersion}, old: ${oldId}... → new: ${secretId.slice(0, 8)}...)`);
     } else {
@@ -600,9 +605,10 @@ async function testProxyOperations() {
     });
     const data = await res.json();
 
-    const errMsg = typeof data.error === "string"
-      ? data.error
-      : (data.error?.message || JSON.stringify(data.error));
+    const errMsg =
+      typeof data.error === "string"
+        ? data.error
+        : data.error?.message || JSON.stringify(data.error);
 
     if (res.status === 200) {
       // Real OpenAI response — credential injection worked with a real key!
@@ -646,7 +652,7 @@ async function testProxyOperations() {
     const res = await fetch(`${PROXY_URL}/nonexistent`, {
       headers: { Authorization: `Bearer ${agentJwt}` },
     });
-    const data = await res.json();
+    const _data = await res.json();
     if (res.status === 400 || res.status === 403) {
       pass(`Proxy rejects unknown alias (${res.status})`);
     } else {
@@ -684,9 +690,10 @@ async function testRedisEnforcement() {
       }),
     });
 
-    const rateLimitRemaining = res.headers.get("X-RateLimit-Remaining-Hourly")
-      || res.headers.get("X-RateLimit-Remaining")
-      || res.headers.get("Retry-After");
+    const rateLimitRemaining =
+      res.headers.get("X-RateLimit-Remaining-Hourly") ||
+      res.headers.get("X-RateLimit-Remaining") ||
+      res.headers.get("Retry-After");
 
     if (rateLimitRemaining !== null) {
       pass(`Rate limit headers present (remaining/retry-after: ${rateLimitRemaining})`);
@@ -718,7 +725,7 @@ async function testRedisEnforcement() {
     });
 
     if (res.status === 429) {
-      const data = await res.json() as any;
+      const data = (await res.json()) as any;
       if (data.error?.includes("Rate limit")) {
         pass("Rate limit denial message is descriptive");
       } else {
@@ -742,7 +749,12 @@ async function testCleanup() {
   // 6a. Delete credential route
   if (routeId) {
     try {
-      const { status, data } = await api("DELETE", `/secrets/routes/${routeId}`, undefined, tenantHeaders());
+      const { status, data } = await api(
+        "DELETE",
+        `/secrets/routes/${routeId}`,
+        undefined,
+        tenantHeaders(),
+      );
       if (status === 200 && data.ok) {
         pass("Delete credential route");
       } else {
@@ -756,7 +768,12 @@ async function testCleanup() {
   // 6b. Delete test secret
   if (secretId) {
     try {
-      const { status, data } = await api("DELETE", `/secrets/${secretId}`, undefined, tenantHeaders());
+      const { status, data } = await api(
+        "DELETE",
+        `/secrets/${secretId}`,
+        undefined,
+        tenantHeaders(),
+      );
       if (status === 200 && data.ok) {
         pass("Delete test secret");
       } else {
@@ -795,12 +812,9 @@ async function testCleanup() {
   const platformKey = process.env.STEWARD_PLATFORM_KEY || process.env.STEWARD_PLATFORM_KEYS;
   if (platformKey) {
     try {
-      const { status, data } = await api(
-        "DELETE",
-        `/platform/tenants/${TENANT_ID}`,
-        undefined,
-        { "X-Steward-Platform-Key": platformKey.split(",")[0].trim() },
-      );
+      const { status, data } = await api("DELETE", `/platform/tenants/${TENANT_ID}`, undefined, {
+        "X-Steward-Platform-Key": platformKey.split(",")[0].trim(),
+      });
       if (status === 200 && data.ok) {
         pass("Delete test tenant (via platform API)");
       } else {
@@ -818,12 +832,10 @@ async function testCleanup() {
 
   // 6f. Verify agent JWT is no longer usable for agent operations
   try {
-    const { status } = await api(
-      "GET",
-      `/agents/${AGENT_ID}`,
-      undefined,
-      { ...tenantHeaders(), ...agentHeaders() },
-    );
+    const { status } = await api("GET", `/agents/${AGENT_ID}`, undefined, {
+      ...tenantHeaders(),
+      ...agentHeaders(),
+    });
     if (status === 404 || status === 403 || status === 401) {
       pass("Agent JWT no longer valid for deleted agent");
     } else {

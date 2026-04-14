@@ -4,12 +4,14 @@
  * Mount: app.route("/agents", agentRoutes)
  */
 
+import { isPersistedPolicyType, toPersistedPolicyRule } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { isPersistedPolicyType, toPersistedPolicyRule } from "@stwd/db";
 import {
-  type AppVariables,
   AGENT_TOKEN_EXPIRY,
+  type AgentIdentity,
+  type ApiResponse,
+  type AppVariables,
   agents,
   agentWallets,
   approvalQueue,
@@ -20,6 +22,7 @@ import {
   ensureAgentForTenant,
   isNonEmptyString,
   isValidAgentId,
+  type PolicyRule,
   policies,
   requireAgentAccess,
   requireTenantLevel,
@@ -28,9 +31,6 @@ import {
   toPolicyRule,
   transactions,
   vault,
-  type AgentIdentity,
-  type ApiResponse,
-  type PolicyRule,
 } from "../services/context";
 
 export const agentRoutes = new Hono<{ Variables: AppVariables }>();
@@ -39,7 +39,11 @@ export const agentRoutes = new Hono<{ Variables: AppVariables }>();
 
 agentRoutes.post("/", async (c) => {
   const tenantId = c.get("tenantId");
-  const body = await safeJsonParse<{ id: string; name: string; platformId?: string }>(c);
+  const body = await safeJsonParse<{
+    id: string;
+    name: string;
+    platformId?: string;
+  }>(c);
 
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
@@ -47,13 +51,19 @@ agentRoutes.post("/", async (c) => {
 
   if (!isValidAgentId(body.id)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)" },
+      {
+        ok: false,
+        error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)",
+      },
       400,
     );
   }
 
   if (!isNonEmptyString(body.name)) {
-    return c.json<ApiResponse>({ ok: false, error: "name is required and must be a non-empty string" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "name is required and must be a non-empty string" },
+      400,
+    );
   }
 
   try {
@@ -80,7 +90,10 @@ agentRoutes.post("/:agentId/token", async (c) => {
   const agentId = c.req.param("agentId");
 
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent tokens cannot generate other agent tokens" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent tokens cannot generate other agent tokens" },
+      403,
+    );
   }
 
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -93,7 +106,15 @@ agentRoutes.post("/:agentId/token", async (c) => {
 
   try {
     const token = await createAgentToken(agentId, tenantId, expiresIn);
-    return c.json<ApiResponse<{ token: string; agentId: string; tenantId: string; scope: string; expiresIn: string }>>({
+    return c.json<
+      ApiResponse<{
+        token: string;
+        agentId: string;
+        tenantId: string;
+        scope: string;
+        expiresIn: string;
+      }>
+    >({
       ok: true,
       data: { token, agentId, tenantId, scope: "agent", expiresIn },
     });
@@ -119,7 +140,13 @@ agentRoutes.get("/:agentId", async (c) => {
 
 agentRoutes.delete("/:agentId", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent deletion requires tenant-level authentication" }, 403);
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Agent deletion requires tenant-level authentication",
+      },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -139,9 +166,7 @@ agentRoutes.delete("/:agentId", async (c) => {
       await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
       await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
       await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
-      await tx.delete(agents).where(
-        and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)),
-      );
+      await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
     });
 
     return c.json<ApiResponse<{ deleted: string }>>({
@@ -159,7 +184,10 @@ agentRoutes.delete("/:agentId", async (c) => {
 
 agentRoutes.get("/:agentId/balance", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -197,7 +225,10 @@ agentRoutes.get("/:agentId/balance", async (c) => {
 
 agentRoutes.get("/:agentId/tokens", async (c) => {
   if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden: token scope does not match agent" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -210,7 +241,12 @@ agentRoutes.get("/:agentId/tokens", async (c) => {
   const chainIdParam = c.req.query("chainId");
   const chainId = chainIdParam ? parseInt(chainIdParam, 10) : undefined;
   const tokensParam = c.req.query("tokens");
-  const customTokens = tokensParam ? tokensParam.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
+  const customTokens = tokensParam
+    ? tokensParam
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+    : undefined;
 
   try {
     // Fetch native balance
@@ -253,13 +289,19 @@ agentRoutes.post("/batch", async (c) => {
   }
 
   if (!Array.isArray(body.agents) || body.agents.length === 0) {
-    return c.json<ApiResponse>({ ok: false, error: "agents array is required and must not be empty" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "agents array is required and must not be empty" },
+      400,
+    );
   }
 
   for (const agentSpec of body.agents) {
     if (!isValidAgentId(agentSpec.id)) {
       return c.json<ApiResponse>(
-        { ok: false, error: `Invalid agent id "${String(agentSpec.id)}" — must be 1-128 alphanumeric characters (plus _ - . :)` },
+        {
+          ok: false,
+          error: `Invalid agent id "${String(agentSpec.id)}" — must be 1-128 alphanumeric characters (plus _ - . :)`,
+        },
         400,
       );
     }
@@ -276,7 +318,12 @@ agentRoutes.post("/batch", async (c) => {
 
   for (const agentSpec of body.agents) {
     try {
-      const identity = await vault.createAgent(tenantId, agentSpec.id, agentSpec.name, agentSpec.platformId);
+      const identity = await vault.createAgent(
+        tenantId,
+        agentSpec.id,
+        agentSpec.name,
+        agentSpec.platformId,
+      );
 
       if (body.applyPolicies && body.applyPolicies.length > 0) {
         const persistedPolicies = body.applyPolicies.map(toPersistedPolicyRule);
@@ -294,11 +341,19 @@ agentRoutes.post("/batch", async (c) => {
 
       created.push(identity);
     } catch (e: unknown) {
-      errors.push({ id: agentSpec.id, error: e instanceof Error ? e.message : "Unknown error" });
+      errors.push({
+        id: agentSpec.id,
+        error: e instanceof Error ? e.message : "Unknown error",
+      });
     }
   }
 
-  return c.json<ApiResponse<{ created: AgentIdentity[]; errors: Array<{ id: string; error: string }> }>>({
+  return c.json<
+    ApiResponse<{
+      created: AgentIdentity[];
+      errors: Array<{ id: string; error: string }>;
+    }>
+  >({
     ok: true,
     data: { created, errors },
   });
@@ -315,10 +370,7 @@ agentRoutes.get("/:agentId/policies", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const agentPolicies = await db
-    .select()
-    .from(policies)
-    .where(eq(policies.agentId, agentId));
+  const agentPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
 
   return c.json<ApiResponse<PolicyRule[]>>({
     ok: true,
@@ -340,7 +392,10 @@ agentRoutes.put("/:agentId/policies", async (c) => {
   const nextPolicies = await safeJsonParse<PolicyRule[]>(c);
 
   if (!nextPolicies || !Array.isArray(nextPolicies)) {
-    return c.json<ApiResponse>({ ok: false, error: "Request body must be a JSON array of policies" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Request body must be a JSON array of policies" },
+      400,
+    );
   }
 
   const validPolicyTypes = [
@@ -355,19 +410,41 @@ agentRoutes.put("/:agentId/policies", async (c) => {
   ] as const;
   for (const policy of nextPolicies) {
     if (!isNonEmptyString(policy.type)) {
-      return c.json<ApiResponse>({ ok: false, error: "Each policy must have a non-empty 'type' field" }, 400);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Each policy must have a non-empty 'type' field" },
+        400,
+      );
     }
     if (!isPersistedPolicyType(policy.type)) {
       return c.json<ApiResponse>(
-        { ok: false, error: `Unknown policy type "${policy.type}" — supported types: ${validPolicyTypes.join(", ")}` },
+        {
+          ok: false,
+          error: `Unknown policy type "${policy.type}" — supported types: ${validPolicyTypes.join(", ")}`,
+        },
         400,
       );
     }
     if (typeof policy.enabled !== "boolean") {
-      return c.json<ApiResponse>({ ok: false, error: `Policy "${policy.id || policy.type}": enabled must be a boolean` }, 400);
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `Policy "${policy.id || policy.type}": enabled must be a boolean`,
+        },
+        400,
+      );
     }
-    if (typeof policy.config !== "object" || policy.config === null || Array.isArray(policy.config)) {
-      return c.json<ApiResponse>({ ok: false, error: `Policy "${policy.id || policy.type}": config must be an object` }, 400);
+    if (
+      typeof policy.config !== "object" ||
+      policy.config === null ||
+      Array.isArray(policy.config)
+    ) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `Policy "${policy.id || policy.type}": config must be an object`,
+        },
+        400,
+      );
     }
   }
 
@@ -386,10 +463,7 @@ agentRoutes.put("/:agentId/policies", async (c) => {
     );
   }
 
-  const storedPolicies = await db
-    .select()
-    .from(policies)
-    .where(eq(policies.agentId, agentId));
+  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
 
   return c.json<ApiResponse<PolicyRule[]>>({
     ok: true,

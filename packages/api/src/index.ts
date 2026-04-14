@@ -5,40 +5,38 @@
  * All route logic lives in `./routes/*`; shared state lives in `./services/context`.
  */
 
+import { closeDb, getDb, runMigrations, shouldUsePGLite } from "@stwd/db";
+import { sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
-
 import { correlationId } from "./middleware/correlation";
+import { initRedis, shutdownRedis } from "./middleware/redis";
 import { tenantCors } from "./middleware/tenant-cors";
+import { agentRoutes } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
 import { authRoutes, initAuthStores } from "./routes/auth";
-import { agentRoutes } from "./routes/agents";
-import { platformRoutes } from "./routes/platform";
-import { tenantRoutes } from "./routes/tenants";
-import { tenantConfigRoutes } from "./routes/tenant-config";
 import { dashboardRoutes } from "./routes/dashboard";
-import { userRoutes } from "./routes/user";
+import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
+import { platformRoutes } from "./routes/platform";
+import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { secretsRoutes } from "./routes/secrets";
+import { tenantConfigRoutes } from "./routes/tenant-config";
+import { tenantRoutes } from "./routes/tenants";
+import { userRoutes } from "./routes/user";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
-import { policiesStandaloneRoutes } from "./routes/policies-standalone";
-import { erc8004Routes, discoveryRoutes } from "./routes/erc8004";
-
 import {
   API_VERSION,
+  type ApiResponse,
+  type AppVariables,
+  dashboardAuthMiddleware,
+  nonceCleanupTimer,
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
-  nonceCleanupTimer,
   tenantAuth,
-  dashboardAuthMiddleware,
-  type AppVariables,
-  type ApiResponse,
 } from "./services/context";
-import { closeDb, getDb, runMigrations, shouldUsePGLite } from "@stwd/db";
-import { sql } from "drizzle-orm";
-import { initRedis, shutdownRedis } from "./middleware/redis";
 
 // ─── App setup ────────────────────────────────────────────────────────────────
 
@@ -79,10 +77,14 @@ app.use("*", tenantCors);
 app.use("*", logger());
 app.use("*", correlationId);
 
-app.use("*", bodyLimit({
-  maxSize: 1024 * 1024,
-  onError: (c) => c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
-}));
+app.use(
+  "*",
+  bodyLimit({
+    maxSize: 1024 * 1024,
+    onError: (c) =>
+      c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
+  }),
+);
 
 // ─── Rate limiting + shutdown guard ───────────────────────────────────────────
 
@@ -278,10 +280,7 @@ const shutdown = async (signal: string) => {
   requestLog.clear();
 
   try {
-    await Promise.all([
-      closeDb(),
-      shutdownRedis(),
-    ]);
+    await Promise.all([closeDb(), shutdownRedis()]);
   } catch (error) {
     console.error("Failed to close connections cleanly", error);
   }

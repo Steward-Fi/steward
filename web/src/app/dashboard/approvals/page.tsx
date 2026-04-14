@@ -1,14 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
-import { motion, AnimatePresence } from "framer-motion";
-import { steward } from "@/lib/api";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
-import { shortenAddress, formatDate, formatWei } from "@/lib/utils";
-import { getChainSymbol } from "@/lib/chains";
 import { ChainBadge } from "@/components/chain-badge";
+import { steward } from "@/lib/api";
+import { getChainSymbol } from "@/lib/chains";
 import type { AgentIdentity } from "@/lib/steward-client";
+import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 interface PendingItem {
   queueId: string;
@@ -33,7 +33,7 @@ interface Toast {
 }
 
 export default function ApprovalsPage() {
-  const { tenant } = useAuth();
+  useAuth();
   const [pending, setPending] = useState<PendingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +42,7 @@ export default function ApprovalsPage() {
 
   useEffect(() => {
     loadPending();
-  }, []);
+  }, [loadPending]);
 
   function addToast(message: string, kind: Toast["kind"]) {
     const id = `${Date.now()}-${Math.random()}`;
@@ -78,7 +78,7 @@ export default function ApprovalsPage() {
                 },
                 agentId: agent.id,
                 agentName: agent.name,
-              }))
+              })),
             );
           }
         } catch {
@@ -87,8 +87,7 @@ export default function ApprovalsPage() {
       }
 
       allPending.sort(
-        (a, b) =>
-          new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime()
+        (a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime(),
       );
       setPending(allPending);
     } catch (e: unknown) {
@@ -98,11 +97,7 @@ export default function ApprovalsPage() {
     }
   }
 
-  async function handleAction(
-    agentId: string,
-    txId: string,
-    action: "approve" | "reject"
-  ) {
+  async function handleAction(agentId: string, txId: string, action: "approve" | "reject") {
     const key = `${txId}-${action}`;
     setActionLoading(key);
     try {
@@ -112,20 +107,15 @@ export default function ApprovalsPage() {
         await steward.reject(agentId, txId);
       }
       // Optimistically remove from list
-      setPending((prev) =>
-        prev.filter((item) => item.transaction?.id !== txId)
-      );
+      setPending((prev) => prev.filter((item) => item.transaction?.id !== txId));
       addToast(
         action === "approve"
           ? "Transaction approved and queued for signing"
           : "Transaction rejected",
-        "success"
+        "success",
       );
     } catch (e: unknown) {
-      addToast(
-        e instanceof Error ? e.message : `Failed to ${action}`,
-        "error"
-      );
+      addToast(e instanceof Error ? e.message : `Failed to ${action}`, "error");
     } finally {
       setActionLoading(null);
     }
@@ -154,9 +144,7 @@ export default function ApprovalsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-700 tracking-tight">
-            Approval Queue
-          </h1>
+          <h1 className="font-display text-2xl font-700 tracking-tight">Approval Queue</h1>
           <p className="text-sm text-text-tertiary mt-1">
             Transactions exceeding policy thresholds
           </p>
@@ -206,12 +194,10 @@ export default function ApprovalsPage() {
 
       {pending.length === 0 && !error ? (
         <div className="py-20 text-center border border-border-subtle">
-          <p className="font-display text-lg font-600 text-text-secondary">
-            Queue is clear
-          </p>
+          <p className="font-display text-lg font-600 text-text-secondary">Queue is clear</p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
-            All transactions are either auto-approved or have been reviewed.
-            Transactions that exceed policy thresholds will appear here.
+            All transactions are either auto-approved or have been reviewed. Transactions that
+            exceed policy thresholds will appear here.
           </p>
         </div>
       ) : (
@@ -223,7 +209,11 @@ export default function ApprovalsPage() {
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, x: 24, height: 0, marginBottom: 0 }}
-                transition={{ delay: i * 0.06, duration: 0.3, ease: [0.25, 1, 0.5, 1] }}
+                transition={{
+                  delay: i * 0.06,
+                  duration: 0.3,
+                  ease: [0.25, 1, 0.5, 1],
+                }}
                 className="border border-border p-6 bg-bg-elevated hover:bg-bg-surface transition-colors overflow-hidden"
               >
                 <div className="flex items-start justify-between gap-6">
@@ -233,7 +223,11 @@ export default function ApprovalsPage() {
                       <span className="text-xs px-2 py-0.5 bg-amber-400/10 text-amber-400 font-medium">
                         Pending
                       </span>
-                      <ChainBadge chainId={item.transaction?.request?.chainId || item.transaction?.chainId || 8453} />
+                      <ChainBadge
+                        chainId={
+                          item.transaction?.request?.chainId || item.transaction?.chainId || 8453
+                        }
+                      />
                       <span className="text-xs text-text-tertiary">
                         {formatDate(item.requestedAt)}
                       </span>
@@ -250,10 +244,8 @@ export default function ApprovalsPage() {
                       <span className="text-text-tertiary">&rarr;</span>
                       <span className="font-mono text-xs text-text-tertiary">
                         {shortenAddress(
-                          item.transaction?.request?.to ||
-                            item.transaction?.toAddress ||
-                            "0x0",
-                          8
+                          item.transaction?.request?.to || item.transaction?.toAddress || "0x0",
+                          8,
                         )}
                       </span>
                     </div>
@@ -264,16 +256,16 @@ export default function ApprovalsPage() {
                         Value:{" "}
                         <span className="text-text-secondary tabular-nums">
                           {formatWei(
-                            item.transaction?.request?.value ||
-                              item.transaction?.value ||
-                              "0",
-                            getChainSymbol(item.transaction?.request?.chainId || item.transaction?.chainId || 8453)
+                            item.transaction?.request?.value || item.transaction?.value || "0",
+                            getChainSymbol(
+                              item.transaction?.request?.chainId ||
+                                item.transaction?.chainId ||
+                                8453,
+                            ),
                           )}
                         </span>
                       </span>
-                      {item.transaction?.request?.data && (
-                        <span>Has calldata</span>
-                      )}
+                      {item.transaction?.request?.data && <span>Has calldata</span>}
                     </div>
 
                     {/* Policy results */}
@@ -289,10 +281,7 @@ export default function ApprovalsPage() {
                                   : "bg-red-400/10 text-red-400"
                               }`}
                             >
-                              {result.type}:{" "}
-                              {result.passed
-                                ? "pass"
-                                : result.reason || "fail"}
+                              {result.type}: {result.passed ? "pass" : result.reason || "fail"}
                             </span>
                           ))}
                         </div>
@@ -302,34 +291,18 @@ export default function ApprovalsPage() {
                   {/* Actions */}
                   <div className="flex gap-2 flex-shrink-0">
                     <button
-                      onClick={() =>
-                        handleAction(
-                          item.agentId,
-                          item.transaction?.id,
-                          "approve"
-                        )
-                      }
+                      onClick={() => handleAction(item.agentId, item.transaction?.id, "approve")}
                       disabled={actionLoading !== null}
                       className="px-4 py-2 text-xs font-medium bg-emerald-400/10 text-emerald-400 hover:bg-emerald-400/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      {actionLoading === `${item.transaction?.id}-approve`
-                        ? "..."
-                        : "Approve"}
+                      {actionLoading === `${item.transaction?.id}-approve` ? "..." : "Approve"}
                     </button>
                     <button
-                      onClick={() =>
-                        handleAction(
-                          item.agentId,
-                          item.transaction?.id,
-                          "reject"
-                        )
-                      }
+                      onClick={() => handleAction(item.agentId, item.transaction?.id, "reject")}
                       disabled={actionLoading !== null}
                       className="px-4 py-2 text-xs font-medium bg-red-400/10 text-red-400 hover:bg-red-400/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      {actionLoading === `${item.transaction?.id}-reject`
-                        ? "..."
-                        : "Reject"}
+                      {actionLoading === `${item.transaction?.id}-reject` ? "..." : "Reject"}
                     </button>
                   </div>
                 </div>

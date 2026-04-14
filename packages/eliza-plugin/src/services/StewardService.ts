@@ -1,17 +1,17 @@
-import { Service, type IAgentRuntime } from "@elizaos/core";
+import { type IAgentRuntime, Service } from "@elizaos/core";
 import {
-  StewardClient,
-  StewardApiError,
-  type SignTransactionInput,
-  type SignTransactionResult,
-  type AgentIdentity,
-  type PolicyRule,
-  type GetBalanceResult,
-  type GetHistoryResult,
-  type SignMessageResult,
   type AgentDashboardResponse,
+  type AgentIdentity,
   type ApprovalQueueEntry,
   type ApprovalStats,
+  type GetBalanceResult,
+  type GetHistoryResult,
+  type PolicyRule,
+  type SignMessageResult,
+  type SignTransactionInput,
+  type SignTransactionResult,
+  StewardApiError,
+  StewardClient,
 } from "@stwd/sdk";
 import type { StewardPluginConfig } from "../types.js";
 
@@ -23,7 +23,8 @@ import type { StewardPluginConfig } from "../types.js";
  */
 export class StewardService extends Service {
   static serviceType = "steward" as const;
-  capabilityDescription = "Steward managed wallet — policy-enforced signing, balances, and approval flows";
+  capabilityDescription =
+    "Steward managed wallet — policy-enforced signing, balances, and approval flows";
 
   private client: StewardClient | null = null;
   private pluginConfig: StewardPluginConfig | null = null;
@@ -64,11 +65,7 @@ export class StewardService extends Service {
       this._connected = true;
       console.info(`[Steward] Connected. Wallet: ${this.agentIdentity.walletAddress}`);
     } catch (err) {
-      if (
-        err instanceof StewardApiError &&
-        err.status === 404 &&
-        this.pluginConfig.autoRegister
-      ) {
+      if (err instanceof StewardApiError && err.status === 404 && this.pluginConfig.autoRegister) {
         await this.tryAutoRegister(runtime);
       } else {
         const msg = err instanceof Error ? err.message : String(err);
@@ -82,8 +79,8 @@ export class StewardService extends Service {
 
   private async tryAutoRegister(runtime: IAgentRuntime): Promise<void> {
     try {
-      const name = (runtime as any).character?.name ?? this.pluginConfig!.agentId;
-      this.agentIdentity = await this.client!.createWallet(this.pluginConfig!.agentId, name);
+      const name = this.getRuntimeState(runtime).character?.name ?? this.getAgentId();
+      this.agentIdentity = await this.getClient().createWallet(this.getAgentId(), name);
       this._connected = true;
       console.info(`[Steward] Registered new wallet: ${this.agentIdentity.walletAddress}`);
     } catch (regErr) {
@@ -95,18 +92,16 @@ export class StewardService extends Service {
   // ── Config Resolution ───────────────────────────────────────────
 
   private resolveConfig(runtime: IAgentRuntime): StewardPluginConfig | null {
-    const settings = (runtime as any).character?.settings?.steward ?? {};
+    const runtimeState = this.getRuntimeState(runtime);
+    const settings = runtimeState.character?.settings?.steward ?? {};
     const env = process.env;
 
-    const apiUrl =
-      settings.apiUrl ??
-      env.STEWARD_API_URL ??
-      "http://localhost:7860";
+    const apiUrl = settings.apiUrl ?? env.STEWARD_API_URL ?? "http://localhost:7860";
 
     return {
       apiUrl,
       apiKey: settings.apiKey ?? env.STEWARD_API_KEY,
-      agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? (runtime as any).agentId ?? "default",
+      agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId ?? "default",
       tenantId: settings.tenantId ?? env.STEWARD_TENANT_ID,
       autoRegister: settings.autoRegister ?? env.STEWARD_AUTO_REGISTER !== "false",
       fallbackLocal: settings.fallbackLocal ?? env.STEWARD_FALLBACK_LOCAL !== "false",
@@ -125,50 +120,92 @@ export class StewardService extends Service {
 
   async signTransaction(tx: SignTransactionInput): Promise<SignTransactionResult> {
     this.assertConnected();
-    return this.client!.signTransaction(this.pluginConfig!.agentId, tx);
+    return this.getClient().signTransaction(this.getAgentId(), tx);
   }
 
   async signMessage(message: string): Promise<SignMessageResult> {
     this.assertConnected();
-    return this.client!.signMessage(this.pluginConfig!.agentId, message);
+    return this.getClient().signMessage(this.getAgentId(), message);
   }
 
   async getBalance(chainId?: number): Promise<GetBalanceResult> {
     this.assertConnected();
-    return this.client!.getBalance(this.pluginConfig!.agentId, chainId);
+    return this.getClient().getBalance(this.getAgentId(), chainId);
   }
 
   async getAgent(): Promise<AgentIdentity> {
     this.assertConnected();
-    return this.agentIdentity!;
+    if (!this.agentIdentity) {
+      throw new Error("Steward agent identity not loaded");
+    }
+    return this.agentIdentity;
   }
 
   async getPolicies(): Promise<PolicyRule[]> {
     this.assertConnected();
-    return this.client!.getPolicies(this.pluginConfig!.agentId);
+    return this.getClient().getPolicies(this.getAgentId());
   }
 
   async getHistory(): Promise<GetHistoryResult> {
     this.assertConnected();
-    return this.client!.getHistory(this.pluginConfig!.agentId);
+    return this.getClient().getHistory(this.getAgentId());
   }
 
   async getDashboard(): Promise<AgentDashboardResponse> {
     this.assertConnected();
-    return this.client!.getAgentDashboard(this.pluginConfig!.agentId);
+    return this.getClient().getAgentDashboard(this.getAgentId());
   }
 
-  async listApprovals(opts?: { status?: string; limit?: number; offset?: number }): Promise<ApprovalQueueEntry[]> {
+  async listApprovals(opts?: {
+    status?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<ApprovalQueueEntry[]> {
     this.assertConnected();
-    return this.client!.listApprovals(opts);
+    return this.getClient().listApprovals(opts);
   }
 
   async getApprovalStats(): Promise<ApprovalStats> {
     this.assertConnected();
-    return this.client!.getApprovalStats();
+    return this.getClient().getApprovalStats();
   }
 
   // ── Internal ────────────────────────────────────────────────────
+
+  private getRuntimeState(runtime: IAgentRuntime): IAgentRuntime & {
+    agentId?: string;
+    character?: {
+      name?: string;
+      settings?: {
+        steward?: Partial<StewardPluginConfig>;
+      };
+    };
+  } {
+    return runtime as IAgentRuntime & {
+      agentId?: string;
+      character?: {
+        name?: string;
+        settings?: {
+          steward?: Partial<StewardPluginConfig>;
+        };
+      };
+    };
+  }
+
+  private getClient(): StewardClient {
+    if (!this.client) {
+      throw new Error("Steward service not connected");
+    }
+    return this.client;
+  }
+
+  private getAgentId(): string {
+    const agentId = this.pluginConfig?.agentId;
+    if (!agentId) {
+      throw new Error("Steward agent id is not configured");
+    }
+    return agentId;
+  }
 
   private assertConnected(): void {
     if (!this._connected || !this.client) {

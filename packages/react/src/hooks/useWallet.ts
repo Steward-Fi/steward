@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
-import type { AgentIdentity, AgentBalance } from "@stwd/sdk";
+import type { AgentBalance, AgentIdentity } from "@stwd/sdk";
+import { useCallback, useEffect, useState } from "react";
 import { useStewardContext } from "../provider.js";
 
 /**

@@ -1,12 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { calculateInternalReputation, type ReputationInput } from "../reputation";
-import { evaluateReputationThreshold } from "../evaluators/reputation-threshold";
-import {
-  evaluateReputationScaling,
-  computeScaledLimit,
-} from "../evaluators/reputation-scaling";
-import { evaluatePolicy, type EvaluatorContext } from "../evaluators";
 import type { PolicyRule, SignRequest } from "@stwd/shared";
+import { type EvaluatorContext, evaluatePolicy } from "../evaluators";
+import { computeScaledLimit, evaluateReputationScaling } from "../evaluators/reputation-scaling";
+import { evaluateReputationThreshold } from "../evaluators/reputation-threshold";
+import { calculateInternalReputation, type ReputationInput } from "../reputation";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -164,8 +161,8 @@ describe("reputation-threshold evaluator", () => {
 
 describe("reputation-scaling evaluator", () => {
   const linearConfig = {
-    baseMaxPerTx: "100000000000000000",   // 0.1 ETH
-    maxMaxPerTx: "10000000000000000000",  // 10 ETH
+    baseMaxPerTx: "100000000000000000", // 0.1 ETH
+    maxMaxPerTx: "10000000000000000000", // 10 ETH
     curve: "linear",
   };
 
@@ -204,18 +201,12 @@ describe("reputation-scaling evaluator", () => {
     });
 
     it("uses max limit at score 100", () => {
-      const limit = computeScaledLimit(
-        linearConfig as any,
-        100,
-      );
+      const limit = computeScaledLimit(linearConfig as any, 100);
       expect(limit).toBe(BigInt("10000000000000000000")); // 10 ETH
     });
 
     it("uses base limit at score 0", () => {
-      const limit = computeScaledLimit(
-        linearConfig as any,
-        0,
-      );
+      const limit = computeScaledLimit(linearConfig as any, 0);
       expect(limit).toBe(BigInt("100000000000000000")); // 0.1 ETH
     });
   });

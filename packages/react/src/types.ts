@@ -1,4 +1,14 @@
-import type { StewardClient, PolicyRule, PolicyType, TxStatus, TxRecord, AgentIdentity, AgentBalance, ChainFamily, PolicyResult } from "@stwd/sdk";
+import type {
+  AgentBalance,
+  AgentIdentity,
+  ChainFamily,
+  PolicyResult,
+  PolicyRule,
+  PolicyType,
+  StewardClient,
+  TxRecord,
+  TxStatus,
+} from "@stwd/sdk";
 
 // ─── Tenant Configuration Types ───
 
@@ -104,8 +114,18 @@ export interface TenantControlPlaneConfig {
 export interface AgentDashboardResponse {
   agent: AgentIdentity;
   balances: {
-    evm?: { native: string; nativeFormatted: string; chainId: number; symbol: string };
-    solana?: { native: string; nativeFormatted: string; chainId: number; symbol: string };
+    evm?: {
+      native: string;
+      nativeFormatted: string;
+      chainId: number;
+      symbol: string;
+    };
+    solana?: {
+      native: string;
+      nativeFormatted: string;
+      chainId: number;
+      symbol: string;
+    };
   };
   spend: {
     today: string;
@@ -138,8 +158,17 @@ export interface SpendStats {
   avgTxValue: string;
   avgTxValueFormatted: string;
   largestTx: { value: string; txHash: string; timestamp: string };
-  daily: Array<{ date: string; spent: string; spentFormatted: string; txCount: number }>;
-  topDestinations: Array<{ address: string; totalSent: string; txCount: number }>;
+  daily: Array<{
+    date: string;
+    spent: string;
+    spentFormatted: string;
+    txCount: number;
+  }>;
+  topDestinations: Array<{
+    address: string;
+    totalSent: string;
+    txCount: number;
+  }>;
   budgetUsage?: {
     dailyLimit: string;
     dailyUsed: string;
@@ -229,7 +258,17 @@ export interface SpendDashboardProps {
 }
 
 // Re-export SDK types consumers will need
-export type { StewardClient, PolicyRule, PolicyType, TxStatus, TxRecord, AgentIdentity, AgentBalance, ChainFamily, PolicyResult };
+export type {
+  AgentBalance,
+  AgentIdentity,
+  ChainFamily,
+  PolicyResult,
+  PolicyRule,
+  PolicyType,
+  StewardClient,
+  TxRecord,
+  TxStatus,
+};
 
 // ─── Multi-Tenant Types ───
 
@@ -242,7 +281,7 @@ export interface StewardTenantMembership {
 
 // ─── Auth Types ───
 
-export type { StewardUser, StewardSession, SessionStorage } from "@stwd/sdk";
+export type { SessionStorage, StewardSession, StewardUser } from "@stwd/sdk";
 
 export interface StewardAuthConfig {
   baseUrl: string;
@@ -274,11 +313,20 @@ export interface StewardAuthContextValue {
   /** Send a magic link email. */
   signInWithEmail: (email: string) => Promise<import("@stwd/sdk").StewardEmailResult>;
   /** Verify a magic link callback token. */
-  verifyEmailCallback: (token: string, email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  verifyEmailCallback: (
+    token: string,
+    email: string,
+  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
   /** Sign in with an Ethereum wallet via SIWE. */
-  signInWithSIWE: (address: string, signMessage: (msg: string) => Promise<string>) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  signInWithSIWE: (
+    address: string,
+    signMessage: (msg: string) => Promise<string>,
+  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
   /** Sign in with an OAuth provider (Google, Discord, etc.) */
-  signInWithOAuth: (provider: string, config?: { redirectUri?: string; tenantId?: string }) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  signInWithOAuth: (
+    provider: string,
+    config?: { redirectUri?: string; tenantId?: string },
+  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
   // ─── Multi-Tenant ───
   /** Currently active tenant ID from session */
   activeTenantId: string | null;
@@ -343,7 +391,11 @@ export interface StewardEmailCallbackProps {
 }
 
 export interface StewardOAuthCallbackProps {
-  onSuccess?: (result: { token: string; user: import("@stwd/sdk").StewardUser } | { code: string; state: string }) => void;
+  onSuccess?: (
+    result:
+      | { token: string; user: import("@stwd/sdk").StewardUser }
+      | { code: string; state: string },
+  ) => void;
   onError?: (error: Error) => void;
   redirectTo?: string;
   provider?: string;
