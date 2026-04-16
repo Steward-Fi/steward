@@ -1,13 +1,13 @@
 # Steward – Docker image (API + Proxy)
 FROM oven/bun:1.3-alpine AS builder
 WORKDIR /app
-COPY package.json bun.lock* bunfig.toml* turbo.json ./
+COPY package.json bun.lock* bunfig.toml* turbo.json tsconfig.json ./
 COPY packages/ packages/
 
 # Remove packages not needed for API/proxy to avoid resolution errors.
 # sdk is excluded by .dockerignore but other packages reference it,
 # so we create a stub package.json for it.
-RUN sed -i '/"web"/d; /"packages\/examples/d' package.json && \
+RUN bun -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));if(Array.isArray(p.workspaces))p.workspaces=p.workspaces.filter(w=>w!=='web'&&!String(w).startsWith('packages/examples'));fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\n')" && \
     rm -rf packages/examples packages/agent-trader packages/react packages/eliza-plugin packages/seed && \
     if [ ! -d packages/sdk ]; then \
       mkdir -p packages/sdk && \
