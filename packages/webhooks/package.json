@@ -6,7 +6,8 @@
   "main": "src/index.ts",
   "scripts": {
     "build": "tsc --noEmit",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "bun test"
   },
   "dependencies": {
     "@stwd/shared": "workspace:*",

@@ -5,11 +5,38 @@
       "dependsOn": ["^build"],
       "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
     },
+    "@stwd/agent-trader#build": {
+      "outputs": []
+    },
+    "@stwd/api#build": {
+      "outputs": []
+    },
+    "@stwd/auth#build": {
+      "outputs": []
+    },
+    "@stwd/db#build": {
+      "outputs": []
+    },
+    "@stwd/example-waifu-integration#build": {
+      "outputs": []
+    },
+    "@stwd/policy-engine#build": {
+      "outputs": []
+    },
+    "@stwd/proxy#build": {
+      "outputs": []
+    },
+    "@stwd/vault#build": {
+      "outputs": []
+    },
+    "@stwd/webhooks#build": {
+      "outputs": []
+    },
     "dev": {
       "cache": false,
       "persistent": true
     },
     "lint": {},
-    "test": {}
+    "test": { "cache": false }
   }
 }

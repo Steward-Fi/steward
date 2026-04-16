@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+
 /**
  * Steward Auth E2E Test
  *
@@ -16,7 +19,52 @@
 
 const STEWARD_URL = (process.env.STEWARD_URL || "https://api.steward.fi").replace(/\/$/, "");
 
-const PLATFORM_KEY = process.env.PLATFORM_KEY || "";
+function firstNonEmpty(...values: Array<string | null | undefined>): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function firstPlatformKeyFromList(value?: string): string {
+  if (!value) {
+    return "";
+  }
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .find(Boolean) || "";
+}
+
+function resolveStoredPlatformKey(): string {
+  const homeDir = process.env.HOME?.trim();
+  if (!homeDir) {
+    return "";
+  }
+
+  const credentialsPath = path.join(homeDir, ".milady", "steward-credentials.json");
+  if (!existsSync(credentialsPath)) {
+    return "";
+  }
+
+  try {
+    const credentials = JSON.parse(readFileSync(credentialsPath, "utf8")) as {
+      apiKey?: string;
+    };
+    return firstNonEmpty(credentials.apiKey);
+  } catch {
+    return "";
+  }
+}
+
+const PLATFORM_KEY = firstNonEmpty(
+  process.env.PLATFORM_KEY,
+  process.env.STEWARD_PLATFORM_KEY,
+  firstPlatformKeyFromList(process.env.STEWARD_PLATFORM_KEYS),
+  resolveStoredPlatformKey(),
+);
 const REQUEST_TIMEOUT_MS = 10_000;
 const TEST_TENANT_ID = `e2e-auth-test-${Date.now()}`;
 

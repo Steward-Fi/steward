@@ -8,7 +8,8 @@
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
     "migrate": "bun src/migrate.ts",
-    "generate": "drizzle-kit generate"
+    "generate": "drizzle-kit generate",
+    "test": "bun test"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.4.2",
