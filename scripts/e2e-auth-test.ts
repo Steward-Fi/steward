@@ -32,10 +32,12 @@ function firstPlatformKeyFromList(value?: string): string {
   if (!value) {
     return "";
   }
-  return value
-    .split(",")
-    .map((entry) => entry.trim())
-    .find(Boolean) || "";
+  return (
+    value
+      .split(",")
+      .map((entry) => entry.trim())
+      .find(Boolean) || ""
+  );
 }
 
 function resolveStoredPlatformKey(): string {
