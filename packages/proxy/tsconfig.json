@@ -3,7 +3,7 @@
   "compilerOptions": {
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["bun"]
+    "types": ["bun-types"]
   },
   "include": ["src"],
   "exclude": ["src/__tests__"]

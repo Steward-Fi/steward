@@ -1,4 +1,7 @@
 #!/usr/bin/env bun
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+
 /**
  * Steward E2E Integration Test
  *
@@ -27,6 +30,48 @@ const AGENT_NAME = "E2E Test Agent";
 // Use a real-looking address (not 0xdead which some policy engines blacklist)
 const WHITELISTED_ADDR = "0x4838B106FCe9647Bdf1E7877BF73cE8B0BAD5f97";
 const NON_WHITELISTED_ADDR = "0x0000000000000000000000000000000000000001";
+
+function firstNonEmpty(...values: Array<string | null | undefined>): string {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+  return "";
+}
+
+function firstPlatformKeyFromList(value?: string): string {
+  if (!value) {
+    return "";
+  }
+  return (
+    value
+      .split(",")
+      .map((entry) => entry.trim())
+      .find(Boolean) || ""
+  );
+}
+
+function resolveStoredPlatformKey(): string {
+  const homeDir = process.env.HOME?.trim();
+  if (!homeDir) {
+    return "";
+  }
+
+  const credentialsPath = path.join(homeDir, ".milady", "steward-credentials.json");
+  if (!existsSync(credentialsPath)) {
+    return "";
+  }
+
+  try {
+    const credentials = JSON.parse(readFileSync(credentialsPath, "utf8")) as {
+      apiKey?: string;
+    };
+    return firstNonEmpty(credentials.apiKey);
+  } catch {
+    return "";
+  }
+}
 
 // ─── Test harness ────────────────────────────────────────────────────────────
 
@@ -809,11 +854,16 @@ async function testCleanup() {
   }
 
   // 6e. Delete test tenant (via platform API if available, otherwise note it)
-  const platformKey = process.env.STEWARD_PLATFORM_KEY || process.env.STEWARD_PLATFORM_KEYS;
+  const platformKey = firstNonEmpty(
+    process.env.PLATFORM_KEY,
+    process.env.STEWARD_PLATFORM_KEY,
+    firstPlatformKeyFromList(process.env.STEWARD_PLATFORM_KEYS),
+    resolveStoredPlatformKey(),
+  );
   if (platformKey) {
     try {
       const { status, data } = await api("DELETE", `/platform/tenants/${TENANT_ID}`, undefined, {
-        "X-Steward-Platform-Key": platformKey.split(",")[0].trim(),
+        "X-Steward-Platform-Key": platformKey,
       });
       if (status === 200 && data.ok) {
         pass("Delete test tenant (via platform API)");
