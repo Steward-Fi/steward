@@ -1,5 +1,6 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 
+import { hashSha256Hex } from "./crypto";
 import type { ApiKeyPair } from "./types";
 
 const API_KEY_PREFIX = "stw_";
@@ -16,7 +17,7 @@ export function generateApiKey(): ApiKeyPair {
 }
 
 export function hashApiKey(key: string): string {
-  return createHash("sha256").update(key).digest("hex");
+  return hashSha256Hex(key);
 }
 
 export function validateApiKey(key: string, hash: string): boolean {
