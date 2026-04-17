@@ -11,7 +11,7 @@ export function useSpend(range: "24h" | "7d" | "30d" | "all" = "7d") {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
-  const baseUrl = (client as unknown as Record<string, string>).baseUrl || "";
+  const baseUrl = client.getBaseUrl();
 
   const fetchStats = useCallback(async () => {
     try {

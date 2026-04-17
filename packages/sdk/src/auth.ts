@@ -100,6 +100,12 @@ type AuthApiResult<T> =
   | { ok: true; status: number; data: T }
   | { ok: false; status: number; error: string };
 
+// Narrow view of @simplewebauthn/browser — a peer dep we import dynamically.
+type SimpleWebAuthnBrowser = Pick<
+  typeof import("@simplewebauthn/browser"),
+  "startAuthentication" | "startRegistration"
+>;
+
 async function authRequest<T>(
   baseUrl: string,
   path: string,
@@ -173,6 +179,10 @@ export class StewardAuth {
     if (onSessionChange) {
       this.listeners.push(onSessionChange);
     }
+  }
+
+  getBaseUrl(): string {
+    return this.baseUrl;
   }
 
   /** Returns the configured default tenantId, if any. */
@@ -322,14 +332,9 @@ export class StewardAuth {
     }
 
     // Dynamically import @simplewebauthn/browser — peer dep, may not be installed
-    type SimpleWebAuthnBrowser = {
-      startAuthentication: (opts: unknown, useBrowserAutofill?: boolean) => Promise<unknown>;
-      startRegistration: (opts: unknown) => Promise<unknown>;
-    };
     let browserLib: SimpleWebAuthnBrowser;
     try {
-      const mod = await import("@simplewebauthn/browser");
-      browserLib = mod as unknown as SimpleWebAuthnBrowser;
+      browserLib = await import("@simplewebauthn/browser");
     } catch {
       throw new StewardApiError(
         "Missing peer dependency: @simplewebauthn/browser. Install it to use passkeys.",
@@ -366,11 +371,14 @@ export class StewardAuth {
   private async completePasskeyLogin(
     email: string,
     options: unknown,
-    lib: { startAuthentication: (opts: unknown) => Promise<unknown> },
+    lib: Pick<SimpleWebAuthnBrowser, "startAuthentication">,
   ): Promise<StewardAuthResult> {
     let authResponse: unknown;
     try {
-      authResponse = await lib.startAuthentication(options);
+      // Server-provided options; types are validated by the WebAuthn browser library.
+      authResponse = await lib.startAuthentication(
+        options as Parameters<SimpleWebAuthnBrowser["startAuthentication"]>[0],
+      );
     } catch (err) {
       throw new StewardApiError(
         `WebAuthn authentication cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -382,13 +390,14 @@ export class StewardAuth {
       this.baseUrl,
       "/auth/passkey/login/verify",
       {
-      method: "POST",
-      body: JSON.stringify({
-        email,
-        response: authResponse,
-        ...(this.tenantId ? { tenantId: this.tenantId } : {}),
-      }),
-    });
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          response: authResponse,
+          ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+        }),
+      },
+    );
 
     if (!verifyRes.ok) {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
@@ -404,7 +413,7 @@ export class StewardAuth {
 
   private async completePasskeyRegister(
     email: string,
-    lib: { startRegistration: (opts: unknown) => Promise<unknown> },
+    lib: Pick<SimpleWebAuthnBrowser, "startRegistration">,
   ): Promise<StewardAuthResult> {
     // Fetch registration options
     const regOptsRes = await authRequest<Record<string, unknown>>(
@@ -425,7 +434,10 @@ export class StewardAuth {
 
     let regResponse: unknown;
     try {
-      regResponse = await lib.startRegistration(regOptsRes.data);
+      // Server-provided options; types are validated by the WebAuthn browser library.
+      regResponse = await lib.startRegistration(
+        regOptsRes.data as Parameters<SimpleWebAuthnBrowser["startRegistration"]>[0],
+      );
     } catch (err) {
       throw new StewardApiError(
         `WebAuthn registration cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -437,13 +449,14 @@ export class StewardAuth {
       this.baseUrl,
       "/auth/passkey/register/verify",
       {
-      method: "POST",
-      body: JSON.stringify({
-        email,
-        response: regResponse,
-        ...(this.tenantId ? { tenantId: this.tenantId } : {}),
-      }),
-    });
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          response: regResponse,
+          ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+        }),
+      },
+    );
 
     if (!verifyRes.ok) {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
@@ -777,9 +790,10 @@ export class StewardAuth {
       this.baseUrl,
       `/auth/oauth/${encodeURIComponent(provider)}/token`,
       {
-      method: "POST",
-      body: JSON.stringify({ code, redirectUri, state, codeVerifier }),
-    });
+        method: "POST",
+        body: JSON.stringify({ code, redirectUri, state, codeVerifier }),
+      },
+    );
 
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);
@@ -896,7 +910,7 @@ export class StewardAuth {
       throw new StewardApiError("Not authenticated. Sign in first.", 0);
     }
 
-    const res = await authRequest<{ data: StewardTenantMembership[] }>(
+    const res = await authRequest<StewardTenantMembership[] | { data: StewardTenantMembership[] }>(
       this.baseUrl,
       "/user/me/tenants",
       {},
@@ -907,7 +921,7 @@ export class StewardAuth {
       throw new StewardApiError(res.error, res.status);
     }
 
-    return res.data.data ?? (res.data as unknown as StewardTenantMembership[]);
+    return Array.isArray(res.data) ? res.data : res.data.data;
   }
 
   /**

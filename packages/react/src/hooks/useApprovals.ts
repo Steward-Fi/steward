@@ -14,7 +14,7 @@ export function useApprovals(refreshInterval?: number) {
   const [isResolving, setIsResolving] = useState(false);
   const [error, setError] = useState<Error | null>(null);
 
-  const baseUrl = (client as unknown as Record<string, string>).baseUrl || "";
+  const baseUrl = client.getBaseUrl();
 
   const fetchApprovals = useCallback(async () => {
     try {
