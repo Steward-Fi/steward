@@ -490,9 +490,6 @@ async function resolveAndValidateTenant(
   };
 }
 
-/** @deprecated Use resolveAndValidateTenant instead */
-const _resolveTenantForUser = resolveAndValidateTenant;
-
 // ─── User / tenant provisioning helpers ──────────────────────────────────────
 
 async function findOrCreateUser(email: string): Promise<typeof users.$inferSelect> {
