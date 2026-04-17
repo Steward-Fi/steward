@@ -90,13 +90,14 @@ async function runPGLiteMigrations(client: PGlite): Promise<void> {
       if (!trimmed || trimmed === "--") continue;
       try {
         await client.exec(trimmed);
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
         // Ignore "already exists" errors for idempotent migrations
-        if (err.message?.includes("already exists") || err.message?.includes("duplicate key")) {
+        if (message.includes("already exists") || message.includes("duplicate key")) {
           continue;
         }
         throw new Error(
-          `Migration ${file} failed: ${err.message}\nStatement: ${trimmed.slice(0, 200)}`,
+          `Migration ${file} failed: ${message}\nStatement: ${trimmed.slice(0, 200)}`,
         );
       }
     }
