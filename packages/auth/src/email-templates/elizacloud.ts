@@ -10,8 +10,7 @@ export function renderElizaCloudTemplate({
   magicLink,
   expiresInMinutes,
 }: MagicLinkTemplateData): RenderedMagicLinkTemplate {
-  const mono =
-    "'JetBrains Mono', 'Menlo', 'Consolas', 'Courier New', monospace";
+  const mono = "'JetBrains Mono', 'Menlo', 'Consolas', 'Courier New', monospace";
   const sans =
     "'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif";
 

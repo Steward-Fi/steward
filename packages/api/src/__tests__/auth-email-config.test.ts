@@ -1,6 +1,4 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-
-import { KeyStore } from "@stwd/vault";
 import {
   closeDb,
   createPGLiteDb,
@@ -9,6 +7,7 @@ import {
   tenantConfigs,
   tenants,
 } from "@stwd/db";
+import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import {
   clearEmailAuthTenantCacheForTests,
@@ -71,19 +70,17 @@ describe("getEmailAuthForTenant", () => {
     const encrypted = new KeyStore(MASTER_PASSWORD).encrypt("tenant-resend-key");
     const dbHandle = getDb();
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
-    await dbHandle
-      .insert(tenantConfigs)
-      .values({
-        tenantId: TEST_TENANT_ID,
-        emailConfig: {
-          provider: "resend",
-          apiKeyEncrypted: JSON.stringify(encrypted),
-          from: "Tenant <login@tenant.example.com>",
-          replyTo: "help@tenant.example.com",
-          templateId: "elizacloud",
-          subjectOverride: "Tenant Sign In",
-        },
-      });
+    await dbHandle.insert(tenantConfigs).values({
+      tenantId: TEST_TENANT_ID,
+      emailConfig: {
+        provider: "resend",
+        apiKeyEncrypted: JSON.stringify(encrypted),
+        from: "Tenant <login@tenant.example.com>",
+        replyTo: "help@tenant.example.com",
+        templateId: "elizacloud",
+        subjectOverride: "Tenant Sign In",
+      },
+    });
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
 
     const auth = await getEmailAuthForTenant(TEST_TENANT_ID);

@@ -1,6 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
-import { closeDb, createPGLiteDb, getDb, setPGLiteOverride, tenantConfigs, tenants } from "@stwd/db";
+import {
+  closeDb,
+  createPGLiteDb,
+  getDb,
+  setPGLiteOverride,
+  tenantConfigs,
+  tenants,
+} from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 const PLATFORM_KEY = "platform-email-config-key";
@@ -39,23 +46,20 @@ describe("platform tenant email config routes", () => {
   });
 
   it("patches, reads, and deletes tenant email config", async () => {
-    const patchResponse = await platformRoutes.request(
-      `/tenants/${TENANT_ID}/email-config`,
-      {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Steward-Platform-Key": PLATFORM_KEY,
-        },
-        body: JSON.stringify({
-          apiKey: "tenant-resend-api-key",
-          from: "Tenant <login@tenant.example.com>",
-          replyTo: "help@tenant.example.com",
-          templateId: "elizacloud",
-          subjectOverride: "Tenant Sign In",
-        }),
+    const patchResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/email-config`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
       },
-    );
+      body: JSON.stringify({
+        apiKey: "tenant-resend-api-key",
+        from: "Tenant <login@tenant.example.com>",
+        replyTo: "help@tenant.example.com",
+        templateId: "elizacloud",
+        subjectOverride: "Tenant Sign In",
+      }),
+    });
 
     expect(patchResponse.status).toBe(200);
     const patchBody = (await patchResponse.json()) as {

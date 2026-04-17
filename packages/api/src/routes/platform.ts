@@ -28,8 +28,8 @@ import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/share
 import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { invalidateEmailAuthForTenant } from "./auth";
 import { createAgentToken } from "../services/context";
+import { invalidateEmailAuthForTenant } from "./auth";
 
 // ─── Vault singleton ──────────────────────────────────────────────────────────
 // Platform routes share the same vault as the main API.
@@ -100,7 +100,10 @@ function isOptionalString(value: unknown): value is string | undefined {
 
 async function getTenantOr404(tenantId: string) {
   const db = getDb();
-  const [tenant] = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.id, tenantId));
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
   return tenant ?? null;
 }
 
@@ -418,15 +421,13 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
 
   return c.json<
     ApiResponse<{
-      emailConfig:
-        | {
-            provider: "resend";
-            from: string;
-            replyTo?: string;
-            templateId?: string;
-            subjectOverride?: string;
-          }
-        | null;
+      emailConfig: {
+        provider: "resend";
+        from: string;
+        replyTo?: string;
+        templateId?: string;
+        subjectOverride?: string;
+      } | null;
       hasApiKey: boolean;
     }>
   >({
