@@ -15,6 +15,7 @@
 import type {
   SessionStorage,
   StewardAuthConfig,
+  StewardAuthExchangeResponse,
   StewardAuthResult,
   StewardEmailResult,
   StewardOAuthConfig,
@@ -377,11 +378,10 @@ export class StewardAuth {
       );
     }
 
-    const verifyRes = await authRequest<{
-      ok: boolean;
-      token: string;
-      user: StewardUser;
-    }>(this.baseUrl, "/auth/passkey/login/verify", {
+    const verifyRes = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/passkey/login/verify",
+      {
       method: "POST",
       body: JSON.stringify({
         email,
@@ -433,11 +433,10 @@ export class StewardAuth {
       );
     }
 
-    const verifyRes = await authRequest<{
-      ok: boolean;
-      token: string;
-      user: StewardUser;
-    }>(this.baseUrl, "/auth/passkey/register/verify", {
+    const verifyRes = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/passkey/register/verify",
+      {
       method: "POST",
       body: JSON.stringify({
         email,
@@ -492,11 +491,7 @@ export class StewardAuth {
    * Call this from the callback URL handler with the `token` and `email` query params.
    */
   async verifyEmailCallback(token: string, email: string): Promise<StewardAuthResult> {
-    const res = await authRequest<{
-      ok: boolean;
-      token: string;
-      user: StewardUser;
-    }>(this.baseUrl, "/auth/email/verify", {
+    const res = await authRequest<StewardAuthExchangeResponse>(this.baseUrl, "/auth/email/verify", {
       method: "POST",
       body: JSON.stringify({
         token,
@@ -778,13 +773,10 @@ export class StewardAuth {
     state: string,
     codeVerifier: string,
   ): Promise<StewardOAuthResult> {
-    const res = await authRequest<{
-      ok: boolean;
-      token: string;
-      refreshToken: string;
-      expiresIn: number;
-      user: StewardUser;
-    }>(this.baseUrl, `/auth/oauth/${encodeURIComponent(provider)}/token`, {
+    const res = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      `/auth/oauth/${encodeURIComponent(provider)}/token`,
+      {
       method: "POST",
       body: JSON.stringify({ code, redirectUri, state, codeVerifier }),
     });
@@ -799,7 +791,7 @@ export class StewardAuth {
 
     const result = this.storeAndReturn(
       res.data.token,
-      res.data.refreshToken,
+      res.data.refreshToken ?? "",
       res.data.user,
       res.data.expiresIn,
     );
