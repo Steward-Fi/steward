@@ -128,15 +128,12 @@ export class Vault {
    * Both addresses are stored in `agent_wallets` and both encrypted keys in
    * `encrypted_chain_keys`. The EVM key is also stored in the legacy
    * `encrypted_keys` table for backwards compatibility.
-   *
-   * @param chainType - Deprecated; ignored. Both chain families are always generated.
    */
   async createAgent(
     tenantId: string,
     agentId: string,
     name: string,
     platformId?: string,
-    _chainType?: "evm" | "solana",
   ): Promise<AgentIdentity> {
     const db = getDb();
     const [existingAgent] = await db
