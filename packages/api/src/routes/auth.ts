@@ -18,6 +18,7 @@
  *
  * POST /email/send                  — { email } → { ok, expiresAt }
  * POST /email/verify                — { token, email } → { token (JWT), user }
+ * GET  /callback/email              — ?token=...&email=... → 302 redirect with session tokens
  *
  * Tenant context
  * ──────────────
@@ -567,6 +568,80 @@ async function safeJsonParse<T>(c: Context): Promise<T | null> {
   } catch {
     return null;
   }
+}
+
+type CompletedEmailAuthResult =
+  | {
+      ok: true;
+      token: string;
+      refreshToken: string;
+      user: { id: string; email: string; walletAddress?: string | null };
+    }
+  | { ok: false; status: 403 | 404; error: string };
+
+async function completeEmailAuth(
+  c: Context,
+  email: string,
+  tenantId?: string,
+): Promise<CompletedEmailAuthResult> {
+  const user = await findOrCreateUser(email);
+  const db = getDb();
+  await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
+
+  // Provision wallet (idempotent, always under personal tenant)
+  let walletAddress = user.walletAddress;
+  try {
+    const w = await provisionWalletForUser(user.id, email);
+    walletAddress = w.walletAddress;
+  } catch (err) {
+    console.error("[EmailAuth] Wallet provision failed:", err);
+  }
+
+  // Resolve requesting tenant and link user
+  const tenantResult = await resolveAndValidateTenant(c, user.id, tenantId);
+  if (!tenantResult.ok) {
+    return { ok: false, status: tenantResult.status, error: tenantResult.error };
+  }
+  const { tenantId: resolvedTenantId } = tenantResult;
+  await ensureUserTenantLink(user.id, resolvedTenantId);
+
+  const token = await createSessionToken(walletAddress ?? "", resolvedTenantId, {
+    userId: user.id,
+    email,
+  });
+  const refreshToken = await createRefreshToken(user.id, resolvedTenantId);
+
+  return {
+    ok: true,
+    token,
+    refreshToken,
+    user: { id: user.id, email, walletAddress },
+  };
+}
+
+function getEmailAuthRedirectBaseUrl(): string {
+  return (process.env.EMAIL_AUTH_REDIRECT_BASE_URL || "https://www.elizacloud.ai").replace(
+    /\/$/,
+    "",
+  );
+}
+
+function buildEmailAuthRedirectUrl(params?: Record<string, string | undefined>): string {
+  const redirectUrl = new URL("/login", `${getEmailAuthRedirectBaseUrl()}/`);
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value) redirectUrl.searchParams.set(key, value);
+  }
+  return redirectUrl.toString();
+}
+
+function redirectEmailAuthFailure(c: Context, reason: string): Response {
+  return c.redirect(
+    buildEmailAuthRedirectUrl({
+      error: "email_auth_failed",
+      reason,
+    }),
+    302,
+  );
 }
 
 // ─── Route group ──────────────────────────────────────────────────────────────
@@ -1139,6 +1214,53 @@ auth.post("/email/send", async (c) => {
 });
 
 /**
+ * GET /callback/email
+ * Query: ?token=<token>&email=<email>&tenantId=<tenantId?>
+ * Mirrors POST /email/verify for browser clicks from magic link emails,
+ * but redirects to the dashboard login page instead of returning JSON.
+ */
+auth.get("/callback/email", async (c) => {
+  const token = c.req.query("token");
+  const emailParam = c.req.query("email");
+  const tenantId = c.req.query("tenantId");
+
+  if (!token || !emailParam) {
+    return redirectEmailAuthFailure(c, "missing_params");
+  }
+
+  const email = emailParam.toLowerCase().trim();
+
+  let result: Awaited<ReturnType<EmailAuth["verifyMagicLink"]>>;
+  try {
+    result = await getEmailAuth().verifyMagicLink(token);
+  } catch {
+    return redirectEmailAuthFailure(c, "invalid_link");
+  }
+
+  if (!result.valid) {
+    return redirectEmailAuthFailure(c, "invalid_link");
+  }
+
+  if (result.email.toLowerCase().trim() !== email) {
+    return redirectEmailAuthFailure(c, "email_mismatch");
+  }
+
+  const authResult = await completeEmailAuth(c, email, tenantId);
+  if (!authResult.ok) {
+    const reason = authResult.status === 404 ? "tenant_not_found" : "tenant_forbidden";
+    return redirectEmailAuthFailure(c, reason);
+  }
+
+  return c.redirect(
+    buildEmailAuthRedirectUrl({
+      token: authResult.token,
+      refreshToken: authResult.refreshToken,
+    }),
+    302,
+  );
+});
+
+/**
  * POST /email/verify
  * Body: { token, email, tenantId? }
  * Headers: X-Steward-Tenant (optional)
@@ -1157,44 +1279,16 @@ auth.post("/email/verify", async (c) => {
   const email = body.email.toLowerCase().trim();
   const result = await getEmailAuth().verifyMagicLink(body.token);
 
-  if (!result.valid || result.email !== email) {
+  if (!result.valid || result.email.toLowerCase().trim() !== email) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
   }
 
-  const user = await findOrCreateUser(email);
-  const db = getDb();
-  await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
-
-  // Provision wallet (idempotent, always under personal tenant)
-  let walletAddress = user.walletAddress;
-  try {
-    const w = await provisionWalletForUser(user.id, email);
-    walletAddress = w.walletAddress;
-  } catch (err) {
-    console.error("[EmailAuth] Wallet provision failed:", err);
+  const authResult = await completeEmailAuth(c, email, body.tenantId);
+  if (!authResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
   }
 
-  // Resolve requesting tenant and link user
-  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
-  if (!tenantResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
-  }
-  const { tenantId } = tenantResult;
-  await ensureUserTenantLink(user.id, tenantId);
-
-  const jwtToken = await createSessionToken(walletAddress ?? "", tenantId, {
-    userId: user.id,
-    email,
-  });
-  const refreshToken = await createRefreshToken(user.id, tenantId);
-
-  return c.json(
-    buildAuthResponse(jwtToken, refreshToken, {
-      id: user.id,
-      email,
-      walletAddress,
-    }),
-  );
+  return c.json(buildAuthResponse(authResult.token, authResult.refreshToken, authResult.user));
 });
 
 // ── OAuth providers list ─────────────────────────────────────────────────────
