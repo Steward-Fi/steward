@@ -18,6 +18,7 @@
  *
  * POST /email/send                  — { email } → { ok, expiresAt }
  * POST /email/verify                — { token, email } → { token (JWT), user }
+ * GET  /callback/email              — ?token=...&email=... → 302 redirect with session tokens
  *
  * Tenant context
  * ──────────────
@@ -33,7 +34,7 @@
  *   3. The JWT's `tenantId` claim is the resolved tenant, not the personal tenant.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
   buildBackend,
   ChallengeStore,
@@ -41,6 +42,7 @@ import {
   generateApiKey,
   getEnabledProviders,
   getProviderConfig,
+  hashSha256Hex,
   isBuiltInProvider,
   OAuthClient,
   PasskeyAuth,
@@ -53,13 +55,14 @@ import {
   authenticators,
   getDb,
   refreshTokens,
+  type TenantEmailConfig,
   tenantConfigs,
   tenants,
   users,
   userTenants,
 } from "@stwd/db";
 import type { ApiResponse } from "@stwd/shared";
-import { provisionUserWallet, Vault } from "@stwd/vault";
+import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { jwtVerify, SignJWT } from "jose";
@@ -183,7 +186,7 @@ export async function createSessionToken(
 // ─── Refresh token helpers ────────────────────────────────────────────────────
 
 function hashToken(raw: string): string {
-  return createHash("sha256").update(raw).digest("hex");
+  return hashSha256Hex(raw);
 }
 
 /**
@@ -312,7 +315,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   // Reset singletons so they pick up the new stores on next use
   _passkeyAuth = null;
   _passkeyAuthByOrigin.clear();
-  _emailAuth = null;
+  _emailAuthByTenant.clear();
 }
 
 function getChallengeStore(): ChallengeStore {
@@ -389,27 +392,125 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   return auth;
 }
 
-// ─── EmailAuth singleton ──────────────────────────────────────────────────────
+// ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
-let _emailAuth: EmailAuth | null = null;
+const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
+let _emailKeyStore: KeyStore | null = null;
 
-function getEmailAuth(): EmailAuth {
-  if (!_emailAuth) {
-    const resendKey = process.env.RESEND_API_KEY;
-    const provider = resendKey
+function getEmailKeyStore(): KeyStore {
+  if (_emailKeyStore) return _emailKeyStore;
+
+  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  if (!masterPassword) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("STEWARD_MASTER_PASSWORD is required");
+    }
+    _emailKeyStore = new KeyStore("dev-secret");
+    return _emailKeyStore;
+  }
+
+  _emailKeyStore = new KeyStore(masterPassword);
+  return _emailKeyStore;
+}
+
+function buildGlobalEmailAuth(): EmailAuth {
+  const resendKey = process.env.RESEND_API_KEY;
+  const provider = resendKey
+    ? new ResendProvider({
+        apiKey: resendKey,
+        from: process.env.EMAIL_FROM || "login@steward.fi",
+      })
+    : undefined;
+
+  return new EmailAuth({
+    from: process.env.EMAIL_FROM || "login@steward.fi",
+    baseUrl: process.env.APP_URL || "https://steward.fi",
+    provider,
+    tokenStore: getTokenStore(),
+  });
+}
+
+function parseEncryptedEmailApiKey(value: string): {
+  ciphertext: string;
+  iv: string;
+  tag: string;
+  salt: string;
+} {
+  const parsed = JSON.parse(value) as Partial<{
+    ciphertext: string;
+    iv: string;
+    tag: string;
+    salt: string;
+  }>;
+
+  if (!parsed.ciphertext || !parsed.iv || !parsed.tag || !parsed.salt) {
+    throw new Error("Invalid tenant email config encryption payload");
+  }
+
+  return {
+    ciphertext: parsed.ciphertext,
+    iv: parsed.iv,
+    tag: parsed.tag,
+    salt: parsed.salt,
+  };
+}
+
+async function loadTenantEmailConfig(tenantId: string): Promise<TenantEmailConfig | null> {
+  const db = getDb();
+  const [row] = await db
+    .select({ emailConfig: tenantConfigs.emailConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  return row?.emailConfig ?? null;
+}
+
+async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
+  const emailConfig = await loadTenantEmailConfig(tenantId);
+  if (!emailConfig) {
+    return buildGlobalEmailAuth();
+  }
+
+  const provider =
+    emailConfig.provider === "resend"
       ? new ResendProvider({
-          apiKey: resendKey,
-          from: process.env.EMAIL_FROM || "login@steward.fi",
+          apiKey: getEmailKeyStore().decrypt(
+            parseEncryptedEmailApiKey(emailConfig.apiKeyEncrypted),
+          ),
+          from: emailConfig.from,
+          replyTo: emailConfig.replyTo,
         })
       : undefined;
-    _emailAuth = new EmailAuth({
-      from: process.env.EMAIL_FROM || "login@steward.fi",
-      baseUrl: process.env.APP_URL || "https://steward.fi",
-      provider,
-      tokenStore: getTokenStore(),
-    });
-  }
-  return _emailAuth;
+
+  return new EmailAuth({
+    from: emailConfig.from,
+    baseUrl: process.env.APP_URL || "https://steward.fi",
+    provider,
+    tokenStore: getTokenStore(),
+    templateId: emailConfig.templateId,
+    subjectOverride: emailConfig.subjectOverride,
+    replyTo: emailConfig.replyTo,
+  });
+}
+
+export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
+  const cached = _emailAuthByTenant.get(tenantId);
+  if (cached) return cached;
+
+  const pending = createEmailAuthForTenant(tenantId).catch((error) => {
+    _emailAuthByTenant.delete(tenantId);
+    throw error;
+  });
+  _emailAuthByTenant.set(tenantId, pending);
+  return pending;
+}
+
+export function invalidateEmailAuthForTenant(tenantId: string): void {
+  _emailAuthByTenant.delete(tenantId);
+}
+
+export function clearEmailAuthTenantCacheForTests(): void {
+  _emailAuthByTenant.clear();
 }
 
 // ─── Vault helper ─────────────────────────────────────────────────────────────
@@ -604,6 +705,80 @@ async function safeJsonParse<T>(c: Context): Promise<T | null> {
   } catch {
     return null;
   }
+}
+
+type CompletedEmailAuthResult =
+  | {
+      ok: true;
+      token: string;
+      refreshToken: string;
+      user: { id: string; email: string; walletAddress?: string | null };
+    }
+  | { ok: false; status: 403 | 404; error: string };
+
+async function completeEmailAuth(
+  c: Context,
+  email: string,
+  tenantId?: string,
+): Promise<CompletedEmailAuthResult> {
+  const user = await findOrCreateUser(email);
+  const db = getDb();
+  await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
+
+  // Provision wallet (idempotent, always under personal tenant)
+  let walletAddress = user.walletAddress;
+  try {
+    const w = await provisionWalletForUser(user.id, email);
+    walletAddress = w.walletAddress;
+  } catch (err) {
+    console.error("[EmailAuth] Wallet provision failed:", err);
+  }
+
+  // Resolve requesting tenant and link user
+  const tenantResult = await resolveAndValidateTenant(c, user.id, tenantId);
+  if (!tenantResult.ok) {
+    return { ok: false, status: tenantResult.status, error: tenantResult.error };
+  }
+  const { tenantId: resolvedTenantId } = tenantResult;
+  await ensureUserTenantLink(user.id, resolvedTenantId);
+
+  const token = await createSessionToken(walletAddress ?? "", resolvedTenantId, {
+    userId: user.id,
+    email,
+  });
+  const refreshToken = await createRefreshToken(user.id, resolvedTenantId);
+
+  return {
+    ok: true,
+    token,
+    refreshToken,
+    user: { id: user.id, email, walletAddress },
+  };
+}
+
+function getEmailAuthRedirectBaseUrl(): string {
+  return (process.env.EMAIL_AUTH_REDIRECT_BASE_URL || "https://www.elizacloud.ai").replace(
+    /\/$/,
+    "",
+  );
+}
+
+function buildEmailAuthRedirectUrl(params?: Record<string, string | undefined>): string {
+  const redirectUrl = new URL("/login", `${getEmailAuthRedirectBaseUrl()}/`);
+  for (const [key, value] of Object.entries(params ?? {})) {
+    if (value) redirectUrl.searchParams.set(key, value);
+  }
+  return redirectUrl.toString();
+}
+
+function redirectEmailAuthFailure(c: Context, reason: string): Response {
+  return c.redirect(
+    buildEmailAuthRedirectUrl({
+      error: "email_auth_failed",
+      reason,
+    }),
+    302,
+  );
 }
 
 // ─── Route group ──────────────────────────────────────────────────────────────
@@ -1256,7 +1431,7 @@ auth.post("/passkey/login/verify", async (c) => {
 
 /**
  * POST /email/send
- * Body: { email }
+ * Body: { email, tenantId? }
  * Sends a magic link email, returns expiry time.
  */
 auth.post("/email/send", async (c) => {
@@ -1267,18 +1442,68 @@ auth.post("/email/send", async (c) => {
       429,
     );
   }
-  const body = await safeJsonParse<{ email: string }>(c);
+  const body = await safeJsonParse<{ email: string; tenantId?: string }>(c);
   if (!body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
   }
 
   const email = body.email.toLowerCase().trim();
-  const { expiresAt } = await getEmailAuth().sendMagicLink(email);
+  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const { expiresAt } = await emailAuth.sendMagicLink(email);
 
   return c.json<ApiResponse<{ expiresAt: string }>>({
     ok: true,
     data: { expiresAt: expiresAt.toISOString() },
   });
+});
+
+/**
+ * GET /callback/email
+ * Query: ?token=<token>&email=<email>&tenantId=<tenantId?>
+ * Mirrors POST /email/verify for browser clicks from magic link emails,
+ * but redirects to the dashboard login page instead of returning JSON.
+ */
+auth.get("/callback/email", async (c) => {
+  const token = c.req.query("token");
+  const emailParam = c.req.query("email");
+  const tenantId = c.req.query("tenantId");
+
+  if (!token || !emailParam) {
+    return redirectEmailAuthFailure(c, "missing_params");
+  }
+
+  const email = emailParam.toLowerCase().trim();
+
+  let result: Awaited<ReturnType<EmailAuth["verifyMagicLink"]>>;
+  try {
+    const emailAuth = await getEmailAuthForTenant(tenantId || _DEFAULT_TENANT_ID);
+    result = await emailAuth.verifyMagicLink(token);
+  } catch {
+    return redirectEmailAuthFailure(c, "invalid_link");
+  }
+
+  if (!result.valid) {
+    return redirectEmailAuthFailure(c, "invalid_link");
+  }
+
+  if (result.email.toLowerCase().trim() !== email) {
+    return redirectEmailAuthFailure(c, "email_mismatch");
+  }
+
+  const authResult = await completeEmailAuth(c, email, tenantId);
+  if (!authResult.ok) {
+    const reason = authResult.status === 404 ? "tenant_not_found" : "tenant_forbidden";
+    return redirectEmailAuthFailure(c, reason);
+  }
+
+  return c.redirect(
+    buildEmailAuthRedirectUrl({
+      token: authResult.token,
+      refreshToken: authResult.refreshToken,
+    }),
+    302,
+  );
 });
 
 /**
@@ -1301,58 +1526,31 @@ auth.post("/email/verify", async (c) => {
   }
 
   const email = body.email.toLowerCase().trim();
-  const result = await getEmailAuth().verifyMagicLink(body.token);
+  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const result = await emailAuth.verifyMagicLink(body.token);
 
-  if (!result.valid || result.email !== email) {
+  if (!result.valid || result.email.toLowerCase().trim() !== email) {
     return c.json<ApiResponse>(
       { ok: false, error: "Invalid or expired magic link" },
       401,
     );
   }
 
-  const user = await findOrCreateUser(email);
-  const db = getDb();
-  await db
-    .update(users)
-    .set({ emailVerified: true })
-    .where(eq(users.id, user.id));
-
-  // Provision wallet (idempotent, always under personal tenant)
-  let walletAddress = user.walletAddress;
-  try {
-    const w = await provisionWalletForUser(user.id, email);
-    walletAddress = w.walletAddress;
-  } catch (err) {
-    console.error("[EmailAuth] Wallet provision failed:", err);
-  }
-
-  // Resolve requesting tenant and link user
-  const tenantResult = await resolveAndValidateTenant(
-    c,
-    user.id,
-    body.tenantId,
-  );
-  if (!tenantResult.ok) {
+  const authResult = await completeEmailAuth(c, email, body.tenantId);
+  if (!authResult.ok) {
     return c.json<ApiResponse>(
-      { ok: false, error: tenantResult.error },
-      tenantResult.status,
+      { ok: false, error: authResult.error },
+      authResult.status,
     );
   }
-  const { tenantId } = tenantResult;
-  await ensureUserTenantLink(user.id, tenantId);
-
-  const jwtToken = await createSessionToken(walletAddress ?? "", tenantId, {
-    userId: user.id,
-    email,
-  });
-  const refreshToken = await createRefreshToken(user.id, tenantId);
 
   return c.json(
-    buildAuthResponse(jwtToken, refreshToken, {
-      id: user.id,
-      email,
-      walletAddress,
-    }),
+    buildAuthResponse(
+      authResult.token,
+      authResult.refreshToken,
+      authResult.user,
+    ),
   );
 });
 

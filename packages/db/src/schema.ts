@@ -23,6 +23,15 @@ import {
   varchar,
 } from "drizzle-orm/pg-core";
 
+export interface TenantEmailConfig {
+  provider: "resend";
+  apiKeyEncrypted: string;
+  from: string;
+  replyTo?: string;
+  templateId?: string;
+  subjectOverride?: string;
+}
+
 export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana"]);
 
 export const policyTypeEnum = pgEnum("policy_type", [
@@ -75,6 +84,7 @@ export const tenantConfigs = pgTable("tenant_configs", {
     .primaryKey()
     .references(() => tenants.id, { onDelete: "cascade" }),
   displayName: varchar("display_name", { length: 255 }),
+  emailConfig: jsonb("email_config").$type<TenantEmailConfig>(),
   policyExposure: jsonb("policy_exposure")
     .$type<PolicyExposureConfig>()
     .notNull()

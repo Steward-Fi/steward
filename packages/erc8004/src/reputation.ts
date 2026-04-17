@@ -1,9 +1,6 @@
 /**
- * ERC-8004 Reputation Registry client.
- *
- * Handles feedback submission and reputation score lookups.
- * Current implementation is stubbed — contract calls will replace the mocks
- * once the reputation contract is deployed.
+ * ERC-8004 reputation registry client.
+ * Uses mock data until the reputation contract is deployed.
  */
 
 import type { FeedbackSignal, RegistryConfig, ReputationScore } from "./types";
@@ -15,24 +12,13 @@ export class ReputationRegistryClient {
     this.config = config;
   }
 
-  /**
-   * Submit a feedback signal for an agent.
-   *
-   * TODO: Replace stub with on-chain feedback submission.
-   * Returns the transaction hash.
-   */
+  /** Return a mock transaction hash until on-chain submission is implemented. */
   async postFeedback(_params: FeedbackSignal): Promise<string> {
-    // TODO: Implement actual on-chain feedback submission
     return `0x${"0".repeat(64)}`;
   }
 
-  /**
-   * Get the aggregated reputation score for an agent.
-   *
-   * TODO: Replace stub with on-chain reputation lookup + internal score merge.
-   */
+  /** Return a zeroed reputation score until on-chain lookups are implemented. */
   async getReputation(agentTokenId: string): Promise<ReputationScore> {
-    // TODO: Implement actual reputation lookup
     return {
       agentId: agentTokenId,
       scoreOnchain: 0,
@@ -43,16 +29,11 @@ export class ReputationRegistryClient {
     };
   }
 
-  /**
-   * Retrieve feedback history for an agent.
-   *
-   * TODO: Replace stub with event log query from the reputation contract.
-   */
+  /** Return no history until feedback events are indexed. */
   async getFeedbackHistory(
     _agentTokenId: string,
     _limit?: number,
   ): Promise<FeedbackSignal[]> {
-    // TODO: Implement actual feedback history lookup
     return [];
   }
 }

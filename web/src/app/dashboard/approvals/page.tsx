@@ -7,23 +7,18 @@ import { useAuth } from "@/components/auth-provider";
 import { ChainBadge } from "@/components/chain-badge";
 import { steward } from "@/lib/api";
 import { getChainSymbol } from "@/lib/chains";
-import type { AgentIdentity } from "@/lib/steward-client";
 import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 interface PendingItem {
-  queueId: string;
-  status: string;
-  requestedAt: string;
-  transaction: {
-    id: string;
-    request?: { to: string; value: string; data?: string; chainId: number };
-    toAddress?: string;
-    value?: string;
-    chainId?: number;
-    policyResults?: { type: string; passed: boolean; reason?: string }[];
-  };
+  id: string;
+  txId: string;
   agentId: string;
-  agentName: string;
+  agentName?: string;
+  status: "pending" | "approved" | "rejected";
+  requestedAt: string;
+  toAddress?: string;
+  value?: string;
+  chainId?: number;
 }
 
 interface Toast {
@@ -56,41 +51,7 @@ export default function ApprovalsPage() {
     try {
       setLoading(true);
       setError(null);
-      const agents: AgentIdentity[] = await steward.listAgents();
-      const allPending: PendingItem[] = [];
-
-      for (const agent of agents) {
-        try {
-          const data = await steward.getPending(agent.id);
-          if (data) {
-            allPending.push(
-              ...data.map((tx) => ({
-                queueId: tx.id,
-                status: tx.status,
-                requestedAt: tx.createdAt || new Date().toISOString(),
-                transaction: {
-                  id: tx.id,
-                  request: tx.request,
-                  toAddress: tx.toAddress,
-                  value: tx.value,
-                  chainId: tx.chainId,
-                  policyResults: tx.policyResults,
-                },
-                agentId: agent.id,
-                agentName: agent.name,
-              })),
-            );
-          }
-        } catch {
-          /* skip agent */
-        }
-      }
-
-      allPending.sort(
-        (a, b) =>
-          new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime(),
-      );
-      setPending(allPending);
+      setPending(await steward.listApprovals());
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load approvals");
     } finally {
@@ -98,23 +59,16 @@ export default function ApprovalsPage() {
     }
   }
 
-  async function handleAction(
-    agentId: string,
-    txId: string,
-    action: "approve" | "reject",
-  ) {
+  async function handleAction(txId: string, action: "approve" | "reject") {
     const key = `${txId}-${action}`;
     setActionLoading(key);
     try {
       if (action === "approve") {
-        await steward.approve(agentId, txId);
+        await steward.approveTransaction(txId, "Approved from dashboard");
       } else {
-        await steward.reject(agentId, txId);
+        await steward.denyTransaction(txId, "Rejected from dashboard");
       }
-      // Optimistically remove from list
-      setPending((prev) =>
-        prev.filter((item) => item.transaction?.id !== txId),
-      );
+      setPending((prev) => prev.filter((item) => item.txId !== txId));
       addToast(
         action === "approve"
           ? "Transaction approved and queued for signing"
@@ -148,12 +102,9 @@ export default function ApprovalsPage() {
       transition={{ duration: 0.3 }}
       className="space-y-8"
     >
-      {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-700 tracking-tight">
-            Approval Queue
-          </h1>
+          <h1 className="font-display text-2xl font-700 tracking-tight">Approval Queue</h1>
           <p className="text-sm text-text-tertiary mt-1">
             Transactions exceeding policy thresholds
           </p>
@@ -165,7 +116,6 @@ export default function ApprovalsPage() {
         )}
       </div>
 
-      {/* Toast notifications */}
       <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 pointer-events-none">
         <AnimatePresence>
           {toasts.map((toast) => (
@@ -187,12 +137,9 @@ export default function ApprovalsPage() {
         </AnimatePresence>
       </div>
 
-      {/* Error state */}
       {error && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
-          <p className="text-text-secondary text-sm mb-1">
-            Failed to load approvals
-          </p>
+          <p className="text-text-secondary text-sm mb-1">Failed to load approvals</p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
           <button
             onClick={loadPending}
@@ -205,12 +152,10 @@ export default function ApprovalsPage() {
 
       {pending.length === 0 && !error ? (
         <div className="py-20 text-center border border-border-subtle">
-          <p className="font-display text-lg font-600 text-text-secondary">
-            Queue is clear
-          </p>
+          <p className="font-display text-lg font-600 text-text-secondary">Queue is clear</p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
-            All transactions are either auto-approved or have been reviewed.
-            Transactions that exceed policy thresholds will appear here.
+            All transactions are either auto-approved or have been reviewed. Transactions that
+            exceed policy thresholds will appear here.
           </p>
         </div>
       ) : (
@@ -218,7 +163,7 @@ export default function ApprovalsPage() {
           <AnimatePresence initial={false}>
             {pending.map((item, i) => (
               <motion.div
-                key={item.queueId || item.transaction?.id}
+                key={item.id}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, x: 24, height: 0, marginBottom: 0 }}
@@ -231,116 +176,53 @@ export default function ApprovalsPage() {
               >
                 <div className="flex items-start justify-between gap-6">
                   <div className="min-w-0 space-y-3">
-                    {/* Agent & time */}
                     <div className="flex items-center gap-3 flex-wrap">
                       <span className="text-xs px-2 py-0.5 bg-amber-400/10 text-amber-400 font-medium">
                         Pending
                       </span>
-                      <ChainBadge
-                        chainId={
-                          item.transaction?.request?.chainId ||
-                          item.transaction?.chainId ||
-                          8453
-                        }
-                      />
+                      <ChainBadge chainId={item.chainId || 8453} />
                       <span className="text-xs text-text-tertiary">
                         {formatDate(item.requestedAt)}
                       </span>
                     </div>
 
-                    {/* From -> To */}
                     <div className="text-sm flex items-center gap-2 flex-wrap">
                       <Link
                         href={`/dashboard/agents/${item.agentId}`}
                         className="text-text hover:text-accent transition-colors font-display font-600"
                       >
-                        {item.agentName}
+                        {item.agentName || item.agentId}
                       </Link>
                       <span className="text-text-tertiary">&rarr;</span>
                       <span className="font-mono text-xs text-text-tertiary">
-                        {shortenAddress(
-                          item.transaction?.request?.to ||
-                            item.transaction?.toAddress ||
-                            "0x0",
-                          8,
-                        )}
+                        {shortenAddress(item.toAddress || "0x0", 8)}
                       </span>
                     </div>
 
-                    {/* Details */}
                     <div className="flex items-center gap-5 text-xs text-text-tertiary">
                       <span>
                         Value:{" "}
                         <span className="text-text-secondary tabular-nums">
-                          {formatWei(
-                            item.transaction?.request?.value ||
-                              item.transaction?.value ||
-                              "0",
-                            getChainSymbol(
-                              item.transaction?.request?.chainId ||
-                                item.transaction?.chainId ||
-                                8453,
-                            ),
-                          )}
+                          {formatWei(item.value || "0", getChainSymbol(item.chainId || 8453))}
                         </span>
                       </span>
-                      {item.transaction?.request?.data && (
-                        <span>Has calldata</span>
-                      )}
                     </div>
-
-                    {/* Policy results */}
-                    {item.transaction?.policyResults &&
-                      item.transaction.policyResults.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5 mt-1">
-                          {item.transaction.policyResults.map((result, ri) => (
-                            <span
-                              key={ri}
-                              className={`text-xs px-2 py-0.5 ${
-                                result.passed
-                                  ? "bg-emerald-400/10 text-emerald-400"
-                                  : "bg-red-400/10 text-red-400"
-                              }`}
-                            >
-                              {result.type}:{" "}
-                              {result.passed ? "pass" : result.reason || "fail"}
-                            </span>
-                          ))}
-                        </div>
-                      )}
                   </div>
 
-                  {/* Actions */}
                   <div className="flex gap-2 flex-shrink-0">
                     <button
-                      onClick={() =>
-                        handleAction(
-                          item.agentId,
-                          item.transaction?.id,
-                          "approve",
-                        )
-                      }
+                      onClick={() => handleAction(item.txId, "approve")}
                       disabled={actionLoading !== null}
                       className="px-4 py-2 text-xs font-medium bg-emerald-400/10 text-emerald-400 hover:bg-emerald-400/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      {actionLoading === `${item.transaction?.id}-approve`
-                        ? "..."
-                        : "Approve"}
+                      {actionLoading === `${item.txId}-approve` ? "..." : "Approve"}
                     </button>
                     <button
-                      onClick={() =>
-                        handleAction(
-                          item.agentId,
-                          item.transaction?.id,
-                          "reject",
-                        )
-                      }
+                      onClick={() => handleAction(item.txId, "reject")}
                       disabled={actionLoading !== null}
                       className="px-4 py-2 text-xs font-medium bg-red-400/10 text-red-400 hover:bg-red-400/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      {actionLoading === `${item.transaction?.id}-reject`
-                        ? "..."
-                        : "Reject"}
+                      {actionLoading === `${item.txId}-reject` ? "..." : "Reject"}
                     </button>
                   </div>
                 </div>

@@ -2,6 +2,7 @@ export { StewardAuth } from "./auth.ts";
 export type {
   SessionStorage,
   StewardAuthConfig,
+  StewardAuthExchangeResponse,
   StewardAuthResult,
   StewardEmailResult,
   StewardOAuthConfig,

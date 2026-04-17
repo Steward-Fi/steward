@@ -82,7 +82,7 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
         record: rows[0] ?? null,
       },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[erc8004] register-onchain error:", err);
     return c.json<ApiResponse>(
       { ok: false, error: "Failed to create registration" },
@@ -118,7 +118,7 @@ erc8004Routes.get("/:id/onchain", async (c) => {
         reputation: getRows(reputation),
       },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[erc8004] onchain lookup error:", err);
     return c.json<ApiResponse>(
       { ok: false, error: "Failed to fetch on-chain data" },
@@ -128,7 +128,7 @@ erc8004Routes.get("/:id/onchain", async (c) => {
 });
 
 // ─── POST /agents/:id/feedback ────────────────────────────────────────────────
-// Submit a feedback signal for an agent. Saves to reputation_cache for now.
+// Persist feedback in reputation_cache until on-chain writes are wired up.
 
 erc8004Routes.post("/:id/feedback", async (c) => {
   const tenantId = c.get("tenantId");
@@ -186,7 +186,7 @@ erc8004Routes.post("/:id/feedback", async (c) => {
         fromAddress: body.fromAddress ?? "",
       },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[erc8004] feedback error:", err);
     return c.json<ApiResponse>(
       { ok: false, error: "Failed to record feedback" },
@@ -230,7 +230,7 @@ discoveryRoutes.get("/agents", async (c) => {
 
     const result = await db.execute(query);
     return c.json<ApiResponse>({ ok: true, data: getRows(result) });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[erc8004] discovery/agents error:", err);
     return c.json<ApiResponse>(
       { ok: false, error: "Failed to query agents" },
@@ -247,7 +247,7 @@ discoveryRoutes.get("/registries", async (c) => {
       SELECT * FROM registry_index WHERE is_active = TRUE ORDER BY chain_id
     `);
     return c.json<ApiResponse>({ ok: true, data: getRows(result) });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("[erc8004] discovery/registries error:", err);
     return c.json<ApiResponse>(
       { ok: false, error: "Failed to query registries" },

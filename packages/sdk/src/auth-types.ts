@@ -48,6 +48,15 @@ export interface StewardAuthResult {
   user: StewardUser;
 }
 
+/** Shared response shape for auth flows that exchange a challenge or callback for a session. */
+export interface StewardAuthExchangeResponse {
+  ok: boolean;
+  token: string;
+  user: StewardUser;
+  refreshToken?: string;
+  expiresIn?: number;
+}
+
 export interface StewardEmailResult {
   ok: boolean;
   expiresAt: string;

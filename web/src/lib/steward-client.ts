@@ -1,5 +1,4 @@
-// TODO: Replace this inline client with @stwd/sdk. This is a divergent copy that predates the SDK.
-// Mirrors @stwd/sdk interface
+// Temporary dashboard client kept in sync with @stwd/sdk.
 
 // ---- Secrets ----
 export interface SecretRecord {
@@ -263,18 +262,44 @@ export class StewardClient {
     return this.request<TxRecord[]>(`/vault/${agentId}/history`);
   }
 
-  async getPending(agentId: string) {
-    return this.request<TxRecord[]>(`/vault/${agentId}/pending`);
+  async listApprovals(status: "pending" | "approved" | "rejected" | "all" = "pending") {
+    // Request the max page size (200) so the dashboard shows all pending items
+    // in a single load. The old /vault/:agentId/pending endpoint was unlimited.
+    const params = new URLSearchParams({ limit: "200" });
+    if (status !== "pending") params.set("status", status);
+    const qs = `?${params.toString()}`;
+    return this.request<
+      {
+        id: string;
+        txId: string;
+        agentId: string;
+        agentName?: string;
+        status: "pending" | "approved" | "rejected";
+        requestedAt: string;
+        resolvedAt?: string;
+        resolvedBy?: string;
+        toAddress?: string;
+        value?: string;
+        chainId?: number;
+        txStatus?: string;
+        comment?: string;
+        reason?: string;
+      }[]
+    >(`/approvals${qs}`);
   }
 
-  async approve(agentId: string, txId: string) {
-    return this.request(`/vault/${agentId}/approve/${txId}`, {
+  async approveTransaction(txId: string, comment?: string) {
+    return this.request(`/approvals/${txId}/approve`, {
       method: "POST",
+      body: JSON.stringify(comment ? { comment } : {}),
     });
   }
 
-  async reject(agentId: string, txId: string) {
-    return this.request(`/vault/${agentId}/reject/${txId}`, { method: "POST" });
+  async denyTransaction(txId: string, reason: string) {
+    return this.request(`/approvals/${txId}/deny`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
   }
 
   // ---- Secrets ----

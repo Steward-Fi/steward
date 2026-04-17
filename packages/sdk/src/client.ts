@@ -141,6 +141,10 @@ export class StewardClient {
     this.tenantId = tenantId;
   }
 
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
   async createWallet(
     agentId: string,
     name: string,

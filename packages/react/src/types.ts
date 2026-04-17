@@ -6,6 +6,8 @@ import type {
   PolicyRule,
   PolicyType,
   StewardClient,
+  StewardProviders as StewardProvidersState,
+  StewardTenantMembership,
   TxRecord,
   TxStatus,
 } from "@stwd/sdk";
@@ -272,29 +274,20 @@ export type {
 
 // ─── Multi-Tenant Types ───
 
-export interface StewardTenantMembership {
-  tenantId: string;
-  tenantName: string;
-  role: string;
-  joinedAt: string;
-}
+export type { StewardTenantMembership } from "@stwd/sdk";
 
 // ─── Auth Types ───
 
-export type { SessionStorage, StewardSession, StewardUser } from "@stwd/sdk";
+export type {
+  SessionStorage,
+  StewardProviders as StewardProvidersState,
+  StewardSession,
+  StewardUser,
+} from "@stwd/sdk";
 
 export interface StewardAuthConfig {
   baseUrl: string;
   storage?: import("@stwd/sdk").SessionStorage;
-}
-
-export interface StewardProvidersState {
-  passkey: boolean;
-  email: boolean;
-  siwe: boolean;
-  google: boolean;
-  discord: boolean;
-  oauth: string[];
 }
 
 export interface StewardAuthContextValue {

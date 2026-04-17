@@ -25,8 +25,6 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
   const fetchTransactions = useCallback(async () => {
     try {
       // Try paginated endpoint first
-      const baseUrl =
-        (client as unknown as Record<string, string>).baseUrl || "";
       const params = new URLSearchParams();
       params.set("page", String(page));
       params.set("pageSize", String(pageSize));
@@ -34,7 +32,7 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
       if (chainId) params.set("chainId", String(chainId));
 
       const res = await fetch(
-        `${baseUrl}/agents/${encodeURIComponent(agentId)}/transactions?${params}`,
+        `${client.getBaseUrl()}/agents/${encodeURIComponent(agentId)}/transactions?${params}`,
         {
           headers: { Accept: "application/json" },
         },

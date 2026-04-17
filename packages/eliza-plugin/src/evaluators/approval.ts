@@ -8,13 +8,7 @@ import type {
 import type { StewardService } from "../services/StewardService.js";
 
 /**
- * approvalRequired — post-action evaluator that detects when a
- * transaction is pending manual approval.
- *
- * When triggered, it could:
- * - Notify the user that their approval is needed
- * - Store the pending tx reference for follow-up
- * - Register a polling interval to check for resolution
+ * Post-action evaluator for transactions awaiting manual approval.
  */
 export const approvalRequiredEvaluator: Evaluator = {
   name: "approvalRequired",
@@ -51,8 +45,7 @@ export const approvalRequiredEvaluator: Evaluator = {
       return undefined;
     }
 
-    // Log for observability — in a full implementation this could
-    // send a notification, create a reminder, or register a webhook.
+    // Log when a transaction is waiting on manual approval.
     console.info(
       "[Steward] Transaction pending approval — user action required",
     );
