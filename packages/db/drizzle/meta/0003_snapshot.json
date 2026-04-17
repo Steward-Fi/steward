@@ -1293,7 +1293,15 @@
     "public.transaction_status": {
       "name": "transaction_status",
       "schema": "public",
-      "values": ["pending", "approved", "rejected", "signed", "broadcast", "confirmed", "failed"]
+      "values": [
+        "pending",
+        "approved",
+        "rejected",
+        "signed",
+        "broadcast",
+        "confirmed",
+        "failed"
+      ]
     },
     "public.webhook_delivery_status": {
       "name": "webhook_delivery_status",

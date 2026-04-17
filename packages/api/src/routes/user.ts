@@ -46,7 +46,8 @@ import { jwtVerify } from "jose";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const _jwtSecretSrc = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+const _jwtSecretSrc =
+  process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
 if (!_jwtSecretSrc) {
   if (process.env.NODE_ENV === "production") {
     throw new Error(
@@ -181,11 +182,16 @@ async function userSessionAuth(
     const result = await jwtVerify(token, JWT_SECRET, { issuer: JWT_ISSUER });
     payload = result.payload as unknown as UserSessionPayload;
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired session token" },
+      401,
+    );
   }
 
   // Support both userId (new) and address (SIWE legacy)
-  const userId = (payload.userId as string | undefined) || (payload.address as string | undefined);
+  const userId =
+    (payload.userId as string | undefined) ||
+    (payload.address as string | undefined);
   if (!userId) {
     return c.json<ApiResponse>(
       { ok: false, error: "Session token missing userId or address claim" },
@@ -251,7 +257,10 @@ user.get("/me/wallet", async (c) => {
   try {
     vault = getVault();
   } catch (_e) {
-    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Vault not configured" },
+      503,
+    );
   }
 
   // Auto-provision if not yet created
@@ -265,7 +274,10 @@ user.get("/me/wallet", async (c) => {
       if (!wallet) throw new Error("Provision succeeded but agent not found");
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
-      return c.json<ApiResponse>({ ok: false, error: `Failed to provision wallet: ${msg}` }, 500);
+      return c.json<ApiResponse>(
+        { ok: false, error: `Failed to provision wallet: ${msg}` },
+        500,
+      );
     }
   }
 
@@ -273,7 +285,11 @@ user.get("/me/wallet", async (c) => {
   const chainId = chainIdParam ? parseInt(chainIdParam, 10) : undefined;
 
   try {
-    const balance = await vault.getBalance(`personal-${userId}`, wallet.id, chainId);
+    const balance = await vault.getBalance(
+      `personal-${userId}`,
+      wallet.id,
+      chainId,
+    );
 
     return c.json<ApiResponse<AgentBalance>>({
       ok: true,
@@ -303,7 +319,10 @@ user.post("/me/wallet/sign", async (c) => {
   try {
     vault = getVault();
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Vault not configured" },
+      503,
+    );
   }
 
   const wallet = await getUserWallet(vault, userId);
@@ -317,13 +336,20 @@ user.post("/me/wallet/sign", async (c) => {
     );
   }
 
-  const body = await safeJsonParse<Omit<SignRequest, "agentId" | "tenantId">>(c);
+  const body =
+    await safeJsonParse<Omit<SignRequest, "agentId" | "tenantId">>(c);
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(body.to)) {
-    return c.json<ApiResponse>({ ok: false, error: "'to' address is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'to' address is required" },
+      400,
+    );
   }
   if (!isValidAddress(body.to)) {
     return c.json<ApiResponse>(
@@ -347,10 +373,15 @@ user.post("/me/wallet/sign", async (c) => {
 
   // Fetch active policies
   const db = getDb();
-  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
+  const storedPolicies = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.agentId, agentId));
 
   const policySet: PolicyRule[] =
-    storedPolicies.length > 0 ? storedPolicies.map(toPolicyRule) : USER_WALLET_DEFAULT_POLICIES;
+    storedPolicies.length > 0
+      ? storedPolicies.map(toPolicyRule)
+      : USER_WALLET_DEFAULT_POLICIES;
 
   const stats = await getTransactionStats(agentId);
   const engine = new PolicyEngine();
@@ -401,7 +432,10 @@ user.get("/me/wallet/history", async (c) => {
   try {
     vault = getVault();
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Vault not configured" },
+      503,
+    );
   }
 
   const wallet = await getUserWallet(vault, userId);
@@ -410,7 +444,10 @@ user.get("/me/wallet/history", async (c) => {
   }
 
   const db = getDb();
-  const history = await db.select().from(transactions).where(eq(transactions.agentId, wallet.id));
+  const history = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.agentId, wallet.id));
 
   return c.json<ApiResponse>({
     ok: true,
@@ -427,7 +464,10 @@ user.get("/me/wallet/policies", async (c) => {
   try {
     vault = getVault();
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Vault not configured" },
+      503,
+    );
   }
 
   const wallet = await getUserWallet(vault, userId);
@@ -440,10 +480,15 @@ user.get("/me/wallet/policies", async (c) => {
   }
 
   const db = getDb();
-  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, wallet.id));
+  const storedPolicies = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.agentId, wallet.id));
 
   const activePolicies: PolicyRule[] =
-    storedPolicies.length > 0 ? storedPolicies.map(toPolicyRule) : USER_WALLET_DEFAULT_POLICIES;
+    storedPolicies.length > 0
+      ? storedPolicies.map(toPolicyRule)
+      : USER_WALLET_DEFAULT_POLICIES;
 
   return c.json<ApiResponse<PolicyRule[]>>({ ok: true, data: activePolicies });
 });
@@ -457,7 +502,10 @@ user.post("/me/wallet/sign-message", async (c) => {
   try {
     vault = getVault();
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Vault not configured" },
+      503,
+    );
   }
 
   const wallet = await getUserWallet(vault, userId);
@@ -483,7 +531,11 @@ user.post("/me/wallet/sign-message", async (c) => {
   }
 
   try {
-    const signature = await vault.signMessage(`personal-${userId}`, wallet.id, body.message);
+    const signature = await vault.signMessage(
+      `personal-${userId}`,
+      wallet.id,
+      body.message,
+    );
 
     return c.json<ApiResponse<{ signature: string; address: string }>>({
       ok: true,
@@ -505,7 +557,10 @@ user.post("/me/wallet/export", async (c) => {
   try {
     vault = getVault();
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Vault not configured" },
+      503,
+    );
   }
 
   const wallet = await getUserWallet(vault, userId);
@@ -589,10 +644,15 @@ user.get("/me/tenants/:tenantId", async (c) => {
     })
     .from(userTenants)
     .innerJoin(tenants, eq(userTenants.tenantId, tenants.id))
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+    .where(
+      and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)),
+    );
 
   if (!membership) {
-    return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Not a member of this tenant" },
+      404,
+    );
   }
 
   return c.json<ApiResponse<typeof membership>>({ ok: true, data: membership });
@@ -621,7 +681,9 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
   const [existing] = await db
     .select({ id: userTenants.id })
     .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+    .where(
+      and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)),
+    );
 
   if (existing) {
     return c.json({ ok: true, tenantId, role: "member", alreadyMember: true });
@@ -646,7 +708,10 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
   }
 
   // 4. Create membership
-  await db.insert(userTenants).values({ userId, tenantId, role: "member" }).onConflictDoNothing();
+  await db
+    .insert(userTenants)
+    .values({ userId, tenantId, role: "member" })
+    .onConflictDoNothing();
 
   return c.json({ ok: true, tenantId, role: "member" });
 });
@@ -661,17 +726,25 @@ user.delete("/me/tenants/:tenantId/leave", async (c) => {
 
   // Cannot leave personal tenant
   if (tenantId === `personal-${userId}`) {
-    return c.json<ApiResponse>({ ok: false, error: "Cannot leave your personal tenant" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Cannot leave your personal tenant" },
+      400,
+    );
   }
 
   const db = getDb();
   const [deleted] = await db
     .delete(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+    .where(
+      and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)),
+    )
     .returning();
 
   if (!deleted) {
-    return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Not a member of this tenant" },
+      404,
+    );
   }
 
   return c.json<ApiResponse>({ ok: true });

@@ -197,11 +197,16 @@ export class StewardClient {
       headers: { ...this.headers, ...options?.headers },
     });
     const json: ApiResponse<T> = await res.json();
-    if (!json.ok) throw new Error(json.error || `Request failed: ${res.status}`);
+    if (!json.ok)
+      throw new Error(json.error || `Request failed: ${res.status}`);
     return json.data as T;
   }
 
-  async createWallet(id: string, name: string, platformId?: string): Promise<AgentIdentity> {
+  async createWallet(
+    id: string,
+    name: string,
+    platformId?: string,
+  ): Promise<AgentIdentity> {
     return this.request<AgentIdentity>("/agents", {
       method: "POST",
       body: JSON.stringify({ id, name, platformId }),
@@ -234,7 +239,10 @@ export class StewardClient {
     return this.request<PolicyRule[]>(`/agents/${agentId}/policies`);
   }
 
-  async setPolicies(agentId: string, policies: PolicyRule[]): Promise<PolicyRule[]> {
+  async setPolicies(
+    agentId: string,
+    policies: PolicyRule[],
+  ): Promise<PolicyRule[]> {
     return this.request<PolicyRule[]>(`/agents/${agentId}/policies`, {
       method: "PUT",
       body: JSON.stringify(policies),
@@ -285,7 +293,10 @@ export class StewardClient {
     return this.request<SecretRecord>(`/secrets/${secretId}`);
   }
 
-  async rotateSecret(secretId: string, payload: SecretRotatePayload): Promise<SecretRecord> {
+  async rotateSecret(
+    secretId: string,
+    payload: SecretRotatePayload,
+  ): Promise<SecretRecord> {
     return this.request<SecretRecord>(`/secrets/${secretId}/rotate`, {
       method: "POST",
       body: JSON.stringify(payload),
@@ -309,7 +320,10 @@ export class StewardClient {
     });
   }
 
-  async updateRoute(routeId: string, payload: Partial<RouteCreatePayload>): Promise<RouteRecord> {
+  async updateRoute(
+    routeId: string,
+    payload: Partial<RouteCreatePayload>,
+  ): Promise<RouteRecord> {
     return this.request<RouteRecord>(`/secrets/routes/${routeId}`, {
       method: "PUT",
       body: JSON.stringify(payload),
@@ -352,14 +366,19 @@ export class StewardClient {
     return this.request<void>(`/policies/${policyId}`, { method: "DELETE" });
   }
 
-  async assignPolicy(policyId: string, agentIds: string[]): Promise<PolicyRecord> {
+  async assignPolicy(
+    policyId: string,
+    agentIds: string[],
+  ): Promise<PolicyRecord> {
     return this.request<PolicyRecord>(`/policies/${policyId}/assign`, {
       method: "POST",
       body: JSON.stringify({ agentIds }),
     });
   }
 
-  async simulatePolicy(payload: PolicySimulatePayload): Promise<PolicySimulateResult> {
+  async simulatePolicy(
+    payload: PolicySimulatePayload,
+  ): Promise<PolicySimulateResult> {
     return this.request<PolicySimulateResult>("/policies/simulate", {
       method: "POST",
       body: JSON.stringify(payload),
@@ -378,7 +397,9 @@ export class StewardClient {
     if (params?.offset !== undefined && params.limit) {
       mapped.page = String(Math.floor(params.offset / params.limit) + 1);
     }
-    const qs = Object.keys(mapped).length ? `?${new URLSearchParams(mapped).toString()}` : "";
+    const qs = Object.keys(mapped).length
+      ? `?${new URLSearchParams(mapped).toString()}`
+      : "";
     const result = await this.request<{
       data: Array<{
         id: string;
@@ -416,7 +437,9 @@ export class StewardClient {
     }));
   }
 
-  async getAuditSummary(range?: "24h" | "7d" | "30d" | "all"): Promise<AuditSummary[]> {
+  async getAuditSummary(
+    range?: "24h" | "7d" | "30d" | "all",
+  ): Promise<AuditSummary[]> {
     const qs = range ? `?range=${range}` : "";
     const result = await this.request<{
       totalTransactions: number;
@@ -458,7 +481,9 @@ export class StewardClient {
     if (params?.result) mapped.status = params.result;
     if (params?.from) mapped.dateFrom = params.from;
     if (params?.to) mapped.dateTo = params.to;
-    const qs = Object.keys(mapped).length ? `?${new URLSearchParams(mapped).toString()}` : "";
+    const qs = Object.keys(mapped).length
+      ? `?${new URLSearchParams(mapped).toString()}`
+      : "";
     const res = await fetch(`${this.baseUrl}/audit/export${qs}`, {
       headers: this.headers,
     });
@@ -489,10 +514,13 @@ export class StewardClient {
     name: string,
     description?: string,
   ): Promise<{ tenantId: string; apiKey: string }> {
-    return this.request<{ tenantId: string; apiKey: string }>("/user/me/tenants", {
-      method: "POST",
-      body: JSON.stringify({ name, description }),
-    });
+    return this.request<{ tenantId: string; apiKey: string }>(
+      "/user/me/tenants",
+      {
+        method: "POST",
+        body: JSON.stringify({ name, description }),
+      },
+    );
   }
 
   async switchTenant(tenantId: string): Promise<void> {

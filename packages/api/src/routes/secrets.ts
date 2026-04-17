@@ -54,7 +54,10 @@ secretsRoutes.post("/", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(body.name)) {
@@ -62,7 +65,10 @@ secretsRoutes.post("/", async (c) => {
   }
 
   if (!isNonEmptyString(body.value)) {
-    return c.json<ApiResponse>({ ok: false, error: "'value' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'value' is required" },
+      400,
+    );
   }
 
   try {
@@ -75,9 +81,15 @@ secretsRoutes.post("/", async (c) => {
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     if (msg.includes("duplicate") || msg.includes("unique")) {
-      return c.json<ApiResponse>({ ok: false, error: `Secret "${body.name}" already exists` }, 409);
+      return c.json<ApiResponse>(
+        { ok: false, error: `Secret "${body.name}" already exists` },
+        409,
+      );
     }
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -129,17 +141,29 @@ secretsRoutes.post("/routes", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(body.secretId)) {
-    return c.json<ApiResponse>({ ok: false, error: "'secretId' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'secretId' is required" },
+      400,
+    );
   }
   if (!isNonEmptyString(body.hostPattern)) {
-    return c.json<ApiResponse>({ ok: false, error: "'hostPattern' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'hostPattern' is required" },
+      400,
+    );
   }
   if (!isNonEmptyString(body.injectAs)) {
-    return c.json<ApiResponse>({ ok: false, error: "'injectAs' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'injectAs' is required" },
+      400,
+    );
   }
   const validInjectAs = ["header", "query", "body"];
   if (!validInjectAs.includes(body.injectAs)) {
@@ -152,7 +176,10 @@ secretsRoutes.post("/routes", async (c) => {
     );
   }
   if (!isNonEmptyString(body.injectKey)) {
-    return c.json<ApiResponse>({ ok: false, error: "'injectKey' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'injectKey' is required" },
+      400,
+    );
   }
 
   try {
@@ -173,7 +200,10 @@ secretsRoutes.post("/routes", async (c) => {
     if (msg.includes("not found")) {
       return c.json<ApiResponse>({ ok: false, error: msg }, 404);
     }
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -221,7 +251,10 @@ secretsRoutes.put("/routes/:id", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (body.injectAs) {
@@ -316,7 +349,10 @@ secretsRoutes.put("/:id", async (c) => {
   const body = await safeJsonParse<{ value: string }>(c);
 
   if (!body || !isNonEmptyString(body.value)) {
-    return c.json<ApiResponse>({ ok: false, error: "'value' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'value' is required" },
+      400,
+    );
   }
 
   const sv = getSecretVault();
@@ -329,7 +365,10 @@ secretsRoutes.put("/:id", async (c) => {
     const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
     return c.json<ApiResponse>({ ok: true, data: rotated });
   } catch (e: unknown) {
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -374,7 +413,10 @@ secretsRoutes.post("/:id/rotate", async (c) => {
   const body = await safeJsonParse<{ value: string }>(c);
 
   if (!body || !isNonEmptyString(body.value)) {
-    return c.json<ApiResponse>({ ok: false, error: "'value' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'value' is required" },
+      400,
+    );
   }
 
   const sv = getSecretVault();
@@ -387,6 +429,9 @@ secretsRoutes.post("/:id/rotate", async (c) => {
     const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
     return c.json<ApiResponse>({ ok: true, data: rotated });
   } catch (e: unknown) {
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });

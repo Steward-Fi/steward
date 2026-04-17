@@ -84,7 +84,12 @@ export class MemoryBackend implements StoreBackend {
  * Keeping it narrow means @stwd/auth doesn't need ioredis as a direct dependency.
  */
 export interface RedisLike {
-  set(key: string, value: string, expiryMode: "PX", time: number): Promise<string | null>;
+  set(
+    key: string,
+    value: string,
+    expiryMode: "PX",
+    time: number,
+  ): Promise<string | null>;
   get(key: string): Promise<string | null>;
   del(...keys: string[]): Promise<number>;
 }

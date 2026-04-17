@@ -38,7 +38,9 @@ export class DCAStrategy implements Strategy {
     }
     this.buyAmount = BigInt(params.buyAmountWei);
     this.minInterval = params.minIntervalSeconds ?? 0;
-    this.minNativeReserve = BigInt(params.minNativeReserve ?? "10000000000000000"); // 0.01 ETH
+    this.minNativeReserve = BigInt(
+      params.minNativeReserve ?? "10000000000000000",
+    ); // 0.01 ETH
   }
 
   async evaluate(state: AgentState): Promise<TradeDecision> {
@@ -56,7 +58,9 @@ export class DCAStrategy implements Strategy {
 
     // Ensure we have enough to buy + keep gas reserve
     const spendable =
-      nativeBalance > this.minNativeReserve ? nativeBalance - this.minNativeReserve : 0n;
+      nativeBalance > this.minNativeReserve
+        ? nativeBalance - this.minNativeReserve
+        : 0n;
 
     if (spendable < this.buyAmount) {
       return {
@@ -76,7 +80,9 @@ export class DCAStrategy implements Strategy {
   }
 }
 
-export function createDCAStrategy(params: Record<string, unknown>): DCAStrategy {
+export function createDCAStrategy(
+  params: Record<string, unknown>,
+): DCAStrategy {
   if (!params.buyAmountWei) {
     throw new Error("DCA strategy requires buyAmountWei in params");
   }

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { keccak256, recoverAddress, recoverMessageAddress, toHex, verifyTypedData } from "viem";
+import {
+  keccak256,
+  recoverAddress,
+  recoverMessageAddress,
+  toHex,
+  verifyTypedData,
+} from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 import { KeyStore } from "../keystore";
@@ -225,7 +231,8 @@ describe("EIP-712 Typed Data Signing", () => {
       name: "TestToken",
       version: "1",
       chainId: 8453,
-      verifyingContract: "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC" as `0x${string}`,
+      verifyingContract:
+        "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC" as `0x${string}`,
     };
 
     const types = {
@@ -337,7 +344,8 @@ describe("Multi-Chain Routing", () => {
     const solAddress = generateSolanaKeypair().publicKey;
 
     // Vault's detectChainType logic (mirrored here for clarity)
-    const detectChainType = (addr: string) => (addr.startsWith("0x") ? "evm" : "solana");
+    const detectChainType = (addr: string) =>
+      addr.startsWith("0x") ? "evm" : "solana";
 
     expect(detectChainType(evmAddress)).toBe("evm");
     expect(detectChainType(solAddress)).toBe("solana");
@@ -381,7 +389,8 @@ describe("Solana Keypair", () => {
     const hexBytes = Buffer.from(kp.secretKey, "hex");
 
     // Encode as base58 (same alphabet as Solana uses)
-    const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    const ALPHABET =
+      "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     let num = BigInt(`0x${hexBytes.toString("hex")}`);
     let base58 = "";
     while (num > 0n) {

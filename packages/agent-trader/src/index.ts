@@ -65,9 +65,12 @@ async function main(): Promise<void> {
     await steward.listAgents();
     logInfo("Steward API reachable ✓");
   } catch (err) {
-    logWarn("Steward API connectivity check failed — will retry on first tick", {
-      error: err instanceof Error ? err.message : String(err),
-    });
+    logWarn(
+      "Steward API connectivity check failed — will retry on first tick",
+      {
+        error: err instanceof Error ? err.message : String(err),
+      },
+    );
   }
 
   // 3. Trading loops
@@ -83,7 +86,10 @@ async function main(): Promise<void> {
   }
 
   // 4. Webhook receiver
-  const webhookServer = createWebhookServer(config.webhookPort, config.webhookSecret);
+  const webhookServer = createWebhookServer(
+    config.webhookPort,
+    config.webhookSecret,
+  );
   registerDefaultHandlers(webhookServer);
 
   try {

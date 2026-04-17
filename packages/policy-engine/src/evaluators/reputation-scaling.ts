@@ -24,7 +24,10 @@ export interface ReputationScalingContext {
 /**
  * Compute the effective limit for a given reputation score and config.
  */
-export function computeScaledLimit(config: ReputationScalingConfig, score: number): bigint {
+export function computeScaledLimit(
+  config: ReputationScalingConfig,
+  score: number,
+): bigint {
   const base = BigInt(config.baseMaxPerTx);
   const max = BigInt(config.maxMaxPerTx);
   const clampedScore = Math.max(0, Math.min(score, 100));

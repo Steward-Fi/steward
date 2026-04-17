@@ -29,7 +29,9 @@ export function SpendDashboard({
   if (error) {
     return (
       <div className={`stwd-card stwd-spend-dashboard ${className || ""}`}>
-        <div className="stwd-error-text">Failed to load spend data: {error.message}</div>
+        <div className="stwd-error-text">
+          Failed to load spend data: {error.message}
+        </div>
       </div>
     );
   }
@@ -70,7 +72,9 @@ export function SpendDashboard({
     <div className={`stwd-card stwd-spend-dashboard ${className || ""}`}>
       <div className="stwd-spend-header">
         <h3 className="stwd-heading">Spend Dashboard</h3>
-        <span className="stwd-badge stwd-badge-muted">{getRangeLabel(stats.range)}</span>
+        <span className="stwd-badge stwd-badge-muted">
+          {getRangeLabel(stats.range)}
+        </span>
       </div>
 
       {/* Summary Stats */}
@@ -134,7 +138,8 @@ export function SpendDashboard({
               />
             </div>
             <div className="stwd-budget-bar-detail">
-              {stats.budgetUsage.weeklyUsed} / {stats.budgetUsage.weeklyLimit} wei
+              {stats.budgetUsage.weeklyUsed} / {stats.budgetUsage.weeklyLimit}{" "}
+              wei
             </div>
           </div>
         </div>
@@ -149,14 +154,20 @@ export function SpendDashboard({
               const maxSpent = Math.max(
                 ...stats.daily.map((d) => parseFloat(d.spentFormatted) || 0),
               );
-              const height = maxSpent > 0 ? (parseFloat(day.spentFormatted) / maxSpent) * 100 : 0;
+              const height =
+                maxSpent > 0
+                  ? (parseFloat(day.spentFormatted) / maxSpent) * 100
+                  : 0;
               return (
                 <div
                   key={day.date}
                   className="stwd-bar-col"
                   title={`${day.date}: ${day.spentFormatted} ETH (${day.txCount} txs)`}
                 >
-                  <div className="stwd-bar" style={{ height: `${Math.max(2, height)}%` }} />
+                  <div
+                    className="stwd-bar"
+                    style={{ height: `${Math.max(2, height)}%` }}
+                  />
                   <div className="stwd-bar-label">{day.date.slice(-5)}</div>
                 </div>
               );
@@ -172,9 +183,15 @@ export function SpendDashboard({
           <div className="stwd-destination-list">
             {stats.topDestinations.map((dest, i) => (
               <div key={i} className="stwd-destination-row">
-                <code className="stwd-address">{truncateAddress(dest.address)}</code>
-                <span className="stwd-destination-amount">{dest.totalSent} wei</span>
-                <span className="stwd-badge stwd-badge-muted">{dest.txCount} txs</span>
+                <code className="stwd-address">
+                  {truncateAddress(dest.address)}
+                </code>
+                <span className="stwd-destination-amount">
+                  {dest.totalSent} wei
+                </span>
+                <span className="stwd-badge stwd-badge-muted">
+                  {dest.txCount} txs
+                </span>
               </div>
             ))}
           </div>

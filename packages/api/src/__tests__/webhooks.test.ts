@@ -36,7 +36,9 @@ afterAll(async () => {
   if (SKIP) return;
   const db = getDb();
   // Clean up webhooks first (FK constraint)
-  await db.delete(webhookConfigs).where(eq(webhookConfigs.tenantId, TEST_TENANT));
+  await db
+    .delete(webhookConfigs)
+    .where(eq(webhookConfigs.tenantId, TEST_TENANT));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT));
 });
 
@@ -150,11 +152,14 @@ describe.skipIf(SKIP)("Webhook Configuration API", () => {
     });
 
     it("returns 404 for non-existent webhook", async () => {
-      const res = await fetch(`${BASE_URL}/webhooks/00000000-0000-0000-0000-000000000000`, {
-        method: "PUT",
-        headers: authHeaders(),
-        body: JSON.stringify({ enabled: false }),
-      });
+      const res = await fetch(
+        `${BASE_URL}/webhooks/00000000-0000-0000-0000-000000000000`,
+        {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify({ enabled: false }),
+        },
+      );
 
       expect(res.status).toBe(404);
     });
@@ -162,9 +167,12 @@ describe.skipIf(SKIP)("Webhook Configuration API", () => {
 
   describe("GET /webhooks/:id/deliveries", () => {
     it("returns empty list for new webhook", async () => {
-      const res = await fetch(`${BASE_URL}/webhooks/${createdWebhookId}/deliveries`, {
-        headers: authHeaders(),
-      });
+      const res = await fetch(
+        `${BASE_URL}/webhooks/${createdWebhookId}/deliveries`,
+        {
+          headers: authHeaders(),
+        },
+      );
 
       expect(res.status).toBe(200);
       const body = await res.json();

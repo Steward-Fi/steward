@@ -17,7 +17,9 @@ import path from "node:path";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const STEWARD_URL = (process.env.STEWARD_URL || "https://api.steward.fi").replace(/\/$/, "");
+const STEWARD_URL = (
+  process.env.STEWARD_URL || "https://api.steward.fi"
+).replace(/\/$/, "");
 
 function firstNonEmpty(...values: Array<string | null | undefined>): string {
   for (const value of values) {
@@ -46,7 +48,11 @@ function resolveStoredPlatformKey(): string {
     return "";
   }
 
-  const credentialsPath = path.join(homeDir, ".milady", "steward-credentials.json");
+  const credentialsPath = path.join(
+    homeDir,
+    ".milady",
+    "steward-credentials.json",
+  );
   if (!existsSync(credentialsPath)) {
     return "";
   }
@@ -106,7 +112,9 @@ function fail(name: string, detail: string) {
 
 function skip(name: string, reason: string) {
   results.push({ name, status: "skip", detail: reason });
-  console.log(`${C.yellow}⚠️  SKIP:${C.reset} ${name} ${C.dim}(${reason})${C.reset}`);
+  console.log(
+    `${C.yellow}⚠️  SKIP:${C.reset} ${name} ${C.dim}(${reason})${C.reset}`,
+  );
 }
 
 // ─── HTTP helper with timeout ────────────────────────────────────────────────
@@ -180,7 +188,10 @@ async function testHealthAndReady() {
   try {
     const { status, data } = await api("GET", "/health");
     if (status === 200 && data?.status === "ok") {
-      pass("Health check", `v${data.version || "?"}, uptime ${data.uptime || "?"}s`);
+      pass(
+        "Health check",
+        `v${data.version || "?"}, uptime ${data.uptime || "?"}s`,
+      );
     } else {
       fail("Health check", `status=${status}, body=${JSON.stringify(data)}`);
       return false;
@@ -235,13 +246,21 @@ async function testProviderDiscovery() {
 
     // Validate shape: must have passkey, email, siwe as booleans
     const requiredBools = ["passkey", "email", "siwe", "google", "discord"];
-    const missingKeys = requiredBools.filter((k) => typeof data[k] !== "boolean");
+    const missingKeys = requiredBools.filter(
+      (k) => typeof data[k] !== "boolean",
+    );
     if (missingKeys.length > 0) {
-      fail("Provider discovery", `missing boolean keys: ${missingKeys.join(", ")}`);
+      fail(
+        "Provider discovery",
+        `missing boolean keys: ${missingKeys.join(", ")}`,
+      );
       return;
     }
     if (!Array.isArray(data.oauth)) {
-      fail("Provider discovery", `oauth should be string[], got ${typeof data.oauth}`);
+      fail(
+        "Provider discovery",
+        `oauth should be string[], got ${typeof data.oauth}`,
+      );
       return;
     }
 
@@ -257,12 +276,19 @@ async function testProviderDiscovery() {
  */
 async function testPasskeyRegistrationOptions() {
   try {
-    const { status, data } = await api("POST", "/auth/passkey/register/options", {
-      body: { email: "e2e-test@steward.fi" },
-    });
+    const { status, data } = await api(
+      "POST",
+      "/auth/passkey/register/options",
+      {
+        body: { email: "e2e-test@steward.fi" },
+      },
+    );
 
     if (status === 404) {
-      skip("Passkey registration options", "endpoint not deployed on this version");
+      skip(
+        "Passkey registration options",
+        "endpoint not deployed on this version",
+      );
       return;
     }
     if (status !== 200) {
@@ -274,7 +300,8 @@ async function testPasskeyRegistrationOptions() {
     }
 
     // WebAuthn creation options should have challenge, rp, user fields
-    const hasChallenge = typeof data.challenge === "string" && data.challenge.length > 0;
+    const hasChallenge =
+      typeof data.challenge === "string" && data.challenge.length > 0;
     const hasRp = data.rp && typeof data.rp.name === "string";
     const hasUser = data.user && typeof data.user.name === "string";
 
@@ -316,9 +343,15 @@ async function testEmailMagicLink() {
       // The endpoint exists and responded, even if it failed for config reasons
       // If we got a structured error, the endpoint works
       if (data?.ok === false || data?.error) {
-        skip("Email magic link", `endpoint exists but: ${data.error || "not configured"}`);
+        skip(
+          "Email magic link",
+          `endpoint exists but: ${data.error || "not configured"}`,
+        );
       } else {
-        fail("Email magic link", `unexpected: status=${status}, body=${JSON.stringify(data)}`);
+        fail(
+          "Email magic link",
+          `unexpected: status=${status}, body=${JSON.stringify(data)}`,
+        );
       }
     }
   } catch (e: any) {
@@ -342,7 +375,8 @@ async function testOAuthAuthorize(provider: "google" | "discord") {
       // Verify redirect URL contains expected OAuth params
       const url = new URL(redirectUrl);
       const hasClientId =
-        url.searchParams.has("client_id") || url.searchParams.has("response_type");
+        url.searchParams.has("client_id") ||
+        url.searchParams.has("response_type");
       if (hasClientId) {
         pass(testName, `redirects to ${url.hostname}`);
       } else {
@@ -373,7 +407,11 @@ async function testSiweNonce() {
   try {
     const { status, data } = await api("GET", "/auth/nonce");
 
-    if (status === 200 && typeof data?.nonce === "string" && data.nonce.length > 0) {
+    if (
+      status === 200 &&
+      typeof data?.nonce === "string" &&
+      data.nonce.length > 0
+    ) {
       pass("SIWE nonce generation", `nonce=${data.nonce.slice(0, 12)}...`);
     } else {
       fail("SIWE nonce generation", `status=${status}, nonce=${data?.nonce}`);
@@ -402,7 +440,10 @@ async function testTokenRefreshRejection() {
     } else if (status === 404) {
       skip("Token refresh rejection", "endpoint not deployed on this version");
     } else {
-      fail("Token refresh rejection", `expected 401, got ${status}: ${JSON.stringify(data)}`);
+      fail(
+        "Token refresh rejection",
+        `expected 401, got ${status}: ${JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Token refresh rejection", e.message);
@@ -430,7 +471,10 @@ async function testCrossTenant() {
       headers: platformHeaders,
     });
 
-    if (createRes.status === 201 || (createRes.status === 200 && createRes.data?.ok)) {
+    if (
+      createRes.status === 201 ||
+      (createRes.status === 200 && createRes.data?.ok)
+    ) {
       tenantCreated = true;
     } else if (createRes.status === 409) {
       // Already exists (from a previous failed run), that's fine
@@ -448,10 +492,16 @@ async function testCrossTenant() {
       headers: { "X-Steward-Tenant": TEST_TENANT_ID },
     });
 
-    if (providersRes.status === 200 && typeof providersRes.data?.passkey === "boolean") {
+    if (
+      providersRes.status === 200 &&
+      typeof providersRes.data?.passkey === "boolean"
+    ) {
       pass(testName, `tenant=${TEST_TENANT_ID}, providers ok`);
     } else {
-      fail(testName, `providers with tenant header: status=${providersRes.status}`);
+      fail(
+        testName,
+        `providers with tenant header: status=${providersRes.status}`,
+      );
     }
   } catch (e: any) {
     fail(testName, e.message);
@@ -486,7 +536,10 @@ async function testUserEndpointsRequireAuth() {
       if (status === 401) {
         // Good, endpoint requires auth
       } else {
-        fail(`User endpoints require auth`, `${ep.label} returned ${status}, expected 401`);
+        fail(
+          `User endpoints require auth`,
+          `${ep.label} returned ${status}, expected 401`,
+        );
         allPassed = false;
       }
     } catch (e: any) {
@@ -496,7 +549,10 @@ async function testUserEndpointsRequireAuth() {
   }
 
   if (allPassed) {
-    pass("User endpoints require auth", "/user/me and /user/me/tenants both return 401");
+    pass(
+      "User endpoints require auth",
+      "/user/me and /user/me/tenants both return 401",
+    );
   }
 }
 

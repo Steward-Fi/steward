@@ -11,7 +11,8 @@ const BASE_URL = `http://localhost:${TEST_PORT}`;
 
 // Use the dev platform key configured in STEWARD_PLATFORM_KEYS
 const PLATFORM_KEY =
-  (process.env.STEWARD_PLATFORM_KEYS ?? "").split(",")[0].trim() || "dev-platform-key";
+  (process.env.STEWARD_PLATFORM_KEYS ?? "").split(",")[0].trim() ||
+  "dev-platform-key";
 
 const TEST_EMAIL_NEW = `platform-users-test-new-${Date.now()}@example.com`;
 const TEST_EMAIL_EXISTING = `platform-users-test-existing-${Date.now()}@example.com`;

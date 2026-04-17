@@ -14,10 +14,20 @@
 
 import type { StewardApiError, StewardClient } from "@stwd/sdk";
 import type { AgentTraderConfig, TraderConfig } from "./config.js";
-import { logDecision, logError, logInfo, logSubmission, logWarn } from "./logger.js";
+import {
+  logDecision,
+  logError,
+  logInfo,
+  logSubmission,
+  logWarn,
+} from "./logger.js";
 import { fetchAgentState } from "./state.js";
 import { resolveStrategy } from "./strategies/index.js";
-import type { AgentState, Strategy, TradeDecision } from "./strategies/types.js";
+import type {
+  AgentState,
+  Strategy,
+  TradeDecision,
+} from "./strategies/types.js";
 import { buildSwapTx, toSignInput } from "./trade-builder.js";
 
 // ─── Loop handle ─────────────────────────────────────────────────────────────
@@ -31,7 +41,10 @@ export interface AgentLoop {
 
 const walletCache = new Map<string, string>(); // agentId → walletAddress
 
-async function resolveWallet(steward: StewardClient, agentId: string): Promise<string | null> {
+async function resolveWallet(
+  steward: StewardClient,
+  agentId: string,
+): Promise<string | null> {
   const cachedWallet = walletCache.get(agentId);
   if (cachedWallet) return cachedWallet;
 
@@ -143,10 +156,13 @@ async function runTick(
         dataLen: builtTx.data.length,
         chainId,
       });
-      logInfo("Transaction queued for human approval — will execute on approval webhook", {
-        agentId,
-        policyResults: result.results,
-      });
+      logInfo(
+        "Transaction queued for human approval — will execute on approval webhook",
+        {
+          agentId,
+          policyResults: result.results,
+        },
+      );
     } else if ("signedTx" in result) {
       logSubmission({
         agentId,
@@ -196,7 +212,12 @@ export function startAgentLoop(
   steward: StewardClient,
   globalConfig: TraderConfig,
 ): AgentLoop {
-  const { agentId, strategy: strategyName, params, intervalSeconds } = agentConfig;
+  const {
+    agentId,
+    strategy: strategyName,
+    params,
+    intervalSeconds,
+  } = agentConfig;
 
   const strategy = resolveStrategy(strategyName, params);
 
@@ -254,7 +275,9 @@ export function startAgentLoop(
     stop: () => {
       stopped = true;
       clearTimeout(initialTimer);
-      logInfo(`Stopped trading loop for agent "${agentId}" (before first tick)`);
+      logInfo(
+        `Stopped trading loop for agent "${agentId}" (before first tick)`,
+      );
     },
   };
 

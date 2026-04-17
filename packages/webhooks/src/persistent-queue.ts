@@ -41,7 +41,10 @@ export class PersistentQueue {
   private readonly maxAttempts: number;
   private readonly batchSize: number;
 
-  constructor(dispatcher = new WebhookDispatcher(), options: PersistentQueueOptions = {}) {
+  constructor(
+    dispatcher = new WebhookDispatcher(),
+    options: PersistentQueueOptions = {},
+  ) {
     this.dispatcher = dispatcher;
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.batchSize = options.batchSize ?? 50;
@@ -51,7 +54,10 @@ export class PersistentQueue {
    * Enqueue a webhook delivery to the database.
    * Returns the delivery ID.
    */
-  async enqueue(event: WebhookEvent, webhook: WebhookConfig | string): Promise<string> {
+  async enqueue(
+    event: WebhookEvent,
+    webhook: WebhookConfig | string,
+  ): Promise<string> {
     const db = getDb();
     const url = typeof webhook === "string" ? webhook : webhook.url;
 

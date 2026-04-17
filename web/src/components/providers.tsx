@@ -7,7 +7,8 @@ import { setAuthToken, steward } from "@/lib/api";
 // Pre-import @simplewebauthn/browser so it's in the client bundle.
 import "@simplewebauthn/browser";
 
-const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
+const API_URL =
+  process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
 
 /**
  * Syncs the Steward auth JWT into the legacy API client once.

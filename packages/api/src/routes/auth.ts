@@ -72,7 +72,10 @@ const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
 // ─── IP-based auth rate limiting ─────────────────────────────────────────────
 
 // In-memory fallback store for when Redis is unavailable
-const _authRateLimitStore = new Map<string, { count: number; resetAt: number }>();
+const _authRateLimitStore = new Map<
+  string,
+  { count: number; resetAt: number }
+>();
 
 /**
  * Check a per-IP rate limit for auth endpoints.
@@ -90,7 +93,9 @@ async function checkAuthRateLimit(
   max: number,
 ): Promise<{ allowed: boolean; retryAfterSecs?: number }> {
   const ip =
-    c.req.header("x-forwarded-for")?.split(",")[0].trim() ?? c.req.header("x-real-ip") ?? "unknown";
+    c.req.header("x-forwarded-for")?.split(",")[0].trim() ??
+    c.req.header("x-real-ip") ??
+    "unknown";
   const key = `ratelimit:auth:${endpoint}:${ip}:${windowMs}`;
 
   // Try Redis first
@@ -132,8 +137,12 @@ async function checkAuthRateLimit(
 
 // JWT secret: all modules MUST use STEWARD_SESSION_SECRET (with STEWARD_MASTER_PASSWORD fallback)
 // to ensure tokens minted by auth routes validate in user routes and vice versa.
-const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
-if (!process.env.STEWARD_SESSION_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
+const jwtSecretSource =
+  process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+if (
+  !process.env.STEWARD_SESSION_SECRET &&
+  process.env.STEWARD_MASTER_PASSWORD
+) {
   console.warn(
     "⚠️ STEWARD_SESSION_SECRET not set, falling back to master password. Set a separate JWT secret for production.",
   );
@@ -181,11 +190,16 @@ function hashToken(raw: string): string {
  * Generate a random refresh token, persist its hash in DB, return the raw value.
  * The raw token is sent to the client; only the hash is stored server-side.
  */
-async function createRefreshToken(userId: string, tenantId: string): Promise<string> {
+async function createRefreshToken(
+  userId: string,
+  tenantId: string,
+): Promise<string> {
   const db = getDb();
   const raw = randomBytes(40).toString("hex");
   const id = randomBytes(16).toString("hex");
-  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
+  const expiresAt = new Date(
+    Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+  );
   await db
     .insert(refreshTokens)
     .values({ id, userId, tenantId, tokenHash: hashToken(raw), expiresAt });
@@ -201,7 +215,10 @@ async function validateRefreshToken(
 ): Promise<typeof refreshTokens.$inferSelect | null> {
   const db = getDb();
   const hash = hashToken(raw);
-  const [record] = await db.select().from(refreshTokens).where(eq(refreshTokens.tokenHash, hash));
+  const [record] = await db
+    .select()
+    .from(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, hash));
   if (!record) return null;
   if (record.expiresAt < new Date()) {
     await db.delete(refreshTokens).where(eq(refreshTokens.id, record.id));
@@ -285,7 +302,9 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
     buildBackend("token", redisClient, usePostgres),
   ]);
 
-  console.log(`[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}`);
+  console.log(
+    `[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}`,
+  );
 
   _challengeStore = new ChallengeStore({ backend: challengeBackend });
   _tokenStore = new TokenStore({ backend: tokenBackend });
@@ -456,7 +475,9 @@ async function resolveAndValidateTenant(
   const [existingLink] = await db
     .select({ id: userTenants.id })
     .from(userTenants)
-    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, requested)));
+    .where(
+      and(eq(userTenants.userId, userId), eq(userTenants.tenantId, requested)),
+    );
 
   if (existingLink) {
     return { ok: true, tenantId: requested, isPersonal: false };
@@ -492,11 +513,19 @@ async function resolveAndValidateTenant(
 
 // ─── User / tenant provisioning helpers ──────────────────────────────────────
 
-async function findOrCreateUser(email: string): Promise<typeof users.$inferSelect> {
+async function findOrCreateUser(
+  email: string,
+): Promise<typeof users.$inferSelect> {
   const db = getDb();
-  const [existing] = await db.select().from(users).where(eq(users.email, email));
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(eq(users.email, email));
   if (existing) return existing;
-  const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
+  const [newUser] = await db
+    .insert(users)
+    .values({ email, emailVerified: false })
+    .returning();
   return newUser;
 }
 
@@ -505,7 +534,10 @@ async function findOrCreateUser(email: string): Promise<typeof users.$inferSelec
  * Used as a fallback when no explicit tenant is requested AND as the home for
  * the user's provisioned wallet agent (wallet always lives under personal tenant).
  */
-async function ensurePersonalTenant(userId: string, displayName: string): Promise<string> {
+async function ensurePersonalTenant(
+  userId: string,
+  displayName: string,
+): Promise<string> {
   const db = getDb();
   const tenantId = `personal-${userId}`;
   const { hash } = generateApiKey();
@@ -527,7 +559,10 @@ async function ensureUserTenantLink(
   role: string = "member",
 ): Promise<void> {
   const db = getDb();
-  await db.insert(userTenants).values({ userId, tenantId, role }).onConflictDoNothing();
+  await db
+    .insert(userTenants)
+    .values({ userId, tenantId, role })
+    .onConflictDoNothing();
 }
 
 /**
@@ -542,7 +577,12 @@ async function provisionWalletForUser(
 ): Promise<{ walletAddress: string; personalTenantId: string }> {
   const personalTenantId = await ensurePersonalTenant(userId, email);
   const vault = getVault();
-  const result = await provisionUserWallet(vault, userId, email, personalTenantId);
+  const result = await provisionUserWallet(
+    vault,
+    userId,
+    email,
+    personalTenantId,
+  );
   const db = getDb();
   await db
     .update(users)
@@ -595,20 +635,29 @@ auth.post("/verify", async (c) => {
   const db = getDb();
   const body = await safeJsonParse<{ message: string; signature: string }>(c);
   if (!body?.message || !body?.signature) {
-    return c.json<ApiResponse>({ ok: false, error: "message and signature are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "message and signature are required" },
+      400,
+    );
   }
 
   let siweMessage: SiweMessage;
   try {
     siweMessage = new SiweMessage(body.message);
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid SIWE message format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid SIWE message format" },
+      400,
+    );
   }
 
   const storedNonce = nonceStore.get(siweMessage.nonce);
   if (!storedNonce || storedNonce.expiresAt <= Date.now()) {
     nonceStore.delete(siweMessage.nonce);
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired nonce" },
+      401,
+    );
   }
 
   try {
@@ -624,7 +673,10 @@ auth.post("/verify", async (c) => {
   let isNewTenant = false;
   let rawApiKey: string | undefined;
 
-  const [existingTenant] = await db.select().from(tenants).where(eq(tenants.ownerAddress, address));
+  const [existingTenant] = await db
+    .select()
+    .from(tenants)
+    .where(eq(tenants.ownerAddress, address));
 
   let tenant = existingTenant;
 
@@ -655,7 +707,10 @@ auth.post("/verify", async (c) => {
         tenant = retryTenant;
         isNewTenant = false;
       } else {
-        return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
+        return c.json<ApiResponse>(
+          { ok: false, error: "Failed to create tenant" },
+          500,
+        );
       }
     } else {
       tenant = newTenant;
@@ -678,9 +733,15 @@ auth.post("/verify", async (c) => {
   const token = await createSessionToken(address, effectiveTenantId);
 
   // For SIWE, find a user by wallet address (may not exist if SIWE-only user)
-  const [siweUser] = await db.select().from(users).where(eq(users.walletAddress, address));
+  const [siweUser] = await db
+    .select()
+    .from(users)
+    .where(eq(users.walletAddress, address));
   const siweUserId = siweUser?.id ?? tenant.id; // fall back to tenant.id as a stable identifier
-  const siweRefreshToken = await createRefreshToken(siweUserId, effectiveTenantId);
+  const siweRefreshToken = await createRefreshToken(
+    siweUserId,
+    effectiveTenantId,
+  );
 
   const responseData: Record<string, unknown> = {
     ok: true,
@@ -704,7 +765,8 @@ auth.post("/verify", async (c) => {
  */
 auth.get("/session", async (c) => {
   const authHeader = c.req.header("Authorization");
-  if (!authHeader?.startsWith("Bearer ")) return c.json({ authenticated: false });
+  if (!authHeader?.startsWith("Bearer "))
+    return c.json({ authenticated: false });
 
   const token = authHeader.slice(7);
   const payload = await verifySessionToken(token);
@@ -741,12 +803,18 @@ auth.post("/refresh", async (c) => {
   }
   const body = await safeJsonParse<{ refreshToken: string }>(c);
   if (!body?.refreshToken) {
-    return c.json<ApiResponse>({ ok: false, error: "refreshToken is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "refreshToken is required" },
+      400,
+    );
   }
 
   const record = await validateRefreshToken(body.refreshToken);
   if (!record) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired refresh token" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired refresh token" },
+      401,
+    );
   }
 
   const db = getDb();
@@ -754,18 +822,28 @@ auth.post("/refresh", async (c) => {
   await db.delete(refreshTokens).where(eq(refreshTokens.id, record.id));
 
   // Fetch user for token claims
-  const [user] = await db.select().from(users).where(eq(users.id, record.userId));
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, record.userId));
   const walletAddress = user?.walletAddress ?? "";
   const email = user?.email ?? undefined;
 
   // Issue new access token (15min)
-  const newAccessToken = await createSessionToken(walletAddress, record.tenantId, {
-    userId: record.userId,
-    ...(email ? { email } : {}),
-  });
+  const newAccessToken = await createSessionToken(
+    walletAddress,
+    record.tenantId,
+    {
+      userId: record.userId,
+      ...(email ? { email } : {}),
+    },
+  );
 
   // Issue new refresh token (rotation)
-  const newRefreshToken = await createRefreshToken(record.userId, record.tenantId);
+  const newRefreshToken = await createRefreshToken(
+    record.userId,
+    record.tenantId,
+  );
 
   return c.json({
     ok: true,
@@ -783,11 +861,16 @@ auth.post("/refresh", async (c) => {
 auth.post("/revoke", async (c) => {
   const body = await safeJsonParse<{ refreshToken: string }>(c);
   if (!body?.refreshToken) {
-    return c.json<ApiResponse>({ ok: false, error: "refreshToken is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "refreshToken is required" },
+      400,
+    );
   }
 
   const db = getDb();
-  await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
+  await db
+    .delete(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -800,20 +883,31 @@ auth.post("/revoke", async (c) => {
 auth.delete("/sessions", async (c) => {
   const authHeader = c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    return c.json<ApiResponse>({ ok: false, error: "Authorization header required" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Authorization header required" },
+      401,
+    );
   }
 
   const payload = await verifySessionToken(authHeader.slice(7));
   if (!payload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired token" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired token" },
+      401,
+    );
   }
 
   if (!payload.userId) {
-    return c.json<ApiResponse>({ ok: false, error: "Token does not contain userId" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Token does not contain userId" },
+      400,
+    );
   }
 
   const db = getDb();
-  await db.delete(refreshTokens).where(eq(refreshTokens.userId, payload.userId));
+  await db
+    .delete(refreshTokens)
+    .where(eq(refreshTokens.userId, payload.userId));
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -840,7 +934,9 @@ auth.post("/passkey/register/options", async (c) => {
     .from(authenticators)
     .where(eq(authenticators.userId, user.id));
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateRegistrationOptions(
+  const options = await getPasskeyAuth(
+    c.req.header("origin"),
+  ).generateRegistrationOptions(
     user.id,
     email,
     existingCreds.map((cred) => cred.credentialId),
@@ -870,7 +966,10 @@ auth.post("/passkey/register/verify", async (c) => {
   }>(c);
 
   if (!body?.email || !body?.response) {
-    return c.json<ApiResponse>({ ok: false, error: "email and response are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "email and response are required" },
+      400,
+    );
   }
 
   const email = body.email.toLowerCase().trim();
@@ -889,9 +988,13 @@ auth.post("/passkey/register/verify", async (c) => {
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyRegistration"]>>;
   try {
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyRegistration(
+    verification = await getPasskeyAuth(
+      c.req.header("origin"),
+    ).verifyRegistration(
       user.id,
-      body.response as unknown as Parameters<PasskeyAuth["verifyRegistration"]>[1],
+      body.response as unknown as Parameters<
+        PasskeyAuth["verifyRegistration"]
+      >[1],
     );
   } catch (err) {
     return c.json<ApiResponse>(
@@ -904,10 +1007,14 @@ auth.post("/passkey/register/verify", async (c) => {
   }
 
   if (!verification.verified || !verification.registrationInfo) {
-    return c.json<ApiResponse>({ ok: false, error: "Registration verification failed" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Registration verification failed" },
+      400,
+    );
   }
 
-  const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
+  const { credential, credentialDeviceType, credentialBackedUp } =
+    verification.registrationInfo;
 
   await db
     .insert(authenticators)
@@ -919,11 +1026,15 @@ auth.post("/passkey/register/verify", async (c) => {
       credentialDeviceType,
       credentialBackedUp,
       transports:
-        (body.response.response as { transports?: string[] } | undefined)?.transports ?? [],
+        (body.response.response as { transports?: string[] } | undefined)
+          ?.transports ?? [],
     })
     .onConflictDoNothing();
 
-  await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
+  await db
+    .update(users)
+    .set({ emailVerified: true })
+    .where(eq(users.id, user.id));
 
   // Provision the user's personal wallet (idempotent)
   let walletAddress = user.walletAddress;
@@ -935,9 +1046,16 @@ auth.post("/passkey/register/verify", async (c) => {
   }
 
   // Resolve which tenant this auth is for and link the user
-  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  const tenantResult = await resolveAndValidateTenant(
+    c,
+    user.id,
+    body.tenantId,
+  );
   if (!tenantResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+    return c.json<ApiResponse>(
+      { ok: false, error: tenantResult.error },
+      tenantResult.status,
+    );
   }
   const { tenantId } = tenantResult;
   await ensureUserTenantLink(user.id, tenantId);
@@ -975,7 +1093,10 @@ auth.post("/passkey/login/options", async (c) => {
 
   const [user] = await db.select().from(users).where(eq(users.email, email));
   if (!user) {
-    return c.json<ApiResponse>({ ok: false, error: "No account found for this email" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "No account found for this email" },
+      404,
+    );
   }
 
   const creds = await db
@@ -984,15 +1105,17 @@ auth.post("/passkey/login/options", async (c) => {
     .where(eq(authenticators.userId, user.id));
 
   if (creds.length === 0) {
-    return c.json<ApiResponse>({ ok: false, error: "No passkeys registered for this email" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "No passkeys registered for this email" },
+      404,
+    );
   }
 
-  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
-    email,
-    {
-      allowCredentials: creds.map((cred) => ({ id: cred.credentialId })),
-    },
-  );
+  const options = await getPasskeyAuth(
+    c.req.header("origin"),
+  ).generateAuthenticationOptions(email, {
+    allowCredentials: creds.map((cred) => ({ id: cred.credentialId })),
+  });
 
   return c.json(options);
 });
@@ -1018,7 +1141,10 @@ auth.post("/passkey/login/verify", async (c) => {
   }>(c);
 
   if (!body?.email || !body?.response) {
-    return c.json<ApiResponse>({ ok: false, error: "email and response are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "email and response are required" },
+      400,
+    );
   }
 
   const email = body.email.toLowerCase().trim();
@@ -1033,17 +1159,27 @@ auth.post("/passkey/login/verify", async (c) => {
     .select()
     .from(authenticators)
     .where(
-      and(eq(authenticators.userId, user.id), eq(authenticators.credentialId, body.response.id)),
+      and(
+        eq(authenticators.userId, user.id),
+        eq(authenticators.credentialId, body.response.id),
+      ),
     );
 
   if (!cred) {
-    return c.json<ApiResponse>({ ok: false, error: "Credential not found" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Credential not found" },
+      404,
+    );
   }
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   try {
-    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
-      body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
+    verification = await getPasskeyAuth(
+      c.req.header("origin"),
+    ).verifyAuthentication(
+      body.response as unknown as Parameters<
+        PasskeyAuth["verifyAuthentication"]
+      >[0],
       undefined,
       cred.credentialPublicKey,
       cred.counter,
@@ -1060,7 +1196,10 @@ auth.post("/passkey/login/verify", async (c) => {
   }
 
   if (!verification.verified) {
-    return c.json<ApiResponse>({ ok: false, error: "Authentication verification failed" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Authentication verification failed" },
+      401,
+    );
   }
 
   // Update counter to prevent replay attacks
@@ -1084,9 +1223,16 @@ auth.post("/passkey/login/verify", async (c) => {
   }
 
   // Resolve the requesting tenant and auto-link if user isn't already a member
-  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  const tenantResult = await resolveAndValidateTenant(
+    c,
+    user.id,
+    body.tenantId,
+  );
   if (!tenantResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+    return c.json<ApiResponse>(
+      { ok: false, error: tenantResult.error },
+      tenantResult.status,
+    );
   }
   const { tenantId } = tenantResult;
   await ensureUserTenantLink(user.id, tenantId);
@@ -1148,19 +1294,28 @@ auth.post("/email/verify", async (c) => {
     tenantId?: string;
   }>(c);
   if (!body?.token || !body?.email) {
-    return c.json<ApiResponse>({ ok: false, error: "token and email are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "token and email are required" },
+      400,
+    );
   }
 
   const email = body.email.toLowerCase().trim();
   const result = await getEmailAuth().verifyMagicLink(body.token);
 
   if (!result.valid || result.email !== email) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired magic link" },
+      401,
+    );
   }
 
   const user = await findOrCreateUser(email);
   const db = getDb();
-  await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
+  await db
+    .update(users)
+    .set({ emailVerified: true })
+    .where(eq(users.id, user.id));
 
   // Provision wallet (idempotent, always under personal tenant)
   let walletAddress = user.walletAddress;
@@ -1172,9 +1327,16 @@ auth.post("/email/verify", async (c) => {
   }
 
   // Resolve requesting tenant and link user
-  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  const tenantResult = await resolveAndValidateTenant(
+    c,
+    user.id,
+    body.tenantId,
+  );
   if (!tenantResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+    return c.json<ApiResponse>(
+      { ok: false, error: tenantResult.error },
+      tenantResult.status,
+    );
   }
   const { tenantId } = tenantResult;
   await ensureUserTenantLink(user.id, tenantId);
@@ -1227,7 +1389,10 @@ auth.get("/providers", (c) => {
 auth.get("/oauth/:provider/authorize", async (c) => {
   const providerName = c.req.param("provider");
   if (!isBuiltInProvider(providerName)) {
-    return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Unknown provider: ${providerName}` },
+      400,
+    );
   }
 
   let oauthClient: OAuthClient;
@@ -1247,7 +1412,10 @@ auth.get("/oauth/:provider/authorize", async (c) => {
   const tenantId = c.req.query("tenant_id");
 
   if (!redirectUri) {
-    return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "redirect_uri is required" },
+      400,
+    );
   }
 
   // Generate a cryptographically random state value
@@ -1258,7 +1426,10 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     .join("");
 
   const callbackUrl = buildOAuthCallbackUrl(c, providerName);
-  const { url: authUrl, codeVerifier } = oauthClient.generateAuthUrl(state, callbackUrl);
+  const { url: authUrl, codeVerifier } = oauthClient.generateAuthUrl(
+    state,
+    callbackUrl,
+  );
 
   // Store state metadata in the challenge store — include PKCE verifier when present
   const statePayload = JSON.stringify({
@@ -1292,21 +1463,33 @@ auth.get("/oauth/:provider/callback", async (c) => {
   const errorParam = c.req.query("error");
 
   if (errorParam) {
-    return c.json<ApiResponse>({ ok: false, error: `OAuth error: ${errorParam}` }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: `OAuth error: ${errorParam}` },
+      400,
+    );
   }
 
   if (!isBuiltInProvider(providerName)) {
-    return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Unknown provider: ${providerName}` },
+      400,
+    );
   }
 
   if (!code || !state) {
-    return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "code and state are required" },
+      400,
+    );
   }
 
   // Validate and consume the state (one-time use)
   const rawPayload = await getChallengeStore().consume(`oauth:${state}`);
   if (!rawPayload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OAuth state" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired OAuth state" },
+      401,
+    );
   }
 
   let stateData: {
@@ -1318,11 +1501,17 @@ auth.get("/oauth/:provider/callback", async (c) => {
   try {
     stateData = JSON.parse(rawPayload) as typeof stateData;
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Malformed OAuth state payload" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Malformed OAuth state payload" },
+      400,
+    );
   }
 
   if (stateData.provider !== providerName) {
-    return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Provider mismatch in state" },
+      400,
+    );
   }
 
   let oauthClient: OAuthClient;
@@ -1343,7 +1532,11 @@ auth.get("/oauth/:provider/callback", async (c) => {
   // Exchange code for access token — pass codeVerifier for PKCE providers (e.g. Twitter)
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
-    tokenResponse = await oauthClient.exchangeCode(code, callbackUrl, stateData.codeVerifier);
+    tokenResponse = await oauthClient.exchangeCode(
+      code,
+      callbackUrl,
+      stateData.codeVerifier,
+    );
   } catch (err) {
     return c.json<ApiResponse>(
       {
@@ -1414,7 +1607,10 @@ auth.get("/oauth/:provider/callback", async (c) => {
 auth.post("/oauth/:provider/token", async (c) => {
   const providerName = c.req.param("provider");
   if (!isBuiltInProvider(providerName)) {
-    return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Unknown provider: ${providerName}` },
+      400,
+    );
   }
 
   const body = await safeJsonParse<{
@@ -1425,7 +1621,10 @@ auth.post("/oauth/:provider/token", async (c) => {
   }>(c);
 
   if (!body?.code || !body?.redirectUri) {
-    return c.json<ApiResponse>({ ok: false, error: "code and redirectUri are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "code and redirectUri are required" },
+      400,
+    );
   }
 
   let oauthClient: OAuthClient;
@@ -1443,7 +1642,11 @@ auth.post("/oauth/:provider/token", async (c) => {
 
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
   try {
-    tokenResponse = await oauthClient.exchangeCode(body.code, body.redirectUri, body.codeVerifier);
+    tokenResponse = await oauthClient.exchangeCode(
+      body.code,
+      body.redirectUri,
+      body.codeVerifier,
+    );
   } catch (err) {
     return c.json<ApiResponse>(
       {
@@ -1495,7 +1698,11 @@ auth.post("/oauth/:provider/token", async (c) => {
   }
 
   return c.json(
-    buildAuthResponse(result.token, result.refreshToken, result.user as Record<string, unknown>),
+    buildAuthResponse(
+      result.token,
+      result.refreshToken,
+      result.user as Record<string, unknown>,
+    ),
   );
 });
 
@@ -1530,8 +1737,10 @@ async function provisionOAuthUser(opts: {
     // Update name/image if we have richer data from the provider and the user doesn't have it yet
     const updates: Partial<typeof users.$inferInsert> = {};
     if (!user.name && providerUser.name) updates.name = providerUser.name;
-    if (!user.image && providerUser.picture) updates.image = providerUser.picture;
-    if (!user.emailVerified && providerUser.verified_email) updates.emailVerified = true;
+    if (!user.image && providerUser.picture)
+      updates.image = providerUser.picture;
+    if (!user.emailVerified && providerUser.verified_email)
+      updates.emailVerified = true;
     if (Object.keys(updates).length > 0) {
       await db.update(users).set(updates).where(eq(users.id, user.id));
     }
@@ -1567,7 +1776,10 @@ async function provisionOAuthUser(opts: {
       const w = await provisionWalletForUser(user.id, email);
       walletAddress = w.walletAddress;
     } catch (err) {
-      console.error(`[OAuthAuth:${providerName}] Wallet provision failed:`, err);
+      console.error(
+        `[OAuthAuth:${providerName}] Wallet provision failed:`,
+        err,
+      );
     }
 
     // 4. Resolve requesting tenant and link user
@@ -1579,11 +1791,18 @@ async function provisionOAuthUser(opts: {
     await ensureUserTenantLink(user.id, resolvedTenantId);
 
     // 5. Mint JWT + refresh token
-    const token = await createSessionToken(walletAddress ?? "", resolvedTenantId, {
-      userId: user.id,
-      email,
-    });
-    const oauthRefreshToken = await createRefreshToken(user.id, resolvedTenantId);
+    const token = await createSessionToken(
+      walletAddress ?? "",
+      resolvedTenantId,
+      {
+        userId: user.id,
+        email,
+      },
+    );
+    const oauthRefreshToken = await createRefreshToken(
+      user.id,
+      resolvedTenantId,
+    );
 
     return {
       ok: true,
@@ -1592,7 +1811,10 @@ async function provisionOAuthUser(opts: {
       user: { id: user.id, email, walletAddress },
     };
   } catch (err) {
-    console.error(`[OAuthAuth:${providerName}] provisionOAuthUser failed:`, err);
+    console.error(
+      `[OAuthAuth:${providerName}] provisionOAuthUser failed:`,
+      err,
+    );
     return {
       ok: false,
       error: err instanceof Error ? err.message : "Internal server error",

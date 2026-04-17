@@ -16,14 +16,19 @@ const DEFAULT_LABELS: Record<PolicyType, string> = {
 };
 
 const POLICY_DESCRIPTIONS: Record<PolicyType, string> = {
-  "spending-limit": "Set maximum amounts per transaction, per day, and per week.",
-  "approved-addresses": "Whitelist or blacklist specific addresses for transactions.",
-  "auto-approve-threshold": "Transactions below this amount are auto-approved without review.",
+  "spending-limit":
+    "Set maximum amounts per transaction, per day, and per week.",
+  "approved-addresses":
+    "Whitelist or blacklist specific addresses for transactions.",
+  "auto-approve-threshold":
+    "Transactions below this amount are auto-approved without review.",
   "time-window": "Restrict transactions to specific hours and days.",
   "rate-limit": "Limit the number of transactions per hour and per day.",
   "allowed-chains": "Restrict which blockchain networks can be used.",
-  "reputation-threshold": "Require a minimum reputation score before an action can proceed.",
-  "reputation-scaling": "Scale the allowed transaction size based on the current reputation score.",
+  "reputation-threshold":
+    "Require a minimum reputation score before an action can proceed.",
+  "reputation-scaling":
+    "Scale the allowed transaction size based on the current reputation score.",
 };
 
 const ALL_POLICY_TYPES = Object.keys(DEFAULT_LABELS) as PolicyType[];
@@ -39,7 +44,8 @@ export function PolicyControls({
   className,
 }: PolicyControlsProps) {
   const { features, tenantConfig } = useStewardContext();
-  const { policies, isLoading, isSaving, error, setPolicies, applyTemplate } = usePolicies();
+  const { policies, isLoading, isSaving, error, setPolicies, applyTemplate } =
+    usePolicies();
   const [editPolicies, setEditPolicies] = useState<PolicyRule[] | null>(null);
   const [showTemplateModal, setShowTemplateModal] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -56,7 +62,9 @@ export function PolicyControls({
     return exposure?.[type] || "visible";
   };
 
-  const visibleTypes = ALL_POLICY_TYPES.filter((type) => getExposure(type) !== "hidden");
+  const visibleTypes = ALL_POLICY_TYPES.filter(
+    (type) => getExposure(type) !== "hidden",
+  );
 
   const findPolicy = (type: PolicyType): PolicyRule | undefined =>
     currentPolicies.find((p) => p.type === type);
@@ -103,7 +111,9 @@ export function PolicyControls({
       setShowTemplateModal(false);
       setEditPolicies(null);
     } catch (err) {
-      setSaveError(err instanceof Error ? err.message : "Failed to apply template");
+      setSaveError(
+        err instanceof Error ? err.message : "Failed to apply template",
+      );
     }
   };
 
@@ -138,7 +148,10 @@ export function PolicyControls({
           const isEnabled = policy?.enabled ?? false;
 
           return (
-            <div key={type} className={`stwd-policy-item ${isEnforced ? "stwd-enforced" : ""}`}>
+            <div
+              key={type}
+              className={`stwd-policy-item ${isEnforced ? "stwd-enforced" : ""}`}
+            >
               <div className="stwd-policy-item-header">
                 <div className="stwd-policy-info">
                   <div className="stwd-policy-name">
@@ -149,14 +162,18 @@ export function PolicyControls({
                     )}
                     {labels[type]}
                   </div>
-                  <div className="stwd-policy-desc">{POLICY_DESCRIPTIONS[type]}</div>
+                  <div className="stwd-policy-desc">
+                    {POLICY_DESCRIPTIONS[type]}
+                  </div>
                 </div>
                 <label className="stwd-toggle">
                   <input
                     type="checkbox"
                     checked={isEnabled}
                     disabled={readOnly || isEnforced}
-                    onChange={(e) => updatePolicy(type, { enabled: e.target.checked })}
+                    onChange={(e) =>
+                      updatePolicy(type, { enabled: e.target.checked })
+                    }
                   />
                   <span className="stwd-toggle-slider" />
                 </label>
@@ -174,7 +191,9 @@ export function PolicyControls({
               )}
 
               {isEnforced && (
-                <div className="stwd-enforced-label">Set by platform — cannot be changed</div>
+                <div className="stwd-enforced-label">
+                  Set by platform — cannot be changed
+                </div>
               )}
             </div>
           );
@@ -191,7 +210,11 @@ export function PolicyControls({
           >
             Cancel
           </button>
-          <button className="stwd-btn stwd-btn-primary" onClick={handleSave} disabled={isSaving}>
+          <button
+            className="stwd-btn stwd-btn-primary"
+            onClick={handleSave}
+            disabled={isSaving}
+          >
             {isSaving ? "Saving..." : "Save Policies"}
           </button>
         </div>
@@ -199,7 +222,10 @@ export function PolicyControls({
 
       {/* Template Modal */}
       {showTemplateModal && (
-        <div className="stwd-modal-overlay" onClick={() => setShowTemplateModal(false)}>
+        <div
+          className="stwd-modal-overlay"
+          onClick={() => setShowTemplateModal(false)}
+        >
           <div className="stwd-modal" onClick={(e) => e.stopPropagation()}>
             <h3 className="stwd-heading">Choose a Template</h3>
             <div className="stwd-template-list">
@@ -239,22 +265,61 @@ interface PolicyConfigEditorProps {
   onConfigChange: (key: string, value: unknown) => void;
 }
 
-function PolicyConfigEditor({ type, config, readOnly, onConfigChange }: PolicyConfigEditorProps) {
+function PolicyConfigEditor({
+  type,
+  config,
+  readOnly,
+  onConfigChange,
+}: PolicyConfigEditorProps) {
   switch (type) {
     case "spending-limit":
-      return <SpendingLimitEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
+      return (
+        <SpendingLimitEditor
+          config={config}
+          readOnly={readOnly}
+          onChange={onConfigChange}
+        />
+      );
     case "approved-addresses":
       return (
-        <ApprovedAddressesEditor config={config} readOnly={readOnly} onChange={onConfigChange} />
+        <ApprovedAddressesEditor
+          config={config}
+          readOnly={readOnly}
+          onChange={onConfigChange}
+        />
       );
     case "auto-approve-threshold":
-      return <AutoApproveEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
+      return (
+        <AutoApproveEditor
+          config={config}
+          readOnly={readOnly}
+          onChange={onConfigChange}
+        />
+      );
     case "time-window":
-      return <TimeWindowEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
+      return (
+        <TimeWindowEditor
+          config={config}
+          readOnly={readOnly}
+          onChange={onConfigChange}
+        />
+      );
     case "rate-limit":
-      return <RateLimitEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
+      return (
+        <RateLimitEditor
+          config={config}
+          readOnly={readOnly}
+          onChange={onConfigChange}
+        />
+      );
     case "allowed-chains":
-      return <AllowedChainsEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
+      return (
+        <AllowedChainsEditor
+          config={config}
+          readOnly={readOnly}
+          onChange={onConfigChange}
+        />
+      );
     default:
       return null;
   }
@@ -432,7 +497,8 @@ function AutoApproveEditor({
   return (
     <div className="stwd-config-stack">
       <p className="stwd-muted-text">
-        Transactions below this amount will be automatically approved without human review.
+        Transactions below this amount will be automatically approved without
+        human review.
       </p>
       <div className="stwd-config-field">
         <label>Threshold (ETH)</label>
@@ -473,8 +539,14 @@ function TimeWindowEditor({
     onChange("allowedDays", newDays);
   };
 
-  const updateHours = (index: number, field: "start" | "end", value: number) => {
-    const newHours = allowedHours.map((h, i) => (i === index ? { ...h, [field]: value } : h));
+  const updateHours = (
+    index: number,
+    field: "start" | "end",
+    value: number,
+  ) => {
+    const newHours = allowedHours.map((h, i) =>
+      i === index ? { ...h, [field]: value } : h,
+    );
     onChange("allowedHours", newHours);
   };
 
@@ -491,7 +563,9 @@ function TimeWindowEditor({
               className="stwd-input stwd-input-sm"
               value={hours.start}
               disabled={readOnly}
-              onChange={(e) => updateHours(i, "start", parseInt(e.target.value, 10))}
+              onChange={(e) =>
+                updateHours(i, "start", parseInt(e.target.value, 10))
+              }
             />
             <span>to</span>
             <input
@@ -501,7 +575,9 @@ function TimeWindowEditor({
               className="stwd-input stwd-input-sm"
               value={hours.end}
               disabled={readOnly}
-              onChange={(e) => updateHours(i, "end", parseInt(e.target.value, 10))}
+              onChange={(e) =>
+                updateHours(i, "end", parseInt(e.target.value, 10))
+              }
             />
           </div>
         ))}
@@ -545,7 +621,9 @@ function RateLimitEditor({
           className="stwd-input"
           value={(config.maxTxPerHour as number) || 10}
           disabled={readOnly}
-          onChange={(e) => onChange("maxTxPerHour", parseInt(e.target.value, 10))}
+          onChange={(e) =>
+            onChange("maxTxPerHour", parseInt(e.target.value, 10))
+          }
         />
       </div>
       <div className="stwd-config-field">
@@ -556,7 +634,9 @@ function RateLimitEditor({
           className="stwd-input"
           value={(config.maxTxPerDay as number) || 100}
           disabled={readOnly}
-          onChange={(e) => onChange("maxTxPerDay", parseInt(e.target.value, 10))}
+          onChange={(e) =>
+            onChange("maxTxPerDay", parseInt(e.target.value, 10))
+          }
         />
       </div>
     </div>

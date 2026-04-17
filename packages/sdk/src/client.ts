@@ -146,10 +146,13 @@ export class StewardClient {
     name: string,
     platformId?: string,
   ): Promise<CreateWalletResult> {
-    const response = await this.request<AgentIdentity, StewardErrorResponse>("/agents", {
-      method: "POST",
-      body: JSON.stringify({ id: agentId, name, platformId }),
-    });
+    const response = await this.request<AgentIdentity, StewardErrorResponse>(
+      "/agents",
+      {
+        method: "POST",
+        body: JSON.stringify({ id: agentId, name, platformId }),
+      },
+    );
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
@@ -158,7 +161,10 @@ export class StewardClient {
     return parseAgentIdentity(response.data);
   }
 
-  async signTransaction(agentId: string, tx: SignTransactionInput): Promise<SignTransactionResult> {
+  async signTransaction(
+    agentId: string,
+    tx: SignTransactionInput,
+  ): Promise<SignTransactionResult> {
     const response = await this.request<
       { txHash: string },
       StewardPendingApproval | StewardErrorResponse
@@ -217,7 +223,9 @@ export class StewardClient {
   }
 
   async listAgents(): Promise<AgentIdentity[]> {
-    const response = await this.request<AgentIdentity[], StewardErrorResponse>("/agents");
+    const response = await this.request<AgentIdentity[], StewardErrorResponse>(
+      "/agents",
+    );
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
@@ -227,9 +235,10 @@ export class StewardClient {
   }
 
   async getHistory(agentId: string): Promise<GetHistoryResult> {
-    const response = await this.request<StewardHistoryEntry[], StewardErrorResponse>(
-      `/vault/${encodeURIComponent(agentId)}/history`,
-    );
+    const response = await this.request<
+      StewardHistoryEntry[],
+      StewardErrorResponse
+    >(`/vault/${encodeURIComponent(agentId)}/history`);
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
@@ -238,14 +247,17 @@ export class StewardClient {
     return response.data;
   }
 
-  async signMessage(agentId: string, message: string): Promise<SignMessageResult> {
-    const response = await this.request<SignMessageResult, StewardErrorResponse>(
-      `/vault/${encodeURIComponent(agentId)}/sign-message`,
-      {
-        method: "POST",
-        body: JSON.stringify({ message }),
-      },
-    );
+  async signMessage(
+    agentId: string,
+    message: string,
+  ): Promise<SignMessageResult> {
+    const response = await this.request<
+      SignMessageResult,
+      StewardErrorResponse
+    >(`/vault/${encodeURIComponent(agentId)}/sign-message`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    });
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
@@ -258,14 +270,17 @@ export class StewardClient {
    * Sign EIP-712 typed data (`eth_signTypedData_v4`).
    * Used for DEX approvals, ERC-20 permits, and structured data signatures.
    */
-  async signTypedData(agentId: string, input: SignTypedDataInput): Promise<SignTypedDataResult> {
-    const response = await this.request<SignTypedDataResult, StewardErrorResponse>(
-      `/vault/${encodeURIComponent(agentId)}/sign-typed-data`,
-      {
-        method: "POST",
-        body: JSON.stringify(input),
-      },
-    );
+  async signTypedData(
+    agentId: string,
+    input: SignTypedDataInput,
+  ): Promise<SignTypedDataResult> {
+    const response = await this.request<
+      SignTypedDataResult,
+      StewardErrorResponse
+    >(`/vault/${encodeURIComponent(agentId)}/sign-typed-data`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
@@ -282,13 +297,13 @@ export class StewardClient {
     agentId: string,
     input: SignSolanaTransactionInput,
   ): Promise<SignSolanaTransactionResult> {
-    const response = await this.request<SignSolanaTransactionResult, StewardErrorResponse>(
-      `/vault/${encodeURIComponent(agentId)}/sign-solana`,
-      {
-        method: "POST",
-        body: JSON.stringify(input),
-      },
-    );
+    const response = await this.request<
+      SignSolanaTransactionResult,
+      StewardErrorResponse
+    >(`/vault/${encodeURIComponent(agentId)}/sign-solana`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
@@ -301,14 +316,17 @@ export class StewardClient {
    * Proxy a read-only RPC call to the appropriate chain provider.
    * Signing/state-modifying methods are blocked server-side.
    */
-  async rpcPassthrough(agentId: string, input: RpcPassthroughInput): Promise<RpcPassthroughResult> {
-    const response = await this.request<RpcPassthroughResult, StewardErrorResponse>(
-      `/vault/${encodeURIComponent(agentId)}/rpc`,
-      {
-        method: "POST",
-        body: JSON.stringify(input),
-      },
-    );
+  async rpcPassthrough(
+    agentId: string,
+    input: RpcPassthroughInput,
+  ): Promise<RpcPassthroughResult> {
+    const response = await this.request<
+      RpcPassthroughResult,
+      StewardErrorResponse
+    >(`/vault/${encodeURIComponent(agentId)}/rpc`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
@@ -321,7 +339,10 @@ export class StewardClient {
    * Get the on-chain native balance for an agent wallet.
    * Optionally pass a chainId to query a specific network (defaults to the server's active chain).
    */
-  async getBalance(agentId: string, chainId?: number): Promise<GetBalanceResult> {
+  async getBalance(
+    agentId: string,
+    chainId?: number,
+  ): Promise<GetBalanceResult> {
     const params = chainId ? `?chainId=${chainId}` : "";
     const response = await this.request<AgentBalance, StewardErrorResponse>(
       `/agents/${encodeURIComponent(agentId)}/balance${params}`,
@@ -339,9 +360,10 @@ export class StewardClient {
    * New agents have both EVM and Solana addresses; legacy agents have EVM only.
    */
   async getAddresses(agentId: string): Promise<GetAddressesResult> {
-    const response = await this.request<GetAddressesResult, StewardErrorResponse>(
-      `/vault/${encodeURIComponent(agentId)}/addresses`,
-    );
+    const response = await this.request<
+      GetAddressesResult,
+      StewardErrorResponse
+    >(`/vault/${encodeURIComponent(agentId)}/addresses`);
 
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
@@ -388,10 +410,12 @@ export class StewardClient {
 
   /** Get the control-plane configuration for a tenant. */
   async getTenantConfig(tenantId: string): Promise<TenantControlPlaneConfig> {
-    const response = await this.request<TenantControlPlaneConfig, StewardErrorResponse>(
-      `/tenants/${encodeURIComponent(tenantId)}/config`,
-    );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<
+      TenantControlPlaneConfig,
+      StewardErrorResponse
+    >(`/tenants/${encodeURIComponent(tenantId)}/config`);
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -400,14 +424,15 @@ export class StewardClient {
     tenantId: string,
     config: Partial<TenantControlPlaneConfig>,
   ): Promise<TenantControlPlaneConfig> {
-    const response = await this.request<TenantControlPlaneConfig, StewardErrorResponse>(
-      `/tenants/${encodeURIComponent(tenantId)}/config`,
-      {
-        method: "PUT",
-        body: JSON.stringify(config),
-      },
-    );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<
+      TenantControlPlaneConfig,
+      StewardErrorResponse
+    >(`/tenants/${encodeURIComponent(tenantId)}/config`, {
+      method: "PUT",
+      body: JSON.stringify(config),
+    });
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -415,10 +440,12 @@ export class StewardClient {
 
   /** Get the aggregated dashboard for an agent (balance, spend, policies, recent tx, pending approvals). */
   async getAgentDashboard(agentId: string): Promise<AgentDashboardResponse> {
-    const response = await this.request<AgentDashboardResponse, StewardErrorResponse>(
-      `/dashboard/${encodeURIComponent(agentId)}`,
-    );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<
+      AgentDashboardResponse,
+      StewardErrorResponse
+    >(`/dashboard/${encodeURIComponent(agentId)}`);
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -435,10 +462,12 @@ export class StewardClient {
     if (opts?.limit) params.set("limit", String(opts.limit));
     if (opts?.offset) params.set("offset", String(opts.offset));
     const qs = params.toString();
-    const response = await this.request<ApprovalQueueEntry[], StewardErrorResponse>(
-      `/approvals${qs ? `?${qs}` : ""}`,
-    );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<
+      ApprovalQueueEntry[],
+      StewardErrorResponse
+    >(`/approvals${qs ? `?${qs}` : ""}`);
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -447,14 +476,15 @@ export class StewardClient {
     txId: string,
     opts?: { comment?: string; approvedBy?: string },
   ): Promise<ApprovalQueueEntry> {
-    const response = await this.request<ApprovalQueueEntry, StewardErrorResponse>(
-      `/approvals/${encodeURIComponent(txId)}/approve`,
-      {
-        method: "POST",
-        body: JSON.stringify(opts ?? {}),
-      },
-    );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<
+      ApprovalQueueEntry,
+      StewardErrorResponse
+    >(`/approvals/${encodeURIComponent(txId)}/approve`, {
+      method: "POST",
+      body: JSON.stringify(opts ?? {}),
+    });
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -464,21 +494,25 @@ export class StewardClient {
     reason: string,
     deniedBy?: string,
   ): Promise<ApprovalQueueEntry> {
-    const response = await this.request<ApprovalQueueEntry, StewardErrorResponse>(
-      `/approvals/${encodeURIComponent(txId)}/deny`,
-      {
-        method: "POST",
-        body: JSON.stringify({ reason, deniedBy }),
-      },
-    );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<
+      ApprovalQueueEntry,
+      StewardErrorResponse
+    >(`/approvals/${encodeURIComponent(txId)}/deny`, {
+      method: "POST",
+      body: JSON.stringify({ reason, deniedBy }),
+    });
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
   /** Get approval statistics for the tenant. */
   async getApprovalStats(): Promise<ApprovalStats> {
-    const response = await this.request<ApprovalStats, StewardErrorResponse>("/approvals/stats");
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<ApprovalStats, StewardErrorResponse>(
+      "/approvals/stats",
+    );
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -486,15 +520,19 @@ export class StewardClient {
 
   /** Get auto-approval rules for the tenant. */
   async getAutoApprovalRules(): Promise<AutoApprovalRule | null> {
-    const response = await this.request<AutoApprovalRule | null, StewardErrorResponse>(
-      "/approvals/rules",
-    );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<
+      AutoApprovalRule | null,
+      StewardErrorResponse
+    >("/approvals/rules");
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
   /** Create or update auto-approval rules. */
-  async updateAutoApprovalRules(rules: Partial<AutoApprovalRule>): Promise<AutoApprovalRule> {
+  async updateAutoApprovalRules(
+    rules: Partial<AutoApprovalRule>,
+  ): Promise<AutoApprovalRule> {
     const response = await this.request<AutoApprovalRule, StewardErrorResponse>(
       "/approvals/rules",
       {
@@ -502,7 +540,8 @@ export class StewardClient {
         body: JSON.stringify(rules),
       },
     );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -510,8 +549,11 @@ export class StewardClient {
 
   /** List webhook configurations for the tenant. */
   async listWebhooks(): Promise<WebhookConfig[]> {
-    const response = await this.request<WebhookConfig[], StewardErrorResponse>("/webhooks");
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<WebhookConfig[], StewardErrorResponse>(
+      "/webhooks",
+    );
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -523,11 +565,15 @@ export class StewardClient {
     maxRetries?: number;
     retryBackoffMs?: number;
   }): Promise<WebhookConfig> {
-    const response = await this.request<WebhookConfig, StewardErrorResponse>("/webhooks", {
-      method: "POST",
-      body: JSON.stringify(webhook),
-    });
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<WebhookConfig, StewardErrorResponse>(
+      "/webhooks",
+      {
+        method: "POST",
+        body: JSON.stringify(webhook),
+      },
+    );
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -547,17 +593,19 @@ export class StewardClient {
       `/webhooks/${encodeURIComponent(webhookId)}`,
       { method: "PUT", body: JSON.stringify(updates) },
     );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
   /** Delete a webhook. */
   async deleteWebhook(webhookId: string): Promise<void> {
-    const response = await this.request<{ deleted: boolean }, StewardErrorResponse>(
-      `/webhooks/${encodeURIComponent(webhookId)}`,
-      { method: "DELETE" },
-    );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    const response = await this.request<
+      { deleted: boolean },
+      StewardErrorResponse
+    >(`/webhooks/${encodeURIComponent(webhookId)}`, { method: "DELETE" });
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
   }
 
   /** Get delivery history for a webhook. */
@@ -569,10 +617,14 @@ export class StewardClient {
     if (opts?.limit) params.set("limit", String(opts.limit));
     if (opts?.offset) params.set("offset", String(opts.offset));
     const qs = params.toString();
-    const response = await this.request<WebhookDelivery[], StewardErrorResponse>(
+    const response = await this.request<
+      WebhookDelivery[],
+      StewardErrorResponse
+    >(
       `/webhooks/${encodeURIComponent(webhookId)}/deliveries${qs ? `?${qs}` : ""}`,
     );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -582,7 +634,8 @@ export class StewardClient {
       `/webhooks/deliveries/${encodeURIComponent(deliveryId)}/retry`,
       { method: "POST" },
     );
-    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    if (!response.ok)
+      throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
@@ -594,7 +647,10 @@ export class StewardClient {
     agents: BatchAgentSpec[],
     policies?: PolicyRule[],
   ): Promise<BatchCreateResult> {
-    const response = await this.request<BatchCreateResult, StewardErrorResponse>("/agents/batch", {
+    const response = await this.request<
+      BatchCreateResult,
+      StewardErrorResponse
+    >("/agents/batch", {
       method: "POST",
       body: JSON.stringify({ agents, applyPolicies: policies }),
     });
@@ -628,7 +684,8 @@ export class StewardClient {
       );
     }
 
-    const payload = await this.parseJson<ApiResponse<TSuccess | TFailure>>(response);
+    const payload =
+      await this.parseJson<ApiResponse<TSuccess | TFailure>>(response);
 
     if (!payload.ok) {
       return {
@@ -681,13 +738,20 @@ export class StewardClient {
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new StewardApiError("Received invalid JSON from Steward API", response.status);
+      throw new StewardApiError(
+        "Received invalid JSON from Steward API",
+        response.status,
+      );
     }
   }
 
   private isPendingApproval(
     data: StewardPendingApproval | StewardErrorResponse | undefined,
   ): data is StewardPendingApproval {
-    return typeof data !== "undefined" && "status" in data && data.status === "pending_approval";
+    return (
+      typeof data !== "undefined" &&
+      "status" in data &&
+      data.status === "pending_approval"
+    );
   }
 }

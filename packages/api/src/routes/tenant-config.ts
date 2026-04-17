@@ -5,7 +5,10 @@
  * These extend the existing tenant routes with config management.
  */
 
-import { tenantConfigs as tenantConfigsTable, toPersistedPolicyRule } from "@stwd/db";
+import {
+  tenantConfigs as tenantConfigsTable,
+  toPersistedPolicyRule,
+} from "@stwd/db";
 import type {
   ApprovalConfig,
   PolicyExposureConfig,
@@ -19,7 +22,12 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { DEFAULT_TENANT_CONFIGS } from "../defaults/tenant-configs";
 import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
-import { type ApiResponse, type AppVariables, db, safeJsonParse } from "../services/context";
+import {
+  type ApiResponse,
+  type AppVariables,
+  db,
+  safeJsonParse,
+} from "../services/context";
 
 export const tenantConfigRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -85,7 +93,10 @@ tenantConfigRoutes.put("/:id/config", async (c) => {
   const body = await safeJsonParse<Partial<TenantControlPlaneConfig>>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   const values = {
@@ -179,7 +190,10 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", async (c) => {
   }>(c);
 
   if (!body?.agentId) {
-    return c.json<ApiResponse>({ ok: false, error: "agentId is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "agentId is required" },
+      400,
+    );
   }
 
   // Get templates from DB or defaults
@@ -196,9 +210,14 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", async (c) => {
     templates = defaultConfig?.policyTemplates ?? [];
   }
 
-  const template = templates.find((t) => t.id === templateName || t.name === templateName);
+  const template = templates.find(
+    (t) => t.id === templateName || t.name === templateName,
+  );
   if (!template) {
-    return c.json<ApiResponse>({ ok: false, error: `Template "${templateName}" not found` }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Template "${templateName}" not found` },
+      404,
+    );
   }
 
   // Apply overrides to template policies

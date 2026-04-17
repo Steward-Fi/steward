@@ -34,8 +34,12 @@ export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
-const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
-if (!process.env.STEWARD_SESSION_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
+const jwtSecretSource =
+  process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+if (
+  !process.env.STEWARD_SESSION_SECRET &&
+  process.env.STEWARD_MASTER_PASSWORD
+) {
   console.warn(
     "⚠️ STEWARD_SESSION_SECRET not set, falling back to master password. Set a separate JWT secret for production.",
   );
@@ -50,11 +54,16 @@ if (!jwtSecretSource) {
     "⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!",
   );
 }
-export const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
+export const JWT_SECRET = new TextEncoder().encode(
+  jwtSecretSource || "dev-secret",
+);
 export const JWT_ISSUER = "steward";
 export const JWT_EXPIRY = "24h";
 
-export async function createSessionToken(address: string, tenantId: string): Promise<string> {
+export async function createSessionToken(
+  address: string,
+  tenantId: string,
+): Promise<string> {
   return new SignJWT({ address, tenantId })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -96,7 +105,10 @@ export async function verifySessionToken(token: string) {
 
 // ─── SIWE nonce store ─────────────────────────────────────────────────────────
 
-export const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
+export const nonceStore = new Map<
+  string,
+  { nonce: string; expiresAt: number }
+>();
 
 export const nonceCleanupTimer = setInterval(
   () => {
@@ -130,12 +142,16 @@ export function isValidAddress(value: unknown): boolean {
 }
 
 export function isValidSolanaAddress(value: unknown): boolean {
-  return typeof value === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
+  return (
+    typeof value === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)
+  );
 }
 
 export function isValidAnyAddress(value: unknown): boolean {
   if (typeof value !== "string") return false;
-  return value.startsWith("0x") ? isValidAddress(value) : isValidSolanaAddress(value);
+  return value.startsWith("0x")
+    ? isValidAddress(value)
+    : isValidSolanaAddress(value);
 }
 
 export async function safeJsonParse<T>(c: Context): Promise<T | null> {
@@ -265,8 +281,13 @@ export function getTenantPayload(tenant: Tenant): Tenant & TenantConfig {
   };
 }
 
-export async function findTenant(tenantId: string): Promise<Tenant | undefined> {
-  const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
+export async function findTenant(
+  tenantId: string,
+): Promise<Tenant | undefined> {
+  const [tenant] = await db
+    .select()
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
   return tenant;
 }
 
@@ -277,8 +298,14 @@ export async function ensureAgentForTenant(
   return vault.getAgent(tenantId, agentId);
 }
 
-export async function getPolicySet(tenantId: string, agentId: string): Promise<PolicyRule[]> {
-  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
+export async function getPolicySet(
+  tenantId: string,
+  agentId: string,
+): Promise<PolicyRule[]> {
+  const storedPolicies = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.agentId, agentId));
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
   return tenantConfigs.get(tenantId)?.defaultPolicies || [];
@@ -343,7 +370,10 @@ export async function tenantAuth(
     if (payload?.tenantId) {
       const jwtTenant = await findTenant(payload.tenantId);
       if (jwtTenant) {
-        if (options?.requireTenantMatch && payload.tenantId !== options.requireTenantMatch) {
+        if (
+          options?.requireTenantMatch &&
+          payload.tenantId !== options.requireTenantMatch
+        ) {
           return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
         }
         c.set("tenantId", payload.tenantId);
@@ -371,7 +401,8 @@ export async function tenantAuth(
   const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
   const tenant = await findTenant(tenantId);
 
-  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  if (!tenant)
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
 
   if (options?.requireTenantMatch && tenantId !== options.requireTenantMatch) {
     return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
@@ -384,32 +415,49 @@ export async function tenantAuth(
       return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
     }
   } else {
-    if (!apiKey) return c.json<ApiResponse>({ ok: false, error: "API key required" }, 401);
-    return c.json<ApiResponse>({ ok: false, error: "Tenant not configured for API key auth" }, 403);
+    if (!apiKey)
+      return c.json<ApiResponse>({ ok: false, error: "API key required" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant not configured for API key auth" },
+      403,
+    );
   }
 
   c.set("tenantId", tenantId);
   c.set("tenant", tenant);
-  c.set("tenantConfig", tenantConfigs.get(tenantId) || { id: tenant.id, name: tenant.name });
+  c.set(
+    "tenantConfig",
+    tenantConfigs.get(tenantId) || { id: tenant.id, name: tenant.name },
+  );
   c.set("authType", "api-key");
 
   await next();
 }
 
-export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next: Next) {
+export async function sessionAuth(
+  c: Context<{ Variables: AppVariables }>,
+  next: Next,
+) {
   const authHeader = c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    return c.json<ApiResponse>({ ok: false, error: "Authorization header required" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Authorization header required" },
+      401,
+    );
   }
 
   const token = authHeader.slice(7);
   const payload = await verifySessionToken(token);
   if (!payload) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired session token" },
+      401,
+    );
   }
 
   const tenant = await findTenant(payload.tenantId);
-  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  if (!tenant)
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
 
   c.set("tenantId", payload.tenantId);
   c.set("tenant", tenant);
@@ -421,13 +469,17 @@ export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next:
   await next();
 }
 
-export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boolean {
+export function requireAgentAccess(
+  c: Context<{ Variables: AppVariables }>,
+): boolean {
   const agentScope = c.get("agentScope");
   if (!agentScope) return true;
   return agentScope === c.req.param("agentId");
 }
 
-export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boolean {
+export function requireTenantLevel(
+  c: Context<{ Variables: AppVariables }>,
+): boolean {
   return c.get("authType") !== "agent-token";
 }
 
@@ -440,17 +492,26 @@ export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boo
  * The dashboard is user-centric (not API-key-centric) so only session JWTs are
  * accepted here — no API key fallback.
  */
-export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariables }>, next: Next) {
+export async function dashboardAuthMiddleware(
+  c: Context<{ Variables: AppVariables }>,
+  next: Next,
+) {
   const authHeader = c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    return c.json<ApiResponse>({ ok: false, error: "Authorization header required" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Authorization header required" },
+      401,
+    );
   }
 
   const token = authHeader.slice(7);
   const payload = await verifySessionToken(token);
 
   if (!payload?.tenantId) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or expired session token" },
+      401,
+    );
   }
 
   const tenant = await findTenant(payload.tenantId);

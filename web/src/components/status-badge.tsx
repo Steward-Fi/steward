@@ -1,6 +1,9 @@
 "use client";
 
-const statusConfig: Record<string, { label: string; color: string; bg: string }> = {
+const statusConfig: Record<
+  string,
+  { label: string; color: string; bg: string }
+> = {
   pending: {
     label: "Pending",
     color: "text-amber-400",

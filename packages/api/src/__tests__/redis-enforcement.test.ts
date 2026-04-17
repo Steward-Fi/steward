@@ -161,7 +161,12 @@ describe("enforceRateLimit (no Redis)", () => {
 describe("recordVaultSpend (no Redis)", () => {
   it("does not throw when Redis is not available", async () => {
     // Should silently succeed (no-op)
-    await recordVaultSpend("test-agent", "test-tenant", "1000000000000000000", 8453);
+    await recordVaultSpend(
+      "test-agent",
+      "test-tenant",
+      "1000000000000000000",
+      8453,
+    );
   });
 
   it("does not throw for zero value", async () => {

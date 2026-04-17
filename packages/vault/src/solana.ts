@@ -107,7 +107,10 @@ export function restoreSolanaKeypair(secretKey: string): Keypair {
   // Detect format: hex strings are longer and only contain hex chars
   // A 64-byte key in hex = 128 chars, in base58 ≈ 87-88 chars
   // A 32-byte seed in hex = 64 chars, in base58 ≈ 43-44 chars
-  if (isHexString(secretKey) && (secretKey.length === 128 || secretKey.length === 64)) {
+  if (
+    isHexString(secretKey) &&
+    (secretKey.length === 128 || secretKey.length === 64)
+  ) {
     // Hex-encoded key
     keyBytes = Uint8Array.from(Buffer.from(secretKey, "hex"));
   } else {
@@ -145,7 +148,8 @@ export async function signSolanaTransaction(
   const keypair = restoreSolanaKeypair(secretKeyHex);
   const connection = new Connection(rpcUrl, "confirmed");
 
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash("confirmed");
 
   const tx = new Transaction({
     recentBlockhash: blockhash,
@@ -163,7 +167,10 @@ export async function signSolanaTransaction(
     preflightCommitment: "confirmed",
   });
 
-  await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, "confirmed");
+  await connection.confirmTransaction(
+    { signature, blockhash, lastValidBlockHeight },
+    "confirmed",
+  );
 
   return signature;
 }
@@ -193,7 +200,10 @@ export async function getSolanaBalance(
  *
  * Compatible with Phantom / Solana wallet standards for off-chain message signing.
  */
-export function signSolanaMessage(secretKeyHex: string, message: string): string {
+export function signSolanaMessage(
+  secretKeyHex: string,
+  message: string,
+): string {
   const keypair = restoreSolanaKeypair(secretKeyHex);
   const messageBytes = Buffer.from(message, "utf8");
 

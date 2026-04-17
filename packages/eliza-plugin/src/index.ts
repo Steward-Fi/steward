@@ -21,7 +21,12 @@ export const stewardPlugin: Plugin = {
 
   services: [StewardService],
 
-  actions: [signTransactionAction, transferAction, checkSpendAction, listApprovalsAction],
+  actions: [
+    signTransactionAction,
+    transferAction,
+    checkSpendAction,
+    listApprovalsAction,
+  ],
 
   providers: [walletStatusProvider, balanceProvider],
 

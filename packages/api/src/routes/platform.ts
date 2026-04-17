@@ -23,7 +23,12 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
-import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/shared";
+import type {
+  AgentIdentity,
+  ApiResponse,
+  PolicyRule,
+  Tenant,
+} from "@stwd/shared";
 import { Vault } from "@stwd/vault";
 import { and, count, eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -74,7 +79,9 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
-async function safeJsonParse<T>(c: { req: { json: <X>() => Promise<X> } }): Promise<T | null> {
+async function safeJsonParse<T>(c: {
+  req: { json: <X>() => Promise<X> };
+}): Promise<T | null> {
   try {
     return await (c.req.json as () => Promise<T>)();
   } catch {
@@ -106,7 +113,9 @@ platform.get("/stats", async (c) => {
     db.select({ total: count() }).from(transactions),
   ]);
 
-  return c.json<ApiResponse<{ tenants: number; agents: number; transactions: number }>>({
+  return c.json<
+    ApiResponse<{ tenants: number; agents: number; transactions: number }>
+  >({
     ok: true,
     data: {
       tenants: tenantCount?.total ?? 0,
@@ -137,14 +146,18 @@ platform.post("/tenants", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isValidTenantId(body.id)) {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Invalid tenant id — must be 1-64 alphanumeric chars (plus _ - . :)",
+        error:
+          "Invalid tenant id — must be 1-64 alphanumeric chars (plus _ - . :)",
       },
       400,
     );
@@ -164,7 +177,10 @@ platform.post("/tenants", async (c) => {
     .where(eq(tenants.id, body.id));
 
   if (existing) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 409);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant already exists" },
+      409,
+    );
   }
 
   const apiKeyPair = generateApiKey();
@@ -179,7 +195,10 @@ platform.post("/tenants", async (c) => {
     .returning();
 
   if (!tenant) {
-    return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Failed to create tenant" },
+      500,
+    );
   }
 
   return c.json<
@@ -237,7 +256,10 @@ platform.get("/tenants/:id", async (c) => {
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   const [tenant] = await db
@@ -276,7 +298,10 @@ platform.delete("/tenants/:id", async (c) => {
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   const [existing] = await db
@@ -310,7 +335,10 @@ platform.put("/tenants/:id/policies", async (c) => {
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   const [existing] = await db
@@ -370,7 +398,11 @@ platform.put("/tenants/:id/policies", async (c) => {
         400,
       );
     }
-    if (typeof rule.config !== "object" || rule.config === null || Array.isArray(rule.config)) {
+    if (
+      typeof rule.config !== "object" ||
+      rule.config === null ||
+      Array.isArray(rule.config)
+    ) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -388,7 +420,9 @@ platform.put("/tenants/:id/policies", async (c) => {
   // TODO: Once Worker 1 adds `defaultPolicies` to tenants schema, do:
   //   await db.update(tenants).set({ defaultPolicies: body }).where(...)
 
-  return c.json<ApiResponse<{ tenantId: string; defaultPolicies: PolicyRule[] }>>({
+  return c.json<
+    ApiResponse<{ tenantId: string; defaultPolicies: PolicyRule[] }>
+  >({
     ok: true,
     data: { tenantId, defaultPolicies: body },
   });
@@ -409,7 +443,10 @@ platform.post("/tenants/:id/agents", async (c) => {
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   // Ensure tenant exists
@@ -427,14 +464,18 @@ platform.post("/tenants/:id/agents", async (c) => {
     platformId?: string;
   }>(c);
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isValidAgentId(body.id)) {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Invalid agent id — must be 1-128 alphanumeric chars (plus _ - . :)",
+        error:
+          "Invalid agent id — must be 1-128 alphanumeric chars (plus _ - . :)",
       },
       400,
     );
@@ -448,8 +489,16 @@ platform.post("/tenants/:id/agents", async (c) => {
   }
 
   try {
-    const identity = await vault().createAgent(tenantId, body.id, body.name, body.platformId);
-    return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity }, 201);
+    const identity = await vault().createAgent(
+      tenantId,
+      body.id,
+      body.name,
+      body.platformId,
+    );
+    return c.json<ApiResponse<AgentIdentity>>(
+      { ok: true, data: identity },
+      201,
+    );
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
@@ -471,7 +520,10 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   const [tenant] = await db
@@ -488,7 +540,10 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!Array.isArray(body.agents) || body.agents.length === 0) {
@@ -517,7 +572,10 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
       );
     }
     if (!isNonEmptyString(spec.name)) {
-      return c.json<ApiResponse>({ ok: false, error: `Agent "${spec.id}" is missing a name` }, 400);
+      return c.json<ApiResponse>(
+        { ok: false, error: `Agent "${spec.id}" is missing a name` },
+        400,
+      );
     }
   }
 
@@ -526,7 +584,12 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
 
   for (const spec of body.agents) {
     try {
-      const identity = await vault().createAgent(tenantId, spec.id, spec.name, spec.platformId);
+      const identity = await vault().createAgent(
+        tenantId,
+        spec.id,
+        spec.name,
+        spec.platformId,
+      );
 
       // Optionally apply default policies
       if (body.applyPolicies && body.applyPolicies.length > 0) {
@@ -572,7 +635,10 @@ platform.get("/tenants/:id/agents", async (c) => {
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   const [tenant] = await db
@@ -603,7 +669,10 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
   const agentId = c.req.param("agentId");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   // Ensure tenant exists
@@ -618,7 +687,10 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
   // Ensure agent belongs to tenant
   const agent = await vault().getAgent(tenantId, agentId);
   if (!agent) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent not found in tenant" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent not found in tenant" },
+      404,
+    );
   }
 
   const body = await safeJsonParse<{ expiresIn?: string }>(c);
@@ -638,8 +710,14 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
       data: { token, agentId, tenantId, scope: "agent" },
     });
   } catch (e: unknown) {
-    console.error(`[platform] Failed to generate agent token for ${agentId}:`, e);
-    return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
+    console.error(
+      `[platform] Failed to generate agent token for ${agentId}:`,
+      e,
+    );
+    return c.json<ApiResponse>(
+      { ok: false, error: "Failed to generate token" },
+      500,
+    );
   }
 });
 
@@ -660,14 +738,24 @@ platform.post("/users", async (c) => {
     emailVerified?: boolean;
     name?: string;
   }>(c);
-  if (!body?.email || typeof body.email !== "string" || !body.email.includes("@")) {
-    return c.json<ApiResponse>({ ok: false, error: "A valid email is required" }, 400);
+  if (
+    !body?.email ||
+    typeof body.email !== "string" ||
+    !body.email.includes("@")
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "A valid email is required" },
+      400,
+    );
   }
 
   const db = getDb();
   const email = body.email.toLowerCase().trim();
 
-  const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, email));
+  const [existing] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.email, email));
 
   if (existing) {
     return c.json<ApiResponse<{ userId: string; isNew: boolean }>>({
@@ -704,7 +792,10 @@ platform.get("/tenants/:id/members", async (c) => {
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   // Verify tenant exists
@@ -742,7 +833,10 @@ platform.post("/tenants/:id/members", async (c) => {
   const tenantId = c.req.param("id");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   const body = await safeJsonParse<{ email: string; role?: string }>(c);
@@ -766,12 +860,18 @@ platform.post("/tenants/:id/members", async (c) => {
   // Find or create user
   let [user] = await db.select().from(users).where(eq(users.email, email));
   if (!user) {
-    const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
+    const [newUser] = await db
+      .insert(users)
+      .values({ email, emailVerified: false })
+      .returning();
     user = newUser;
   }
 
   // Upsert user_tenants link
-  await db.insert(userTenants).values({ userId: user.id, tenantId, role }).onConflictDoNothing();
+  await db
+    .insert(userTenants)
+    .values({ userId: user.id, tenantId, role })
+    .onConflictDoNothing();
 
   return c.json<
     ApiResponse<{
@@ -793,16 +893,24 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
   const userId = c.req.param("userId");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   const [deleted] = await db
     .delete(userTenants)
-    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
+    .where(
+      and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)),
+    )
     .returning();
 
   if (!deleted) {
-    return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Member not found in tenant" },
+      404,
+    );
   }
 
   return c.json<ApiResponse>({ ok: true });
@@ -819,7 +927,10 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   const userId = c.req.param("userId");
 
   if (!isValidTenantId(tenantId)) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid tenant id format" },
+      400,
+    );
   }
 
   const body = await safeJsonParse<{ role: string }>(c);
@@ -830,14 +941,21 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   const [updated] = await db
     .update(userTenants)
     .set({ role: body.role })
-    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)))
+    .where(
+      and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)),
+    )
     .returning();
 
   if (!updated) {
-    return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Member not found in tenant" },
+      404,
+    );
   }
 
-  return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>({
+  return c.json<
+    ApiResponse<{ userId: string; tenantId: string; role: string }>
+  >({
     ok: true,
     data: { userId, tenantId, role: body.role },
   });

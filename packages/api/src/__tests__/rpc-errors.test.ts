@@ -58,7 +58,9 @@ describe("RPC Error Detection", () => {
     });
 
     it("detects insufficient balance error", () => {
-      const error = new Error("sender doesn't have enough funds: insufficient balance");
+      const error = new Error(
+        "sender doesn't have enough funds: insufficient balance",
+      );
       expect(isRpcError(error)).toBe(true);
     });
 
@@ -74,7 +76,9 @@ describe("RPC Error Detection", () => {
     });
 
     it("detects execution reverted", () => {
-      const error = new Error("execution reverted: ERC20: transfer amount exceeds balance");
+      const error = new Error(
+        "execution reverted: ERC20: transfer amount exceeds balance",
+      );
       expect(isRpcError(error)).toBe(true);
     });
 

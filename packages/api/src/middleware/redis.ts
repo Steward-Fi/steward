@@ -29,7 +29,9 @@ let redisClient: Redis | null = null;
 export async function initRedis(): Promise<boolean> {
   const url = process.env.REDIS_URL;
   if (!url) {
-    console.log("[steward:redis] REDIS_URL not set — Redis enforcement disabled");
+    console.log(
+      "[steward:redis] REDIS_URL not set — Redis enforcement disabled",
+    );
     return false;
   }
 
@@ -38,7 +40,9 @@ export async function initRedis(): Promise<boolean> {
     // Ping to verify the connection
     await redisClient?.ping();
     redisAvailable = true;
-    console.log("[steward:redis] Redis connected — rate limiting and spend tracking enabled");
+    console.log(
+      "[steward:redis] Redis connected — rate limiting and spend tracking enabled",
+    );
     return true;
   } catch (err) {
     console.warn(
@@ -164,7 +168,10 @@ export async function recordAgentSpend(
   try {
     await recordSpend(agentId, tenantId, costUsd, host);
   } catch (err) {
-    console.error("[steward:redis] Failed to record spend:", (err as Error).message);
+    console.error(
+      "[steward:redis] Failed to record spend:",
+      (err as Error).message,
+    );
   }
 }
 

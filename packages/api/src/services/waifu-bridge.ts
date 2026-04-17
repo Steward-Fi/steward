@@ -6,7 +6,12 @@
  * wallet infrastructure, applying sensible default policies for every provisioned agent.
  */
 
-import { getDb, type PersistedPolicyRule, policies, toPersistedPolicyRule } from "@stwd/db";
+import {
+  getDb,
+  type PersistedPolicyRule,
+  policies,
+  toPersistedPolicyRule,
+} from "@stwd/db";
 import type { AgentBalance, AgentIdentity, PolicyRule } from "@stwd/shared";
 import type { Vault } from "@stwd/vault";
 import { eq } from "drizzle-orm";
@@ -113,13 +118,23 @@ export class WaifuBridge {
     // Create the Steward wallet
     let agent: AgentIdentity;
     try {
-      agent = await this.vault.createAgent(this.tenantId, waifuAgentId, name, platformId);
+      agent = await this.vault.createAgent(
+        this.tenantId,
+        waifuAgentId,
+        name,
+        platformId,
+      );
     } catch (err) {
-      console.error(`[WaifuBridge] Failed to create agent "${waifuAgentId}":`, err);
+      console.error(
+        `[WaifuBridge] Failed to create agent "${waifuAgentId}":`,
+        err,
+      );
       throw err;
     }
 
-    console.log(`[WaifuBridge] Agent "${waifuAgentId}" created — wallet ${agent.walletAddress}`);
+    console.log(
+      `[WaifuBridge] Agent "${waifuAgentId}" created — wallet ${agent.walletAddress}`,
+    );
 
     // Apply default waifu policies
     const defaultPolicies = buildDefaultPolicies(portalAddress);
@@ -169,7 +184,10 @@ export class WaifuBridge {
    *
    * @throws Error if the agent doesn't exist or balance fetch fails
    */
-  async syncAgentBalance(agentId: string, chainId?: number): Promise<AgentBalance> {
+  async syncAgentBalance(
+    agentId: string,
+    chainId?: number,
+  ): Promise<AgentBalance> {
     if (!agentId) {
       throw new Error("agentId is required for balance sync");
     }
@@ -177,7 +195,11 @@ export class WaifuBridge {
     const resolvedChainId = chainId ?? WAIFU_CHAIN_ID;
 
     try {
-      const balance = await this.vault.getBalance(this.tenantId, agentId, resolvedChainId);
+      const balance = await this.vault.getBalance(
+        this.tenantId,
+        agentId,
+        resolvedChainId,
+      );
 
       return {
         agentId,

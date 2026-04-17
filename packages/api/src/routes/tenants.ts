@@ -34,14 +34,18 @@ tenantRoutes.post("/", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isValidTenantId(body.id)) {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Invalid tenant id — must be 1-64 alphanumeric characters (plus _ - . :)",
+        error:
+          "Invalid tenant id — must be 1-64 alphanumeric characters (plus _ - . :)",
       },
       400,
     );
@@ -55,12 +59,18 @@ tenantRoutes.post("/", async (c) => {
   }
 
   if (typeof body.apiKeyHash !== "string") {
-    return c.json<ApiResponse>({ ok: false, error: "apiKeyHash is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "apiKeyHash is required" },
+      400,
+    );
   }
 
   const existingTenant = await findTenant(body.id);
   if (existingTenant) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant already exists" },
+      400,
+    );
   }
 
   const apiKeyHash =
@@ -107,15 +117,27 @@ tenantRoutes.put("/:id/webhook", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (body.webhookUrl !== undefined && typeof body.webhookUrl !== "string") {
-    return c.json<ApiResponse>({ ok: false, error: "webhookUrl must be a string" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "webhookUrl must be a string" },
+      400,
+    );
   }
 
-  if (body.defaultPolicies !== undefined && !Array.isArray(body.defaultPolicies)) {
-    return c.json<ApiResponse>({ ok: false, error: "defaultPolicies must be an array" }, 400);
+  if (
+    body.defaultPolicies !== undefined &&
+    !Array.isArray(body.defaultPolicies)
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "defaultPolicies must be an array" },
+      400,
+    );
   }
 
   const updatedConfig: TenantConfig = {

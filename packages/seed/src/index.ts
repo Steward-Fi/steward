@@ -63,7 +63,14 @@ type PolicyResultSeed = {
 type TransactionSeed = {
   id: string;
   agentId: string;
-  status: "pending" | "approved" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
+  status:
+    | "pending"
+    | "approved"
+    | "rejected"
+    | "signed"
+    | "broadcast"
+    | "confirmed"
+    | "failed";
   toAddress: `0x${string}`;
   value: string;
   data?: `0x${string}`;
@@ -224,7 +231,10 @@ async function seed() {
     });
   }
 
-  await db.insert(agents).values(agentRows).onConflictDoNothing({ target: agents.id });
+  await db
+    .insert(agents)
+    .values(agentRows)
+    .onConflictDoNothing({ target: agents.id });
   await db
     .insert(encryptedKeys)
     .values(encryptedKeyRows)
@@ -473,7 +483,10 @@ async function seed() {
     },
   ];
 
-  await db.insert(policies).values(policySeeds).onConflictDoNothing({ target: policies.id });
+  await db
+    .insert(policies)
+    .values(policySeeds)
+    .onConflictDoNothing({ target: policies.id });
 
   /* ════════════════════════════════════════════════════════════════════════ */
   /*  TRANSACTIONS                                                           */
@@ -753,7 +766,8 @@ async function seed() {
           policyId: "pol-treasury-spending",
           type: "spending-limit",
           passed: false,
-          reason: "daily spend 5.0 BNB + requested 8.0 BNB exceeds 10 BNB daily limit",
+          reason:
+            "daily spend 5.0 BNB + requested 8.0 BNB exceeds 10 BNB daily limit",
         },
         {
           policyId: "pol-treasury-addresses",
@@ -1022,7 +1036,8 @@ async function seed() {
           policyId: "pol-dex-window",
           type: "time-window",
           passed: false,
-          reason: "transaction submitted on Saturday — trading restricted to weekdays (Mon-Fri)",
+          reason:
+            "transaction submitted on Saturday — trading restricted to weekdays (Mon-Fri)",
         },
         { policyId: "pol-dex-rate", type: "rate-limit", passed: true },
       ],
@@ -1043,7 +1058,8 @@ async function seed() {
           policyId: "pol-dex-addresses",
           type: "approved-addresses",
           passed: false,
-          reason: "destination 0x7a250d56...488D (Uniswap Router) not on approved whitelist",
+          reason:
+            "destination 0x7a250d56...488D (Uniswap Router) not on approved whitelist",
         },
         {
           policyId: "pol-dex-auto",
@@ -1290,7 +1306,8 @@ async function seed() {
           policyId: "pol-pred-auto",
           type: "auto-approve-threshold",
           passed: false,
-          reason: "value 90 POL exceeds auto-approve threshold of 20 POL — requires human approval",
+          reason:
+            "value 90 POL exceeds auto-approve threshold of 20 POL — requires human approval",
         },
         { policyId: "pol-pred-rate", type: "rate-limit", passed: true },
       ],
@@ -1543,7 +1560,8 @@ async function seed() {
           policyId: "pol-perp-spending",
           type: "spending-limit",
           passed: false,
-          reason: "daily spend 1.8 ETH + requested 0.4 ETH exceeds 2 ETH daily limit",
+          reason:
+            "daily spend 1.8 ETH + requested 0.4 ETH exceeds 2 ETH daily limit",
         },
         {
           policyId: "pol-perp-addresses",
@@ -1572,7 +1590,8 @@ async function seed() {
           policyId: "pol-perp-spending",
           type: "spending-limit",
           passed: false,
-          reason: "daily spend 1.7 ETH + requested 0.45 ETH exceeds 2 ETH daily limit",
+          reason:
+            "daily spend 1.7 ETH + requested 0.45 ETH exceeds 2 ETH daily limit",
         },
         {
           policyId: "pol-perp-addresses",
@@ -1759,7 +1778,8 @@ async function seed() {
           policyId: "pol-hosting-addresses",
           type: "approved-addresses",
           passed: false,
-          reason: "destination 0x1111...1111 not on whitelist — only Eliza Cloud address allowed",
+          reason:
+            "destination 0x1111...1111 not on whitelist — only Eliza Cloud address allowed",
         },
         {
           policyId: "pol-hosting-auto",
@@ -1836,7 +1856,10 @@ async function seed() {
     },
   ];
 
-  await db.insert(transactions).values(txSeeds).onConflictDoNothing({ target: transactions.id });
+  await db
+    .insert(transactions)
+    .values(txSeeds)
+    .onConflictDoNothing({ target: transactions.id });
 
   /* ════════════════════════════════════════════════════════════════════════ */
   /*  APPROVAL QUEUE                                                         */

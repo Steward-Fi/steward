@@ -109,7 +109,10 @@ beforeAll(async () => {
   if (user) {
     testUserId = user.id;
   } else {
-    const [existing] = await db.select().from(users).where(eq(users.email, TEST_USER_EMAIL));
+    const [existing] = await db
+      .select()
+      .from(users)
+      .where(eq(users.email, TEST_USER_EMAIL));
     testUserId = existing.id;
   }
 
@@ -128,8 +131,12 @@ afterAll(async () => {
   // Clean up in reverse order of dependencies
   await db.delete(userTenants).where(eq(userTenants.userId, testUserId));
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, OPEN_TENANT));
-  await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, INVITE_TENANT));
-  await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, CLOSED_TENANT));
+  await db
+    .delete(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, INVITE_TENANT));
+  await db
+    .delete(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, CLOSED_TENANT));
   await db.delete(tenants).where(eq(tenants.id, OPEN_TENANT));
   await db.delete(tenants).where(eq(tenants.id, INVITE_TENANT));
   await db.delete(tenants).where(eq(tenants.id, CLOSED_TENANT));
@@ -141,10 +148,14 @@ afterAll(async () => {
 
 async function getTestUserToken(tenantId?: string): Promise<string> {
   const { createSessionToken } = await import("../routes/auth");
-  return createSessionToken("0x0000000000000000000000000000000000000000", tenantId ?? OPEN_TENANT, {
-    userId: testUserId,
-    email: TEST_USER_EMAIL,
-  });
+  return createSessionToken(
+    "0x0000000000000000000000000000000000000000",
+    tenantId ?? OPEN_TENANT,
+    {
+      userId: testUserId,
+      email: TEST_USER_EMAIL,
+    },
+  );
 }
 
 // ─── Tests: User Tenant APIs ──────────────────────────────────────────────
@@ -206,10 +217,13 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     it("allows joining an open tenant (no config row = default open)", async () => {
       const token = await getTestUserToken();
 
-      const res = await fetch(`${BASE_URL}/user/me/tenants/${NO_CONFIG_TENANT}/join`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${BASE_URL}/user/me/tenants/${NO_CONFIG_TENANT}/join`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
 
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
@@ -224,10 +238,13 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     it("rejects joining an invite-only tenant", async () => {
       const token = await getTestUserToken();
 
-      const res = await fetch(`${BASE_URL}/user/me/tenants/${INVITE_TENANT}/join`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${BASE_URL}/user/me/tenants/${INVITE_TENANT}/join`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
 
       expect(res.status).toBe(403);
     });
@@ -235,10 +252,13 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     it("rejects joining a closed tenant", async () => {
       const token = await getTestUserToken();
 
-      const res = await fetch(`${BASE_URL}/user/me/tenants/${CLOSED_TENANT}/join`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${BASE_URL}/user/me/tenants/${CLOSED_TENANT}/join`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
 
       expect(res.status).toBe(403);
     });
@@ -246,10 +266,13 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     it("returns 404 for a non-existent tenant", async () => {
       const token = await getTestUserToken();
 
-      const res = await fetch(`${BASE_URL}/user/me/tenants/nonexistent-tenant/join`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${BASE_URL}/user/me/tenants/nonexistent-tenant/join`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
 
       expect(res.status).toBe(404);
     });
@@ -265,10 +288,13 @@ describeWithDatabase("Cross-Tenant Identity", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
 
-      const res = await fetch(`${BASE_URL}/user/me/tenants/${NO_CONFIG_TENANT}/leave`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${BASE_URL}/user/me/tenants/${NO_CONFIG_TENANT}/leave`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
 
       expect(res.status).toBe(200);
       const body = (await res.json()) as { ok: boolean };
@@ -278,10 +304,13 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     it("prevents leaving personal tenant", async () => {
       const token = await getTestUserToken();
 
-      const res = await fetch(`${BASE_URL}/user/me/tenants/personal-${testUserId}/leave`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(
+        `${BASE_URL}/user/me/tenants/personal-${testUserId}/leave`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      );
 
       expect(res.status).toBe(400);
     });
@@ -289,9 +318,12 @@ describeWithDatabase("Cross-Tenant Identity", () => {
 
   describe("Platform tenant member management", () => {
     it("GET /platform/tenants/:id/members lists members", async () => {
-      const res = await fetch(`${BASE_URL}/platform/tenants/${OPEN_TENANT}/members`, {
-        headers: { "X-Steward-Platform-Key": platformKey },
-      });
+      const res = await fetch(
+        `${BASE_URL}/platform/tenants/${OPEN_TENANT}/members`,
+        {
+          headers: { "X-Steward-Platform-Key": platformKey },
+        },
+      );
 
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
@@ -303,14 +335,17 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     });
 
     it("POST /platform/tenants/:id/members invites a user", async () => {
-      const res = await fetch(`${BASE_URL}/platform/tenants/${INVITE_TENANT}/members`, {
-        method: "POST",
-        headers: {
-          "X-Steward-Platform-Key": platformKey,
-          "Content-Type": "application/json",
+      const res = await fetch(
+        `${BASE_URL}/platform/tenants/${INVITE_TENANT}/members`,
+        {
+          method: "POST",
+          headers: {
+            "X-Steward-Platform-Key": platformKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ email: TEST_USER_EMAIL, role: "admin" }),
         },
-        body: JSON.stringify({ email: TEST_USER_EMAIL, role: "admin" }),
-      });
+      );
 
       expect(res.status).toBe(201);
       const body = (await res.json()) as {
@@ -358,9 +393,12 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     });
 
     it("returns 404 for members of non-existent tenant", async () => {
-      const res = await fetch(`${BASE_URL}/platform/tenants/nonexistent/members`, {
-        headers: { "X-Steward-Platform-Key": platformKey },
-      });
+      const res = await fetch(
+        `${BASE_URL}/platform/tenants/nonexistent/members`,
+        {
+          headers: { "X-Steward-Platform-Key": platformKey },
+        },
+      );
 
       expect(res.status).toBe(404);
     });

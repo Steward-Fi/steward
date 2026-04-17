@@ -21,7 +21,9 @@ import { drizzle } from "drizzle-orm/pglite";
 import * as schema from "./schema";
 import * as schemaAuth from "./schema-auth";
 
-export type PGLiteDb = ReturnType<typeof drizzle<typeof schema & typeof schemaAuth>>;
+export type PGLiteDb = ReturnType<
+  typeof drizzle<typeof schema & typeof schemaAuth>
+>;
 
 let globalPGLite: { client: PGlite; db: PGLiteDb } | undefined;
 
@@ -71,7 +73,9 @@ async function runPGLiteMigrations(client: PGlite): Promise<void> {
 
   // Read all SQL files (skip meta/ directory and non-.sql)
   const files = await readdir(migrationsFolder);
-  const sqlFiles = files.filter((f) => f.endsWith(".sql") && !f.startsWith(".")).sort();
+  const sqlFiles = files
+    .filter((f) => f.endsWith(".sql") && !f.startsWith("."))
+    .sort();
 
   for (const file of sqlFiles) {
     const tag = file.replace(/\.sql$/, "");
@@ -92,7 +96,10 @@ async function runPGLiteMigrations(client: PGlite): Promise<void> {
         await client.exec(trimmed);
       } catch (err: any) {
         // Ignore "already exists" errors for idempotent migrations
-        if (err.message?.includes("already exists") || err.message?.includes("duplicate key")) {
+        if (
+          err.message?.includes("already exists") ||
+          err.message?.includes("duplicate key")
+        ) {
           continue;
         }
         throw new Error(
@@ -101,7 +108,9 @@ async function runPGLiteMigrations(client: PGlite): Promise<void> {
       }
     }
 
-    await client.exec(`INSERT INTO __steward_migrations (tag) VALUES ('${tag}')`);
+    await client.exec(
+      `INSERT INTO __steward_migrations (tag) VALUES ('${tag}')`,
+    );
     console.log(`[pglite] Applied migration: ${file}`);
   }
 }
@@ -111,7 +120,9 @@ async function runPGLiteMigrations(client: PGlite): Promise<void> {
  *
  * @param dataDir - directory for persistence, or "memory://" for in-memory
  */
-export async function createPGLiteDb(dataDir?: string): Promise<{ client: PGlite; db: PGLiteDb }> {
+export async function createPGLiteDb(
+  dataDir?: string,
+): Promise<{ client: PGlite; db: PGLiteDb }> {
   const useMemory = process.env.STEWARD_PGLITE_MEMORY === "true";
 
   let connectionTarget: string;

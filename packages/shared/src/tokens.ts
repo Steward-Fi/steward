@@ -65,7 +65,10 @@ export function getNativeSymbol(chainId: number): string {
  * For known ERC-20 tokens (from KNOWN_TOKEN_DECIMALS), returns the known value.
  * Falls back to 18 for unknown tokens.
  */
-export function getTokenDecimals(chainId: number, tokenAddress?: string): number {
+export function getTokenDecimals(
+  chainId: number,
+  tokenAddress?: string,
+): number {
   if (!tokenAddress || tokenAddress === "native" || tokenAddress === "") {
     return getNativeDecimals(chainId);
   }

@@ -47,7 +47,9 @@ export function usePolicies() {
 
   const applyTemplate = useCallback(
     async (templateId: string, overrides?: Record<string, unknown>) => {
-      const template = tenantConfig?.policyTemplates.find((t) => t.id === templateId);
+      const template = tenantConfig?.policyTemplates.find(
+        (t) => t.id === templateId,
+      );
       if (!template) {
         throw new Error(`Template "${templateId}" not found`);
       }

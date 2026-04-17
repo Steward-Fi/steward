@@ -51,7 +51,10 @@ export class RetryQueue {
         continue;
       }
 
-      const result = await this.dispatcher.dispatch(delivery.event, delivery.webhook);
+      const result = await this.dispatcher.dispatch(
+        delivery.event,
+        delivery.webhook,
+      );
       delivery.attempts += 1;
 
       if (result.success) {

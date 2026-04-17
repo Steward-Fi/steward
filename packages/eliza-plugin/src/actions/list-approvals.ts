@@ -55,8 +55,14 @@ export const listApprovalsAction: Action = {
     ],
   ] as ActionExample[][],
 
-  async validate(runtime: IAgentRuntime, _message: Memory, _state?: State): Promise<boolean> {
-    const steward = runtime.getService("steward" as any) as StewardService | null;
+  async validate(
+    runtime: IAgentRuntime,
+    _message: Memory,
+    _state?: State,
+  ): Promise<boolean> {
+    const steward = runtime.getService(
+      "steward" as any,
+    ) as StewardService | null;
     return steward?.isConnected() ?? false;
   },
 

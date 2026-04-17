@@ -5,7 +5,9 @@ import { type EvaluatorContext, evaluatePolicy } from "../evaluators";
 
 // ─── Test Helpers ─────────────────────────────────────────────────────────
 
-function makeContext(overrides: Partial<EvaluatorContext> = {}): EvaluatorContext {
+function makeContext(
+  overrides: Partial<EvaluatorContext> = {},
+): EvaluatorContext {
   const defaultRequest: SignRequest = {
     agentId: "test-agent",
     tenantId: "test-tenant",
@@ -24,19 +26,31 @@ function makeContext(overrides: Partial<EvaluatorContext> = {}): EvaluatorContex
   };
 }
 
-function makeSpendingRule(config: Record<string, unknown>, id = "spending-1"): PolicyRule {
+function makeSpendingRule(
+  config: Record<string, unknown>,
+  id = "spending-1",
+): PolicyRule {
   return { id, type: "spending-limit", enabled: true, config };
 }
 
-function makeRateRule(config: Record<string, unknown>, id = "rate-1"): PolicyRule {
+function makeRateRule(
+  config: Record<string, unknown>,
+  id = "rate-1",
+): PolicyRule {
   return { id, type: "rate-limit", enabled: true, config };
 }
 
-function makeAddressRule(config: Record<string, unknown>, id = "addr-1"): PolicyRule {
+function makeAddressRule(
+  config: Record<string, unknown>,
+  id = "addr-1",
+): PolicyRule {
   return { id, type: "approved-addresses", enabled: true, config };
 }
 
-function makeTimeWindowRule(config: Record<string, unknown>, id = "time-1"): PolicyRule {
+function makeTimeWindowRule(
+  config: Record<string, unknown>,
+  id = "time-1",
+): PolicyRule {
   return { id, type: "time-window", enabled: true, config };
 }
 
@@ -703,7 +717,10 @@ describe("Auto-Approve Threshold Policy", () => {
 // ─── Allowed Chains Tests ─────────────────────────────────────────────────
 
 describe("Allowed Chains Policy", () => {
-  function makeAllowedChainsRule(chains: string[], id = "chains-1"): PolicyRule {
+  function makeAllowedChainsRule(
+    chains: string[],
+    id = "chains-1",
+  ): PolicyRule {
     return { id, type: "allowed-chains", enabled: true, config: { chains } };
   }
 
@@ -718,7 +735,11 @@ describe("Allowed Chains Policy", () => {
   });
 
   it("passes when request chainId matches one of multiple allowed chains", async () => {
-    const rule = makeAllowedChainsRule(["eip155:1", "eip155:56", "eip155:8453"]);
+    const rule = makeAllowedChainsRule([
+      "eip155:1",
+      "eip155:56",
+      "eip155:8453",
+    ]);
     const ctx = makeContext({
       request: { ...makeContext().request, chainId: 56 },
     }); // BSC
@@ -1005,7 +1026,9 @@ describe("PolicyEngine.evaluate()", () => {
 
     expect(result.approved).toBe(false);
     expect(result.requiresManualApproval).toBe(false);
-    const failedResult = result.results.find((r) => r.type === "approved-addresses");
+    const failedResult = result.results.find(
+      (r) => r.type === "approved-addresses",
+    );
     expect(failedResult?.passed).toBe(false);
   });
 
@@ -1025,7 +1048,9 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.results).toHaveLength(3);
     expect(result.results.map((r) => r.type)).toContain("spending-limit");
     expect(result.results.map((r) => r.type)).toContain("rate-limit");
-    expect(result.results.map((r) => r.type)).toContain("auto-approve-threshold");
+    expect(result.results.map((r) => r.type)).toContain(
+      "auto-approve-threshold",
+    );
   });
 
   it("allowed-chains pass alongside other passing policies → approved", async () => {
@@ -1048,7 +1073,9 @@ describe("PolicyEngine.evaluate()", () => {
 
     expect(result.approved).toBe(true);
     expect(result.requiresManualApproval).toBe(false);
-    const chainsResult = result.results.find((r) => r.type === "allowed-chains");
+    const chainsResult = result.results.find(
+      (r) => r.type === "allowed-chains",
+    );
     expect(chainsResult?.passed).toBe(true);
   });
 
@@ -1076,7 +1103,9 @@ describe("PolicyEngine.evaluate()", () => {
 
     expect(result.approved).toBe(false);
     expect(result.requiresManualApproval).toBe(false);
-    const chainsResult = result.results.find((r) => r.type === "allowed-chains");
+    const chainsResult = result.results.find(
+      (r) => r.type === "allowed-chains",
+    );
     expect(chainsResult?.passed).toBe(false);
     expect(chainsResult?.reason).toContain("eip155:8453");
   });

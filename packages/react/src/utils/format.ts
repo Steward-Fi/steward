@@ -23,7 +23,11 @@ export function formatWei(wei: string, decimals = 4): string {
 /**
  * Format a wei string for currency display with symbol.
  */
-export function formatBalance(wei: string, symbol = "ETH", decimals = 4): string {
+export function formatBalance(
+  wei: string,
+  symbol = "ETH",
+  decimals = 4,
+): string {
   return `${formatWei(wei, decimals)} ${symbol}`;
 }
 
@@ -91,7 +95,10 @@ export function getExplorerTxUrl(txHash: string, chainId: number): string {
 /**
  * Get a block explorer URL for an address.
  */
-export function getExplorerAddressUrl(address: string, chainId: number): string {
+export function getExplorerAddressUrl(
+  address: string,
+  chainId: number,
+): string {
   const explorers: Record<number, string> = {
     1: "https://etherscan.io",
     56: "https://bscscan.com",

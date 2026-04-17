@@ -47,11 +47,19 @@ export class ThresholdStrategy implements Strategy {
   private readonly minNativeReserve: bigint;
 
   constructor(params: ThresholdParams) {
-    this.buyBelowPrice = params.buyBelowPrice ? BigInt(params.buyBelowPrice) : null;
+    this.buyBelowPrice = params.buyBelowPrice
+      ? BigInt(params.buyBelowPrice)
+      : null;
     this.buyAmount = params.buyAmountWei ? BigInt(params.buyAmountWei) : null;
-    this.sellAbovePrice = params.sellAbovePrice ? BigInt(params.sellAbovePrice) : null;
-    this.sellAmount = params.sellAmountTokens ? BigInt(params.sellAmountTokens) : null;
-    this.minNativeReserve = BigInt(params.minNativeReserve ?? "10000000000000000"); // 0.01 ETH
+    this.sellAbovePrice = params.sellAbovePrice
+      ? BigInt(params.sellAbovePrice)
+      : null;
+    this.sellAmount = params.sellAmountTokens
+      ? BigInt(params.sellAmountTokens)
+      : null;
+    this.minNativeReserve = BigInt(
+      params.minNativeReserve ?? "10000000000000000",
+    ); // 0.01 ETH
 
     if (!this.buyBelowPrice && !this.sellAbovePrice) {
       throw new Error(
@@ -92,7 +100,8 @@ export class ThresholdStrategy implements Strategy {
         };
       }
 
-      const safeAmount = this.sellAmount < tokenBalance ? this.sellAmount : tokenBalance;
+      const safeAmount =
+        this.sellAmount < tokenBalance ? this.sellAmount : tokenBalance;
 
       return {
         action: "sell",
@@ -114,7 +123,9 @@ export class ThresholdStrategy implements Strategy {
       }
 
       const spendable =
-        nativeBalance > this.minNativeReserve ? nativeBalance - this.minNativeReserve : 0n;
+        nativeBalance > this.minNativeReserve
+          ? nativeBalance - this.minNativeReserve
+          : 0n;
 
       if (spendable < this.buyAmount) {
         return {
@@ -137,7 +148,9 @@ export class ThresholdStrategy implements Strategy {
   }
 }
 
-export function createThresholdStrategy(params: Record<string, unknown>): ThresholdStrategy {
+export function createThresholdStrategy(
+  params: Record<string, unknown>,
+): ThresholdStrategy {
   return new ThresholdStrategy({
     buyBelowPrice: params.buyBelowPrice as string | undefined,
     buyAmountWei: params.buyAmountWei as string | undefined,

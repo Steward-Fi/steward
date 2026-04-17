@@ -1,6 +1,11 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { disconnectRedis, getRedis } from "../client.js";
-import { checkSpendLimit, getSpend, getSpendByHost, recordSpend } from "../spend-tracker.js";
+import {
+  checkSpendLimit,
+  getSpend,
+  getSpendByHost,
+  recordSpend,
+} from "../spend-tracker.js";
 
 const runRedis = process.env.STEWARD_REDIS_TESTS === "1";
 const describeRedis = runRedis ? describe : describe.skip;

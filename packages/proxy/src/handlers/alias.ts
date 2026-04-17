@@ -27,7 +27,9 @@ export interface ResolvedTarget {
  */
 export function resolveTarget(requestPath: string): ResolvedTarget | null {
   // Strip leading slash and split into segments
-  const cleaned = requestPath.startsWith("/") ? requestPath.slice(1) : requestPath;
+  const cleaned = requestPath.startsWith("/")
+    ? requestPath.slice(1)
+    : requestPath;
   if (!cleaned) return null;
 
   const slashIdx = cleaned.indexOf("/");
@@ -46,11 +48,14 @@ export function resolveTarget(requestPath: string): ResolvedTarget | null {
 
   // 2. Direct proxy: /proxy/custom.api.com/endpoint → custom.api.com/endpoint
   if (firstSegment === "proxy") {
-    const afterProxy = remainder.startsWith("/") ? remainder.slice(1) : remainder;
+    const afterProxy = remainder.startsWith("/")
+      ? remainder.slice(1)
+      : remainder;
     if (!afterProxy) return null;
 
     const hostSlashIdx = afterProxy.indexOf("/");
-    const host = hostSlashIdx === -1 ? afterProxy : afterProxy.slice(0, hostSlashIdx);
+    const host =
+      hostSlashIdx === -1 ? afterProxy : afterProxy.slice(0, hostSlashIdx);
     const path = hostSlashIdx === -1 ? "/" : afterProxy.slice(hostSlashIdx);
 
     // Basic hostname validation

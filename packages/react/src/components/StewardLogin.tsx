@@ -1,5 +1,11 @@
 import { useContext, useEffect, useRef, useState } from "react";
-import { DiscordIcon, EmailIcon, EthereumIcon, GoogleIcon, PasskeyIcon } from "../icons/index.js";
+import {
+  DiscordIcon,
+  EmailIcon,
+  EthereumIcon,
+  GoogleIcon,
+  PasskeyIcon,
+} from "../icons/index.js";
 import { StewardAuthContext } from "../provider.js";
 import type { StewardLoginProps } from "../types.js";
 
@@ -56,7 +62,12 @@ export function StewardLogin({
 
   // When auth state changes to authenticated, fire onSuccess for redirect
   useEffect(() => {
-    if (ctx?.isAuthenticated && ctx.session?.token && onSuccess && !didFireSuccess.current) {
+    if (
+      ctx?.isAuthenticated &&
+      ctx.session?.token &&
+      onSuccess &&
+      !didFireSuccess.current
+    ) {
       didFireSuccess.current = true;
       const user = ctx.session.user ?? { id: "", email: "" };
       onSuccess({ token: ctx.session.token, user });
@@ -67,7 +78,8 @@ export function StewardLogin({
     return (
       <div className={`stwd-login stwd-login--error ${className ?? ""}`}>
         <p className="stwd-login__error">
-          StewardLogin must be used inside a &lt;StewardProvider&gt; with an <code>auth</code> prop.
+          StewardLogin must be used inside a &lt;StewardProvider&gt; with an{" "}
+          <code>auth</code> prop.
         </p>
       </div>
     );
@@ -137,7 +149,10 @@ export function StewardLogin({
       if (typeof ctx.signInWithOAuth !== "function") {
         throw new Error("OAuth not available. Update @stwd/sdk.");
       }
-      const result = await ctx.signInWithOAuth(provider, tenantId ? { tenantId } : undefined);
+      const result = await ctx.signInWithOAuth(
+        provider,
+        tenantId ? { tenantId } : undefined,
+      );
       onSuccess?.(result);
     } catch (err) {
       handleError(err);
@@ -145,17 +160,22 @@ export function StewardLogin({
   };
 
   const isLoading = step === "loading" || ctx.isLoading;
-  const variantClass = variant === "card" ? "stwd-login--card" : "stwd-login--inline";
+  const variantClass =
+    variant === "card" ? "stwd-login--card" : "stwd-login--inline";
 
   if (step === "email-sent") {
     return (
-      <div className={`stwd-login ${variantClass} stwd-login--sent ${className ?? ""}`}>
+      <div
+        className={`stwd-login ${variantClass} stwd-login--sent ${className ?? ""}`}
+      >
         <div className="stwd-login__notice">
           <span className="stwd-login__notice-icon">✉️</span>
           <p>
             Magic link sent to <strong>{email}</strong>
           </p>
-          <p className="stwd-login__notice-sub">Check your inbox and click the link to sign in.</p>
+          <p className="stwd-login__notice-sub">
+            Check your inbox and click the link to sign in.
+          </p>
         </div>
         <button
           className="stwd-login__btn stwd-login__btn--back"
@@ -184,7 +204,9 @@ export function StewardLogin({
             (() => {
               const tenant = ctx.tenants.find((t) => t.tenantId === tenantId);
               return tenant ? (
-                <p className="stwd-login__tenant-name">Signing in to {tenant.tenantName}</p>
+                <p className="stwd-login__tenant-name">
+                  Signing in to {tenant.tenantName}
+                </p>
               ) : null;
             })()}
         </div>

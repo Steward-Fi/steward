@@ -27,7 +27,9 @@ function parseAmount(amountStr: string): { valueWei: string; symbol: string } {
   const cleaned = amountStr.trim();
   const match = cleaned.match(/^([\d.]+)\s*(\w+)?$/i);
   if (!match) {
-    throw new Error(`Could not parse amount: "${amountStr}". Expected format like "0.1 ETH"`);
+    throw new Error(
+      `Could not parse amount: "${amountStr}". Expected format like "0.1 ETH"`,
+    );
   }
 
   const numericValue = parseFloat(match[1]);
@@ -52,12 +54,21 @@ function parseAmount(amountStr: string): { valueWei: string; symbol: string } {
 export const transferAction: Action = {
   name: "STEWARD_TRANSFER",
   description: "Send tokens to an address using the Steward-managed wallet",
-  similes: ["send tokens", "transfer", "send ETH", "send SOL", "send BNB", "pay", "wire"],
+  similes: [
+    "send tokens",
+    "transfer",
+    "send ETH",
+    "send SOL",
+    "send BNB",
+    "pay",
+    "wire",
+  ],
 
   parameters: [
     {
       name: "to",
-      description: "Recipient address (0x… for EVM, base58 for Solana) or ENS name",
+      description:
+        "Recipient address (0x… for EVM, base58 for Solana) or ENS name",
       required: true,
       schema: { type: "string" },
     },
@@ -99,8 +110,14 @@ export const transferAction: Action = {
     ],
   ] as ActionExample[][],
 
-  async validate(runtime: IAgentRuntime, _message: Memory, _state?: State): Promise<boolean> {
-    const steward = runtime.getService("steward" as any) as StewardService | null;
+  async validate(
+    runtime: IAgentRuntime,
+    _message: Memory,
+    _state?: State,
+  ): Promise<boolean> {
+    const steward = runtime.getService(
+      "steward" as any,
+    ) as StewardService | null;
     return steward?.isConnected() ?? false;
   },
 

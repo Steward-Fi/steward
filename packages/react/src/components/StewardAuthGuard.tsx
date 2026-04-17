@@ -21,7 +21,11 @@ import { StewardLogin } from "./StewardLogin.js";
  *   <Dashboard />
  * </StewardAuthGuard>
  */
-export function StewardAuthGuard({ children, fallback, loadingFallback }: StewardAuthGuardProps) {
+export function StewardAuthGuard({
+  children,
+  fallback,
+  loadingFallback,
+}: StewardAuthGuardProps) {
   const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
@@ -33,7 +37,9 @@ export function StewardAuthGuard({ children, fallback, loadingFallback }: Stewar
   }
 
   if (!isAuthenticated) {
-    return <div className="stwd-auth-guard">{fallback ?? <StewardLogin />}</div>;
+    return (
+      <div className="stwd-auth-guard">{fallback ?? <StewardLogin />}</div>
+    );
   }
 
   return <>{children}</>;

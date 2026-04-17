@@ -40,31 +40,41 @@ dashboardRoutes.get("/:agentId", async (c) => {
   }
 
   // Run queries in parallel
-  const [policyRules, txStats, recentTxRows, pendingApprovalsResult, balanceResult] =
-    await Promise.all([
-      // Policies
-      getPolicySet(tenantId, agentId),
+  const [
+    policyRules,
+    txStats,
+    recentTxRows,
+    pendingApprovalsResult,
+    balanceResult,
+  ] = await Promise.all([
+    // Policies
+    getPolicySet(tenantId, agentId),
 
-      // Spend stats
-      getTransactionStats(agentId),
+    // Spend stats
+    getTransactionStats(agentId),
 
-      // Recent transactions (last 5)
-      db
-        .select()
-        .from(transactions)
-        .where(eq(transactions.agentId, agentId))
-        .orderBy(desc(transactions.createdAt))
-        .limit(5),
+    // Recent transactions (last 5)
+    db
+      .select()
+      .from(transactions)
+      .where(eq(transactions.agentId, agentId))
+      .orderBy(desc(transactions.createdAt))
+      .limit(5),
 
-      // Pending approvals count
-      db
-        .select({ count: sql<number>`count(*)` })
-        .from(approvalQueue)
-        .where(and(eq(approvalQueue.agentId, agentId), eq(approvalQueue.status, "pending"))),
+    // Pending approvals count
+    db
+      .select({ count: sql<number>`count(*)` })
+      .from(approvalQueue)
+      .where(
+        and(
+          eq(approvalQueue.agentId, agentId),
+          eq(approvalQueue.status, "pending"),
+        ),
+      ),
 
-      // Balance — try to get from vault
-      vault.getBalance(tenantId, agentId).catch(() => null),
-    ]);
+    // Balance — try to get from vault
+    vault.getBalance(tenantId, agentId).catch(() => null),
+  ]);
 
   // Get monthly spend
   const oneMonthAgo = new Date(Date.now() - 30 * 86400_000);

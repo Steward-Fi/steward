@@ -12,7 +12,9 @@ function ErrorPage({ statusCode }: { statusCode?: number }) {
       }}
     >
       <div style={{ textAlign: "center" }}>
-        <h1 style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>{statusCode || "Error"}</h1>
+        <h1 style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>
+          {statusCode || "Error"}
+        </h1>
         <p style={{ fontSize: "0.875rem", color: "#888" }}>
           {statusCode === 404 ? "Page not found" : "An error occurred"}
         </p>

@@ -18,7 +18,10 @@ import { PROXY_PORT } from "./config";
 import { getAliasNames } from "./handlers/alias";
 import { handleProxy } from "./handlers/proxy";
 import { authMiddleware } from "./middleware/auth";
-import { initProxyRedis, shutdownProxyRedis } from "./middleware/redis-enforcement";
+import {
+  initProxyRedis,
+  shutdownProxyRedis,
+} from "./middleware/redis-enforcement";
 
 // ─── Ensure DB is initialised ────────────────────────────────────────────────
 
@@ -59,7 +62,10 @@ app.all("*", handleProxy);
 // ─── Redis initialization (non-blocking) ─────────────────────────────────────
 
 initProxyRedis().catch((err) => {
-  console.warn("[proxy] Redis initialization failed, continuing without Redis:", err);
+  console.warn(
+    "[proxy] Redis initialization failed, continuing without Redis:",
+    err,
+  );
 });
 
 // ─── Graceful shutdown ────────────────────────────────────────────────────────

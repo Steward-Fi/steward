@@ -25,7 +25,8 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
   const fetchTransactions = useCallback(async () => {
     try {
       // Try paginated endpoint first
-      const baseUrl = (client as unknown as Record<string, string>).baseUrl || "";
+      const baseUrl =
+        (client as unknown as Record<string, string>).baseUrl || "";
       const params = new URLSearchParams();
       params.set("page", String(page));
       params.set("pageSize", String(pageSize));
@@ -82,7 +83,10 @@ export function useTransactions(opts: UseTransactionsOpts = {}) {
 
   // Client-side pagination for fallback
   const totalPages = Math.max(1, Math.ceil(allTransactions.length / pageSize));
-  const paginatedTx = allTransactions.slice((page - 1) * pageSize, page * pageSize);
+  const paginatedTx = allTransactions.slice(
+    (page - 1) * pageSize,
+    page * pageSize,
+  );
 
   return {
     transactions: paginatedTx,

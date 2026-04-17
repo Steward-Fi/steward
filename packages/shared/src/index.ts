@@ -624,7 +624,10 @@ export function getChainMeta(chainId: number): ChainMeta | undefined {
   return CHAIN_META[chainId];
 }
 
-export function getExplorerTxLink(chainId: number, txHash: string): string | undefined {
+export function getExplorerTxLink(
+  chainId: number,
+  txHash: string,
+): string | undefined {
   const meta = CHAIN_META[chainId];
   return meta ? `${meta.explorerTxUrl}${txHash}` : undefined;
 }

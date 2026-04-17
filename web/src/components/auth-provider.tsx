@@ -29,8 +29,13 @@ export interface AuthContextType {
   isLoading: boolean;
   signIn: () => Promise<void>;
   signInWithPasskey: (email: string) => Promise<void>;
-  signInWithEmail: (email: string) => Promise<{ ok: boolean; expiresAt?: string }>;
-  completeEmailAuth: (result: { token: string; user: { id: string; email: string } }) => void;
+  signInWithEmail: (
+    email: string,
+  ) => Promise<{ ok: boolean; expiresAt?: string }>;
+  completeEmailAuth: (result: {
+    token: string;
+    user: { id: string; email: string };
+  }) => void;
   signOut: () => Promise<void>;
 }
 
@@ -49,7 +54,9 @@ export function useAuth(): AuthContextType {
       : null;
 
     return {
-      address: (user as unknown as Record<string, unknown>)?.address as string | undefined,
+      address: (user as unknown as Record<string, unknown>)?.address as
+        | string
+        | undefined,
       email: user?.email ?? undefined,
       userId: user?.id ?? undefined,
       tenant,
@@ -63,7 +70,8 @@ export function useAuth(): AuthContextType {
         const result = await auth.signInWithEmail(email);
         return {
           ok: true,
-          expiresAt: (result as unknown as Record<string, unknown>).expiresAt as string,
+          expiresAt: (result as unknown as Record<string, unknown>)
+            .expiresAt as string,
         };
       },
       completeEmailAuth: () => {},

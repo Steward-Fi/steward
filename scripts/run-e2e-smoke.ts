@@ -6,7 +6,8 @@ import net from "node:net";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const bunCmd = process.env.npm_execpath || process.env.BUN || "bun";
-const skipRequested = process.env.MILADY_SKIP_STEWARD_FI_LIVE_SMOKE?.trim() === "1";
+const skipRequested =
+  process.env.MILADY_SKIP_STEWARD_FI_LIVE_SMOKE?.trim() === "1";
 const explicitStewardUrl = process.env.STEWARD_URL?.trim();
 const authSmokeScript = new URL("./e2e-auth-test.ts", import.meta.url);
 const LOCAL_READY_TIMEOUT_MS = 120_000;
@@ -56,7 +57,10 @@ async function getFreePort(): Promise<number> {
   });
 }
 
-async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+async function waitForChildExit(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> {
   if (child.exitCode !== null) {
     return true;
   }
@@ -143,7 +147,9 @@ function runAuthSmoke(env: NodeJS.ProcessEnv): number {
 
 async function main(): Promise<void> {
   if (skipRequested) {
-    console.log("[steward-fi] Skipping e2e smoke because MILADY_SKIP_STEWARD_FI_LIVE_SMOKE=1.");
+    console.log(
+      "[steward-fi] Skipping e2e smoke because MILADY_SKIP_STEWARD_FI_LIVE_SMOKE=1.",
+    );
     process.exit(0);
   }
 
@@ -183,11 +189,14 @@ async function main(): Promise<void> {
     STEWARD_DB_MODE: "pglite",
     STEWARD_PGLITE_MEMORY: "true",
     STEWARD_PLATFORM_KEY: platformKey,
-    STEWARD_PLATFORM_KEYS: process.env.STEWARD_PLATFORM_KEYS?.trim() || platformKey,
+    STEWARD_PLATFORM_KEYS:
+      process.env.STEWARD_PLATFORM_KEYS?.trim() || platformKey,
     STEWARD_URL: stewardUrl,
   };
 
-  console.log(`[steward-fi] Starting local embedded steward at ${stewardUrl} for smoke.`);
+  console.log(
+    `[steward-fi] Starting local embedded steward at ${stewardUrl} for smoke.`,
+  );
 
   const child = spawn(bunCmd, ["run", "scripts/start-local.ts"], {
     cwd: process.cwd(),

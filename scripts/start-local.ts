@@ -3,7 +3,10 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 
-const requiredArtifacts = ["packages/redis/dist/index.js", "packages/shared/dist/index.js"];
+const requiredArtifacts = [
+  "packages/redis/dist/index.js",
+  "packages/shared/dist/index.js",
+];
 
 function run(command: string, args: string[]) {
   const result = spawnSync(command, args, {
@@ -22,7 +25,9 @@ function run(command: string, args: string[]) {
 }
 
 if (requiredArtifacts.some((artifact) => !existsSync(artifact))) {
-  console.log("[steward] Building workspace packages required for embedded mode...");
+  console.log(
+    "[steward] Building workspace packages required for embedded mode...",
+  );
   run("bunx", ["turbo", "run", "build", "--filter=@stwd/api..."]);
 }
 

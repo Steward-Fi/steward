@@ -8,9 +8,18 @@ import { ChainBadge } from "@/components/chain-badge";
 import { CopyButton } from "@/components/copy-button";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
-import { getChainSymbol, getExplorerAddressLink, getExplorerTxLink } from "@/lib/chains";
+import {
+  getChainSymbol,
+  getExplorerAddressLink,
+  getExplorerTxLink,
+} from "@/lib/chains";
 import type { AgentIdentity, PolicyRule, TxRecord } from "@/lib/steward-client";
-import { formatDate, formatWei, policyTypeLabel, shortenAddress } from "@/lib/utils";
+import {
+  formatDate,
+  formatWei,
+  policyTypeLabel,
+  shortenAddress,
+} from "@/lib/utils";
 
 interface BalanceInfo {
   agentId: string;
@@ -78,7 +87,9 @@ export default function AgentDetailPage() {
   const [balance, setBalance] = useState<BalanceInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"transactions" | "policies">("transactions");
+  const [activeTab, setActiveTab] = useState<"transactions" | "policies">(
+    "transactions",
+  );
 
   useEffect(() => {
     loadAgent();
@@ -127,7 +138,9 @@ export default function AgentDetailPage() {
   if (error) {
     return (
       <div className="py-20 text-center">
-        <p className="font-display text-lg font-600 text-text-secondary">Failed to load agent</p>
+        <p className="font-display text-lg font-600 text-text-secondary">
+          Failed to load agent
+        </p>
         <p className="text-sm text-text-tertiary mt-2 font-mono">{error}</p>
         <div className="flex items-center justify-center gap-3 mt-6">
           <button
@@ -150,8 +163,12 @@ export default function AgentDetailPage() {
   if (!agent) {
     return (
       <div className="py-20 text-center">
-        <p className="font-display text-lg font-600 text-text-secondary">Agent not found</p>
-        <p className="text-sm text-text-tertiary mt-2">No agent with ID &ldquo;{agentId}&rdquo;</p>
+        <p className="font-display text-lg font-600 text-text-secondary">
+          Agent not found
+        </p>
+        <p className="text-sm text-text-tertiary mt-2">
+          No agent with ID &ldquo;{agentId}&rdquo;
+        </p>
         <Link
           href="/dashboard/agents"
           className="inline-block mt-6 text-xs px-4 py-2 bg-accent text-bg hover:bg-accent-hover transition-colors"
@@ -170,7 +187,9 @@ export default function AgentDetailPage() {
     }
   }, 0n);
 
-  const pendingCount = transactions.filter((tx) => tx.status === "pending").length;
+  const pendingCount = transactions.filter(
+    (tx) => tx.status === "pending",
+  ).length;
 
   const activePolicies = policies.filter((p) => p.enabled).length;
 
@@ -192,18 +211,24 @@ export default function AgentDetailPage() {
 
         <div className="flex items-start justify-between mt-3">
           <div>
-            <h1 className="font-display text-2xl font-700 tracking-tight">{agent.name}</h1>
+            <h1 className="font-display text-2xl font-700 tracking-tight">
+              {agent.name}
+            </h1>
             <div className="flex items-center gap-3 mt-2 flex-wrap">
               <span className="text-xs text-text-tertiary">{agent.id}</span>
               {agent.platformId && (
                 <>
                   <span className="text-border">|</span>
-                  <span className="text-xs text-text-tertiary">{agent.platformId}</span>
+                  <span className="text-xs text-text-tertiary">
+                    {agent.platformId}
+                  </span>
                 </>
               )}
               <span className="text-border">|</span>
               <div className="flex items-center gap-1">
-                <span className="font-mono text-xs text-text-secondary">{agent.walletAddress}</span>
+                <span className="font-mono text-xs text-text-secondary">
+                  {agent.walletAddress}
+                </span>
                 <CopyButton text={agent.walletAddress} />
               </div>
             </div>
@@ -211,7 +236,9 @@ export default function AgentDetailPage() {
           <a
             href={
               getExplorerAddressLink(
-                transactions[0]?.request?.chainId || transactions[0]?.chainId || 8453,
+                transactions[0]?.request?.chainId ||
+                  transactions[0]?.chainId ||
+                  8453,
                 agent.walletAddress,
               ) || `https://basescan.org/address/${agent.walletAddress}`
             }
@@ -256,7 +283,9 @@ export default function AgentDetailPage() {
             transition={{ delay: i * 0.06, duration: 0.3 }}
             className="bg-bg p-6"
           >
-            <div className="text-xs text-text-tertiary tracking-wider uppercase">{stat.label}</div>
+            <div className="text-xs text-text-tertiary tracking-wider uppercase">
+              {stat.label}
+            </div>
             <div
               className={`font-display text-2xl font-700 mt-2 tabular-nums ${
                 stat.accent ? "text-amber-400" : ""
@@ -275,7 +304,9 @@ export default function AgentDetailPage() {
             key={tab}
             onClick={() => setActiveTab(tab)}
             className={`relative px-4 py-2.5 text-sm transition-colors ${
-              activeTab === tab ? "text-text" : "text-text-tertiary hover:text-text-secondary"
+              activeTab === tab
+                ? "text-text"
+                : "text-text-tertiary hover:text-text-secondary"
             }`}
           >
             {tab === "transactions"
@@ -301,7 +332,9 @@ export default function AgentDetailPage() {
         <div>
           {transactions.length === 0 ? (
             <div className="py-16 text-center border border-border-subtle">
-              <p className="text-text-tertiary text-sm">No transactions for this agent yet.</p>
+              <p className="text-text-tertiary text-sm">
+                No transactions for this agent yet.
+              </p>
             </div>
           ) : (
             <div className="border-t border-border-subtle">
@@ -326,18 +359,26 @@ export default function AgentDetailPage() {
                     <StatusBadge status={tx.status} />
                   </div>
                   <div className="w-20">
-                    <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
+                    <ChainBadge
+                      chainId={tx.request?.chainId || tx.chainId || 8453}
+                      compact
+                    />
                   </div>
                   <div className="flex-1 min-w-0">
                     <span className="font-mono text-xs text-text-tertiary">
-                      {shortenAddress(tx.request?.to || tx.toAddress || "0x0", 8)}
+                      {shortenAddress(
+                        tx.request?.to || tx.toAddress || "0x0",
+                        8,
+                      )}
                     </span>
                   </div>
                   <div className="w-28 text-right">
                     <span className="text-sm tabular-nums text-text-secondary">
                       {formatWei(
                         tx.request?.value || tx.value || "0",
-                        getChainSymbol(tx.request?.chainId || tx.chainId || 8453),
+                        getChainSymbol(
+                          tx.request?.chainId || tx.chainId || 8453,
+                        ),
                       )}
                     </span>
                   </div>
@@ -345,8 +386,10 @@ export default function AgentDetailPage() {
                     {tx.txHash ? (
                       <a
                         href={
-                          getExplorerTxLink(tx.request?.chainId || tx.chainId || 8453, tx.txHash) ||
-                          "#"
+                          getExplorerTxLink(
+                            tx.request?.chainId || tx.chainId || 8453,
+                            tx.txHash,
+                          ) || "#"
                         }
                         target="_blank"
                         rel="noopener noreferrer"
@@ -356,7 +399,9 @@ export default function AgentDetailPage() {
                         {shortenAddress(tx.txHash, 6)} ↗
                       </a>
                     ) : (
-                      <span className="text-xs text-text-tertiary">&mdash;</span>
+                      <span className="text-xs text-text-tertiary">
+                        &mdash;
+                      </span>
                     )}
                   </div>
                   <div className="w-32 text-right">
@@ -375,8 +420,8 @@ export default function AgentDetailPage() {
       {activeTab === "policies" && (
         <div className="space-y-2">
           <p className="text-xs text-text-tertiary mb-4">
-            All 5 policy types are shown. Disabled policies are placeholders — configure them via
-            the API or SDK.
+            All 5 policy types are shown. Disabled policies are placeholders —
+            configure them via the API or SDK.
           </p>
           <div className="space-y-px bg-border">
             {policies.map((policy, i) => (
@@ -403,14 +448,19 @@ export default function AgentDetailPage() {
                     </div>
                     <div className="text-xs text-text-tertiary mt-0.5">
                       {policy.enabled
-                        ? formatPolicyConfig(policy.type, policy.config as Record<string, string>)
+                        ? formatPolicyConfig(
+                            policy.type,
+                            policy.config as Record<string, string>,
+                          )
                         : "Not configured"}
                     </div>
                   </div>
                 </div>
                 <span
                   className={`text-xs flex-shrink-0 ${
-                    policy.enabled ? "text-emerald-400" : "text-text-tertiary/50"
+                    policy.enabled
+                      ? "text-emerald-400"
+                      : "text-text-tertiary/50"
                   }`}
                 >
                   {policy.enabled ? "Active" : "Disabled"}
@@ -424,7 +474,10 @@ export default function AgentDetailPage() {
   );
 }
 
-function formatPolicyConfig(type: string, config: Record<string, string>): string {
+function formatPolicyConfig(
+  type: string,
+  config: Record<string, string>,
+): string {
   switch (type) {
     case "spending-limit":
       return `Max ${formatWei(config.maxPerTx || "0")} ETH/tx · ${formatWei(

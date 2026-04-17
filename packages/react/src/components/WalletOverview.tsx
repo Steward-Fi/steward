@@ -45,7 +45,9 @@ export function WalletOverview({
   if (error) {
     return (
       <div className={`stwd-card stwd-wallet-overview ${className || ""}`}>
-        <div className="stwd-error-text">Failed to load wallet: {error.message}</div>
+        <div className="stwd-error-text">
+          Failed to load wallet: {error.message}
+        </div>
       </div>
     );
   }
@@ -67,15 +69,21 @@ export function WalletOverview({
       <div className="stwd-wallet-header">
         <h3 className="stwd-heading">{agent.name}</h3>
         {agent.platformId && (
-          <span className="stwd-badge stwd-badge-muted">{agent.platformId}</span>
+          <span className="stwd-badge stwd-badge-muted">
+            {agent.platformId}
+          </span>
         )}
       </div>
 
       <div className="stwd-wallet-addresses">
         {displayAddresses.map((addr) => (
           <div key={addr.chainFamily} className="stwd-address-row">
-            <span className="stwd-chain-badge">{addr.chainFamily.toUpperCase()}</span>
-            <code className="stwd-address">{truncateAddress(addr.address)}</code>
+            <span className="stwd-chain-badge">
+              {addr.chainFamily.toUpperCase()}
+            </span>
+            <code className="stwd-address">
+              {truncateAddress(addr.address)}
+            </code>
             {showCopy && (
               <button
                 className="stwd-btn stwd-btn-ghost stwd-btn-sm"
@@ -106,7 +114,9 @@ export function WalletOverview({
               ? `${balance.balances.nativeFormatted} ${balance.balances.symbol}`
               : formatBalance(balance.balances.native, balance.balances.symbol)}
           </div>
-          <div className="stwd-balance-chain">Chain ID: {balance.balances.chainId}</div>
+          <div className="stwd-balance-chain">
+            Chain ID: {balance.balances.chainId}
+          </div>
         </div>
       )}
 
@@ -114,7 +124,9 @@ export function WalletOverview({
         <div className="stwd-wallet-qr">
           <div className="stwd-qr-placeholder">
             <div className="stwd-qr-label">Fund this wallet</div>
-            <code className="stwd-address-full">{displayAddresses[0].address}</code>
+            <code className="stwd-address-full">
+              {displayAddresses[0].address}
+            </code>
             <div className="stwd-muted-text">
               Send funds to the address above to fund this agent's wallet.
             </div>

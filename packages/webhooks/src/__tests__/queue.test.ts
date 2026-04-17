@@ -41,7 +41,8 @@ async function startWebhookServer(statuses: number[]) {
       bodyText,
     });
 
-    const status = statuses[responseIndex] ?? statuses[statuses.length - 1] ?? 200;
+    const status =
+      statuses[responseIndex] ?? statuses[statuses.length - 1] ?? 200;
     responseIndex += 1;
     res.writeHead(status, { "Content-Type": "text/plain" });
     res.end(status >= 200 && status < 300 ? "ok" : "error");

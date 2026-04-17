@@ -124,7 +124,9 @@ export function StewardOAuthCallback({
   if (step === "loading") {
     return (
       <div className="stwd-callback stwd-callback__loading">
-        <div className="stwd-loading">Completing {provider ? `${provider} ` : ""}sign-in…</div>
+        <div className="stwd-loading">
+          Completing {provider ? `${provider} ` : ""}sign-in…
+        </div>
       </div>
     );
   }
@@ -141,7 +143,9 @@ export function StewardOAuthCallback({
   return (
     <div className="stwd-callback stwd-callback__error">
       <p className="stwd-error-text">{errorMsg ?? "OAuth sign-in failed."}</p>
-      <p className="stwd-muted-text">Try signing in again from the login page.</p>
+      <p className="stwd-muted-text">
+        Try signing in again from the login page.
+      </p>
     </div>
   );
 }

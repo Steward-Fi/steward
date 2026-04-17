@@ -6,7 +6,11 @@
  * - Graceful degradation: returns null on failure so callers can fall back to wei comparison
  */
 
-import { getNativeDecimals, getTokenDecimals, getWrappedNativeAddress } from "./tokens.js";
+import {
+  getNativeDecimals,
+  getTokenDecimals,
+  getWrappedNativeAddress,
+} from "./tokens.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -15,21 +19,32 @@ export interface PriceOracle {
   getNativeUsdPrice(chainId: number): Promise<number | null>;
 
   /** Get ERC-20 token USD price. Returns null if unavailable. */
-  getTokenUsdPrice(chainId: number, tokenAddress: string): Promise<number | null>;
+  getTokenUsdPrice(
+    chainId: number,
+    tokenAddress: string,
+  ): Promise<number | null>;
 
   /**
    * Convert a wei/lamport value to USD.
    * If tokenAddress is undefined or "native", uses native token price.
    * Returns null if price is unavailable.
    */
-  weiToUsd(weiValue: string, chainId: number, tokenAddress?: string): Promise<number | null>;
+  weiToUsd(
+    weiValue: string,
+    chainId: number,
+    tokenAddress?: string,
+  ): Promise<number | null>;
 
   /**
    * Convert a USD value to wei/lamports.
    * If tokenAddress is undefined or "native", uses native token price.
    * Returns null if price is unavailable.
    */
-  usdToWei(usdValue: number, chainId: number, tokenAddress?: string): Promise<string | null>;
+  usdToWei(
+    usdValue: number,
+    chainId: number,
+    tokenAddress?: string,
+  ): Promise<string | null>;
 }
 
 // ─── DexScreener Response Shape ───────────────────────────────────────────────
@@ -52,7 +67,9 @@ interface CacheEntry {
 
 // ─── Implementation ───────────────────────────────────────────────────────────
 
-export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracle {
+export function createPriceOracle(options?: {
+  cacheTtlMs?: number;
+}): PriceOracle {
   const cacheTtlMs = options?.cacheTtlMs ?? 60_000; // 60 seconds default
   const cache = new Map<string, CacheEntry>();
 
@@ -87,7 +104,9 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
       });
 
       if (!res.ok) {
-        console.warn(`[price-oracle] DexScreener returned ${res.status} for ${tokenAddress}`);
+        console.warn(
+          `[price-oracle] DexScreener returned ${res.status} for ${tokenAddress}`,
+        );
         return null;
       }
 
@@ -106,12 +125,18 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
       return parseFloat(sorted[0].priceUsd!);
     } catch (err) {
-      console.warn(`[price-oracle] Failed to fetch price for ${tokenAddress}:`, err);
+      console.warn(
+        `[price-oracle] Failed to fetch price for ${tokenAddress}:`,
+        err,
+      );
       return null;
     }
   }
 
-  async function getPrice(chainId: number, tokenAddress: string): Promise<number | null> {
+  async function getPrice(
+    chainId: number,
+    tokenAddress: string,
+  ): Promise<number | null> {
     const key = cacheKey(chainId, tokenAddress);
     const cached = getCached(key);
     if (cached !== null) return cached;
@@ -127,13 +152,18 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
     async getNativeUsdPrice(chainId: number): Promise<number | null> {
       const wrappedAddress = getWrappedNativeAddress(chainId);
       if (!wrappedAddress) {
-        console.warn(`[price-oracle] No wrapped native address for chainId ${chainId}`);
+        console.warn(
+          `[price-oracle] No wrapped native address for chainId ${chainId}`,
+        );
         return null;
       }
       return getPrice(chainId, wrappedAddress);
     },
 
-    async getTokenUsdPrice(chainId: number, tokenAddress: string): Promise<number | null> {
+    async getTokenUsdPrice(
+      chainId: number,
+      tokenAddress: string,
+    ): Promise<number | null> {
       return getPrice(chainId, tokenAddress);
     },
 
@@ -142,7 +172,8 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
       chainId: number,
       tokenAddress?: string,
     ): Promise<number | null> {
-      const isNative = !tokenAddress || tokenAddress === "native" || tokenAddress === "";
+      const isNative =
+        !tokenAddress || tokenAddress === "native" || tokenAddress === "";
       const price = isNative
         ? await oracle.getNativeUsdPrice(chainId)
         : await oracle.getTokenUsdPrice(chainId, tokenAddress!);
@@ -161,7 +192,8 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
       const remainder = wei % divisor;
 
       // Convert to number: wholePart + remainder/divisor
-      const tokenAmount = Number(wholePart) + Number(remainder) / Number(divisor);
+      const tokenAmount =
+        Number(wholePart) + Number(remainder) / Number(divisor);
       return tokenAmount * price;
     },
 
@@ -170,7 +202,8 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
       chainId: number,
       tokenAddress?: string,
     ): Promise<string | null> {
-      const isNative = !tokenAddress || tokenAddress === "native" || tokenAddress === "";
+      const isNative =
+        !tokenAddress || tokenAddress === "native" || tokenAddress === "";
       const price = isNative
         ? await oracle.getNativeUsdPrice(chainId)
         : await oracle.getTokenUsdPrice(chainId, tokenAddress!);

@@ -48,7 +48,10 @@ export class ReputationRegistryClient {
    *
    * TODO: Replace stub with event log query from the reputation contract.
    */
-  async getFeedbackHistory(_agentTokenId: string, _limit?: number): Promise<FeedbackSignal[]> {
+  async getFeedbackHistory(
+    _agentTokenId: string,
+    _limit?: number,
+  ): Promise<FeedbackSignal[]> {
     // TODO: Implement actual feedback history lookup
     return [];
   }

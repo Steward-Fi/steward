@@ -4,7 +4,11 @@ import { motion, useScroll, useTransform } from "framer-motion";
 import Image from "next/image";
 import { useRef } from "react";
 import { CodeBlock } from "@/components/code-block";
-import { Reveal, StaggerContainer, StaggerItem } from "@/components/motion-wrapper";
+import {
+  Reveal,
+  StaggerContainer,
+  StaggerItem,
+} from "@/components/motion-wrapper";
 import { Nav } from "@/components/nav";
 
 const easeOutExpo: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -20,7 +24,10 @@ function Hero() {
   const y = useTransform(scrollYProgress, [0, 0.5], [0, 80]);
 
   return (
-    <section ref={ref} className="relative h-screen flex items-center px-6 md:px-10 pt-16">
+    <section
+      ref={ref}
+      className="relative h-screen flex items-center px-6 md:px-10 pt-16"
+    >
       {/* Grid lines background */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-0 left-[20%] w-px h-full bg-border-subtle opacity-40" />
@@ -32,10 +39,19 @@ function Hero() {
 
       {/* Compass star watermark */}
       <div className="absolute top-1/2 right-[5%] -translate-y-1/2 opacity-[0.03] pointer-events-none hidden lg:block">
-        <Image src="/logo.png" alt="" width={600} height={600} className="w-[500px] h-[500px]" />
+        <Image
+          src="/logo.png"
+          alt=""
+          width={600}
+          height={600}
+          className="w-[500px] h-[500px]"
+        />
       </div>
 
-      <motion.div style={{ opacity, y }} className="relative max-w-[1400px] mx-auto w-full">
+      <motion.div
+        style={{ opacity, y }}
+        className="relative max-w-[1400px] mx-auto w-full"
+      >
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 items-center">
           {/* Left: headline */}
           <div className="lg:col-span-7">
@@ -56,7 +72,9 @@ function Hero() {
             >
               Agents don&apos;t need keys.
               <br />
-              <span className="text-[oklch(0.75_0.15_55)]">They need permission.</span>
+              <span className="text-[oklch(0.75_0.15_55)]">
+                They need permission.
+              </span>
             </motion.h1>
 
             <motion.p
@@ -65,8 +83,9 @@ function Hero() {
               transition={{ duration: 0.6, ease: easeOutExpo, delay: 0.4 }}
               className="mt-8 text-lg text-text-secondary max-w-lg leading-relaxed"
             >
-              Every credential encrypted. Every call proxied. Every dollar tracked. Open-source
-              middleware that sits between your agents and everything they touch.
+              Every credential encrypted. Every call proxied. Every dollar
+              tracked. Open-source middleware that sits between your agents and
+              everything they touch.
             </motion.p>
 
             <motion.div
@@ -156,13 +175,17 @@ function ProblemSection() {
     <section className="relative px-6 md:px-10 py-32 md:py-40">
       <div className="max-w-[1400px] mx-auto">
         <Reveal direction="up" delay={0}>
-          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">The problem</p>
+          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
+            The problem
+          </p>
         </Reveal>
         <Reveal direction="up" delay={0.1}>
           <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-3xl">
             Your agent has the same access as you.
             <br />
-            <span className="text-[oklch(0.75_0.15_55)]">That&apos;s the problem.</span>
+            <span className="text-[oklch(0.75_0.15_55)]">
+              That&apos;s the problem.
+            </span>
           </h2>
         </Reveal>
 
@@ -176,8 +199,12 @@ function ProblemSection() {
                 <span className="font-display text-4xl font-800 text-border tracking-tight">
                   {problem.num}
                 </span>
-                <h3 className="font-display text-xl font-700 mt-5 mb-3">{problem.title}</h3>
-                <p className="text-sm text-text-secondary leading-relaxed">{problem.desc}</p>
+                <h3 className="font-display text-xl font-700 mt-5 mb-3">
+                  {problem.title}
+                </h3>
+                <p className="text-sm text-text-secondary leading-relaxed">
+                  {problem.desc}
+                </p>
               </div>
             </StaggerItem>
           ))}
@@ -226,23 +253,33 @@ function ArchitectureSection() {
     <section className="relative px-6 md:px-10 py-32 md:py-40 border-t border-border-subtle">
       <div className="max-w-[1400px] mx-auto">
         <Reveal>
-          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">Architecture</p>
+          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
+            Architecture
+          </p>
         </Reveal>
         <Reveal delay={0.1}>
           <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-3xl">
             Three layers between your agent
             <br />
-            <span className="text-[oklch(0.75_0.15_55)]">and the real world.</span>
+            <span className="text-[oklch(0.75_0.15_55)]">
+              and the real world.
+            </span>
           </h2>
         </Reveal>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle mt-16">
           {layers.map((layer, i) => (
-            <Reveal key={layer.num} delay={i * 0.1} className="bg-bg p-8 md:p-10">
+            <Reveal
+              key={layer.num}
+              delay={i * 0.1}
+              className="bg-bg p-8 md:p-10"
+            >
               <span className="font-display text-5xl font-800 text-border tracking-tight">
                 {layer.num}
               </span>
-              <h3 className="font-display text-xl font-700 mt-6 mb-1">{layer.label}</h3>
+              <h3 className="font-display text-xl font-700 mt-6 mb-1">
+                {layer.label}
+              </h3>
               <p className="text-xs text-text-tertiary tracking-wide uppercase mb-5">
                 {layer.detail}
               </p>
@@ -371,7 +408,9 @@ const completion = await openai.chat.completions.create({
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-16">
           <div className="lg:col-span-4">
             <Reveal>
-              <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">SDK</p>
+              <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
+                SDK
+              </p>
             </Reveal>
             <Reveal delay={0.1}>
               <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05]">
@@ -384,13 +423,16 @@ const completion = await openai.chat.completions.create({
             </Reveal>
             <Reveal delay={0.2}>
               <p className="mt-6 text-text-secondary leading-relaxed">
-                TypeScript SDK for policy-checked signing and credential-injected API proxying.
-                Works with any agent framework.
+                TypeScript SDK for policy-checked signing and
+                credential-injected API proxying. Works with any agent
+                framework.
               </p>
             </Reveal>
             <Reveal delay={0.3}>
               <div className="mt-8">
-                <code className="text-xs text-text-tertiary font-mono">npm i @stwd/sdk</code>
+                <code className="text-xs text-text-tertiary font-mono">
+                  npm i @stwd/sdk
+                </code>
               </div>
             </Reveal>
           </div>
@@ -428,7 +470,11 @@ function SpecsSection() {
       <div className="max-w-[1400px] mx-auto">
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-px bg-border-subtle">
           {specs.map((spec, i) => (
-            <Reveal key={spec.label} delay={i * 0.1} className="bg-bg p-8 md:p-10 text-center">
+            <Reveal
+              key={spec.label}
+              delay={i * 0.1}
+              className="bg-bg p-8 md:p-10 text-center"
+            >
               <div className="font-display text-2xl md:text-3xl font-800 tracking-tight">
                 {spec.value}
               </div>
@@ -462,9 +508,9 @@ function PlatformsSection() {
             </Reveal>
             <Reveal delay={0.2}>
               <p className="mt-6 text-lg text-text-secondary leading-relaxed max-w-xl">
-                One Steward instance for thousands of agents across isolated tenants. Each tenant
-                gets its own policies, credentials, and webhook endpoints. Self-hosted. No
-                per-transaction toll.
+                One Steward instance for thousands of agents across isolated
+                tenants. Each tenant gets its own policies, credentials, and
+                webhook endpoints. Self-hosted. No per-transaction toll.
               </p>
             </Reveal>
           </div>
@@ -491,8 +537,12 @@ function PlatformsSection() {
               ].map((tenant) => (
                 <StaggerItem key={tenant.name}>
                   <div className="border-l-2 border-border pl-6 py-2 hover:border-accent transition-colors">
-                    <div className="font-display font-700 text-lg">{tenant.name}</div>
-                    <div className="text-sm text-text-secondary mt-1">{tenant.desc}</div>
+                    <div className="font-display font-700 text-lg">
+                      {tenant.name}
+                    </div>
+                    <div className="text-sm text-text-secondary mt-1">
+                      {tenant.desc}
+                    </div>
                   </div>
                 </StaggerItem>
               ))}
@@ -510,7 +560,9 @@ function OpenSourceSection() {
     <section className="relative px-6 md:px-10 py-32 md:py-40 border-t border-border-subtle">
       <div className="max-w-[1400px] mx-auto text-center">
         <Reveal>
-          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">Open source</p>
+          <p className="text-sm text-text-tertiary tracking-widest uppercase mb-8">
+            Open source
+          </p>
         </Reveal>
         <Reveal delay={0.1}>
           <h2 className="font-display text-hero-sm font-800 tracking-tight leading-[1.05] max-w-2xl mx-auto">
@@ -561,7 +613,9 @@ function Footer() {
               height={18}
               className="w-[18px] h-[18px] opacity-60"
             />
-            <span className="font-display text-base font-bold tracking-tight">steward</span>
+            <span className="font-display text-base font-bold tracking-tight">
+              steward
+            </span>
           </div>
           <p className="text-xs text-text-tertiary mt-1">
             Governance infrastructure for autonomous AI agents.

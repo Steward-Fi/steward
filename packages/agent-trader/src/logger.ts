@@ -39,7 +39,11 @@ export interface WebhookLog {
 
 // ─── Internal emit ───────────────────────────────────────────────────────────
 
-function emit(level: LogLevel, tag: string, payload: Record<string, unknown>): void {
+function emit(
+  level: LogLevel,
+  tag: string,
+  payload: Record<string, unknown>,
+): void {
   const line = JSON.stringify({ level, tag, ...payload });
   if (level === "error") {
     process.stderr.write(`${line}\n`);
@@ -80,7 +84,11 @@ export function logWarn(message: string, meta?: Record<string, unknown>): void {
   });
 }
 
-export function logError(message: string, error?: unknown, meta?: Record<string, unknown>): void {
+export function logError(
+  message: string,
+  error?: unknown,
+  meta?: Record<string, unknown>,
+): void {
   const errMeta =
     error instanceof Error
       ? { errorMessage: error.message, stack: error.stack }

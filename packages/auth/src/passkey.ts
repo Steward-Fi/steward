@@ -101,7 +101,9 @@ export class PasskeyAuth {
       // (TextEncoder returns Uint8Array<ArrayBufferLike> which TS rejects).
       userID: (() => {
         const encoded = new TextEncoder().encode(userId);
-        return new Uint8Array(encoded.buffer.slice(0)) as Uint8Array<ArrayBuffer>;
+        return new Uint8Array(
+          encoded.buffer.slice(0),
+        ) as Uint8Array<ArrayBuffer>;
       })(),
       attestationType: "none",
       excludeCredentials: existingCredentials.map((id) => ({ id })),
@@ -133,7 +135,8 @@ export class PasskeyAuth {
     response: RegistrationResponseJSON,
     expectedChallenge?: string,
   ) {
-    const challenge = expectedChallenge ?? (await this.challenges.consume(userId));
+    const challenge =
+      expectedChallenge ?? (await this.challenges.consume(userId));
     if (!challenge) {
       throw new Error(
         `No active challenge found for user "${userId}". It may have expired (>5 min) or already been used.`,
@@ -246,7 +249,10 @@ export class PasskeyAuth {
 function base64urlToUint8Array(base64url: string): Uint8Array<ArrayBuffer> {
   // Normalise base64url → standard base64
   const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
-  const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+  const padded = base64.padEnd(
+    base64.length + ((4 - (base64.length % 4)) % 4),
+    "=",
+  );
   // Use hex as intermediate to avoid TypeScript encoding type issues across @types/node versions
   const hexStr = [...atob(padded)]
     .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
@@ -263,7 +269,9 @@ function base64urlToUint8Array(base64url: string): Uint8Array<ArrayBuffer> {
  */
 export function uint8ArrayToBase64url(bytes: Uint8Array): string {
   // Build hex string without Buffer.from(Uint8Array) which has type issues across @types/node versions
-  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(
+    "",
+  );
   const raw =
     hex
       .match(/.{1,2}/g)

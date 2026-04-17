@@ -57,7 +57,9 @@ function findModelPricing(model: string): ModelPricing | null {
 /**
  * Parse token usage from an OpenAI API response.
  */
-function parseOpenAIUsage(responseBody: any): { inputTokens: number; outputTokens: number } | null {
+function parseOpenAIUsage(
+  responseBody: any,
+): { inputTokens: number; outputTokens: number } | null {
   const usage = responseBody?.usage;
   if (!usage) return null;
 
@@ -90,7 +92,11 @@ function parseAnthropicUsage(
  * @param responseBody - The parsed response body (needs .usage)
  * @returns Cost in USD, or 0 for unknown APIs/models
  */
-export function estimateCost(host: string, requestBody: any, responseBody: any): number {
+export function estimateCost(
+  host: string,
+  requestBody: any,
+  responseBody: any,
+): number {
   if (!KNOWN_HOSTS.has(host)) return 0;
 
   // Determine model from request or response
@@ -113,7 +119,8 @@ export function estimateCost(host: string, requestBody: any, responseBody: any):
 
   // Cost = (input_tokens / 1000 * input_price) + (output_tokens / 1000 * output_price)
   const cost =
-    (usage.inputTokens / 1000) * pricing.input + (usage.outputTokens / 1000) * pricing.output;
+    (usage.inputTokens / 1000) * pricing.input +
+    (usage.outputTokens / 1000) * pricing.output;
 
   return Math.round(cost * 1_000_000) / 1_000_000; // round to 6 decimal places
 }

@@ -75,7 +75,9 @@ export function CodeBlock({
 }: CodeBlockProps) {
   const ref = useRef<HTMLDivElement>(null);
   const isInView = useInView(ref, { once: true, amount: 0.3 });
-  const [visibleChars, setVisibleChars] = useState(typeEffect ? 0 : code.length);
+  const [visibleChars, setVisibleChars] = useState(
+    typeEffect ? 0 : code.length,
+  );
   const tokens = tokenize(code);
 
   useEffect(() => {
@@ -122,7 +124,9 @@ export function CodeBlock({
     >
       {filename && (
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-subtle bg-bg-elevated/50">
-          <span className="text-xs text-text-tertiary font-mono">{filename}</span>
+          <span className="text-xs text-text-tertiary font-mono">
+            {filename}
+          </span>
           <div className="flex items-center gap-2">
             {language && (
               <span className="text-[10px] uppercase tracking-widest text-text-tertiary">

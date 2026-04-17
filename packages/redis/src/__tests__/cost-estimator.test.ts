@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { estimateCost, getPricingTable, isKnownHost } from "../cost-estimator.js";
+import {
+  estimateCost,
+  getPricingTable,
+  isKnownHost,
+} from "../cost-estimator.js";
 
 describe("Cost Estimator", () => {
   test("estimates OpenAI gpt-4o cost", () => {
@@ -83,7 +87,11 @@ describe("Cost Estimator", () => {
   });
 
   test("returns 0 for unknown host", () => {
-    const cost = estimateCost("api.birdeye.so", { model: "irrelevant" }, { data: "something" });
+    const cost = estimateCost(
+      "api.birdeye.so",
+      { model: "irrelevant" },
+      { data: "something" },
+    );
 
     expect(cost).toBe(0);
   });

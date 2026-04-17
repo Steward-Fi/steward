@@ -2,7 +2,12 @@ import { useState } from "react";
 import { useApprovals } from "../hooks/useApprovals.js";
 import { useStewardContext } from "../provider.js";
 import type { ApprovalQueueProps } from "../types.js";
-import { formatRelativeTime, formatWei, getStatusColor, truncateAddress } from "../utils/format.js";
+import {
+  formatRelativeTime,
+  formatWei,
+  getStatusColor,
+  truncateAddress,
+} from "../utils/format.js";
 
 /**
  * Pending transactions awaiting human review.
@@ -14,7 +19,8 @@ export function ApprovalQueue({
   className,
 }: ApprovalQueueProps) {
   const { features } = useStewardContext();
-  const { pending, isLoading, error, approve, reject, isResolving } = useApprovals(refreshInterval);
+  const { pending, isLoading, error, approve, reject, isResolving } =
+    useApprovals(refreshInterval);
   const [confirmAction, setConfirmAction] = useState<{
     txId: string;
     action: "approve" | "reject";
@@ -30,7 +36,10 @@ export function ApprovalQueue({
       } else {
         await reject(confirmAction.txId);
       }
-      onResolve?.(confirmAction.txId, confirmAction.action === "approve" ? "approved" : "rejected");
+      onResolve?.(
+        confirmAction.txId,
+        confirmAction.action === "approve" ? "approved" : "rejected",
+      );
     } catch {
       // Error handled by hook
     }
@@ -48,7 +57,9 @@ export function ApprovalQueue({
   if (error) {
     return (
       <div className={`stwd-card stwd-approval-queue ${className || ""}`}>
-        <div className="stwd-error-text">Failed to load approvals: {error.message}</div>
+        <div className="stwd-error-text">
+          Failed to load approvals: {error.message}
+        </div>
       </div>
     );
   }
@@ -58,7 +69,9 @@ export function ApprovalQueue({
       <div className="stwd-approval-header">
         <h3 className="stwd-heading">Pending Approvals</h3>
         {pending.length > 0 && (
-          <span className="stwd-badge stwd-badge-warning">{pending.length}</span>
+          <span className="stwd-badge stwd-badge-warning">
+            {pending.length}
+          </span>
         )}
       </div>
 
@@ -75,20 +88,31 @@ export function ApprovalQueue({
                 <div className="stwd-approval-to">
                   To: <code>{truncateAddress(entry.to)}</code>
                 </div>
-                <div className="stwd-approval-value">{formatWei(entry.value)} ETH</div>
+                <div className="stwd-approval-value">
+                  {formatWei(entry.value)} ETH
+                </div>
                 <div className="stwd-approval-meta">
-                  <span className="stwd-badge stwd-badge-muted">Chain {entry.chainId}</span>
-                  <span className="stwd-approval-time">{formatRelativeTime(entry.createdAt)}</span>
+                  <span className="stwd-badge stwd-badge-muted">
+                    Chain {entry.chainId}
+                  </span>
+                  <span className="stwd-approval-time">
+                    {formatRelativeTime(entry.createdAt)}
+                  </span>
                 </div>
               </div>
 
               {showPolicyReason && entry.policyResults.length > 0 && (
                 <div className="stwd-approval-reasons">
-                  <div className="stwd-approval-reasons-label">Triggered policies:</div>
+                  <div className="stwd-approval-reasons-label">
+                    Triggered policies:
+                  </div>
                   {entry.policyResults
                     .filter((pr) => !pr.passed)
                     .map((pr, i) => (
-                      <div key={i} className={`stwd-badge ${getStatusColor("rejected")}`}>
+                      <div
+                        key={i}
+                        className={`stwd-badge ${getStatusColor("rejected")}`}
+                      >
                         {pr.type}: {pr.reason || "failed"}
                       </div>
                     ))}
@@ -99,14 +123,18 @@ export function ApprovalQueue({
                 <button
                   className="stwd-btn stwd-btn-error"
                   disabled={isResolving}
-                  onClick={() => setConfirmAction({ txId: entry.txId, action: "reject" })}
+                  onClick={() =>
+                    setConfirmAction({ txId: entry.txId, action: "reject" })
+                  }
                 >
                   Deny
                 </button>
                 <button
                   className="stwd-btn stwd-btn-success"
                   disabled={isResolving}
-                  onClick={() => setConfirmAction({ txId: entry.txId, action: "approve" })}
+                  onClick={() =>
+                    setConfirmAction({ txId: entry.txId, action: "approve" })
+                  }
                 >
                   Approve
                 </button>
@@ -118,10 +146,15 @@ export function ApprovalQueue({
 
       {/* Confirmation Dialog */}
       {confirmAction && (
-        <div className="stwd-modal-overlay" onClick={() => setConfirmAction(null)}>
+        <div
+          className="stwd-modal-overlay"
+          onClick={() => setConfirmAction(null)}
+        >
           <div className="stwd-modal" onClick={(e) => e.stopPropagation()}>
             <h3 className="stwd-heading">
-              {confirmAction.action === "approve" ? "Approve Transaction?" : "Deny Transaction?"}
+              {confirmAction.action === "approve"
+                ? "Approve Transaction?"
+                : "Deny Transaction?"}
             </h3>
             <p className="stwd-muted-text">
               {confirmAction.action === "approve"

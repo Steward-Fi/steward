@@ -67,7 +67,9 @@ export function getDb() {
 
 export function getSql() {
   if (pgliteOverride) {
-    throw new Error("getSql() is not available in PGLite mode — use getDb() instead");
+    throw new Error(
+      "getSql() is not available in PGLite mode — use getDb() instead",
+    );
   }
   globalDb ??= createDb();
   return globalDb.client;

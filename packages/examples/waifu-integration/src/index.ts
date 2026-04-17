@@ -1,4 +1,9 @@
-import { type PolicyRule, StewardApiError, StewardClient, type TxRecord } from "@stwd/sdk";
+import {
+  type PolicyRule,
+  StewardApiError,
+  StewardClient,
+  type TxRecord,
+} from "@stwd/sdk";
 import type { ApiResponse, WebhookEvent } from "@stwd/shared";
 
 const BASE_CHAIN_ID = 8453;
@@ -81,7 +86,10 @@ function weiToEthLabel(value: string): string {
   return `${formatEther(BigInt(value))} ETH`;
 }
 
-async function signWebhookPayload(payload: string, secret: string): Promise<string> {
+async function signWebhookPayload(
+  payload: string,
+  secret: string,
+): Promise<string> {
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     "raw",
@@ -90,10 +98,14 @@ async function signWebhookPayload(payload: string, secret: string): Promise<stri
     false,
     ["sign"],
   );
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  return Array.from(new Uint8Array(signature), (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(payload),
   );
+  return Array.from(new Uint8Array(signature), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
 }
 
 async function verifyWebhookPayload(
@@ -114,7 +126,10 @@ function authHeaders(): HeadersInit {
   };
 }
 
-async function requestJson<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function requestJson<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   const headers = new Headers(authHeaders());
   const extraHeaders = new Headers(init.headers);
 
@@ -167,7 +182,9 @@ async function registerOrUpdateTenant(defaultPolicies: PolicyRule[]) {
   }
 
   if (createResponse.status !== 400 || body.error !== "Tenant already exists") {
-    throw new Error(body.error ?? `Failed to register tenant: ${createResponse.status}`);
+    throw new Error(
+      body.error ?? `Failed to register tenant: ${createResponse.status}`,
+    );
   }
 
   await requestJson(`/tenants/${encodeURIComponent(config.tenantId)}/webhook`, {
@@ -185,8 +202,12 @@ async function registerOrUpdateTenant(defaultPolicies: PolicyRule[]) {
   detail("webhook", tenant.webhookUrl ?? "not set");
 }
 
-async function fetchPendingApprovals(agentId: string): Promise<PendingApprovalRecord[]> {
-  return requestJson<PendingApprovalRecord[]>(`/vault/${encodeURIComponent(agentId)}/pending`);
+async function fetchPendingApprovals(
+  agentId: string,
+): Promise<PendingApprovalRecord[]> {
+  return requestJson<PendingApprovalRecord[]>(
+    `/vault/${encodeURIComponent(agentId)}/pending`,
+  );
 }
 
 async function approvePending(agentId: string, txId: string) {
@@ -197,7 +218,9 @@ async function approvePending(agentId: string, txId: string) {
 }
 
 async function fetchHistory(agentId: string) {
-  return requestJson<TxRecord[]>(`/vault/${encodeURIComponent(agentId)}/history`);
+  return requestJson<TxRecord[]>(
+    `/vault/${encodeURIComponent(agentId)}/history`,
+  );
 }
 
 async function sendWebhookNotification(event: WebhookEvent) {
@@ -236,13 +259,20 @@ async function startWebhookServer(received: ReceivedWebhook[]) {
       const event = request.headers.get("X-Steward-Event") ?? "unknown";
       const signature = request.headers.get("X-Steward-Signature") ?? "";
       const rawBody = await request.text();
-      const isValid = await verifyWebhookPayload(rawBody, config.webhookSecret, signature);
+      const isValid = await verifyWebhookPayload(
+        rawBody,
+        config.webhookSecret,
+        signature,
+      );
 
       if (!isValid) {
-        return new Response(JSON.stringify({ ok: false, error: "Invalid webhook signature" }), {
-          status: 401,
-          headers: { "Content-Type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({ ok: false, error: "Invalid webhook signature" }),
+          {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
       }
 
       const payload = JSON.parse(rawBody) as WebhookEvent;
@@ -326,14 +356,20 @@ async function main() {
       tenantId: config.tenantId,
     });
 
-    const bootstrapPolicies = buildDefaultPolicies("0x0000000000000000000000000000000000000000");
+    const bootstrapPolicies = buildDefaultPolicies(
+      "0x0000000000000000000000000000000000000000",
+    );
     await registerOrUpdateTenant(bootstrapPolicies);
 
     section("Agent Wallet");
 
     let agent;
     try {
-      agent = await client.createWallet(config.agentId, config.agentName, config.platformId);
+      agent = await client.createWallet(
+        config.agentId,
+        config.agentName,
+        config.platformId,
+      );
       detail("created", `${agent.id} -> ${agent.walletAddress}`);
     } catch (error) {
       if (!(error instanceof StewardApiError) || error.status !== 400) {
@@ -382,7 +418,10 @@ async function main() {
       }
     } catch (error) {
       console.log("Small tx passed policy but could not be broadcast.");
-      detail("likely cause", "fund the demo wallet with ETH on Base so the signer can pay gas");
+      detail(
+        "likely cause",
+        "fund the demo wallet with ETH on Base so the signer can pay gas",
+      );
       detail("error", error instanceof Error ? error.message : "Unknown error");
     }
 
@@ -408,7 +447,9 @@ async function main() {
       (entry) => entry.transaction.request.value === mediumTxValue,
     );
     if (!mediumPending) {
-      throw new Error("Could not find the pending approval for the medium transaction");
+      throw new Error(
+        "Could not find the pending approval for the medium transaction",
+      );
     }
 
     await sendWebhookNotification({
@@ -421,12 +462,16 @@ async function main() {
         queueId: mediumPending.queueId,
         value: mediumTxValue,
         to: mediumPending.transaction.request.to,
-        summary: "milady-trader exceeded the auto-approve threshold and needs waifu.fun approval",
+        summary:
+          "milady-trader exceeded the auto-approve threshold and needs waifu.fun approval",
         policyResults: mediumPending.transaction.policyResults,
       },
     });
 
-    const mediumApproval = await approvePending(agent.id, mediumPending.transaction.id);
+    const mediumApproval = await approvePending(
+      agent.id,
+      mediumPending.transaction.id,
+    );
     detail("medium tx", `approved and signed (${mediumApproval.txHash})`);
 
     const largeTxValue = parseEther("0.2").toString();
@@ -436,13 +481,17 @@ async function main() {
         value: largeTxValue,
         chainId: BASE_CHAIN_ID,
       });
-      throw new Error("Expected large transaction to be rejected by the spending limit");
+      throw new Error(
+        "Expected large transaction to be rejected by the spending limit",
+      );
     } catch (error) {
       if (!(error instanceof StewardApiError)) {
         throw error;
       }
 
-      console.log(`Large tx (${weiToEthLabel(largeTxValue)}) was rejected before signing.`);
+      console.log(
+        `Large tx (${weiToEthLabel(largeTxValue)}) was rejected before signing.`,
+      );
       printPolicyResults(
         "Policy engine result:",
         (error.data?.results as
@@ -463,7 +512,10 @@ async function main() {
       }
     }
     detail("webhook deliveries", receivedWebhooks.length);
-    detail("received events", receivedWebhooks.map((entry) => entry.event).join(", ") || "none");
+    detail(
+      "received events",
+      receivedWebhooks.map((entry) => entry.event).join(", ") || "none",
+    );
   } finally {
     server.stop();
   }
@@ -471,6 +523,8 @@ async function main() {
 
 await main().catch((error) => {
   console.error("\nWaifu integration example failed.");
-  console.error(error instanceof Error ? (error.stack ?? error.message) : error);
+  console.error(
+    error instanceof Error ? (error.stack ?? error.message) : error,
+  );
   process.exitCode = 1;
 });

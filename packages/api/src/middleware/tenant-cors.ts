@@ -58,7 +58,10 @@ const MAX_AGE = "86400";
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 
-export async function tenantCors(c: Context, next: Next): Promise<Response | undefined> {
+export async function tenantCors(
+  c: Context,
+  next: Next,
+): Promise<Response | undefined> {
   const origin = c.req.header("origin") ?? "";
   const tenantId = c.req.header("X-Steward-Tenant");
 
@@ -83,7 +86,10 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
       }
       // origins.length === 0 → no config yet → fall through to wildcard
     } catch (err) {
-      console.warn("[tenant-cors] Failed to load origins for tenant, falling back to *:", err);
+      console.warn(
+        "[tenant-cors] Failed to load origins for tenant, falling back to *:",
+        err,
+      );
     }
   }
 

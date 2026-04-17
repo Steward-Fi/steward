@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { _generateCodeChallenge, _generateCodeVerifier, StewardAuth } from "../auth";
+import {
+  _generateCodeChallenge,
+  _generateCodeVerifier,
+  StewardAuth,
+} from "../auth";
 import type { SessionStorage, StewardProviders } from "../auth-types";
 import { StewardApiError } from "../client";
 
@@ -213,7 +217,10 @@ describe("handleOAuthCallback", () => {
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/, "");
-    const sig = btoa("fakesig").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    const sig = btoa("fakesig")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
     return `${header}.${payload}.${sig}`;
   }
 
@@ -223,7 +230,9 @@ describe("handleOAuthCallback", () => {
       expect(true).toBe(false);
     } catch (err) {
       expect(err).toBeInstanceOf(StewardApiError);
-      expect((err as StewardApiError).message).toContain("No OAuth state found");
+      expect((err as StewardApiError).message).toContain(
+        "No OAuth state found",
+      );
     }
   });
 
@@ -259,7 +268,9 @@ describe("handleOAuthCallback", () => {
       expect(true).toBe(false);
     } catch (err) {
       expect(err).toBeInstanceOf(StewardApiError);
-      expect((err as StewardApiError).message).toContain("Missing code or state");
+      expect((err as StewardApiError).message).toContain(
+        "Missing code or state",
+      );
     }
   });
 

@@ -50,13 +50,20 @@ function buildHandlerMap(): HandlerMap {
   return new Map();
 }
 
-function addHandler(map: HandlerMap, event: string, handler: WebhookHandler): void {
+function addHandler(
+  map: HandlerMap,
+  event: string,
+  handler: WebhookHandler,
+): void {
   const list = map.get(event) ?? [];
   list.push(handler);
   map.set(event, list);
 }
 
-async function dispatchEvent(map: HandlerMap, event: WebhookEvent): Promise<void> {
+async function dispatchEvent(
+  map: HandlerMap,
+  event: WebhookEvent,
+): Promise<void> {
   const specific = map.get(event.type) ?? [];
   const wildcard = map.get("*") ?? [];
 
@@ -83,11 +90,16 @@ async function parseBody(body: string): Promise<WebhookEvent | null> {
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
 
-export function createWebhookServer(port: number, _secret?: string): WebhookServer {
+export function createWebhookServer(
+  port: number,
+  _secret?: string,
+): WebhookServer {
   const handlers = buildHandlerMap();
   let stopFn: (() => Promise<void>) | null = null;
 
-  const handleRequest = async (body: string): Promise<{ status: number; message: string }> => {
+  const handleRequest = async (
+    body: string,
+  ): Promise<{ status: number; message: string }> => {
     if (!body) {
       return { status: 400, message: "Empty body" };
     }
@@ -146,30 +158,32 @@ export function createWebhookServer(port: number, _secret?: string): WebhookServ
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const http = await import("node:http");
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const srv = http.createServer(async (req: IncomingMessage, res: ServerResponse) => {
-        if (req.method !== "POST") {
-          res.writeHead(405);
-          res.end("Method Not Allowed");
-          return;
-        }
+      const srv = http.createServer(
+        async (req: IncomingMessage, res: ServerResponse) => {
+          if (req.method !== "POST") {
+            res.writeHead(405);
+            res.end("Method Not Allowed");
+            return;
+          }
 
-        let body = "";
-        req.on("data", (chunk: { toString(): string }) => {
-          body += chunk.toString();
-        });
-        req.on("end", async () => {
-          const result = await handleRequest(body);
-          res.writeHead(result.status, {
-            "Content-Type": "application/json",
+          let body = "";
+          req.on("data", (chunk: { toString(): string }) => {
+            body += chunk.toString();
           });
-          res.end(
-            JSON.stringify({
-              ok: result.status === 200,
-              message: result.message,
-            }),
-          );
-        });
-      });
+          req.on("end", async () => {
+            const result = await handleRequest(body);
+            res.writeHead(result.status, {
+              "Content-Type": "application/json",
+            });
+            res.end(
+              JSON.stringify({
+                ok: result.status === 200,
+                message: result.message,
+              }),
+            );
+          });
+        },
+      );
 
       await new Promise<void>((resolve) => srv.listen(port, resolve));
       stopFn = () =>

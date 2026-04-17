@@ -75,7 +75,9 @@ afterEach(() => {
 
 // ─── Helper factories ─────────────────────────────────────────────────────
 
-function makeClient(overrides: Partial<StewardClientConfig> = {}): StewardClient {
+function makeClient(
+  overrides: Partial<StewardClientConfig> = {},
+): StewardClient {
   return new StewardClient({
     baseUrl: "https://api.steward.example",
     ...overrides,
@@ -242,7 +244,9 @@ describe("HTTP request building", () => {
     };
     await makeClient().signTransaction("agent-1", tx);
     expect(lastCapture?.method).toBe("POST");
-    expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/sign");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/vault/agent-1/sign",
+    );
     expect(lastCapture?.body).toEqual(tx);
   });
 
@@ -250,14 +254,18 @@ describe("HTTP request building", () => {
     installMockFetch({ ok: true, data: [mockPolicy] });
     await makeClient().getPolicies("agent-1");
     expect(lastCapture?.method).toBe("GET");
-    expect(lastCapture?.url).toBe("https://api.steward.example/agents/agent-1/policies");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/agents/agent-1/policies",
+    );
   });
 
   it("setPolicies → PUT /agents/:id/policies", async () => {
     installMockFetch({ ok: true, data: null });
     await makeClient().setPolicies("agent-1", [mockPolicy]);
     expect(lastCapture?.method).toBe("PUT");
-    expect(lastCapture?.url).toBe("https://api.steward.example/agents/agent-1/policies");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/agents/agent-1/policies",
+    );
     expect(lastCapture?.body).toEqual([mockPolicy]);
   });
 
@@ -265,14 +273,18 @@ describe("HTTP request building", () => {
     installMockFetch({ ok: true, data: [] });
     await makeClient().getHistory("agent-1");
     expect(lastCapture?.method).toBe("GET");
-    expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/history");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/vault/agent-1/history",
+    );
   });
 
   it("signMessage → POST /vault/:id/sign-message", async () => {
     installMockFetch({ ok: true, data: { signature: "0xsig" } });
     await makeClient().signMessage("agent-1", "hello world");
     expect(lastCapture?.method).toBe("POST");
-    expect(lastCapture?.url).toBe("https://api.steward.example/vault/agent-1/sign-message");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/vault/agent-1/sign-message",
+    );
     expect(lastCapture?.body).toEqual({ message: "hello world" });
   });
 
@@ -291,7 +303,9 @@ describe("HTTP request building", () => {
       },
     });
     await makeClient().getBalance("agent-1");
-    expect(lastCapture?.url).toBe("https://api.steward.example/agents/agent-1/balance");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/agents/agent-1/balance",
+    );
   });
 
   it("getBalance with chainId → GET /agents/:id/balance?chainId=1", async () => {
@@ -309,7 +323,9 @@ describe("HTTP request building", () => {
       },
     });
     await makeClient().getBalance("agent-1", 1);
-    expect(lastCapture?.url).toBe("https://api.steward.example/agents/agent-1/balance?chainId=1");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/agents/agent-1/balance?chainId=1",
+    );
   });
 
   it("createWalletBatch → POST /agents/batch", async () => {
@@ -329,7 +345,9 @@ describe("Error handling", () => {
   it("throws StewardApiError on non-ok API response", async () => {
     installMockFetch({ ok: false, error: "Agent not found" }, 404);
     const client = makeClient();
-    await expect(client.getAgent("missing-agent")).rejects.toThrow(StewardApiError);
+    await expect(client.getAgent("missing-agent")).rejects.toThrow(
+      StewardApiError,
+    );
   });
 
   it("StewardApiError carries correct status code", async () => {
@@ -351,7 +369,10 @@ describe("Error handling", () => {
     const errorData = {
       results: [{ policyId: "p1", type: "spending-limit", passed: false }],
     };
-    installMockFetch({ ok: false, error: "Policy rejected", data: errorData }, 403);
+    installMockFetch(
+      { ok: false, error: "Policy rejected", data: errorData },
+      403,
+    );
     const client = makeClient();
     let caught: StewardApiError | null = null;
     try {
@@ -403,7 +424,9 @@ describe("Error handling", () => {
   it("setPolicies throws on error without returning data", async () => {
     installMockFetch({ ok: false, error: "Forbidden" }, 403);
     const client = makeClient();
-    await expect(client.setPolicies("agent-1", [])).rejects.toThrow(StewardApiError);
+    await expect(client.setPolicies("agent-1", [])).rejects.toThrow(
+      StewardApiError,
+    );
   });
 });
 
@@ -429,7 +452,9 @@ describe("Response parsing", () => {
     installMockFetch({ ok: true, data: mockAgent });
     const agent = await makeClient().getAgent("agent-1");
     expect(agent.id).toBe("agent-1");
-    expect(agent.walletAddress).toBe("0xabcdef0123456789abcdef0123456789abcdef01");
+    expect(agent.walletAddress).toBe(
+      "0xabcdef0123456789abcdef0123456789abcdef01",
+    );
   });
 
   it("getPolicies returns array of PolicyRule", async () => {
@@ -457,7 +482,9 @@ describe("Response parsing", () => {
         error: "Approval required",
         data: {
           status: "pending_approval",
-          results: [{ policyId: "p1", type: "auto-approve-threshold", passed: false }],
+          results: [
+            { policyId: "p1", type: "auto-approve-threshold", passed: false },
+          ],
         },
       },
       202,

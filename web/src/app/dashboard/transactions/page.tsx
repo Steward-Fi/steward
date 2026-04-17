@@ -12,7 +12,14 @@ import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 type TxWithAgent = TxRecord & { agentName?: string };
 
-const FILTERS = ["all", "signed", "confirmed", "pending", "rejected", "failed"] as const;
+const FILTERS = [
+  "all",
+  "signed",
+  "confirmed",
+  "pending",
+  "rejected",
+  "failed",
+] as const;
 
 export default function TransactionsPage() {
   const [transactions, setTransactions] = useState<TxWithAgent[]>([]);
@@ -47,7 +54,9 @@ export default function TransactionsPage() {
       }
 
       allTx.sort(
-        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime(),
+        (a, b) =>
+          new Date(b.createdAt || 0).getTime() -
+          new Date(a.createdAt || 0).getTime(),
       );
       setTransactions(allTx);
     } catch (e: unknown) {
@@ -58,7 +67,9 @@ export default function TransactionsPage() {
   }
 
   const filtered =
-    filter === "all" ? transactions : transactions.filter((tx) => tx.status === filter);
+    filter === "all"
+      ? transactions
+      : transactions.filter((tx) => tx.status === filter);
 
   const counts = transactions.reduce(
     (acc: Record<string, number>, tx) => {
@@ -86,14 +97,20 @@ export default function TransactionsPage() {
     >
       {/* Header */}
       <div>
-        <h1 className="font-display text-2xl font-700 tracking-tight">Transactions</h1>
-        <p className="text-sm text-text-tertiary mt-1">All transactions across agents</p>
+        <h1 className="font-display text-2xl font-700 tracking-tight">
+          Transactions
+        </h1>
+        <p className="text-sm text-text-tertiary mt-1">
+          All transactions across agents
+        </p>
       </div>
 
       {/* Error state */}
       {error && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
-          <p className="text-text-secondary text-sm mb-1">Failed to load transactions</p>
+          <p className="text-text-secondary text-sm mb-1">
+            Failed to load transactions
+          </p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
           <button
             onClick={loadTransactions}
@@ -116,7 +133,9 @@ export default function TransactionsPage() {
                 : "text-text-tertiary hover:text-text-secondary hover:bg-bg-elevated"
             }`}
           >
-            {status === "all" ? "All" : status.charAt(0).toUpperCase() + status.slice(1)}
+            {status === "all"
+              ? "All"
+              : status.charAt(0).toUpperCase() + status.slice(1)}
             <span className="ml-1 tabular-nums">
               {status === "all" ? transactions.length : counts[status] || 0}
             </span>
@@ -128,7 +147,9 @@ export default function TransactionsPage() {
       {error ? null : filtered.length === 0 ? (
         <div className="py-16 text-center border border-border-subtle">
           <p className="text-text-tertiary text-sm">
-            {filter === "all" ? "No transactions yet" : `No ${filter} transactions`}
+            {filter === "all"
+              ? "No transactions yet"
+              : `No ${filter} transactions`}
           </p>
           {filter === "all" && (
             <p className="text-text-tertiary text-xs mt-1">
@@ -161,7 +182,10 @@ export default function TransactionsPage() {
                 <StatusBadge status={tx.status} />
               </div>
               <div className="w-20">
-                <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
+                <ChainBadge
+                  chainId={tx.request?.chainId || tx.chainId || 8453}
+                  compact
+                />
               </div>
               <div className="flex-1 min-w-0">
                 <Link
@@ -188,7 +212,10 @@ export default function TransactionsPage() {
                 {tx.txHash ? (
                   <a
                     href={
-                      getExplorerTxLink(tx.request?.chainId || tx.chainId || 8453, tx.txHash) || "#"
+                      getExplorerTxLink(
+                        tx.request?.chainId || tx.chainId || 8453,
+                        tx.txHash,
+                      ) || "#"
                     }
                     target="_blank"
                     rel="noopener noreferrer"

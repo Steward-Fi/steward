@@ -61,7 +61,8 @@ function DashboardNav() {
     setMenuOpen(false);
   }, []);
 
-  const activeLabel = links.find((l) => isActive(l.href, l.exact))?.label ?? "Dashboard";
+  const activeLabel =
+    links.find((l) => isActive(l.href, l.exact))?.label ?? "Dashboard";
 
   return (
     <header className="border-b border-border sticky top-0 z-40 bg-bg/90 backdrop-blur-sm">
@@ -72,7 +73,13 @@ function DashboardNav() {
             href="/"
             className="flex items-center gap-2 hover:opacity-80 transition-opacity flex-shrink-0"
           >
-            <Image src="/logo.png" alt="Steward" width={20} height={20} className="w-5 h-5" />
+            <Image
+              src="/logo.png"
+              alt="Steward"
+              width={20}
+              height={20}
+              className="w-5 h-5"
+            />
             <span className="font-display text-base font-bold tracking-tight text-text hidden sm:inline">
               steward
             </span>
@@ -87,7 +94,9 @@ function DashboardNav() {
                   key={link.href}
                   href={link.href}
                   className={`relative px-3 py-1.5 text-sm transition-colors whitespace-nowrap ${
-                    active ? "text-text" : "text-text-tertiary hover:text-text-secondary"
+                    active
+                      ? "text-text"
+                      : "text-text-tertiary hover:text-text-secondary"
                   }`}
                 >
                   {link.label}
@@ -108,7 +117,10 @@ function DashboardNav() {
           </nav>
 
           {/* Mobile hamburger */}
-          <div className="flex md:hidden items-center gap-3 flex-1 min-w-0" ref={menuRef}>
+          <div
+            className="flex md:hidden items-center gap-3 flex-1 min-w-0"
+            ref={menuRef}
+          >
             <button
               onClick={() => setMenuOpen(!menuOpen)}
               className="flex items-center gap-2 px-2 py-1.5 text-sm text-text-secondary hover:text-text transition-colors"
@@ -126,7 +138,9 @@ function DashboardNav() {
                   className={`block w-4 h-[1.5px] bg-current transition-transform ${menuOpen ? "-rotate-45 -translate-y-[5px]" : ""}`}
                 />
               </div>
-              <span className="text-xs text-text-tertiary truncate">{activeLabel}</span>
+              <span className="text-xs text-text-tertiary truncate">
+                {activeLabel}
+              </span>
             </button>
 
             <AnimatePresence>
@@ -177,9 +191,16 @@ function LoadingSpinner() {
   );
 }
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+export default function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
-    <StewardAuthGuard fallback={<RedirectToLogin />} loadingFallback={<LoadingSpinner />}>
+    <StewardAuthGuard
+      fallback={<RedirectToLogin />}
+      loadingFallback={<LoadingSpinner />}
+    >
       <div className="min-h-screen bg-bg">
         <DashboardNav />
         <main className="max-w-[1400px] mx-auto px-4 md:px-6 lg:px-10 py-6 md:py-8 lg:py-12">

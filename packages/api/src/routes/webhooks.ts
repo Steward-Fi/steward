@@ -47,7 +47,10 @@ function generateSecret(): string {
 
 webhookRoutes.post("/", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -60,17 +63,26 @@ webhookRoutes.post("/", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(body.url) || !isValidUrl(body.url)) {
-    return c.json<ApiResponse>({ ok: false, error: "url must be a valid HTTP(S) URL" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "url must be a valid HTTP(S) URL" },
+      400,
+    );
   }
 
   // Validate events if provided
   if (body.events) {
     if (!Array.isArray(body.events)) {
-      return c.json<ApiResponse>({ ok: false, error: "events must be an array" }, 400);
+      return c.json<ApiResponse>(
+        { ok: false, error: "events must be an array" },
+        400,
+      );
     }
     const invalidEvents = body.events.filter(
       (e) => !(VALID_EVENTS as readonly string[]).includes(e),
@@ -88,16 +100,24 @@ webhookRoutes.post("/", async (c) => {
 
   if (
     body.maxRetries !== undefined &&
-    (typeof body.maxRetries !== "number" || body.maxRetries < 0 || body.maxRetries > 10)
+    (typeof body.maxRetries !== "number" ||
+      body.maxRetries < 0 ||
+      body.maxRetries > 10)
   ) {
-    return c.json<ApiResponse>({ ok: false, error: "maxRetries must be 0-10" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "maxRetries must be 0-10" },
+      400,
+    );
   }
 
   if (
     body.retryBackoffMs !== undefined &&
     (typeof body.retryBackoffMs !== "number" || body.retryBackoffMs < 1000)
   ) {
-    return c.json<ApiResponse>({ ok: false, error: "retryBackoffMs must be >= 1000" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "retryBackoffMs must be >= 1000" },
+      400,
+    );
   }
 
   const secret = generateSecret();
@@ -128,7 +148,10 @@ webhookRoutes.post("/", async (c) => {
 
 webhookRoutes.get("/", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -158,7 +181,10 @@ webhookRoutes.get("/", async (c) => {
 
 webhookRoutes.put("/:id", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -174,21 +200,35 @@ webhookRoutes.put("/:id", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   // Check webhook exists and belongs to tenant
   const [existing] = await db
     .select()
     .from(webhookConfigs)
-    .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)));
+    .where(
+      and(
+        eq(webhookConfigs.id, webhookId),
+        eq(webhookConfigs.tenantId, tenantId),
+      ),
+    );
 
   if (!existing) {
     return c.json<ApiResponse>({ ok: false, error: "Webhook not found" }, 404);
   }
 
-  if (body.url !== undefined && (!isNonEmptyString(body.url) || !isValidUrl(body.url))) {
-    return c.json<ApiResponse>({ ok: false, error: "url must be a valid HTTP(S) URL" }, 400);
+  if (
+    body.url !== undefined &&
+    (!isNonEmptyString(body.url) || !isValidUrl(body.url))
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "url must be a valid HTTP(S) URL" },
+      400,
+    );
   }
 
   if (body.events) {
@@ -209,13 +249,19 @@ webhookRoutes.put("/:id", async (c) => {
   if (body.enabled !== undefined) updates.enabled = body.enabled;
   if (body.description !== undefined) updates.description = body.description;
   if (body.maxRetries !== undefined) updates.maxRetries = body.maxRetries;
-  if (body.retryBackoffMs !== undefined) updates.retryBackoffMs = body.retryBackoffMs;
+  if (body.retryBackoffMs !== undefined)
+    updates.retryBackoffMs = body.retryBackoffMs;
   updates.updatedAt = new Date();
 
   const [updated] = await db
     .update(webhookConfigs)
     .set(updates)
-    .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)))
+    .where(
+      and(
+        eq(webhookConfigs.id, webhookId),
+        eq(webhookConfigs.tenantId, tenantId),
+      ),
+    )
     .returning();
 
   return c.json<ApiResponse>({ ok: true, data: updated });
@@ -225,7 +271,10 @@ webhookRoutes.put("/:id", async (c) => {
 
 webhookRoutes.delete("/:id", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -233,7 +282,12 @@ webhookRoutes.delete("/:id", async (c) => {
 
   const [deleted] = await db
     .delete(webhookConfigs)
-    .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)))
+    .where(
+      and(
+        eq(webhookConfigs.id, webhookId),
+        eq(webhookConfigs.tenantId, tenantId),
+      ),
+    )
     .returning();
 
   if (!deleted) {
@@ -247,7 +301,10 @@ webhookRoutes.delete("/:id", async (c) => {
 
 webhookRoutes.get("/:id/deliveries", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -257,7 +314,12 @@ webhookRoutes.get("/:id/deliveries", async (c) => {
   const [webhook] = await db
     .select()
     .from(webhookConfigs)
-    .where(and(eq(webhookConfigs.id, webhookId), eq(webhookConfigs.tenantId, tenantId)));
+    .where(
+      and(
+        eq(webhookConfigs.id, webhookId),
+        eq(webhookConfigs.tenantId, tenantId),
+      ),
+    );
 
   if (!webhook) {
     return c.json<ApiResponse>({ ok: false, error: "Webhook not found" }, 404);
@@ -270,7 +332,12 @@ webhookRoutes.get("/:id/deliveries", async (c) => {
   const deliveries = await db
     .select()
     .from(webhookDeliveries)
-    .where(and(eq(webhookDeliveries.tenantId, tenantId), eq(webhookDeliveries.url, webhook.url)))
+    .where(
+      and(
+        eq(webhookDeliveries.tenantId, tenantId),
+        eq(webhookDeliveries.url, webhook.url),
+      ),
+    )
     .orderBy(desc(webhookDeliveries.createdAt))
     .limit(limit)
     .offset(offset);
@@ -282,7 +349,10 @@ webhookRoutes.get("/:id/deliveries", async (c) => {
 
 webhookRoutes.post("/deliveries/:id/retry", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -291,14 +361,22 @@ webhookRoutes.post("/deliveries/:id/retry", async (c) => {
   const [delivery] = await db
     .select()
     .from(webhookDeliveries)
-    .where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.tenantId, tenantId)));
+    .where(
+      and(
+        eq(webhookDeliveries.id, deliveryId),
+        eq(webhookDeliveries.tenantId, tenantId),
+      ),
+    );
 
   if (!delivery) {
     return c.json<ApiResponse>({ ok: false, error: "Delivery not found" }, 404);
   }
 
   if (delivery.status === "delivered") {
-    return c.json<ApiResponse>({ ok: false, error: "Delivery already succeeded" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Delivery already succeeded" },
+      400,
+    );
   }
 
   // Reset for retry

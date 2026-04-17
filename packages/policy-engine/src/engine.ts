@@ -1,4 +1,9 @@
-import type { PolicyResult, PolicyRule, PriceOracle, SignRequest } from "@stwd/shared";
+import type {
+  PolicyResult,
+  PolicyRule,
+  PriceOracle,
+  SignRequest,
+} from "@stwd/shared";
 import { type EvaluatorContext, evaluatePolicy } from "./evaluators";
 
 export interface PolicyEvaluationContext {
@@ -33,7 +38,10 @@ export class PolicyEngine {
    *
    * Now async to support USD-based evaluations that require price oracle lookups.
    */
-  async evaluate(policies: PolicyRule[], ctx: PolicyEvaluationContext): Promise<EvaluationResult> {
+  async evaluate(
+    policies: PolicyRule[],
+    ctx: PolicyEvaluationContext,
+  ): Promise<EvaluationResult> {
     if (policies.length === 0) {
       // No policies = everything auto-approved (dangerous but valid for testing)
       return { approved: true, results: [], requiresManualApproval: false };
@@ -53,8 +61,12 @@ export class PolicyEngine {
       policies.map((policy) => evaluatePolicy(policy, evaluatorCtx)),
     );
 
-    const hardPolicies = results.filter((r) => r.type !== "auto-approve-threshold");
-    const autoApproveResult = results.find((r) => r.type === "auto-approve-threshold");
+    const hardPolicies = results.filter(
+      (r) => r.type !== "auto-approve-threshold",
+    );
+    const autoApproveResult = results.find(
+      (r) => r.type === "auto-approve-threshold",
+    );
 
     const allHardPass = hardPolicies.every((r) => r.passed);
     const autoApprovePass = autoApproveResult ? autoApproveResult.passed : true;

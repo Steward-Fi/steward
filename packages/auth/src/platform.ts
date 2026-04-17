@@ -86,7 +86,10 @@ export function platformAuthMiddleware() {
     }
 
     if (!isValidPlatformKey(key)) {
-      return c.json<ApiResponse>({ ok: false, error: "Invalid platform key" }, 403);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Invalid platform key" },
+        403,
+      );
     }
 
     await next();

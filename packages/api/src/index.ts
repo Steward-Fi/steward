@@ -58,17 +58,26 @@ app.onError((err, c) => {
   const requestId = c.get("requestId") || "unknown";
 
   if (err instanceof SyntaxError || err.message?.includes("JSON")) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   console.error(`[${requestId}] Unhandled API error:`, err);
-  return c.json<ApiResponse>({ ok: false, error: "Internal server error" }, 500);
+  return c.json<ApiResponse>(
+    { ok: false, error: "Internal server error" },
+    500,
+  );
 });
 
 // ─── 404 fallback ─────────────────────────────────────────────────────────────
 
 app.notFound((c) =>
-  c.json<ApiResponse>({ ok: false, error: `Not found: ${c.req.method} ${c.req.path}` }, 404),
+  c.json<ApiResponse>(
+    { ok: false, error: `Not found: ${c.req.method} ${c.req.path}` },
+    404,
+  ),
 );
 
 // ─── Global middleware ────────────────────────────────────────────────────────
@@ -82,7 +91,10 @@ app.use(
   bodyLimit({
     maxSize: 1024 * 1024,
     onError: (c) =>
-      c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
+      c.json<ApiResponse>(
+        { ok: false, error: "Request body too large (max 1MB)" },
+        413,
+      ),
   }),
 );
 
@@ -92,11 +104,17 @@ app.use("*", async (c, next) => {
   if (c.req.path === "/health" || c.req.path === "/ready") return next();
 
   if (isShuttingDown) {
-    return c.json<ApiResponse>({ ok: false, error: "Server is shutting down" }, 503);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Server is shutting down" },
+      503,
+    );
   }
 
   const forwardedFor = c.req.header("x-forwarded-for");
-  const ip = forwardedFor?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "unknown";
+  const ip =
+    forwardedFor?.split(",")[0]?.trim() ||
+    c.req.header("x-real-ip") ||
+    "unknown";
   const now = Date.now();
   const current = requestLog.get(ip);
 
@@ -106,8 +124,14 @@ app.use("*", async (c, next) => {
   }
 
   if (current.count >= RATE_LIMIT_MAX_REQUESTS) {
-    c.header("Retry-After", Math.ceil((current.resetAt - now) / 1000).toString());
-    return c.json<ApiResponse>({ ok: false, error: "Rate limit exceeded" }, 429);
+    c.header(
+      "Retry-After",
+      Math.ceil((current.resetAt - now) / 1000).toString(),
+    );
+    return c.json<ApiResponse>(
+      { ok: false, error: "Rate limit exceeded" },
+      429,
+    );
   }
 
   current.count += 1;
@@ -153,7 +177,9 @@ app.use("/policies/*", (c, next) => tenantAuth(c, next));
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
-app.get("/", (c) => c.json({ name: "steward", version: API_VERSION, status: "running" }));
+app.get("/", (c) =>
+  c.json({ name: "steward", version: API_VERSION, status: "running" }),
+);
 app.get("/health", (c) =>
   c.json({
     status: "ok",
@@ -227,9 +253,14 @@ app.route("/discovery", discoveryRoutes);
 if (shouldUsePGLite()) {
   migrationsRan = true;
   console.log("[steward] PGLite mode detected — skipping Postgres migrator.");
-} else if (process.env.SKIP_MIGRATIONS === "true" || process.env.SKIP_MIGRATIONS === "1") {
+} else if (
+  process.env.SKIP_MIGRATIONS === "true" ||
+  process.env.SKIP_MIGRATIONS === "1"
+) {
   migrationsRan = true;
-  console.log("[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.");
+  console.log(
+    "[steward] SKIP_MIGRATIONS set — skipping auto-migration. Run migrations manually.",
+  );
 } else {
   try {
     console.log("[steward] Running database migrations...");
@@ -252,7 +283,10 @@ initRedis()
     return initAuthStores(usePostgres);
   })
   .catch((err) => {
-    console.warn("[steward] Redis/auth store initialization failed, using in-memory stores:", err);
+    console.warn(
+      "[steward] Redis/auth store initialization failed, using in-memory stores:",
+      err,
+    );
     initAuthStores(false).catch(() => {});
   });
 

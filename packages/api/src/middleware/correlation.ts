@@ -35,6 +35,8 @@ export const correlationId = createMiddleware(async (c, next) => {
  * Helper to get the current request ID from context.
  * Returns "unknown" if not in a request context.
  */
-export function getRequestId(c: { get: (key: "requestId") => string | undefined }): string {
+export function getRequestId(c: {
+  get: (key: "requestId") => string | undefined;
+}): string {
   return c.get("requestId") || "unknown";
 }

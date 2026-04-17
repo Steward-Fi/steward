@@ -1,4 +1,10 @@
-import type { IAgentRuntime, Memory, Provider, ProviderResult, State } from "@elizaos/core";
+import type {
+  IAgentRuntime,
+  Memory,
+  Provider,
+  ProviderResult,
+  State,
+} from "@elizaos/core";
 import type { StewardService } from "../services/StewardService.js";
 
 /**
@@ -12,8 +18,14 @@ export const balanceProvider: Provider = {
   name: "stewardBalance",
   description: "On-chain balance of the Steward-managed wallet",
 
-  async get(runtime: IAgentRuntime, _message: Memory, _state: State): Promise<ProviderResult> {
-    const steward = runtime.getService("steward" as any) as StewardService | null;
+  async get(
+    runtime: IAgentRuntime,
+    _message: Memory,
+    _state: State,
+  ): Promise<ProviderResult> {
+    const steward = runtime.getService(
+      "steward" as any,
+    ) as StewardService | null;
 
     if (!steward?.isConnected()) {
       return { text: "", data: {} };

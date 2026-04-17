@@ -1,6 +1,7 @@
 import { StewardClient } from "./steward-client";
 
-export const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
+export const API_URL =
+  process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
 
 let _apiKey = "";
 let _tenantId = "";

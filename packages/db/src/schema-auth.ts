@@ -23,8 +23,12 @@ export const users = pgTable("users", {
   image: text("image"),
   walletAddress: varchar("wallet_address", { length: 128 }),
   stewardWalletId: varchar("steward_wallet_id", { length: 64 }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
 });
 
 // ─── Authenticators (WebAuthn / passkeys) ────────────────────────────────────
@@ -41,7 +45,9 @@ export const authenticators = pgTable(
     credentialDeviceType: varchar("credential_device_type", { length: 32 }),
     credentialBackedUp: boolean("credential_backed_up").default(false),
     transports: text("transports").array(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => ({
     userIdIdx: index("authenticators_user_id_idx").on(table.userId),
@@ -58,7 +64,9 @@ export const sessions = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     sessionToken: text("session_token").notNull().unique(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => ({
     userIdIdx: index("sessions_user_id_idx").on(table.userId),
@@ -102,7 +110,9 @@ export const refreshTokens = pgTable(
     tenantId: text("tenant_id").notNull(),
     tokenHash: text("token_hash").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => ({
     tokenHashIdx: index("refresh_tokens_token_hash_idx").on(table.tokenHash),
@@ -123,10 +133,15 @@ export const userTenants = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
     role: varchar("role", { length: 32 }).notNull().default("member"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => ({
-    userTenantUnique: uniqueIndex("user_tenants_unique").on(table.userId, table.tenantId),
+    userTenantUnique: uniqueIndex("user_tenants_unique").on(
+      table.userId,
+      table.tenantId,
+    ),
   }),
 );
 

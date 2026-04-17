@@ -33,7 +33,9 @@ function getKeyStore(): KeyStore {
   if (!_keyStore) {
     const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
     if (!masterPassword) {
-      throw new Error("STEWARD_MASTER_PASSWORD is required for secret decryption");
+      throw new Error(
+        "STEWARD_MASTER_PASSWORD is required for secret decryption",
+      );
     }
     _keyStore = new KeyStore(masterPassword);
   }
@@ -66,14 +68,20 @@ async function findMatchingRoute(
   const routes = await db
     .select()
     .from(secretRoutes)
-    .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.enabled, true)))
+    .where(
+      and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.enabled, true)),
+    )
     .orderBy(desc(secretRoutes.priority));
 
   // Match in priority order (first match wins)
   for (const route of routes) {
     if (!matchHost(route.hostPattern, host)) continue;
     if (!matchPath(route.pathPattern ?? "/*", path)) continue;
-    if (route.method !== "*" && route.method?.toUpperCase() !== method.toUpperCase()) continue;
+    if (
+      route.method !== "*" &&
+      route.method?.toUpperCase() !== method.toUpperCase()
+    )
+      continue;
     return route;
   }
 
@@ -90,7 +98,11 @@ async function findMatchingRoute(
  */
 async function decryptSecret(secretId: string): Promise<string> {
   const db = getDb();
-  const [secret] = await db.select().from(secrets).where(eq(secrets.id, secretId)).limit(1);
+  const [secret] = await db
+    .select()
+    .from(secrets)
+    .where(eq(secrets.id, secretId))
+    .limit(1);
 
   if (!secret) {
     throw new Error(`Secret ${secretId} not found`);
@@ -117,7 +129,10 @@ function injectCredential(
   route: SecretRoute,
   credential: string,
 ): { headers: Headers; url: URL; body: ReadableStream<Uint8Array> | null } {
-  const formattedValue = (route.injectFormat ?? "{value}").replace("{value}", credential);
+  const formattedValue = (route.injectFormat ?? "{value}").replace(
+    "{value}",
+    credential,
+  );
 
   switch (route.injectAs) {
     case "header":
@@ -172,7 +187,12 @@ export async function handleProxy(c: Context): Promise<Response> {
   }
 
   // 2. Find matching secret route
-  const route = await findMatchingRoute(tenantId, target.host, target.path, method);
+  const route = await findMatchingRoute(
+    tenantId,
+    target.host,
+    target.path,
+    method,
+  );
   if (!route) {
     return c.json(
       {
@@ -288,7 +308,8 @@ export async function handleProxy(c: Context): Promise<Response> {
   // the cost, and still return the body to the client.
   //
   // For non-LLM hosts or streaming responses, we pass through without buffering.
-  let responseBody: ReadableStream<Uint8Array> | ArrayBuffer | null = response.body;
+  let responseBody: ReadableStream<Uint8Array> | ArrayBuffer | null =
+    response.body;
   const contentType = response.headers.get("content-type") || "";
   const isJsonResponse = contentType.includes("application/json");
   const isLLMHost =
@@ -318,9 +339,13 @@ export async function handleProxy(c: Context): Promise<Response> {
       }
 
       // Track spend asynchronously
-      trackProxySpend(agentId, tenantId, target.host, requestBodyParsed, parsedResponse).catch(
-        (err) => console.error("[proxy] Spend tracking failed:", err),
-      );
+      trackProxySpend(
+        agentId,
+        tenantId,
+        target.host,
+        requestBodyParsed,
+        parsedResponse,
+      ).catch((err) => console.error("[proxy] Spend tracking failed:", err));
 
       responseBody = bodyBuffer;
     } catch {

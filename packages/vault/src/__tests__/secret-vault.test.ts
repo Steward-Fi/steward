@@ -110,7 +110,9 @@ describe("Route matching — glob patterns", () => {
   });
 
   it("matches exact path", () => {
-    expect(matchesGlob("/v1/chat/completions", "/v1/chat/completions")).toBe(true);
+    expect(matchesGlob("/v1/chat/completions", "/v1/chat/completions")).toBe(
+      true,
+    );
     expect(matchesGlob("/v1/embeddings", "/v1/chat/completions")).toBe(false);
   });
 
@@ -121,8 +123,12 @@ describe("Route matching — glob patterns", () => {
   });
 
   it("matches complex patterns", () => {
-    expect(matchesGlob("api.service.example.com", "*.service.*.com")).toBe(true);
-    expect(matchesGlob("/api/v1/users/123/profile", "/api/v1/users/*")).toBe(true);
+    expect(matchesGlob("api.service.example.com", "*.service.*.com")).toBe(
+      true,
+    );
+    expect(matchesGlob("/api/v1/users/123/profile", "/api/v1/users/*")).toBe(
+      true,
+    );
   });
 
   it("escapes regex special characters", () => {

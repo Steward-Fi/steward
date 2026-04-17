@@ -68,7 +68,9 @@ export default function AuditPage() {
     setError(null);
     try {
       const clean: AuditQueryParams = Object.fromEntries(
-        Object.entries(params).filter(([, v]) => v !== "" && v !== undefined && v !== 0),
+        Object.entries(params).filter(
+          ([, v]) => v !== "" && v !== undefined && v !== 0,
+        ),
       ) as AuditQueryParams;
       if (!clean.limit) clean.limit = 50;
 
@@ -128,7 +130,10 @@ export default function AuditPage() {
     [summary],
   );
 
-  const totalCost = summary.reduce((acc, s) => acc + (parseFloat(s.totalCost) || 0), 0);
+  const totalCost = summary.reduce(
+    (acc, s) => acc + (parseFloat(s.totalCost) || 0),
+    0,
+  );
   const totalActions = summary.reduce((acc, s) => acc + s.totalActions, 0);
   const totalDenied = summary.reduce((acc, s) => acc + s.denyCount, 0);
 
@@ -146,7 +151,9 @@ export default function AuditPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-700 tracking-tight">Audit Log</h1>
+          <h1 className="font-display text-2xl font-700 tracking-tight">
+            Audit Log
+          </h1>
           <p className="text-sm text-text-tertiary mt-1">
             All agent actions, policy decisions, and system events
           </p>
@@ -184,7 +191,10 @@ export default function AuditPage() {
               accent: false,
             },
           ].map(({ label, value, accent }) => (
-            <div key={label} className="border border-border bg-bg-elevated p-4 space-y-1">
+            <div
+              key={label}
+              className="border border-border bg-bg-elevated p-4 space-y-1"
+            >
               <div className="text-xs text-text-tertiary">{label}</div>
               <div
                 className={`font-display text-xl font-700 tabular-nums ${accent ? "text-red-400" : "text-text"}`}
@@ -199,7 +209,9 @@ export default function AuditPage() {
       {/* Per-agent summary */}
       {!loading && !error && summary.length > 0 && (
         <div className="space-y-2">
-          <h3 className="text-xs text-text-tertiary uppercase tracking-wider">Spend by Agent</h3>
+          <h3 className="text-xs text-text-tertiary uppercase tracking-wider">
+            Spend by Agent
+          </h3>
           <div className="border-t border-border-subtle">
             {summary.map((s) => (
               <div
@@ -214,26 +226,38 @@ export default function AuditPage() {
                     <div className="text-sm font-display font-600 truncate">
                       {s.agentName || s.agentId}
                     </div>
-                    <div className="text-xs text-text-tertiary font-mono truncate">{s.agentId}</div>
+                    <div className="text-xs text-text-tertiary font-mono truncate">
+                      {s.agentId}
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-6 flex-shrink-0 text-xs tabular-nums">
                   <div className="text-right hidden md:block">
-                    <div className="text-text-secondary">{s.totalActions.toLocaleString()}</div>
+                    <div className="text-text-secondary">
+                      {s.totalActions.toLocaleString()}
+                    </div>
                     <div className="text-text-tertiary">actions</div>
                   </div>
                   <div className="text-right hidden md:block">
-                    <div className="text-emerald-400">{s.allowCount.toLocaleString()}</div>
+                    <div className="text-emerald-400">
+                      {s.allowCount.toLocaleString()}
+                    </div>
                     <div className="text-text-tertiary">allowed</div>
                   </div>
                   <div className="text-right hidden md:block">
-                    <div className={s.denyCount > 0 ? "text-red-400" : "text-text-tertiary"}>
+                    <div
+                      className={
+                        s.denyCount > 0 ? "text-red-400" : "text-text-tertiary"
+                      }
+                    >
                       {s.denyCount.toLocaleString()}
                     </div>
                     <div className="text-text-tertiary">denied</div>
                   </div>
                   <div className="text-right">
-                    <div className="text-text-secondary">{formatCost(s.totalCost)}</div>
+                    <div className="text-text-secondary">
+                      {formatCost(s.totalCost)}
+                    </div>
                     <div className="text-text-tertiary">cost</div>
                   </div>
                 </div>
@@ -244,13 +268,20 @@ export default function AuditPage() {
       )}
 
       {/* Filters */}
-      <form onSubmit={applyFilters} className="border border-border bg-bg-elevated p-4">
+      <form
+        onSubmit={applyFilters}
+        className="border border-border bg-bg-elevated p-4"
+      >
         <div className="flex flex-wrap gap-3 items-end">
           <div className="flex-1 min-w-[140px]">
-            <label className="text-xs text-text-tertiary block mb-1">Agent</label>
+            <label className="text-xs text-text-tertiary block mb-1">
+              Agent
+            </label>
             <select
               value={filters.agentId}
-              onChange={(e) => setFilters({ ...filters, agentId: e.target.value })}
+              onChange={(e) =>
+                setFilters({ ...filters, agentId: e.target.value })
+              }
               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
             >
               <option value="">All agents</option>
@@ -263,7 +294,9 @@ export default function AuditPage() {
           </div>
 
           <div className="flex-1 min-w-[140px]">
-            <label className="text-xs text-text-tertiary block mb-1">Action Type</label>
+            <label className="text-xs text-text-tertiary block mb-1">
+              Action Type
+            </label>
             <select
               value={filters.action}
               onChange={(e) =>
@@ -283,10 +316,14 @@ export default function AuditPage() {
           </div>
 
           <div className="flex-1 min-w-[120px]">
-            <label className="text-xs text-text-tertiary block mb-1">Result</label>
+            <label className="text-xs text-text-tertiary block mb-1">
+              Result
+            </label>
             <select
               value={filters.result}
-              onChange={(e) => setFilters({ ...filters, result: e.target.value })}
+              onChange={(e) =>
+                setFilters({ ...filters, result: e.target.value })
+              }
               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
             >
               <option value="">All results</option>
@@ -297,7 +334,9 @@ export default function AuditPage() {
           </div>
 
           <div className="flex-1 min-w-[140px]">
-            <label className="text-xs text-text-tertiary block mb-1">From</label>
+            <label className="text-xs text-text-tertiary block mb-1">
+              From
+            </label>
             <input
               type="datetime-local"
               value={filters.from}
@@ -323,7 +362,9 @@ export default function AuditPage() {
             >
               Apply
               {activeFilters > 0 && (
-                <span className="ml-1.5 text-xs bg-bg/30 px-1 py-0.5">{activeFilters}</span>
+                <span className="ml-1.5 text-xs bg-bg/30 px-1 py-0.5">
+                  {activeFilters}
+                </span>
               )}
             </button>
             {activeFilters > 0 && (
@@ -342,7 +383,9 @@ export default function AuditPage() {
       {/* Error */}
       {error && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
-          <p className="text-text-secondary text-sm mb-1">Failed to load audit log</p>
+          <p className="text-text-secondary text-sm mb-1">
+            Failed to load audit log
+          </p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
           <button
             onClick={() => loadData(applied)}
@@ -362,7 +405,9 @@ export default function AuditPage() {
         </div>
       ) : !error && entries.length === 0 ? (
         <div className="py-20 text-center border border-border-subtle">
-          <p className="font-display text-lg font-600 text-text-secondary">No events found</p>
+          <p className="font-display text-lg font-600 text-text-secondary">
+            No events found
+          </p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
             {activeFilters > 0
               ? "No events match the current filters. Try adjusting your criteria."
@@ -398,12 +443,16 @@ export default function AuditPage() {
                 transition={{ delay: i * 0.02, duration: 0.2, ease }}
               >
                 <button
-                  onClick={() => setExpanded(expanded === entry.id ? null : entry.id)}
+                  onClick={() =>
+                    setExpanded(expanded === entry.id ? null : entry.id)
+                  }
                   className="w-full text-left"
                 >
                   <div
                     className={`grid grid-cols-[1fr_auto_auto_auto_auto] gap-4 px-3 py-3.5 border-b border-border-subtle transition-colors items-center ${
-                      expanded === entry.id ? "bg-bg-elevated" : "hover:bg-bg-elevated/30"
+                      expanded === entry.id
+                        ? "bg-bg-elevated"
+                        : "hover:bg-bg-elevated/30"
                     }`}
                   >
                     <div className="min-w-0">
@@ -445,7 +494,9 @@ export default function AuditPage() {
                         <div className="flex flex-wrap gap-4 md:hidden text-xs">
                           <div className="space-y-0.5">
                             <div className="text-text-tertiary">Agent</div>
-                            <div className="text-text-secondary">{agentName(entry.agentId)}</div>
+                            <div className="text-text-secondary">
+                              {agentName(entry.agentId)}
+                            </div>
                           </div>
                           <div className="space-y-0.5">
                             <div className="text-text-tertiary">Result</div>
@@ -464,17 +515,22 @@ export default function AuditPage() {
                         </div>
 
                         {/* Details JSON */}
-                        {entry.details && Object.keys(entry.details).length > 0 && (
-                          <div className="space-y-1">
-                            <div className="text-xs text-text-tertiary">Details</div>
-                            <pre className="text-xs font-mono text-text-secondary bg-bg p-3 border border-border-subtle overflow-x-auto">
-                              {JSON.stringify(entry.details, null, 2)}
-                            </pre>
-                          </div>
-                        )}
+                        {entry.details &&
+                          Object.keys(entry.details).length > 0 && (
+                            <div className="space-y-1">
+                              <div className="text-xs text-text-tertiary">
+                                Details
+                              </div>
+                              <pre className="text-xs font-mono text-text-secondary bg-bg p-3 border border-border-subtle overflow-x-auto">
+                                {JSON.stringify(entry.details, null, 2)}
+                              </pre>
+                            </div>
+                          )}
 
                         {/* Entry ID */}
-                        <div className="text-xs text-text-tertiary font-mono">ID: {entry.id}</div>
+                        <div className="text-xs text-text-tertiary font-mono">
+                          ID: {entry.id}
+                        </div>
 
                         {/* Agent summary inline */}
                         {(() => {
@@ -494,7 +550,9 @@ export default function AuditPage() {
                                   {agentSummary.denyCount} denied
                                 </span>
                               )}
-                              <span>{formatCost(agentSummary.totalCost)} total cost</span>
+                              <span>
+                                {formatCost(agentSummary.totalCost)} total cost
+                              </span>
                             </div>
                           );
                         })()}

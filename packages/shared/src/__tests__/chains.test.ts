@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { CHAINS, chainFromCaip2, chainFromNumeric, fromCaip2, toCaip2 } from "../index";
+import {
+  CHAINS,
+  chainFromCaip2,
+  chainFromNumeric,
+  fromCaip2,
+  toCaip2,
+} from "../index";
 
 // ─── CHAINS registry ─────────────────────────────────────────────────────────
 

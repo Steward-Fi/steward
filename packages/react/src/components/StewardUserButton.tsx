@@ -66,7 +66,10 @@ export function StewardUserButton({
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleClickOutside = useCallback((e: MouseEvent) => {
-    if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+    if (
+      containerRef.current &&
+      !containerRef.current.contains(e.target as Node)
+    ) {
       setOpen(false);
     }
   }, []);
@@ -83,7 +86,9 @@ export function StewardUserButton({
   if (!user) return null;
 
   const displayEmail = user.email || null;
-  const displayWallet = user.walletAddress ? truncateAddress(user.walletAddress) : null;
+  const displayWallet = user.walletAddress
+    ? truncateAddress(user.walletAddress)
+    : null;
   const displayName = displayEmail ?? displayWallet ?? "User";
 
   const handleSignOut = () => {
@@ -126,7 +131,8 @@ export function StewardUserButton({
           </span>
         )}
         <span className="stwd-user-button__name">
-          {displayEmail ?? (showWallet && displayWallet ? displayWallet : displayName)}
+          {displayEmail ??
+            (showWallet && displayWallet ? displayWallet : displayName)}
         </span>
       </button>
 
@@ -141,18 +147,27 @@ export function StewardUserButton({
           {auth.activeTenantId &&
             auth.tenants &&
             (() => {
-              const current = auth.tenants.find((t) => t.tenantId === auth.activeTenantId);
+              const current = auth.tenants.find(
+                (t) => t.tenantId === auth.activeTenantId,
+              );
               return current ? (
-                <div className="stwd-user-button__dropdown-tenant" role="menuitem">
+                <div
+                  className="stwd-user-button__dropdown-tenant"
+                  role="menuitem"
+                >
                   <span className="stwd-user-button__tenant-label">App:</span>{" "}
-                  <span className="stwd-user-button__tenant-name">{current.tenantName}</span>
+                  <span className="stwd-user-button__tenant-name">
+                    {current.tenantName}
+                  </span>
                 </div>
               ) : null;
             })()}
           {/* Inline tenant switcher */}
           {showTenantSwitcher && auth.tenants && auth.tenants.length > 1 && (
             <div className="stwd-user-button__tenant-switcher">
-              <div className="stwd-user-button__tenant-switcher-label">Switch App</div>
+              <div className="stwd-user-button__tenant-switcher-label">
+                Switch App
+              </div>
               {auth.tenants
                 .filter((t) => t.tenantId !== auth.activeTenantId)
                 .map((tenant) => (

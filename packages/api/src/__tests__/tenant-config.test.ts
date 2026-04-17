@@ -182,9 +182,12 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
 
   describe("GET /tenants/:id/config/templates", () => {
     it("returns saved templates", async () => {
-      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config/templates`, {
-        headers: headers(),
-      });
+      const res = await fetch(
+        `${BASE_URL}/tenants/${TENANT_ID}/config/templates`,
+        {
+          headers: headers(),
+        },
+      );
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.ok).toBe(true);
@@ -237,7 +240,10 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
 describe.skipIf(SKIP)("Dashboard API", () => {
   it("returns 404 for non-existent agent", async () => {
     const { createSessionToken } = await import("../routes/auth");
-    const token = await createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID);
+    const token = await createSessionToken(
+      "0x0000000000000000000000000000000000000000",
+      TENANT_ID,
+    );
     const res = await fetch(`${BASE_URL}/dashboard/nonexistent-agent`, {
       headers: { Authorization: `Bearer ${token}` },
     });

@@ -46,14 +46,18 @@ agentRoutes.post("/", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isValidAgentId(body.id)) {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)",
+        error:
+          "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)",
       },
       400,
     );
@@ -67,7 +71,12 @@ agentRoutes.post("/", async (c) => {
   }
 
   try {
-    const identity = await vault.createAgent(tenantId, body.id, body.name, body.platformId);
+    const identity = await vault.createAgent(
+      tenantId,
+      body.id,
+      body.name,
+      body.platformId,
+    );
     return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -120,8 +129,14 @@ agentRoutes.post("/:agentId/token", async (c) => {
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] Failed to generate agent token for ${agentId}:`, e);
-    return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
+    console.error(
+      `[${requestId}] Failed to generate agent token for ${agentId}:`,
+      e,
+    );
+    return c.json<ApiResponse>(
+      { ok: false, error: "Failed to generate token" },
+      500,
+    );
   }
 });
 
@@ -163,10 +178,14 @@ agentRoutes.delete("/:agentId", async (c) => {
       await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
       await tx.delete(transactions).where(eq(transactions.agentId, agentId));
       await tx.delete(policies).where(eq(policies.agentId, agentId));
-      await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
+      await tx
+        .delete(encryptedChainKeys)
+        .where(eq(encryptedChainKeys.agentId, agentId));
       await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
       await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
-      await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+      await tx
+        .delete(agents)
+        .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
     });
 
     return c.json<ApiResponse<{ deleted: string }>>({
@@ -176,7 +195,10 @@ agentRoutes.delete("/:agentId", async (c) => {
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
     console.error(`[${requestId}] Failed to delete agent ${agentId}:`, e);
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -253,7 +275,12 @@ agentRoutes.get("/:agentId/tokens", async (c) => {
     const balance = await vault.getBalance(tenantId, agentId, chainId);
 
     // Fetch ERC-20 token balances
-    const tokenBalances = await vault.getTokenBalances(tenantId, agentId, chainId, customTokens);
+    const tokenBalances = await vault.getTokenBalances(
+      tenantId,
+      agentId,
+      chainId,
+      customTokens,
+    );
 
     return c.json<ApiResponse>({
       ok: true,
@@ -285,7 +312,10 @@ agentRoutes.post("/batch", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!Array.isArray(body.agents) || body.agents.length === 0) {
@@ -370,7 +400,10 @@ agentRoutes.get("/:agentId/policies", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const agentPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
+  const agentPolicies = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.agentId, agentId));
 
   return c.json<ApiResponse<PolicyRule[]>>({
     ok: true,
@@ -463,7 +496,10 @@ agentRoutes.put("/:agentId/policies", async (c) => {
     );
   }
 
-  const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
+  const storedPolicies = await db
+    .select()
+    .from(policies)
+    .where(eq(policies.agentId, agentId));
 
   return c.json<ApiResponse<PolicyRule[]>>({
     ok: true,

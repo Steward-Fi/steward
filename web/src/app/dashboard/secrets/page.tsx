@@ -3,7 +3,11 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
 import { steward } from "@/lib/api";
-import type { RouteCreatePayload, RouteRecord, SecretRecord } from "@/lib/steward-client";
+import type {
+  RouteCreatePayload,
+  RouteRecord,
+  SecretRecord,
+} from "@/lib/steward-client";
 import { formatDate } from "@/lib/utils";
 
 const ease: [number, number, number, number] = [0.25, 1, 0.5, 1];
@@ -47,7 +51,9 @@ export default function SecretsPage() {
   const [routesLoading, setRoutesLoading] = useState(false);
   const [showAddRoute, setShowAddRoute] = useState(false);
   const [addingRoute, setAddingRoute] = useState(false);
-  const [routeForm, setRouteForm] = useState<Omit<RouteCreatePayload, "secretId">>({
+  const [routeForm, setRouteForm] = useState<
+    Omit<RouteCreatePayload, "secretId">
+  >({
     hostPattern: "",
     pathPattern: "",
     injectAs: "header",
@@ -121,7 +127,9 @@ export default function SecretsPage() {
       setCreateForm({ name: "", value: "", description: "" });
       toast("Secret created", "success");
     } catch (e: unknown) {
-      setCreateError(e instanceof Error ? e.message : "Failed to create secret");
+      setCreateError(
+        e instanceof Error ? e.message : "Failed to create secret",
+      );
     } finally {
       setCreating(false);
     }
@@ -141,7 +149,10 @@ export default function SecretsPage() {
       setRotateValue("");
       toast(`Secret rotated to version ${updated.version}`, "success");
     } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : "Failed to rotate secret", "error");
+      toast(
+        e instanceof Error ? e.message : "Failed to rotate secret",
+        "error",
+      );
     } finally {
       setRotating(false);
     }
@@ -156,7 +167,10 @@ export default function SecretsPage() {
       setConfirmDelete(null);
       toast("Secret deleted", "success");
     } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : "Failed to delete secret", "error");
+      toast(
+        e instanceof Error ? e.message : "Failed to delete secret",
+        "error",
+      );
     } finally {
       setDeleting(false);
     }
@@ -231,7 +245,9 @@ export default function SecretsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-700 tracking-tight">Secrets</h1>
+          <h1 className="font-display text-2xl font-700 tracking-tight">
+            Secrets
+          </h1>
           <p className="text-sm text-text-tertiary mt-1">
             Manage API keys and credentials injected into agent requests
           </p>
@@ -265,13 +281,17 @@ export default function SecretsPage() {
                   <input
                     type="text"
                     value={createForm.name}
-                    onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
+                    onChange={(e) =>
+                      setCreateForm({ ...createForm, name: e.target.value })
+                    }
                     placeholder="openai-api-key"
                     className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-text-tertiary block mb-1.5">Description</label>
+                  <label className="text-xs text-text-tertiary block mb-1.5">
+                    Description
+                  </label>
                   <input
                     type="text"
                     value={createForm.description}
@@ -293,12 +313,15 @@ export default function SecretsPage() {
                 <input
                   type="password"
                   value={createForm.value}
-                  onChange={(e) => setCreateForm({ ...createForm, value: e.target.value })}
+                  onChange={(e) =>
+                    setCreateForm({ ...createForm, value: e.target.value })
+                  }
                   placeholder="sk-..."
                   className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                 />
                 <p className="text-xs text-text-tertiary mt-1.5">
-                  Value is encrypted at rest and never returned in plaintext after creation.
+                  Value is encrypted at rest and never returned in plaintext
+                  after creation.
                 </p>
               </div>
               <AnimatePresence>
@@ -340,7 +363,9 @@ export default function SecretsPage() {
       {/* Error */}
       {error && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
-          <p className="text-text-secondary text-sm mb-1">Failed to load secrets</p>
+          <p className="text-text-secondary text-sm mb-1">
+            Failed to load secrets
+          </p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
           <button
             onClick={loadSecrets}
@@ -363,9 +388,12 @@ export default function SecretsPage() {
             </div>
           ) : secrets.length === 0 && !error ? (
             <div className="py-16 text-center border border-border-subtle">
-              <p className="font-display text-base font-600 text-text-secondary">No secrets yet</p>
+              <p className="font-display text-base font-600 text-text-secondary">
+                No secrets yet
+              </p>
               <p className="text-sm text-text-tertiary mt-1 max-w-xs mx-auto">
-                Store API keys and credentials that agents can use in their requests.
+                Store API keys and credentials that agents can use in their
+                requests.
               </p>
               <button
                 onClick={() => setShowCreate(true)}
@@ -384,9 +412,13 @@ export default function SecretsPage() {
                     animate={{ opacity: 1, height: "auto" }}
                     exit={{ opacity: 0, height: 0 }}
                     transition={{ duration: 0.25, ease }}
-                    onClick={() => setSelected(selected?.id === secret.id ? null : secret)}
+                    onClick={() =>
+                      setSelected(selected?.id === secret.id ? null : secret)
+                    }
                     className={`w-full text-left flex items-center justify-between py-4 px-3 border-b border-border-subtle transition-colors group ${
-                      selected?.id === secret.id ? "bg-accent-bg" : "hover:bg-bg-elevated/40"
+                      selected?.id === secret.id
+                        ? "bg-accent-bg"
+                        : "hover:bg-bg-elevated/40"
                     }`}
                   >
                     <div className="min-w-0">
@@ -432,9 +464,13 @@ export default function SecretsPage() {
                 {/* Secret header */}
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h2 className="font-display text-lg font-700">{selected.name}</h2>
+                    <h2 className="font-display text-lg font-700">
+                      {selected.name}
+                    </h2>
                     {selected.description && (
-                      <p className="text-sm text-text-tertiary mt-0.5">{selected.description}</p>
+                      <p className="text-sm text-text-tertiary mt-0.5">
+                        {selected.description}
+                      </p>
                     )}
                   </div>
                   <button
@@ -497,8 +533,8 @@ export default function SecretsPage() {
                     >
                       <div className="border border-amber-400/20 bg-amber-400/5 p-4 space-y-3">
                         <p className="text-xs text-amber-400 font-medium">
-                          Rotation creates a new version. Previous version is immediately
-                          invalidated.
+                          Rotation creates a new version. Previous version is
+                          immediately invalidated.
                         </p>
                         <input
                           type="password"
@@ -543,8 +579,8 @@ export default function SecretsPage() {
                     >
                       <div className="border border-red-400/20 bg-red-400/5 p-4 space-y-3">
                         <p className="text-xs text-red-400 font-medium">
-                          Delete "{selected.name}"? This cannot be undone. Any routes using this
-                          secret will stop working.
+                          Delete "{selected.name}"? This cannot be undone. Any
+                          routes using this secret will stop working.
                         </p>
                         <div className="flex gap-3">
                           <button
@@ -569,7 +605,9 @@ export default function SecretsPage() {
                 {/* Divider */}
                 <div className="border-t border-border-subtle pt-4">
                   <div className="flex items-center justify-between mb-4">
-                    <h3 className="font-display text-sm font-600">Route Configuration</h3>
+                    <h3 className="font-display text-sm font-600">
+                      Route Configuration
+                    </h3>
                     <button
                       onClick={() => setShowAddRoute(!showAddRoute)}
                       className="text-xs px-3 py-1.5 border border-border text-text-tertiary hover:text-text hover:border-accent transition-colors"
@@ -593,7 +631,8 @@ export default function SecretsPage() {
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
                               <label className="text-xs text-text-tertiary block mb-1">
-                                Host Pattern <span className="text-accent">*</span>
+                                Host Pattern{" "}
+                                <span className="text-accent">*</span>
                               </label>
                               <input
                                 type="text"
@@ -636,7 +675,8 @@ export default function SecretsPage() {
                                 onChange={(e) =>
                                   setRouteForm({
                                     ...routeForm,
-                                    injectAs: e.target.value as RouteCreatePayload["injectAs"],
+                                    injectAs: e.target
+                                      .value as RouteCreatePayload["injectAs"],
                                   })
                                 }
                                 className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
@@ -737,7 +777,8 @@ export default function SecretsPage() {
                   ) : routes.length === 0 ? (
                     <div className="py-8 text-center border border-border-subtle">
                       <p className="text-xs text-text-tertiary">
-                        No routes configured. Routes define where this secret gets injected.
+                        No routes configured. Routes define where this secret
+                        gets injected.
                       </p>
                     </div>
                   ) : (
@@ -751,7 +792,9 @@ export default function SecretsPage() {
                             <div className="font-mono text-xs text-text truncate">
                               {route.hostPattern}
                               {route.pathPattern && (
-                                <span className="text-text-tertiary">{route.pathPattern}</span>
+                                <span className="text-text-tertiary">
+                                  {route.pathPattern}
+                                </span>
                               )}
                             </div>
                             <div className="flex items-center gap-2 text-xs text-text-tertiary">
@@ -759,13 +802,19 @@ export default function SecretsPage() {
                                 {route.injectAs}
                               </span>
                               {route.headerName && (
-                                <span className="font-mono">{route.headerName}</span>
+                                <span className="font-mono">
+                                  {route.headerName}
+                                </span>
                               )}
                               {route.queryParam && (
-                                <span className="font-mono">?{route.queryParam}</span>
+                                <span className="font-mono">
+                                  ?{route.queryParam}
+                                </span>
                               )}
                               {route.bodyPath && (
-                                <span className="font-mono">.{route.bodyPath}</span>
+                                <span className="font-mono">
+                                  .{route.bodyPath}
+                                </span>
                               )}
                             </div>
                           </div>
@@ -789,7 +838,9 @@ export default function SecretsPage() {
                 exit={{ opacity: 0 }}
                 className="h-40 border border-border-subtle flex items-center justify-center"
               >
-                <p className="text-sm text-text-tertiary">Select a secret to view details</p>
+                <p className="text-sm text-text-tertiary">
+                  Select a secret to view details
+                </p>
               </motion.div>
             )}
           </AnimatePresence>

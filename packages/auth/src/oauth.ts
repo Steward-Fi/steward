@@ -64,7 +64,9 @@ type BuiltInProvider = (typeof BUILT_IN_PROVIDERS)[number];
 /**
  * Returns true if the given provider name is a known built-in OAuth provider.
  */
-export function isBuiltInProvider(provider: string): provider is BuiltInProvider {
+export function isBuiltInProvider(
+  provider: string,
+): provider is BuiltInProvider {
   return (BUILT_IN_PROVIDERS as readonly string[]).includes(provider);
 }
 
@@ -158,7 +160,9 @@ export function getProviderConfig(provider: string): OAuthProvider {
 // ─── PKCE helpers ─────────────────────────────────────────────────────────────
 
 function uint8ArrayToBase64url(arr: Uint8Array): string {
-  const base64 = btoa(Array.from(arr, (byte) => String.fromCharCode(byte)).join(""));
+  const base64 = btoa(
+    Array.from(arr, (byte) => String.fromCharCode(byte)).join(""),
+  );
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
@@ -309,7 +313,9 @@ export class OAuthClient {
             : data.avatar != null
               ? String(data.avatar)
               : undefined,
-      verified_email: Boolean(data.verified_email ?? data.email_verified ?? data.verified ?? false),
+      verified_email: Boolean(
+        data.verified_email ?? data.email_verified ?? data.verified ?? false,
+      ),
     };
   }
 }

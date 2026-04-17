@@ -68,9 +68,13 @@ function rowToTemplate(row: any): PolicyTemplate {
     rules: typeof row.rules === "string" ? JSON.parse(row.rules) : row.rules,
     isDefault: row.is_default,
     createdAt:
-      row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : String(row.created_at),
     updatedAt:
-      row.updated_at instanceof Date ? row.updated_at.toISOString() : String(row.updated_at),
+      row.updated_at instanceof Date
+        ? row.updated_at.toISOString()
+        : String(row.updated_at),
   };
 }
 
@@ -84,7 +88,10 @@ async function listTemplates(tenantId: string): Promise<PolicyTemplate[]> {
   return (rows as any[]).map(rowToTemplate);
 }
 
-async function getTemplate(tenantId: string, id: string): Promise<PolicyTemplate | null> {
+async function getTemplate(
+  tenantId: string,
+  id: string,
+): Promise<PolicyTemplate | null> {
   const rows = await db.execute(
     sql`SELECT id, tenant_id, name, description, rules, is_default, created_at, updated_at
         FROM policy_templates
@@ -94,7 +101,10 @@ async function getTemplate(tenantId: string, id: string): Promise<PolicyTemplate
   return row ? rowToTemplate(row) : null;
 }
 
-async function insertTemplate(tenantId: string, body: CreateTemplateBody): Promise<PolicyTemplate> {
+async function insertTemplate(
+  tenantId: string,
+  body: CreateTemplateBody,
+): Promise<PolicyTemplate> {
   const rows = await db.execute(
     sql`INSERT INTO policy_templates (tenant_id, name, description, rules, is_default)
         VALUES (${tenantId}, ${body.name}, ${body.description ?? null}, ${JSON.stringify(body.rules ?? [])}::jsonb, ${body.isDefault ?? false})
@@ -115,7 +125,8 @@ async function updateTemplate(
   const hasRules = body.rules !== undefined;
   const hasDefault = body.isDefault !== undefined;
 
-  if (!hasName && !hasDesc && !hasRules && !hasDefault) return getTemplate(tenantId, id);
+  if (!hasName && !hasDesc && !hasRules && !hasDefault)
+    return getTemplate(tenantId, id);
 
   const rows = await db.execute(
     sql`UPDATE policy_templates SET
@@ -162,7 +173,10 @@ policiesStandaloneRoutes.post("/", async (c) => {
 
   const body = await safeJsonParse<CreateTemplateBody>(c);
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(body.name)) {
@@ -173,12 +187,18 @@ policiesStandaloneRoutes.post("/", async (c) => {
   }
 
   if (!Array.isArray(body.rules)) {
-    return c.json<ApiResponse>({ ok: false, error: "rules must be an array" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "rules must be an array" },
+      400,
+    );
   }
 
   try {
     const template = await insertTemplate(tenantId, body);
-    return c.json<ApiResponse<PolicyTemplate>>({ ok: true, data: template }, 201);
+    return c.json<ApiResponse<PolicyTemplate>>(
+      { ok: true, data: template },
+      201,
+    );
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
@@ -192,7 +212,10 @@ policiesStandaloneRoutes.get("/:id", async (c) => {
 
   const template = await getTemplate(tenantId, id);
   if (!template) {
-    return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Policy template not found" },
+      404,
+    );
   }
 
   return c.json<ApiResponse<PolicyTemplate>>({ ok: true, data: template });
@@ -212,17 +235,26 @@ policiesStandaloneRoutes.put("/:id", async (c) => {
 
   const body = await safeJsonParse<Partial<CreateTemplateBody>>(c);
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (body.rules !== undefined && !Array.isArray(body.rules)) {
-    return c.json<ApiResponse>({ ok: false, error: "rules must be an array" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "rules must be an array" },
+      400,
+    );
   }
 
   try {
     const template = await updateTemplate(tenantId, id, body);
     if (!template) {
-      return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Policy template not found" },
+        404,
+      );
     }
     return c.json<ApiResponse<PolicyTemplate>>({ ok: true, data: template });
   } catch (e: unknown) {
@@ -245,7 +277,10 @@ policiesStandaloneRoutes.delete("/:id", async (c) => {
 
   const deleted = await deleteTemplate(tenantId, id);
   if (!deleted) {
-    return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Policy template not found" },
+      404,
+    );
   }
 
   return c.json<ApiResponse>({ ok: true, data: { deleted: true } });
@@ -265,12 +300,18 @@ policiesStandaloneRoutes.post("/:id/assign", async (c) => {
 
   const body = await safeJsonParse<AssignBody>(c);
   if (!body || !Array.isArray(body.agentIds) || body.agentIds.length === 0) {
-    return c.json<ApiResponse>({ ok: false, error: "agentIds must be a non-empty array" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "agentIds must be a non-empty array" },
+      400,
+    );
   }
 
   const template = await getTemplate(tenantId, id);
   if (!template) {
-    return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Policy template not found" },
+      404,
+    );
   }
 
   // Validate all agents exist for this tenant
@@ -323,7 +364,10 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
 
   const body = await safeJsonParse<SimulateBody>(c);
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!body.request?.to || !body.request?.value) {
@@ -341,7 +385,10 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
   } else if (body.policyId) {
     const template = await getTemplate(tenantId, body.policyId);
     if (!template) {
-      return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Policy template not found" },
+        404,
+      );
     }
     rules = template.rules;
   } else if (body.agentId) {

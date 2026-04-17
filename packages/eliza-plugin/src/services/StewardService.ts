@@ -61,11 +61,19 @@ export class StewardService extends Service {
 
     // Probe health + fetch agent identity
     try {
-      this.agentIdentity = await this.client.getAgent(this.pluginConfig.agentId);
+      this.agentIdentity = await this.client.getAgent(
+        this.pluginConfig.agentId,
+      );
       this._connected = true;
-      console.info(`[Steward] Connected. Wallet: ${this.agentIdentity.walletAddress}`);
+      console.info(
+        `[Steward] Connected. Wallet: ${this.agentIdentity.walletAddress}`,
+      );
     } catch (err) {
-      if (err instanceof StewardApiError && err.status === 404 && this.pluginConfig.autoRegister) {
+      if (
+        err instanceof StewardApiError &&
+        err.status === 404 &&
+        this.pluginConfig.autoRegister
+      ) {
         await this.tryAutoRegister(runtime);
       } else {
         const msg = err instanceof Error ? err.message : String(err);
@@ -79,10 +87,16 @@ export class StewardService extends Service {
 
   private async tryAutoRegister(runtime: IAgentRuntime): Promise<void> {
     try {
-      const name = this.getRuntimeState(runtime).character?.name ?? this.getAgentId();
-      this.agentIdentity = await this.getClient().createWallet(this.getAgentId(), name);
+      const name =
+        this.getRuntimeState(runtime).character?.name ?? this.getAgentId();
+      this.agentIdentity = await this.getClient().createWallet(
+        this.getAgentId(),
+        name,
+      );
       this._connected = true;
-      console.info(`[Steward] Registered new wallet: ${this.agentIdentity.walletAddress}`);
+      console.info(
+        `[Steward] Registered new wallet: ${this.agentIdentity.walletAddress}`,
+      );
     } catch (regErr) {
       const msg = regErr instanceof Error ? regErr.message : String(regErr);
       console.error(`[Steward] Failed to auto-register agent: ${msg}`);
@@ -96,15 +110,22 @@ export class StewardService extends Service {
     const settings = runtimeState.character?.settings?.steward ?? {};
     const env = process.env;
 
-    const apiUrl = settings.apiUrl ?? env.STEWARD_API_URL ?? "http://localhost:7860";
+    const apiUrl =
+      settings.apiUrl ?? env.STEWARD_API_URL ?? "http://localhost:7860";
 
     return {
       apiUrl,
       apiKey: settings.apiKey ?? env.STEWARD_API_KEY,
-      agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId ?? "default",
+      agentId:
+        settings.agentId ??
+        env.STEWARD_AGENT_ID ??
+        runtimeState.agentId ??
+        "default",
       tenantId: settings.tenantId ?? env.STEWARD_TENANT_ID,
-      autoRegister: settings.autoRegister ?? env.STEWARD_AUTO_REGISTER !== "false",
-      fallbackLocal: settings.fallbackLocal ?? env.STEWARD_FALLBACK_LOCAL !== "false",
+      autoRegister:
+        settings.autoRegister ?? env.STEWARD_AUTO_REGISTER !== "false",
+      fallbackLocal:
+        settings.fallbackLocal ?? env.STEWARD_FALLBACK_LOCAL !== "false",
     };
   }
 
@@ -118,7 +139,9 @@ export class StewardService extends Service {
     return this.pluginConfig;
   }
 
-  async signTransaction(tx: SignTransactionInput): Promise<SignTransactionResult> {
+  async signTransaction(
+    tx: SignTransactionInput,
+  ): Promise<SignTransactionResult> {
     this.assertConnected();
     return this.getClient().signTransaction(this.getAgentId(), tx);
   }

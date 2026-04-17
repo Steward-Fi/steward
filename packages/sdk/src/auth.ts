@@ -46,7 +46,10 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
     // base64url → base64 → decode
     // atob is available globally in browsers and Node.js >= 18
     const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+    const padded = base64.padEnd(
+      base64.length + ((4 - (base64.length % 4)) % 4),
+      "=",
+    );
     const json = atob(padded);
     return JSON.parse(json) as Record<string, unknown>;
   } catch {
@@ -54,7 +57,10 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
   }
 }
 
-function sessionFromToken(token: string, user?: StewardUser): StewardSession | null {
+function sessionFromToken(
+  token: string,
+  user?: StewardUser,
+): StewardSession | null {
   const payload = decodeJwtPayload(token);
   if (!payload) return null;
   return {
@@ -123,7 +129,10 @@ async function authRequest<T>(
       headers,
     });
   } catch (err) {
-    throw new StewardApiError(err instanceof Error ? err.message : "Network request failed", 0);
+    throw new StewardApiError(
+      err instanceof Error ? err.message : "Network request failed",
+      0,
+    );
   }
 
   const text = await response.text();
@@ -133,7 +142,10 @@ async function authRequest<T>(
     try {
       payload = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      throw new StewardApiError("Received invalid JSON from Steward API", response.status);
+      throw new StewardApiError(
+        "Received invalid JSON from Steward API",
+        response.status,
+      );
     }
   }
 
@@ -154,9 +166,15 @@ export class StewardAuth {
   private readonly baseUrl: string;
   private readonly storage: SessionStorage;
   private readonly tenantId: string | undefined;
-  private readonly listeners: Array<(session: StewardSession | null) => void> = [];
+  private readonly listeners: Array<(session: StewardSession | null) => void> =
+    [];
 
-  constructor({ baseUrl, storage, onSessionChange, tenantId }: StewardAuthConfig) {
+  constructor({
+    baseUrl,
+    storage,
+    onSessionChange,
+    tenantId,
+  }: StewardAuthConfig) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.tenantId = tenantId;
 
@@ -256,10 +274,14 @@ export class StewardAuth {
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) return null;
 
-    const res = await authRequest<StewardRefreshResult>(this.baseUrl, "/auth/refresh", {
-      method: "POST",
-      body: JSON.stringify({ refreshToken }),
-    });
+    const res = await authRequest<StewardRefreshResult>(
+      this.baseUrl,
+      "/auth/refresh",
+      {
+        method: "POST",
+        body: JSON.stringify({ refreshToken }),
+      },
+    );
 
     if (!res.ok) {
       // Refresh token invalid/expired — sign the user out
@@ -296,7 +318,9 @@ export class StewardAuth {
    * Register a listener that fires whenever the session changes.
    * Returns a cleanup function that removes the listener.
    */
-  onSessionChange(callback: (session: StewardSession | null) => void): () => void {
+  onSessionChange(
+    callback: (session: StewardSession | null) => void,
+  ): () => void {
     this.listeners.push(callback);
     return () => {
       const idx = this.listeners.indexOf(callback);
@@ -322,7 +346,10 @@ export class StewardAuth {
 
     // Dynamically import @simplewebauthn/browser — peer dep, may not be installed
     type SimpleWebAuthnBrowser = {
-      startAuthentication: (opts: unknown, useBrowserAutofill?: boolean) => Promise<unknown>;
+      startAuthentication: (
+        opts: unknown,
+        useBrowserAutofill?: boolean,
+      ) => Promise<unknown>;
       startRegistration: (opts: unknown) => Promise<unknown>;
     };
     let browserLib: SimpleWebAuthnBrowser;
@@ -466,13 +493,17 @@ export class StewardAuth {
    */
   async signInWithEmail(email: string): Promise<StewardEmailResult> {
     // API shape: { ok: true, data: { expiresAt: string } }
-    const res = await authRequest<Record<string, unknown>>(this.baseUrl, "/auth/email/send", {
-      method: "POST",
-      body: JSON.stringify({
-        email,
-        ...(this.tenantId ? { tenantId: this.tenantId } : {}),
-      }),
-    });
+    const res = await authRequest<Record<string, unknown>>(
+      this.baseUrl,
+      "/auth/email/send",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+        }),
+      },
+    );
 
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);
@@ -482,7 +513,8 @@ export class StewardAuth {
     const expiresAt =
       typeof res.data.expiresAt === "string"
         ? res.data.expiresAt
-        : ((res.data.data as { expiresAt?: string } | undefined)?.expiresAt ?? "");
+        : ((res.data.data as { expiresAt?: string } | undefined)?.expiresAt ??
+          "");
 
     return { ok: true, expiresAt };
   }
@@ -491,7 +523,10 @@ export class StewardAuth {
    * Exchange a magic link token for a session JWT.
    * Call this from the callback URL handler with the `token` and `email` query params.
    */
-  async verifyEmailCallback(token: string, email: string): Promise<StewardAuthResult> {
+  async verifyEmailCallback(
+    token: string,
+    email: string,
+  ): Promise<StewardAuthResult> {
     const res = await authRequest<{
       ok: boolean;
       token: string;
@@ -534,7 +569,10 @@ export class StewardAuth {
     signMessage: (msg: string) => Promise<string>,
   ): Promise<StewardAuthResult> {
     // 1. Fetch a fresh nonce
-    const nonceRes = await authRequest<{ nonce: string }>(this.baseUrl, "/auth/nonce");
+    const nonceRes = await authRequest<{ nonce: string }>(
+      this.baseUrl,
+      "/auth/nonce",
+    );
 
     if (!nonceRes.ok) {
       throw new StewardApiError(nonceRes.error, nonceRes.status);
@@ -580,7 +618,9 @@ export class StewardAuth {
     }>(this.baseUrl, "/auth/verify", {
       method: "POST",
       body: JSON.stringify({ message: siweMessage, signature }),
-      ...(this.tenantId ? { headers: { "X-Steward-Tenant": this.tenantId } } : {}),
+      ...(this.tenantId
+        ? { headers: { "X-Steward-Tenant": this.tenantId } }
+        : {}),
     });
 
     if (!verifyRes.ok) {
@@ -604,7 +644,8 @@ export class StewardAuth {
 
   // ─── OAuth / Provider Discovery ───────────────────────────────────────────
 
-  private providersCache: { data: StewardProviders; fetchedAt: number } | null = null;
+  private providersCache: { data: StewardProviders; fetchedAt: number } | null =
+    null;
   private static readonly PROVIDERS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
   /**
@@ -615,12 +656,16 @@ export class StewardAuth {
     if (
       !forceRefresh &&
       this.providersCache &&
-      Date.now() - this.providersCache.fetchedAt < StewardAuth.PROVIDERS_CACHE_TTL_MS
+      Date.now() - this.providersCache.fetchedAt <
+        StewardAuth.PROVIDERS_CACHE_TTL_MS
     ) {
       return this.providersCache.data;
     }
 
-    const res = await authRequest<StewardProviders>(this.baseUrl, "/auth/providers");
+    const res = await authRequest<StewardProviders>(
+      this.baseUrl,
+      "/auth/providers",
+    );
 
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);
@@ -664,7 +709,9 @@ export class StewardAuth {
     // Build the redirect URI
     const redirectUri =
       config?.redirectUri ??
-      (isBrowser() ? `${window.location.origin}/auth/callback` : "http://localhost/auth/callback");
+      (isBrowser()
+        ? `${window.location.origin}/auth/callback`
+        : "http://localhost/auth/callback");
 
     // Build the authorization URL
     const params = new URLSearchParams({
@@ -688,8 +735,12 @@ export class StewardAuth {
     // Open popup
     const popupWidth = config?.popupWidth ?? 500;
     const popupHeight = config?.popupHeight ?? 600;
-    const left = Math.round(window.screenX + (window.outerWidth - popupWidth) / 2);
-    const top = Math.round(window.screenY + (window.outerHeight - popupHeight) / 2);
+    const left = Math.round(
+      window.screenX + (window.outerWidth - popupWidth) / 2,
+    );
+    const top = Math.round(
+      window.screenY + (window.outerHeight - popupHeight) / 2,
+    );
 
     const popup = window.open(
       authorizeUrl,
@@ -709,7 +760,10 @@ export class StewardAuth {
 
     // Validate state
     if (callbackParams.state !== state) {
-      throw new StewardApiError("OAuth state mismatch, possible CSRF attack", 0);
+      throw new StewardApiError(
+        "OAuth state mismatch, possible CSRF attack",
+        0,
+      );
     }
 
     if (callbackParams.error) {
@@ -717,11 +771,20 @@ export class StewardAuth {
     }
 
     if (!callbackParams.code) {
-      throw new StewardApiError("No authorization code received from OAuth provider", 0);
+      throw new StewardApiError(
+        "No authorization code received from OAuth provider",
+        0,
+      );
     }
 
     // Exchange code for tokens via PKCE
-    return this.exchangeOAuthCode(provider, callbackParams.code, redirectUri, state, codeVerifier);
+    return this.exchangeOAuthCode(
+      provider,
+      callbackParams.code,
+      redirectUri,
+      state,
+      codeVerifier,
+    );
   }
 
   /**
@@ -757,7 +820,10 @@ export class StewardAuth {
     }
 
     if (params.state !== storedState) {
-      throw new StewardApiError("OAuth state mismatch, possible CSRF attack", 0);
+      throw new StewardApiError(
+        "OAuth state mismatch, possible CSRF attack",
+        0,
+      );
     }
 
     // Build redirect URI from current location (or fallback)
@@ -765,7 +831,13 @@ export class StewardAuth {
       ? `${window.location.origin}${window.location.pathname}`
       : "http://localhost/auth/callback";
 
-    return this.exchangeOAuthCode(provider, params.code, redirectUri, params.state, storedVerifier);
+    return this.exchangeOAuthCode(
+      provider,
+      params.code,
+      redirectUri,
+      params.state,
+      storedVerifier,
+    );
   }
 
   /**
@@ -856,7 +928,9 @@ export class StewardAuth {
           resolved = true;
           clearInterval(poll);
           window.removeEventListener("message", messageHandler);
-          reject(new StewardApiError("OAuth popup timed out after 5 minutes", 0));
+          reject(
+            new StewardApiError("OAuth popup timed out after 5 minutes", 0),
+          );
           return;
         }
 
@@ -865,7 +939,12 @@ export class StewardAuth {
           resolved = true;
           clearInterval(poll);
           window.removeEventListener("message", messageHandler);
-          reject(new StewardApiError("OAuth popup was closed before completing sign-in", 0));
+          reject(
+            new StewardApiError(
+              "OAuth popup was closed before completing sign-in",
+              0,
+            ),
+          );
           return;
         }
 
@@ -974,10 +1053,14 @@ export class StewardAuth {
       return null;
     }
 
-    const res = await authRequest<StewardRefreshResult>(this.baseUrl, "/auth/refresh", {
-      method: "POST",
-      body: JSON.stringify({ refreshToken, tenantId }),
-    });
+    const res = await authRequest<StewardRefreshResult>(
+      this.baseUrl,
+      "/auth/refresh",
+      {
+        method: "POST",
+        body: JSON.stringify({ refreshToken, tenantId }),
+      },
+    );
 
     if (!res.ok) {
       // Refresh failed, user needs to re-authenticate

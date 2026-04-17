@@ -29,11 +29,17 @@ export function getRedis(): Redis {
     });
 
     instance.on("error", (err) => {
-      console.error("[steward:redis] connection error:", (err as Error).message);
+      console.error(
+        "[steward:redis] connection error:",
+        (err as Error).message,
+      );
     });
 
     instance.on("connect", () => {
-      console.log("[steward:redis] connected to", url.replace(/\/\/.*@/, "//***@"));
+      console.log(
+        "[steward:redis] connected to",
+        url.replace(/\/\/.*@/, "//***@"),
+      );
     });
 
     if (!shutdownRegistered) {

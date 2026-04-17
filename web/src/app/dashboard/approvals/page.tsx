@@ -87,7 +87,8 @@ export default function ApprovalsPage() {
       }
 
       allPending.sort(
-        (a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime(),
+        (a, b) =>
+          new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime(),
       );
       setPending(allPending);
     } catch (e: unknown) {
@@ -97,7 +98,11 @@ export default function ApprovalsPage() {
     }
   }
 
-  async function handleAction(agentId: string, txId: string, action: "approve" | "reject") {
+  async function handleAction(
+    agentId: string,
+    txId: string,
+    action: "approve" | "reject",
+  ) {
     const key = `${txId}-${action}`;
     setActionLoading(key);
     try {
@@ -107,7 +112,9 @@ export default function ApprovalsPage() {
         await steward.reject(agentId, txId);
       }
       // Optimistically remove from list
-      setPending((prev) => prev.filter((item) => item.transaction?.id !== txId));
+      setPending((prev) =>
+        prev.filter((item) => item.transaction?.id !== txId),
+      );
       addToast(
         action === "approve"
           ? "Transaction approved and queued for signing"
@@ -144,7 +151,9 @@ export default function ApprovalsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-700 tracking-tight">Approval Queue</h1>
+          <h1 className="font-display text-2xl font-700 tracking-tight">
+            Approval Queue
+          </h1>
           <p className="text-sm text-text-tertiary mt-1">
             Transactions exceeding policy thresholds
           </p>
@@ -181,7 +190,9 @@ export default function ApprovalsPage() {
       {/* Error state */}
       {error && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
-          <p className="text-text-secondary text-sm mb-1">Failed to load approvals</p>
+          <p className="text-text-secondary text-sm mb-1">
+            Failed to load approvals
+          </p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
           <button
             onClick={loadPending}
@@ -194,10 +205,12 @@ export default function ApprovalsPage() {
 
       {pending.length === 0 && !error ? (
         <div className="py-20 text-center border border-border-subtle">
-          <p className="font-display text-lg font-600 text-text-secondary">Queue is clear</p>
+          <p className="font-display text-lg font-600 text-text-secondary">
+            Queue is clear
+          </p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
-            All transactions are either auto-approved or have been reviewed. Transactions that
-            exceed policy thresholds will appear here.
+            All transactions are either auto-approved or have been reviewed.
+            Transactions that exceed policy thresholds will appear here.
           </p>
         </div>
       ) : (
@@ -225,7 +238,9 @@ export default function ApprovalsPage() {
                       </span>
                       <ChainBadge
                         chainId={
-                          item.transaction?.request?.chainId || item.transaction?.chainId || 8453
+                          item.transaction?.request?.chainId ||
+                          item.transaction?.chainId ||
+                          8453
                         }
                       />
                       <span className="text-xs text-text-tertiary">
@@ -244,7 +259,9 @@ export default function ApprovalsPage() {
                       <span className="text-text-tertiary">&rarr;</span>
                       <span className="font-mono text-xs text-text-tertiary">
                         {shortenAddress(
-                          item.transaction?.request?.to || item.transaction?.toAddress || "0x0",
+                          item.transaction?.request?.to ||
+                            item.transaction?.toAddress ||
+                            "0x0",
                           8,
                         )}
                       </span>
@@ -256,7 +273,9 @@ export default function ApprovalsPage() {
                         Value:{" "}
                         <span className="text-text-secondary tabular-nums">
                           {formatWei(
-                            item.transaction?.request?.value || item.transaction?.value || "0",
+                            item.transaction?.request?.value ||
+                              item.transaction?.value ||
+                              "0",
                             getChainSymbol(
                               item.transaction?.request?.chainId ||
                                 item.transaction?.chainId ||
@@ -265,7 +284,9 @@ export default function ApprovalsPage() {
                           )}
                         </span>
                       </span>
-                      {item.transaction?.request?.data && <span>Has calldata</span>}
+                      {item.transaction?.request?.data && (
+                        <span>Has calldata</span>
+                      )}
                     </div>
 
                     {/* Policy results */}
@@ -281,7 +302,8 @@ export default function ApprovalsPage() {
                                   : "bg-red-400/10 text-red-400"
                               }`}
                             >
-                              {result.type}: {result.passed ? "pass" : result.reason || "fail"}
+                              {result.type}:{" "}
+                              {result.passed ? "pass" : result.reason || "fail"}
                             </span>
                           ))}
                         </div>
@@ -291,18 +313,34 @@ export default function ApprovalsPage() {
                   {/* Actions */}
                   <div className="flex gap-2 flex-shrink-0">
                     <button
-                      onClick={() => handleAction(item.agentId, item.transaction?.id, "approve")}
+                      onClick={() =>
+                        handleAction(
+                          item.agentId,
+                          item.transaction?.id,
+                          "approve",
+                        )
+                      }
                       disabled={actionLoading !== null}
                       className="px-4 py-2 text-xs font-medium bg-emerald-400/10 text-emerald-400 hover:bg-emerald-400/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      {actionLoading === `${item.transaction?.id}-approve` ? "..." : "Approve"}
+                      {actionLoading === `${item.transaction?.id}-approve`
+                        ? "..."
+                        : "Approve"}
                     </button>
                     <button
-                      onClick={() => handleAction(item.agentId, item.transaction?.id, "reject")}
+                      onClick={() =>
+                        handleAction(
+                          item.agentId,
+                          item.transaction?.id,
+                          "reject",
+                        )
+                      }
                       disabled={actionLoading !== null}
                       className="px-4 py-2 text-xs font-medium bg-red-400/10 text-red-400 hover:bg-red-400/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                     >
-                      {actionLoading === `${item.transaction?.id}-reject` ? "..." : "Reject"}
+                      {actionLoading === `${item.transaction?.id}-reject`
+                        ? "..."
+                        : "Reject"}
                     </button>
                   </div>
                 </div>

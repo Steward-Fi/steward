@@ -53,7 +53,10 @@ export class SessionManager {
    * @param extra   Optional additional claims to embed in the token
    * @returns       A compact JWT string suitable for use as a session token
    */
-  async createSession(userId: string, extra?: Record<string, unknown>): Promise<string> {
+  async createSession(
+    userId: string,
+    extra?: Record<string, unknown>,
+  ): Promise<string> {
     const now = Math.floor(Date.now() / 1000);
 
     const builder = new SignJWT({
@@ -63,7 +66,9 @@ export class SessionManager {
       .setProtectedHeader({ alg: "HS256" })
       .setIssuer(this.issuer)
       .setIssuedAt(now)
-      .setExpirationTime(this.expiresIn as Parameters<SignJWT["setExpirationTime"]>[0]);
+      .setExpirationTime(
+        this.expiresIn as Parameters<SignJWT["setExpirationTime"]>[0],
+      );
 
     return builder.sign(this.secret);
   }

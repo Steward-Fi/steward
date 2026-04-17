@@ -31,7 +31,10 @@ export function themeToCSS(theme: TenantTheme): Record<string, string> {
   };
 }
 
-export function mergeTheme(base: TenantTheme, overrides?: Partial<TenantTheme>): TenantTheme {
+export function mergeTheme(
+  base: TenantTheme,
+  overrides?: Partial<TenantTheme>,
+): TenantTheme {
   if (!overrides) return base;
   return { ...base, ...overrides };
 }

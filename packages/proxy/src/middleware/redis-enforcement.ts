@@ -34,7 +34,9 @@ export async function initProxyRedis(): Promise<boolean> {
     const client = getRedis();
     await client.ping();
     redisAvailable = true;
-    console.log("[proxy:redis] Redis connected — rate limiting and spend tracking enabled");
+    console.log(
+      "[proxy:redis] Redis connected — rate limiting and spend tracking enabled",
+    );
     return true;
   } catch (err) {
     console.warn("[proxy:redis] Failed to connect:", (err as Error).message);
@@ -80,7 +82,10 @@ export async function checkProxyRateLimit(
     const key = `ratelimit:proxy:${agentId}:${host}:${windowMs}`;
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
-    console.error("[proxy:redis] Rate limit check failed:", (err as Error).message);
+    console.error(
+      "[proxy:redis] Rate limit check failed:",
+      (err as Error).message,
+    );
     return PERMISSIVE;
   }
 }
@@ -114,7 +119,10 @@ export async function trackProxySpend(
     }
     return cost;
   } catch (err) {
-    console.error("[proxy:redis] Spend tracking failed:", (err as Error).message);
+    console.error(
+      "[proxy:redis] Spend tracking failed:",
+      (err as Error).message,
+    );
     return 0;
   }
 }
@@ -136,7 +144,10 @@ export async function checkProxySpendLimit(
   try {
     return await checkSpendLimit(agentId, dailyLimitUsd, "day");
   } catch (err) {
-    console.error("[proxy:redis] Spend limit check failed:", (err as Error).message);
+    console.error(
+      "[proxy:redis] Spend limit check failed:",
+      (err as Error).message,
+    );
     return { allowed: true, spent: 0, remaining: dailyLimitUsd };
   }
 }

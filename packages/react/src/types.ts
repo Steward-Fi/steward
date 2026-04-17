@@ -309,9 +309,13 @@ export interface StewardAuthContextValue {
   signOut: () => void;
   getToken: () => string | null;
   /** Sign in with a passkey (WebAuthn). Browser-only. */
-  signInWithPasskey: (email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  signInWithPasskey: (
+    email: string,
+  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
   /** Send a magic link email. */
-  signInWithEmail: (email: string) => Promise<import("@stwd/sdk").StewardEmailResult>;
+  signInWithEmail: (
+    email: string,
+  ) => Promise<import("@stwd/sdk").StewardEmailResult>;
   /** Verify a magic link callback token. */
   verifyEmailCallback: (
     token: string,
@@ -347,7 +351,10 @@ export interface StewardAuthContextValue {
 // ─── Auth Component Props ───
 
 export interface StewardLoginProps {
-  onSuccess?: (result: { token: string; user: import("@stwd/sdk").StewardUser }) => void;
+  onSuccess?: (result: {
+    token: string;
+    user: import("@stwd/sdk").StewardUser;
+  }) => void;
   onError?: (error: Error) => void;
   showPasskey?: boolean;
   showEmail?: boolean;
@@ -385,7 +392,10 @@ export interface StewardUserButtonProps {
 }
 
 export interface StewardEmailCallbackProps {
-  onSuccess?: (result: { token: string; user: import("@stwd/sdk").StewardUser }) => void;
+  onSuccess?: (result: {
+    token: string;
+    user: import("@stwd/sdk").StewardUser;
+  }) => void;
   onError?: (error: Error) => void;
   redirectTo?: string;
 }

@@ -24,7 +24,9 @@ export default function GlobalError({
           }}
         >
           <div style={{ textAlign: "center" }}>
-            <h1 style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>Something went wrong</h1>
+            <h1 style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>
+              Something went wrong
+            </h1>
             <button
               onClick={reset}
               style={{

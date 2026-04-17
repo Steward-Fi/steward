@@ -1,15 +1,25 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { getEnabledProviders, getProviderConfig, isBuiltInProvider, OAuthClient } from "../oauth";
+import {
+  getEnabledProviders,
+  getProviderConfig,
+  isBuiltInProvider,
+  OAuthClient,
+} from "../oauth";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function verifyPkceChallenge(verifier: string, challenge: string): boolean {
-  const expected = createHash("sha256").update(verifier).digest().toString("base64url");
+  const expected = createHash("sha256")
+    .update(verifier)
+    .digest()
+    .toString("base64url");
   return expected === challenge;
 }
 
-function asFetchMock(impl: (...args: any[]) => Promise<Response>): typeof fetch {
+function asFetchMock(
+  impl: (...args: any[]) => Promise<Response>,
+): typeof fetch {
   return impl as unknown as typeof fetch;
 }
 
@@ -83,19 +93,25 @@ describe("getProviderConfig", () => {
   it("throws when google env vars are missing", () => {
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
-    expect(() => getProviderConfig("google")).toThrow("Google OAuth not configured");
+    expect(() => getProviderConfig("google")).toThrow(
+      "Google OAuth not configured",
+    );
   });
 
   it("throws when discord env vars are missing", () => {
     delete process.env.DISCORD_CLIENT_ID;
     delete process.env.DISCORD_CLIENT_SECRET;
-    expect(() => getProviderConfig("discord")).toThrow("Discord OAuth not configured");
+    expect(() => getProviderConfig("discord")).toThrow(
+      "Discord OAuth not configured",
+    );
   });
 
   it("throws when twitter env vars are missing", () => {
     delete process.env.TWITTER_CLIENT_ID;
     delete process.env.TWITTER_CLIENT_SECRET;
-    expect(() => getProviderConfig("twitter")).toThrow("Twitter OAuth not configured");
+    expect(() => getProviderConfig("twitter")).toThrow(
+      "Twitter OAuth not configured",
+    );
   });
 
   it("returns config with requiresPkce=true for Twitter", () => {
@@ -146,7 +162,10 @@ describe("OAuthClient.generateAuthUrl", () => {
 
   it("generates a well-formed URL for non-PKCE providers", () => {
     const client = new OAuthClient(googleConfig);
-    const { url, codeVerifier } = client.generateAuthUrl("state123", "https://app.com/callback");
+    const { url, codeVerifier } = client.generateAuthUrl(
+      "state123",
+      "https://app.com/callback",
+    );
     expect(url).toContain("accounts.google.com");
     expect(url).toContain("state=state123");
     expect(url).toContain("redirect_uri=");
@@ -157,13 +176,19 @@ describe("OAuthClient.generateAuthUrl", () => {
 
   it("does NOT include code_challenge params for non-PKCE providers", () => {
     const client = new OAuthClient(googleConfig);
-    const { url } = client.generateAuthUrl("state123", "https://app.com/callback");
+    const { url } = client.generateAuthUrl(
+      "state123",
+      "https://app.com/callback",
+    );
     expect(url).not.toContain("code_challenge");
   });
 
   it("generates PKCE params for Twitter", () => {
     const client = new OAuthClient(twitterConfig);
-    const { url, codeVerifier } = client.generateAuthUrl("state456", "https://app.com/callback");
+    const { url, codeVerifier } = client.generateAuthUrl(
+      "state456",
+      "https://app.com/callback",
+    );
     expect(url).toContain("code_challenge_method=S256");
     expect(url).toContain("code_challenge=");
     expect(typeof codeVerifier).toBe("string");
@@ -172,7 +197,10 @@ describe("OAuthClient.generateAuthUrl", () => {
 
   it("PKCE code_challenge is the SHA-256 hash of the verifier (S256)", () => {
     const client = new OAuthClient(twitterConfig);
-    const { url, codeVerifier } = client.generateAuthUrl("state456", "https://app.com/callback");
+    const { url, codeVerifier } = client.generateAuthUrl(
+      "state456",
+      "https://app.com/callback",
+    );
     const params = new URLSearchParams(new URL(url).search);
     const challenge = params.get("code_challenge")!;
     expect(verifyPkceChallenge(codeVerifier!, challenge)).toBe(true);
@@ -180,8 +208,14 @@ describe("OAuthClient.generateAuthUrl", () => {
 
   it("generates unique codeVerifiers on each call", () => {
     const client = new OAuthClient(twitterConfig);
-    const { codeVerifier: v1 } = client.generateAuthUrl("s1", "https://app.com/cb");
-    const { codeVerifier: v2 } = client.generateAuthUrl("s2", "https://app.com/cb");
+    const { codeVerifier: v1 } = client.generateAuthUrl(
+      "s1",
+      "https://app.com/cb",
+    );
+    const { codeVerifier: v2 } = client.generateAuthUrl(
+      "s2",
+      "https://app.com/cb",
+    );
     expect(v1).not.toBe(v2);
   });
 });
@@ -201,21 +235,26 @@ describe("OAuthClient.exchangeCode", () => {
 
   it("throws if codeVerifier is missing for a PKCE provider", async () => {
     const client = new OAuthClient(pkceConfig);
-    await expect(client.exchangeCode("auth-code", "https://app.com/cb")).rejects.toThrow(
-      "codeVerifier is required",
-    );
+    await expect(
+      client.exchangeCode("auth-code", "https://app.com/cb"),
+    ).rejects.toThrow("codeVerifier is required");
   });
 
   it("includes code_verifier in the token request body for PKCE providers", async () => {
     let capturedBody = "";
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = asFetchMock(async (_url: string | URL | Request, init?: RequestInit) => {
-      capturedBody = init?.body?.toString() ?? "";
-      return new Response(JSON.stringify({ access_token: "tok", token_type: "Bearer" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    });
+    globalThis.fetch = asFetchMock(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        capturedBody = init?.body?.toString() ?? "";
+        return new Response(
+          JSON.stringify({ access_token: "tok", token_type: "Bearer" }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      },
+    );
 
     const client = new OAuthClient(pkceConfig);
     await client.exchangeCode("auth-code", "https://app.com/cb", "my-verifier");
@@ -233,9 +272,9 @@ describe("OAuthClient.exchangeCode", () => {
         }),
     );
     const client = new OAuthClient({ ...pkceConfig, requiresPkce: false });
-    await expect(client.exchangeCode("code", "https://app.com/cb")).rejects.toThrow(
-      "Token exchange failed (401)",
-    );
+    await expect(
+      client.exchangeCode("code", "https://app.com/cb"),
+    ).rejects.toThrow("Token exchange failed (401)");
     globalThis.fetch = originalFetch;
   });
 });
@@ -309,10 +348,13 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = asFetchMock(
       async () =>
-        new Response(JSON.stringify({ data: { id: "tid", username: "handle" } }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
+        new Response(
+          JSON.stringify({ data: { id: "tid", username: "handle" } }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
     );
     const client = makeClient();
     const info = await client.getUserInfo("tok");
@@ -330,7 +372,9 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
         }),
     );
     const client = makeClient();
-    await expect(client.getUserInfo("bad-token")).rejects.toThrow("getUserInfo failed (401)");
+    await expect(client.getUserInfo("bad-token")).rejects.toThrow(
+      "getUserInfo failed (401)",
+    );
     globalThis.fetch = originalFetch;
   });
 });

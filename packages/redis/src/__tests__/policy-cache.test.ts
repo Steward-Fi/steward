@@ -51,7 +51,10 @@ afterAll(async () => {
 
 describeRedis("Policy Cache", () => {
   test("returns null on cache miss", async () => {
-    const result = await getCachedPolicies("nonexistent-agent", "nonexistent-tenant");
+    const result = await getCachedPolicies(
+      "nonexistent-agent",
+      "nonexistent-tenant",
+    );
     expect(result).toBeNull();
   });
 

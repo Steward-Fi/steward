@@ -9,7 +9,9 @@ export function useWallet() {
   const { client, agentId, pollInterval } = useStewardContext();
   const [agent, setAgent] = useState<AgentIdentity | null>(null);
   const [balance, setBalance] = useState<AgentBalance | null>(null);
-  const [addresses, setAddresses] = useState<Array<{ chainFamily: string; address: string }>>([]);
+  const [addresses, setAddresses] = useState<
+    Array<{ chainFamily: string; address: string }>
+  >([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 

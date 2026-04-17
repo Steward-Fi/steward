@@ -4,7 +4,14 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 const SKIP = !process.env.DATABASE_URL;
 
 import { generateApiKey } from "@stwd/auth";
-import { agents, approvalQueue, autoApprovalRules, getDb, tenants, transactions } from "@stwd/db";
+import {
+  agents,
+  approvalQueue,
+  autoApprovalRules,
+  getDb,
+  tenants,
+  transactions,
+} from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
@@ -87,7 +94,9 @@ afterAll(async () => {
   const db = getDb();
   await db.delete(approvalQueue).where(eq(approvalQueue.agentId, TEST_AGENT));
   await db.delete(transactions).where(eq(transactions.agentId, TEST_AGENT));
-  await db.delete(autoApprovalRules).where(eq(autoApprovalRules.tenantId, TEST_TENANT));
+  await db
+    .delete(autoApprovalRules)
+    .where(eq(autoApprovalRules.tenantId, TEST_TENANT));
   await db.delete(agents).where(eq(agents.id, TEST_AGENT));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT));
 });
@@ -148,11 +157,14 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
 
   describe("POST /approvals/:txId/approve", () => {
     it("approves a pending transaction", async () => {
-      const res = await fetch(`${BASE_URL}/approvals/${TEST_TX_APPROVE}/approve`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({ comment: "Looks good" }),
-      });
+      const res = await fetch(
+        `${BASE_URL}/approvals/${TEST_TX_APPROVE}/approve`,
+        {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ comment: "Looks good" }),
+        },
+      );
 
       expect(res.status).toBe(200);
       const body = await res.json();
@@ -162,11 +174,14 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
     });
 
     it("rejects double-approval", async () => {
-      const res = await fetch(`${BASE_URL}/approvals/${TEST_TX_APPROVE}/approve`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({}),
-      });
+      const res = await fetch(
+        `${BASE_URL}/approvals/${TEST_TX_APPROVE}/approve`,
+        {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({}),
+        },
+      );
 
       expect(res.status).toBe(400);
       const body = await res.json();

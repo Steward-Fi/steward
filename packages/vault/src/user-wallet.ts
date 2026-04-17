@@ -174,15 +174,23 @@ export async function getUserWallet(
  * @param userId    The application user ID.
  * @param tenantId  Optional override tenant (defaults to `personal-<userId>`).
  */
-export async function applyUserWalletDefaults(userId: string, _tenantId?: string): Promise<void> {
+export async function applyUserWalletDefaults(
+  userId: string,
+  _tenantId?: string,
+): Promise<void> {
   const agentId = agentIdFor(userId);
   const db = getDb();
 
   // Ensure the agent exists in the DB before inserting policies
-  const [agentRow] = await db.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId));
+  const [agentRow] = await db
+    .select({ id: agents.id })
+    .from(agents)
+    .where(eq(agents.id, agentId));
 
   if (!agentRow) {
-    throw new Error(`Cannot apply default policies: agent "${agentId}" not found in database`);
+    throw new Error(
+      `Cannot apply default policies: agent "${agentId}" not found in database`,
+    );
   }
 
   // Replace policies atomically

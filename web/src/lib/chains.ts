@@ -70,17 +70,24 @@ export function getChainMeta(chainId: number): ChainMeta | undefined {
   return CHAIN_META[chainId];
 }
 
-export function getExplorerTxLink(chainId: number, txHash: string): string | undefined {
+export function getExplorerTxLink(
+  chainId: number,
+  txHash: string,
+): string | undefined {
   const meta = CHAIN_META[chainId];
   if (!meta) return undefined;
   if (chainId === 102) return `${meta.explorerTxUrl}${txHash}?cluster=devnet`;
   return `${meta.explorerTxUrl}${txHash}`;
 }
 
-export function getExplorerAddressLink(chainId: number, address: string): string | undefined {
+export function getExplorerAddressLink(
+  chainId: number,
+  address: string,
+): string | undefined {
   const meta = CHAIN_META[chainId];
   if (!meta) return undefined;
-  if (chainId === 102) return `${meta.explorerUrl}/address/${address}?cluster=devnet`;
+  if (chainId === 102)
+    return `${meta.explorerUrl}/address/${address}?cluster=devnet`;
   return `${meta.explorerUrl}/address/${address}`;
 }
 

@@ -53,7 +53,9 @@ export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
 ]);
 
 const timestamps = {
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow()
@@ -73,14 +75,26 @@ export const tenantConfigs = pgTable("tenant_configs", {
     .primaryKey()
     .references(() => tenants.id, { onDelete: "cascade" }),
   displayName: varchar("display_name", { length: 255 }),
-  policyExposure: jsonb("policy_exposure").$type<PolicyExposureConfig>().notNull().default({}),
-  policyTemplates: jsonb("policy_templates").$type<PolicyTemplate[]>().notNull().default([]),
+  policyExposure: jsonb("policy_exposure")
+    .$type<PolicyExposureConfig>()
+    .notNull()
+    .default({}),
+  policyTemplates: jsonb("policy_templates")
+    .$type<PolicyTemplate[]>()
+    .notNull()
+    .default([]),
   secretRoutePresets: jsonb("secret_route_presets")
     .$type<SecretRoutePreset[]>()
     .notNull()
     .default([]),
-  approvalConfig: jsonb("approval_config").$type<ApprovalConfig>().notNull().default({}),
-  featureFlags: jsonb("feature_flags").$type<TenantFeatureFlags>().notNull().default({}),
+  approvalConfig: jsonb("approval_config")
+    .$type<ApprovalConfig>()
+    .notNull()
+    .default({}),
+  featureFlags: jsonb("feature_flags")
+    .$type<TenantFeatureFlags>()
+    .notNull()
+    .default({}),
   theme: jsonb("theme").$type<TenantTheme>(),
   /** Allowed CORS origins for this tenant. Empty = fall back to wildcard (*). */
   allowedOrigins: text("allowed_origins").array().notNull().default([]),
@@ -121,7 +135,9 @@ export const encryptedKeys = pgTable(
     salt: text("salt").notNull(),
   },
   (table) => ({
-    agentIdUniqueIdx: uniqueIndex("encrypted_keys_agent_id_idx").on(table.agentId),
+    agentIdUniqueIdx: uniqueIndex("encrypted_keys_agent_id_idx").on(
+      table.agentId,
+    ),
   }),
 );
 
@@ -140,7 +156,9 @@ export const agentWallets = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     address: varchar("address", { length: 128 }).notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => ({
     agentChainUniqueIdx: uniqueIndex("agent_wallets_agent_chain_idx").on(
@@ -181,7 +199,10 @@ export const policies = pgTable("policies", {
     .references(() => agents.id, { onDelete: "cascade" }),
   type: policyTypeEnum("type").notNull(),
   enabled: boolean("enabled").notNull().default(true),
-  config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+  config: jsonb("config")
+    .$type<Record<string, unknown>>()
+    .notNull()
+    .default({}),
   ...timestamps,
 });
 
@@ -198,8 +219,13 @@ export const transactions = pgTable(
     data: text("data"),
     chainId: integer("chain_id").notNull(),
     txHash: varchar("tx_hash", { length: 128 }),
-    policyResults: jsonb("policy_results").$type<PolicyResult[]>().notNull().default([]),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    policyResults: jsonb("policy_results")
+      .$type<PolicyResult[]>()
+      .notNull()
+      .default([]),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     signedAt: timestamp("signed_at", { withTimezone: true }),
     confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
   },
@@ -219,7 +245,9 @@ export const approvalQueue = pgTable(
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
     status: approvalQueueStatusEnum("status").notNull().default("pending"),
-    requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    requestedAt: timestamp("requested_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
     resolvedBy: varchar("resolved_by", { length: 255 }),
   },
@@ -300,12 +328,16 @@ export const webhookDeliveries = pgTable(
     maxAttempts: integer("max_attempts").notNull().default(5),
     nextRetryAt: timestamp("next_retry_at", { withTimezone: true }),
     lastError: text("last_error"),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
   },
   (table) => ({
     statusIdx: index("webhook_deliveries_status_idx").on(table.status),
-    nextRetryIdx: index("webhook_deliveries_next_retry_idx").on(table.nextRetryAt),
+    nextRetryIdx: index("webhook_deliveries_next_retry_idx").on(
+      table.nextRetryAt,
+    ),
     tenantIdx: index("webhook_deliveries_tenant_idx").on(table.tenantId),
   }),
 );
@@ -317,12 +349,15 @@ export const webhookConfigRelations = relations(webhookConfigs, ({ one }) => ({
   }),
 }));
 
-export const autoApprovalRuleRelations = relations(autoApprovalRules, ({ one }) => ({
-  tenant: one(tenants, {
-    fields: [autoApprovalRules.tenantId],
-    references: [tenants.id],
+export const autoApprovalRuleRelations = relations(
+  autoApprovalRules,
+  ({ one }) => ({
+    tenant: one(tenants, {
+      fields: [autoApprovalRules.tenantId],
+      references: [tenants.id],
+    }),
   }),
-}));
+);
 
 export const tenantRelations = relations(tenants, ({ many, one }) => ({
   agents: many(agents),
@@ -403,12 +438,15 @@ export const agentWalletRelations = relations(agentWallets, ({ one }) => ({
   }),
 }));
 
-export const encryptedChainKeyRelations = relations(encryptedChainKeys, ({ one }) => ({
-  agent: one(agents, {
-    fields: [encryptedChainKeys.agentId],
-    references: [agents.id],
+export const encryptedChainKeyRelations = relations(
+  encryptedChainKeys,
+  ({ one }) => ({
+    agent: one(agents, {
+      fields: [encryptedChainKeys.agentId],
+      references: [agents.id],
+    }),
   }),
-}));
+);
 
 export type Tenant = typeof tenants.$inferSelect;
 export type NewTenant = typeof tenants.$inferInsert;
@@ -452,8 +490,12 @@ export const secrets = pgTable(
     rotatedAt: timestamp("rotated_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => ({
     tenantNameVersion: uniqueIndex("secrets_tenant_name_version_idx").on(
@@ -479,7 +521,9 @@ export const secretRoutes = pgTable(
     injectFormat: varchar("inject_format", { length: 255 }).default("{value}"),
     priority: integer("priority").notNull().default(0),
     enabled: boolean("enabled").notNull().default(true),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => ({
     tenantIdx: index("secret_routes_tenant_idx").on(table.tenantId),
@@ -517,7 +561,9 @@ export const proxyAuditLog = pgTable(
     method: varchar("method", { length: 10 }).notNull(),
     statusCode: integer("status_code").notNull(),
     latencyMs: integer("latency_ms").notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => ({
     tenantIdx: index("proxy_audit_log_tenant_idx").on(table.tenantId),

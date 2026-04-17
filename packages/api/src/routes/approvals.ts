@@ -24,7 +24,10 @@ export const approvalRoutes = new Hono<{ Variables: AppVariables }>();
 
 approvalRoutes.get("/", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -56,7 +59,10 @@ approvalRoutes.get("/", async (c) => {
       and(
         eq(agents.tenantId, tenantId),
         statusFilter !== "all"
-          ? eq(approvalQueue.status, statusFilter as "pending" | "approved" | "rejected")
+          ? eq(
+              approvalQueue.status,
+              statusFilter as "pending" | "approved" | "rejected",
+            )
           : undefined,
       ),
     )
@@ -71,7 +77,10 @@ approvalRoutes.get("/", async (c) => {
 
 approvalRoutes.get("/stats", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -111,13 +120,18 @@ approvalRoutes.get("/stats", async (c) => {
 
 approvalRoutes.post("/:txId/approve", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
   const txId = c.req.param("txId");
 
-  const body = await safeJsonParse<{ comment?: string; approvedBy?: string }>(c);
+  const body = await safeJsonParse<{ comment?: string; approvedBy?: string }>(
+    c,
+  );
 
   // Find approval entry, verify it belongs to this tenant
   const [entry] = await db
@@ -137,7 +151,10 @@ approvalRoutes.post("/:txId/approve", async (c) => {
   }
 
   if (entry.status !== "pending") {
-    return c.json<ApiResponse>({ ok: false, error: `Approval already ${entry.status}` }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Approval already ${entry.status}` },
+      400,
+    );
   }
 
   const resolvedBy = body?.approvedBy || "tenant-admin";
@@ -154,7 +171,10 @@ approvalRoutes.post("/:txId/approve", async (c) => {
     .returning();
 
   // Update transaction status to approved
-  await db.update(transactions).set({ status: "approved" }).where(eq(transactions.id, txId));
+  await db
+    .update(transactions)
+    .set({ status: "approved" })
+    .where(eq(transactions.id, txId));
 
   return c.json<ApiResponse>({
     ok: true,
@@ -169,7 +189,10 @@ approvalRoutes.post("/:txId/approve", async (c) => {
 
 approvalRoutes.post("/:txId/deny", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -177,7 +200,11 @@ approvalRoutes.post("/:txId/deny", async (c) => {
 
   const body = await safeJsonParse<{ reason: string; deniedBy?: string }>(c);
 
-  if (!body?.reason || typeof body.reason !== "string" || body.reason.trim().length === 0) {
+  if (
+    !body?.reason ||
+    typeof body.reason !== "string" ||
+    body.reason.trim().length === 0
+  ) {
     return c.json<ApiResponse>({ ok: false, error: "reason is required" }, 400);
   }
 
@@ -199,7 +226,10 @@ approvalRoutes.post("/:txId/deny", async (c) => {
   }
 
   if (entry.status !== "pending") {
-    return c.json<ApiResponse>({ ok: false, error: `Approval already ${entry.status}` }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: `Approval already ${entry.status}` },
+      400,
+    );
   }
 
   const resolvedBy = body.deniedBy || "tenant-admin";
@@ -216,7 +246,10 @@ approvalRoutes.post("/:txId/deny", async (c) => {
     .returning();
 
   // Update transaction status to rejected
-  await db.update(transactions).set({ status: "rejected" }).where(eq(transactions.id, txId));
+  await db
+    .update(transactions)
+    .set({ status: "rejected" })
+    .where(eq(transactions.id, txId));
 
   return c.json<ApiResponse>({
     ok: true,
@@ -231,7 +264,10 @@ approvalRoutes.post("/:txId/deny", async (c) => {
 
 approvalRoutes.get("/rules", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -246,7 +282,10 @@ approvalRoutes.get("/rules", async (c) => {
 
 approvalRoutes.put("/rules", async (c) => {
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Tenant-level auth required" },
+      403,
+    );
   }
 
   const tenantId = c.get("tenantId");
@@ -259,7 +298,10 @@ approvalRoutes.put("/rules", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (body.maxAmountWei !== undefined) {
@@ -276,8 +318,14 @@ approvalRoutes.put("/rules", async (c) => {
     }
   }
 
-  if (body.autoDenyAfterHours !== undefined && body.autoDenyAfterHours !== null) {
-    if (typeof body.autoDenyAfterHours !== "number" || body.autoDenyAfterHours <= 0) {
+  if (
+    body.autoDenyAfterHours !== undefined &&
+    body.autoDenyAfterHours !== null
+  ) {
+    if (
+      typeof body.autoDenyAfterHours !== "number" ||
+      body.autoDenyAfterHours <= 0
+    ) {
       return c.json<ApiResponse>(
         {
           ok: false,
@@ -296,9 +344,12 @@ approvalRoutes.put("/rules", async (c) => {
 
   if (existing) {
     const updates: Record<string, unknown> = { updatedAt: new Date() };
-    if (body.maxAmountWei !== undefined) updates.maxAmountWei = body.maxAmountWei;
-    if (body.autoDenyAfterHours !== undefined) updates.autoDenyAfterHours = body.autoDenyAfterHours;
-    if (body.escalateAboveWei !== undefined) updates.escalateAboveWei = body.escalateAboveWei;
+    if (body.maxAmountWei !== undefined)
+      updates.maxAmountWei = body.maxAmountWei;
+    if (body.autoDenyAfterHours !== undefined)
+      updates.autoDenyAfterHours = body.autoDenyAfterHours;
+    if (body.escalateAboveWei !== undefined)
+      updates.escalateAboveWei = body.escalateAboveWei;
     if (body.enabled !== undefined) updates.enabled = body.enabled;
 
     const [updated] = await db

@@ -38,7 +38,9 @@ describe("matchPath", () => {
   });
 
   test("exact match", () => {
-    expect(matchPath("/v1/chat/completions", "/v1/chat/completions")).toBe(true);
+    expect(matchPath("/v1/chat/completions", "/v1/chat/completions")).toBe(
+      true,
+    );
     expect(matchPath("/v1/chat/completions", "/v1/embeddings")).toBe(false);
   });
 

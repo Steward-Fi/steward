@@ -12,7 +12,8 @@ import { jwtVerify, SignJWT } from "jose";
 
 const TEST_PORT = 3299;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
-const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+const jwtSecretSource =
+  process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
 const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
 const JWT_ISSUER = "steward";
 
@@ -39,7 +40,11 @@ function agentBearerHeaders(token: string) {
   };
 }
 
-async function createAgentToken(agentId: string, tenantId: string, expiresIn = "30d") {
+async function createAgentToken(
+  agentId: string,
+  tenantId: string,
+  expiresIn = "30d",
+) {
   return new SignJWT({ agentId, tenantId, scope: "agent" })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
@@ -84,8 +89,12 @@ afterAll(async () => {
   if (SKIP) return;
   // Clean up test data
   const db = getDb();
-  await db.delete(encryptedKeys).where(eq(encryptedKeys.agentId, TEST_AGENT_ID));
-  await db.delete(encryptedKeys).where(eq(encryptedKeys.agentId, OTHER_AGENT_ID));
+  await db
+    .delete(encryptedKeys)
+    .where(eq(encryptedKeys.agentId, TEST_AGENT_ID));
+  await db
+    .delete(encryptedKeys)
+    .where(eq(encryptedKeys.agentId, OTHER_AGENT_ID));
   await db.delete(agents).where(eq(agents.tenantId, TEST_TENANT_ID));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT_ID));
 });
@@ -262,10 +271,17 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
 
   afterAll(async () => {
     const db = getDb();
-    await db.delete(encryptedKeys).where(eq(encryptedKeys.agentId, IMPORT_AGENT_ID));
+    await db
+      .delete(encryptedKeys)
+      .where(eq(encryptedKeys.agentId, IMPORT_AGENT_ID));
     await db
       .delete(agents)
-      .where(and(eq(agents.id, IMPORT_AGENT_ID), eq(agents.tenantId, TEST_TENANT_ID)));
+      .where(
+        and(
+          eq(agents.id, IMPORT_AGENT_ID),
+          eq(agents.tenantId, TEST_TENANT_ID),
+        ),
+      );
   });
 
   it("imports an EVM private key and returns derived address", async () => {

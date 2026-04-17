@@ -7,7 +7,11 @@
  */
 
 import type { PolicyRule } from "@stwd/shared";
-import { checkAgentRateLimit, isRedisAvailable, recordAgentSpend } from "./redis";
+import {
+  checkAgentRateLimit,
+  isRedisAvailable,
+  recordAgentSpend,
+} from "./redis";
 
 // ─── Rate limit extraction from policies ─────────────────────────────────────
 
@@ -20,7 +24,9 @@ interface RateLimitParams {
  * Extract rate-limit parameters from an agent's policy set.
  * Returns null if no enabled rate-limit policy exists.
  */
-export function extractRateLimitPolicy(policies: PolicyRule[]): RateLimitParams | null {
+export function extractRateLimitPolicy(
+  policies: PolicyRule[],
+): RateLimitParams | null {
   const rlPolicy = policies.find((p) => p.type === "rate-limit" && p.enabled);
   if (!rlPolicy) return null;
 
@@ -43,7 +49,9 @@ export function extractRateLimitPolicy(policies: PolicyRule[]): RateLimitParams 
 export function extractSpendLimitPolicy(
   policies: PolicyRule[],
 ): { maxPerDay: string; maxPerWeek: string } | null {
-  const slPolicy = policies.find((p) => p.type === "spending-limit" && p.enabled);
+  const slPolicy = policies.find(
+    (p) => p.type === "spending-limit" && p.enabled,
+  );
   if (!slPolicy) return null;
 
   const config = slPolicy.config as Record<string, unknown>;
@@ -60,7 +68,8 @@ export function extractSpendLimitPolicy(
   const maxAmount = String(config.maxAmount ?? "0");
   const period = String(config.period ?? "day").toLowerCase();
 
-  const MAX = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+  const MAX =
+    "115792089237316195423570985008687907853269984665640564039457584007913129639935";
   switch (period) {
     case "day":
     case "daily":

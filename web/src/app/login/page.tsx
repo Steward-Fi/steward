@@ -6,8 +6,16 @@ import { useRouter } from "next/navigation";
 
 const Logo = (
   <div className="flex items-center justify-center gap-2.5">
-    <Image src="/logo.png" alt="" width={28} height={28} className="w-7 h-7 opacity-70" />
-    <span className="font-display text-xl font-bold tracking-tight">steward</span>
+    <Image
+      src="/logo.png"
+      alt=""
+      width={28}
+      height={28}
+      className="w-7 h-7 opacity-70"
+    />
+    <span className="font-display text-xl font-bold tracking-tight">
+      steward
+    </span>
   </div>
 );
 

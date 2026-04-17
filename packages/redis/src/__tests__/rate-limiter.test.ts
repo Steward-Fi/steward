@@ -17,7 +17,13 @@ beforeEach(async () => {
   const redis = getRedis();
   let cursor = "0";
   do {
-    const [newCursor, keys] = await redis.scan(cursor, "MATCH", `${TEST_PREFIX}:*`, "COUNT", 100);
+    const [newCursor, keys] = await redis.scan(
+      cursor,
+      "MATCH",
+      `${TEST_PREFIX}:*`,
+      "COUNT",
+      100,
+    );
     cursor = newCursor;
     if (keys.length > 0) await redis.del(...keys);
   } while (cursor !== "0");

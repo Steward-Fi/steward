@@ -29,7 +29,10 @@ export function tenantAuthMiddleware() {
     const apiKey = c.req.header("X-Steward-Key");
 
     if (!tenantId || !apiKey) {
-      return c.json<ApiResponse>({ ok: false, error: "Missing authentication headers" }, 401);
+      return c.json<ApiResponse>(
+        { ok: false, error: "Missing authentication headers" },
+        401,
+      );
     }
 
     const tenant = await findTenantById(tenantId);
@@ -47,6 +50,9 @@ export function tenantAuthMiddleware() {
 
 export function dashboardAuthMiddleware() {
   return createMiddleware(async (c) => {
-    return c.json<ApiResponse>({ ok: false, error: "Dashboard auth not implemented" }, 501);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Dashboard auth not implemented" },
+      501,
+    );
   });
 }

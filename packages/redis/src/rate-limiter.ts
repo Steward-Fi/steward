@@ -68,7 +68,8 @@ export async function checkRateLimit(
 
   // results[3] = [null, [member, score]] or [null, []]
   const oldestEntry = results[3]?.[1] as string[];
-  const oldestTimestamp = oldestEntry.length >= 2 ? Number(oldestEntry[1]) : now;
+  const oldestTimestamp =
+    oldestEntry.length >= 2 ? Number(oldestEntry[1]) : now;
   const resetMs = Math.max(0, oldestTimestamp + windowMs - now);
 
   if (currentCount > maxRequests) {

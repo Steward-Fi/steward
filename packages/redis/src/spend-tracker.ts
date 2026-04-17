@@ -37,7 +37,8 @@ function getDateKey(period: SpendPeriod, date: Date = new Date()): string {
     case "week": {
       // ISO week number
       const jan1 = new Date(Date.UTC(y, 0, 1));
-      const dayOfYear = Math.floor((date.getTime() - jan1.getTime()) / 86400000) + 1;
+      const dayOfYear =
+        Math.floor((date.getTime() - jan1.getTime()) / 86400000) + 1;
       const weekNum = Math.ceil((dayOfYear + jan1.getUTCDay()) / 7);
       return `${y}-W${String(weekNum).padStart(2, "0")}`;
     }
@@ -46,7 +47,11 @@ function getDateKey(period: SpendPeriod, date: Date = new Date()): string {
   }
 }
 
-function spendKey(agentId: string, period: SpendPeriod, dateKey: string): string {
+function spendKey(
+  agentId: string,
+  period: SpendPeriod,
+  dateKey: string,
+): string {
   return `spend:${agentId}:${period}:${dateKey}`;
 }
 
@@ -97,7 +102,11 @@ export async function recordSpend(
  *
  * @returns Spend in USD
  */
-export async function getSpend(agentId: string, period: SpendPeriod, date?: Date): Promise<number> {
+export async function getSpend(
+  agentId: string,
+  period: SpendPeriod,
+  date?: Date,
+): Promise<number> {
   const redis = getRedis();
   const dateKey = getDateKey(period, date || new Date());
   const key = spendKey(agentId, period, dateKey);

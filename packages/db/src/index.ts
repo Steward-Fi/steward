@@ -1,4 +1,9 @@
-import type { AgentIdentity, PolicyRule, SignRequest, TxRecord } from "@stwd/shared";
+import type {
+  AgentIdentity,
+  PolicyRule,
+  SignRequest,
+  TxRecord,
+} from "@stwd/shared";
 import { eq, inArray } from "drizzle-orm";
 
 export {
@@ -49,7 +54,9 @@ export type TransactionRequestFields = Pick<
 
 export type DbTxRecord = TxRecord;
 
-export function isPersistedPolicyType(value: string): value is PersistedPolicyType {
+export function isPersistedPolicyType(
+  value: string,
+): value is PersistedPolicyType {
   return (policyTypeEnum.enumValues as readonly string[]).includes(value);
 }
 
@@ -83,7 +90,10 @@ export async function getAgentWalletAddresses(
   const { getDb } = await import("./client");
   const { agentWallets } = await import("./schema");
   const db = getDb();
-  const rows = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
+  const rows = await db
+    .select()
+    .from(agentWallets)
+    .where(eq(agentWallets.agentId, agentId));
 
   const result: { evm?: string; solana?: string } = {};
   for (const row of rows) {
@@ -105,7 +115,10 @@ export async function getAgentWalletAddressesBatch(
   const { getDb } = await import("./client");
   const { agentWallets } = await import("./schema");
   const db = getDb();
-  const rows = await db.select().from(agentWallets).where(inArray(agentWallets.agentId, agentIds));
+  const rows = await db
+    .select()
+    .from(agentWallets)
+    .where(inArray(agentWallets.agentId, agentIds));
 
   const result = new Map<string, { evm?: string; solana?: string }>();
   for (const row of rows) {

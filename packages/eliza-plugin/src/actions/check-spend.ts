@@ -16,7 +16,8 @@ import type { StewardService } from "../services/StewardService.js";
  */
 export const checkSpendAction: Action = {
   name: "STEWARD_CHECK_SPEND",
-  description: "Check the agent wallet's spending stats (today, this week, this month)",
+  description:
+    "Check the agent wallet's spending stats (today, this week, this month)",
   similes: [
     "check spend",
     "how much have I spent",
@@ -39,8 +40,14 @@ export const checkSpendAction: Action = {
     ],
   ] as ActionExample[][],
 
-  async validate(runtime: IAgentRuntime, _message: Memory, _state?: State): Promise<boolean> {
-    const steward = runtime.getService("steward" as any) as StewardService | null;
+  async validate(
+    runtime: IAgentRuntime,
+    _message: Memory,
+    _state?: State,
+  ): Promise<boolean> {
+    const steward = runtime.getService(
+      "steward" as any,
+    ) as StewardService | null;
     return steward?.isConnected() ?? false;
   },
 

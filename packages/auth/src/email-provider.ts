@@ -26,7 +26,12 @@ export class ResendProvider implements EmailProvider {
     this.from = config.from;
   }
 
-  async send(to: string, subject: string, text: string, html?: string): Promise<void> {
+  async send(
+    to: string,
+    subject: string,
+    text: string,
+    html?: string,
+  ): Promise<void> {
     const { error } = await this.client.emails.send({
       from: this.from,
       to,

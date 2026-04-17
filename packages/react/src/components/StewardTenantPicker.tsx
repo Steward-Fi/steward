@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "../hooks/useAuth.js";
-import type { StewardTenantMembership, StewardTenantPickerProps } from "../types.js";
+import type {
+  StewardTenantMembership,
+  StewardTenantPickerProps,
+} from "../types.js";
 
 /**
  * StewardTenantPicker — Switch between connected apps/tenants.
@@ -28,11 +31,15 @@ export function StewardTenantPicker({
 
   // Check if tenant methods are available
   const hasTenantSupport =
-    typeof auth.listTenants === "function" && typeof auth.switchTenant === "function";
+    typeof auth.listTenants === "function" &&
+    typeof auth.switchTenant === "function";
 
   // Click-outside to close dropdown
   const handleClickOutside = useCallback((e: MouseEvent) => {
-    if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+    if (
+      containerRef.current &&
+      !containerRef.current.contains(e.target as Node)
+    ) {
       setOpen(false);
     }
   }, []);
@@ -72,12 +79,15 @@ export function StewardTenantPicker({
 
   // Find current tenant name
   const activeTenant = tenants?.find((t) => t.tenantId === activeTenantId);
-  const triggerLabel = activeTenant?.tenantName ?? activeTenantId ?? "Select App";
+  const triggerLabel =
+    activeTenant?.tenantName ?? activeTenantId ?? "Select App";
 
   // Loading state
   if (isTenantsLoading && !tenants) {
     return (
-      <div className={`stwd-tenant-picker stwd-tenant-picker--${variant} ${className ?? ""}`}>
+      <div
+        className={`stwd-tenant-picker stwd-tenant-picker--${variant} ${className ?? ""}`}
+      >
         <div className="stwd-tenant-picker__loading">Loading apps…</div>
       </div>
     );
@@ -86,7 +96,9 @@ export function StewardTenantPicker({
   // Empty state
   if (tenants && tenants.length === 0) {
     return (
-      <div className={`stwd-tenant-picker stwd-tenant-picker--${variant} ${className ?? ""}`}>
+      <div
+        className={`stwd-tenant-picker stwd-tenant-picker--${variant} ${className ?? ""}`}
+      >
         <div className="stwd-tenant-picker__empty">No apps connected</div>
       </div>
     );
@@ -106,7 +118,9 @@ export function StewardTenantPicker({
           role="menuitem"
           aria-current={isActive ? "true" : undefined}
         >
-          <span className="stwd-tenant-picker__item-name">{tenant.tenantName}</span>
+          <span className="stwd-tenant-picker__item-name">
+            {tenant.tenantName}
+          </span>
           <span className="stwd-tenant-picker__item-role">
             {isSwitching ? "Switching…" : tenant.role}
           </span>
@@ -117,7 +131,9 @@ export function StewardTenantPicker({
   // List variant — always visible
   if (variant === "list") {
     return (
-      <div className={`stwd-tenant-picker stwd-tenant-picker--list ${className ?? ""}`}>
+      <div
+        className={`stwd-tenant-picker stwd-tenant-picker--list ${className ?? ""}`}
+      >
         <div className="stwd-tenant-picker__list" role="menu">
           {tenants && renderItems(tenants)}
         </div>
@@ -138,8 +154,12 @@ export function StewardTenantPicker({
         aria-expanded={open}
         aria-haspopup="true"
       >
-        <span className="stwd-tenant-picker__trigger-label">{triggerLabel}</span>
-        <span className="stwd-tenant-picker__trigger-arrow">{open ? "▲" : "▼"}</span>
+        <span className="stwd-tenant-picker__trigger-label">
+          {triggerLabel}
+        </span>
+        <span className="stwd-tenant-picker__trigger-arrow">
+          {open ? "▲" : "▼"}
+        </span>
       </button>
 
       {open && tenants && (

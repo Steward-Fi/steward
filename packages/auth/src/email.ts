@@ -173,7 +173,9 @@ export class EmailAuth {
    * Generate a magic link token, persist its hash, and send the email.
    * Returns the token hash (for verification lookup) and the expiry date.
    */
-  async sendMagicLink(email: string): Promise<{ tokenHash: string; expiresAt: Date }> {
+  async sendMagicLink(
+    email: string,
+  ): Promise<{ tokenHash: string; expiresAt: Date }> {
     const token = generateToken();
     const tokenHash = hashToken(token);
     const expiresAt = new Date(Date.now() + this.tokenTtlMs);
@@ -196,7 +198,9 @@ export class EmailAuth {
    * Verify a raw token received from the callback URL.
    * One-time use: deletes the token after successful verification.
    */
-  async verifyMagicLink(token: string): Promise<{ email: string; valid: boolean }> {
+  async verifyMagicLink(
+    token: string,
+  ): Promise<{ email: string; valid: boolean }> {
     const tokenHash = hashToken(token);
     const email = await this.tokenStore.verify(tokenHash);
 

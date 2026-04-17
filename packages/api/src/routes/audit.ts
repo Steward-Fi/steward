@@ -34,7 +34,10 @@ function parseLimit(raw: string | undefined): number {
 
 /** Resolve the set of agentIds belonging to the authenticated tenant. */
 async function tenantAgentIds(tenantId: string): Promise<string[]> {
-  const rows = await db.select({ id: agents.id }).from(agents).where(eq(agents.tenantId, tenantId));
+  const rows = await db
+    .select({ id: agents.id })
+    .from(agents)
+    .where(eq(agents.tenantId, tenantId));
   return rows.map((r) => r.id);
 }
 
@@ -97,7 +100,8 @@ auditRoutes.get("/log", async (c) => {
   const entries: AuditEntry[] = [];
   let totalCount = 0;
 
-  const wantTx = !filterAction || ["sign", "approve", "reject"].includes(filterAction);
+  const wantTx =
+    !filterAction || ["sign", "approve", "reject"].includes(filterAction);
   const wantProxy = !filterAction || filterAction === "proxy";
 
   // ── Transactions + approval_queue ────────────────────────────────────────
@@ -118,7 +122,10 @@ auditRoutes.get("/log", async (c) => {
     const txWhere = and(...txConditions);
 
     // Count
-    const [txCount] = await db.select({ count: count() }).from(transactions).where(txWhere);
+    const [txCount] = await db
+      .select({ count: count() })
+      .from(transactions)
+      .where(txWhere);
 
     // Fetch with left join to approval_queue
     const txRows = await db
@@ -148,8 +155,13 @@ auditRoutes.get("/log", async (c) => {
     for (const row of txRows) {
       let action: string;
       if (row.aqStatus === "approved") action = "approve";
-      else if (row.aqStatus === "rejected" || row.status === "rejected") action = "reject";
-      else if (row.status === "signed" || row.status === "broadcast" || row.status === "confirmed")
+      else if (row.aqStatus === "rejected" || row.status === "rejected")
+        action = "reject";
+      else if (
+        row.status === "signed" ||
+        row.status === "broadcast" ||
+        row.status === "confirmed"
+      )
         action = "sign";
       else action = "sign"; // pending, failed, etc.
 
@@ -166,7 +178,9 @@ auditRoutes.get("/log", async (c) => {
           txHash: row.txHash ?? undefined,
           approvalStatus: row.aqStatus ?? undefined,
           resolvedBy: row.aqResolvedBy ?? undefined,
-          resolvedAt: row.aqResolvedAt ? (row.aqResolvedAt as Date).toISOString() : undefined,
+          resolvedAt: row.aqResolvedAt
+            ? (row.aqResolvedAt as Date).toISOString()
+            : undefined,
         },
         policyResults: row.policyResults,
         value: row.value,
@@ -198,7 +212,10 @@ auditRoutes.get("/log", async (c) => {
 
     const proxyWhere = and(...proxyConditions);
 
-    const [proxyCount] = await db.select({ count: count() }).from(proxyAuditLog).where(proxyWhere);
+    const [proxyCount] = await db
+      .select({ count: count() })
+      .from(proxyAuditLog)
+      .where(proxyWhere);
 
     const proxyRows = await db
       .select()
@@ -234,7 +251,9 @@ auditRoutes.get("/log", async (c) => {
   }
 
   // Sort merged entries by timestamp descending, then paginate
-  entries.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  entries.sort(
+    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+  );
 
   const needsClientPagination = wantTx && wantProxy;
   const paginatedEntries = needsClientPagination
@@ -310,7 +329,9 @@ auditRoutes.get("/summary", async (c) => {
     .where(and(...txConditions));
 
   // Proxy request count
-  const proxyConditions: ReturnType<typeof eq>[] = [eq(proxyAuditLog.tenantId, tenantId)];
+  const proxyConditions: ReturnType<typeof eq>[] = [
+    eq(proxyAuditLog.tenantId, tenantId),
+  ];
   if (since) proxyConditions.push(gte(proxyAuditLog.createdAt, since));
 
   const [proxyStats] = await db
@@ -352,14 +373,20 @@ auditRoutes.get("/summary", async (c) => {
   }));
 
   // Daily activity (transactions only, last 30 days max)
-  const dailyCutoff = since || new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+  const dailyCutoff =
+    since || new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
   const dailyRows = await db
     .select({
       date: sql<string>`date_trunc('day', ${transactions.createdAt})::date::text`,
       txCount: count(),
     })
     .from(transactions)
-    .where(and(inArray(transactions.agentId, agentIds), gte(transactions.createdAt, dailyCutoff)))
+    .where(
+      and(
+        inArray(transactions.agentId, agentIds),
+        gte(transactions.createdAt, dailyCutoff),
+      ),
+    )
     .groupBy(sql`date_trunc('day', ${transactions.createdAt})`)
     .orderBy(sql`date_trunc('day', ${transactions.createdAt})`);
 
@@ -409,14 +436,18 @@ auditRoutes.get("/export", async (c) => {
   const rows: string[] = [];
   rows.push("id,timestamp,agentId,action,status,to,value,details");
 
-  const wantTx = !filterAction || ["sign", "approve", "reject"].includes(filterAction);
+  const wantTx =
+    !filterAction || ["sign", "approve", "reject"].includes(filterAction);
   const wantProxy = !filterAction || filterAction === "proxy";
 
   if (wantTx && relevantAgentIds.length > 0) {
     const txConditions = [inArray(transactions.agentId, relevantAgentIds)];
-    if (filterStatus) txConditions.push(eq(transactions.status, filterStatus as any));
-    if (dateFrom) txConditions.push(gte(transactions.createdAt, new Date(dateFrom)));
-    if (dateTo) txConditions.push(lte(transactions.createdAt, new Date(dateTo)));
+    if (filterStatus)
+      txConditions.push(eq(transactions.status, filterStatus as any));
+    if (dateFrom)
+      txConditions.push(gte(transactions.createdAt, new Date(dateFrom)));
+    if (dateTo)
+      txConditions.push(lte(transactions.createdAt, new Date(dateTo)));
 
     const txRows = await db
       .select()
@@ -446,10 +477,15 @@ auditRoutes.get("/export", async (c) => {
   }
 
   if (wantProxy) {
-    const proxyConditions: ReturnType<typeof eq>[] = [eq(proxyAuditLog.tenantId, tenantId)];
-    if (filterAgentId) proxyConditions.push(eq(proxyAuditLog.agentId, filterAgentId));
-    if (dateFrom) proxyConditions.push(gte(proxyAuditLog.createdAt, new Date(dateFrom)));
-    if (dateTo) proxyConditions.push(lte(proxyAuditLog.createdAt, new Date(dateTo)));
+    const proxyConditions: ReturnType<typeof eq>[] = [
+      eq(proxyAuditLog.tenantId, tenantId),
+    ];
+    if (filterAgentId)
+      proxyConditions.push(eq(proxyAuditLog.agentId, filterAgentId));
+    if (dateFrom)
+      proxyConditions.push(gte(proxyAuditLog.createdAt, new Date(dateFrom)));
+    if (dateTo)
+      proxyConditions.push(lte(proxyAuditLog.createdAt, new Date(dateTo)));
 
     const proxyRows = await db
       .select()

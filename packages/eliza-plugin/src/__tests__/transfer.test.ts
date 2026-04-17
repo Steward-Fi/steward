@@ -15,13 +15,17 @@ describe("STEWARD_TRANSFER action", () => {
   });
 
   it("requires 'amount' parameter", () => {
-    const amountParam = transferAction.parameters?.find((p) => p.name === "amount");
+    const amountParam = transferAction.parameters?.find(
+      (p) => p.name === "amount",
+    );
     expect(amountParam).toBeDefined();
     expect(amountParam?.required).toBe(true);
   });
 
   it("has optional 'chain' parameter", () => {
-    const chainParam = transferAction.parameters?.find((p) => p.name === "chain");
+    const chainParam = transferAction.parameters?.find(
+      (p) => p.name === "chain",
+    );
     expect(chainParam).toBeDefined();
     expect(chainParam?.required).toBeFalsy();
   });
@@ -39,9 +43,14 @@ describe("STEWARD_TRANSFER action", () => {
       getService: () => ({ isConnected: () => true }),
     } as any;
 
-    const result = await transferAction.handler(mockRuntime, {} as any, undefined, {
-      parameters: {},
-    });
+    const result = await transferAction.handler(
+      mockRuntime,
+      {} as any,
+      undefined,
+      {
+        parameters: {},
+      },
+    );
 
     expect(result).toBeDefined();
     expect(result?.success).toBe(false);

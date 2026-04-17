@@ -81,16 +81,22 @@ export async function evaluatePolicy(
  * Normalize spending-limit config to the canonical format (maxPerTx/maxPerDay/maxPerWeek).
  * Accepts both the canonical format and the simplified maxAmount/period format.
  */
-function normalizeSpendingLimitConfig(config: Record<string, unknown>): SpendingLimitConfig {
+function normalizeSpendingLimitConfig(
+  config: Record<string, unknown>,
+): SpendingLimitConfig {
   // Use a very large default for unrestricted limits
-  const MAX_UINT = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+  const MAX_UINT =
+    "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 
   // If already in canonical format (has any of the standard fields), fill in missing with MAX_UINT
   if (config.maxPerTx !== undefined || config.maxPerTxUsd !== undefined) {
     return {
-      maxPerTx: config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT,
-      maxPerDay: config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT,
-      maxPerWeek: config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT,
+      maxPerTx:
+        config.maxPerTx !== undefined ? String(config.maxPerTx) : MAX_UINT,
+      maxPerDay:
+        config.maxPerDay !== undefined ? String(config.maxPerDay) : MAX_UINT,
+      maxPerWeek:
+        config.maxPerWeek !== undefined ? String(config.maxPerWeek) : MAX_UINT,
       maxPerTxUsd: config.maxPerTxUsd as number | undefined,
       maxPerDayUsd: config.maxPerDayUsd as number | undefined,
       maxPerWeekUsd: config.maxPerWeekUsd as number | undefined,
@@ -173,7 +179,10 @@ async function evaluateSpendingLimit(
 
       // Daily USD limit — convert spentToday from wei to USD
       if (config.maxPerDayUsd !== undefined) {
-        const spentTodayUsd = await ctx.priceOracle.weiToUsd(ctx.spentToday.toString(), chainId);
+        const spentTodayUsd = await ctx.priceOracle.weiToUsd(
+          ctx.spentToday.toString(),
+          chainId,
+        );
         if (spentTodayUsd !== null) {
           if (spentTodayUsd + txUsd > config.maxPerDayUsd) {
             return {
@@ -187,7 +196,10 @@ async function evaluateSpendingLimit(
 
       // Weekly USD limit — convert spentThisWeek from wei to USD
       if (config.maxPerWeekUsd !== undefined) {
-        const spentWeekUsd = await ctx.priceOracle.weiToUsd(ctx.spentThisWeek.toString(), chainId);
+        const spentWeekUsd = await ctx.priceOracle.weiToUsd(
+          ctx.spentThisWeek.toString(),
+          chainId,
+        );
         if (spentWeekUsd !== null) {
           if (spentWeekUsd + txUsd > config.maxPerWeekUsd) {
             return {
@@ -225,7 +237,10 @@ async function evaluateSpendingLimit(
     };
   }
 
-  if (config.maxPerWeek && ctx.spentThisWeek + txValue > BigInt(config.maxPerWeek)) {
+  if (
+    config.maxPerWeek &&
+    ctx.spentThisWeek + txValue > BigInt(config.maxPerWeek)
+  ) {
     return {
       ...base,
       passed: false,
@@ -236,7 +251,10 @@ async function evaluateSpendingLimit(
   return { ...base, passed: true };
 }
 
-function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+function evaluateApprovedAddresses(
+  rule: PolicyRule,
+  ctx: EvaluatorContext,
+): PolicyResult {
   const config = rule.config as unknown as ApprovedAddressesConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const target = ctx.request.to.toLowerCase();
@@ -263,7 +281,10 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
   return { ...base, passed: true };
 }
 
-async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Promise<PolicyResult> {
+async function evaluateAutoApprove(
+  rule: PolicyRule,
+  ctx: EvaluatorContext,
+): Promise<PolicyResult> {
   const config = rule.config as unknown as AutoApproveConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const txValue = BigInt(ctx.request.value);
@@ -310,7 +331,10 @@ async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Pro
   return { ...base, passed: true, reason: "No threshold configured" };
 }
 
-function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+function evaluateRateLimit(
+  rule: PolicyRule,
+  ctx: EvaluatorContext,
+): PolicyResult {
   const config = rule.config as unknown as RateLimitConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
 
@@ -333,7 +357,10 @@ function evaluateRateLimit(rule: PolicyRule, ctx: EvaluatorContext): PolicyResul
   return { ...base, passed: true };
 }
 
-function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyResult {
+function evaluateTimeWindow(
+  rule: PolicyRule,
+  _ctx: EvaluatorContext,
+): PolicyResult {
   const config = rule.config as unknown as TimeWindowConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const now = new Date();
@@ -349,7 +376,9 @@ function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyRes
   }
 
   if (config.allowedHours.length > 0) {
-    const inWindow = config.allowedHours.some((w) => hour >= w.start && hour < w.end);
+    const inWindow = config.allowedHours.some(
+      (w) => hour >= w.start && hour < w.end,
+    );
     if (!inWindow) {
       return {
         ...base,
@@ -365,7 +394,10 @@ function evaluateTimeWindow(rule: PolicyRule, _ctx: EvaluatorContext): PolicyRes
 /**
  * Allowed-chains policy: restricts transactions to a set of permitted CAIP-2 chain identifiers.
  */
-function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+function evaluateAllowedChains(
+  rule: PolicyRule,
+  ctx: EvaluatorContext,
+): PolicyResult {
   const config = rule.config as unknown as AllowedChainsConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
   const chainId = ctx.request.chainId;

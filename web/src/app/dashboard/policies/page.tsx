@@ -167,7 +167,10 @@ export default function PoliciesPage() {
     try {
       setLoading(true);
       setError(null);
-      const [p, a] = await Promise.all([steward.listPolicies(), steward.listAgents()]);
+      const [p, a] = await Promise.all([
+        steward.listPolicies(),
+        steward.listAgents(),
+      ]);
       setPolicies(p);
       setAgents(a);
     } catch (e: unknown) {
@@ -238,7 +241,9 @@ export default function PoliciesPage() {
       setRulesJson("{}");
       toast("Policy created", "success");
     } catch (e: unknown) {
-      setCreateError(e instanceof Error ? e.message : "Failed to create policy");
+      setCreateError(
+        e instanceof Error ? e.message : "Failed to create policy",
+      );
     } finally {
       setCreating(false);
     }
@@ -269,13 +274,19 @@ export default function PoliciesPage() {
     if (!selected) return;
     setAssigning(true);
     try {
-      const updated = await steward.assignPolicy(selected.id, Array.from(assignSelected));
+      const updated = await steward.assignPolicy(
+        selected.id,
+        Array.from(assignSelected),
+      );
       setPolicies((p) => p.map((x) => (x.id === updated.id ? updated : x)));
       setSelected(updated);
       setShowAssign(false);
       toast("Policy assignments updated", "success");
     } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : "Failed to assign policy", "error");
+      toast(
+        e instanceof Error ? e.message : "Failed to assign policy",
+        "error",
+      );
     } finally {
       setAssigning(false);
     }
@@ -315,7 +326,10 @@ export default function PoliciesPage() {
       setConfirmDelete(null);
       toast("Policy deleted", "success");
     } catch (e: unknown) {
-      toast(e instanceof Error ? e.message : "Failed to delete policy", "error");
+      toast(
+        e instanceof Error ? e.message : "Failed to delete policy",
+        "error",
+      );
     } finally {
       setDeleting(false);
     }
@@ -353,7 +367,9 @@ export default function PoliciesPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-700 tracking-tight">Policies</h1>
+          <h1 className="font-display text-2xl font-700 tracking-tight">
+            Policies
+          </h1>
           <p className="text-sm text-text-tertiary mt-1">
             Define and assign access control rules for your agents
           </p>
@@ -382,7 +398,9 @@ export default function PoliciesPage() {
             <div className="border border-border bg-bg-elevated p-6 space-y-6">
               {createStep === "template" ? (
                 <>
-                  <h3 className="font-display text-sm font-600">Choose a Template</h3>
+                  <h3 className="font-display text-sm font-600">
+                    Choose a Template
+                  </h3>
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     {Object.entries(TEMPLATES).map(([key, tmpl]) => (
                       <button
@@ -394,8 +412,12 @@ export default function PoliciesPage() {
                             : "border-border hover:border-accent/60 hover:bg-bg-surface"
                         }`}
                       >
-                        <div className="font-display text-sm font-600">{tmpl.name}</div>
-                        <div className="text-xs text-text-tertiary">{tmpl.description}</div>
+                        <div className="font-display text-sm font-600">
+                          {tmpl.name}
+                        </div>
+                        <div className="text-xs text-text-tertiary">
+                          {tmpl.description}
+                        </div>
                         <span
                           className={`inline-block text-xs px-1.5 py-0.5 rounded-sm mt-1 ${typeColor(tmpl.type)}`}
                         >
@@ -417,7 +439,9 @@ export default function PoliciesPage() {
                       }}
                       className="text-left p-4 border border-border hover:border-accent/60 hover:bg-bg-surface transition-colors space-y-1.5"
                     >
-                      <div className="font-display text-sm font-600">Custom</div>
+                      <div className="font-display text-sm font-600">
+                        Custom
+                      </div>
                       <div className="text-xs text-text-tertiary">
                         Start from scratch with your own rules
                       </div>
@@ -436,7 +460,9 @@ export default function PoliciesPage() {
               ) : (
                 <form onSubmit={handleCreate} className="space-y-5">
                   <div className="flex items-center justify-between">
-                    <h3 className="font-display text-sm font-600">Configure Policy</h3>
+                    <h3 className="font-display text-sm font-600">
+                      Configure Policy
+                    </h3>
                     <button
                       type="button"
                       onClick={() => setCreateStep("template")}
@@ -454,13 +480,17 @@ export default function PoliciesPage() {
                       <input
                         type="text"
                         value={createForm.name}
-                        onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
+                        onChange={(e) =>
+                          setCreateForm({ ...createForm, name: e.target.value })
+                        }
                         placeholder="My Policy"
                         className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                       />
                     </div>
                     <div>
-                      <label className="text-xs text-text-tertiary block mb-1.5">Type</label>
+                      <label className="text-xs text-text-tertiary block mb-1.5">
+                        Type
+                      </label>
                       <select
                         value={createForm.type}
                         onChange={(e) =>
@@ -481,7 +511,9 @@ export default function PoliciesPage() {
                   </div>
 
                   <div>
-                    <label className="text-xs text-text-tertiary block mb-1.5">Description</label>
+                    <label className="text-xs text-text-tertiary block mb-1.5">
+                      Description
+                    </label>
                     <input
                       type="text"
                       value={createForm.description}
@@ -497,7 +529,9 @@ export default function PoliciesPage() {
                   </div>
 
                   <div>
-                    <label className="text-xs text-text-tertiary block mb-1.5">Rules (JSON)</label>
+                    <label className="text-xs text-text-tertiary block mb-1.5">
+                      Rules (JSON)
+                    </label>
                     <textarea
                       value={rulesJson}
                       onChange={(e) => {
@@ -565,7 +599,9 @@ export default function PoliciesPage() {
       {/* Error */}
       {error && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
-          <p className="text-text-secondary text-sm mb-1">Failed to load policies</p>
+          <p className="text-text-secondary text-sm mb-1">
+            Failed to load policies
+          </p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
           <button
             onClick={loadAll}
@@ -588,7 +624,9 @@ export default function PoliciesPage() {
             </div>
           ) : policies.length === 0 && !error ? (
             <div className="py-16 text-center border border-border-subtle">
-              <p className="font-display text-base font-600 text-text-secondary">No policies yet</p>
+              <p className="font-display text-base font-600 text-text-secondary">
+                No policies yet
+              </p>
               <p className="text-sm text-text-tertiary mt-1 max-w-xs mx-auto">
                 Create policies to control what your agents are allowed to do.
               </p>
@@ -611,7 +649,9 @@ export default function PoliciesPage() {
                     transition={{ duration: 0.25, ease }}
                     onClick={() => openDetail(policy)}
                     className={`w-full text-left flex items-start justify-between py-4 px-3 border-b border-border-subtle transition-colors group ${
-                      selected?.id === policy.id ? "bg-accent-bg" : "hover:bg-bg-elevated/40"
+                      selected?.id === policy.id
+                        ? "bg-accent-bg"
+                        : "hover:bg-bg-elevated/40"
                     }`}
                   >
                     <div className="min-w-0">
@@ -626,7 +666,9 @@ export default function PoliciesPage() {
                         </div>
                       )}
                       <div className="flex items-center gap-2 mt-1.5 flex-wrap">
-                        <span className={`text-xs px-1.5 py-0.5 ${typeColor(policy.type)}`}>
+                        <span
+                          className={`text-xs px-1.5 py-0.5 ${typeColor(policy.type)}`}
+                        >
                           {policy.type.replace("_", " ")}
                         </span>
                         {policy.assignedAgents?.length > 0 && (
@@ -660,13 +702,19 @@ export default function PoliciesPage() {
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <div className="flex items-center gap-2 flex-wrap">
-                      <h2 className="font-display text-lg font-700">{selected.name}</h2>
-                      <span className={`text-xs px-1.5 py-0.5 ${typeColor(selected.type)}`}>
+                      <h2 className="font-display text-lg font-700">
+                        {selected.name}
+                      </h2>
+                      <span
+                        className={`text-xs px-1.5 py-0.5 ${typeColor(selected.type)}`}
+                      >
                         {selected.type.replace("_", " ")}
                       </span>
                     </div>
                     {selected.description && (
-                      <p className="text-sm text-text-tertiary mt-0.5">{selected.description}</p>
+                      <p className="text-sm text-text-tertiary mt-0.5">
+                        {selected.description}
+                      </p>
                     )}
                   </div>
                   <button
@@ -686,7 +734,9 @@ export default function PoliciesPage() {
                     </div>
                   </div>
                   <div className="space-y-1">
-                    <div className="text-xs text-text-tertiary">Assigned Agents</div>
+                    <div className="text-xs text-text-tertiary">
+                      Assigned Agents
+                    </div>
                     <div className="text-sm font-mono text-text-secondary">
                       {(selected.assignedAgents || []).length}
                     </div>
@@ -698,7 +748,8 @@ export default function PoliciesPage() {
                   <button
                     onClick={() => {
                       setEditMode(!editMode);
-                      if (!editMode) setEditJson(JSON.stringify(selected.rules, null, 2));
+                      if (!editMode)
+                        setEditJson(JSON.stringify(selected.rules, null, 2));
                     }}
                     className="px-3 py-1.5 text-xs font-medium border border-border text-text-secondary hover:border-accent hover:text-accent transition-colors"
                   >
@@ -739,8 +790,8 @@ export default function PoliciesPage() {
                     >
                       <div className="border border-red-400/20 bg-red-400/5 p-4 space-y-3">
                         <p className="text-xs text-red-400 font-medium">
-                          Delete "{selected.name}"? Agents using this policy will lose its
-                          protections.
+                          Delete "{selected.name}"? Agents using this policy
+                          will lose its protections.
                         </p>
                         <div className="flex gap-3">
                           <button
@@ -777,7 +828,11 @@ export default function PoliciesPage() {
                     )}
                   </div>
                   <textarea
-                    value={editMode ? editJson : JSON.stringify(selected.rules, null, 2)}
+                    value={
+                      editMode
+                        ? editJson
+                        : JSON.stringify(selected.rules, null, 2)
+                    }
                     onChange={(e) => {
                       if (editMode) {
                         setEditJson(e.target.value);
@@ -819,9 +874,13 @@ export default function PoliciesPage() {
                       className="overflow-hidden"
                     >
                       <div className="border border-border bg-bg p-4 space-y-3">
-                        <p className="text-xs font-display font-600">Assign to Agents</p>
+                        <p className="text-xs font-display font-600">
+                          Assign to Agents
+                        </p>
                         {agents.length === 0 ? (
-                          <p className="text-xs text-text-tertiary">No agents available.</p>
+                          <p className="text-xs text-text-tertiary">
+                            No agents available.
+                          </p>
                         ) : (
                           <div className="space-y-1.5 max-h-40 overflow-y-auto">
                             {agents.map((a) => (
@@ -843,7 +902,9 @@ export default function PoliciesPage() {
                                 <span className="text-sm text-text-secondary group-hover:text-text transition-colors">
                                   {a.name}
                                 </span>
-                                <span className="text-xs text-text-tertiary font-mono">{a.id}</span>
+                                <span className="text-xs text-text-tertiary font-mono">
+                                  {a.id}
+                                </span>
                               </label>
                             ))}
                           </div>
@@ -886,7 +947,8 @@ export default function PoliciesPage() {
                           Policy Simulator
                         </p>
                         <p className="text-xs text-text-tertiary">
-                          Test whether a request would be allowed by this policy.
+                          Test whether a request would be allowed by this
+                          policy.
                         </p>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -913,7 +975,9 @@ export default function PoliciesPage() {
                             </select>
                           </div>
                           <div>
-                            <label className="text-xs text-text-tertiary block mb-1">Method</label>
+                            <label className="text-xs text-text-tertiary block mb-1">
+                              Method
+                            </label>
                             <select
                               value={simForm.method}
                               onChange={(e) =>
@@ -924,21 +988,27 @@ export default function PoliciesPage() {
                               }
                               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-violet-400 transition-colors"
                             >
-                              {["GET", "POST", "PUT", "DELETE", "PATCH"].map((m) => (
-                                <option key={m} value={m}>
-                                  {m}
-                                </option>
-                              ))}
+                              {["GET", "POST", "PUT", "DELETE", "PATCH"].map(
+                                (m) => (
+                                  <option key={m} value={m}>
+                                    {m}
+                                  </option>
+                                ),
+                              )}
                             </select>
                           </div>
                         </div>
 
                         <div>
-                          <label className="text-xs text-text-tertiary block mb-1">URL</label>
+                          <label className="text-xs text-text-tertiary block mb-1">
+                            URL
+                          </label>
                           <input
                             type="text"
                             value={simForm.url}
-                            onChange={(e) => setSimForm({ ...simForm, url: e.target.value })}
+                            onChange={(e) =>
+                              setSimForm({ ...simForm, url: e.target.value })
+                            }
                             placeholder="https://api.example.com/v1/chat"
                             className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-violet-400 transition-colors font-mono"
                           />
@@ -969,7 +1039,9 @@ export default function PoliciesPage() {
                             <input
                               type="text"
                               value={simForm.data}
-                              onChange={(e) => setSimForm({ ...simForm, data: e.target.value })}
+                              onChange={(e) =>
+                                setSimForm({ ...simForm, data: e.target.value })
+                              }
                               placeholder="0x..."
                               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-violet-400 transition-colors font-mono"
                             />
@@ -1005,7 +1077,9 @@ export default function PoliciesPage() {
                                 </span>
                               </div>
                               {simResult.reason && (
-                                <p className="text-xs text-text-secondary">{simResult.reason}</p>
+                                <p className="text-xs text-text-secondary">
+                                  {simResult.reason}
+                                </p>
                               )}
                               {simResult.matchedRules.length > 0 && (
                                 <div className="flex flex-wrap gap-1.5">
@@ -1035,7 +1109,9 @@ export default function PoliciesPage() {
                 exit={{ opacity: 0 }}
                 className="h-40 border border-border-subtle flex items-center justify-center"
               >
-                <p className="text-sm text-text-tertiary">Select a policy to view and edit</p>
+                <p className="text-sm text-text-tertiary">
+                  Select a policy to view and edit
+                </p>
               </motion.div>
             )}
           </AnimatePresence>

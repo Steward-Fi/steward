@@ -22,7 +22,12 @@ export const signTransactionAction: Action = {
   name: "STEWARD_SIGN_TRANSACTION",
   description:
     "Sign and broadcast a transaction through Steward's managed wallet with policy enforcement",
-  similes: ["sign transaction", "send transaction", "execute transaction", "broadcast transaction"],
+  similes: [
+    "sign transaction",
+    "send transaction",
+    "execute transaction",
+    "broadcast transaction",
+  ],
 
   parameters: [
     {
@@ -45,7 +50,8 @@ export const signTransactionAction: Action = {
     },
     {
       name: "chainId",
-      description: "Target chain ID (e.g. 8453 for Base, 1 for Ethereum mainnet)",
+      description:
+        "Target chain ID (e.g. 8453 for Base, 1 for Ethereum mainnet)",
       required: false,
       schema: { type: "number" },
     },
@@ -63,8 +69,14 @@ export const signTransactionAction: Action = {
     ],
   ] as ActionExample[][],
 
-  async validate(runtime: IAgentRuntime, _message: Memory, _state?: State): Promise<boolean> {
-    const steward = runtime.getService("steward" as any) as StewardService | null;
+  async validate(
+    runtime: IAgentRuntime,
+    _message: Memory,
+    _state?: State,
+  ): Promise<boolean> {
+    const steward = runtime.getService(
+      "steward" as any,
+    ) as StewardService | null;
     return steward?.isConnected() ?? false;
   },
 

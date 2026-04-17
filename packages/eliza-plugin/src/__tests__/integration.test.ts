@@ -36,7 +36,10 @@ let agent: AgentIdentity;
  * Build a mock IAgentRuntime that the plugin components expect.
  * The service is passed in so providers/actions can find it via getService().
  */
-function mockRuntime(service: StewardService | null, overrides: Record<string, any> = {}) {
+function mockRuntime(
+  service: StewardService | null,
+  overrides: Record<string, any> = {},
+) {
   return {
     agentId: TEST_AGENT_ID,
     character: {
@@ -70,13 +73,17 @@ beforeAll(async () => {
     tenantId: TENANT_ID,
   });
   agent = await client.createWallet(TEST_AGENT_ID, "Eliza Integration Test");
-  console.log(`[setup] Created agent ${TEST_AGENT_ID} → ${agent.walletAddress}`);
+  console.log(
+    `[setup] Created agent ${TEST_AGENT_ID} → ${agent.walletAddress}`,
+  );
 });
 
 afterAll(async () => {
   if (!runLive) return;
   // Steward doesn't have a DELETE agent endpoint yet, so we just log.
-  console.log(`[teardown] Test agent ${TEST_AGENT_ID} left on milady-cloud (no delete API)`);
+  console.log(
+    `[teardown] Test agent ${TEST_AGENT_ID} left on milady-cloud (no delete API)`,
+  );
 });
 
 // ── StewardService ──────────────────────────────────────────────
@@ -171,7 +178,11 @@ describeLive("Providers (real API)", () => {
 
   describe("walletStatusProvider", () => {
     it("returns wallet address and agent ID", async () => {
-      const result = await walletStatusProvider.get(runtime, {} as any, {} as any);
+      const result = await walletStatusProvider.get(
+        runtime,
+        {} as any,
+        {} as any,
+      );
       expect(result).toBeDefined();
       expect(result.text).toContain("Steward Wallet:");
       expect(result.text).toContain("0x");
@@ -182,7 +193,11 @@ describeLive("Providers (real API)", () => {
     });
 
     it("returns policy info (empty for fresh agent)", async () => {
-      const result = await walletStatusProvider.get(runtime, {} as any, {} as any);
+      const result = await walletStatusProvider.get(
+        runtime,
+        {} as any,
+        {} as any,
+      );
       expect(result.text).toContain("Active policies:");
       expect(result.data?.policies).toBeDefined();
     });
@@ -203,7 +218,11 @@ describeLive("Providers (real API)", () => {
   describe("walletStatusProvider (disconnected)", () => {
     it("returns empty when service is null", async () => {
       const disconnectedRuntime = mockRuntime(null);
-      const result = await walletStatusProvider.get(disconnectedRuntime, {} as any, {} as any);
+      const result = await walletStatusProvider.get(
+        disconnectedRuntime,
+        {} as any,
+        {} as any,
+      );
       expect(result.text).toBe("");
     });
   });
@@ -211,7 +230,11 @@ describeLive("Providers (real API)", () => {
   describe("balanceProvider (disconnected)", () => {
     it("returns empty when service is null", async () => {
       const disconnectedRuntime = mockRuntime(null);
-      const result = await balanceProvider.get(disconnectedRuntime, {} as any, {} as any);
+      const result = await balanceProvider.get(
+        disconnectedRuntime,
+        {} as any,
+        {} as any,
+      );
       expect(result.text).toBe("");
     });
   });
@@ -241,41 +264,64 @@ describeLive("Actions (validation + error paths)", () => {
 
     it("validates false when service is disconnected", async () => {
       const disconnected = mockRuntime(null);
-      const valid = await signTransactionAction.validate(disconnected, {} as any);
+      const valid = await signTransactionAction.validate(
+        disconnected,
+        {} as any,
+      );
       expect(valid).toBe(false);
     });
 
     it("returns error for missing params", async () => {
-      const result = await signTransactionAction.handler(runtime, {} as any, undefined, {
-        parameters: {},
-      });
+      const result = await signTransactionAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: {},
+        },
+      );
       expect(result?.success).toBe(false);
       expect(result?.error).toContain("Missing required parameters");
     });
 
     it("returns error for missing 'to'", async () => {
-      const result = await signTransactionAction.handler(runtime, {} as any, undefined, {
-        parameters: { value: "1000" },
-      });
+      const result = await signTransactionAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: { value: "1000" },
+        },
+      );
       expect(result?.success).toBe(false);
       expect(result?.error).toContain("Missing required parameters");
     });
 
     it("returns error for missing 'value'", async () => {
-      const result = await signTransactionAction.handler(runtime, {} as any, undefined, {
-        parameters: { to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
-      });
+      const result = await signTransactionAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: { to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045" },
+        },
+      );
       expect(result?.success).toBe(false);
     });
 
     it("handles unfunded transaction attempt", async () => {
-      const result = await signTransactionAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          value: "1000000000000000",
-          chainId: 84532,
+      const result = await signTransactionAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            value: "1000000000000000",
+            chainId: 84532,
+          },
         },
-      });
+      );
       // Should either fail (insufficient funds) or succeed with pending_approval
       expect(result).toBeDefined();
       if (!result?.success) {
@@ -292,44 +338,64 @@ describeLive("Actions (validation + error paths)", () => {
     });
 
     it("returns error for missing params", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {},
-      });
+      const result = await transferAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: {},
+        },
+      );
       expect(result?.success).toBe(false);
       expect(result?.error).toContain("Missing required parameters");
     });
 
     it("returns error for unknown chain", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: "0.01 ETH",
-          chain: "avalanche",
+      const result = await transferAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: "0.01 ETH",
+            chain: "avalanche",
+          },
         },
-      });
+      );
       expect(result?.success).toBe(false);
       expect(result?.error).toContain("Unknown chain");
     });
 
     it("returns error for invalid amount format", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: "not-a-number",
+      const result = await transferAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: "not-a-number",
+          },
         },
-      });
+      );
       expect(result?.success).toBe(false);
       expect(result?.text).toContain("Transfer failed");
     });
 
     it("parses 0.1 ETH correctly and hits API", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: "0.1 ETH",
-          chain: "base-sepolia",
+      const result = await transferAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: "0.1 ETH",
+            chain: "base-sepolia",
+          },
         },
-      });
+      );
       // Will fail (no funds) but should reach the API
       expect(result).toBeDefined();
       if (!result?.success) {
@@ -338,13 +404,18 @@ describeLive("Actions (validation + error paths)", () => {
     });
 
     it("parses amount without symbol (defaults to ETH)", async () => {
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: "0.5",
-          chain: "base",
+      const result = await transferAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: "0.5",
+            chain: "base",
+          },
         },
-      });
+      );
       expect(result).toBeDefined();
     });
   });
@@ -357,13 +428,19 @@ describe("approvalRequiredEvaluator", () => {
     const stewardMsg = {
       content: { action: "STEWARD_SIGN_TRANSACTION" },
     } as any;
-    expect(await approvalRequiredEvaluator.validate({} as any, stewardMsg)).toBe(true);
+    expect(
+      await approvalRequiredEvaluator.validate({} as any, stewardMsg),
+    ).toBe(true);
 
     const otherMsg = { content: { action: "SOME_OTHER_ACTION" } } as any;
-    expect(await approvalRequiredEvaluator.validate({} as any, otherMsg)).toBe(false);
+    expect(await approvalRequiredEvaluator.validate({} as any, otherMsg)).toBe(
+      false,
+    );
 
     const noAction = { content: { text: "hello" } } as any;
-    expect(await approvalRequiredEvaluator.validate({} as any, noAction)).toBe(false);
+    expect(await approvalRequiredEvaluator.validate({} as any, noAction)).toBe(
+      false,
+    );
   });
 
   it("returns undefined when no pending approval", async () => {
@@ -371,7 +448,11 @@ describe("approvalRequiredEvaluator", () => {
     const runtime = { getService: () => service } as any;
     const state = { lastActionResult: { data: { status: "completed" } } };
 
-    const result = await approvalRequiredEvaluator.handler(runtime, {} as any, state as any);
+    const result = await approvalRequiredEvaluator.handler(
+      runtime,
+      {} as any,
+      state as any,
+    );
     expect(result).toBeUndefined();
   });
 
@@ -387,7 +468,11 @@ describe("approvalRequiredEvaluator", () => {
       },
     };
 
-    const result = await approvalRequiredEvaluator.handler(runtime, {} as any, state as any);
+    const result = await approvalRequiredEvaluator.handler(
+      runtime,
+      {} as any,
+      state as any,
+    );
     expect(result).toBeDefined();
     expect(result?.success).toBe(true);
     expect(result?.data?.pendingApproval).toBe(true);
@@ -424,13 +509,18 @@ describe("Amount parsing (via transfer handler)", () => {
       } as any;
       const runtime = { getService: () => service } as any;
 
-      const result = await transferAction.handler(runtime, {} as any, undefined, {
-        parameters: {
-          to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-          amount: input,
-          chain: "base",
+      const result = await transferAction.handler(
+        runtime,
+        {} as any,
+        undefined,
+        {
+          parameters: {
+            to: "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
+            amount: input,
+            chain: "base",
+          },
         },
-      });
+      );
 
       if (shouldFail) {
         expect(result?.success).toBe(false);

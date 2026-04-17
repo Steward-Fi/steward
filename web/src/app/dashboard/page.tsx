@@ -50,7 +50,9 @@ export default function DashboardOverview() {
       }
 
       allTx.sort(
-        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime(),
+        (a, b) =>
+          new Date(b.createdAt || 0).getTime() -
+          new Date(a.createdAt || 0).getTime(),
       );
 
       setData({
@@ -105,8 +107,12 @@ export default function DashboardOverview() {
     >
       {/* Header */}
       <div>
-        <h1 className="font-display text-2xl font-700 tracking-tight">Overview</h1>
-        <p className="text-sm text-text-tertiary mt-1">Agent wallet infrastructure</p>
+        <h1 className="font-display text-2xl font-700 tracking-tight">
+          Overview
+        </h1>
+        <p className="text-sm text-text-tertiary mt-1">
+          Agent wallet infrastructure
+        </p>
       </div>
 
       {/* Key Stats */}
@@ -127,7 +133,9 @@ export default function DashboardOverview() {
             transition={{ delay: i * 0.08, ease: easeOutQuart, duration: 0.4 }}
             className="bg-bg p-6 md:p-8"
           >
-            <div className="text-xs text-text-tertiary tracking-wider uppercase">{stat.label}</div>
+            <div className="text-xs text-text-tertiary tracking-wider uppercase">
+              {stat.label}
+            </div>
             <div
               className={`font-display text-3xl font-700 mt-2 tabular-nums ${
                 stat.accent ? "text-amber-400" : ""
@@ -154,7 +162,8 @@ export default function DashboardOverview() {
               <div className="flex items-center gap-3">
                 <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
                 <span className="text-sm text-text">
-                  {pendingCount} transaction{pendingCount !== 1 && "s"} awaiting review
+                  {pendingCount} transaction{pendingCount !== 1 && "s"} awaiting
+                  review
                 </span>
               </div>
               <span className="text-xs text-text-tertiary group-hover:text-text-secondary transition-colors">
@@ -180,7 +189,9 @@ export default function DashboardOverview() {
         {recentTx.length === 0 ? (
           <div className="py-16 text-center border border-border-subtle">
             <p className="text-text-tertiary text-sm">No transactions yet</p>
-            <p className="text-text-tertiary text-xs mt-1">Create an agent to get started</p>
+            <p className="text-text-tertiary text-xs mt-1">
+              Create an agent to get started
+            </p>
             <Link
               href="/dashboard/agents"
               className="inline-block mt-4 text-xs px-4 py-2 bg-accent text-bg hover:bg-accent-hover transition-colors"
@@ -200,14 +211,19 @@ export default function DashboardOverview() {
               >
                 <div className="flex items-center gap-4 min-w-0">
                   <StatusBadge status={tx.status} />
-                  <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
+                  <ChainBadge
+                    chainId={tx.request?.chainId || tx.chainId || 8453}
+                    compact
+                  />
                   <Link
                     href={`/dashboard/agents/${tx.agentId}`}
                     className="text-sm text-text hover:text-accent transition-colors truncate"
                   >
                     {tx.agentName || tx.agentId}
                   </Link>
-                  <span className="text-text-tertiary text-xs hidden sm:inline">to</span>
+                  <span className="text-text-tertiary text-xs hidden sm:inline">
+                    to
+                  </span>
                   <span className="font-mono text-xs text-text-tertiary hidden sm:inline">
                     {shortenAddress(tx.request?.to || tx.toAddress || "0x0", 4)}
                   </span>

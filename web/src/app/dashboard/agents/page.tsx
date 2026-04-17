@@ -42,13 +42,19 @@ export default function AgentsPage() {
     setCreateError(null);
     try {
       setCreating(true);
-      const newAgent = await steward.createWallet(form.id, form.name, form.platformId || undefined);
+      const newAgent = await steward.createWallet(
+        form.id,
+        form.name,
+        form.platformId || undefined,
+      );
       // Add directly to list without re-fetching
       setAgents((prev) => [newAgent, ...prev]);
       setShowCreate(false);
       setForm({ id: "", name: "", platformId: "" });
     } catch (err: unknown) {
-      setCreateError(err instanceof Error ? err.message : "Failed to create agent");
+      setCreateError(
+        err instanceof Error ? err.message : "Failed to create agent",
+      );
     } finally {
       setCreating(false);
     }
@@ -70,8 +76,12 @@ export default function AgentsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="font-display text-2xl font-700 tracking-tight">Agents</h1>
-          <p className="text-sm text-text-tertiary mt-1">Manage agent wallets and policies</p>
+          <h1 className="font-display text-2xl font-700 tracking-tight">
+            Agents
+          </h1>
+          <p className="text-sm text-text-tertiary mt-1">
+            Manage agent wallets and policies
+          </p>
         </div>
         <button
           onClick={() => setShowCreate(!showCreate)}
@@ -121,12 +131,15 @@ export default function AgentsPage() {
                 </div>
                 <div>
                   <label className="text-xs text-text-tertiary block mb-1.5">
-                    Platform ID <span className="text-text-tertiary">(optional)</span>
+                    Platform ID{" "}
+                    <span className="text-text-tertiary">(optional)</span>
                   </label>
                   <input
                     type="text"
                     value={form.platformId}
-                    onChange={(e) => setForm({ ...form, platformId: e.target.value })}
+                    onChange={(e) =>
+                      setForm({ ...form, platformId: e.target.value })
+                    }
                     placeholder="discord / twitter / etc."
                     className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
                   />
@@ -171,7 +184,9 @@ export default function AgentsPage() {
       {/* Error state */}
       {error && !loading && (
         <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
-          <p className="text-text-secondary text-sm mb-1">Failed to load agents</p>
+          <p className="text-text-secondary text-sm mb-1">
+            Failed to load agents
+          </p>
           <p className="text-text-tertiary text-xs mb-4 font-mono">{error}</p>
           <button
             onClick={loadAgents}
@@ -191,10 +206,12 @@ export default function AgentsPage() {
         </div>
       ) : error ? null : agents.length === 0 ? (
         <div className="py-20 text-center border border-border-subtle">
-          <p className="font-display text-lg font-600 text-text-secondary">No agents yet</p>
+          <p className="font-display text-lg font-600 text-text-secondary">
+            No agents yet
+          </p>
           <p className="text-sm text-text-tertiary mt-2 max-w-sm mx-auto">
-            Create your first agent to generate a managed wallet with policy enforcement. Each agent
-            gets its own address on Base.
+            Create your first agent to generate a managed wallet with policy
+            enforcement. Each agent gets its own address on Base.
           </p>
           <button
             onClick={() => setShowCreate(true)}
@@ -229,7 +246,9 @@ export default function AgentsPage() {
                       <div className="text-xs text-text-tertiary mt-0.5 truncate">
                         {agent.id}
                         {agent.platformId && (
-                          <span className="ml-2 text-text-tertiary/60">· {agent.platformId}</span>
+                          <span className="ml-2 text-text-tertiary/60">
+                            · {agent.platformId}
+                          </span>
                         )}
                       </div>
                     </div>

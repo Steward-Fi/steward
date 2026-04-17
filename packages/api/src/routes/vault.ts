@@ -7,7 +7,10 @@
 
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
+import {
+  enforceRateLimit,
+  recordVaultSpend,
+} from "../middleware/redis-enforcement";
 import {
   type ApiResponse,
   type AppVariables,
@@ -60,13 +63,20 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const request = await safeJsonParse<Omit<SignRequest, "agentId" | "tenantId">>(c);
+  const request =
+    await safeJsonParse<Omit<SignRequest, "agentId" | "tenantId">>(c);
   if (!request) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(request.to)) {
-    return c.json<ApiResponse>({ ok: false, error: "'to' address is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'to' address is required" },
+      400,
+    );
   }
   if (!isValidAnyAddress(request.to)) {
     const errMsg = request.to.startsWith("0x")
@@ -81,7 +91,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     );
   }
 
-  const resolvedChainId = request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
+  const resolvedChainId =
+    request.chainId || parseInt(process.env.CHAIN_ID || "8453", 10);
   const signRequest: SignRequest = {
     ...request,
     tenantId,
@@ -209,9 +220,12 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       .where(eq(transactions.id, txId));
 
     // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
-    recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
-      console.error("[vault] Failed to record spend:", err),
-    );
+    recordVaultSpend(
+      agentId,
+      tenantId,
+      signRequest.value,
+      resolvedChainId,
+    ).catch((err) => console.error("[vault] Failed to record spend:", err));
 
     dispatchWebhook(tenantId, agentId, "tx_signed", {
       txId,
@@ -232,7 +246,10 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[${requestId}] Sign transaction failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] Sign transaction failed for agent ${agentId}:`,
+      e,
+    );
 
     dispatchWebhook(tenantId, agentId, "tx_failed", {
       error: rawMessage,
@@ -240,9 +257,15 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     });
 
     if (isRpcError(e)) {
-      return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
+      return c.json<ApiResponse>(
+        { ok: false, error: extractRpcErrorMessage(e) },
+        502,
+      );
     }
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -272,7 +295,10 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     .from(transactions)
     .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
   if (!transaction) {
-    return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction not found" },
+      404,
+    );
   }
 
   const resolvedAt = new Date();
@@ -340,11 +366,16 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     await db
       .update(approvalQueue)
       .set({ status: "pending", resolvedAt: null, resolvedBy: null })
-      .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
+      .where(
+        and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)),
+      );
 
     const requestId = c.get("requestId") || "unknown";
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[${requestId}] Approve transaction failed for agent ${agentId}, tx ${txId}:`, e);
+    console.error(
+      `[${requestId}] Approve transaction failed for agent ${agentId}, tx ${txId}:`,
+      e,
+    );
 
     dispatchWebhook(tenantId, agentId, "tx_failed", {
       txId,
@@ -353,9 +384,15 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     });
 
     if (isRpcError(e)) {
-      return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
+      return c.json<ApiResponse>(
+        { ok: false, error: extractRpcErrorMessage(e) },
+        502,
+      );
     }
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -469,7 +506,10 @@ vaultRoutes.get("/:agentId/history", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const history = await db.select().from(transactions).where(eq(transactions.agentId, agentId));
+  const history = await db
+    .select()
+    .from(transactions)
+    .where(eq(transactions.agentId, agentId));
 
   return c.json<ApiResponse>({
     ok: true,
@@ -502,7 +542,10 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!body.domain || typeof body.domain !== "object") {
@@ -518,7 +561,10 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     );
   }
   if (!isNonEmptyString(body.primaryType)) {
-    return c.json<ApiResponse>({ ok: false, error: "'primaryType' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'primaryType' is required" },
+      400,
+    );
   }
   if (!body.value || typeof body.value !== "object") {
     return c.json<ApiResponse>(
@@ -548,7 +594,10 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
         c.header(key, value);
       }
     }
-    return c.json<ApiResponse>({ ok: false, error: rlResult.reason || "Rate limit exceeded" }, 429);
+    return c.json<ApiResponse>(
+      { ok: false, error: rlResult.reason || "Rate limit exceeded" },
+      429,
+    );
   }
 
   const stats = await getTransactionStats(agentId);
@@ -660,7 +709,10 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[${requestId}] Sign typed data failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] Sign typed data failed for agent ${agentId}:`,
+      e,
+    );
 
     dispatchWebhook(tenantId, agentId, "tx_failed", {
       txId,
@@ -668,7 +720,10 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       requestId,
     });
 
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -698,14 +753,18 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   }>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(body.transaction)) {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "'transaction' is required (base64-encoded serialized Solana transaction)",
+        error:
+          "'transaction' is required (base64-encoded serialized Solana transaction)",
       },
       400,
     );
@@ -716,7 +775,8 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       return c.json<ApiResponse>(
         {
           ok: false,
-          error: "'to' must be a valid Solana address (base58, 32–44 chars) or Ethereum address",
+          error:
+            "'to' must be a valid Solana address (base58, 32–44 chars) or Ethereum address",
         },
         400,
       );
@@ -895,9 +955,15 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     });
 
     if (isRpcError(e)) {
-      return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
+      return c.json<ApiResponse>(
+        { ok: false, error: extractRpcErrorMessage(e) },
+        502,
+      );
     }
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -921,11 +987,17 @@ vaultRoutes.post("/:agentId/rpc", async (c) => {
   const body = await safeJsonParse<RpcRequest>(c);
 
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(body.method)) {
-    return c.json<ApiResponse>({ ok: false, error: "'method' is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "'method' is required" },
+      400,
+    );
   }
 
   if (!body.chainId || typeof body.chainId !== "number") {
@@ -944,7 +1016,10 @@ vaultRoutes.post("/:agentId/rpc", async (c) => {
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
     const message = e instanceof Error ? e.message : "Unknown error";
-    console.error(`[${requestId}] RPC passthrough failed for agent ${agentId}:`, e);
+    console.error(
+      `[${requestId}] RPC passthrough failed for agent ${agentId}:`,
+      e,
+    );
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
   }
 });
@@ -979,8 +1054,14 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] getAddresses failed for agent ${agentId}:`, e);
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    console.error(
+      `[${requestId}] getAddresses failed for agent ${agentId}:`,
+      e,
+    );
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -1001,7 +1082,8 @@ vaultRoutes.post("/:agentId/import", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)",
+        error:
+          "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)",
       },
       400,
     );
@@ -1012,27 +1094,46 @@ vaultRoutes.post("/:agentId/import", async (c) => {
     chain: "evm" | "solana";
   }>(c);
   if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid JSON in request body" },
+      400,
+    );
   }
 
   if (!isNonEmptyString(body.privateKey)) {
-    return c.json<ApiResponse>({ ok: false, error: "privateKey is required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "privateKey is required" },
+      400,
+    );
   }
 
   if (body.chain !== "evm" && body.chain !== "solana") {
-    return c.json<ApiResponse>({ ok: false, error: "chain must be 'evm' or 'solana'" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "chain must be 'evm' or 'solana'" },
+      400,
+    );
   }
 
   try {
-    const result = await vault.importKey(tenantId, agentId, body.privateKey, body.chain);
-    return c.json<ApiResponse<{ agentId: string; walletAddress: string; chain: string }>>({
+    const result = await vault.importKey(
+      tenantId,
+      agentId,
+      body.privateKey,
+      body.chain,
+    );
+    return c.json<
+      ApiResponse<{ agentId: string; walletAddress: string; chain: string }>
+    >({
       ok: true,
       data: { agentId, walletAddress: result.walletAddress, chain: body.chain },
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
     console.error(`[${requestId}] Key import failed for agent ${agentId}:`, e);
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -1073,7 +1174,10 @@ vaultRoutes.post("/:agentId/export", async (c) => {
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";
     console.error(`[${requestId}] Key export failed for agent ${agentId}:`, e);
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    return c.json<ApiResponse>(
+      { ok: false, error: sanitizeErrorMessage(e) },
+      500,
+    );
   }
 });
 
@@ -1095,7 +1199,10 @@ function dispatchWebhook(
   const webhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
   if (webhookUrl) {
     webhookDispatcher
-      .dispatch({ type, tenantId, agentId, data, timestamp: new Date() }, webhookUrl)
+      .dispatch(
+        { type, tenantId, agentId, data, timestamp: new Date() },
+        webhookUrl,
+      )
       .catch(console.error);
   }
 }

@@ -10,11 +10,14 @@ import { jwtVerify } from "jose";
 
 // ─── JWT configuration (mirrors packages/api/src/services/context.ts) ────────
 
-const jwtSecretSource = process.env.STEWARD_JWT_SECRET || process.env.STEWARD_MASTER_PASSWORD;
+const jwtSecretSource =
+  process.env.STEWARD_JWT_SECRET || process.env.STEWARD_MASTER_PASSWORD;
 
 if (!jwtSecretSource) {
   if (process.env.NODE_ENV === "production") {
-    throw new Error("⛔ STEWARD_JWT_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
+    throw new Error(
+      "⛔ STEWARD_JWT_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production",
+    );
   }
   console.warn(
     "⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT verification. Set STEWARD_JWT_SECRET before going to production!",
@@ -43,7 +46,10 @@ export interface AgentClaims {
 export async function authMiddleware(c: Context, next: Next) {
   const authHeader = c.req.header("authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    return c.json({ ok: false, error: "Missing or invalid Authorization header" }, 401);
+    return c.json(
+      { ok: false, error: "Missing or invalid Authorization header" },
+      401,
+    );
   }
 
   const token = authHeader.slice(7);
@@ -58,13 +64,19 @@ export async function authMiddleware(c: Context, next: Next) {
     const scope = payload.scope as string | undefined;
 
     if (!agentId || !tenantId) {
-      return c.json({ ok: false, error: "Token missing agentId or tenantId claims" }, 401);
+      return c.json(
+        { ok: false, error: "Token missing agentId or tenantId claims" },
+        401,
+      );
     }
 
     // For now, all agent tokens implicitly have api:proxy scope.
     // In the future we'll check: scope === "agent" || scopes.includes("api:proxy")
     if (scope !== "agent") {
-      return c.json({ ok: false, error: "Token does not have agent scope" }, 403);
+      return c.json(
+        { ok: false, error: "Token does not have agent scope" },
+        403,
+      );
     }
 
     // Set on context for downstream handlers
@@ -73,7 +85,11 @@ export async function authMiddleware(c: Context, next: Next) {
 
     await next();
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Token verification failed";
-    return c.json({ ok: false, error: `Authentication failed: ${message}` }, 401);
+    const message =
+      err instanceof Error ? err.message : "Token verification failed";
+    return c.json(
+      { ok: false, error: `Authentication failed: ${message}` },
+      401,
+    );
   }
 }

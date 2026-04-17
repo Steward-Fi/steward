@@ -3,7 +3,14 @@
  */
 
 import { type Chain, createPublicClient, formatUnits, http } from "viem";
-import { arbitrum, base, baseSepolia, bsc, mainnet, polygon } from "viem/chains";
+import {
+  arbitrum,
+  base,
+  baseSepolia,
+  bsc,
+  mainnet,
+  polygon,
+} from "viem/chains";
 
 // ─── ERC-20 ABI (minimal for balance queries) ────────────────────────────────
 
@@ -259,6 +266,9 @@ export async function getTokenBalances(
   );
 
   return results
-    .filter((r): r is PromiseFulfilledResult<TokenBalance> => r.status === "fulfilled")
+    .filter(
+      (r): r is PromiseFulfilledResult<TokenBalance> =>
+        r.status === "fulfilled",
+    )
     .map((r) => r.value);
 }

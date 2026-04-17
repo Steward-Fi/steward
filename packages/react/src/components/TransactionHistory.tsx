@@ -26,7 +26,15 @@ export function TransactionHistory({
 
   if (!features.showTransactionHistory) return null;
 
-  const { transactions, isLoading, error, page, totalPages, nextPage, prevPage } = useTransactions({
+  const {
+    transactions,
+    isLoading,
+    error,
+    page,
+    totalPages,
+    nextPage,
+    prevPage,
+  } = useTransactions({
     pageSize,
     status: statusFilter,
     chainId: chainFilter?.[0],
@@ -43,7 +51,9 @@ export function TransactionHistory({
   if (error) {
     return (
       <div className={`stwd-card stwd-tx-history ${className || ""}`}>
-        <div className="stwd-error-text">Failed to load transactions: {error.message}</div>
+        <div className="stwd-error-text">
+          Failed to load transactions: {error.message}
+        </div>
       </div>
     );
   }
@@ -81,13 +91,18 @@ export function TransactionHistory({
                       )}
                     </div>
                     <div className="stwd-tx-value">
-                      {tx.request?.value ? formatWei(tx.request.value) : "0"} ETH
+                      {tx.request?.value ? formatWei(tx.request.value) : "0"}{" "}
+                      ETH
                     </div>
                   </div>
 
                   <div className="stwd-tx-meta">
-                    <span className={`stwd-badge ${getStatusColor(tx.status)}`}>{tx.status}</span>
-                    <span className="stwd-tx-time">{formatRelativeTime(tx.createdAt)}</span>
+                    <span className={`stwd-badge ${getStatusColor(tx.status)}`}>
+                      {tx.status}
+                    </span>
+                    <span className="stwd-tx-time">
+                      {formatRelativeTime(tx.createdAt)}
+                    </span>
                     {tx.txHash && (
                       <a
                         className="stwd-link"

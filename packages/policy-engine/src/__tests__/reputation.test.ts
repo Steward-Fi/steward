@@ -1,9 +1,15 @@
 import { describe, expect, it } from "bun:test";
 import type { PolicyRule, SignRequest } from "@stwd/shared";
 import { type EvaluatorContext, evaluatePolicy } from "../evaluators";
-import { computeScaledLimit, evaluateReputationScaling } from "../evaluators/reputation-scaling";
+import {
+  computeScaledLimit,
+  evaluateReputationScaling,
+} from "../evaluators/reputation-scaling";
 import { evaluateReputationThreshold } from "../evaluators/reputation-threshold";
-import { calculateInternalReputation, type ReputationInput } from "../reputation";
+import {
+  calculateInternalReputation,
+  type ReputationInput,
+} from "../reputation";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -15,7 +21,9 @@ function makeRule(
   return { id, type, enabled: true, config };
 }
 
-function makeEvalCtx(overrides: Partial<EvaluatorContext> = {}): EvaluatorContext {
+function makeEvalCtx(
+  overrides: Partial<EvaluatorContext> = {},
+): EvaluatorContext {
   const defaultRequest: SignRequest = {
     agentId: "test-agent",
     tenantId: "test-tenant",

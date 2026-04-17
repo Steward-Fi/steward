@@ -68,7 +68,8 @@ function getPublicClient(chainId: number): PublicClient {
     (chainId === 8453 ? "https://mainnet.base.org" : undefined);
 
   const client = createPublicClient({
-    chain: chainId === 8453 ? base : ({ id: chainId } as unknown as typeof base),
+    chain:
+      chainId === 8453 ? base : ({ id: chainId } as unknown as typeof base),
     transport: http(rpcUrl),
   }) as unknown as PublicClient;
 
@@ -78,7 +79,10 @@ function getPublicClient(chainId: number): PublicClient {
 
 // ─── Balances ────────────────────────────────────────────────────────────────
 
-async function getNativeBalance(walletAddress: string, chainId: number): Promise<bigint> {
+async function getNativeBalance(
+  walletAddress: string,
+  chainId: number,
+): Promise<bigint> {
   const client = getPublicClient(chainId);
   return client.getBalance({ address: walletAddress as `0x${string}` });
 }
@@ -99,10 +103,14 @@ async function getTokenBalance(
 
 // ─── Token price ──────────────────────────────────────────────────────────────
 
-async function getTokenPrice(tokenAddress: string, chainId: number): Promise<bigint> {
+async function getTokenPrice(
+  tokenAddress: string,
+  chainId: number,
+): Promise<bigint> {
   // 1. External price oracle (env: PRICE_ORACLE_URL or per-token override)
   const oracleUrl =
-    process.env[`PRICE_ORACLE_${tokenAddress.toLowerCase()}`] ?? process.env.PRICE_ORACLE_URL;
+    process.env[`PRICE_ORACLE_${tokenAddress.toLowerCase()}`] ??
+    process.env.PRICE_ORACLE_URL;
 
   if (oracleUrl) {
     try {
@@ -121,7 +129,8 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<big
 
   // 2. DEX pair reserve ratio
   const pairAddress =
-    process.env[`DEX_PAIR_${tokenAddress.toLowerCase()}`] ?? process.env.DEX_PAIR_ADDRESS;
+    process.env[`DEX_PAIR_${tokenAddress.toLowerCase()}`] ??
+    process.env.DEX_PAIR_ADDRESS;
 
   if (pairAddress) {
     try {
@@ -164,15 +173,21 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<big
 
 // ─── Steward history helpers ──────────────────────────────────────────────────
 
-function secondsSinceLastTrade(history: Array<{ timestamp: number; value: string }>): number {
+function secondsSinceLastTrade(
+  history: Array<{ timestamp: number; value: string }>,
+): number {
   if (history.length === 0) return Infinity;
   const latestTs = Math.max(...history.map((h) => h.timestamp));
   return Math.floor(Date.now() / 1000) - latestTs;
 }
 
-function dailyVolume(history: Array<{ timestamp: number; value: string }>): bigint {
+function dailyVolume(
+  history: Array<{ timestamp: number; value: string }>,
+): bigint {
   const cutoff = Math.floor(Date.now() / 1000) - 86400;
-  return history.filter((h) => h.timestamp >= cutoff).reduce((acc, h) => acc + BigInt(h.value), 0n);
+  return history
+    .filter((h) => h.timestamp >= cutoff)
+    .reduce((acc, h) => acc + BigInt(h.value), 0n);
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
@@ -192,13 +207,15 @@ export async function fetchAgentState(
       });
       return 0n;
     }),
-    getTokenBalance(walletAddress, agentConfig.tokenAddress, chainId).catch((err) => {
-      logWarn("Failed to fetch token balance", {
-        agentId: agentConfig.agentId,
-        error: String(err),
-      });
-      return 0n;
-    }),
+    getTokenBalance(walletAddress, agentConfig.tokenAddress, chainId).catch(
+      (err) => {
+        logWarn("Failed to fetch token balance", {
+          agentId: agentConfig.agentId,
+          error: String(err),
+        });
+        return 0n;
+      },
+    ),
     getTokenPrice(agentConfig.tokenAddress, chainId).catch((err) => {
       logWarn("Failed to fetch token price", {
         agentId: agentConfig.agentId,
@@ -215,7 +232,8 @@ export async function fetchAgentState(
     }),
   ]);
 
-  const tokenValueInNative = tokenPrice > 0n ? (tokenBalance * tokenPrice) / BigInt(1e18) : 0n;
+  const tokenValueInNative =
+    tokenPrice > 0n ? (tokenBalance * tokenPrice) / BigInt(1e18) : 0n;
   const treasuryValue = nativeBalance + tokenValueInNative;
 
   return {

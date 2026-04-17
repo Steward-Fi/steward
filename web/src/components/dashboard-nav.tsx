@@ -46,7 +46,13 @@ export function DashboardNav() {
               href="/"
               className="flex items-center gap-2 hover:opacity-80 transition-opacity flex-shrink-0"
             >
-              <Image src="/logo.png" alt="Steward" width={20} height={20} className="w-5 h-5" />
+              <Image
+                src="/logo.png"
+                alt="Steward"
+                width={20}
+                height={20}
+                className="w-5 h-5"
+              />
               <span className="font-display text-base font-bold tracking-tight text-text">
                 steward
               </span>
@@ -60,7 +66,9 @@ export function DashboardNav() {
                     key={link.href}
                     href={link.href}
                     className={`relative px-3 py-1.5 text-sm transition-colors whitespace-nowrap flex-shrink-0 ${
-                      active ? "text-text" : "text-text-tertiary hover:text-text-secondary"
+                      active
+                        ? "text-text"
+                        : "text-text-tertiary hover:text-text-secondary"
                     }`}
                   >
                     {link.label}

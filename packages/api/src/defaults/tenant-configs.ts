@@ -9,7 +9,8 @@ import type { PolicyTemplate, TenantControlPlaneConfig } from "@stwd/shared";
 const TRADING_TEMPLATE: PolicyTemplate = {
   id: "trading-agent",
   name: "Trading Agent",
-  description: "For agents that trade on DEXs. Spending limits + approved routers.",
+  description:
+    "For agents that trade on DEXs. Spending limits + approved routers.",
   icon: "chart-line",
   policies: [
     {
@@ -72,7 +73,8 @@ const TRADING_TEMPLATE: PolicyTemplate = {
 const CHATBOT_TEMPLATE: PolicyTemplate = {
   id: "chatbot-agent",
   name: "Chat Agent",
-  description: "For conversational agents that tip or pay for services. Low limits, high safety.",
+  description:
+    "For conversational agents that tip or pay for services. Low limits, high safety.",
   icon: "message-circle",
   policies: [
     {
@@ -307,8 +309,9 @@ export const ELIZA_CLOUD_CONFIG: TenantControlPlaneConfig = {
 };
 
 /** All default configs, keyed by tenant ID */
-export const DEFAULT_TENANT_CONFIGS: Record<string, TenantControlPlaneConfig> = {
-  "milady-cloud": MILADY_CLOUD_CONFIG,
-  "milady-desktop": MILADY_DESKTOP_CONFIG,
-  "eliza-cloud": ELIZA_CLOUD_CONFIG,
-};
+export const DEFAULT_TENANT_CONFIGS: Record<string, TenantControlPlaneConfig> =
+  {
+    "milady-cloud": MILADY_CLOUD_CONFIG,
+    "milady-desktop": MILADY_DESKTOP_CONFIG,
+    "eliza-cloud": ELIZA_CLOUD_CONFIG,
+  };

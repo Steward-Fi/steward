@@ -21,7 +21,8 @@ import path from "node:path";
 // ─── Config ──────────────────────────────────────────────────────────────────
 
 const STEWARD_URL = process.env.STEWARD_URL || "http://88.99.66.168:3200";
-const PROXY_URL = process.env.PROXY_URL || STEWARD_URL.replace(":3200", ":8080");
+const PROXY_URL =
+  process.env.PROXY_URL || STEWARD_URL.replace(":3200", ":8080");
 const TEST_PREFIX = `e2e-${Date.now()}`;
 const TENANT_ID = `${TEST_PREFIX}-tenant`;
 const TENANT_KEY = `${TEST_PREFIX}-key-${crypto.randomUUID().slice(0, 8)}`;
@@ -58,7 +59,11 @@ function resolveStoredPlatformKey(): string {
     return "";
   }
 
-  const credentialsPath = path.join(homeDir, ".milady", "steward-credentials.json");
+  const credentialsPath = path.join(
+    homeDir,
+    ".milady",
+    "steward-credentials.json",
+  );
   if (!existsSync(credentialsPath)) {
     return "";
   }
@@ -177,7 +182,12 @@ async function testCloudProvisioning() {
 
   // 1c. Get tenant
   try {
-    const { status, data } = await api("GET", `/tenants/${TENANT_ID}`, undefined, tenantHeaders());
+    const { status, data } = await api(
+      "GET",
+      `/tenants/${TENANT_ID}`,
+      undefined,
+      tenantHeaders(),
+    );
     if (status === 200 && data.ok && data.data?.id === TENANT_ID) {
       pass("Get tenant by ID");
     } else {
@@ -196,7 +206,9 @@ async function testCloudProvisioning() {
       tenantHeaders(),
     );
     if (status === 200 && data.ok && data.data?.walletAddress) {
-      pass(`Create test agent (wallet: ${data.data.walletAddress.slice(0, 10)}...)`);
+      pass(
+        `Create test agent (wallet: ${data.data.walletAddress.slice(0, 10)}...)`,
+      );
     } else {
       fail("Create test agent", `${data.error || JSON.stringify(data)}`);
       return false;
@@ -235,8 +247,15 @@ async function testCloudProvisioning() {
       policies,
       tenantHeaders(),
     );
-    if (status === 200 && data.ok && Array.isArray(data.data) && data.data.length === 3) {
-      pass("Set agent policies (spending-limit, approved-addresses, rate-limit)");
+    if (
+      status === 200 &&
+      data.ok &&
+      Array.isArray(data.data) &&
+      data.data.length === 3
+    ) {
+      pass(
+        "Set agent policies (spending-limit, approved-addresses, rate-limit)",
+      );
     } else {
       fail("Set agent policies", `${data.error || JSON.stringify(data)}`);
     }
@@ -255,7 +274,10 @@ async function testCloudProvisioning() {
     if (status === 200 && data.ok && data.data?.length === 3) {
       pass("Get agent policies (3 policies confirmed)");
     } else {
-      fail("Get agent policies", `Expected 3 policies, got: ${JSON.stringify(data)}`);
+      fail(
+        "Get agent policies",
+        `Expected 3 policies, got: ${JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Get agent policies", e.message);
@@ -293,10 +315,15 @@ async function testWalletOperations() {
 
   // 2a. Check wallet balance (native)
   try {
-    const { status, data } = await api("GET", `/agents/${AGENT_ID}/balance`, undefined, {
-      ...tenantHeaders(),
-      ...agentHeaders(),
-    });
+    const { status, data } = await api(
+      "GET",
+      `/agents/${AGENT_ID}/balance`,
+      undefined,
+      {
+        ...tenantHeaders(),
+        ...agentHeaders(),
+      },
+    );
     if (status === 200 && data.ok && data.data?.walletAddress) {
       pass(
         `Check native balance (${data.data.balances?.nativeFormatted || "0"} ${data.data.balances?.symbol || "ETH"})`,
@@ -310,15 +337,23 @@ async function testWalletOperations() {
 
   // 2b. Check ERC-20 token balances
   try {
-    const { status, data } = await api("GET", `/agents/${AGENT_ID}/tokens`, undefined, {
-      ...tenantHeaders(),
-      ...agentHeaders(),
-    });
+    const { status, data } = await api(
+      "GET",
+      `/agents/${AGENT_ID}/tokens`,
+      undefined,
+      {
+        ...tenantHeaders(),
+        ...agentHeaders(),
+      },
+    );
     if (status === 200 && data.ok && data.data?.walletAddress) {
       const tokenCount = data.data.tokens?.length ?? 0;
       pass(`Check ERC-20 token balances (${tokenCount} tokens)`);
     } else {
-      fail("Check ERC-20 token balances", `${data.error || JSON.stringify(data)}`);
+      fail(
+        "Check ERC-20 token balances",
+        `${data.error || JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Check ERC-20 token balances", e.message);
@@ -326,15 +361,25 @@ async function testWalletOperations() {
 
   // 2c. Get wallet addresses (multi-chain)
   try {
-    const { status, data } = await api("GET", `/vault/${AGENT_ID}/addresses`, undefined, {
-      ...tenantHeaders(),
-      ...agentHeaders(),
-    });
+    const { status, data } = await api(
+      "GET",
+      `/vault/${AGENT_ID}/addresses`,
+      undefined,
+      {
+        ...tenantHeaders(),
+        ...agentHeaders(),
+      },
+    );
     if (status === 200 && data.ok && Array.isArray(data.data?.addresses)) {
-      const chains = data.data.addresses.map((a: any) => a.chainFamily).join(", ");
+      const chains = data.data.addresses
+        .map((a: any) => a.chainFamily)
+        .join(", ");
       pass(`Get multi-chain addresses (${chains})`);
     } else {
-      fail("Get multi-chain addresses", `${data.error || JSON.stringify(data)}`);
+      fail(
+        "Get multi-chain addresses",
+        `${data.error || JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Get multi-chain addresses", e.message);
@@ -420,7 +465,10 @@ async function testWalletOperations() {
       pass(`Rate limit triggered after ${attempts} attempts`);
     } else {
       // Rate limiting might not work if Redis is down
-      skip("Rate limit enforcement", "Redis may not be available — sent 8 requests without 429");
+      skip(
+        "Rate limit enforcement",
+        "Redis may not be available — sent 8 requests without 429",
+      );
     }
   } catch (e: any) {
     fail("Rate limit enforcement", e.message);
@@ -428,10 +476,15 @@ async function testWalletOperations() {
 
   // 2g. Transaction history
   try {
-    const { status, data } = await api("GET", `/vault/${AGENT_ID}/history`, undefined, {
-      ...tenantHeaders(),
-      ...agentHeaders(),
-    });
+    const { status, data } = await api(
+      "GET",
+      `/vault/${AGENT_ID}/history`,
+      undefined,
+      {
+        ...tenantHeaders(),
+        ...agentHeaders(),
+      },
+    );
     if (status === 200 && data.ok && Array.isArray(data.data)) {
       pass(`Transaction history (${data.data.length} entries)`);
     } else {
@@ -465,7 +518,10 @@ async function testSecretManagement() {
       secretId = data.data.id;
       pass(`Create test secret (id: ${secretId.slice(0, 8)}...)`);
     } else {
-      fail("Create test secret", `status=${status}: ${data.error || JSON.stringify(data)}`);
+      fail(
+        "Create test secret",
+        `status=${status}: ${data.error || JSON.stringify(data)}`,
+      );
       return;
     }
   } catch (e: any) {
@@ -475,7 +531,12 @@ async function testSecretManagement() {
 
   // 3b. List secrets
   try {
-    const { status, data } = await api("GET", "/secrets", undefined, tenantHeaders());
+    const { status, data } = await api(
+      "GET",
+      "/secrets",
+      undefined,
+      tenantHeaders(),
+    );
     if (status === 200 && data.ok && Array.isArray(data.data)) {
       const found = data.data.some((s: any) => s.id === secretId);
       if (found) {
@@ -492,8 +553,17 @@ async function testSecretManagement() {
 
   // 3c. Get secret by ID
   try {
-    const { status, data } = await api("GET", `/secrets/${secretId}`, undefined, tenantHeaders());
-    if (status === 200 && data.ok && data.data?.name === `${TEST_PREFIX}-openai-key`) {
+    const { status, data } = await api(
+      "GET",
+      `/secrets/${secretId}`,
+      undefined,
+      tenantHeaders(),
+    );
+    if (
+      status === 200 &&
+      data.ok &&
+      data.data?.name === `${TEST_PREFIX}-openai-key`
+    ) {
       pass("Get secret by ID (metadata only, no value)");
     } else {
       fail("Get secret by ID", `${data.error || JSON.stringify(data)}`);
@@ -524,7 +594,10 @@ async function testSecretManagement() {
       routeId = data.data.id;
       pass(`Create credential route (id: ${routeId.slice(0, 8)}...)`);
     } else {
-      fail("Create credential route", `status=${status}: ${data.error || JSON.stringify(data)}`);
+      fail(
+        "Create credential route",
+        `status=${status}: ${data.error || JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Create credential route", e.message);
@@ -532,11 +605,18 @@ async function testSecretManagement() {
 
   // 3e. List routes
   try {
-    const { status, data } = await api("GET", "/secrets/routes", undefined, tenantHeaders());
+    const { status, data } = await api(
+      "GET",
+      "/secrets/routes",
+      undefined,
+      tenantHeaders(),
+    );
     if (status === 200 && data.ok && Array.isArray(data.data)) {
       const found = data.data.some((r: any) => r.id === routeId);
       if (found) {
-        pass(`List credential routes (found test route among ${data.data.length})`);
+        pass(
+          `List credential routes (found test route among ${data.data.length})`,
+        );
       } else {
         fail("List credential routes", "Test route not found in list");
       }
@@ -560,9 +640,14 @@ async function testSecretManagement() {
       const oldId = secretId.slice(0, 8);
       secretId = data.data.id; // Update to new version's ID
       const newVersion = data.data.version ?? "unknown";
-      pass(`Rotate secret (v${newVersion}, old: ${oldId}... → new: ${secretId.slice(0, 8)}...)`);
+      pass(
+        `Rotate secret (v${newVersion}, old: ${oldId}... → new: ${secretId.slice(0, 8)}...)`,
+      );
     } else {
-      fail("Rotate secret", `status=${status}: ${data.error || JSON.stringify(data)}`);
+      fail(
+        "Rotate secret",
+        `status=${status}: ${data.error || JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Rotate secret", e.message);
@@ -570,7 +655,12 @@ async function testSecretManagement() {
 
   // 3g. Verify new version is accessible by its new ID
   try {
-    const { status, data } = await api("GET", `/secrets/${secretId}`, undefined, tenantHeaders());
+    const { status, data } = await api(
+      "GET",
+      `/secrets/${secretId}`,
+      undefined,
+      tenantHeaders(),
+    );
     if (status === 200 && data.ok && data.data?.version === 2) {
       pass("Get rotated secret (version 2 confirmed)");
     } else if (status === 200 && data.ok) {
@@ -586,7 +676,12 @@ async function testSecretManagement() {
   if (routeId && secretId !== oldSecretId) {
     try {
       // Delete old route and create new one pointing to rotated secret
-      await api("DELETE", `/secrets/routes/${routeId}`, undefined, tenantHeaders());
+      await api(
+        "DELETE",
+        `/secrets/routes/${routeId}`,
+        undefined,
+        tenantHeaders(),
+      );
       const { status, data } = await api(
         "POST",
         "/secrets/routes",
@@ -607,7 +702,10 @@ async function testSecretManagement() {
         routeId = data.data.id;
         pass("Update credential route to rotated secret");
       } else {
-        fail("Update credential route", `${data.error || JSON.stringify(data)}`);
+        fail(
+          "Update credential route",
+          `${data.error || JSON.stringify(data)}`,
+        );
       }
     } catch (e: any) {
       fail("Update credential route", e.message);
@@ -627,7 +725,9 @@ async function testProxyOperations() {
     const res = await fetch(`${PROXY_URL}/health`);
     const data = await res.json();
     if (res.status === 200 && data.ok) {
-      pass(`Proxy health check (aliases: ${data.aliases?.join(", ") || "none"})`);
+      pass(
+        `Proxy health check (aliases: ${data.aliases?.join(", ") || "none"})`,
+      );
     } else {
       fail("Proxy health check", `Unexpected: ${JSON.stringify(data)}`);
       return;
@@ -657,17 +757,24 @@ async function testProxyOperations() {
 
     if (res.status === 200) {
       // Real OpenAI response — credential injection worked with a real key!
-      pass("Proxy request with credential injection (OpenAI models — real key!)");
+      pass(
+        "Proxy request with credential injection (OpenAI models — real key!)",
+      );
     } else if (res.status === 401 && errMsg.includes("Incorrect API key")) {
       // OpenAI rejected our fake key — but the FULL FLOW WORKED:
       // JWT auth ✓ → route match ✓ → secret decrypt ✓ → header inject ✓ ��� forward ✓
-      pass("Proxy full flow verified (JWT→decrypt→inject→forward, OpenAI rejected fake key)");
+      pass(
+        "Proxy full flow verified (JWT→decrypt→inject→forward, OpenAI rejected fake key)",
+      );
     } else if (res.status === 403) {
       // No matching credential route — proxy authenticated JWT but no route for this tenant
       pass(`Proxy authenticated agent JWT, no route match (403)`);
     } else if (res.status === 401) {
       // JWT itself was rejected by the proxy
-      fail("Proxy JWT auth", `Agent JWT rejected by proxy: ${errMsg.slice(0, 80)}`);
+      fail(
+        "Proxy JWT auth",
+        `Agent JWT rejected by proxy: ${errMsg.slice(0, 80)}`,
+      );
     } else if (res.status === 429) {
       pass("Proxy request (rate limited — Redis enforcement working)");
     } else if (res.status === 502) {
@@ -686,7 +793,10 @@ async function testProxyOperations() {
     if (res.status === 401) {
       pass("Proxy rejects unauthenticated request (401)");
     } else {
-      fail("Proxy auth enforcement", `Expected 401, got ${res.status}: ${JSON.stringify(data)}`);
+      fail(
+        "Proxy auth enforcement",
+        `Expected 401, got ${res.status}: ${JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Proxy auth enforcement", e.message);
@@ -741,12 +851,17 @@ async function testRedisEnforcement() {
       res.headers.get("Retry-After");
 
     if (rateLimitRemaining !== null) {
-      pass(`Rate limit headers present (remaining/retry-after: ${rateLimitRemaining})`);
+      pass(
+        `Rate limit headers present (remaining/retry-after: ${rateLimitRemaining})`,
+      );
     } else if (res.status === 429) {
       const retryAfter = res.headers.get("Retry-After");
       pass(`Rate limit enforced (429, Retry-After: ${retryAfter})`);
     } else {
-      skip("Rate limit headers", "No rate limit headers — Redis may not be available");
+      skip(
+        "Rate limit headers",
+        "No rate limit headers — Redis may not be available",
+      );
     }
   } catch (e: any) {
     fail("Rate limit headers", e.message);
@@ -777,7 +892,9 @@ async function testRedisEnforcement() {
         pass("Rate limit enforcement active (429)");
       }
     } else {
-      pass(`Vault sign request (status ${res.status} — rate limit may have reset)`);
+      pass(
+        `Vault sign request (status ${res.status} — rate limit may have reset)`,
+      );
     }
   } catch (e: any) {
     fail("Rate limit state verification", e.message);
@@ -803,7 +920,10 @@ async function testCleanup() {
       if (status === 200 && data.ok) {
         pass("Delete credential route");
       } else {
-        fail("Delete credential route", `${data.error || JSON.stringify(data)}`);
+        fail(
+          "Delete credential route",
+          `${data.error || JSON.stringify(data)}`,
+        );
       }
     } catch (e: any) {
       fail("Delete credential route", e.message);
@@ -831,7 +951,12 @@ async function testCleanup() {
 
   // 6c. Delete test agent (cascading — should remove wallets, policies, transactions)
   try {
-    const { status, data } = await api("DELETE", `/agents/${AGENT_ID}`, undefined, tenantHeaders());
+    const { status, data } = await api(
+      "DELETE",
+      `/agents/${AGENT_ID}`,
+      undefined,
+      tenantHeaders(),
+    );
     if (status === 200 && data.ok) {
       pass("Delete test agent (cascade)");
     } else {
@@ -843,11 +968,19 @@ async function testCleanup() {
 
   // 6d. Verify agent is gone
   try {
-    const { status, data } = await api("GET", `/agents/${AGENT_ID}`, undefined, tenantHeaders());
+    const { status, data } = await api(
+      "GET",
+      `/agents/${AGENT_ID}`,
+      undefined,
+      tenantHeaders(),
+    );
     if (status === 404) {
       pass("Verify agent deleted (404)");
     } else {
-      fail("Verify agent deleted", `Expected 404, got ${status}: ${JSON.stringify(data)}`);
+      fail(
+        "Verify agent deleted",
+        `Expected 404, got ${status}: ${JSON.stringify(data)}`,
+      );
     }
   } catch (e: any) {
     fail("Verify agent deleted", e.message);
@@ -862,9 +995,14 @@ async function testCleanup() {
   );
   if (platformKey) {
     try {
-      const { status, data } = await api("DELETE", `/platform/tenants/${TENANT_ID}`, undefined, {
-        "X-Steward-Platform-Key": platformKey,
-      });
+      const { status, data } = await api(
+        "DELETE",
+        `/platform/tenants/${TENANT_ID}`,
+        undefined,
+        {
+          "X-Steward-Platform-Key": platformKey,
+        },
+      );
       if (status === 200 && data.ok) {
         pass("Delete test tenant (via platform API)");
       } else {

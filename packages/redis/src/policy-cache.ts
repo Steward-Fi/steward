@@ -75,7 +75,10 @@ export async function setCachedPolicies(
  * Invalidate cached policies for an agent.
  * Called on policy CRUD operations to ensure fresh data.
  */
-export async function invalidateCache(agentId: string, tenantId?: string): Promise<void> {
+export async function invalidateCache(
+  agentId: string,
+  tenantId?: string,
+): Promise<void> {
   const redis = getRedis();
 
   if (tenantId) {

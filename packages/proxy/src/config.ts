@@ -16,7 +16,10 @@ export const DEFAULT_ALIASES: Record<string, string> = {
 };
 
 /** Default port for the proxy server */
-export const PROXY_PORT = parseInt(process.env.STEWARD_PROXY_PORT || "8080", 10);
+export const PROXY_PORT = parseInt(
+  process.env.STEWARD_PROXY_PORT || "8080",
+  10,
+);
 
 /** Required JWT scope for proxy access */
 export const PROXY_SCOPE = "api:proxy";

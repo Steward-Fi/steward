@@ -76,13 +76,19 @@ function loadJsonConfig(path: string): Partial<TraderConfig> {
 }
 
 export function loadConfig(): TraderConfig {
-  const configPath = resolve(process.env.CONFIG_PATH ?? "agent-trader.config.json");
+  const configPath = resolve(
+    process.env.CONFIG_PATH ?? "agent-trader.config.json",
+  );
   const file = loadJsonConfig(configPath);
 
   // Merge: file takes precedence, env vars override the connection block
   const steward: StewardConnection = {
-    apiUrl: process.env.STEWARD_API_URL ?? file.steward?.apiUrl ?? "http://localhost:3000",
-    tenantId: process.env.STEWARD_TENANT_ID ?? file.steward?.tenantId ?? "default",
+    apiUrl:
+      process.env.STEWARD_API_URL ??
+      file.steward?.apiUrl ??
+      "http://localhost:3000",
+    tenantId:
+      process.env.STEWARD_TENANT_ID ?? file.steward?.tenantId ?? "default",
     apiKey: process.env.STEWARD_API_KEY ?? file.steward?.apiKey ?? "",
   };
 
@@ -91,7 +97,9 @@ export function loadConfig(): TraderConfig {
     ...file,
     steward,
     webhookPort: Number(
-      process.env.WEBHOOK_PORT ?? file.webhookPort ?? CONFIG_DEFAULTS.webhookPort,
+      process.env.WEBHOOK_PORT ??
+        file.webhookPort ??
+        CONFIG_DEFAULTS.webhookPort,
     ),
     dryRun:
       process.env.DRY_RUN === "true"
@@ -119,16 +127,25 @@ function validate(config: TraderConfig): void {
       throw new Error("Config error: each agent must have an agentId");
     }
     if (!agent.tokenAddress) {
-      throw new Error(`Config error: agent "${agent.agentId}" is missing tokenAddress`);
+      throw new Error(
+        `Config error: agent "${agent.agentId}" is missing tokenAddress`,
+      );
     }
-    const validStrategies: StrategyName[] = ["rebalance", "dca", "threshold", "manual"];
+    const validStrategies: StrategyName[] = [
+      "rebalance",
+      "dca",
+      "threshold",
+      "manual",
+    ];
     if (!validStrategies.includes(agent.strategy)) {
       throw new Error(
         `Config error: agent "${agent.agentId}" has unknown strategy "${agent.strategy}"`,
       );
     }
     if (!agent.intervalSeconds || agent.intervalSeconds < 10) {
-      throw new Error(`Config error: agent "${agent.agentId}" intervalSeconds must be ≥ 10`);
+      throw new Error(
+        `Config error: agent "${agent.agentId}" intervalSeconds must be ≥ 10`,
+      );
     }
   }
 }

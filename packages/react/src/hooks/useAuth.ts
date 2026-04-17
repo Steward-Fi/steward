@@ -12,7 +12,9 @@ import type { StewardAuthContextValue } from "../types.js";
 export function useAuth(): StewardAuthContextValue {
   const ctx = useContext(StewardAuthContext);
   if (!ctx) {
-    throw new Error("useAuth must be used within a <StewardProvider> with an `auth` prop.");
+    throw new Error(
+      "useAuth must be used within a <StewardProvider> with an `auth` prop.",
+    );
   }
   return ctx;
 }

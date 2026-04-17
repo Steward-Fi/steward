@@ -127,7 +127,11 @@ export function StewardEmailCallback({
   return (
     <div className="stwd-callback stwd-callback__error">
       <p className="stwd-error-text">{errorMsg ?? "Verification failed."}</p>
-      <button className="stwd-btn stwd-btn-secondary" onClick={handleRetry} type="button">
+      <button
+        className="stwd-btn stwd-btn-secondary"
+        onClick={handleRetry}
+        type="button"
+      >
         Retry
       </button>
     </div>
