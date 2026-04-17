@@ -182,14 +182,10 @@ app.get("/ready", async (c) => {
   }
 
   // 3. Vault initialized (master password present and usable)
-  try {
-    if (!process.env.STEWARD_MASTER_PASSWORD) {
-      checks.vault = { ok: false, error: "STEWARD_MASTER_PASSWORD not set" };
-    } else {
-      checks.vault = { ok: true };
-    }
-  } catch (err: unknown) {
-    checks.vault = { ok: false, error: err instanceof Error ? err.message : "unknown" };
+  if (!process.env.STEWARD_MASTER_PASSWORD) {
+    checks.vault = { ok: false, error: "STEWARD_MASTER_PASSWORD not set" };
+  } else {
+    checks.vault = { ok: true };
   }
 
   const allOk = Object.values(checks).every((c) => c.ok);

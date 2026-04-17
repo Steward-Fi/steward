@@ -111,13 +111,7 @@ export class WaifuBridge {
     );
 
     // Create the Steward wallet
-    let agent: AgentIdentity;
-    try {
-      agent = await this.vault.createAgent(this.tenantId, waifuAgentId, name, platformId);
-    } catch (err) {
-      console.error(`[WaifuBridge] Failed to create agent "${waifuAgentId}":`, err);
-      throw err;
-    }
+    const agent = await this.vault.createAgent(this.tenantId, waifuAgentId, name, platformId);
 
     console.log(`[WaifuBridge] Agent "${waifuAgentId}" created — wallet ${agent.walletAddress}`);
 
@@ -176,25 +170,17 @@ export class WaifuBridge {
 
     const resolvedChainId = chainId ?? WAIFU_CHAIN_ID;
 
-    try {
-      const balance = await this.vault.getBalance(this.tenantId, agentId, resolvedChainId);
+    const balance = await this.vault.getBalance(this.tenantId, agentId, resolvedChainId);
 
-      return {
-        agentId,
-        walletAddress: balance.walletAddress,
-        balances: {
-          native: balance.native.toString(),
-          nativeFormatted: balance.nativeFormatted,
-          chainId: balance.chainId,
-          symbol: balance.symbol,
-        },
-      };
-    } catch (err) {
-      console.error(
-        `[WaifuBridge] Failed to sync balance for agent "${agentId}" on chain ${resolvedChainId}:`,
-        err,
-      );
-      throw err;
-    }
+    return {
+      agentId,
+      walletAddress: balance.walletAddress,
+      balances: {
+        native: balance.native.toString(),
+        nativeFormatted: balance.nativeFormatted,
+        chainId: balance.chainId,
+        symbol: balance.symbol,
+      },
+    };
   }
 }
