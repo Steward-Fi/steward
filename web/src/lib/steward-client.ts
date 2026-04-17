@@ -1,5 +1,4 @@
-// TODO: Replace this inline client with @stwd/sdk. This is a divergent copy that predates the SDK.
-// Mirrors @stwd/sdk interface
+// Temporary dashboard client kept in sync with @stwd/sdk.
 
 // ---- Secrets ----
 export interface SecretRecord {

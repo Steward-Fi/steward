@@ -1,9 +1,6 @@
 /**
- * ERC-8004 Identity Registry client.
- *
- * Handles agent card creation and on-chain registration.
- * Current implementation is stubbed — contract calls will replace the mocks
- * once the registry contract is deployed.
+ * ERC-8004 identity registry client.
+ * Uses mock data until the registry contract is deployed.
  */
 
 import type { AgentCard, RegistrationResult, RegistryConfig } from "./types";
@@ -15,7 +12,7 @@ export class IdentityRegistryClient {
     this.config = config;
   }
 
-  /** Build a well-formed AgentCard from partial inputs. */
+  /** Build an AgentCard from partial inputs. */
   buildAgentCard(params: {
     name: string;
     description: string;
@@ -35,14 +32,9 @@ export class IdentityRegistryClient {
   }
 
   /**
-   * Register an agent on-chain.
-   *
-   * TODO: Replace stub with actual contract interaction (ethers/viem).
-   * The flow will be: upload AgentCard JSON to IPFS, call registry.register(tokenURI),
-   * then return the minted token ID and tx hash.
+   * Return mock registration data until the registry contract is live.
    */
   async register(_agentCard: AgentCard, _privateKey?: string): Promise<RegistrationResult> {
-    // TODO: Implement actual on-chain registration
     const mockTokenId = `0x${Date.now().toString(16)}`;
     return {
       tokenId: mockTokenId,
@@ -53,13 +45,8 @@ export class IdentityRegistryClient {
     };
   }
 
-  /**
-   * Look up an existing registration by token ID.
-   *
-   * TODO: Replace stub with registry.tokenURI(tokenId) call + JSON fetch.
-   */
+  /** Return null until on-chain lookups are implemented. */
   async getRegistration(_tokenId: string): Promise<AgentCard | null> {
-    // TODO: Implement actual on-chain lookup
     return null;
   }
 }

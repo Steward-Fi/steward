@@ -97,16 +97,10 @@ export class SessionManager {
 
   /**
    * Invalidate a session token.
-   *
-   * Note: because JWTs are stateless, true server-side invalidation requires a
-   * blocklist (e.g. Redis set of revoked `jti` values). This default
-   * implementation is a no-op placeholder — wire up a real blocklist for
-   * production use.
+   * JWT revocation needs a server-side blocklist, so this default implementation is a no-op.
    *
    * @param _token  The token to invalidate
    */
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async invalidateSession(_token: string): Promise<void> {
-    // TODO: persist token `jti` to a blocklist (Redis / DB) and check it in verifySession
-  }
+  async invalidateSession(_token: string): Promise<void> {}
 }

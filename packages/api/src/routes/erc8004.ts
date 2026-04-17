@@ -117,7 +117,7 @@ erc8004Routes.get("/:id/onchain", async (c) => {
 });
 
 // ─── POST /agents/:id/feedback ────────────────────────────────────────────────
-// Submit a feedback signal for an agent. Saves to reputation_cache for now.
+// Persist feedback in reputation_cache until on-chain writes are wired up.
 
 erc8004Routes.post("/:id/feedback", async (c) => {
   const tenantId = c.get("tenantId");
