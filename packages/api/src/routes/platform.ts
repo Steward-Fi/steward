@@ -17,6 +17,7 @@ import {
   getDb,
   isPersistedPolicyType,
   policies,
+  tenantConfigs,
   tenants,
   toPersistedPolicyRule,
   transactions,
@@ -24,10 +25,11 @@ import {
   userTenants,
 } from "@stwd/db";
 import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/shared";
-import { Vault } from "@stwd/vault";
+import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { createAgentToken } from "../services/context";
+import { invalidateEmailAuthForTenant } from "./auth";
 
 // ─── Vault singleton ──────────────────────────────────────────────────────────
 // Platform routes share the same vault as the main API.
@@ -57,6 +59,24 @@ function vault(): Vault {
   return _vault;
 }
 
+let _platformKeyStore: KeyStore | undefined;
+function platformKeyStore(): KeyStore {
+  if (_platformKeyStore) return _platformKeyStore;
+
+  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  if (!masterPassword) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("⛔ STEWARD_MASTER_PASSWORD must be set in production");
+    }
+    console.warn(
+      "⚠️  [DEV ONLY] Using insecure 'dev-secret' as vault master password. Set STEWARD_MASTER_PASSWORD before going to production!",
+    );
+  }
+
+  _platformKeyStore = new KeyStore(masterPassword || "dev-secret");
+  return _platformKeyStore;
+}
+
 // ─── Validation helpers ───────────────────────────────────────────────────────
 
 const AGENT_ID_RE = /^[a-zA-Z0-9_\-.:]{1,128}$/;
@@ -72,6 +92,19 @@ function isValidTenantId(id: unknown): id is string {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+  return value === undefined || isNonEmptyString(value);
+}
+
+async function getTenantOr404(tenantId: string) {
+  const db = getDb();
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  return tenant ?? null;
 }
 
 async function safeJsonParse<T>(c: { req: { json: <X>() => Promise<X> } }): Promise<T | null> {
@@ -265,6 +298,189 @@ platform.get("/tenants/:id", async (c) => {
     ok: true,
     data: { ...tenant, agentCount: agentCount ?? 0 },
   });
+});
+
+/**
+ * PATCH /tenants/:tenantId/email-config
+ * Body: { apiKey, from, replyTo?, templateId?, subjectOverride? }
+ *
+ * Upserts the tenant-specific email provider config.
+ */
+platform.patch("/tenants/:tenantId/email-config", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("tenantId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  if (!(await getTenantOr404(tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    apiKey: string;
+    from: string;
+    replyTo?: string;
+    templateId?: string;
+    subjectOverride?: string;
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isNonEmptyString(body.apiKey) || !isNonEmptyString(body.from)) {
+    return c.json<ApiResponse>({ ok: false, error: "apiKey and from are required" }, 400);
+  }
+
+  if (
+    !isOptionalString(body.replyTo) ||
+    !isOptionalString(body.templateId) ||
+    !isOptionalString(body.subjectOverride)
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "replyTo, templateId, and subjectOverride must be non-empty strings" },
+      400,
+    );
+  }
+
+  const encryptedApiKey = JSON.stringify(platformKeyStore().encrypt(body.apiKey.trim()));
+  const emailConfig = {
+    provider: "resend" as const,
+    apiKeyEncrypted: encryptedApiKey,
+    from: body.from.trim(),
+    ...(body.replyTo ? { replyTo: body.replyTo.trim() } : {}),
+    ...(body.templateId ? { templateId: body.templateId.trim() } : {}),
+    ...(body.subjectOverride ? { subjectOverride: body.subjectOverride.trim() } : {}),
+  };
+
+  const [existingConfig] = await db
+    .select({ tenantId: tenantConfigs.tenantId })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  if (existingConfig) {
+    await db
+      .update(tenantConfigs)
+      .set({ emailConfig, updatedAt: new Date() })
+      .where(eq(tenantConfigs.tenantId, tenantId));
+  } else {
+    await db.insert(tenantConfigs).values({
+      tenantId,
+      emailConfig,
+    });
+  }
+
+  invalidateEmailAuthForTenant(tenantId);
+
+  return c.json<
+    ApiResponse<{
+      provider: "resend";
+      from: string;
+      replyTo?: string;
+      templateId?: string;
+      subjectOverride?: string;
+      hasApiKey: true;
+    }>
+  >({
+    ok: true,
+    data: {
+      provider: "resend",
+      from: emailConfig.from,
+      replyTo: emailConfig.replyTo,
+      templateId: emailConfig.templateId,
+      subjectOverride: emailConfig.subjectOverride,
+      hasApiKey: true,
+    },
+  });
+});
+
+/**
+ * GET /tenants/:tenantId/email-config
+ * Returns the tenant-specific email config without exposing the encrypted API key.
+ */
+platform.get("/tenants/:tenantId/email-config", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("tenantId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  if (!(await getTenantOr404(tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const [row] = await db
+    .select({ emailConfig: tenantConfigs.emailConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  const emailConfig = row?.emailConfig;
+
+  return c.json<
+    ApiResponse<{
+      emailConfig: {
+        provider: "resend";
+        from: string;
+        replyTo?: string;
+        templateId?: string;
+        subjectOverride?: string;
+      } | null;
+      hasApiKey: boolean;
+    }>
+  >({
+    ok: true,
+    data: emailConfig
+      ? {
+          emailConfig: {
+            provider: emailConfig.provider,
+            from: emailConfig.from,
+            replyTo: emailConfig.replyTo,
+            templateId: emailConfig.templateId,
+            subjectOverride: emailConfig.subjectOverride,
+          },
+          hasApiKey: Boolean(emailConfig.apiKeyEncrypted),
+        }
+      : {
+          emailConfig: null,
+          hasApiKey: false,
+        },
+  });
+});
+
+/**
+ * DELETE /tenants/:tenantId/email-config
+ * Clears the tenant-specific email config.
+ */
+platform.delete("/tenants/:tenantId/email-config", async (c) => {
+  const db = getDb();
+  const tenantId = c.req.param("tenantId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  if (!(await getTenantOr404(tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const [existingConfig] = await db
+    .select({ tenantId: tenantConfigs.tenantId })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  if (existingConfig) {
+    await db
+      .update(tenantConfigs)
+      .set({ emailConfig: null, updatedAt: new Date() })
+      .where(eq(tenantConfigs.tenantId, tenantId));
+  }
+
+  invalidateEmailAuthForTenant(tenantId);
+
+  return c.json<ApiResponse>({ ok: true });
 });
 
 /**
