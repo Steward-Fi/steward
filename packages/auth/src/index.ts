@@ -1,6 +1,7 @@
 export * from "./api-keys";
 export * from "./challenge-store";
 export * from "./email";
+export * from "./email-templates";
 export * from "./email-provider";
 export * from "./middleware";
 export * from "./oauth";

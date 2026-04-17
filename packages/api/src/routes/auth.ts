@@ -54,13 +54,14 @@ import {
   authenticators,
   getDb,
   refreshTokens,
+  type TenantEmailConfig,
   tenantConfigs,
   tenants,
   users,
   userTenants,
 } from "@stwd/db";
 import type { ApiResponse } from "@stwd/shared";
-import { provisionUserWallet, Vault } from "@stwd/vault";
+import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { jwtVerify, SignJWT } from "jose";
@@ -294,7 +295,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   // Reset singletons so they pick up the new stores on next use
   _passkeyAuth = null;
   _passkeyAuthByOrigin.clear();
-  _emailAuth = null;
+  _emailAuthByTenant.clear();
 }
 
 function getChallengeStore(): ChallengeStore {
@@ -371,27 +372,125 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   return auth;
 }
 
-// ─── EmailAuth singleton ──────────────────────────────────────────────────────
+// ─── EmailAuth cache ──────────────────────────────────────────────────────────
 
-let _emailAuth: EmailAuth | null = null;
+const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
+let _emailKeyStore: KeyStore | null = null;
 
-function getEmailAuth(): EmailAuth {
-  if (!_emailAuth) {
-    const resendKey = process.env.RESEND_API_KEY;
-    const provider = resendKey
+function getEmailKeyStore(): KeyStore {
+  if (_emailKeyStore) return _emailKeyStore;
+
+  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  if (!masterPassword) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("STEWARD_MASTER_PASSWORD is required");
+    }
+    _emailKeyStore = new KeyStore("dev-secret");
+    return _emailKeyStore;
+  }
+
+  _emailKeyStore = new KeyStore(masterPassword);
+  return _emailKeyStore;
+}
+
+function buildGlobalEmailAuth(): EmailAuth {
+  const resendKey = process.env.RESEND_API_KEY;
+  const provider = resendKey
+    ? new ResendProvider({
+        apiKey: resendKey,
+        from: process.env.EMAIL_FROM || "login@steward.fi",
+      })
+    : undefined;
+
+  return new EmailAuth({
+    from: process.env.EMAIL_FROM || "login@steward.fi",
+    baseUrl: process.env.APP_URL || "https://steward.fi",
+    provider,
+    tokenStore: getTokenStore(),
+  });
+}
+
+function parseEncryptedEmailApiKey(value: string): {
+  ciphertext: string;
+  iv: string;
+  tag: string;
+  salt: string;
+} {
+  const parsed = JSON.parse(value) as Partial<{
+    ciphertext: string;
+    iv: string;
+    tag: string;
+    salt: string;
+  }>;
+
+  if (!parsed.ciphertext || !parsed.iv || !parsed.tag || !parsed.salt) {
+    throw new Error("Invalid tenant email config encryption payload");
+  }
+
+  return {
+    ciphertext: parsed.ciphertext,
+    iv: parsed.iv,
+    tag: parsed.tag,
+    salt: parsed.salt,
+  };
+}
+
+async function loadTenantEmailConfig(tenantId: string): Promise<TenantEmailConfig | null> {
+  const db = getDb();
+  const [row] = await db
+    .select({ emailConfig: tenantConfigs.emailConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  return row?.emailConfig ?? null;
+}
+
+async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
+  const emailConfig = await loadTenantEmailConfig(tenantId);
+  if (!emailConfig) {
+    return buildGlobalEmailAuth();
+  }
+
+  const provider =
+    emailConfig.provider === "resend"
       ? new ResendProvider({
-          apiKey: resendKey,
-          from: process.env.EMAIL_FROM || "login@steward.fi",
+          apiKey: getEmailKeyStore().decrypt(
+            parseEncryptedEmailApiKey(emailConfig.apiKeyEncrypted),
+          ),
+          from: emailConfig.from,
+          replyTo: emailConfig.replyTo,
         })
       : undefined;
-    _emailAuth = new EmailAuth({
-      from: process.env.EMAIL_FROM || "login@steward.fi",
-      baseUrl: process.env.APP_URL || "https://steward.fi",
-      provider,
-      tokenStore: getTokenStore(),
-    });
-  }
-  return _emailAuth;
+
+  return new EmailAuth({
+    from: emailConfig.from,
+    baseUrl: process.env.APP_URL || "https://steward.fi",
+    provider,
+    tokenStore: getTokenStore(),
+    templateId: emailConfig.templateId,
+    subjectOverride: emailConfig.subjectOverride,
+    replyTo: emailConfig.replyTo,
+  });
+}
+
+export async function getEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
+  const cached = _emailAuthByTenant.get(tenantId);
+  if (cached) return cached;
+
+  const pending = createEmailAuthForTenant(tenantId).catch((error) => {
+    _emailAuthByTenant.delete(tenantId);
+    throw error;
+  });
+  _emailAuthByTenant.set(tenantId, pending);
+  return pending;
+}
+
+export function invalidateEmailAuthForTenant(tenantId: string): void {
+  _emailAuthByTenant.delete(tenantId);
+}
+
+export function clearEmailAuthTenantCacheForTests(): void {
+  _emailAuthByTenant.clear();
 }
 
 // ─── Vault helper ─────────────────────────────────────────────────────────────
@@ -1188,7 +1287,7 @@ auth.post("/passkey/login/verify", async (c) => {
 
 /**
  * POST /email/send
- * Body: { email }
+ * Body: { email, tenantId? }
  * Sends a magic link email, returns expiry time.
  */
 auth.post("/email/send", async (c) => {
@@ -1199,13 +1298,15 @@ auth.post("/email/send", async (c) => {
       429,
     );
   }
-  const body = await safeJsonParse<{ email: string }>(c);
+  const body = await safeJsonParse<{ email: string; tenantId?: string }>(c);
   if (!body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
   }
 
   const email = body.email.toLowerCase().trim();
-  const { expiresAt } = await getEmailAuth().sendMagicLink(email);
+  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const { expiresAt } = await emailAuth.sendMagicLink(email);
 
   return c.json<ApiResponse<{ expiresAt: string }>>({
     ok: true,
@@ -1232,7 +1333,8 @@ auth.get("/callback/email", async (c) => {
 
   let result: Awaited<ReturnType<EmailAuth["verifyMagicLink"]>>;
   try {
-    result = await getEmailAuth().verifyMagicLink(token);
+    const emailAuth = await getEmailAuthForTenant(tenantId || _DEFAULT_TENANT_ID);
+    result = await emailAuth.verifyMagicLink(token);
   } catch {
     return redirectEmailAuthFailure(c, "invalid_link");
   }
@@ -1277,7 +1379,9 @@ auth.post("/email/verify", async (c) => {
   }
 
   const email = body.email.toLowerCase().trim();
-  const result = await getEmailAuth().verifyMagicLink(body.token);
+  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const result = await emailAuth.verifyMagicLink(body.token);
 
   if (!result.valid || result.email.toLowerCase().trim() !== email) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
