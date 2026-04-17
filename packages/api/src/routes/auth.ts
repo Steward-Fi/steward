@@ -34,7 +34,7 @@
  *   3. The JWT's `tenantId` claim is the resolved tenant, not the personal tenant.
  */
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
   buildBackend,
   ChallengeStore,
@@ -42,6 +42,7 @@ import {
   generateApiKey,
   getEnabledProviders,
   getProviderConfig,
+  hashSha256Hex,
   isBuiltInProvider,
   OAuthClient,
   PasskeyAuth,
@@ -176,7 +177,7 @@ export async function createSessionToken(
 // ─── Refresh token helpers ────────────────────────────────────────────────────
 
 function hashToken(raw: string): string {
-  return createHash("sha256").update(raw).digest("hex");
+  return hashSha256Hex(raw);
 }
 
 /**
@@ -589,9 +590,6 @@ async function resolveAndValidateTenant(
     error: `Tenant '${requested}' is not accepting new members`,
   };
 }
-
-/** @deprecated Use resolveAndValidateTenant instead */
-const _resolveTenantForUser = resolveAndValidateTenant;
 
 // ─── User / tenant provisioning helpers ──────────────────────────────────────
 

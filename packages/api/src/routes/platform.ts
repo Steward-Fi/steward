@@ -597,12 +597,7 @@ platform.put("/tenants/:id/policies", async (c) => {
     }
   }
 
-  // Store on tenant row as JSON in a virtual column using a raw SQL update.
-  // The tenants table does not yet have a `default_policies` column — we use
-  // a JSONB side-channel in the name column until Worker 1 adds it.
-  // For now, respond with what was sent so the caller can cache it.
-  // TODO: Once Worker 1 adds `defaultPolicies` to tenants schema, do:
-  //   await db.update(tenants).set({ defaultPolicies: body }).where(...)
+  // Default policies are not persisted yet, so return the validated payload for caller-side caching.
 
   return c.json<ApiResponse<{ tenantId: string; defaultPolicies: PolicyRule[] }>>({
     ok: true,

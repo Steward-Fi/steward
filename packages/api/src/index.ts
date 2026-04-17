@@ -177,19 +177,15 @@ app.get("/ready", async (c) => {
     // A cheap query that exercises the connection without touching app tables
     await db.execute(sql`SELECT 1`);
     checks.database = { ok: true };
-  } catch (err: any) {
-    checks.database = { ok: false, error: err?.message ?? "unknown" };
+  } catch (err: unknown) {
+    checks.database = { ok: false, error: err instanceof Error ? err.message : "unknown" };
   }
 
   // 3. Vault initialized (master password present and usable)
-  try {
-    if (!process.env.STEWARD_MASTER_PASSWORD) {
-      checks.vault = { ok: false, error: "STEWARD_MASTER_PASSWORD not set" };
-    } else {
-      checks.vault = { ok: true };
-    }
-  } catch (err: any) {
-    checks.vault = { ok: false, error: err?.message ?? "unknown" };
+  if (!process.env.STEWARD_MASTER_PASSWORD) {
+    checks.vault = { ok: false, error: "STEWARD_MASTER_PASSWORD not set" };
+  } else {
+    checks.vault = { ok: true };
   }
 
   const allOk = Object.values(checks).every((c) => c.ok);

@@ -1,5 +1,6 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
+import { hashSha256Hex } from "./crypto";
 import type { EmailProvider } from "./email-provider";
 import { ConsoleProvider } from "./email-provider";
 import {
@@ -61,7 +62,7 @@ function generateToken(): string {
 }
 
 function hashToken(token: string): string {
-  return createHash("sha256").update(token).digest("hex");
+  return hashSha256Hex(token);
 }
 
 function buildMagicLink(

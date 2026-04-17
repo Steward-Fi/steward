@@ -21,7 +21,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@stwd/sdk": "^0.7.0"
+    "@stwd/sdk": "^0.7.3"
   },
   "peerDependencies": {
     "react": ">=18.0.0",

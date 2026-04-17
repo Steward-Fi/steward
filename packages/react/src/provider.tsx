@@ -163,17 +163,9 @@ export function StewardProvider({
   const signInWithOAuth = useCallback(
     async (provider: string, config?: { redirectUri?: string; tenantId?: string }) => {
       if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
-      const authAny = authInstance as unknown as Record<string, unknown>;
-      if (typeof authAny.signInWithOAuth !== "function") {
-        throw new Error("StewardAuth.signInWithOAuth not available. Update @stwd/sdk to >=0.6.0");
-      }
       setAuthLoading(true);
       try {
-        const fn = authAny.signInWithOAuth as (
-          p: string,
-          c?: { redirectUri?: string; tenantId?: string },
-        ) => Promise<import("@stwd/sdk").StewardAuthResult>;
-        return await fn(provider, config);
+        return await authInstance.signInWithOAuth(provider, config);
       } finally {
         setAuthLoading(false);
       }
@@ -188,12 +180,10 @@ export function StewardProvider({
 
   useEffect(() => {
     if (!authInstance) return;
-    const inst = authInstance as unknown as Record<string, unknown>;
-    if (typeof inst.getProviders !== "function") return;
-    const fetchProviders = inst.getProviders as () => Promise<StewardProvidersState>;
     let cancelled = false;
     setIsProvidersLoading(true);
-    fetchProviders()
+    authInstance
+      .getProviders()
       .then((result) => {
         if (!cancelled) setProviders(result);
       })
@@ -218,9 +208,8 @@ export function StewardProvider({
   useEffect(() => {
     if (authSession) {
       // Session may carry a tenantId claim; use it as active if no prop override
-      const sessionTenant = (authSession as unknown as Record<string, unknown>).tenantId;
-      if (typeof sessionTenant === "string" && sessionTenant) {
-        setActiveTenantId(sessionTenant);
+      if (authSession.tenantId) {
+        setActiveTenantId(authSession.tenantId);
       } else if (tenantIdProp) {
         setActiveTenantId(tenantIdProp);
       }
@@ -233,14 +222,9 @@ export function StewardProvider({
 
   const listTenants = useCallback(async (): Promise<StewardTenantMembership[]> => {
     if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
-    const inst = authInstance as unknown as Record<string, unknown>;
-    if (typeof inst.listTenants !== "function") {
-      throw new Error("StewardAuth.listTenants not available. Update @stwd/sdk.");
-    }
     setIsTenantsLoading(true);
     try {
-      const fn = inst.listTenants as () => Promise<StewardTenantMembership[]>;
-      const result = await fn();
+      const result = await authInstance.listTenants();
       setTenants(result);
       return result;
     } finally {
@@ -251,14 +235,9 @@ export function StewardProvider({
   const switchTenant = useCallback(
     async (tenantId: string): Promise<boolean> => {
       if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
-      const inst = authInstance as unknown as Record<string, unknown>;
-      if (typeof inst.switchTenant !== "function") {
-        throw new Error("StewardAuth.switchTenant not available. Update @stwd/sdk.");
-      }
       setAuthLoading(true);
       try {
-        const fn = inst.switchTenant as (id: string) => Promise<StewardSession | null>;
-        const session = await fn(tenantId);
+        const session = await authInstance.switchTenant(tenantId);
         if (session) {
           setActiveTenantId(tenantId);
           return true;
@@ -274,12 +253,7 @@ export function StewardProvider({
   const joinTenant = useCallback(
     async (tenantId: string): Promise<StewardTenantMembership> => {
       if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
-      const inst = authInstance as unknown as Record<string, unknown>;
-      if (typeof inst.joinTenant !== "function") {
-        throw new Error("StewardAuth.joinTenant not available. Update @stwd/sdk.");
-      }
-      const fn = inst.joinTenant as (id: string) => Promise<StewardTenantMembership>;
-      const membership = await fn(tenantId);
+      const membership = await authInstance.joinTenant(tenantId);
       // Refresh tenant list after joining
       try {
         await listTenants();
@@ -294,12 +268,7 @@ export function StewardProvider({
   const leaveTenant = useCallback(
     async (tenantId: string): Promise<void> => {
       if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
-      const inst = authInstance as unknown as Record<string, unknown>;
-      if (typeof inst.leaveTenant !== "function") {
-        throw new Error("StewardAuth.leaveTenant not available. Update @stwd/sdk.");
-      }
-      const fn = inst.leaveTenant as (id: string) => Promise<void>;
-      await fn(tenantId);
+      await authInstance.leaveTenant(tenantId);
       // Refresh tenant list after leaving
       try {
         await listTenants();
@@ -313,12 +282,10 @@ export function StewardProvider({
   // Auto-fetch tenants when user authenticates
   useEffect(() => {
     if (!authInstance || !authSession) return;
-    const inst = authInstance as unknown as Record<string, unknown>;
-    if (typeof inst.listTenants !== "function") return;
     let cancelled = false;
     setIsTenantsLoading(true);
-    const fn = inst.listTenants as () => Promise<StewardTenantMembership[]>;
-    fn()
+    authInstance
+      .listTenants()
       .then((result) => {
         if (!cancelled) setTenants(result);
       })
@@ -388,10 +355,9 @@ export function StewardProvider({
 
     async function fetchConfig() {
       try {
-        const res = await fetch(
-          `${(client as unknown as { baseUrl: string }).baseUrl || ""}/tenants/config`,
-          { headers: { Accept: "application/json" } },
-        );
+        const res = await fetch(`${client.getBaseUrl()}/tenants/config`, {
+          headers: { Accept: "application/json" },
+        });
         if (res.ok && !cancelled) {
           const json = await res.json();
           if (json.ok && json.data) {
