@@ -1,7 +1,8 @@
 export interface MagicLinkTemplateData {
   email: string;
-  link: string;
-  tenantId?: string;
+  magicLink: string;
+  tenantName?: string;
+  expiresInMinutes: number;
 }
 
 export interface RenderedMagicLinkTemplate {
@@ -11,14 +12,14 @@ export interface RenderedMagicLinkTemplate {
 }
 
 export function renderDefaultTemplate({
-  link,
+  magicLink,
 }: MagicLinkTemplateData): RenderedMagicLinkTemplate {
   return {
     subject: "Sign in to Steward",
     text: [
       "Click the link below to sign in:",
       "",
-      link,
+      magicLink,
       "",
       "This link expires in 10 minutes.",
       "If you didn't request this, you can safely ignore this email.",
@@ -50,7 +51,7 @@ export function renderDefaultTemplate({
           </table>
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr><td align="center" style="padding-bottom:32px;">
-              <a href="${link}" target="_blank" style="display:inline-block;background-color:#c4873a;color:#0b0a09;font-size:14px;font-weight:600;text-decoration:none;padding:12px 32px;letter-spacing:0.01em;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+              <a href="${magicLink}" target="_blank" style="display:inline-block;background-color:#c4873a;color:#0b0a09;font-size:14px;font-weight:600;text-decoration:none;padding:12px 32px;letter-spacing:0.01em;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
                 Sign in
               </a>
             </td></tr>
@@ -62,7 +63,7 @@ export function renderDefaultTemplate({
                   Or copy this link into your browser:
                 </td></tr>
                 <tr><td style="font-size:11px;color:#9c9788;word-break:break-all;line-height:1.5;padding-top:6px;">
-                  ${link}
+                  ${magicLink}
                 </td></tr>
               </table>
             </td></tr>

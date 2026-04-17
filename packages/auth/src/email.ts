@@ -121,8 +121,13 @@ export class EmailAuth {
     this.tokenStore.store(tokenHash, email, this.tokenTtlMs);
 
     // Build and send the email
-    const link = buildMagicLink(this.baseUrl, this.callbackPath, token, email);
-    const rendered = this.templateRenderer(this.templateId, { email, link });
+    const magicLink = buildMagicLink(this.baseUrl, this.callbackPath, token, email);
+    const rendered = this.templateRenderer(this.templateId, {
+      magicLink,
+      email,
+      expiresInMinutes: Math.floor(this.tokenTtlMs / (60 * 1000)),
+      tenantName: undefined,
+    });
     const subject = this.subjectOverride || rendered.subject;
     const body = rendered.text;
     const html = rendered.html;
