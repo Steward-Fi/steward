@@ -160,6 +160,29 @@ export function StewardProvider({
     [authInstance],
   );
 
+  // Solana sign-in is feature-detected off the SDK instance. Older SDK builds
+  // will simply expose `undefined` here and consumers must gate UI accordingly.
+  const signInWithSolana = useMemo(() => {
+    if (!authInstance) return undefined;
+    const impl = (
+      authInstance as unknown as {
+        signInWithSolana?: (
+          publicKey: string,
+          signMessage: (msg: Uint8Array) => Promise<Uint8Array>,
+        ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+      }
+    ).signInWithSolana;
+    if (typeof impl !== "function") return undefined;
+    return async (publicKey: string, signMessage: (msg: Uint8Array) => Promise<Uint8Array>) => {
+      setAuthLoading(true);
+      try {
+        return await impl.call(authInstance, publicKey, signMessage);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+  }, [authInstance]);
+
   const signInWithOAuth = useCallback(
     async (provider: string, config?: { redirectUri?: string; tenantId?: string }) => {
       if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
@@ -315,6 +338,7 @@ export function StewardProvider({
       signInWithEmail,
       verifyEmailCallback,
       signInWithSIWE,
+      signInWithSolana,
       signInWithOAuth,
       // Multi-tenant
       activeTenantId,
@@ -338,6 +362,7 @@ export function StewardProvider({
     signInWithEmail,
     verifyEmailCallback,
     signInWithSIWE,
+    signInWithSolana,
     signInWithOAuth,
     activeTenantId,
     tenants,
