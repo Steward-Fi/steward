@@ -264,6 +264,46 @@ describe("StewardAuth multi-tenant", () => {
     });
   });
 
+  describe("signInWithSIWE", () => {
+    test("prefers backend userId over tenant.id", async () => {
+      const token = fakeJwt({ address: "0xabc", userId: "user-siwe" });
+      const server = await startStewardServer((request) => {
+        if (request.path === "/auth/nonce") {
+          return { json: { nonce: "nonce-456" } };
+        }
+
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/auth/verify");
+        return {
+          json: {
+            ok: true,
+            token,
+            refreshToken: "siwe-refresh",
+            expiresIn: 900,
+            userId: "user-siwe",
+            address: "0xabc",
+            walletChain: "ethereum",
+            tenant: { id: "tenant-should-not-win", name: "tenant" },
+          },
+        };
+      });
+
+      try {
+        const auth = new StewardAuth({ baseUrl: server.baseUrl, storage });
+        const result = await auth.signInWithSIWE("0xabc", async () => "0xsigned");
+
+        expect(result.user).toEqual({
+          id: "user-siwe",
+          email: "",
+          walletAddress: "0xabc",
+          walletChain: "ethereum",
+        });
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
   describe("signInWithSolana", () => {
     test("builds SIWS message, signs bytes, and stores session", async () => {
       const signedMessages: string[] = [];
@@ -284,6 +324,7 @@ describe("StewardAuth multi-tenant", () => {
         expect(body.publicKey).toBe("So11111111111111111111111111111111111111112");
         expect(body.message).toContain("wants you to sign in with your Solana account:");
         expect(body.message).toContain("Nonce: nonce-123");
+        expect(body.message).toContain("Chain ID: mainnet");
         expect(bs58.decode(body.signature)).toEqual(new Uint8Array([1, 2, 3, 4]));
         return {
           json: {
@@ -291,7 +332,10 @@ describe("StewardAuth multi-tenant", () => {
             token,
             refreshToken: "sol-refresh",
             expiresIn: 900,
-            address: body.publicKey,
+            userId: "user-solana",
+            address: "tenant-shaped-address-that-should-not-win",
+            publicKey: body.publicKey,
+            walletChain: "solana",
             tenant: { id: "solana:So11111111111111111111111111111111111111112", name: "sol" },
           },
         };
@@ -308,7 +352,12 @@ describe("StewardAuth multi-tenant", () => {
         );
 
         expect(signedMessages).toHaveLength(1);
-        expect(result.user.walletChain).toBe("solana");
+        expect(result.user).toEqual({
+          id: "user-solana",
+          email: "",
+          walletAddress: "So11111111111111111111111111111111111111112",
+          walletChain: "solana",
+        });
         expect(storage.getItem("steward_session_token")).toBe(token);
         expect(storage.getItem("steward_refresh_token")).toBe("sol-refresh");
       } finally {

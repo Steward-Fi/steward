@@ -1017,7 +1017,9 @@ auth.post("/verify", async (c) => {
     token,
     refreshToken,
     expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    userId: user.id,
     address,
+    walletChain: "ethereum",
     tenant: { id: tenantResult.tenant.id, name: tenantResult.tenant.name },
   };
 
@@ -1117,7 +1119,10 @@ auth.post("/verify/solana", async (c) => {
     token,
     refreshToken,
     expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    userId: user.id,
     address: body.publicKey,
+    publicKey: body.publicKey,
+    walletChain: "solana",
     tenant: { id: tenantResult.tenant.id, name: tenantResult.tenant.name },
   };
 

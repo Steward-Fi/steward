@@ -56,6 +56,15 @@ export interface StewardAuthExchangeResponse {
   user: StewardUser;
   refreshToken?: string;
   expiresIn?: number;
+  userId?: string;
+  address?: string;
+  publicKey?: string;
+  walletChain?: "ethereum" | "solana";
+  tenant?: {
+    id: string;
+    name: string;
+    apiKey?: string;
+  };
 }
 
 export interface StewardEmailResult {

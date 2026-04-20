@@ -127,7 +127,7 @@ function buildSiwsMessage(publicKey: string, nonce: string, issuedAt: string): s
     "",
     `URI: ${origin}`,
     "Version: 1",
-    "Chain ID: solana:mainnet",
+    "Chain ID: mainnet",
     `Nonce: ${nonce}`,
     `Issued At: ${issuedAt}`,
   ].join("\n");
@@ -611,12 +611,7 @@ export class StewardAuth {
     }
 
     // 4. Verify with the API
-    const verifyRes = await authRequest<{
-      ok: boolean;
-      token: string;
-      address: string;
-      tenant: { id: string; name: string; apiKey?: string };
-    }>(this.baseUrl, "/auth/verify", {
+    const verifyRes = await authRequest<StewardAuthExchangeResponse>(this.baseUrl, "/auth/verify", {
       method: "POST",
       body: JSON.stringify({ message: siweMessage, signature }),
       ...(this.tenantId ? { headers: { "X-Steward-Tenant": this.tenantId } } : {}),
@@ -628,10 +623,10 @@ export class StewardAuth {
 
     // SIWE response has no `user` object — synthesise one from address
     const user: StewardUser = {
-      id: verifyRes.data.tenant.id,
+      id: verifyRes.data.userId ?? verifyRes.data.tenant?.id ?? "",
       email: "",
       walletAddress: verifyRes.data.address,
-      walletChain: "ethereum",
+      walletChain: verifyRes.data.walletChain ?? "ethereum",
     };
 
     return this.storeAndReturn(
@@ -667,12 +662,7 @@ export class StewardAuth {
       );
     }
 
-    const verifyRes = await authRequest<{
-      ok: boolean;
-      token: string;
-      address: string;
-      tenant: { id: string; name: string; apiKey?: string };
-    }>(this.baseUrl, "/auth/verify/solana", {
+    const verifyRes = await authRequest<StewardAuthExchangeResponse>(this.baseUrl, "/auth/verify/solana", {
       method: "POST",
       body: JSON.stringify({
         message,
@@ -687,10 +677,10 @@ export class StewardAuth {
     }
 
     const user: StewardUser = {
-      id: verifyRes.data.tenant.id,
+      id: verifyRes.data.userId ?? verifyRes.data.tenant?.id ?? "",
       email: "",
-      walletAddress: verifyRes.data.address,
-      walletChain: "solana",
+      walletAddress: verifyRes.data.publicKey ?? verifyRes.data.address,
+      walletChain: verifyRes.data.walletChain ?? "solana",
     };
 
     return this.storeAndReturn(
