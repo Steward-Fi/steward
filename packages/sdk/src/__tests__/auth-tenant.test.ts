@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
+import bs58 from "bs58";
 import { StewardAuth } from "../auth.ts";
 
 class TestStorage {
@@ -235,6 +236,81 @@ describe("StewardAuth multi-tenant", () => {
       try {
         const auth = createAuthWithSession(storage, server.baseUrl);
         await expect(auth.leaveTenant("some-app")).resolves.toBeUndefined();
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
+  describe("refreshSession", () => {
+    test("keeps local session on 5xx refresh failures", async () => {
+      const server = await startStewardServer((request) => {
+        expect(request.path).toBe("/auth/refresh");
+        return {
+          status: 503,
+          json: { ok: false, error: "temporary failure" },
+        };
+      });
+
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        const result = await auth.refreshSession();
+        expect(result).toBeNull();
+        expect(storage.getItem("steward_session_token")).not.toBeNull();
+        expect(storage.getItem("steward_refresh_token")).toBe("refresh-token-123");
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
+  describe("signInWithSolana", () => {
+    test("builds SIWS message, signs bytes, and stores session", async () => {
+      const signedMessages: string[] = [];
+      const token = fakeJwt({ address: "So11111111111111111111111111111111111111112" });
+      const server = await startStewardServer((request) => {
+        if (request.path === "/auth/nonce") {
+          expect(request.method).toBe("GET");
+          return { json: { nonce: "nonce-123" } };
+        }
+
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/auth/verify/solana");
+        const body = request.bodyJson as {
+          message: string;
+          signature: string;
+          publicKey: string;
+        };
+        expect(body.publicKey).toBe("So11111111111111111111111111111111111111112");
+        expect(body.message).toContain("wants you to sign in with your Solana account:");
+        expect(body.message).toContain("Nonce: nonce-123");
+        expect(bs58.decode(body.signature)).toEqual(new Uint8Array([1, 2, 3, 4]));
+        return {
+          json: {
+            ok: true,
+            token,
+            refreshToken: "sol-refresh",
+            expiresIn: 900,
+            address: body.publicKey,
+            tenant: { id: "solana:So11111111111111111111111111111111111111112", name: "sol" },
+          },
+        };
+      });
+
+      try {
+        const auth = new StewardAuth({ baseUrl: server.baseUrl, storage });
+        const result = await auth.signInWithSolana(
+          "So11111111111111111111111111111111111111112",
+          async (messageBytes) => {
+            signedMessages.push(new TextDecoder().decode(messageBytes));
+            return new Uint8Array([1, 2, 3, 4]);
+          },
+        );
+
+        expect(signedMessages).toHaveLength(1);
+        expect(result.user.walletChain).toBe("solana");
+        expect(storage.getItem("steward_session_token")).toBe(token);
+        expect(storage.getItem("steward_refresh_token")).toBe("sol-refresh");
       } finally {
         await server.close();
       }

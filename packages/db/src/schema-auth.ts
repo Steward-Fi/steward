@@ -22,6 +22,7 @@ export const users = pgTable("users", {
   name: varchar("name", { length: 255 }),
   image: text("image"),
   walletAddress: varchar("wallet_address", { length: 128 }),
+  walletChain: varchar("wallet_chain", { length: 16 }).default("ethereum"),
   stewardWalletId: varchar("steward_wallet_id", { length: 64 }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

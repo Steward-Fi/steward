@@ -12,6 +12,7 @@
  *   const client = new StewardClient({ baseUrl, bearerToken: auth.getToken() });
  */
 
+import bs58 from "bs58";
 import type {
   SessionStorage,
   StewardAuthConfig,
@@ -92,6 +93,44 @@ function isBrowser(): boolean {
     typeof window.document !== "undefined" &&
     typeof navigator !== "undefined"
   );
+}
+
+function getSignInOrigin(): { domain: string; origin: string } {
+  return isBrowser()
+    ? { domain: window.location.host, origin: window.location.origin }
+    : { domain: "steward.fi", origin: "https://steward.fi" };
+}
+
+function buildSiweMessage(address: string, nonce: string, issuedAt: string): string {
+  const { domain, origin } = getSignInOrigin();
+  return [
+    `${domain} wants you to sign in with your Ethereum account:`,
+    address,
+    "",
+    "Sign in to Steward",
+    "",
+    `URI: ${origin}`,
+    "Version: 1",
+    "Chain ID: 1",
+    `Nonce: ${nonce}`,
+    `Issued At: ${issuedAt}`,
+  ].join("\n");
+}
+
+function buildSiwsMessage(publicKey: string, nonce: string, issuedAt: string): string {
+  const { domain, origin } = getSignInOrigin();
+  return [
+    `${domain} wants you to sign in with your Solana account:`,
+    publicKey,
+    "",
+    "Sign in to Steward",
+    "",
+    `URI: ${origin}`,
+    "Version: 1",
+    "Chain ID: solana:mainnet",
+    `Nonce: ${nonce}`,
+    `Issued At: ${issuedAt}`,
+  ].join("\n");
 }
 
 // ─── Fetch helpers — same pattern as StewardClient ───────────────────────────
@@ -267,14 +306,20 @@ export class StewardAuth {
     const refreshToken = this.getRefreshToken();
     if (!refreshToken) return null;
 
-    const res = await authRequest<StewardRefreshResult>(this.baseUrl, "/auth/refresh", {
-      method: "POST",
-      body: JSON.stringify({ refreshToken }),
-    });
+    let res: Awaited<ReturnType<typeof authRequest<StewardRefreshResult>>>;
+    try {
+      res = await authRequest<StewardRefreshResult>(this.baseUrl, "/auth/refresh", {
+        method: "POST",
+        body: JSON.stringify({ refreshToken }),
+      });
+    } catch {
+      return null;
+    }
 
     if (!res.ok) {
-      // Refresh token invalid/expired — sign the user out
-      this.signOut();
+      if (res.status === 401) {
+        this.signOut();
+      }
       return null;
     }
 
@@ -551,22 +596,8 @@ export class StewardAuth {
     const { nonce } = nonceRes.data;
 
     // 2. Build a minimal SIWE message string (EIP-4361)
-    const domain = isBrowser() ? window.location.host : "steward.fi";
-    const origin = isBrowser() ? window.location.origin : "https://steward.fi";
     const issuedAt = new Date().toISOString();
-
-    const siweMessage = [
-      `${domain} wants you to sign in with your Ethereum account:`,
-      address,
-      "",
-      "Sign in to Steward",
-      "",
-      `URI: ${origin}`,
-      "Version: 1",
-      `Chain ID: 1`,
-      `Nonce: ${nonce}`,
-      `Issued At: ${issuedAt}`,
-    ].join("\n");
+    const siweMessage = buildSiweMessage(address, nonce, issuedAt);
 
     // 3. Have the caller sign the message
     let signature: string;
@@ -600,6 +631,66 @@ export class StewardAuth {
       id: verifyRes.data.tenant.id,
       email: "",
       walletAddress: verifyRes.data.address,
+      walletChain: "ethereum",
+    };
+
+    return this.storeAndReturn(
+      verifyRes.data.token,
+      (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
+      user,
+      (verifyRes.data as { expiresIn?: number }).expiresIn,
+    );
+  }
+
+  /**
+   * Sign in with a Solana wallet via Sign-In With Solana.
+   */
+  async signInWithSolana(
+    publicKey: string,
+    signMessage: (message: Uint8Array) => Promise<Uint8Array>,
+  ): Promise<StewardAuthResult> {
+    const nonceRes = await authRequest<{ nonce: string }>(this.baseUrl, "/auth/nonce");
+    if (!nonceRes.ok) {
+      throw new StewardApiError(nonceRes.error, nonceRes.status);
+    }
+
+    const issuedAt = new Date().toISOString();
+    const message = buildSiwsMessage(publicKey, nonceRes.data.nonce, issuedAt);
+
+    let signatureBytes: Uint8Array;
+    try {
+      signatureBytes = await signMessage(new TextEncoder().encode(message));
+    } catch (err) {
+      throw new StewardApiError(
+        `Wallet signing failed: ${err instanceof Error ? err.message : String(err)}`,
+        0,
+      );
+    }
+
+    const verifyRes = await authRequest<{
+      ok: boolean;
+      token: string;
+      address: string;
+      tenant: { id: string; name: string; apiKey?: string };
+    }>(this.baseUrl, "/auth/verify/solana", {
+      method: "POST",
+      body: JSON.stringify({
+        message,
+        signature: bs58.encode(signatureBytes),
+        publicKey,
+      }),
+      ...(this.tenantId ? { headers: { "X-Steward-Tenant": this.tenantId } } : {}),
+    });
+
+    if (!verifyRes.ok) {
+      throw new StewardApiError(verifyRes.error, verifyRes.status);
+    }
+
+    const user: StewardUser = {
+      id: verifyRes.data.tenant.id,
+      email: "",
+      walletAddress: verifyRes.data.address,
+      walletChain: "solana",
     };
 
     return this.storeAndReturn(

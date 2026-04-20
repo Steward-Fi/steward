@@ -131,8 +131,10 @@ describe("getProviders", () => {
     passkey: true,
     email: true,
     siwe: true,
+    siws: true,
     google: true,
     discord: false,
+    github: false,
     oauth: ["google"],
   };
 
@@ -157,8 +159,10 @@ describe("getProviders", () => {
       passkey: false,
       email: false,
       siwe: false,
+      siws: false,
       google: false,
       discord: false,
+      github: false,
       oauth: [],
     });
     const second = await auth.getProviders();
@@ -172,7 +176,8 @@ describe("getProviders", () => {
     const updated: StewardProviders = {
       ...mockProviders,
       discord: true,
-      oauth: ["google", "discord"],
+      github: true,
+      oauth: ["google", "discord", "github"],
     };
     installMockFetch(updated);
     const result = await auth.getProviders(true);
