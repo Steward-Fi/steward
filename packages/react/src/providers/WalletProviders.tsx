@@ -2,7 +2,6 @@ import { darkTheme, RainbowKitProvider, type Theme } from "@rainbow-me/rainbowki
 import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import {
-  BackpackWalletAdapter,
   PhantomWalletAdapter,
   SolflareWalletAdapter,
 } from "@solana/wallet-adapter-wallets";
@@ -93,7 +92,6 @@ export function SolanaWalletProvider({
       wallets ?? [
         new PhantomWalletAdapter(),
         new SolflareWalletAdapter(),
-        new BackpackWalletAdapter(),
       ],
     [wallets],
   );

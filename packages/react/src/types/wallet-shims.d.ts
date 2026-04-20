@@ -109,7 +109,6 @@ declare module "@solana/wallet-adapter-react-ui/styles.css" {
 declare module "@solana/wallet-adapter-wallets" {
   export class PhantomWalletAdapter {}
   export class SolflareWalletAdapter {}
-  export class BackpackWalletAdapter {}
 }
 
 declare module "@solana/web3.js" {
