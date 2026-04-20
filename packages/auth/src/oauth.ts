@@ -32,6 +32,7 @@ export interface OAuthProvider {
   scopes: string[];
   /** If true, PKCE (S256) is added to the auth URL and required in code exchange. */
   requiresPkce?: boolean;
+  emailUrl?: string;
 }
 
 export interface OAuthTokenResponse {
@@ -50,6 +51,12 @@ export interface OAuthUserInfo {
   verified_email?: boolean;
 }
 
+interface OAuthEmailAddress {
+  email: string;
+  primary?: boolean;
+  verified?: boolean;
+}
+
 export interface AuthUrlResult {
   url: string;
   /** Present when requiresPkce=true. Must be stored and passed to exchangeCode(). */
@@ -58,7 +65,7 @@ export interface AuthUrlResult {
 
 // ─── Built-in Provider Configs ───────────────────────────────────────────────
 
-const BUILT_IN_PROVIDERS = ["google", "discord", "twitter"] as const;
+const BUILT_IN_PROVIDERS = ["google", "discord", "twitter", "github"] as const;
 type BuiltInProvider = (typeof BUILT_IN_PROVIDERS)[number];
 
 /**
@@ -81,6 +88,9 @@ export function getEnabledProviders(): string[] {
   }
   if (process.env.TWITTER_CLIENT_ID && process.env.TWITTER_CLIENT_SECRET) {
     enabled.push("twitter");
+  }
+  if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
+    enabled.push("github");
   }
   return enabled;
 }
@@ -147,6 +157,25 @@ export function getProviderConfig(provider: string): OAuthProvider {
           "https://api.twitter.com/2/users/me?user.fields=id,name,username,profile_image_url",
         scopes: ["tweet.read", "users.read", "offline.access"],
         requiresPkce: true,
+      };
+    }
+
+    case "github": {
+      const clientId = process.env.GITHUB_CLIENT_ID;
+      const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+      if (!clientId || !clientSecret) {
+        throw new Error(
+          "GitHub OAuth not configured: GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET are required",
+        );
+      }
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl: "https://github.com/login/oauth/authorize",
+        tokenUrl: "https://github.com/login/oauth/access_token",
+        userInfoUrl: "https://api.github.com/user",
+        emailUrl: "https://api.github.com/user/emails",
+        scopes: ["read:user", "user:email"],
       };
     }
 
@@ -291,7 +320,7 @@ export class OAuthClient {
         ? (raw.data as Record<string, unknown>)
         : raw;
 
-    return {
+    const userInfo = {
       id: String(data.id ?? data.sub ?? ""),
       // Twitter does not expose email — leave as empty string; caller must handle
       email: String(data.email ?? ""),
@@ -306,10 +335,54 @@ export class OAuthClient {
           ? String(data.profile_image_url)
           : data.picture != null
             ? String(data.picture)
-            : data.avatar != null
-              ? String(data.avatar)
-              : undefined,
+            : data.avatar_url != null
+              ? String(data.avatar_url)
+              : data.avatar != null
+                ? String(data.avatar)
+                : undefined,
       verified_email: Boolean(data.verified_email ?? data.email_verified ?? data.verified ?? false),
-    };
+    } satisfies OAuthUserInfo;
+
+    if (!userInfo.email && this.provider.emailUrl) {
+      const emailInfo = await this.getPrimaryEmail(accessToken);
+      if (emailInfo) {
+        userInfo.email = emailInfo.email;
+        userInfo.verified_email = emailInfo.verified ?? userInfo.verified_email;
+      }
+    }
+
+    return userInfo;
+  }
+
+  private async getPrimaryEmail(accessToken: string): Promise<OAuthEmailAddress | null> {
+    if (!this.provider.emailUrl) return null;
+
+    const res = await fetch(this.provider.emailUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`getPrimaryEmail failed (${res.status}): ${text}`);
+    }
+
+    const raw = await res.json();
+    if (!Array.isArray(raw)) return null;
+
+    const emails = raw.filter(
+      (entry): entry is OAuthEmailAddress =>
+        entry != null && typeof entry === "object" && typeof entry.email === "string",
+    );
+
+    return (
+      emails.find((entry) => entry.primary && entry.verified) ??
+      emails.find((entry) => entry.primary) ??
+      emails.find((entry) => entry.verified) ??
+      emails[0] ??
+      null
+    );
   }
 }

@@ -34,7 +34,7 @@
  *   3. The JWT's `tenantId` claim is the resolved tenant, not the personal tenant.
  */
 
-import { randomBytes } from "node:crypto";
+import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 import {
   buildBackend,
   ChallengeStore,
@@ -63,6 +63,7 @@ import {
 } from "@stwd/db";
 import type { ApiResponse } from "@stwd/shared";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
+import bs58 from "bs58";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { jwtVerify, SignJWT } from "jose";
@@ -601,6 +602,184 @@ async function findOrCreateUser(email: string): Promise<typeof users.$inferSelec
   return newUser;
 }
 
+async function findOrCreateWalletUser(
+  walletAddress: string,
+  walletChain: "ethereum" | "solana",
+): Promise<typeof users.$inferSelect> {
+  const db = getDb();
+  const [existing] = await db.select().from(users).where(eq(users.walletAddress, walletAddress));
+  if (existing) {
+    if (existing.walletChain !== walletChain) {
+      await db.update(users).set({ walletChain }).where(eq(users.id, existing.id));
+      const [updated] = await db.select().from(users).where(eq(users.id, existing.id));
+      return updated ?? { ...existing, walletChain };
+    }
+    return existing;
+  }
+
+  const [created] = await db
+    .insert(users)
+    .values({
+      walletAddress,
+      walletChain,
+      email: null,
+      emailVerified: false,
+    })
+    .returning();
+  return created;
+}
+
+type WalletTenantResult = {
+  tenant: typeof tenants.$inferSelect;
+  isNewTenant: boolean;
+  rawApiKey?: string;
+};
+
+async function findOrCreateWalletTenant(opts: {
+  ownerAddress: string;
+  tenantId: string;
+  tenantName: string;
+}): Promise<WalletTenantResult> {
+  const db = getDb();
+  const [existingTenant] = await db
+    .select()
+    .from(tenants)
+    .where(eq(tenants.ownerAddress, opts.ownerAddress));
+  if (existingTenant) {
+    return { tenant: existingTenant, isNewTenant: false };
+  }
+
+  const apiKeyPair = generateApiKey();
+  const [newTenant] = await db
+    .insert(tenants)
+    .values({
+      id: opts.tenantId,
+      name: opts.tenantName,
+      apiKeyHash: apiKeyPair.hash,
+      ownerAddress: opts.ownerAddress,
+    })
+    .onConflictDoNothing()
+    .returning();
+
+  if (newTenant) {
+    return { tenant: newTenant, isNewTenant: true, rawApiKey: apiKeyPair.key };
+  }
+
+  const [retryTenant] = await db.select().from(tenants).where(eq(tenants.id, opts.tenantId));
+  if (!retryTenant) {
+    throw new Error("Failed to create tenant");
+  }
+
+  return { tenant: retryTenant, isNewTenant: false };
+}
+
+function getAllowedSiweDomains(): string[] | null {
+  const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
+  if (!raw) return null;
+  const domains = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return domains.length > 0 ? domains : null;
+}
+
+type ParsedSiwsMessage = {
+  domain: string;
+  publicKey: string;
+  nonce: string;
+  issuedAt?: string;
+  uri?: string;
+  version?: string;
+  chainId?: string;
+  statement?: string;
+};
+
+const ALLOWED_SOLANA_CHAIN_IDS = new Set(["solana", "mainnet", "devnet"]);
+
+function isAllowedSiwsUri(uri: string | undefined, domain: string): boolean {
+  if (!uri) return false;
+  try {
+    const parsedUri = new URL(uri);
+    return parsedUri.protocol === "https:" && parsedUri.host === domain;
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedSiwsChainId(chainId: string | undefined): boolean {
+  if (!chainId) return true;
+  return ALLOWED_SOLANA_CHAIN_IDS.has(chainId.trim().toLowerCase());
+}
+
+function parseSiwsMessage(message: string): ParsedSiwsMessage | null {
+  const lines = message.split(/\r?\n/);
+  if (lines.length < 2) return null;
+
+  const firstLine = lines[0]?.trim();
+  const publicKey = lines[1]?.trim();
+  const match = firstLine?.match(/^(.*) wants you to sign in with your Solana account:$/);
+  if (!match || !publicKey) return null;
+
+  const statementLines: string[] = [];
+  const fields = new Map<string, string>();
+  let inFields = false;
+
+  for (const rawLine of lines.slice(2)) {
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    const fieldMatch = line.match(/^([A-Za-z ]+):\s*(.+)$/);
+    if (fieldMatch) {
+      inFields = true;
+      fields.set(fieldMatch[1].toLowerCase().replace(/\s+/g, ""), fieldMatch[2]);
+      continue;
+    }
+
+    if (!inFields) {
+      statementLines.push(line);
+    }
+  }
+
+  const nonce = fields.get("nonce");
+  if (!nonce) return null;
+
+  return {
+    domain: match[1].trim(),
+    publicKey,
+    nonce,
+    issuedAt: fields.get("issuedat"),
+    uri: fields.get("uri"),
+    version: fields.get("version"),
+    chainId: fields.get("chainid"),
+    statement: statementLines.length > 0 ? statementLines.join("\n") : undefined,
+  };
+}
+
+function verifySolanaMessageSignature(
+  message: string,
+  signature: string,
+  publicKey: string,
+): boolean {
+  try {
+    const publicKeyBytes = bs58.decode(publicKey);
+    const signatureBytes = bs58.decode(signature);
+    if (publicKeyBytes.length !== 32) return false;
+
+    const keyObject = createPublicKey({
+      key: {
+        kty: "OKP",
+        crv: "Ed25519",
+        x: uint8ArrayToBase64url(publicKeyBytes),
+      },
+      format: "jwk",
+    });
+
+    return verifySignature(null, Buffer.from(message, "utf8"), keyObject, signatureBytes);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Ensure the user's personal tenant exists.
  * Used as a fallback when no explicit tenant is requested AND as the home for
@@ -780,6 +959,11 @@ auth.post("/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid SIWE message format" }, 400);
   }
 
+  const allowedDomains = getAllowedSiweDomains();
+  if (allowedDomains && !allowedDomains.includes(siweMessage.domain)) {
+    return c.json<ApiResponse>({ ok: false, error: "SIWE domain not allowed" }, 401);
+  }
+
   const storedNonce = nonceStore.get(siweMessage.nonce);
   if (!storedNonce || storedNonce.expiresAt <= Date.now()) {
     nonceStore.delete(siweMessage.nonce);
@@ -795,52 +979,21 @@ auth.post("/verify", async (c) => {
 
   nonceStore.delete(siweMessage.nonce);
 
-  const address = siweMessage.address;
-  let isNewTenant = false;
-  let rawApiKey: string | undefined;
-
-  const [existingTenant] = await db.select().from(tenants).where(eq(tenants.ownerAddress, address));
-
-  let tenant = existingTenant;
-
-  if (!tenant) {
-    isNewTenant = true;
-    const tenantId = `t-${address.slice(2, 10).toLowerCase()}`;
-    const tenantName = `${address.slice(0, 6)}...${address.slice(-4)}`;
-    const apiKeyPair = generateApiKey();
-    rawApiKey = apiKeyPair.key;
-
-    const [newTenant] = await db
-      .insert(tenants)
-      .values({
-        id: tenantId,
-        name: tenantName,
-        apiKeyHash: apiKeyPair.hash,
-        ownerAddress: address,
-      })
-      .onConflictDoNothing()
-      .returning();
-
-    if (!newTenant) {
-      const [retryTenant] = await db
-        .select()
-        .from(tenants)
-        .where(eq(tenants.ownerAddress, address));
-      if (retryTenant) {
-        tenant = retryTenant;
-        isNewTenant = false;
-      } else {
-        return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
-      }
-    } else {
-      tenant = newTenant;
-    }
+  const address = siweMessage.address.toLowerCase();
+  let tenantResult: WalletTenantResult;
+  try {
+    tenantResult = await findOrCreateWalletTenant({
+      ownerAddress: address,
+      tenantId: `t-${address.slice(2, 10)}`,
+      tenantName: `${address.slice(0, 6)}...${address.slice(-4)}`,
+    });
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
   }
 
-  // If an explicit requesting tenant was provided and it exists, use that instead
   const requestedTenantId = c.req.header("X-Steward-Tenant");
-  let effectiveTenantId = tenant.id;
-  if (requestedTenantId && requestedTenantId !== tenant.id) {
+  let effectiveTenantId = tenantResult.tenant.id;
+  if (requestedTenantId && requestedTenantId !== tenantResult.tenant.id) {
     const [requestedTenant] = await db
       .select()
       .from(tenants)
@@ -850,24 +1003,140 @@ auth.post("/verify", async (c) => {
     }
   }
 
-  const token = await createSessionToken(address, effectiveTenantId);
+  const user = await findOrCreateWalletUser(address, "ethereum");
+  await ensureUserTenantLink(
+    user.id,
+    effectiveTenantId,
+    effectiveTenantId === tenantResult.tenant.id ? "owner" : "member",
+  );
 
-  // For SIWE, find a user by wallet address (may not exist if SIWE-only user)
-  const [siweUser] = await db.select().from(users).where(eq(users.walletAddress, address));
-  const siweUserId = siweUser?.id ?? tenant.id; // fall back to tenant.id as a stable identifier
-  const siweRefreshToken = await createRefreshToken(siweUserId, effectiveTenantId);
+  const token = await createSessionToken(address, effectiveTenantId, {
+    userId: user.id,
+  });
+  const refreshToken = await createRefreshToken(user.id, effectiveTenantId);
 
   const responseData: Record<string, unknown> = {
     ok: true,
     token,
-    refreshToken: siweRefreshToken,
+    refreshToken,
     expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    userId: user.id,
     address,
-    tenant: { id: tenant.id, name: tenant.name },
+    walletChain: "ethereum",
+    tenant: { id: tenantResult.tenant.id, name: tenantResult.tenant.name },
   };
 
-  if (isNewTenant && rawApiKey) {
-    (responseData.tenant as Record<string, unknown>).apiKey = rawApiKey;
+  if (tenantResult.isNewTenant && tenantResult.rawApiKey) {
+    (responseData.tenant as Record<string, unknown>).apiKey = tenantResult.rawApiKey;
+  }
+
+  return c.json(responseData);
+});
+
+auth.post("/verify/solana", async (c) => {
+  const db = getDb();
+  const body = await safeJsonParse<{ message: string; signature: string; publicKey: string }>(c);
+  if (!body?.message || !body?.signature || !body?.publicKey) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "message, signature, and publicKey are required" },
+      400,
+    );
+  }
+
+  const parsed = parseSiwsMessage(body.message);
+  if (!parsed) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid SIWS message format" }, 400);
+  }
+
+  if (parsed.publicKey !== body.publicKey) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "publicKey does not match signed message" },
+      401,
+    );
+  }
+
+  const allowedDomains = getAllowedSiweDomains();
+  if (allowedDomains && !allowedDomains.includes(parsed.domain)) {
+    return c.json<ApiResponse>({ ok: false, error: "SIWS domain not allowed" }, 401);
+  }
+
+  if (!isAllowedSiwsUri(parsed.uri, parsed.domain)) {
+    return c.json<ApiResponse>({ ok: false, error: "SIWS uri must match the signed domain" }, 401);
+  }
+
+  if (parsed.version !== "1") {
+    return c.json<ApiResponse>({ ok: false, error: 'SIWS version must be "1"' }, 401);
+  }
+
+  if (!isAllowedSiwsChainId(parsed.chainId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "SIWS chainId must be one of: solana, mainnet, devnet" },
+      401,
+    );
+  }
+
+  const storedNonce = nonceStore.get(parsed.nonce);
+  if (!storedNonce || storedNonce.expiresAt <= Date.now()) {
+    nonceStore.delete(parsed.nonce);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
+  }
+
+  if (!verifySolanaMessageSignature(body.message, body.signature, body.publicKey)) {
+    nonceStore.delete(parsed.nonce);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid signature" }, 401);
+  }
+
+  nonceStore.delete(parsed.nonce);
+
+  let tenantResult: WalletTenantResult;
+  try {
+    tenantResult = await findOrCreateWalletTenant({
+      ownerAddress: `solana:${body.publicKey}`,
+      tenantId: `solana:${body.publicKey}`,
+      tenantName: `${body.publicKey.slice(0, 4)}...${body.publicKey.slice(-4)}`,
+    });
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
+  }
+
+  const requestedTenantId = c.req.header("X-Steward-Tenant");
+  let effectiveTenantId = tenantResult.tenant.id;
+  if (requestedTenantId && requestedTenantId !== tenantResult.tenant.id) {
+    const [requestedTenant] = await db
+      .select()
+      .from(tenants)
+      .where(eq(tenants.id, requestedTenantId));
+    if (requestedTenant) {
+      effectiveTenantId = requestedTenantId;
+    }
+  }
+
+  const user = await findOrCreateWalletUser(body.publicKey, "solana");
+  await ensureUserTenantLink(
+    user.id,
+    effectiveTenantId,
+    effectiveTenantId === tenantResult.tenant.id ? "owner" : "member",
+  );
+
+  const token = await createSessionToken(body.publicKey, effectiveTenantId, {
+    userId: user.id,
+  });
+  const refreshToken = await createRefreshToken(user.id, effectiveTenantId);
+
+  const responseData: Record<string, unknown> = {
+    ok: true,
+    token,
+    refreshToken,
+    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    userId: user.id,
+    address: body.publicKey,
+    publicKey: body.publicKey,
+    walletChain: "solana",
+    tenant: { id: tenantResult.tenant.id, name: tenantResult.tenant.name },
+  };
+
+  if (tenantResult.isNewTenant && tenantResult.rawApiKey) {
+    (responseData.tenant as Record<string, unknown>).apiKey = tenantResult.rawApiKey;
   }
 
   return c.json(responseData);
@@ -1400,7 +1669,7 @@ auth.post("/email/verify", async (c) => {
  * Returns which auth methods are enabled based on environment configuration.
  * Used by the React widget to decide which login buttons to show.
  *
- * Response: { passkey: true, email: bool, siwe: true, google: bool, discord: bool, oauth: string[] }
+ * Response: { passkey: true, email: bool, siwe: true, siws: true, google: bool, discord: bool, github: bool, oauth: string[] }
  */
 auth.get("/providers", (c) => {
   const oauthProviders = getEnabledProviders();
@@ -1408,8 +1677,10 @@ auth.get("/providers", (c) => {
     passkey: true,
     email: Boolean(process.env.RESEND_API_KEY),
     siwe: true,
-    google: Boolean(process.env.GOOGLE_CLIENT_ID),
-    discord: Boolean(process.env.DISCORD_CLIENT_ID),
+    siws: true,
+    google: oauthProviders.includes("google"),
+    discord: oauthProviders.includes("discord"),
+    github: oauthProviders.includes("github"),
     oauth: oauthProviders,
   });
 });

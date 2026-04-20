@@ -12,8 +12,11 @@ export { StewardTenantPicker } from "./components/StewardTenantPicker.js";
 export { StewardUserButton } from "./components/StewardUserButton.js";
 export { TransactionHistory } from "./components/TransactionHistory.js";
 export { WalletOverview } from "./components/WalletOverview.js";
+// <WalletLogin /> and EVM/Solana provider wrappers live at the
+// `@stwd/react/wallet` subpath to keep their optional peer-dep imports
+// (wagmi, @rainbow-me/rainbowkit, @solana/*) off the root entry point.
+// Importing `@stwd/react` alone will NOT resolve those modules.
 export { useApprovals } from "./hooks/useApprovals.js";
-
 // ─── Hooks ───
 export { useAuth } from "./hooks/useAuth.js";
 export { usePolicies } from "./hooks/usePolicies.js";

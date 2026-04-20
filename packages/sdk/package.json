@@ -1,6 +1,6 @@
 {
   "name": "@stwd/sdk",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "description": "TypeScript SDK for Steward — agent wallet infrastructure with policy enforcement",
   "type": "module",
   "main": "dist/index.js",
@@ -40,6 +40,9 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "bs58": "^6.0.0"
   },
   "devDependencies": {
     "@simplewebauthn/browser": "^13.0.0"

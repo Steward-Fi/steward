@@ -73,7 +73,7 @@ export const tenants = pgTable("tenants", {
   id: varchar("id", { length: 64 }).primaryKey(),
   name: varchar("name", { length: 255 }).notNull(),
   apiKeyHash: text("api_key_hash").notNull(),
-  ownerAddress: varchar("owner_address", { length: 42 }),
+  ownerAddress: varchar("owner_address", { length: 128 }),
   ...timestamps,
 });
 

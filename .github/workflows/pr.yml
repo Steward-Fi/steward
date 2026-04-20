@@ -97,6 +97,7 @@ jobs:
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_SESSION_SECRET: "ci-session-secret"
+          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run packages/api/src/index.ts > /tmp/steward-api-integration.log 2>&1 &
           echo $! > /tmp/steward-api-integration.pid
@@ -118,6 +119,7 @@ jobs:
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_SESSION_SECRET: "ci-session-secret"
+          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
 
       - name: Stop API test server
         if: always()
@@ -154,6 +156,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_SESSION_SECRET: "ci-session-secret"
+          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run start:local > /tmp/steward-fi-e2e.log 2>&1 &
           echo $! > /tmp/steward-fi-e2e.pid
