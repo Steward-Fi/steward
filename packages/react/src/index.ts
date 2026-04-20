@@ -11,9 +11,14 @@ export { StewardOAuthCallback } from "./components/StewardOAuthCallback.js";
 export { StewardTenantPicker } from "./components/StewardTenantPicker.js";
 export { StewardUserButton } from "./components/StewardUserButton.js";
 export { TransactionHistory } from "./components/TransactionHistory.js";
+export type {
+  WalletChains,
+  WalletLoginClassOverrides,
+  WalletLoginProps,
+} from "./components/WalletLogin.js";
+export { WalletLogin } from "./components/WalletLogin.js";
 export { WalletOverview } from "./components/WalletOverview.js";
 export { useApprovals } from "./hooks/useApprovals.js";
-
 // ─── Hooks ───
 export { useAuth } from "./hooks/useAuth.js";
 export { usePolicies } from "./hooks/usePolicies.js";
@@ -30,6 +35,16 @@ export {
   PasskeyIcon,
 } from "./icons/index.js";
 export { StewardProvider } from "./provider.js";
+export type {
+  EVMWalletProviderProps,
+  SolanaWalletProviderProps,
+} from "./providers/WalletProviders.js";
+// Optional provider wrappers. These import from peer deps (wagmi, @solana/*)
+// and are tree-shaken out when consumers only import <WalletLogin />.
+export {
+  EVMWalletProvider,
+  SolanaWalletProvider,
+} from "./providers/WalletProviders.js";
 // ─── Types ───
 export type {
   AgentBalance,
