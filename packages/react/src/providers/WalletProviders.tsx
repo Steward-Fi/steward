@@ -6,6 +6,7 @@ import {
   PhantomWalletAdapter,
   SolflareWalletAdapter,
 } from "@solana/wallet-adapter-wallets";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 // All imports from optional peer dependencies are intentional. These two
 // wrappers are opt-in utilities; consumers who ship their own wagmi / Solana
@@ -17,6 +18,11 @@ import { type Config as WagmiConfig, WagmiProvider } from "wagmi";
 export interface EVMWalletProviderProps {
   /** wagmi v2 `Config` created with `createConfig()` or `getDefaultConfig()`. */
   config: WagmiConfig;
+  /**
+   * TanStack Query client. Pass yours if the host app already has one;
+   * otherwise a default client is created and scoped to this subtree.
+   */
+  queryClient?: QueryClient;
   /** RainbowKit theme. Defaults to dark. Pass `null` to skip theming. */
   theme?: Theme | null;
   /** RainbowKit modal size. Defaults to "compact". */
@@ -27,26 +33,30 @@ export interface EVMWalletProviderProps {
 }
 
 /**
- * Wraps children with wagmi + RainbowKit providers. This is an optional
- * convenience — most apps already have their own wagmi setup. Skip this
- * wrapper if so; `<WalletLogin chains="evm">` only needs the ambient wagmi +
- * RainbowKit context to exist somewhere above it.
+ * Wraps children with wagmi + RainbowKit + TanStack Query providers. This is
+ * an optional convenience. Most apps already have their own wagmi setup;
+ * skip this wrapper if so. `<WalletLogin chains="evm">` only needs the
+ * ambient wagmi + RainbowKit + QueryClient context to exist above it.
  *
  * Remember to import `@rainbow-me/rainbowkit/styles.css` once at your app root.
  */
 export function EVMWalletProvider({
   config,
+  queryClient,
   theme,
   modalSize = "compact",
   reconnectOnMount = true,
   children,
 }: EVMWalletProviderProps) {
   const resolvedTheme = theme === null ? null : (theme ?? darkTheme());
+  const client = useMemo(() => queryClient ?? new QueryClient(), [queryClient]);
   return (
     <WagmiProvider config={config} reconnectOnMount={reconnectOnMount}>
-      <RainbowKitProvider theme={resolvedTheme} modalSize={modalSize}>
-        {children}
-      </RainbowKitProvider>
+      <QueryClientProvider client={client}>
+        <RainbowKitProvider theme={resolvedTheme} modalSize={modalSize}>
+          {children}
+        </RainbowKitProvider>
+      </QueryClientProvider>
     </WagmiProvider>
   );
 }

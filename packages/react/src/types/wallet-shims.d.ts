@@ -127,3 +127,15 @@ declare module "bs58" {
   };
   export default bs58;
 }
+
+declare module "@tanstack/react-query" {
+  import type { FC, ReactNode } from "react";
+  export class QueryClient {
+    constructor(opts?: Record<string, unknown>);
+  }
+  export interface QueryClientProviderProps {
+    client: QueryClient;
+    children?: ReactNode;
+  }
+  export const QueryClientProvider: FC<QueryClientProviderProps>;
+}
