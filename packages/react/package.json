@@ -1,6 +1,6 @@
 {
   "name": "@stwd/react",
-  "version": "0.6.7",
+  "version": "0.7.0",
   "description": "Embeddable React components for Steward agent wallet management",
   "type": "module",
   "main": "dist/index.js",
@@ -21,7 +21,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@stwd/sdk": "^0.7.3"
+    "@stwd/sdk": "^0.8.0"
   },
   "peerDependencies": {
     "react": ">=18.0.0",

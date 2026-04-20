@@ -16,15 +16,16 @@ function asFetchMock(impl: (...args: any[]) => Promise<Response>): typeof fetch 
 // ─── isBuiltInProvider ───────────────────────────────────────────────────────
 
 describe("isBuiltInProvider", () => {
-  it("returns true for google, discord, twitter", () => {
+  it("returns true for google, discord, twitter, github", () => {
     expect(isBuiltInProvider("google")).toBe(true);
     expect(isBuiltInProvider("discord")).toBe(true);
     expect(isBuiltInProvider("twitter")).toBe(true);
+    expect(isBuiltInProvider("github")).toBe(true);
   });
 
   it("returns false for unknown providers", () => {
-    expect(isBuiltInProvider("github")).toBe(false);
     expect(isBuiltInProvider("facebook")).toBe(false);
+    expect(isBuiltInProvider("linkedin")).toBe(false);
     expect(isBuiltInProvider("")).toBe(false);
   });
 });
@@ -40,6 +41,8 @@ describe("getEnabledProviders", () => {
       DISCORD_CLIENT_SECRET: process.env.DISCORD_CLIENT_SECRET,
       TWITTER_CLIENT_ID: process.env.TWITTER_CLIENT_ID,
       TWITTER_CLIENT_SECRET: process.env.TWITTER_CLIENT_SECRET,
+      GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
+      GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
     };
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
@@ -47,6 +50,8 @@ describe("getEnabledProviders", () => {
     delete process.env.DISCORD_CLIENT_SECRET;
     delete process.env.TWITTER_CLIENT_ID;
     delete process.env.TWITTER_CLIENT_SECRET;
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
     expect(getEnabledProviders()).toEqual([]);
     Object.assign(process.env, orig);
   });
@@ -58,9 +63,12 @@ describe("getEnabledProviders", () => {
     delete process.env.DISCORD_CLIENT_SECRET;
     delete process.env.TWITTER_CLIENT_ID;
     delete process.env.TWITTER_CLIENT_SECRET;
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
     expect(getEnabledProviders()).toContain("google");
     expect(getEnabledProviders()).not.toContain("discord");
     expect(getEnabledProviders()).not.toContain("twitter");
+    expect(getEnabledProviders()).not.toContain("github");
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
   });
@@ -77,7 +85,7 @@ describe("getEnabledProviders", () => {
 
 describe("getProviderConfig", () => {
   it("throws for unknown providers", () => {
-    expect(() => getProviderConfig("github")).toThrow("Unknown OAuth provider");
+    expect(() => getProviderConfig("facebook")).toThrow("Unknown OAuth provider");
   });
 
   it("throws when google env vars are missing", () => {
@@ -96,6 +104,12 @@ describe("getProviderConfig", () => {
     delete process.env.TWITTER_CLIENT_ID;
     delete process.env.TWITTER_CLIENT_SECRET;
     expect(() => getProviderConfig("twitter")).toThrow("Twitter OAuth not configured");
+  });
+
+  it("throws when github env vars are missing", () => {
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
+    expect(() => getProviderConfig("github")).toThrow("GitHub OAuth not configured");
   });
 
   it("returns config with requiresPkce=true for Twitter", () => {
@@ -118,6 +132,16 @@ describe("getProviderConfig", () => {
     delete process.env.GOOGLE_CLIENT_SECRET;
     delete process.env.DISCORD_CLIENT_ID;
     delete process.env.DISCORD_CLIENT_SECRET;
+  });
+
+  it("returns config with GitHub email fallback endpoint", () => {
+    process.env.GITHUB_CLIENT_ID = "ghid";
+    process.env.GITHUB_CLIENT_SECRET = "ghsecret";
+    const config = getProviderConfig("github");
+    expect(config.emailUrl).toBe("https://api.github.com/user/emails");
+    expect(config.scopes).toEqual(["read:user", "user:email"]);
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
   });
 });
 
@@ -317,6 +341,49 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
     const client = makeClient();
     const info = await client.getUserInfo("tok");
     expect(info.name).toBe("handle");
+    globalThis.fetch = originalFetch;
+  });
+
+  it("fetches GitHub email from /user/emails when /user email is empty", async () => {
+    const originalFetch = globalThis.fetch;
+    let callCount = 0;
+    globalThis.fetch = asFetchMock(async (input) => {
+      const url = String(input);
+      callCount += 1;
+      if (url.endsWith("/userinfo")) {
+        return new Response(
+          JSON.stringify({
+            id: "gh-123",
+            login: "octocat",
+            name: "The Octocat",
+            avatar_url: "https://github.com/images/error/octocat_happy.gif",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify([
+          { email: "secondary@example.com", primary: false, verified: true },
+          { email: "primary@example.com", primary: true, verified: true },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    const client = new OAuthClient({
+      clientId: "c",
+      clientSecret: "s",
+      authorizationUrl: "https://example.com/auth",
+      tokenUrl: "https://example.com/token",
+      userInfoUrl: "https://example.com/userinfo",
+      emailUrl: "https://example.com/emails",
+      scopes: [],
+    });
+    const info = await client.getUserInfo("tok");
+    expect(callCount).toBe(2);
+    expect(info.id).toBe("gh-123");
+    expect(info.email).toBe("primary@example.com");
+    expect(info.picture).toBe("https://github.com/images/error/octocat_happy.gif");
+    expect(info.verified_email).toBe(true);
     globalThis.fetch = originalFetch;
   });
 

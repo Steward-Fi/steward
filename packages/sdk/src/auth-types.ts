@@ -20,6 +20,7 @@ export interface StewardUser {
   id: string;
   email: string;
   walletAddress?: string;
+  walletChain?: "ethereum" | "solana";
 }
 
 export interface StewardSession {
@@ -55,6 +56,15 @@ export interface StewardAuthExchangeResponse {
   user: StewardUser;
   refreshToken?: string;
   expiresIn?: number;
+  userId?: string;
+  address?: string;
+  publicKey?: string;
+  walletChain?: "ethereum" | "solana";
+  tenant?: {
+    id: string;
+    name: string;
+    apiKey?: string;
+  };
 }
 
 export interface StewardEmailResult {
@@ -126,8 +136,10 @@ export interface StewardProviders {
   passkey: boolean;
   email: boolean;
   siwe: boolean;
+  siws: boolean;
   google: boolean;
   discord: boolean;
+  github: boolean;
   /** List of all enabled OAuth provider names */
   oauth: string[];
 }
