@@ -315,6 +315,15 @@ export interface StewardAuthContextValue {
     address: string,
     signMessage: (msg: string) => Promise<string>,
   ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  /**
+   * Sign in with a Solana wallet via SIWS (Sign-In With Solana).
+   * Optional: present only when the underlying SDK supports it. When undefined,
+   * Solana wallet sign-in is disabled at runtime.
+   */
+  signInWithSolana?: (
+    publicKey: string,
+    signMessage: (msg: Uint8Array) => Promise<Uint8Array>,
+  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
   /** Sign in with an OAuth provider (Google, Discord, etc.) */
   signInWithOAuth: (
     provider: string,
