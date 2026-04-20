@@ -61,9 +61,9 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
-import bs58 from "bs58";
 import type { ApiResponse } from "@stwd/shared";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
+import bs58 from "bs58";
 import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { jwtVerify, SignJWT } from "jose";
@@ -994,7 +994,10 @@ auth.post("/verify", async (c) => {
   const requestedTenantId = c.req.header("X-Steward-Tenant");
   let effectiveTenantId = tenantResult.tenant.id;
   if (requestedTenantId && requestedTenantId !== tenantResult.tenant.id) {
-    const [requestedTenant] = await db.select().from(tenants).where(eq(tenants.id, requestedTenantId));
+    const [requestedTenant] = await db
+      .select()
+      .from(tenants)
+      .where(eq(tenants.id, requestedTenantId));
     if (requestedTenant) {
       effectiveTenantId = requestedTenantId;
     }
@@ -1046,7 +1049,10 @@ auth.post("/verify/solana", async (c) => {
   }
 
   if (parsed.publicKey !== body.publicKey) {
-    return c.json<ApiResponse>({ ok: false, error: "publicKey does not match signed message" }, 401);
+    return c.json<ApiResponse>(
+      { ok: false, error: "publicKey does not match signed message" },
+      401,
+    );
   }
 
   const allowedDomains = getAllowedSiweDomains();
@@ -1096,7 +1102,10 @@ auth.post("/verify/solana", async (c) => {
   const requestedTenantId = c.req.header("X-Steward-Tenant");
   let effectiveTenantId = tenantResult.tenant.id;
   if (requestedTenantId && requestedTenantId !== tenantResult.tenant.id) {
-    const [requestedTenant] = await db.select().from(tenants).where(eq(tenants.id, requestedTenantId));
+    const [requestedTenant] = await db
+      .select()
+      .from(tenants)
+      .where(eq(tenants.id, requestedTenantId));
     if (requestedTenant) {
       effectiveTenantId = requestedTenantId;
     }

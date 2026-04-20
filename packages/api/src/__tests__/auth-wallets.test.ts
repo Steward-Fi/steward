@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import { createPrivateKey, sign as cryptoSign } from "node:crypto";
-import { getDb, refreshTokens, tenants, userTenants, users } from "@stwd/db";
+import { getDb, refreshTokens, tenants, users, userTenants } from "@stwd/db";
 import bs58 from "bs58";
 import { eq } from "drizzle-orm";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -134,7 +134,10 @@ describeWithDatabase("wallet auth flows", () => {
     createdEvmAddresses.add(account.address.toLowerCase());
     expect(json.address).toBe(account.address.toLowerCase());
     const db = getDb();
-    const [user] = await db.select().from(users).where(eq(users.walletAddress, account.address.toLowerCase()));
+    const [user] = await db
+      .select()
+      .from(users)
+      .where(eq(users.walletAddress, account.address.toLowerCase()));
     expect(user).toBeDefined();
     expect(user?.walletChain).toBe("ethereum");
 
@@ -155,10 +158,15 @@ describeWithDatabase("wallet auth flows", () => {
 
     try {
       const nonce = await fetchNonce();
-      const message = buildSiwsMessage(SOLANA_TEST_KEYPAIR.publicKey, nonce).replace(
-        "steward.fi wants you to sign in with your Solana account:",
-        "evil.com wants you to sign in with your Solana account:",
-      );
+      // Construct a signed message whose domain AND uri both claim evil.com,
+      // so the URI-vs-domain consistency check passes and only the domain
+      // allowlist check can reject.
+      const message = buildSiwsMessage(SOLANA_TEST_KEYPAIR.publicKey, nonce)
+        .replace(
+          "steward.fi wants you to sign in with your Solana account:",
+          "evil.com wants you to sign in with your Solana account:",
+        )
+        .replace("URI: https://steward.fi", "URI: https://evil.com");
       const signature = signSolanaMessage(message);
 
       const res = await fetch(`${BASE_URL}/auth/verify/solana`, {

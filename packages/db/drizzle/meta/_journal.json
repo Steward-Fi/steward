@@ -113,6 +113,20 @@
       "when": 1775096300000,
       "tag": "0015_reputation_policy_types",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1775096900000,
+      "tag": "0016_tenant_email_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1775097500000,
+      "tag": "0017_user_wallet_chain",
+      "breakpoints": true
     }
   ]
 }

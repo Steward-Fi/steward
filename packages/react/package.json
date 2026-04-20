@@ -42,15 +42,33 @@
     "bs58": "^5.0.0"
   },
   "peerDependenciesMeta": {
-    "wagmi": { "optional": true },
-    "viem": { "optional": true },
-    "@rainbow-me/rainbowkit": { "optional": true },
-    "@tanstack/react-query": { "optional": true },
-    "@solana/wallet-adapter-react": { "optional": true },
-    "@solana/wallet-adapter-react-ui": { "optional": true },
-    "@solana/wallet-adapter-wallets": { "optional": true },
-    "@solana/web3.js": { "optional": true },
-    "bs58": { "optional": true }
+    "wagmi": {
+      "optional": true
+    },
+    "viem": {
+      "optional": true
+    },
+    "@rainbow-me/rainbowkit": {
+      "optional": true
+    },
+    "@tanstack/react-query": {
+      "optional": true
+    },
+    "@solana/wallet-adapter-react": {
+      "optional": true
+    },
+    "@solana/wallet-adapter-react-ui": {
+      "optional": true
+    },
+    "@solana/wallet-adapter-wallets": {
+      "optional": true
+    },
+    "@solana/web3.js": {
+      "optional": true
+    },
+    "bs58": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/react": "^18.0.0",

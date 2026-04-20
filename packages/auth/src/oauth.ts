@@ -337,9 +337,9 @@ export class OAuthClient {
             ? String(data.picture)
             : data.avatar_url != null
               ? String(data.avatar_url)
-            : data.avatar != null
-              ? String(data.avatar)
-              : undefined,
+              : data.avatar != null
+                ? String(data.avatar)
+                : undefined,
       verified_email: Boolean(data.verified_email ?? data.email_verified ?? data.verified ?? false),
     } satisfies OAuthUserInfo;
 
@@ -377,6 +377,12 @@ export class OAuthClient {
         entry != null && typeof entry === "object" && typeof entry.email === "string",
     );
 
-    return emails.find((entry) => entry.primary && entry.verified) ?? emails.find((entry) => entry.primary) ?? emails.find((entry) => entry.verified) ?? emails[0] ?? null;
+    return (
+      emails.find((entry) => entry.primary && entry.verified) ??
+      emails.find((entry) => entry.primary) ??
+      emails.find((entry) => entry.verified) ??
+      emails[0] ??
+      null
+    );
   }
 }

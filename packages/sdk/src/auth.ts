@@ -662,15 +662,19 @@ export class StewardAuth {
       );
     }
 
-    const verifyRes = await authRequest<StewardAuthExchangeResponse>(this.baseUrl, "/auth/verify/solana", {
-      method: "POST",
-      body: JSON.stringify({
-        message,
-        signature: bs58.encode(signatureBytes),
-        publicKey,
-      }),
-      ...(this.tenantId ? { headers: { "X-Steward-Tenant": this.tenantId } } : {}),
-    });
+    const verifyRes = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/verify/solana",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          message,
+          signature: bs58.encode(signatureBytes),
+          publicKey,
+        }),
+        ...(this.tenantId ? { headers: { "X-Steward-Tenant": this.tenantId } } : {}),
+      },
+    );
 
     if (!verifyRes.ok) {
       throw new StewardApiError(verifyRes.error, verifyRes.status);
