@@ -59,7 +59,7 @@ function buildSiwsMessage(publicKey: string, nonce: string): string {
     "",
     "URI: https://steward.fi",
     "Version: 1",
-    "Chain ID: solana:mainnet",
+    "Chain ID: mainnet",
     `Nonce: ${nonce}`,
     `Issued At: ${issuedAt}`,
   ].join("\n");
@@ -147,6 +147,42 @@ describeWithDatabase("wallet auth flows", () => {
     const payload = decodeJwtPayload(json.token);
     expect(payload.address).toBe(account.address.toLowerCase());
     expect(payload.userId).toBe(user?.id);
+  });
+
+  it("rejects SIWS messages whose signed domain is not on the allowlist", async () => {
+    const previousAllowedDomains = process.env.SIWE_ALLOWED_DOMAINS;
+    process.env.SIWE_ALLOWED_DOMAINS = "steward.fi";
+
+    try {
+      const nonce = await fetchNonce();
+      const message = buildSiwsMessage(SOLANA_TEST_KEYPAIR.publicKey, nonce).replace(
+        "steward.fi wants you to sign in with your Solana account:",
+        "evil.com wants you to sign in with your Solana account:",
+      );
+      const signature = signSolanaMessage(message);
+
+      const res = await fetch(`${BASE_URL}/auth/verify/solana`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message,
+          signature,
+          publicKey: SOLANA_TEST_KEYPAIR.publicKey,
+        }),
+      });
+
+      expect(res.status).toBe(401);
+      await expect(res.json()).resolves.toMatchObject({
+        ok: false,
+        error: "SIWS domain not allowed",
+      });
+    } finally {
+      if (previousAllowedDomains === undefined) {
+        delete process.env.SIWE_ALLOWED_DOMAINS;
+      } else {
+        process.env.SIWE_ALLOWED_DOMAINS = previousAllowedDomains;
+      }
+    }
   });
 
   it("verifies a known-good Solana signature and provisions a solana user/tenant", async () => {

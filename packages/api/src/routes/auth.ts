@@ -694,6 +694,23 @@ type ParsedSiwsMessage = {
   statement?: string;
 };
 
+const ALLOWED_SOLANA_CHAIN_IDS = new Set(["solana", "mainnet", "devnet"]);
+
+function isAllowedSiwsUri(uri: string | undefined, domain: string): boolean {
+  if (!uri) return false;
+  try {
+    const parsedUri = new URL(uri);
+    return parsedUri.protocol === "https:" && parsedUri.host === domain;
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedSiwsChainId(chainId: string | undefined): boolean {
+  if (!chainId) return true;
+  return ALLOWED_SOLANA_CHAIN_IDS.has(chainId.trim().toLowerCase());
+}
+
 function parseSiwsMessage(message: string): ParsedSiwsMessage | null {
   const lines = message.split(/\r?\n/);
   if (lines.length < 2) return null;
@@ -727,7 +744,7 @@ function parseSiwsMessage(message: string): ParsedSiwsMessage | null {
   if (!nonce) return null;
 
   return {
-    domain: match[1],
+    domain: match[1].trim(),
     publicKey,
     nonce,
     issuedAt: fields.get("issuedat"),
@@ -1028,6 +1045,26 @@ auth.post("/verify/solana", async (c) => {
 
   if (parsed.publicKey !== body.publicKey) {
     return c.json<ApiResponse>({ ok: false, error: "publicKey does not match signed message" }, 401);
+  }
+
+  const allowedDomains = getAllowedSiweDomains();
+  if (allowedDomains && !allowedDomains.includes(parsed.domain)) {
+    return c.json<ApiResponse>({ ok: false, error: "SIWS domain not allowed" }, 401);
+  }
+
+  if (!isAllowedSiwsUri(parsed.uri, parsed.domain)) {
+    return c.json<ApiResponse>({ ok: false, error: "SIWS uri must match the signed domain" }, 401);
+  }
+
+  if (parsed.version !== "1") {
+    return c.json<ApiResponse>({ ok: false, error: 'SIWS version must be "1"' }, 401);
+  }
+
+  if (!isAllowedSiwsChainId(parsed.chainId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "SIWS chainId must be one of: solana, mainnet, devnet" },
+      401,
+    );
   }
 
   const storedNonce = nonceStore.get(parsed.nonce);
