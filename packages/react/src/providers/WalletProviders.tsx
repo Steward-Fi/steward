@@ -1,10 +1,7 @@
 import { darkTheme, RainbowKitProvider, type Theme } from "@rainbow-me/rainbowkit";
 import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
-import {
-  PhantomWalletAdapter,
-  SolflareWalletAdapter,
-} from "@solana/wallet-adapter-wallets";
+import { PhantomWalletAdapter, SolflareWalletAdapter } from "@solana/wallet-adapter-wallets";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 // All imports from optional peer dependencies are intentional. These two
@@ -88,11 +85,7 @@ export function SolanaWalletProvider({
   children,
 }: SolanaWalletProviderProps) {
   const defaultWallets = useMemo(
-    () =>
-      wallets ?? [
-        new PhantomWalletAdapter(),
-        new SolflareWalletAdapter(),
-      ],
+    () => wallets ?? [new PhantomWalletAdapter(), new SolflareWalletAdapter()],
     [wallets],
   );
 

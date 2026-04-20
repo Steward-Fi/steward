@@ -127,6 +127,13 @@
       "when": 1775097500000,
       "tag": "0017_user_wallet_chain",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1775098100000,
+      "tag": "0018_tenant_owner_address_widen",
+      "breakpoints": true
     }
   ]
 }
