@@ -479,6 +479,47 @@ vaultRoutes.get("/:agentId/history", async (c) => {
 
 // ─── EIP-712 Typed Data Signing ───────────────────────────────────────────────
 
+// ─── Sign arbitrary message (personal_sign / eth_sign) ───────────────────────────────
+//
+// Used by server-to-server flows that need an off-chain signature from an
+// agent (e.g. four.meme SIWE login). EVM uses viem's personal_sign over the
+// UTF-8 bytes of the message. Solana uses Ed25519 over the message bytes.
+//
+// POST /vault/:agentId/sign-message
+// body: { "message": "<string>" }
+// resp: { ok: true, data: { signature: "0x..." } }
+vaultRoutes.post("/:agentId/sign-message", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{ message: string }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (!isNonEmptyString(body.message)) {
+    return c.json<ApiResponse>({ ok: false, error: "'message' is required" }, 400);
+  }
+
+  try {
+    const signature = await vault.signMessage(tenantId, agentId, body.message);
+    return c.json<ApiResponse>({ ok: true, data: { signature } });
+  } catch (e) {
+    console.error(`[Vault] sign-message failed for ${tenantId}/${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
 vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>(
