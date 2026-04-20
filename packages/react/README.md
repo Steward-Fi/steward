@@ -91,7 +91,15 @@ Or pass theme overrides to the provider:
 
 ## Wallet Login
 
-First-class EVM + Solana sign-in. Uses [wagmi](https://wagmi.sh) + [RainbowKit](https://rainbowkit.com) on EVM and [`@solana/wallet-adapter-react`](https://github.com/anza-xyz/wallet-adapter) on Solana. Tree-shakeable: if you only import `<WalletLogin />`, the provider wrappers are not bundled.
+First-class EVM + Solana sign-in. Uses [wagmi](https://wagmi.sh) + [RainbowKit](https://rainbowkit.com) on EVM and [`@solana/wallet-adapter-react`](https://github.com/anza-xyz/wallet-adapter) on Solana.
+
+**Imported from a subpath to keep wallet peer deps off the root entrypoint:**
+
+```ts
+import { WalletLogin, EVMWalletProvider, SolanaWalletProvider } from "@stwd/react/wallet";
+```
+
+Consumers that don't use wallet login can continue to import everything else from `@stwd/react` without installing wagmi / rainbowkit / @solana/*. The wallet entrypoint itself loads each chain's panel dynamically, so `chains="evm"` never resolves `@solana/*` at runtime (and vice versa).
 
 ### Install
 
@@ -104,17 +112,17 @@ bun add @solana/wallet-adapter-react @solana/wallet-adapter-react-ui \
         @solana/wallet-adapter-wallets @solana/web3.js bs58
 ```
 
-All wallet packages are declared as **optional peer dependencies**. Install only the families you need.
+All wallet packages are declared as **optional peer dependencies**. Install only the families you need. `@tanstack/react-query` is required whenever you use `EVMWalletProvider` or anything wagmi downstream.
 
 ### Basic usage
 
 ```tsx
+import { StewardProvider } from "@stwd/react";
 import {
-  StewardProvider,
   EVMWalletProvider,
   SolanaWalletProvider,
   WalletLogin,
-} from "@stwd/react";
+} from "@stwd/react/wallet";
 import "@stwd/react/styles.css";
 import "@rainbow-me/rainbowkit/styles.css";
 import "@solana/wallet-adapter-react-ui/styles.css";
@@ -149,7 +157,7 @@ export function App() {
 
 ### Advanced: bring your own providers
 
-`<EVMWalletProvider>` and `<SolanaWalletProvider>` are optional. If your app already mounts wagmi + RainbowKit + Solana wallet-adapter providers elsewhere, `<WalletLogin />` will pick them up automatically.
+`<EVMWalletProvider>` and `<SolanaWalletProvider>` are optional convenience wrappers. `<EVMWalletProvider>` also mounts a `QueryClientProvider` for wagmi v2 hooks; pass your own `queryClient` prop if your app already has one. If your app already mounts wagmi + RainbowKit + TanStack Query + Solana wallet-adapter providers elsewhere, `<WalletLogin />` will pick them up automatically.
 
 ```tsx
 <WagmiProvider config={wagmiConfig}>

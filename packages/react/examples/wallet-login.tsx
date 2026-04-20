@@ -10,7 +10,8 @@
  * This file is documentation, not shipped code. It is not part of the build.
  */
 
-import { EVMWalletProvider, SolanaWalletProvider, StewardProvider, WalletLogin } from "@stwd/react";
+import { StewardProvider } from "@stwd/react";
+import { EVMWalletProvider, SolanaWalletProvider, WalletLogin } from "@stwd/react/wallet";
 import { StewardClient } from "@stwd/sdk";
 
 import "@stwd/react/styles.css";
