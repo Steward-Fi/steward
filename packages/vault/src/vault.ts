@@ -413,10 +413,16 @@ export class Vault {
       }
 
       if (shouldBroadcast) {
+        // Use chain-specific RPC. Prior versions fell back to
+        // `this.config.rpcUrl` which is tenant-wide and may not match
+        // the target chain (e.g. Steward config pointed at Base but
+        // the tx is for BSC), causing RPC-side balance checks to fail
+        // with 'total cost exceeds balance' (wrong chain's balance).
+        const rpcUrl = CHAIN_RPCS[chainId] ?? this.config.rpcUrl;
         const client = createWalletClient({
           account,
           chain,
-          transport: http(this.config.rpcUrl),
+          transport: http(rpcUrl),
         });
 
         hash = await client.sendTransaction({
