@@ -536,8 +536,8 @@ async function resolveAndValidateTenant(
   userId: string,
   bodyTenantId?: string,
 ): Promise<TenantResolutionResult> {
-  const headerTenant = c.req.header("X-Steward-Tenant");
-  const requested = headerTenant || bodyTenantId;
+  const headerTenant = c.req.header("X-Steward-Tenant")?.trim();
+  const requested = (headerTenant || bodyTenantId?.trim()) || undefined;
 
   if (!requested) {
     return { ok: true, tenantId: `personal-${userId}`, isPersonal: true };
