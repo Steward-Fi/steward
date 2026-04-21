@@ -44,7 +44,7 @@ curl -X POST http://steward-proxy:8080/anthropic/v1/messages \
   -H "Authorization: Bearer agent-jwt" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-sonnet-4-6",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello"}]
   }'
@@ -96,7 +96,7 @@ Most LLM SDKs support custom base URLs, making proxy integration trivial:
     });
 
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       max_tokens: 1024,
       messages: [{ role: "user", content: "Hello" }],
     });

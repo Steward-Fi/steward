@@ -28,9 +28,8 @@ const PRICING: Record<string, ModelPricing> = {
 
   // Anthropic
   "claude-sonnet-4-6": { input: 0.003, output: 0.015 },
-  "claude-opus-4-6": { input: 0.015, output: 0.075 },
+  "claude-opus-4-7": { input: 0.015, output: 0.075 },
   "claude-haiku-3.5": { input: 0.0008, output: 0.004 },
-  "claude-3-5-sonnet-20241022": { input: 0.003, output: 0.015 },
 };
 
 /**

@@ -54,10 +54,10 @@ describe("Cost Estimator", () => {
     expect(cost).toBeCloseTo(0.045, 6);
   });
 
-  test("estimates Anthropic claude-opus-4-6 cost", () => {
+  test("estimates Anthropic claude-opus-4-7 cost", () => {
     const cost = estimateCost(
       "api.anthropic.com",
-      { model: "claude-opus-4-6" },
+      { model: "claude-opus-4-7" },
       {
         usage: {
           input_tokens: 10000,
