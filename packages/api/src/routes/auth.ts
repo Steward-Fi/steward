@@ -64,7 +64,7 @@ import {
 import type { ApiResponse } from "@stwd/shared";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
-import { and, eq } from "drizzle-orm";
+import { and, eq, gte, lt } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { jwtVerify, SignJWT } from "jose";
 import { generateNonce, SiweMessage } from "siwe";
@@ -197,20 +197,26 @@ async function createRefreshToken(userId: string, tenantId: string): Promise<str
 }
 
 /**
- * Validate a raw refresh token. Returns the stored record or null if missing/expired.
- * Does NOT delete the token — caller must do that on successful use (one-time use).
+ * Atomically consume a raw refresh token.
+ * Deletes and returns the row in one statement so concurrent refresh attempts
+ * cannot both validate the same one-time token and mint parallel successors.
  */
-async function validateRefreshToken(
-  raw: string,
-): Promise<typeof refreshTokens.$inferSelect | null> {
+async function consumeRefreshToken(raw: string): Promise<typeof refreshTokens.$inferSelect | null> {
   const db = getDb();
-  const hash = hashToken(raw);
-  const [record] = await db.select().from(refreshTokens).where(eq(refreshTokens.tokenHash, hash));
-  if (!record) return null;
-  if (record.expiresAt < new Date()) {
-    await db.delete(refreshTokens).where(eq(refreshTokens.id, record.id));
+  const now = new Date();
+  const [record] = await db
+    .delete(refreshTokens)
+    .where(and(eq(refreshTokens.tokenHash, hashToken(raw)), gte(refreshTokens.expiresAt, now)))
+    .returning();
+
+  // Best-effort cleanup for expired rows so they do not linger forever.
+  if (!record) {
+    await db
+      .delete(refreshTokens)
+      .where(and(eq(refreshTokens.tokenHash, hashToken(raw)), lt(refreshTokens.expiresAt, now)));
     return null;
   }
+
   return record;
 }
 
@@ -536,8 +542,8 @@ async function resolveAndValidateTenant(
   userId: string,
   bodyTenantId?: string,
 ): Promise<TenantResolutionResult> {
-  const headerTenant = c.req.header("X-Steward-Tenant");
-  const requested = headerTenant || bodyTenantId;
+  const headerTenant = c.req.header("X-Steward-Tenant")?.trim();
+  const requested = headerTenant || bodyTenantId?.trim() || undefined;
 
   if (!requested) {
     return { ok: true, tenantId: `personal-${userId}`, isPersonal: true };
@@ -1188,14 +1194,12 @@ auth.post("/refresh", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "refreshToken is required" }, 400);
   }
 
-  const record = await validateRefreshToken(body.refreshToken);
+  const record = await consumeRefreshToken(body.refreshToken);
   if (!record) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired refresh token" }, 401);
   }
 
   const db = getDb();
-  // Rotate: delete old token immediately (one-time use)
-  await db.delete(refreshTokens).where(eq(refreshTokens.id, record.id));
 
   // Fetch user for token claims
   const [user] = await db.select().from(users).where(eq(users.id, record.userId));

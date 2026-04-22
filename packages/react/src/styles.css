@@ -1405,12 +1405,53 @@
 
 .stwd-wallet-connector {
   display: flex;
-  align-items: center;
+  align-items: stretch;
+  width: 100%;
+}
+
+/* Force the third-party connector (RainbowKit ConnectButton container or
+   Solana WalletMultiButton) to fill the column and behave like one of
+   our own buttons. */
+.stwd-wallet-connector > * {
+  width: 100%;
 }
 
 .stwd-wallet-connector :where(button, .wallet-adapter-button) {
   border-radius: 0 !important;
   font-family: var(--stwd-wallet-font) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  line-height: 1.25 !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+  padding: 10px 14px !important;
+  height: auto !important;
+  min-height: 40px !important;
+  width: 100% !important;
+  justify-content: center !important;
+  background: var(--stwd-wallet-surface) !important;
+  color: var(--stwd-wallet-text) !important;
+  border: 1px solid var(--stwd-wallet-border) !important;
+  box-shadow: none !important;
+  white-space: nowrap;
+}
+
+.stwd-wallet-connector :where(button, .wallet-adapter-button):hover {
+  background: var(--stwd-wallet-border) !important;
+  border-color: var(--stwd-wallet-border-hover) !important;
+}
+
+/* RainbowKit wraps its button in a div that sets display: flex; justify-content
+   with extra paddings. Flatten that so the inner button fills the column. */
+.stwd-wallet-connector [data-testid="rk-connect-button"],
+.stwd-wallet-connector [aria-label="Open Connect Modal"] {
+  width: 100% !important;
+}
+
+/* Solana WalletMultiButton dropdown arrow and icon alignment. */
+.stwd-wallet-connector .wallet-adapter-button-start-icon,
+.stwd-wallet-connector .wallet-adapter-button-end-icon {
+  margin: 0 8px 0 0 !important;
 }
 
 .stwd-wallet-status {
