@@ -1714,7 +1714,10 @@ auth.get("/oauth/:provider/authorize", async (c) => {
   }
 
   const redirectUri = c.req.query("redirect_uri");
-  const tenantId = c.req.query("tenant_id");
+  // Accept both `tenant_id` (snake_case, canonical) and `tenantId` (camelCase)
+  // so integrators sending either shape land on the right tenant. Whitespace
+  // is trimmed defensively for the same reason we trim headers elsewhere.
+  const tenantId = c.req.query("tenant_id")?.trim() || c.req.query("tenantId")?.trim() || undefined;
 
   if (!redirectUri) {
     return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
