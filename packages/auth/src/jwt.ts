@@ -26,6 +26,8 @@ export interface AgentTokenPayload extends StewardJwtPayload {
   agentId: string;
   tenantId: string;
   scope: "agent";
+  /** Plural permissions list. Required for proxy access ("api:proxy"). */
+  scopes?: string[];
 }
 
 export interface RefreshTokenPayload extends StewardJwtPayload {
@@ -178,10 +180,12 @@ export async function signAccessToken(
 }
 
 export async function signAgentToken(
-  payload: Omit<AgentTokenPayload, "scope"> & { scope?: "agent" },
+  payload: Omit<AgentTokenPayload, "scope"> & { scope?: "agent"; scopes?: string[] },
   expiresIn: string = AGENT_TOKEN_EXPIRY,
 ): Promise<string> {
-  return signJwtPayload({ ...payload, scope: "agent" }, expiresIn);
+  const merged: Record<string, unknown> = { ...payload, scope: "agent" };
+  if (Array.isArray(payload.scopes)) merged.scopes = payload.scopes;
+  return signJwtPayload(merged, expiresIn);
 }
 
 export async function signRefreshToken(
