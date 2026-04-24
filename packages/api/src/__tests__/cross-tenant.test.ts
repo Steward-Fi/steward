@@ -174,6 +174,73 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     });
   });
 
+  describe("POST /user/me/tenants", () => {
+    it("creates a tenant and adds the user as owner", async () => {
+      const token = await getTestUserToken();
+      const tenantId = `test-ct-created-${Date.now()}`;
+
+      const res = await fetch(`${BASE_URL}/user/me/tenants`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Created Tenant", slug: tenantId }),
+      });
+
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as {
+        ok: boolean;
+        data: { tenantId: string; role: string; apiKey: string };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.data.tenantId).toBe(tenantId);
+      expect(body.data.role).toBe("owner");
+      expect(body.data.apiKey.startsWith("stw_")).toBe(true);
+
+      const db = getDb();
+      const [membership] = await db
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(eq(userTenants.tenantId, tenantId));
+      expect(membership?.role).toBe("owner");
+
+      await db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
+      await db.delete(tenants).where(eq(tenants.id, tenantId));
+    });
+  });
+
+  describe("POST /user/me/tenants/switch", () => {
+    it("validates membership and returns a new token", async () => {
+      const token = await getTestUserToken();
+
+      const res = await fetch(`${BASE_URL}/user/me/tenants/switch`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ tenantId: OPEN_TENANT }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        ok: boolean;
+        data: { token: string; tenantId: string; activeTenantId: string; role: string };
+      };
+      expect(body.ok).toBe(true);
+      expect(typeof body.data.token).toBe("string");
+      expect(body.data.tenantId).toBe(OPEN_TENANT);
+      expect(body.data.activeTenantId).toBe(OPEN_TENANT);
+    });
+
+    it("rejects switching to a tenant the user is not a member of", async () => {
+      const token = await getTestUserToken();
+
+      const res = await fetch(`${BASE_URL}/user/me/tenants/switch`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ tenantId: CLOSED_TENANT }),
+      });
+
+      expect(res.status).toBe(403);
+    });
+  });
+
   describe("GET /user/me/tenants/:tenantId", () => {
     it("returns membership info for a joined tenant", async () => {
       const token = await getTestUserToken();
