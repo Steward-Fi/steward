@@ -10,6 +10,7 @@ export * from "./oauth";
 export * from "./passkey";
 export * from "./platform";
 export * from "./session";
+export * from "./revocation";
 export * from "./store-backends";
 export * from "./token-store";
 export * from "./types";

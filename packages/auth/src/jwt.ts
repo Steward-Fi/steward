@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { type JWTPayload, jwtVerify, SignJWT } from "jose";
 
 export const JWT_ISSUER = "steward";
@@ -152,10 +153,14 @@ export async function signJwtPayload(
   secretKey: Uint8Array = getJwtSecretKey(),
   issuer: string = JWT_ISSUER,
 ): Promise<string> {
-  return new SignJWT(payload)
+  // Always assign a jti so tokens can be individually revoked via the
+  // revocation store. Callers may pre-set payload.jti to override.
+  const jti = (typeof payload.jti === "string" && payload.jti) || randomUUID();
+  return new SignJWT({ ...payload, jti })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setIssuer(issuer)
+    .setJti(jti)
     .setExpirationTime(expiresIn as Parameters<SignJWT["setExpirationTime"]>[0])
     .sign(secretKey);
 }

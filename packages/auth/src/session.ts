@@ -7,6 +7,7 @@
 
 import type { JWTPayload } from "jose";
 import { getJwtSecret, signJwtPayload, verifyJwtPayload } from "./jwt";
+import { assertTokenNotRevoked, revocationStore, TokenRevokedError } from "./revocation.js";
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,7 @@ export interface SessionConfig {
 
 export interface SessionPayload extends JWTPayload {
   userId: string;
+  jti: string;
   [key: string]: unknown;
 }
 
@@ -49,7 +51,8 @@ export class SessionManager {
   }
 
   /**
-   * Create a signed JWT for a user session.
+   * Create a signed JWT for a user session. signJwtPayload guarantees a jti
+   * claim, so every session token can be individually revoked.
    *
    * @param userId  The user's UUID or identifier — included as a top-level claim
    * @param extra   Optional additional claims to embed in the token
@@ -71,32 +74,46 @@ export class SessionManager {
    * Verify and decode a session JWT.
    *
    * Returns the payload (including `userId`) on success, or `null` if the
-   * token is invalid, expired, or has been tampered with.
+   * token is invalid, expired, or has been tampered with. Throws
+   * TokenRevokedError if the token's jti has been revoked.
    *
    * @param token  The compact JWT string
    */
   async verifySession(token: string): Promise<SessionPayload | null> {
+    let payload: JWTPayload;
     try {
-      const payload = await verifyJwtPayload(token, this.secret, this.issuer);
-
-      // Sanity-check our custom claim is present
-      if (typeof payload.userId !== "string") {
-        return null;
-      }
-
-      return payload as SessionPayload;
+      payload = await verifyJwtPayload(token, this.secret, this.issuer);
     } catch {
       // Covers JWTExpired, JWTInvalid, JWSInvalid, etc.
       return null;
     }
+
+    // Sanity-check our custom claims are present
+    if (typeof payload.userId !== "string" || typeof payload.jti !== "string") {
+      return null;
+    }
+
+    await assertTokenNotRevoked(payload);
+
+    return payload as SessionPayload;
   }
 
   /**
-   * Invalidate a session token.
-   * JWT revocation needs a server-side blocklist, so this default implementation is a no-op.
+   * Invalidate a session token by adding its JTI to the revocation store until
+   * the token's natural expiry. Redis shares this across instances; without
+   * REDIS_URL the store is in-memory for single-instance/embedded mode.
    *
-   * @param _token  The token to invalidate
+   * @param token  The token to invalidate
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async invalidateSession(_token: string): Promise<void> {}
+  async invalidateSession(token: string): Promise<void> {
+    const payload = await verifyJwtPayload(token, this.secret, this.issuer);
+
+    if (typeof payload.jti !== "string" || typeof payload.exp !== "number") {
+      throw new Error("Session token is missing revocable jti/exp claims");
+    }
+
+    await revocationStore.revokeToken(payload.jti, payload.exp);
+  }
 }
+
+export { TokenRevokedError };
