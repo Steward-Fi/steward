@@ -489,18 +489,42 @@ export interface PolicyTemplateCreate {
 
 export type PolicyTemplateUpdate = Partial<PolicyTemplateCreate>;
 
+/**
+ * Transaction-shaped policy simulation request.
+ * Used to evaluate signing policies against a hypothetical transaction.
+ */
+export interface PolicySimulateTransactionRequest {
+  kind?: "transaction";
+  to: string;
+  value: string;
+  data?: string;
+  chainId?: number;
+}
+
+/**
+ * Proxy-shaped policy simulation request.
+ * Used to evaluate proxy gateway policies against an outbound API call.
+ */
+export interface PolicySimulateProxyRequest {
+  kind: "proxy";
+  method?: string;
+  url?: string;
+  body?: unknown;
+  data?: unknown;
+  value?: string;
+}
+
+export type PolicySimulateRequest =
+  | PolicySimulateTransactionRequest
+  | PolicySimulateProxyRequest;
+
 export interface PolicySimulateInput {
   /** Simulate an existing saved template. */
   policyId?: string;
   /** Or simulate an inline rule set. */
   rules?: PolicyRule[];
   agentId: string;
-  request: {
-    to: string;
-    value: string;
-    data?: string;
-    chainId?: number;
-  };
+  request: PolicySimulateRequest;
 }
 
 export interface PolicySimulateResult {

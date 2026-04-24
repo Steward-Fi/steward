@@ -1,6 +1,11 @@
 "use client";
 
-import type { AgentIdentity, PolicyRule, PolicyTemplate } from "@stwd/sdk";
+import type {
+  AgentIdentity,
+  PolicyRule,
+  PolicySimulateResult,
+  PolicyTemplate,
+} from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
 import { steward } from "@/lib/api";
@@ -45,6 +50,7 @@ interface PolicySimulatePayload {
   policyId: string;
   agentId: string;
   request: {
+    kind?: "proxy" | "transaction";
     method?: string;
     url?: string;
     value?: string;
@@ -201,11 +207,7 @@ export default function PoliciesPage() {
     value: "",
     data: "",
   });
-  const [simResult, setSimResult] = useState<{
-    allowed: boolean;
-    reason?: string;
-    matchedRules: string[];
-  } | null>(null);
+  const [simResult, setSimResult] = useState<PolicySimulateResult | null>(null);
   const [simulating, setSimulating] = useState(false);
 
   // Delete
@@ -376,8 +378,9 @@ export default function PoliciesPage() {
         policyId: selected.id,
         agentId: simForm.agentId,
         request: {
-          method: simForm.method || undefined,
-          url: simForm.url || undefined,
+          kind: "proxy",
+          method: simForm.method || "GET",
+          url: simForm.url,
           value: simForm.value || undefined,
           data: simForm.data || undefined,
         },
@@ -391,13 +394,7 @@ export default function PoliciesPage() {
           data: payload.request.data,
         },
       });
-      // Re-shape to the dashboard's historical result type so the existing
-      // UI continues to render.
-      setSimResult({
-        allowed: result.approved,
-        reason: result.results.find((r) => !r.passed)?.reason,
-        matchedRules: result.results.filter((r) => r.passed).map((r) => r.policyId),
-      });
+      setSimResult(result);
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : "Simulation failed", "error");
     } finally {
@@ -1091,29 +1088,31 @@ export default function PoliciesPage() {
                               animate={{ opacity: 1, y: 0 }}
                               exit={{ opacity: 0 }}
                               className={`p-4 border space-y-2 ${
-                                simResult.allowed
+                                simResult.approved
                                   ? "border-emerald-400/30 bg-emerald-400/5"
                                   : "border-red-400/30 bg-red-400/5"
                               }`}
                             >
                               <div className="flex items-center gap-2">
                                 <span
-                                  className={`text-sm font-display font-700 ${simResult.allowed ? "text-emerald-400" : "text-red-400"}`}
+                                  className={`text-sm font-display font-700 ${simResult.approved ? "text-emerald-400" : "text-red-400"}`}
                                 >
-                                  {simResult.allowed ? "ALLOWED" : "DENIED"}
+                                  {simResult.approved ? "ALLOWED" : "DENIED"}
                                 </span>
                               </div>
-                              {simResult.reason && (
-                                <p className="text-xs text-text-secondary">{simResult.reason}</p>
+                              {simResult.requiresManualApproval && (
+                                <p className="text-xs text-text-secondary">
+                                  Manual approval would be required.
+                                </p>
                               )}
-                              {simResult.matchedRules.length > 0 && (
+                              {simResult.results.length > 0 && (
                                 <div className="flex flex-wrap gap-1.5">
-                                  {simResult.matchedRules.map((rule, i) => (
+                                  {simResult.results.map((rule, i) => (
                                     <span
                                       key={i}
                                       className="text-xs px-1.5 py-0.5 bg-bg border border-border font-mono text-text-tertiary"
                                     >
-                                      {rule}
+                                      {`${rule.type}: ${rule.passed ? "pass" : "fail"}${rule.reason ? ` — ${rule.reason}` : ""}`}
                                     </span>
                                   ))}
                                 </div>
