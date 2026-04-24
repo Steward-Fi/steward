@@ -12,14 +12,20 @@ function toHex(buffer: ArrayBuffer): string {
 
 async function signPayload(payload: string, secret: string): Promise<string> {
   const encoder = new TextEncoder();
+  const secretBytes = encoder.encode(secret);
   const key = await crypto.subtle.importKey(
     "raw",
-    encoder.encode(secret),
+    secretBytes.buffer.slice(secretBytes.byteOffset, secretBytes.byteOffset + secretBytes.byteLength) as ArrayBuffer,
     { name: "HMAC", hash: "SHA-256" },
     false,
     ["sign"],
   );
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
+  const payloadBytes = encoder.encode(payload);
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    payloadBytes.buffer.slice(payloadBytes.byteOffset, payloadBytes.byteOffset + payloadBytes.byteLength) as ArrayBuffer,
+  );
 
   return toHex(signature);
 }
