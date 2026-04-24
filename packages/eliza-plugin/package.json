@@ -1,6 +1,6 @@
 {
   "name": "@stwd/eliza-plugin",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Steward wallet management plugin for ElizaOS agents",
   "license": "MIT",
   "type": "module",
@@ -16,7 +16,7 @@
     }
   },
   "dependencies": {
-    "@stwd/sdk": "0.4.0"
+    "@stwd/sdk": "^0.8.0"
   },
   "peerDependencies": {
     "@elizaos/core": ">=2.0.0-alpha.50"
