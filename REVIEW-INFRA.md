@@ -81,9 +81,7 @@ Reviewer: Sol (subagent, code review)
 
 - **[deploy/Dockerfile]** References `packages/agent-trader`, `packages/react`, `packages/eliza-plugin`, `packages/seed` via `sed` removal but these packages have changed since the Dockerfile was written. The `sed` command removes `"web"` and `"packages/examples"` but doesn't account for `erc8004`.
 
-- **[docs/quickstart.md + docs/quickstart.mdx]** Two quickstart files exist (`.md` and `.mdx`). The `mint.json` navigation references `"quickstart"` which Mintlify resolves to `.mdx`. The `.md` version may be stale.
-
-- **[docs/] Multiple legacy/stale doc files.** `docs/architecture.md`, `docs/auth.md`, `docs/deployment.md`, `docs/policies.md`, `docs/quickstart.md`, `docs/react.md`, `docs/sdk.md` appear to be pre-Mintlify versions superseded by the `.mdx` files under `docs/concepts/`, `docs/auth/`, `docs/sdk/`, `docs/guides/`. They're not referenced in `mint.json` navigation.
+- **[docs/archive/ + docs/*.mdx]** Legacy root Markdown docs that duplicated Mintlify pages were archived under `docs/archive/`; active navigation stays on `.mdx` pages in `mint.json`.
 
 - **[CONTRIBUTING.md]** Says "Run all tests from the root: `bun test`" but `turbo.json` has a `test` task and the root `package.json` has `"test": "turbo test"`. These aren't the same thing and may produce different results.
 

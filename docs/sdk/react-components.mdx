@@ -439,6 +439,12 @@ export function AgentManagementPage({ agentId }: { agentId: string }) {
 
 ---
 
+## Known Limitations
+
+- Components require a configured `StewardClient`; they do not create tenants or platform keys.
+- Control-plane theming and feature flags depend on the tenant config API being reachable.
+- Approval and transaction components poll the API; choose intervals appropriate for your deployment.
+
 ## Peer Dependencies
 
 - `react >= 18`
