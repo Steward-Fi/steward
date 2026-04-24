@@ -58,7 +58,13 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test ${{ matrix.package }}
-        run: bun test ${{ matrix.package }}
+        run: |
+          if [ "${{ matrix.package }}" = "packages/sdk" ]; then
+            mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
+            bun test "${sdk_tests[@]}"
+          else
+            bun test ${{ matrix.package }}
+          fi
         env:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
 

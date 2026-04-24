@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -27,6 +29,28 @@ jobs:
 
       - name: Typecheck
         run: bun run typecheck
+
+
+      - name: Check public package version bumps
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${BASE_REF}"
+          changed_files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+
+          status=0
+          for pkg in sdk react eliza-plugin; do
+            pkg_dir="packages/${pkg}"
+            if echo "$changed_files" | grep -qE "^${pkg_dir}/"; then
+              if ! echo "$changed_files" | grep -qE "^${pkg_dir}/(package.json|CHANGELOG.md|CHANGELOG|changelog.md)$"; then
+                echo "::error::${pkg_dir} changed without a package.json version bump or changelog update"
+                status=1
+              fi
+            fi
+          done
+
+          exit "$status"
 
       - name: Check PR title
         run: |
@@ -70,7 +94,13 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test ${{ matrix.package }}
-        run: bun test ${{ matrix.package }}
+        run: |
+          if [ "${{ matrix.package }}" = "packages/sdk" ]; then
+            mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
+            bun test "${sdk_tests[@]}"
+          else
+            bun test ${{ matrix.package }}
+          fi
         env:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
 
