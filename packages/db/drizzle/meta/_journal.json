@@ -141,6 +141,13 @@
       "when": 1775098700000,
       "tag": "0019_harden_erc8004_policy_schemas",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1777026834865,
+      "tag": "0020_proxy_audit_reason",
+      "breakpoints": true
     }
   ]
 }

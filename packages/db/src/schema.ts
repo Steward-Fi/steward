@@ -680,6 +680,7 @@ export const proxyAuditLog = pgTable(
     method: varchar("method", { length: 10 }).notNull(),
     statusCode: integer("status_code").notNull(),
     latencyMs: integer("latency_ms").notNull(),
+    reason: text("reason"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

@@ -5,7 +5,7 @@
  * and cost estimation integration.
  */
 
-import { describe, expect, it } from "bun:test";
+import { beforeEach, describe, expect, it } from "bun:test";
 import { estimateCost, isKnownHost } from "@stwd/redis";
 import {
   checkProxyRateLimit,
@@ -13,6 +13,10 @@ import {
   isProxyRedisAvailable,
   trackProxySpend,
 } from "../middleware/redis-enforcement";
+
+beforeEach(() => {
+  delete process.env.REDIS_REQUIRED;
+});
 
 // ─── Graceful degradation (no Redis) ─────────────────────────────────────────
 
@@ -47,6 +51,15 @@ describe("proxy Redis enforcement (no Redis)", () => {
   it("checkProxySpendLimit allows when limit is 0 (no limit)", async () => {
     const result = await checkProxySpendLimit("agent-1", 0);
     expect(result.allowed).toBe(true);
+  });
+
+  it("checkProxySpendLimit fails closed when Redis is required", async () => {
+    process.env.REDIS_REQUIRED = "true";
+
+    const result = await checkProxySpendLimit("agent-1", 100);
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Redis unavailable");
   });
 });
 

@@ -16,6 +16,7 @@ export interface AuditEntry {
   method: string;
   statusCode: number;
   latencyMs: number;
+  reason?: string;
 }
 
 /**
@@ -33,6 +34,7 @@ export async function recordAudit(entry: AuditEntry): Promise<void> {
       method: entry.method,
       statusCode: entry.statusCode,
       latencyMs: entry.latencyMs,
+      reason: entry.reason,
     });
   } catch (err) {
     // Never let audit logging break the proxy
