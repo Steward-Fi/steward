@@ -1,9 +1,10 @@
-import { StewardClient } from "./steward-client";
+import { StewardClient } from "@stwd/sdk";
 
 export const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
 
 let _apiKey = "";
 let _tenantId = "";
+let _steward: StewardClient;
 
 export function setCredentials(tenantId: string, apiKey: string) {
   _tenantId = tenantId;
@@ -18,7 +19,7 @@ export function setCredentials(tenantId: string, apiKey: string) {
 export function setAuthToken(token: string) {
   _steward = new StewardClient({
     baseUrl: API_URL,
-    authToken: token,
+    bearerToken: token,
   });
 }
 
@@ -38,8 +39,8 @@ function getInitialToken(): string | undefined {
 
 const initialToken = getInitialToken();
 
-let _steward = initialToken
-  ? new StewardClient({ baseUrl: API_URL, authToken: initialToken })
+_steward = initialToken
+  ? new StewardClient({ baseUrl: API_URL, bearerToken: initialToken })
   : new StewardClient({
       baseUrl: API_URL,
       apiKey: _apiKey,
@@ -49,7 +50,12 @@ let _steward = initialToken
 // Proxy getter so components always get the latest client instance
 export const steward = new Proxy({} as StewardClient, {
   get(_target, prop) {
-    return (_steward as unknown as Record<string | symbol, unknown>)[prop];
+    const value = (_steward as unknown as Record<string | symbol, unknown>)[prop];
+    if (typeof value === "function") {
+      // Rebind `this` so SDK methods can call private members on the live client.
+      return (value as (...args: unknown[]) => unknown).bind(_steward);
+    }
+    return value;
   },
 });
 

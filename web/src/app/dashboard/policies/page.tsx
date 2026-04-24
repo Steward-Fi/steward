@@ -2,14 +2,69 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
+import type { AgentIdentity, PolicyRule, PolicyTemplate } from "@stwd/sdk";
 import { steward } from "@/lib/api";
-import type {
-  AgentIdentity,
-  PolicyCreatePayload,
-  PolicyRecord,
-  PolicySimulatePayload,
-} from "@/lib/steward-client";
 import { formatDate } from "@/lib/utils";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dashboard-local policy shape.
+//
+// The backend `/policies` endpoints return a `PolicyTemplate` with typed
+// `rules: PolicyRule[]` (plus `name`, `description`, `isDefault`). This page
+// pre-dates the typed template API and has historically rendered a
+// UI-categorized shape ("api_access" / "spend_limit" / etc.) with
+// `rules: Record<string, unknown>` and an `assignedAgents: string[]` field
+// that the template endpoint doesn't expose.
+//
+// The JSON editor roundtrips the raw `rules` payload, so values survive the
+// cast even when they don't match the nominal type. Leaving this shape in
+// place keeps the UI identical while the dashboard migrates off the inline
+// client. Flagged for a follow-up: unify this with `PolicyTemplate` and stop
+// pretending `rules` is a bag.
+// ─────────────────────────────────────────────────────────────────────────────
+interface PolicyRecord {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  type: "api_access" | "spend_limit" | "rate_limit" | "transaction";
+  rules: Record<string, unknown>;
+  assignedAgents: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface PolicyCreatePayload {
+  name: string;
+  description?: string;
+  type: PolicyRecord["type"];
+  rules: Record<string, unknown>;
+}
+
+interface PolicySimulatePayload {
+  policyId: string;
+  agentId: string;
+  request: {
+    method?: string;
+    url?: string;
+    value?: string;
+    data?: string;
+  };
+}
+
+function fromTemplate(t: PolicyTemplate): PolicyRecord {
+  return {
+    id: t.id,
+    tenantId: t.tenantId,
+    name: t.name,
+    description: t.description ?? undefined,
+    type: "transaction",
+    rules: t.rules as unknown as Record<string, unknown>,
+    assignedAgents: [],
+    createdAt: t.createdAt,
+    updatedAt: t.updatedAt,
+  };
+}
 
 const ease: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
@@ -167,8 +222,8 @@ export default function PoliciesPage() {
     try {
       setLoading(true);
       setError(null);
-      const [p, a] = await Promise.all([steward.listPolicies(), steward.listAgents()]);
-      setPolicies(p);
+      const [p, a] = await Promise.all([steward.listPolicyTemplates(), steward.listAgents()]);
+      setPolicies(p.map(fromTemplate));
       setAgents(a);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load policies");
@@ -224,7 +279,16 @@ export default function PoliciesPage() {
     setCreating(true);
     setCreateError(null);
     try {
-      const p = await steward.createPolicy({ ...createForm, rules });
+      const template = await steward.createPolicyTemplate({
+        name: createForm.name,
+        description: createForm.description,
+        rules: rules as unknown as PolicyRule[],
+      });
+      const p: PolicyRecord = {
+        ...fromTemplate(template),
+        type: createForm.type,
+        description: createForm.description,
+      };
       setPolicies((prev) => [p, ...prev]);
       setShowCreate(false);
       setCreateStep("template");
@@ -253,9 +317,20 @@ export default function PoliciesPage() {
     }
     setSaving(true);
     try {
-      const updated = await steward.updatePolicy(selected.id, { rules });
-      setPolicies((p) => p.map((x) => (x.id === updated.id ? updated : x)));
-      setSelected(updated);
+      const updated = fromTemplate(
+        await steward.updatePolicyTemplate(selected.id, {
+          rules: rules as unknown as PolicyRule[],
+        }),
+      );
+      // Preserve dashboard-only fields (type, assignedAgents) that the
+      // template endpoint doesn't round-trip.
+      const merged: PolicyRecord = {
+        ...updated,
+        type: selected.type,
+        assignedAgents: selected.assignedAgents,
+      };
+      setPolicies((p) => p.map((x) => (x.id === merged.id ? merged : x)));
+      setSelected(merged);
       setEditMode(false);
       toast("Policy saved", "success");
     } catch (e: unknown) {
@@ -269,9 +344,14 @@ export default function PoliciesPage() {
     if (!selected) return;
     setAssigning(true);
     try {
-      const updated = await steward.assignPolicy(selected.id, Array.from(assignSelected));
-      setPolicies((p) => p.map((x) => (x.id === updated.id ? updated : x)));
-      setSelected(updated);
+      const assignedAgents = Array.from(assignSelected);
+      const result = await steward.assignPolicyTemplate(selected.id, assignedAgents);
+      const merged: PolicyRecord = {
+        ...selected,
+        assignedAgents: result.assignedAgents,
+      };
+      setPolicies((p) => p.map((x) => (x.id === merged.id ? merged : x)));
+      setSelected(merged);
       setShowAssign(false);
       toast("Policy assignments updated", "success");
     } catch (e: unknown) {
@@ -287,6 +367,11 @@ export default function PoliciesPage() {
     setSimulating(true);
     setSimResult(null);
     try {
+      // FIXME (flag to Sol): this form collects `method` / `url` / `data`
+      // inputs that the backend `/policies/simulate` route doesn't consume.
+      // It requires `request: { to, value, chainId? }`. For now, pass the
+      // existing inputs through and derive `to`/`value` from the URL+value
+      // fields so the call still reaches the backend.
       const payload: PolicySimulatePayload = {
         policyId: selected.id,
         agentId: simForm.agentId,
@@ -297,8 +382,22 @@ export default function PoliciesPage() {
           data: simForm.data || undefined,
         },
       };
-      const result = await steward.simulatePolicy(payload);
-      setSimResult(result);
+      const result = await steward.simulatePolicy({
+        policyId: payload.policyId,
+        agentId: payload.agentId,
+        request: {
+          to: payload.request.url || "",
+          value: payload.request.value || "0",
+          data: payload.request.data,
+        },
+      });
+      // Re-shape to the dashboard's historical result type so the existing
+      // UI continues to render.
+      setSimResult({
+        allowed: result.approved,
+        reason: result.results.find((r) => !r.passed)?.reason,
+        matchedRules: result.results.filter((r) => r.passed).map((r) => r.policyId),
+      });
     } catch (e: unknown) {
       toast(e instanceof Error ? e.message : "Simulation failed", "error");
     } finally {
@@ -309,7 +408,7 @@ export default function PoliciesPage() {
   async function handleDelete(policyId: string) {
     setDeleting(true);
     try {
-      await steward.deletePolicy(policyId);
+      await steward.deletePolicyTemplate(policyId);
       setPolicies((p) => p.filter((x) => x.id !== policyId));
       if (selected?.id === policyId) setSelected(null);
       setConfirmDelete(null);

@@ -2,13 +2,16 @@
 
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
+import type { AgentIdentity } from "@stwd/sdk";
 import { steward } from "@/lib/api";
-import type {
-  AgentIdentity,
-  AuditEntry,
-  AuditQueryParams,
-  AuditSummary,
-} from "@/lib/steward-client";
+import {
+  type AuditEntry,
+  type AuditQueryParams,
+  type AuditSummary,
+  toAuditEntry,
+  toAuditLogQuery,
+  toAuditSummaryRows,
+} from "@/lib/audit-adapter";
 import { formatDate } from "@/lib/utils";
 
 const ease: [number, number, number, number] = [0.25, 1, 0.5, 1];
@@ -73,12 +76,12 @@ export default function AuditPage() {
       if (!clean.limit) clean.limit = 50;
 
       const [log, sum, agentList] = await Promise.all([
-        steward.getAuditLog(clean),
+        steward.getAuditLog(toAuditLogQuery(clean)),
         steward.getAuditSummary(),
         steward.listAgents(),
       ]);
-      setEntries(log);
-      setSummary(sum);
+      setEntries(log.data.map(toAuditEntry));
+      setSummary(toAuditSummaryRows(sum));
       setAgents(agentList);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load audit log");

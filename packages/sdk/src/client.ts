@@ -5,15 +5,29 @@ import type {
   ApiResponse,
   ApprovalQueueEntry,
   ApprovalStats,
+  AuditLogResponse,
+  AuditSummaryResponse,
   AutoApprovalRule,
   ChainFamily,
+  CreateRoutePayload,
+  CreateSecretPayload,
   ExportKeyResult,
   PolicyResult,
   PolicyRule,
+  PolicySimulateInput,
+  PolicySimulateResult,
+  PolicyTemplate,
+  PolicyTemplateCreate,
+  PolicyTemplateUpdate,
+  RouteRecord,
   RpcResponse,
+  SecretRecord,
   TenantControlPlaneConfig,
+  TenantMembership,
+  TxRecord,
   TypedDataDomain,
   TypedDataField,
+  UpdateRoutePayload,
   WebhookConfig,
   WebhookDelivery,
 } from "./types.ts";
@@ -194,8 +208,12 @@ export class StewardClient {
     return response.data;
   }
 
-  async setPolicies(agentId: string, policies: PolicyRule[]): Promise<void> {
-    const response = await this.request<void, StewardErrorResponse>(
+  /**
+   * Replace the policy set for an agent. Returns the stored policies
+   * (with server-assigned ids where applicable).
+   */
+  async setPolicies(agentId: string, policies: PolicyRule[]): Promise<PolicyRule[]> {
+    const response = await this.request<PolicyRule[] | undefined, StewardErrorResponse>(
       `/agents/${encodeURIComponent(agentId)}/policies`,
       {
         method: "PUT",
@@ -206,6 +224,9 @@ export class StewardClient {
     if (!response.ok) {
       throw new StewardApiError(response.error, response.status, response.data);
     }
+
+    // Older API builds returned no body; fall back to the input on void.
+    return response.data ?? policies;
   }
 
   async getAgent(agentId: string): Promise<AgentIdentity> {
@@ -230,8 +251,30 @@ export class StewardClient {
     return response.data.map(parseAgentIdentity);
   }
 
+  /**
+   * Return a compact history feed for an agent. Each entry is a
+   * `{ timestamp, value }` pair — suitable for trend charts and volume
+   * windows. For the full signed-transaction objects, prefer
+   * {@link getTransactionHistory}.
+   */
   async getHistory(agentId: string): Promise<GetHistoryResult> {
-    const response = await this.request<StewardHistoryEntry[], StewardErrorResponse>(
+    const records = await this.getTransactionHistory(agentId);
+    return records.map((tx) => ({
+      timestamp: Math.floor(
+        (tx.createdAt instanceof Date ? tx.createdAt.getTime() : new Date(tx.createdAt).getTime()) /
+          1000,
+      ),
+      value: tx.request?.value ?? "0",
+    }));
+  }
+
+  /**
+   * Return the full transaction history for an agent as `TxRecord[]`.
+   * Includes status, policy results, tx hash, timestamps, and the
+   * original sign request.
+   */
+  async getTransactionHistory(agentId: string): Promise<TxRecord[]> {
+    const response = await this.request<TxRecord[], StewardErrorResponse>(
       `/vault/${encodeURIComponent(agentId)}/history`,
     );
 
@@ -239,7 +282,20 @@ export class StewardClient {
       throw new StewardApiError(response.error, response.status, response.data);
     }
 
-    return response.data;
+    return response.data.map((tx) => ({
+      ...tx,
+      createdAt: tx.createdAt instanceof Date ? tx.createdAt : new Date(tx.createdAt),
+      signedAt: tx.signedAt
+        ? tx.signedAt instanceof Date
+          ? tx.signedAt
+          : new Date(tx.signedAt)
+        : undefined,
+      confirmedAt: tx.confirmedAt
+        ? tx.confirmedAt instanceof Date
+          ? tx.confirmedAt
+          : new Date(tx.confirmedAt)
+        : undefined,
+    }));
   }
 
   async signMessage(agentId: string, message: string): Promise<SignMessageResult> {
@@ -585,6 +641,260 @@ export class StewardClient {
     const response = await this.request<WebhookDelivery, StewardErrorResponse>(
       `/webhooks/deliveries/${encodeURIComponent(deliveryId)}/retry`,
       { method: "POST" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  // ─── Secrets ────────────────────────────────
+
+  /** List all secrets for the tenant. Values are never returned. */
+  async listSecrets(): Promise<SecretRecord[]> {
+    const response = await this.request<SecretRecord[], StewardErrorResponse>("/secrets");
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Create a new secret. */
+  async createSecret(payload: CreateSecretPayload): Promise<SecretRecord> {
+    const response = await this.request<SecretRecord, StewardErrorResponse>("/secrets", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Get a single secret by id (value is not returned). */
+  async getSecret(secretId: string): Promise<SecretRecord> {
+    const response = await this.request<SecretRecord, StewardErrorResponse>(
+      `/secrets/${encodeURIComponent(secretId)}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Rotate a secret's value. Bumps the secret's version. */
+  async rotateSecret(secretId: string, value: string): Promise<SecretRecord> {
+    const response = await this.request<SecretRecord, StewardErrorResponse>(
+      `/secrets/${encodeURIComponent(secretId)}/rotate`,
+      {
+        method: "POST",
+        body: JSON.stringify({ value }),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Delete a secret and all of its routes. */
+  async deleteSecret(secretId: string): Promise<void> {
+    const response = await this.request<{ deleted: boolean } | undefined, StewardErrorResponse>(
+      `/secrets/${encodeURIComponent(secretId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+  }
+
+  // ─── Secret Routes ─────────────────────────────
+
+  /** List credential injection routes, optionally filtered by secretId. */
+  async listRoutes(secretId?: string): Promise<RouteRecord[]> {
+    const qs = secretId ? `?secretId=${encodeURIComponent(secretId)}` : "";
+    const response = await this.request<RouteRecord[], StewardErrorResponse>(
+      `/secrets/routes${qs}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Create a credential injection route for a secret. */
+  async createRoute(payload: CreateRoutePayload): Promise<RouteRecord> {
+    const response = await this.request<RouteRecord, StewardErrorResponse>("/secrets/routes", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Update an existing route. */
+  async updateRoute(routeId: string, payload: UpdateRoutePayload): Promise<RouteRecord> {
+    const response = await this.request<RouteRecord, StewardErrorResponse>(
+      `/secrets/routes/${encodeURIComponent(routeId)}`,
+      { method: "PUT", body: JSON.stringify(payload) },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Delete a route. */
+  async deleteRoute(routeId: string): Promise<void> {
+    const response = await this.request<{ deleted: boolean } | undefined, StewardErrorResponse>(
+      `/secrets/routes/${encodeURIComponent(routeId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+  }
+
+  // ─── Policy Templates ────────────────────────────
+
+  /** List policy templates for the tenant. */
+  async listPolicyTemplates(): Promise<PolicyTemplate[]> {
+    const response = await this.request<PolicyTemplate[], StewardErrorResponse>("/policies");
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Get a single policy template by id. */
+  async getPolicyTemplate(templateId: string): Promise<PolicyTemplate> {
+    const response = await this.request<PolicyTemplate, StewardErrorResponse>(
+      `/policies/${encodeURIComponent(templateId)}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Create a new policy template. */
+  async createPolicyTemplate(payload: PolicyTemplateCreate): Promise<PolicyTemplate> {
+    const response = await this.request<PolicyTemplate, StewardErrorResponse>("/policies", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Update an existing policy template. */
+  async updatePolicyTemplate(
+    templateId: string,
+    payload: PolicyTemplateUpdate,
+  ): Promise<PolicyTemplate> {
+    const response = await this.request<PolicyTemplate, StewardErrorResponse>(
+      `/policies/${encodeURIComponent(templateId)}`,
+      { method: "PUT", body: JSON.stringify(payload) },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Delete a policy template. */
+  async deletePolicyTemplate(templateId: string): Promise<void> {
+    const response = await this.request<{ deleted: boolean } | undefined, StewardErrorResponse>(
+      `/policies/${encodeURIComponent(templateId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+  }
+
+  /** Assign a policy template to one or more agents (overwrites their existing rules). */
+  async assignPolicyTemplate(
+    templateId: string,
+    agentIds: string[],
+  ): Promise<{ templateId: string; assignedAgents: string[]; rulesApplied: number }> {
+    const response = await this.request<
+      { templateId: string; assignedAgents: string[]; rulesApplied: number },
+      StewardErrorResponse
+    >(`/policies/${encodeURIComponent(templateId)}/assign`, {
+      method: "POST",
+      body: JSON.stringify({ agentIds }),
+    });
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Simulate policy evaluation against a mock transaction. */
+  async simulatePolicy(input: PolicySimulateInput): Promise<PolicySimulateResult> {
+    const response = await this.request<PolicySimulateResult, StewardErrorResponse>(
+      "/policies/simulate",
+      { method: "POST", body: JSON.stringify(input) },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  // ─── Audit ──────────────────────────────────
+
+  /**
+   * Fetch a page of audit log entries for the tenant. Supports filter by
+   * agent, action (`sign` | `approve` | `reject` | `proxy`), status, and
+   * date range. Pagination is page/limit-based.
+   */
+  async getAuditLog(params?: {
+    agentId?: string;
+    action?: string;
+    status?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<AuditLogResponse> {
+    const search = new URLSearchParams();
+    if (params?.agentId) search.set("agentId", params.agentId);
+    if (params?.action) search.set("action", params.action);
+    if (params?.status) search.set("status", params.status);
+    if (params?.dateFrom) search.set("dateFrom", params.dateFrom);
+    if (params?.dateTo) search.set("dateTo", params.dateTo);
+    if (params?.page) search.set("page", String(params.page));
+    if (params?.limit) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    const response = await this.request<AuditLogResponse, StewardErrorResponse>(
+      `/audit/log${qs ? `?${qs}` : ""}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Aggregate audit counters + top agents + daily activity. */
+  async getAuditSummary(range?: "24h" | "7d" | "30d" | "all"): Promise<AuditSummaryResponse> {
+    const qs = range ? `?range=${range}` : "";
+    const response = await this.request<AuditSummaryResponse, StewardErrorResponse>(
+      `/audit/summary${qs}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /**
+   * Download the audit log as CSV. Returns the raw CSV body as a string.
+   * Does not use the `/api/v1` JSON envelope — streams text directly.
+   */
+  async exportAuditCsv(params?: {
+    agentId?: string;
+    action?: string;
+    status?: string;
+    dateFrom?: string;
+    dateTo?: string;
+  }): Promise<string> {
+    const search = new URLSearchParams();
+    if (params?.agentId) search.set("agentId", params.agentId);
+    if (params?.action) search.set("action", params.action);
+    if (params?.status) search.set("status", params.status);
+    if (params?.dateFrom) search.set("dateFrom", params.dateFrom);
+    if (params?.dateTo) search.set("dateTo", params.dateTo);
+    const qs = search.toString();
+    const url = `${this.baseUrl}/audit/export${qs ? `?${qs}` : ""}`;
+    let response: Response;
+    try {
+      response = await fetch(url, { headers: this.buildHeaders() });
+    } catch (error) {
+      throw new StewardApiError(
+        error instanceof Error ? error.message : "Network request failed",
+        0,
+      );
+    }
+    if (!response.ok) {
+      throw new StewardApiError(`Audit export failed: ${response.status}`, response.status);
+    }
+    return response.text();
+  }
+
+  // ─── User Tenants ─────────────────────────────
+
+  /** List the tenants the authenticated user is a member of. Requires user JWT. */
+  async listUserTenants(): Promise<TenantMembership[]> {
+    const response = await this.request<TenantMembership[], StewardErrorResponse>(
+      "/user/me/tenants",
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return response.data;

@@ -3,7 +3,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { CopyButton } from "@/components/copy-button";
-import { steward } from "@/lib/api";
+import { API_URL, steward } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 
 interface TenantInfo {
@@ -16,6 +16,53 @@ interface TenantInfo {
 interface CreatedTenant {
   tenantId: string;
   apiKey: string;
+}
+
+/**
+ * FIXME (flag to Sol): the dashboard invokes `POST /user/me/tenants` to
+ * create a tenant and `POST /user/me/tenants/switch` to switch, but neither
+ * endpoint exists in `packages/api`. The actual create-tenant route lives at
+ * `POST /platform/tenants` and there is no switch endpoint at all — switching
+ * is a client-side concept today (localStorage only). Until the backend
+ * catches up, keep these as direct `fetch` calls so the SDK only exposes
+ * routes that actually exist.
+ */
+async function createTenantViaApi(
+  name: string,
+  description?: string,
+): Promise<CreatedTenant> {
+  const token =
+    typeof window !== "undefined"
+      ? localStorage.getItem("steward_session_token") || ""
+      : "";
+  const res = await fetch(`${API_URL}/user/me/tenants`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ name, description }),
+  });
+  const json = (await res.json()) as { ok: boolean; data?: CreatedTenant; error?: string };
+  if (!json.ok || !json.data) throw new Error(json.error || `Request failed: ${res.status}`);
+  return json.data;
+}
+
+async function switchTenantViaApi(tenantId: string): Promise<void> {
+  const token =
+    typeof window !== "undefined"
+      ? localStorage.getItem("steward_session_token") || ""
+      : "";
+  const res = await fetch(`${API_URL}/user/me/tenants/switch`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ tenantId }),
+  });
+  const json = (await res.json()) as { ok: boolean; error?: string };
+  if (!json.ok) throw new Error(json.error || `Request failed: ${res.status}`);
 }
 
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
@@ -45,7 +92,7 @@ export default function TenantsPage() {
     try {
       setLoading(true);
       setError(null);
-      const list = await steward.listTenants();
+      const list = await steward.listUserTenants();
       setTenants(list);
       // If no active tenant set but we have tenants, use first one
       if (!activeTenantId && list.length > 0) {
@@ -61,7 +108,7 @@ export default function TenantsPage() {
   async function switchTenant(tenantId: string) {
     try {
       setSwitching(tenantId);
-      await steward.switchTenant(tenantId);
+      await switchTenantViaApi(tenantId);
       setActiveTenantId(tenantId);
       localStorage.setItem("steward_active_tenant", tenantId);
     } catch (e: unknown) {
@@ -77,7 +124,7 @@ export default function TenantsPage() {
     setCreateError(null);
     try {
       setCreating(true);
-      const result = await steward.createTenant(form.name, form.description || undefined);
+      const result = await createTenantViaApi(form.name, form.description || undefined);
       setCreated(result);
       // Add to list
       setTenants((prev) => [
