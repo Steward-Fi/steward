@@ -69,7 +69,7 @@ const result = await steward.signTransaction("trading-bot", {
 });
 ```
 
-See the full [Quickstart Guide](docs/quickstart.md) for auth setup, policies, and self-hosting.
+See the full [Quickstart Guide](docs/quickstart.mdx) for auth setup and policies. See the [Deployment Guide](docs/deployment.md) for self-hosting.
 
 ---
 
@@ -130,11 +130,13 @@ Steward runs anywhere. Two options:
 ```bash
 git clone https://github.com/Steward-Fi/steward.git && cd steward
 cp .env.example .env
-# Set STEWARD_MASTER_PASSWORD and POSTGRES_PASSWORD in .env
+# Set STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_PLATFORM_KEYS,
+# STEWARD_SESSION_SECRET, and STEWARD_JWT_SECRET in .env
 docker compose up -d
+curl http://127.0.0.1:3200/ready
 ```
 
-This starts the API (`:3200`), proxy (`:8080`), Postgres, and Redis.
+This starts the API (`:3200`), proxy (`:8080`), Postgres, and Redis. API migrations run automatically on startup unless `SKIP_MIGRATIONS` is set.
 
 **Embedded mode (no third-party dependencies):**
 
