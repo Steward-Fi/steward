@@ -6,7 +6,7 @@
  * re-instantiate them (which would lead to duplicate connections / inconsistent state).
  */
 
-import { validateApiKey } from "@stwd/auth";
+import { signAccessToken, signAgentToken, validateApiKey, verifyToken } from "@stwd/auth";
 import { getDb, policies, tenants, toPolicyRule, transactions } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
@@ -22,7 +22,6 @@ import { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
-import { jwtVerify, SignJWT } from "jose";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -34,33 +33,10 @@ export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
-const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
-if (!process.env.STEWARD_SESSION_SECRET && process.env.STEWARD_MASTER_PASSWORD) {
-  console.warn(
-    "⚠️ STEWARD_SESSION_SECRET not set, falling back to master password. Set a separate JWT secret for production.",
-  );
-}
-if (!jwtSecretSource) {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error(
-      "⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production",
-    );
-  }
-  console.warn(
-    "⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!",
-  );
-}
-export const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
-export const JWT_ISSUER = "steward";
 export const JWT_EXPIRY = "24h";
 
 export async function createSessionToken(address: string, tenantId: string): Promise<string> {
-  return new SignJWT({ address, tenantId })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setIssuer(JWT_ISSUER)
-    .setExpirationTime(JWT_EXPIRY)
-    .sign(JWT_SECRET);
+  return signAccessToken({ address, tenantId }, JWT_EXPIRY);
 }
 
 export async function createAgentToken(
@@ -68,20 +44,12 @@ export async function createAgentToken(
   tenantId: string,
   expiresIn?: string,
 ): Promise<string> {
-  return new SignJWT({ agentId, tenantId, scope: "agent" })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setIssuer(JWT_ISSUER)
-    .setExpirationTime(expiresIn || AGENT_TOKEN_EXPIRY)
-    .sign(JWT_SECRET);
+  return signAgentToken({ agentId, tenantId }, expiresIn || AGENT_TOKEN_EXPIRY);
 }
 
 export async function verifySessionToken(token: string) {
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET, {
-      issuer: JWT_ISSUER,
-    });
-    return payload as {
+    return (await verifyToken(token)) as {
       address: string;
       tenantId: string;
       agentId?: string;

@@ -5,6 +5,7 @@
  * All route logic lives in `./routes/*`; shared state lives in `./services/context`.
  */
 
+import { validateJwtSecretEnv } from "@stwd/auth";
 import { closeDb, getDb, runMigrations, shouldUsePGLite } from "@stwd/db";
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
@@ -47,6 +48,7 @@ let migrationsRan = false;
 if (!Number.isInteger(PORT) || PORT <= 0) {
   throw new Error("PORT must be a positive integer");
 }
+validateJwtSecretEnv();
 
 const app = new Hono<{ Variables: AppVariables }>();
 const requestLog = new Map<string, { count: number; resetAt: number }>();

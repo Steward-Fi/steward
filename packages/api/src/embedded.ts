@@ -16,8 +16,9 @@
 
 import { createPGLiteDb, getDataDir, setPGLiteOverride } from "@stwd/db";
 
-// Force PGLite mode
+// Force PGLite/embedded mode
 process.env.STEWARD_DB_MODE = "pglite";
+process.env.STEWARD_EMBEDDED = "true";
 
 // Set a sentinel DATABASE_URL so context.ts's requireEnv doesn't throw.
 // PGLite overrides getDb() before any SQL runs, so this URL is never used.
