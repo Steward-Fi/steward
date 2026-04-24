@@ -134,6 +134,13 @@
       "when": 1775098100000,
       "tag": "0018_tenant_owner_address_widen",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1775098700000,
+      "tag": "0019_harden_erc8004_policy_schemas",
+      "breakpoints": true
     }
   ]
 }

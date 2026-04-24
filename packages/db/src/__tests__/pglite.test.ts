@@ -69,6 +69,33 @@ describe("PGLite Adapter", () => {
     await client.close();
   });
 
+  test("migrations create ERC-8004 and policy template tables", async () => {
+    const { client } = await freshDb();
+    const expectedTables = [
+      "agent_registrations",
+      "reputation_cache",
+      "registry_index",
+      "policy_templates",
+    ];
+
+    const result = await client.query<{ table_name: string }>(
+      `SELECT table_name
+       FROM information_schema.tables
+       WHERE table_schema = 'public'
+         AND table_name IN (
+           'agent_registrations',
+           'reputation_cache',
+           'registry_index',
+           'policy_templates'
+         )
+       ORDER BY table_name`,
+    );
+
+    expect(result.rows.map((row) => row.table_name).sort()).toEqual(expectedTables.sort());
+
+    await client.close();
+  });
+
   // ─── Basic CRUD ────────────────────────────────────────────────────────
 
   test("create and read tenant", async () => {
