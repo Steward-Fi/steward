@@ -1,0 +1,164 @@
+---
+title: "ADR-0003: Single container, multiple services deploy"
+status: Accepted
+date: 2026-04-24
+---
+
+# ADR-0003 — Single container, multiple services deploy
+
+**Status:** Accepted
+**Last reviewed:** 2026-04-24
+
+## Context
+
+Steward has multiple long-running services (API, credential proxy) plus
+stateful dependencies (Postgres, Redis). We had to pick a canonical
+deployment shape. This ADR records **why Docker Compose is the reference
+deploy** and how every other deployment target (Railway, Fly.io,
+bare-metal, k8s) relates to it.
+
+## Decision
+
+### Docker Compose is the reference
+
+`docker-compose.yml` at the repo root is the canonical production
+deployment. It declares four services:
+
+- `steward-api` — REST API + vault, port 3200 (bound to `127.0.0.1` by
+  default; expected to sit behind a reverse proxy / TLS terminator).
+- `steward-proxy` — credential injection proxy, port 8080.
+- `postgres` — PostgreSQL 16, internal network only.
+- `redis` — Redis 7 for rate limiting and token store, internal network
+  only.
+
+The API and the proxy share a single Docker image (`steward:latest`,
+built from `Dockerfile`) but run as **separate containers** with
+different entrypoints.
+
+**Why Compose (vs "just run `bun`"):**
+
+- Four processes + two stateful deps is enough that a process manager
+  matters. Compose gives us restart policies, healthchecks, and an
+  internal network in one file.
+- Every realistic deployment target (bare-metal VPS, Hetzner dedicated,
+  Railway, Fly, a k8s cluster, an internal Nomad) can ingest Compose as
+  either the actual runtime (VPS, bare-metal) or as a specification that
+  translates one-to-one (`kompose convert`, Railway's Compose import,
+  Fly's `fly launch --from-compose`).
+- It's the lowest common denominator for self-hosters, which matches
+  Steward's "no vendor lock-in" value.
+
+### Why separate containers for API and proxy
+
+They share code (same Docker image) but run as separate processes
+because:
+
+- **Blast radius.** The proxy handles arbitrary outbound credential
+  injection against tenant-controlled upstream URLs. That's a different
+  attack surface from the vault's internal REST. Process isolation means
+  a proxy-side bug (e.g. a request-smuggling CVE in an upstream HTTP
+  library) does not automatically have vault authority.
+- **Independent scaling.** The proxy is throughput-bound (streaming
+  third-party API responses); the API is latency-bound (signing, DB writes).
+  Separate containers let us scale replicas independently when we get
+  there.
+- **Independent restart.** A proxy crash should not interrupt signing.
+
+They share an image because:
+
+- Shared TypeScript codebase. One build, two entrypoints.
+- Simpler release: one `docker build`, one tag to pin.
+
+### Postgres and Redis as separate services
+
+- **Postgres** is the system of record: encrypted keys, agents, tenants,
+  users, policies, transactions, approvals, audit log.
+- **Redis** is the ephemeral store: rate-limit counters, JWT token store
+  (denylist + rotation tracking), short-lived session data.
+
+Redis is not load-bearing for correctness — if Redis is down, rate limits
+degrade gracefully (per the middleware) and token rotation falls back to
+database-backed lookup. Postgres is load-bearing; losing Postgres means
+the API is down.
+
+### Embedded PGLite mode for local dev
+
+`packages/api/src/embedded.ts` is an alternate entrypoint that:
+
+- Sets `STEWARD_DB_MODE=pglite`.
+- Uses `@electric-sql/pglite` (Postgres-in-WASM) via `@stwd/db`'s
+  `createPGLiteDb()`.
+- Persists data to `~/.steward/data/` by default (configurable with
+  `STEWARD_PGLITE_PATH`).
+- Runs migrations in-process.
+
+This is the "no-Docker, no third-party DB" path for:
+
+- Desktop apps bundling Steward as an in-process library.
+- CLI agents / local dev where Docker is overkill.
+- CI smoke tests.
+
+**It is not a production deployment target.** Embedded mode is single-
+process, single-machine, no Redis. The SDK and the feature surface are
+the same, but the operational guarantees are not (no hot-standby, no
+shared rate limiting, no horizontal scaling). This is called out in the
+embedded-mode docs.
+
+### Railway / Fly.io / bare-metal are derivatives
+
+Railway and Fly have their own native abstractions, and users have
+asked for first-class templates. The position is:
+
+- **Compose is the spec.** A Railway / Fly / k8s deployment is a
+  translation of Compose into the target's native manifest.
+- We ship Railway and Fly templates as conveniences (see
+  `deploy/` and `docs/RAILWAY-DEPLOY.md`), but behavior is defined by
+  the Compose file.
+- If a target-specific deployment diverges from Compose (e.g. a Railway
+  template uses a managed Postgres instead of the `postgres` service),
+  that's fine — the Compose semantic is still the reference.
+
+### Migrations auto-run on startup
+
+`@stwd/db` runs pending migrations at API boot, not as a separate step.
+See `packages/db/src/migrate.ts` and the PGLite equivalent in
+`packages/db/src/pglite.ts` (line ~48).
+
+**Why:**
+
+- Self-hosters should be able to `docker compose up -d` after a
+  `git pull` and have the thing work.
+- A broken migration fails the healthcheck; a bad deploy is obvious.
+- Separating migrations from startup would mean a separate ops runbook,
+  which contradicts the "minimal ops overhead" design goal.
+
+**Tradeoff:** this model is not safe for zero-downtime rolling deploys
+when multiple API replicas compete to run the same migration. For v1
+(single-replica Compose), this is fine. When we add horizontal scaling,
+we'll gate migrations on a leader lock (`pg_advisory_lock`) or extract
+them into an init container.
+
+## Consequences
+
+- **Positive:** one `docker-compose.yml` is the whole story. Runs on a
+  $5 VPS. Translates cleanly to every other hosting target.
+- **Negative:** no opinion on load balancing, TLS termination, or
+  secrets management — those are the operator's responsibility. We
+  assume a reverse proxy (Caddy, nginx, Traefik) in front for TLS.
+- **Limitations accepted for v1:**
+  - No rolling deploy story.
+  - No leader election for migrations.
+  - Redis is single-instance (not Sentinel / Cluster).
+- **Future:**
+  - **Helm chart / k8s manifests** for users who have already made the
+    k8s bet.
+  - **Managed hosted tier** (`steward.fi`) — multi-tenant, Steward runs
+    the infra. Same packages, same Compose-shaped topology under the
+    hood, just operated for you.
+
+## Related
+
+- `docker-compose.yml`, `docker-compose.dev.yml`, `Dockerfile`
+- `docs/deployment.md`, `docs/RAILWAY-DEPLOY.md`
+- `packages/api/src/embedded.ts`
+- `packages/db/src/migrate.ts`

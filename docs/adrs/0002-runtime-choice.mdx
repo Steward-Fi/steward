@@ -1,0 +1,136 @@
+---
+title: "ADR-0002: Why Bun and Hono"
+status: Accepted
+date: 2026-04-24
+---
+
+# ADR-0002 — Why Bun and Hono
+
+**Status:** Accepted
+**Last reviewed:** 2026-04-24
+
+## Context
+
+Steward is a TypeScript monorepo that ships an API, a credential proxy, an
+SDK, and supporting packages. We had to pick a runtime, an HTTP framework,
+and a monorepo toolchain. This ADR records why we landed on **Bun + Hono +
+Turborepo**, and what that costs us.
+
+This is a tradeoff document, not a sales pitch. If these tradeoffs stop
+making sense, the decision is reversible.
+
+## Decision
+
+### Runtime: Bun
+
+`package.json` pins `"packageManager": "bun@1.3.9"`. The `Dockerfile` uses
+the `oven/bun` base image. All `turbo` scripts shell out to `bun`.
+
+**What Bun buys us:**
+
+- **Native TypeScript execution.** No `ts-node`, no `tsx`, no build step for
+  development. `bun run packages/api/src/index.ts` just works. For a ten-ish
+  package monorepo that would otherwise need a build pipeline in dev, this
+  is a meaningful ergonomics win.
+- **Fast startup.** Cold start for the API (`bun run packages/api/src/index.ts`)
+  is sub-second on a developer laptop. `ts-node` equivalents were
+  multi-second. This matters most for the embedded mode (`embedded.ts`) —
+  users starting a local desktop daemon notice.
+- **Built-in test runner.** `bun test` runs our `__tests__/` files with
+  minimal config. No jest, no vitest wiring in every package.
+- **`Bun.serve` performance.** Our HTTP surface is not yet a bottleneck, but
+  `Bun.serve` routinely benchmarks 2–4× Node's `http` on raw throughput.
+  That's headroom, not a feature we rely on.
+- **Workspaces in the package manager itself.** `bun install` resolves
+  `packages/*` workspaces natively. No `pnpm`, no hoisting surprises.
+
+**What Bun costs us:**
+
+- **Smaller ecosystem.** Some Node-specific packages still break (native
+  modules, older modules that monkey-patch `require`). We have hit this
+  maybe a dozen times since adoption; each time we either forked, swapped
+  to an alternative, or used the Node-compat shim (`node:` imports work
+  fine). It's a real tax, not a huge one.
+- **Shorter production track record.** Bun 1.0 shipped in September 2023.
+  Node has been in production everywhere since 2011. If we hit a Bun-only
+  bug under load, we're first-party debuggers. Mitigations: we do not rely
+  on Bun-exclusive APIs anywhere we don't have to (see below).
+- **Node compatibility is not currently guaranteed.** We do not
+  continuously test the Steward packages on Node. `bun` is the
+  canonical runtime. A user who tries `node packages/api/src/index.ts`
+  will probably hit an import that Bun resolves differently. If Node
+  compat becomes a user-facing requirement, we'll add it to CI.
+
+### HTTP framework: Hono
+
+All routes in `packages/api/src/routes/*.ts` are Hono handlers. The proxy
+(`packages/proxy/`) is also Hono.
+
+**Why Hono:**
+
+- **Edge-ready.** Hono's core is a small request/response router that
+  compiles to Bun, Node, Cloudflare Workers, Deno, and Vercel Edge without
+  code changes. We do not currently deploy to edge targets, but a future
+  hosted tier might (e.g. per-region proxy shards). Hono keeps that door
+  open. Express would not.
+- **Small footprint.** No dep tree. Install size under 100 KB. The whole
+  framework is ~2000 lines of readable TypeScript.
+- **Middleware model that matches what we want.** Hono's middleware is
+  onion-style async, which lets us layer: `auth → rate-limit → policy →
+  handler`. Our `packages/api/src/middleware/` composes cleanly.
+- **First-class TypeScript.** Route types flow through to client code
+  without codegen. We use this in `@stwd/sdk`.
+
+**Why not Express:** Express is fine but older. The middleware types are
+a hand-rolled afterthought; the sync-ish callback model fights async
+handlers. The ecosystem is vast but also full of abandoned packages. For
+a 2024–2026 greenfield project, Hono wins on ergonomics and type safety.
+
+**Why not Fastify:** Fastify is a reasonable alternative and we considered
+it. It's more opinionated than Hono (schema-driven validation, hooks
+lifecycle). For our scale, Hono's minimalism fits better — we don't need
+Fastify's plugin system, and we wanted a framework that is also at home on
+Workers. No strong opinion; Fastify would also have worked.
+
+### Monorepo: Turborepo + Bun workspaces
+
+`turbo.json` defines task pipelines; `package.json` declares
+`"workspaces": ["packages/*", "packages/examples/*", …]`.
+
+**Why Turborepo:**
+
+- **Caching that works.** Local and remote task caching with a sane
+  defaults. `turbo build` on a warm cache is effectively instant.
+- **Dependency-aware task ordering.** Build `@stwd/shared` before
+  `@stwd/vault` automatically, without hand-wired scripts.
+- **Plays well with Bun.** Turbo invokes `bun` as the task runner; no
+  conflict with the package manager.
+
+**Why not Nx:** Nx is more powerful (code generators, project graph
+analysis, executors) and we would reach for it if this were a 30+ package
+codebase with multiple heterogeneous apps. For ~15 packages with a
+consistent structure, Nx's config overhead is more than we need.
+
+**Why not Lerna:** Lerna is effectively in maintenance mode and its
+caching story is worse than Turbo's. Not a serious contender.
+
+## Consequences
+
+- **Positive:** fast dev loop, fewer moving parts, unified tooling story
+  ("it's all just bun"), monorepo works out of the box.
+- **Negative:** runtime lock-in to Bun. A user who wants to deploy on
+  vanilla Node would need to do the port themselves. This is an
+  acceptable cost for v1; if community demand for Node support
+  materializes, we'll add it.
+- **Risk:** if Bun hits a long-term bug or a licensing / governance
+  problem (Bun is an Oven-Inc-backed project, not a foundation), we
+  inherit that risk. Mitigation: nothing we wrote is architecturally
+  Bun-specific. A port to Node would be a CI matrix change plus a few
+  `Bun.*` API swaps, not a rewrite.
+
+## Related
+
+- `Dockerfile`
+- `package.json`
+- `turbo.json`
+- [ADR-0003 — Deployment model](./0003-deployment-model.mdx)
