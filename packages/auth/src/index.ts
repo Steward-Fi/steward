@@ -4,6 +4,7 @@ export * from "./crypto";
 export * from "./email";
 export * from "./email-provider";
 export * from "./email-templates";
+export * from "./jwt";
 export * from "./middleware";
 export * from "./oauth";
 export * from "./passkey";
