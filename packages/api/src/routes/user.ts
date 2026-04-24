@@ -16,7 +16,7 @@
  *       This file exports a Hono route group ready for mounting.
  */
 
-import { verifyToken } from "@stwd/auth";
+import { assertTokenNotRevoked, verifyToken } from "@stwd/auth";
 import {
   getDb,
   policies,
@@ -162,7 +162,9 @@ async function userSessionAuth(
 
   let payload: UserSessionPayload;
   try {
-    payload = (await verifyToken(token)) as unknown as UserSessionPayload;
+    const verified = (await verifyToken(token)) as unknown as UserSessionPayload;
+    await assertTokenNotRevoked(verified as { jti?: string; exp?: number; iat?: number });
+    payload = verified;
   } catch {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
   }

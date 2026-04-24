@@ -34,7 +34,7 @@
  *   3. The JWT's `tenantId` claim is the resolved tenant, not the personal tenant.
  */
 
-import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
+import { createPublicKey, randomBytes, randomUUID, verify as verifySignature } from "node:crypto";
 import {
   buildBackend,
   ChallengeStore,
@@ -47,6 +47,8 @@ import {
   OAuthClient,
   PasskeyAuth,
   ResendProvider,
+  assertTokenNotRevoked,
+  revocationStore,
   signAccessToken,
   TokenStore,
   uint8ArrayToBase64url,
@@ -217,12 +219,17 @@ export async function verifySessionToken(token: string): Promise<{
   email?: string;
 } | null> {
   try {
-    return (await verifyToken(token)) as {
+    const payload = (await verifyToken(token)) as {
       address: string;
       tenantId: string;
       userId?: string;
       email?: string;
+      jti?: string;
+      exp?: number;
+      iat?: number;
     };
+    await assertTokenNotRevoked(payload);
+    return payload;
   } catch {
     return null;
   }
@@ -1169,9 +1176,23 @@ auth.get("/session", async (c) => {
 
 /**
  * POST /logout
- * JWT is stateless — client drops the token.
+ * Revokes the presented access token's JTI until its natural expiry. Refresh
+ * token revocation is handled by /refresh/revoke and /refresh/revoke-all.
  */
-auth.post("/logout", (c) => c.json<ApiResponse>({ ok: true }));
+auth.post("/logout", async (c) => {
+  const authHeader = c.req.header("Authorization");
+  if (authHeader?.startsWith("Bearer ")) {
+    try {
+      const payload = await verifyToken(authHeader.slice(7));
+      if (typeof payload.jti === "string" && typeof payload.exp === "number") {
+        await revocationStore.revokeToken(payload.jti, payload.exp);
+      }
+    } catch {
+      // Logout remains idempotent: invalid/expired tokens are already unusable.
+    }
+  }
+  return c.json<ApiResponse>({ ok: true });
+});
 
 /**
  * POST /refresh

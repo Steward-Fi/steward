@@ -6,7 +6,13 @@
  * re-instantiate them (which would lead to duplicate connections / inconsistent state).
  */
 
-import { signAccessToken, signAgentToken, validateApiKey, verifyToken } from "@stwd/auth";
+import {
+  assertTokenNotRevoked,
+  signAccessToken,
+  signAgentToken,
+  validateApiKey,
+  verifyToken,
+} from "@stwd/auth";
 import { getDb, policies, tenants, toPolicyRule, transactions } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
@@ -86,7 +92,7 @@ export async function createAgentToken(
 
 export async function verifySessionToken(token: string) {
   try {
-    return (await verifyToken(token)) as {
+    const payload = (await verifyToken(token)) as {
       address: string;
       tenantId: string;
       agentId?: string;
@@ -95,6 +101,8 @@ export async function verifySessionToken(token: string) {
       userId?: string;
       email?: string;
     };
+    await assertTokenNotRevoked(payload);
+    return payload;
   } catch {
     return null;
   }
