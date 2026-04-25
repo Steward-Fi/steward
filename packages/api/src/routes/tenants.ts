@@ -90,7 +90,13 @@ tenantRoutes.post("/", async (c) => {
   });
 });
 
-tenantRoutes.get("/:id", (c) => {
+tenantRoutes.get("/:id", async (c, next) => {
+  // /tenants/config is a public discovery endpoint handled by tenantConfigRoutes.
+  // Fall through so its registered handler runs instead of treating "config"
+  // as a tenant id (which crashes because no tenant context was attached).
+  if (c.req.param("id") === "config") {
+    return next();
+  }
   const tenant = c.get("tenant");
   return c.json<ApiResponse<Tenant & TenantConfig>>({
     ok: true,

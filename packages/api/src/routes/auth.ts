@@ -1015,6 +1015,54 @@ function redirectEmailAuthFailure(c: Context, reason: string): Response {
 
 const auth = new Hono();
 
+// ── Discovery ─────────────────────────────────────────────────────────────────
+
+/**
+ * GET /providers
+ * Public endpoint. Returns which authentication methods are enabled on this
+ * server so a client SDK (e.g. @stwd/sdk) can render the right sign-in UI.
+ *
+ * Passkey/email/SIWE/SIWS are always wired in this build. OAuth providers are
+ * advertised only when their corresponding STEWARD_OAUTH_<PROVIDER>_CLIENT_ID
+ * env var is present, so a stripped-down deployment honestly reports what it
+ * supports rather than offering a broken Google button.
+ */
+auth.get("/providers", (c) => {
+  const oauthClientIds: Record<string, string | undefined> = {
+    google: process.env.STEWARD_OAUTH_GOOGLE_CLIENT_ID,
+    discord: process.env.STEWARD_OAUTH_DISCORD_CLIENT_ID,
+    github: process.env.STEWARD_OAUTH_GITHUB_CLIENT_ID,
+  };
+  const oauth = Object.entries(oauthClientIds)
+    .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
+    .map(([name]) => name);
+
+  return c.json<
+    ApiResponse<{
+      passkey: boolean;
+      email: boolean;
+      siwe: boolean;
+      siws: boolean;
+      google: boolean;
+      discord: boolean;
+      github: boolean;
+      oauth: string[];
+    }>
+  >({
+    ok: true,
+    data: {
+      passkey: true,
+      email: true,
+      siwe: true,
+      siws: true,
+      google: oauth.includes("google"),
+      discord: oauth.includes("discord"),
+      github: oauth.includes("github"),
+      oauth,
+    },
+  });
+});
+
 // ── SIWE ──────────────────────────────────────────────────────────────────────
 
 /**

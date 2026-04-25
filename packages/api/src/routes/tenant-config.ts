@@ -23,6 +23,40 @@ import { type ApiResponse, type AppVariables, db, safeJsonParse } from "../servi
 
 export const tenantConfigRoutes = new Hono<{ Variables: AppVariables }>();
 
+// ─── GET /tenants/config — public discovery for the default tenant ────────────
+
+/**
+ * GET /config (mounts at /tenants/config)
+ * Public, no auth required. Used by the @stwd/sdk React provider to fetch the
+ * default tenant's policy templates, theme, and feature flags before the user
+ * signs in. Mirrors `/tenants/:id/config` but always resolves to the default
+ * tenant id and never reads the database — this is pure discovery, never PII.
+ *
+ * Registered before the `/:id/config` handler below so Hono's matcher prefers
+ * the literal segment over the parameterised one.
+ */
+tenantConfigRoutes.get("/config", async (c) => {
+  const defaultConfig = DEFAULT_TENANT_CONFIGS.default;
+  if (defaultConfig) {
+    return c.json<ApiResponse<TenantControlPlaneConfig>>({
+      ok: true,
+      data: defaultConfig,
+    });
+  }
+  const emptyConfig: TenantControlPlaneConfig = {
+    tenantId: "default",
+    policyExposure: {},
+    policyTemplates: [],
+    secretRoutePresets: [],
+    approvalConfig: {},
+    featureFlags: {},
+  };
+  return c.json<ApiResponse<TenantControlPlaneConfig>>({
+    ok: true,
+    data: emptyConfig,
+  });
+});
+
 // ─── GET /tenants/:id/config — get tenant control plane config ────────────────
 
 tenantConfigRoutes.get("/:id/config", async (c) => {
