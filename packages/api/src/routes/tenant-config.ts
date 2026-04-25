@@ -23,6 +23,15 @@ import { type ApiResponse, type AppVariables, db, safeJsonParse } from "../servi
 
 export const tenantConfigRoutes = new Hono<{ Variables: AppVariables }>();
 
+const emptyTenantConfig = (tenantId: string): TenantControlPlaneConfig => ({
+  tenantId,
+  policyExposure: {},
+  policyTemplates: [],
+  secretRoutePresets: [],
+  approvalConfig: {},
+  featureFlags: {},
+});
+
 // ─── GET /tenants/config — public discovery for the default tenant ────────────
 
 /**
@@ -36,24 +45,9 @@ export const tenantConfigRoutes = new Hono<{ Variables: AppVariables }>();
  * the literal segment over the parameterised one.
  */
 tenantConfigRoutes.get("/config", async (c) => {
-  const defaultConfig = DEFAULT_TENANT_CONFIGS.default;
-  if (defaultConfig) {
-    return c.json<ApiResponse<TenantControlPlaneConfig>>({
-      ok: true,
-      data: defaultConfig,
-    });
-  }
-  const emptyConfig: TenantControlPlaneConfig = {
-    tenantId: "default",
-    policyExposure: {},
-    policyTemplates: [],
-    secretRoutePresets: [],
-    approvalConfig: {},
-    featureFlags: {},
-  };
   return c.json<ApiResponse<TenantControlPlaneConfig>>({
     ok: true,
-    data: emptyConfig,
+    data: DEFAULT_TENANT_CONFIGS.default ?? emptyTenantConfig("default"),
   });
 });
 
