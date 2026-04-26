@@ -150,11 +150,13 @@ export function getProviderConfig(provider: string): OAuthProvider {
       return {
         clientId,
         clientSecret,
-        authorizationUrl: "https://twitter.com/i/oauth2/authorize",
-        tokenUrl: "https://api.twitter.com/2/oauth2/token",
-        // id, name, username — Twitter v2 does NOT expose email via this endpoint
-        userInfoUrl:
-          "https://api.twitter.com/2/users/me?user.fields=id,name,username,profile_image_url",
+        // X (formerly Twitter) finished migrating to x.com domain. The user-
+        // facing authorize URL is the most visible, but all 3 endpoints work
+        // identically on x.com today.
+        authorizationUrl: "https://x.com/i/oauth2/authorize",
+        tokenUrl: "https://api.x.com/2/oauth2/token",
+        // id, name, username — X v2 does NOT expose email via this endpoint
+        userInfoUrl: "https://api.x.com/2/users/me?user.fields=id,name,username,profile_image_url",
         scopes: ["tweet.read", "users.read", "offline.access"],
         requiresPkce: true,
       };
