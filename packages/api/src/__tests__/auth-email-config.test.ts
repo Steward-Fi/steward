@@ -156,4 +156,34 @@ describe("getEmailAuthForTenant", () => {
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
   });
+
+  it("uses global Resend creds + per-tenant magicLinkBaseUrl when no apiKeyEncrypted", async () => {
+    clearEmailAuthTenantCacheForTests();
+
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    // Magic-link-only tenant config (no per-tenant Resend key).
+    // This is the waifu.fun shape: tenant doesn't bring its own Resend
+    // account, just wants its own magic-link landing URL.
+    await dbHandle.insert(tenantConfigs).values({
+      tenantId: TEST_TENANT_ID,
+      emailConfig: {
+        magicLinkBaseUrl: "https://waifu.fun",
+      },
+    });
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+
+    const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
+    const provider = (auth as any).provider;
+
+    // Magic-link target overridden to the tenant's domain
+    expect((auth as any).baseUrl).toBe("https://waifu.fun");
+    expect((auth as any).callbackPath).toBe("/auth/email/verify");
+    // Provider falls back to the global Resend key
+    expect(provider.constructor.name).toBe("ResendProvider");
+    expect(provider.from).toBe("Global <login@example.com>");
+
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+  });
 });
