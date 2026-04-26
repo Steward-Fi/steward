@@ -24,9 +24,14 @@ import {
 } from "drizzle-orm/pg-core";
 
 export interface TenantEmailConfig {
-  provider: "resend";
-  apiKeyEncrypted: string;
-  from: string;
+  /**
+   * Per-tenant Resend provider config. Optional — a tenant can also leave
+   * this entirely empty and only set `magicLinkBaseUrl` to override the
+   * magic-link target while continuing to use the global RESEND_API_KEY.
+   */
+  provider?: "resend";
+  apiKeyEncrypted?: string;
+  from?: string;
   replyTo?: string;
   templateId?: string;
   subjectOverride?: string;

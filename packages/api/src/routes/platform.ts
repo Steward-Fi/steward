@@ -422,11 +422,13 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
   return c.json<
     ApiResponse<{
       emailConfig: {
-        provider: "resend";
-        from: string;
+        provider?: "resend";
+        from?: string;
         replyTo?: string;
         templateId?: string;
         subjectOverride?: string;
+        magicLinkBaseUrl?: string;
+        magicLinkCallbackPath?: string;
       } | null;
       hasApiKey: boolean;
     }>
@@ -440,6 +442,8 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
             replyTo: emailConfig.replyTo,
             templateId: emailConfig.templateId,
             subjectOverride: emailConfig.subjectOverride,
+            magicLinkBaseUrl: emailConfig.magicLinkBaseUrl,
+            magicLinkCallbackPath: emailConfig.magicLinkCallbackPath,
           },
           hasApiKey: Boolean(emailConfig.apiKeyEncrypted),
         }

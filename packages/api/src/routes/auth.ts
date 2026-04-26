@@ -401,7 +401,7 @@ function getEmailKeyStore(): KeyStore {
   return _emailKeyStore;
 }
 
-function buildGlobalEmailAuth(): EmailAuth {
+function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: string }): EmailAuth {
   const resendKey = process.env.RESEND_API_KEY;
   const provider = resendKey
     ? new ResendProvider({
@@ -412,7 +412,8 @@ function buildGlobalEmailAuth(): EmailAuth {
 
   return new EmailAuth({
     from: process.env.EMAIL_FROM || "login@steward.fi",
-    baseUrl: process.env.APP_URL || "https://steward.fi",
+    baseUrl: overrides?.baseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi",
+    callbackPath: overrides?.callbackPath,
     provider,
     tokenStore: getTokenStore(),
   });
@@ -455,34 +456,47 @@ async function loadTenantEmailConfig(tenantId: string): Promise<TenantEmailConfi
 
 async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
   const emailConfig = await loadTenantEmailConfig(tenantId);
-  if (!emailConfig) {
-    return buildGlobalEmailAuth();
-  }
-
-  const provider =
-    emailConfig.provider === "resend"
-      ? new ResendProvider({
-          apiKey: getEmailKeyStore().decrypt(
-            parseEncryptedEmailApiKey(emailConfig.apiKeyEncrypted),
-          ),
-          from: emailConfig.from,
-          replyTo: emailConfig.replyTo,
-        })
-      : undefined;
 
   // Per-tenant magic-link override: when a tenant supplies its own
   // `magicLinkBaseUrl` we build the link against that origin so the click
   // lands on the tenant's app (e.g. https://waifu.fun/auth/email/verify)
   // instead of Steward's built-in callback (which redirects to
   // EMAIL_AUTH_REDIRECT_BASE_URL and is hard-defaulted to elizacloud.ai).
-  const baseUrl =
-    emailConfig.magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
-  const callbackPath = emailConfig.magicLinkBaseUrl
-    ? emailConfig.magicLinkCallbackPath || "/auth/email/verify"
+  const magicLinkBaseUrl = emailConfig?.magicLinkBaseUrl;
+  const callbackPath = magicLinkBaseUrl
+    ? emailConfig?.magicLinkCallbackPath || "/auth/email/verify"
     : undefined; // let EmailAuth fall through to its DEFAULT_CALLBACK
 
+  if (!emailConfig || !emailConfig.apiKeyEncrypted) {
+    // No per-tenant Resend config (or only magic-link override) — use the
+    // global env-backed provider but still honor the per-tenant magic-link
+    // overrides if present.
+    return buildGlobalEmailAuth({
+      baseUrl: magicLinkBaseUrl,
+      callbackPath,
+    });
+  }
+
+  // We've already returned via buildGlobalEmailAuth above when apiKeyEncrypted
+  // is missing, so it's safe to assume `emailConfig.from + apiKeyEncrypted`
+  // are both present here.
+  const from = emailConfig.from || process.env.EMAIL_FROM || "login@steward.fi";
+  const provider =
+    emailConfig.provider === "resend" && emailConfig.apiKeyEncrypted
+      ? new ResendProvider({
+          apiKey: getEmailKeyStore().decrypt(
+            parseEncryptedEmailApiKey(emailConfig.apiKeyEncrypted),
+          ),
+          from,
+          replyTo: emailConfig.replyTo,
+        })
+      : undefined;
+
+  const baseUrl =
+    magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
+
   return new EmailAuth({
-    from: emailConfig.from,
+    from,
     baseUrl,
     callbackPath,
     provider,
