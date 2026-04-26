@@ -1300,7 +1300,10 @@ auth.delete("/sessions", async (c) => {
  * Finds or creates user, returns WebAuthn registration options.
  */
 auth.post("/passkey/register/options", async (c) => {
-  const body = await safeJsonParse<{ email: string }>(c);
+  const body = await safeJsonParse<{
+    email: string;
+    authenticatorAttachment?: "platform" | "cross-platform";
+  }>(c);
   if (!body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
   }
@@ -1314,10 +1317,16 @@ auth.post("/passkey/register/options", async (c) => {
     .from(authenticators)
     .where(eq(authenticators.userId, user.id));
 
+  const attachment =
+    body.authenticatorAttachment === "platform" || body.authenticatorAttachment === "cross-platform"
+      ? body.authenticatorAttachment
+      : undefined;
+
   const options = await getPasskeyAuth(c.req.header("origin")).generateRegistrationOptions(
     user.id,
     email,
     existingCreds.map((cred) => cred.credentialId),
+    attachment ? { authenticatorAttachment: attachment } : undefined,
   );
 
   return c.json(options);
