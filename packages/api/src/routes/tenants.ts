@@ -5,7 +5,7 @@
  */
 
 import { hashApiKey } from "@stwd/auth";
-import { Hono } from "hono";
+import { type Context, Hono, type Next } from "hono";
 import {
   type ApiResponse,
   type AppVariables,
@@ -18,11 +18,19 @@ import {
   safeJsonParse,
   type Tenant,
   type TenantConfig,
+  tenantAuth,
   tenantConfigs,
   tenants,
 } from "../services/context";
 
 export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
+
+// Per-route auth that pins the JWT's tenantId to the URL :id path param.
+// Applied directly on handlers below so the "public discovery" route in
+// tenantConfigRoutes (mounted before this router) doesn't need a magic-string
+// skip in a catch-all middleware.
+export const requireTenantId = (c: Context<{ Variables: AppVariables }>, next: Next) =>
+  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") });
 
 tenantRoutes.post("/", async (c) => {
   const body = await safeJsonParse<{
@@ -90,13 +98,7 @@ tenantRoutes.post("/", async (c) => {
   });
 });
 
-tenantRoutes.get("/:id", async (c, next) => {
-  // /tenants/config is a public discovery endpoint handled by tenantConfigRoutes.
-  // Fall through so its registered handler runs instead of treating "config"
-  // as a tenant id (which crashes because no tenant context was attached).
-  if (c.req.param("id") === "config") {
-    return next();
-  }
+tenantRoutes.get("/:id", requireTenantId, async (c) => {
   const tenant = c.get("tenant");
   return c.json<ApiResponse<Tenant & TenantConfig>>({
     ok: true,
@@ -104,7 +106,7 @@ tenantRoutes.get("/:id", async (c, next) => {
   });
 });
 
-tenantRoutes.put("/:id/webhook", async (c) => {
+tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
   const tenant = c.get("tenant");
   const tenantConfig = c.get("tenantConfig");
   const body = await safeJsonParse<{

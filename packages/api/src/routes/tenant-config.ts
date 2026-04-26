@@ -20,6 +20,7 @@ import { Hono } from "hono";
 import { DEFAULT_TENANT_CONFIGS } from "../defaults/tenant-configs";
 import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
 import { type ApiResponse, type AppVariables, db, safeJsonParse } from "../services/context";
+import { requireTenantId } from "./tenants";
 
 export const tenantConfigRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -53,8 +54,8 @@ tenantConfigRoutes.get("/config", async (c) => {
 
 // ─── GET /tenants/:id/config — get tenant control plane config ────────────────
 
-tenantConfigRoutes.get("/:id/config", async (c) => {
-  const tenantId = c.req.param("id");
+tenantConfigRoutes.get("/:id/config", requireTenantId, async (c) => {
+  const tenantId = c.req.param("id") as string;
 
   // Try DB first
   const [row] = await db
@@ -82,34 +83,16 @@ tenantConfigRoutes.get("/:id/config", async (c) => {
     });
   }
 
-  // Fall back to defaults
-  const defaultConfig = DEFAULT_TENANT_CONFIGS[tenantId];
-  if (defaultConfig) {
-    return c.json<ApiResponse<TenantControlPlaneConfig>>({
-      ok: true,
-      data: defaultConfig,
-    });
-  }
-
-  // Return empty config
-  const emptyConfig: TenantControlPlaneConfig = {
-    tenantId,
-    policyExposure: {},
-    policyTemplates: [],
-    secretRoutePresets: [],
-    approvalConfig: {},
-    featureFlags: {},
-  };
   return c.json<ApiResponse<TenantControlPlaneConfig>>({
     ok: true,
-    data: emptyConfig,
+    data: DEFAULT_TENANT_CONFIGS[tenantId] ?? emptyTenantConfig(tenantId),
   });
 });
 
 // ─── PUT /tenants/:id/config — update tenant control plane config ─────────────
 
-tenantConfigRoutes.put("/:id/config", async (c) => {
-  const tenantId = c.req.param("id");
+tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
+  const tenantId = c.req.param("id") as string;
   const body = await safeJsonParse<Partial<TenantControlPlaneConfig>>(c);
 
   if (!body) {
@@ -172,8 +155,8 @@ tenantConfigRoutes.put("/:id/config", async (c) => {
 
 // ─── GET /tenants/:id/config/templates — list policy templates ────────────────
 
-tenantConfigRoutes.get("/:id/config/templates", async (c) => {
-  const tenantId = c.req.param("id");
+tenantConfigRoutes.get("/:id/config/templates", requireTenantId, async (c) => {
+  const tenantId = c.req.param("id") as string;
 
   const [row] = await db
     .select({ policyTemplates: tenantConfigsTable.policyTemplates })
@@ -197,8 +180,8 @@ tenantConfigRoutes.get("/:id/config/templates", async (c) => {
 
 // ─── POST /tenants/:id/config/templates/:name/apply — apply template to agent ─
 
-tenantConfigRoutes.post("/:id/config/templates/:name/apply", async (c) => {
-  const tenantId = c.req.param("id");
+tenantConfigRoutes.post("/:id/config/templates/:name/apply", requireTenantId, async (c) => {
+  const tenantId = c.req.param("id") as string;
   const templateName = c.req.param("name");
 
   const body = await safeJsonParse<{

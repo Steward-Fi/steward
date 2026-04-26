@@ -131,24 +131,9 @@ app.use("/agents/*", (c, next) => tenantAuth(c, next));
 app.use("/vault/*", (c, next) => tenantAuth(c, next));
 app.use("/secrets", (c, next) => tenantAuth(c, next));
 app.use("/secrets/*", (c, next) => tenantAuth(c, next));
-app.use("/tenants/:id", (c, next) => {
-  // GET /tenants/config (no id) is a public discovery endpoint used by the
-  // @stwd/sdk React provider to fetch default-tenant policy/theme/feature
-  // flags before the user has authenticated. The :id wildcard would otherwise
-  // catch it and demand tenant auth, which isn't available pre-signin.
-  const id = c.req.param("id");
-  if (id === "config" && c.req.method === "GET") return next();
-  return tenantAuth(c, next, { requireTenantMatch: id });
-});
-app.use("/tenants/:id/webhook", (c, next) =>
-  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
-);
-app.use("/tenants/:id/config", (c, next) =>
-  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
-);
-app.use("/tenants/:id/config/*", (c, next) =>
-  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
-);
+// Tenant routes apply auth per-handler via the `requireTenantId` middleware
+// inside tenants.ts / tenant-config.ts, so the public `GET /tenants/config`
+// discovery endpoint doesn't need a magic-string skip in a catch-all here.
 app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
 app.use("/webhooks", (c, next) => tenantAuth(c, next));
 app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
@@ -216,8 +201,10 @@ app.route("/user", userRoutes);
 app.route("/agents", agentRoutes);
 app.route("/vault", vaultRoutes);
 app.route("/secrets", secretsRoutes);
-app.route("/tenants", tenantRoutes);
+// tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler
+// is matched before tenantRoutes' `/:id` wildcard would catch "config" as an id.
 app.route("/tenants", tenantConfigRoutes);
+app.route("/tenants", tenantRoutes);
 app.route("/dashboard", dashboardRoutes);
 app.route("/webhooks", webhookRoutes);
 app.route("/approvals", approvalRoutes);
