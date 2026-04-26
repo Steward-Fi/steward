@@ -160,10 +160,9 @@ describe("OAuthClient.generateAuthUrl", () => {
   const twitterConfig = {
     clientId: "twitter-client-id",
     clientSecret: "twitter-secret",
-    authorizationUrl: "https://twitter.com/i/oauth2/authorize",
-    tokenUrl: "https://api.twitter.com/2/oauth2/token",
-    userInfoUrl:
-      "https://api.twitter.com/2/users/me?user.fields=id,name,username,profile_image_url",
+    authorizationUrl: "https://x.com/i/oauth2/authorize",
+    tokenUrl: "https://api.x.com/2/oauth2/token",
+    userInfoUrl: "https://api.x.com/2/users/me?user.fields=id,name,username,profile_image_url",
     scopes: ["tweet.read", "users.read", "offline.access"],
     requiresPkce: true,
   };
