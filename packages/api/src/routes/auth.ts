@@ -476,9 +476,7 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
   // instead of Steward's built-in callback (which redirects to
   // EMAIL_AUTH_REDIRECT_BASE_URL and is hard-defaulted to elizacloud.ai).
   const baseUrl =
-    emailConfig.magicLinkBaseUrl?.replace(/\/$/, "") ||
-    process.env.APP_URL ||
-    "https://steward.fi";
+    emailConfig.magicLinkBaseUrl?.replace(/\/$/, "") || process.env.APP_URL || "https://steward.fi";
   const callbackPath = emailConfig.magicLinkBaseUrl
     ? emailConfig.magicLinkCallbackPath || "/auth/email/verify"
     : undefined; // let EmailAuth fall through to its DEFAULT_CALLBACK
