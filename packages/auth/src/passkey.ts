@@ -90,8 +90,19 @@ export class PasskeyAuth {
     userId: string,
     email: string,
     existingCredentials: string[] = [],
+    options?: {
+      /**
+       * Hint to the browser about which authenticator to prefer.
+       *   - "platform":      built-in (Touch ID, Face ID, Windows Hello)
+       *   - "cross-platform": roaming (YubiKey, phone-QR, security key)
+       *   - undefined:        let the browser pick (shows both)
+       *
+       * Most consumer apps want "platform" so the OS surfaces native UX.
+       */
+      authenticatorAttachment?: "platform" | "cross-platform";
+    },
   ): Promise<PublicKeyCredentialCreationOptionsJSON> {
-    const options = await swGenReg({
+    const regOptions = await swGenReg({
       rpName: this.config.rpName,
       rpID: this.config.rpID,
       userName: email,
@@ -108,13 +119,16 @@ export class PasskeyAuth {
       authenticatorSelection: {
         residentKey: "preferred",
         userVerification: "preferred",
+        ...(options?.authenticatorAttachment
+          ? { authenticatorAttachment: options.authenticatorAttachment }
+          : {}),
       },
     });
 
     // Store the challenge so we can verify it later
-    this.challenges.set(userId, options.challenge);
+    this.challenges.set(userId, regOptions.challenge);
 
-    return options;
+    return regOptions;
   }
 
   /**
