@@ -59,6 +59,8 @@ describe("getEmailAuthForTenant", () => {
 
     expect((auth as any).from).toBe("Global <login@example.com>");
     expect((auth as any).templateId).toBeUndefined();
+    expect((auth as any).baseUrl).toBe("https://app.example.com");
+    expect((auth as any).callbackPath).toBe("/auth/callback/email");
     expect(provider.constructor.name).toBe("ResendProvider");
     expect(provider.from).toBe("Global <login@example.com>");
     expect(provider.replyTo).toBeUndefined();
@@ -92,6 +94,64 @@ describe("getEmailAuthForTenant", () => {
     expect((auth as any).subjectOverride).toBe("Tenant Sign In");
     expect(provider.from).toBe("Tenant <login@tenant.example.com>");
     expect(provider.replyTo).toBe("help@tenant.example.com");
+    // Without magicLinkBaseUrl set, baseUrl should fall back to APP_URL
+    expect((auth as any).baseUrl).toBe("https://app.example.com");
+    expect((auth as any).callbackPath).toBe("/auth/callback/email");
+
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+  });
+
+  it("uses tenant magicLinkBaseUrl when set, with default callback path", async () => {
+    clearEmailAuthTenantCacheForTests();
+
+    const encrypted = new KeyStore(MASTER_PASSWORD).encrypt("tenant-resend-key");
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    await dbHandle.insert(tenantConfigs).values({
+      tenantId: TEST_TENANT_ID,
+      emailConfig: {
+        provider: "resend",
+        apiKeyEncrypted: JSON.stringify(encrypted),
+        from: "Waifu <noreply@waifu.fun>",
+        magicLinkBaseUrl: "https://waifu.fun",
+      },
+    });
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+
+    const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
+
+    expect((auth as any).baseUrl).toBe("https://waifu.fun");
+    // Defaults to /auth/email/verify when magicLinkBaseUrl is set
+    expect((auth as any).callbackPath).toBe("/auth/email/verify");
+
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+  });
+
+  it("uses tenant magicLinkBaseUrl + custom callbackPath when both set", async () => {
+    clearEmailAuthTenantCacheForTests();
+
+    const encrypted = new KeyStore(MASTER_PASSWORD).encrypt("tenant-resend-key");
+    const dbHandle = getDb();
+    await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
+    await dbHandle.insert(tenantConfigs).values({
+      tenantId: TEST_TENANT_ID,
+      emailConfig: {
+        provider: "resend",
+        apiKeyEncrypted: JSON.stringify(encrypted),
+        from: "App <noreply@app.example>",
+        magicLinkBaseUrl: "https://app.example.com/",
+        magicLinkCallbackPath: "/login/email-callback",
+      },
+    });
+    invalidateEmailAuthForTenant(TEST_TENANT_ID);
+
+    const auth = await getEmailAuthForTenant(TEST_TENANT_ID);
+
+    // Trailing slash gets stripped from baseUrl
+    expect((auth as any).baseUrl).toBe("https://app.example.com");
+    expect((auth as any).callbackPath).toBe("/login/email-callback");
 
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);

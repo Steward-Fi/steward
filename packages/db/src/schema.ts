@@ -30,6 +30,23 @@ export interface TenantEmailConfig {
   replyTo?: string;
   templateId?: string;
   subjectOverride?: string;
+  /**
+   * Optional override for the magic-link `baseUrl`. When set, magic links
+   * will be built against this URL (e.g. "https://waifu.fun") instead of
+   * Steward's APP_URL. Lets third-party apps own their own email-callback
+   * landing page and call POST /auth/email/verify directly to mint a JWT.
+   *
+   * If unset, falls back to APP_URL and Steward handles the callback via
+   * its built-in GET /auth/callback/email handler (which redirects to
+   * EMAIL_AUTH_REDIRECT_BASE_URL/login). Existing tenants are unaffected.
+   */
+  magicLinkBaseUrl?: string;
+  /**
+   * Optional path on `magicLinkBaseUrl` that the magic link points at.
+   * Defaults to "/auth/email/verify" when `magicLinkBaseUrl` is set.
+   * Has no effect when `magicLinkBaseUrl` is unset.
+   */
+  magicLinkCallbackPath?: string;
 }
 
 export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana"]);

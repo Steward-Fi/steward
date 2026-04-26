@@ -470,9 +470,23 @@ async function createEmailAuthForTenant(tenantId: string): Promise<EmailAuth> {
         })
       : undefined;
 
+  // Per-tenant magic-link override: when a tenant supplies its own
+  // `magicLinkBaseUrl` we build the link against that origin so the click
+  // lands on the tenant's app (e.g. https://waifu.fun/auth/email/verify)
+  // instead of Steward's built-in callback (which redirects to
+  // EMAIL_AUTH_REDIRECT_BASE_URL and is hard-defaulted to elizacloud.ai).
+  const baseUrl =
+    emailConfig.magicLinkBaseUrl?.replace(/\/$/, "") ||
+    process.env.APP_URL ||
+    "https://steward.fi";
+  const callbackPath = emailConfig.magicLinkBaseUrl
+    ? emailConfig.magicLinkCallbackPath || "/auth/email/verify"
+    : undefined; // let EmailAuth fall through to its DEFAULT_CALLBACK
+
   return new EmailAuth({
     from: emailConfig.from,
-    baseUrl: process.env.APP_URL || "https://steward.fi",
+    baseUrl,
+    callbackPath,
     provider,
     tokenStore: getTokenStore(),
     templateId: emailConfig.templateId,
