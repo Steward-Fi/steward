@@ -93,6 +93,11 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Build workspace dependencies
+        run: |
+          PKG_NAME="@stwd/$(basename ${{ matrix.package }})"
+          bunx turbo run build --filter="${PKG_NAME}..."
+
       - name: Test ${{ matrix.package }}
         run: |
           if [ "${{ matrix.package }}" = "packages/sdk" ]; then
