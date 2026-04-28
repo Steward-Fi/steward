@@ -363,6 +363,7 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
 
 const _emailAuthByTenant = new Map<string, Promise<EmailAuth>>();
 let _emailKeyStore: KeyStore | null = null;
+let _oauthKeyStore: KeyStore | null = null;
 
 function getEmailKeyStore(): KeyStore {
   if (_emailKeyStore) return _emailKeyStore;
@@ -378,6 +379,81 @@ function getEmailKeyStore(): KeyStore {
 
   _emailKeyStore = new KeyStore(masterPassword);
   return _emailKeyStore;
+}
+
+function getOAuthKeyStore(): KeyStore {
+  if (_oauthKeyStore) return _oauthKeyStore;
+
+  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+  if (!masterPassword) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens");
+    }
+    _oauthKeyStore = new KeyStore("dev-secret");
+    return _oauthKeyStore;
+  }
+
+  _oauthKeyStore = new KeyStore(masterPassword);
+  return _oauthKeyStore;
+}
+
+type OAuthEncryptedTokenFields = Pick<
+  typeof accounts.$inferInsert,
+  | "accessTokenEncrypted"
+  | "accessTokenIv"
+  | "accessTokenTag"
+  | "accessTokenSalt"
+  | "refreshTokenEncrypted"
+  | "refreshTokenIv"
+  | "refreshTokenTag"
+  | "refreshTokenSalt"
+>;
+
+export function encryptOAuthProviderTokens(
+  accessToken: string,
+  refreshToken?: string | null,
+): OAuthEncryptedTokenFields {
+  const keyStore = getOAuthKeyStore();
+  const encryptedAccessToken = keyStore.encrypt(accessToken);
+  const encryptedRefreshToken = refreshToken ? keyStore.encrypt(refreshToken) : null;
+
+  return {
+    accessTokenEncrypted: encryptedAccessToken.ciphertext,
+    accessTokenIv: encryptedAccessToken.iv,
+    accessTokenTag: encryptedAccessToken.tag,
+    accessTokenSalt: encryptedAccessToken.salt,
+    refreshTokenEncrypted: encryptedRefreshToken?.ciphertext ?? null,
+    refreshTokenIv: encryptedRefreshToken?.iv ?? null,
+    refreshTokenTag: encryptedRefreshToken?.tag ?? null,
+    refreshTokenSalt: encryptedRefreshToken?.salt ?? null,
+  };
+}
+
+export function decryptOAuthProviderToken(encrypted: {
+  ciphertext: string | null;
+  iv: string | null;
+  tag: string | null;
+  salt: string | null;
+}): string | null {
+  if (!encrypted.ciphertext) return null;
+  if (!encrypted.iv || !encrypted.tag || !encrypted.salt) {
+    throw new Error("OAuth provider token is not encrypted or is missing encryption metadata");
+  }
+
+  try {
+    return getOAuthKeyStore().decrypt({
+      ciphertext: encrypted.ciphertext,
+      iv: encrypted.iv,
+      tag: encrypted.tag,
+      salt: encrypted.salt,
+    });
+  } catch (err) {
+    throw new Error(
+      `Failed to decrypt OAuth provider token: check STEWARD_MASTER_PASSWORD${
+        err instanceof Error ? ` (${err.message})` : ""
+      }`,
+    );
+  }
 }
 
 function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: string }): EmailAuth {
@@ -504,6 +580,10 @@ export function invalidateEmailAuthForTenant(tenantId: string): void {
 
 export function clearEmailAuthTenantCacheForTests(): void {
   _emailAuthByTenant.clear();
+}
+
+export function clearOAuthTokenKeyStoreForTests(): void {
+  _oauthKeyStore = null;
 }
 
 // ─── Vault helper ─────────────────────────────────────────────────────────────
@@ -2041,15 +2121,22 @@ async function provisionOAuthUser(opts: {
       await db.update(users).set(updates).where(eq(users.id, user.id));
     }
 
-    // 2. Upsert the OAuth account link (provider + providerAccountId → user)
+    // 2. Upsert the OAuth account link (provider + providerAccountId → user).
+    // Provider tokens are stored encrypted with the deployment master password.
+    // If STEWARD_MASTER_PASSWORD changes, operators must run a decrypt +
+    // re-encrypt rotation pass before switching the application to the new
+    // password, otherwise existing OAuth provider tokens cannot be decrypted.
+    const encryptedProviderTokens = encryptOAuthProviderTokens(
+      tokenResponse.access_token,
+      tokenResponse.refresh_token ?? null,
+    );
     await db
       .insert(accounts)
       .values({
         userId: user.id,
         provider: providerName,
         providerAccountId: providerUser.id,
-        accessToken: tokenResponse.access_token,
-        refreshToken: tokenResponse.refresh_token ?? null,
+        ...encryptedProviderTokens,
         expiresAt: tokenResponse.expires_in
           ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
           : null,
@@ -2058,8 +2145,7 @@ async function provisionOAuthUser(opts: {
         target: [accounts.provider, accounts.providerAccountId],
         set: {
           userId: user.id,
-          accessToken: tokenResponse.access_token,
-          refreshToken: tokenResponse.refresh_token ?? null,
+          ...encryptedProviderTokens,
           expiresAt: tokenResponse.expires_in
             ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
             : null,

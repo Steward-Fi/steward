@@ -148,6 +148,13 @@
       "when": 1777026834865,
       "tag": "0020_proxy_audit_reason",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1777018500000,
+      "tag": "0021_oauth_account_token_encryption",
+      "breakpoints": true
     }
   ]
 }

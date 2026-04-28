@@ -78,8 +78,14 @@ export const accounts = pgTable(
     providerAccountId: varchar("provider_account_id", {
       length: 255,
     }).notNull(),
-    accessToken: text("access_token"),
-    refreshToken: text("refresh_token"),
+    accessTokenEncrypted: text("access_token_encrypted"),
+    accessTokenIv: text("access_token_iv"),
+    accessTokenTag: text("access_token_tag"),
+    accessTokenSalt: text("access_token_salt"),
+    refreshTokenEncrypted: text("refresh_token_encrypted"),
+    refreshTokenIv: text("refresh_token_iv"),
+    refreshTokenTag: text("refresh_token_tag"),
+    refreshTokenSalt: text("refresh_token_salt"),
     // Unix timestamp integer — matches OAuth provider convention
     expiresAt: integer("expires_at"),
   },

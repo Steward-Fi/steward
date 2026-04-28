@@ -63,6 +63,10 @@ description: "Version history for Steward and related packages."
 
 ## Steward API
 
+### Unreleased
+
+- **OAuth token encryption** — OAuth provider access/refresh tokens are stored with KeyStore-compatible AES-256-GCM metadata instead of plaintext. Operators changing `STEWARD_MASTER_PASSWORD` must run a decrypt/re-encrypt rotation pass for existing provider tokens before switching the app to the new password.
+
 ### v1.5.0 (2026-03-27)
 
 - **Secret Vault** — Encrypted credential storage with CRUD API
