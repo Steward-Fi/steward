@@ -5,12 +5,16 @@ export { and, count, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
 export {
   closeDb,
   createDb,
+  createDbForRequest,
+  createNeonHttpDb,
   createPostgresClient,
+  getDatabaseDriver,
   getDatabaseUrl,
   getDb,
   getSql,
   setPGLiteOverride,
 } from "./client";
+export type { DatabaseDriver } from "./client";
 export { runMigrations } from "./migrate";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
 export type { PGLiteDb } from "./pglite";
