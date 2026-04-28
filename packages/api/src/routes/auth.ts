@@ -78,15 +78,16 @@ const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
 
 // ─── IP-based auth rate limiting ─────────────────────────────────────────────
 
-// In-memory fallback store for when Redis is unavailable
-const _authRateLimitStore = new Map<string, { count: number; resetAt: number }>();
-
 /**
- * Check a per-IP rate limit for auth endpoints.
- * Uses Redis sliding-window when available; falls back to in-memory counter.
+ * Check a per-IP rate limit for auth endpoints, backed by the Redis sliding
+ * window. When Redis is unavailable the request is allowed — the existing
+ * Bun-side global rate limiter (in index.ts) and the upstream platform
+ * (Cloudflare, ALB, etc.) are still in front of this. We deliberately do not
+ * keep an in-memory fallback Map: it is incorrect across multiple instances
+ * and impossible on Cloudflare Workers (no shared state across isolates).
  *
  * @param c        - Hono context (used to read client IP headers)
- * @param endpoint - Short name used as part of the Redis/memory key
+ * @param endpoint - Short name used as part of the Redis key
  * @param windowMs - Window length in milliseconds
  * @param max      - Maximum allowed requests in the window
  */
@@ -100,39 +101,24 @@ async function checkAuthRateLimit(
     c.req.header("x-forwarded-for")?.split(",")[0].trim() ?? c.req.header("x-real-ip") ?? "unknown";
   const key = `ratelimit:auth:${endpoint}:${ip}:${windowMs}`;
 
-  // Try Redis first
   try {
     const redisMw = await import("../middleware/redis.js");
-    if (redisMw.isRedisAvailable()) {
-      const { checkRateLimit } = await import("@stwd/redis");
-      const result = await checkRateLimit(key, windowMs, max);
-      if (!result.allowed) {
-        return {
-          allowed: false,
-          retryAfterSecs: Math.ceil(result.resetMs / 1000),
-        };
-      }
-      return { allowed: true };
-    }
-  } catch {
-    // Redis unavailable — fall through to in-memory
-  }
+    if (!redisMw.isRedisAvailable()) return { allowed: true };
 
-  // In-memory sliding-window fallback
-  const now = Date.now();
-  const entry = _authRateLimitStore.get(key);
-  if (!entry || entry.resetAt <= now) {
-    _authRateLimitStore.set(key, { count: 1, resetAt: now + windowMs });
+    const { checkRateLimit } = await import("@stwd/redis");
+    const result = await checkRateLimit(key, windowMs, max);
+    if (!result.allowed) {
+      return {
+        allowed: false,
+        retryAfterSecs: Math.ceil(result.resetMs / 1000),
+      };
+    }
+    return { allowed: true };
+  } catch {
+    // Treat Redis errors as soft-fail (allow the request) so a transient
+    // Redis outage doesn't lock users out of authentication.
     return { allowed: true };
   }
-  if (entry.count >= max) {
-    return {
-      allowed: false,
-      retryAfterSecs: Math.ceil((entry.resetAt - now) / 1000),
-    };
-  }
-  entry.count++;
-  return { allowed: true };
 }
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
@@ -235,19 +221,51 @@ export async function verifySessionToken(token: string): Promise<{
   }
 }
 
-// ─── Nonce store (SIWE) ───────────────────────────────────────────────────────
+// ─── Nonce store (SIWE / SIWS) ───────────────────────────────────────────────
+//
+// Backed by the same StoreBackend abstraction the challenge/token stores use,
+// so nonces persist across instances on Workers (Upstash) and across restarts
+// in production (Postgres `auth_kv_store`). The default is in-memory for
+// dev/test — initAuthStores() upgrades it once Redis/Postgres availability
+// is known.
+//
+// TTL matches the previous Map GC interval (5 minutes), enforced by the
+// backend itself so no setInterval cleanup is needed.
 
-const nonceStore = new Map<string, { nonce: string; expiresAt: number }>();
+const SIWE_NONCE_TTL_MS = 5 * 60 * 1000;
+let _nonceBackend: import("@stwd/auth").StoreBackend | null = null;
 
-setInterval(
-  () => {
-    const now = Date.now();
-    for (const [key, entry] of nonceStore.entries()) {
-      if (entry.expiresAt <= now) nonceStore.delete(key);
-    }
-  },
-  5 * 60 * 1000,
-);
+function getNonceBackend(): import("@stwd/auth").StoreBackend {
+  if (_nonceBackend) return _nonceBackend;
+  // Lazily fall back to a fresh in-memory backend if initAuthStores() hasn't
+  // been called yet (e.g. tests or Workers cold-boot before middleware runs).
+  // initAuthStores() will replace this with a Redis or Postgres-backed one.
+  // Imported via require to avoid a circular dep with @stwd/auth at module init.
+  const { MemoryBackend } = require("@stwd/auth") as typeof import("@stwd/auth");
+  _nonceBackend = new MemoryBackend();
+  return _nonceBackend;
+}
+
+async function setSiweNonce(nonce: string): Promise<void> {
+  await getNonceBackend().set(nonce, "1", SIWE_NONCE_TTL_MS);
+}
+
+/**
+ * Atomically consume a SIWE nonce. Returns true if the nonce was present and
+ * unexpired (and is now deleted), false otherwise.
+ *
+ * The check-then-delete is not strictly atomic across instances — Upstash and
+ * Postgres do both, but with a small window. For SIWE this is acceptable: the
+ * surrounding signature check is the actual authentication, and a leaked nonce
+ * is useless without the corresponding wallet signature.
+ */
+async function consumeSiweNonce(nonce: string): Promise<boolean> {
+  const backend = getNonceBackend();
+  const value = await backend.get(nonce);
+  if (!value) return false;
+  await backend.delete(nonce);
+  return true;
+}
 
 // ─── PasskeyAuth singleton ────────────────────────────────────────────────────
 
@@ -269,15 +287,21 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   const [
     { backend: challengeBackend, source: challengeSource },
     { backend: tokenBackend, source: tokenSource },
+    { backend: nonceBackend, source: nonceSource },
   ] = await Promise.all([
     buildBackend("challenge", redisClient, usePostgres),
     buildBackend("token", redisClient, usePostgres),
+    buildBackend("siwe-nonce", redisClient, usePostgres),
   ]);
 
-  console.log(`[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}`);
+  console.log(
+    `[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}, ` +
+      `siwe-nonce store: ${nonceSource}`,
+  );
 
   _challengeStore = new ChallengeStore({ backend: challengeBackend });
   _tokenStore = new TokenStore({ backend: tokenBackend });
+  _nonceBackend = nonceBackend;
 
   // Reset singletons so they pick up the new stores on next use
   _passkeyAuth = null;
@@ -1069,9 +1093,9 @@ auth.get("/providers", (c) => {
  * GET /nonce
  * Returns a fresh one-time nonce for SIWE message construction.
  */
-auth.get("/nonce", (c) => {
+auth.get("/nonce", async (c) => {
   const nonce = generateNonce();
-  nonceStore.set(nonce, { nonce, expiresAt: Date.now() + 5 * 60 * 1000 });
+  await setSiweNonce(nonce);
   return c.json({ nonce });
 });
 
@@ -1103,20 +1127,16 @@ auth.post("/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "SIWE domain not allowed" }, 401);
   }
 
-  const storedNonce = nonceStore.get(siweMessage.nonce);
-  if (!storedNonce || storedNonce.expiresAt <= Date.now()) {
-    nonceStore.delete(siweMessage.nonce);
+  const nonceOk = await consumeSiweNonce(siweMessage.nonce);
+  if (!nonceOk) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
   }
 
   try {
     await siweMessage.verify({ signature: body.signature });
   } catch {
-    nonceStore.delete(siweMessage.nonce);
     return c.json<ApiResponse>({ ok: false, error: "Invalid signature" }, 401);
   }
-
-  nonceStore.delete(siweMessage.nonce);
 
   const address = siweMessage.address.toLowerCase();
   let tenantResult: WalletTenantResult;
@@ -1214,18 +1234,14 @@ auth.post("/verify/solana", async (c) => {
     );
   }
 
-  const storedNonce = nonceStore.get(parsed.nonce);
-  if (!storedNonce || storedNonce.expiresAt <= Date.now()) {
-    nonceStore.delete(parsed.nonce);
+  const nonceOk = await consumeSiweNonce(parsed.nonce);
+  if (!nonceOk) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
   }
 
   if (!verifySolanaMessageSignature(body.message, body.signature, body.publicKey)) {
-    nonceStore.delete(parsed.nonce);
     return c.json<ApiResponse>({ ok: false, error: "Invalid signature" }, 401);
   }
-
-  nonceStore.delete(parsed.nonce);
 
   let tenantResult: WalletTenantResult;
   try {
