@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 
-import { encryptOAuthAccountPlaintextTokens } from "../../../../scripts/encrypt-oauth-account-tokens";
+import { encryptOAuthAccountPlaintextTokens } from "../oauth-token-encryption";
 import { createPGLiteDb } from "../pglite";
 import { accounts, users } from "../schema-auth";
 

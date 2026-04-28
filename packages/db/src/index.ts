@@ -12,6 +12,7 @@ export {
   setPGLiteOverride,
 } from "./client";
 export { runMigrations } from "./migrate";
+export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
 export type { PGLiteDb } from "./pglite";
 export {
   closePGLiteDb,
