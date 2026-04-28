@@ -148,9 +148,12 @@ function buildGlobalDb(): GlobalDbHandle {
 }
 
 export function getDb() {
-  if (pgliteOverride) return pgliteOverride.db;
+  if (pgliteOverride) return pgliteOverride.db as ReturnType<typeof createDb>["db"];
   globalDb ??= buildGlobalDb();
-  return globalDb.db;
+  // Both postgres-js and neon-http drivers expose the same Drizzle surface
+  // for our schema; we type the public return as the postgres-js variant so
+  // callers don't have to branch on driver type at every call site.
+  return globalDb.db as unknown as ReturnType<typeof createDb>["db"];
 }
 
 /**
