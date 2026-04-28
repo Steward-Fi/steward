@@ -34,6 +34,38 @@ export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
 export const JWT_EXPIRY = "24h";
+export const AGENT_SCOPE = "agent";
+export const PROXY_SCOPE = "api:proxy";
+
+export function normalizeAgentTokenScopes(scopes?: string[]): string[] {
+  const normalized = new Set([AGENT_SCOPE]);
+  for (const scope of scopes ?? []) {
+    if (typeof scope === "string" && scope.trim()) {
+      normalized.add(scope.trim());
+    }
+  }
+  return [...normalized];
+}
+
+export function parseAgentTokenScopes(value: unknown): string[] | null {
+  if (value === undefined || value === null || value === "") {
+    return [AGENT_SCOPE];
+  }
+
+  const requested = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(",")
+      : null;
+
+  if (!requested || !requested.every((scope) => typeof scope === "string")) return null;
+
+  const scopes = normalizeAgentTokenScopes(requested.map((scope) => scope.trim()).filter(Boolean));
+
+  // Agent tokens always include the legacy/base agent scope. The only opt-in
+  // privilege exposed by token minting endpoints today is proxy gateway access.
+  return scopes.every((scope) => scope === AGENT_SCOPE || scope === PROXY_SCOPE) ? scopes : null;
+}
 
 export async function createSessionToken(address: string, tenantId: string): Promise<string> {
   return signAccessToken({ address, tenantId }, JWT_EXPIRY);
@@ -43,8 +75,13 @@ export async function createAgentToken(
   agentId: string,
   tenantId: string,
   expiresIn?: string,
+  scopes?: string[],
 ): Promise<string> {
-  return signAgentToken({ agentId, tenantId }, expiresIn || AGENT_TOKEN_EXPIRY);
+  const tokenScopes = normalizeAgentTokenScopes(scopes);
+  return signAgentToken(
+    { agentId, tenantId, scopes: tokenScopes },
+    expiresIn || AGENT_TOKEN_EXPIRY,
+  );
 }
 
 export async function verifySessionToken(token: string) {
@@ -54,6 +91,7 @@ export async function verifySessionToken(token: string) {
       tenantId: string;
       agentId?: string;
       scope?: string;
+      scopes?: string[];
       userId?: string;
       email?: string;
     };

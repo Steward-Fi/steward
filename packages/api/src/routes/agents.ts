@@ -23,6 +23,7 @@ import {
   isNonEmptyString,
   isValidAgentId,
   type PolicyRule,
+  parseAgentTokenScopes,
   policies,
   requireAgentAccess,
   requireTenantLevel,
@@ -101,22 +102,30 @@ agentRoutes.post("/:agentId/token", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const body = await safeJsonParse<{ expiresIn?: string }>(c);
+  const body = await safeJsonParse<{ expiresIn?: string; scopes?: string[] | string }>(c);
   const expiresIn = body?.expiresIn || AGENT_TOKEN_EXPIRY;
+  const scopes = parseAgentTokenScopes(body?.scopes ?? c.req.query("scopes"));
+  if (!scopes) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid scopes — supported values: agent, api:proxy" },
+      400,
+    );
+  }
 
   try {
-    const token = await createAgentToken(agentId, tenantId, expiresIn);
+    const token = await createAgentToken(agentId, tenantId, expiresIn, scopes);
     return c.json<
       ApiResponse<{
         token: string;
         agentId: string;
         tenantId: string;
         scope: string;
+        scopes: string[];
         expiresIn: string;
       }>
     >({
       ok: true,
-      data: { token, agentId, tenantId, scope: "agent", expiresIn },
+      data: { token, agentId, tenantId, scope: "agent", scopes, expiresIn },
     });
   } catch (e: unknown) {
     const requestId = c.get("requestId") || "unknown";

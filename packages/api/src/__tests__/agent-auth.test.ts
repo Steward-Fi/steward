@@ -97,12 +97,14 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
     expect(json.data.agentId).toBe(TEST_AGENT_ID);
     expect(json.data.tenantId).toBe(TEST_TENANT_ID);
     expect(json.data.scope).toBe("agent");
+    expect(json.data.scopes).toEqual(["agent"]);
 
     // Verify the JWT payload
     const payload = await verifyToken(json.data.token);
     expect(payload.agentId).toBe(TEST_AGENT_ID);
     expect(payload.tenantId).toBe(TEST_TENANT_ID);
     expect(payload.scope).toBe("agent");
+    expect(payload.scopes).toEqual(["agent"]);
   });
 
   it("returns 404 for non-existent agent", async () => {

@@ -28,7 +28,7 @@ import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/share
 import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { createAgentToken } from "../services/context";
+import { createAgentToken, parseAgentTokenScopes } from "../services/context";
 import { invalidateEmailAuthForTenant } from "./auth";
 
 // ─── Vault singleton ──────────────────────────────────────────────────────────
@@ -805,7 +805,7 @@ platform.get("/tenants/:id/agents", async (c) => {
 
 /**
  * POST /tenants/:id/agents/:agentId/token
- * Body: { expiresIn?: string }
+ * Body: { expiresIn?: string, scopes?: string[] | string }
  *
  * Generates a scoped JWT for the specified agent.
  * Used by platform operators (e.g. Milady Cloud provisioner) to mint
@@ -836,21 +836,29 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found in tenant" }, 404);
   }
 
-  const body = await safeJsonParse<{ expiresIn?: string }>(c);
+  const body = await safeJsonParse<{ expiresIn?: string; scopes?: string[] | string }>(c);
   const expiresIn = body?.expiresIn || undefined;
+  const scopes = parseAgentTokenScopes(body?.scopes ?? c.req.query("scopes"));
+  if (!scopes) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid scopes — supported values: agent, api:proxy" },
+      400,
+    );
+  }
 
   try {
-    const token = await createAgentToken(agentId, tenantId, expiresIn);
+    const token = await createAgentToken(agentId, tenantId, expiresIn, scopes);
     return c.json<
       ApiResponse<{
         token: string;
         agentId: string;
         tenantId: string;
         scope: string;
+        scopes: string[];
       }>
     >({
       ok: true,
-      data: { token, agentId, tenantId, scope: "agent" },
+      data: { token, agentId, tenantId, scope: "agent", scopes },
     });
   } catch (e: unknown) {
     console.error(`[platform] Failed to generate agent token for ${agentId}:`, e);

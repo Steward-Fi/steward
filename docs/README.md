@@ -22,6 +22,12 @@ STEWARD_PROXY_URL=http://steward-proxy:8080
 STEWARD_AGENT_TOKEN=stwd_jwt_...
 ```
 
+Proxy-bound agent tokens must be minted with the explicit `api:proxy` scope
+(`scopes: ["agent", "api:proxy"]`). Legacy tokens that only carry
+`scope: "agent"` are still accepted by the proxy with a deprecation warning for
+the next 1-2 release cycles, but new deployments should opt in when creating the
+token.
+
 Every transaction and every API call flows through Steward, where it is authenticated, policy-checked, logged, and metered before being forwarded with real credentials injected at the proxy.
 
 ## Core Primitives

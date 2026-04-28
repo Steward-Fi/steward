@@ -469,6 +469,24 @@ For agents that should only be able to sign transactions for a specific agent ID
 POST /agents/{agentId}/token
 X-Steward-Tenant: my-tenant
 X-Steward-Key: stw_abc123...
+Content-Type: application/json
+
+{}
+```
+
+Agent tokens keep the legacy singular `scope: "agent"` claim and also include a
+plural `scopes` claim. By default, new tokens have `scopes: ["agent"]`.
+
+To mint a token that can call the credential-injection proxy, explicitly opt in
+to the proxy scope using the request body or `?scopes=api:proxy`:
+
+```http
+POST /agents/{agentId}/token
+X-Steward-Tenant: my-tenant
+X-Steward-Key: stw_abc123...
+Content-Type: application/json
+
+{ "scopes": ["api:proxy"] }
 ```
 
 **Response:**
@@ -477,12 +495,19 @@ X-Steward-Key: stw_abc123...
 {
   "ok": true,
   "data": {
-    "token": "eyJhbGciOiJIUzI1NiJ9..."
+    "token": "eyJhbGciOiJIUzI1NiJ9...",
+    "scope": "agent",
+    "scopes": ["agent", "api:proxy"]
   }
 }
 ```
 
-This token has an `agentScope` claim in the JWT payload. When used for vault operations, the API verifies that the requested `agentId` matches the scope — an agent cannot sign transactions for a different agent using this token.
+When used for vault operations, the API verifies that the requested `agentId`
+matches the token's `agentId` claim — an agent cannot sign transactions for a
+different agent using this token. The proxy additionally requires `scopes` to
+include `api:proxy`. Legacy tokens with no `scopes` array and `scope: "agent"`
+are accepted by the proxy with a deprecation warning for 1-2 release cycles,
+then will be rejected.
 
 ---
 
