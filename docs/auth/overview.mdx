@@ -130,6 +130,19 @@ See [Cross-Tenant Identity](/auth/cross-tenant) for details on tenant management
   </Tab>
 </Tabs>
 
+## API Keys, Agent Tokens, and Platform Keys
+
+Steward uses separate credentials for different audiences:
+
+| Credential | Header | Scope | Notes |
+| --- | --- | --- | --- |
+| Tenant API key | `X-Steward-Key` plus optional `X-Steward-Tenant` | Tenant API operations | Platform tenant creation returns the raw key once. Steward stores only the hash. |
+| Agent JWT | `Authorization: Bearer <token>` | One agent within one tenant | Created by platform agent-token endpoints and carries `scope: "agent"`. |
+| User/session JWT | `Authorization: Bearer <token>` | Authenticated user/session | Returned by passkey, email, OAuth, and SIWE flows. |
+| Platform key | `X-Steward-Platform-Key` | Cross-tenant `/platform/*` administration | Configured out of band in `STEWARD_PLATFORM_KEYS`. |
+
+Production deployments should set a JWT secret separate from `STEWARD_MASTER_PASSWORD`. The current code is being unified around JWT env naming; check the deployment guide before configuring production secrets.
+
 ## Related
 
 - [Passkeys](/auth/passkeys) — WebAuthn setup and usage

@@ -143,6 +143,10 @@ Incoming Request
     └── QUEUE → Hold for manual approval, notify via webhook
 ```
 
+## Value Units
+
+Policy values are evaluated in the units accepted by the API for the action being checked. EVM transaction limits such as `maxPerTransaction`, `maxPerDay`, and `maxValue` are normally passed as integer wei strings. UI and operator docs may display human ETH/USD equivalents, but policy enforcement should be configured with exact integer values to avoid rounding surprises.
+
 ## Policy Results
 
 Every policy evaluation returns detailed results:

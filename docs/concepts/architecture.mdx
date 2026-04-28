@@ -111,6 +111,13 @@ sequenceDiagram
     end
 ```
 
+## Deployment Modes
+
+Steward currently supports two database modes:
+
+- **Hosted/PostgreSQL mode** — API and proxy processes connect to PostgreSQL using `DATABASE_URL`. This is what Docker Compose and production-style deployments use.
+- **Embedded/PGLite mode** — `bun run start:local` runs the API against PGLite, persisted at `~/.steward/data` unless `STEWARD_PGLITE_MEMORY=true` is set. This is intended for local development, desktop sidecars, and tests.
+
 ## Deployment Topology
 
 ```mermaid
@@ -176,8 +183,8 @@ flowchart LR
 | Component | Technology |
 |-----------|-----------|
 | API Server | [Hono](https://hono.dev) on [Bun](https://bun.sh) |
-| Database | PostgreSQL (Neon) |
-| Encryption | AES-256-GCM with Argon2id key derivation |
+| Database | PostgreSQL 16 or embedded PGLite for local/dev mode |
+| Encryption | AES-256-GCM with keys derived via Node `scryptSync` |
 | EVM Signing | [viem](https://viem.sh) |
 | Solana Signing | [@solana/web3.js](https://solana-labs.github.io/solana-web3.js/) |
 | ORM | [Drizzle](https://orm.drizzle.team) |
