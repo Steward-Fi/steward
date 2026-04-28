@@ -1,6 +1,14 @@
 // @stwd/redis — Redis client, rate limiting, spend tracking, policy caching
 
-export { disconnectRedis, getRedis } from "./client.js";
+export {
+  disconnectRedis,
+  getRedis,
+  getRedisDriver,
+  type IoredisLike,
+  type RedisDriver,
+} from "./client.js";
+export type { IoredisPipelineLike } from "./upstash-adapter.js";
+export { createUpstashIoredisAdapter } from "./upstash-adapter.js";
 export {
   estimateCost,
   getPricingTable,
