@@ -55,6 +55,7 @@
         "@stwd/db": "workspace:*",
         "@stwd/shared": "workspace:*",
         "hono": "^4.7.0",
+        "jose": "^6.2.1",
         "resend": "^6.9.4",
       },
       "devDependencies": {
@@ -121,13 +122,13 @@
       "name": "@stwd/proxy",
       "version": "0.3.0",
       "dependencies": {
+        "@stwd/auth": "workspace:*",
         "@stwd/db": "workspace:*",
         "@stwd/redis": "workspace:*",
         "@stwd/shared": "workspace:*",
         "@stwd/vault": "workspace:*",
         "drizzle-orm": "^0.44.5",
         "hono": "^4",
-        "jose": "^6",
       },
       "devDependencies": {
         "bun-types": "^1.3.12",

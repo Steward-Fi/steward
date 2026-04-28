@@ -5,24 +5,8 @@
  * and sets them on the Hono context for downstream handlers.
  */
 
+import { verifyToken } from "@stwd/auth";
 import type { Context, Next } from "hono";
-import { jwtVerify } from "jose";
-
-// ─── JWT configuration (mirrors packages/api/src/services/context.ts) ────────
-
-const jwtSecretSource = process.env.STEWARD_JWT_SECRET || process.env.STEWARD_MASTER_PASSWORD;
-
-if (!jwtSecretSource) {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error("⛔ STEWARD_JWT_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production");
-  }
-  console.warn(
-    "⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT verification. Set STEWARD_JWT_SECRET before going to production!",
-  );
-}
-
-const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
-const JWT_ISSUER = "steward";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,9 +33,7 @@ export async function authMiddleware(c: Context, next: Next) {
   const token = authHeader.slice(7);
 
   try {
-    const { payload } = await jwtVerify(token, JWT_SECRET, {
-      issuer: JWT_ISSUER,
-    });
+    const payload = await verifyToken(token);
 
     const agentId = payload.agentId as string | undefined;
     const tenantId = payload.tenantId as string | undefined;

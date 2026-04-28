@@ -12,6 +12,7 @@
  *   STEWARD_MASTER_PASSWORD=xxx STEWARD_PROXY_PORT=8080 bun run src/index.ts
  */
 
+import { validateJwtSecretEnv } from "@stwd/auth";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { PROXY_PORT } from "./config";
@@ -23,6 +24,8 @@ import { initProxyRedis, shutdownProxyRedis } from "./middleware/redis-enforceme
 // ─── Ensure DB is initialised ────────────────────────────────────────────────
 
 import { createDb, getDatabaseUrl } from "@stwd/db";
+
+validateJwtSecretEnv();
 
 const dbUrl = getDatabaseUrl();
 if (!dbUrl) {

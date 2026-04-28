@@ -16,6 +16,7 @@
  *       This file exports a Hono route group ready for mounting.
  */
 
+import { verifyToken } from "@stwd/auth";
 import {
   getDb,
   policies,
@@ -42,23 +43,6 @@ import {
 } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
-import { jwtVerify } from "jose";
-
-// ─── Config ───────────────────────────────────────────────────────────────────
-
-const _jwtSecretSrc = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
-if (!_jwtSecretSrc) {
-  if (process.env.NODE_ENV === "production") {
-    throw new Error(
-      "⛔ STEWARD_SESSION_SECRET (or STEWARD_MASTER_PASSWORD) must be set in production",
-    );
-  }
-  console.warn(
-    "⚠️  [DEV ONLY] Using insecure 'dev-secret' for JWT signing. Set STEWARD_SESSION_SECRET before going to production!",
-  );
-}
-const JWT_SECRET = new TextEncoder().encode(_jwtSecretSrc || "dev-secret");
-const JWT_ISSUER = "steward";
 
 // ─── Session payload types ────────────────────────────────────────────────────
 
@@ -178,8 +162,7 @@ async function userSessionAuth(
 
   let payload: UserSessionPayload;
   try {
-    const result = await jwtVerify(token, JWT_SECRET, { issuer: JWT_ISSUER });
-    payload = result.payload as unknown as UserSessionPayload;
+    payload = (await verifyToken(token)) as unknown as UserSessionPayload;
   } catch {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
   }

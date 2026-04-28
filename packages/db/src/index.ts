@@ -1,6 +1,7 @@
 import type { AgentIdentity, PolicyRule, SignRequest, TxRecord } from "@stwd/shared";
 import { eq, inArray } from "drizzle-orm";
 
+export { and, count, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
 export {
   closeDb,
   createDb,

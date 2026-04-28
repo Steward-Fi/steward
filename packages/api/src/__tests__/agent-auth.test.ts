@@ -3,19 +3,14 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 // Skip all DB-dependent tests when DATABASE_URL is not configured
 const SKIP = !process.env.DATABASE_URL;
 
-import { generateApiKey } from "@stwd/auth";
+import { generateApiKey, signAgentToken, verifyToken } from "@stwd/auth";
 import { agents, encryptedKeys, getDb, tenants } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
-import { jwtVerify, SignJWT } from "jose";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
 const TEST_PORT = 3299;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
-const jwtSecretSource = process.env.STEWARD_SESSION_SECRET || process.env.STEWARD_MASTER_PASSWORD;
-const JWT_SECRET = new TextEncoder().encode(jwtSecretSource || "dev-secret");
-const JWT_ISSUER = "steward";
-
 const TEST_TENANT_ID = "test-agent-auth";
 const TEST_AGENT_ID = "agent-001";
 const OTHER_AGENT_ID = "agent-002";
@@ -40,12 +35,7 @@ function agentBearerHeaders(token: string) {
 }
 
 async function createAgentToken(agentId: string, tenantId: string, expiresIn = "30d") {
-  return new SignJWT({ agentId, tenantId, scope: "agent" })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt()
-    .setIssuer(JWT_ISSUER)
-    .setExpirationTime(expiresIn)
-    .sign(JWT_SECRET);
+  return signAgentToken({ agentId, tenantId }, expiresIn);
 }
 
 // ─── Setup ────────────────────────────────────────────────────────────────
@@ -109,9 +99,7 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
     expect(json.data.scope).toBe("agent");
 
     // Verify the JWT payload
-    const { payload } = await jwtVerify(json.data.token, JWT_SECRET, {
-      issuer: JWT_ISSUER,
-    });
+    const payload = await verifyToken(json.data.token);
     expect(payload.agentId).toBe(TEST_AGENT_ID);
     expect(payload.tenantId).toBe(TEST_TENANT_ID);
     expect(payload.scope).toBe("agent");

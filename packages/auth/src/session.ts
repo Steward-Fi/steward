@@ -5,13 +5,14 @@
  * available to all packages via the monorepo workspace.
  */
 
-import { type JWTPayload, jwtVerify, SignJWT } from "jose";
+import type { JWTPayload } from "jose";
+import { getJwtSecret, signJwtPayload, verifyJwtPayload } from "./jwt";
 
 // ─── Config ────────────────────────────────────────────────────────────────
 
 export interface SessionConfig {
-  /** JWT signing secret — at least 32 random bytes recommended */
-  secret: string;
+  /** JWT signing secret — at least 32 random bytes recommended. Defaults to STEWARD_JWT_SECRET. */
+  secret?: string;
   /** JWT issuer claim. Defaults to "steward" */
   issuer?: string;
   /**
@@ -36,12 +37,13 @@ export class SessionManager {
   private readonly expiresIn: string;
 
   constructor(config: SessionConfig) {
-    if (!config.secret || config.secret.length < 16) {
+    const secret = config.secret ?? getJwtSecret();
+    if (!secret || secret.length < 16) {
       throw new Error(
-        "SessionManager: secret must be at least 16 characters. Use a long random string in production.",
+        "SessionManager: JWT secret must be at least 16 characters. Use STEWARD_JWT_SECRET with a long random string in production.",
       );
     }
-    this.secret = new TextEncoder().encode(config.secret);
+    this.secret = new TextEncoder().encode(secret);
     this.issuer = config.issuer ?? "steward";
     this.expiresIn = config.expiresIn ?? "7d";
   }
@@ -54,18 +56,15 @@ export class SessionManager {
    * @returns       A compact JWT string suitable for use as a session token
    */
   async createSession(userId: string, extra?: Record<string, unknown>): Promise<string> {
-    const now = Math.floor(Date.now() / 1000);
-
-    const builder = new SignJWT({
-      userId,
-      ...extra,
-    })
-      .setProtectedHeader({ alg: "HS256" })
-      .setIssuer(this.issuer)
-      .setIssuedAt(now)
-      .setExpirationTime(this.expiresIn as Parameters<SignJWT["setExpirationTime"]>[0]);
-
-    return builder.sign(this.secret);
+    return signJwtPayload(
+      {
+        userId,
+        ...extra,
+      },
+      this.expiresIn,
+      this.secret,
+      this.issuer,
+    );
   }
 
   /**
@@ -78,10 +77,7 @@ export class SessionManager {
    */
   async verifySession(token: string): Promise<SessionPayload | null> {
     try {
-      const { payload } = await jwtVerify(token, this.secret, {
-        issuer: this.issuer,
-        algorithms: ["HS256"],
-      });
+      const payload = await verifyJwtPayload(token, this.secret, this.issuer);
 
       // Sanity-check our custom claim is present
       if (typeof payload.userId !== "string") {
