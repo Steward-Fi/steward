@@ -20,11 +20,9 @@ describe("session revocation", () => {
       scope: "agent",
       agentId: "agent-revoke-test",
     });
-    const { payload: oldPayload } = await jwtVerify(
-      oldToken,
-      new TextEncoder().encode(secret),
-      { issuer: "steward" },
-    );
+    const { payload: oldPayload } = await jwtVerify(oldToken, new TextEncoder().encode(secret), {
+      issuer: "steward",
+    });
 
     await revocationStore.revokeAgentTokens(
       "agent-revoke-test",
@@ -38,11 +36,9 @@ describe("session revocation", () => {
       scope: "agent",
       agentId: "agent-revoke-test",
     });
-    const { payload: newPayload } = await jwtVerify(
-      newToken,
-      new TextEncoder().encode(secret),
-      { issuer: "steward" },
-    );
+    const { payload: newPayload } = await jwtVerify(newToken, new TextEncoder().encode(secret), {
+      issuer: "steward",
+    });
     await revocationStore.revokeAgentTokens(
       "agent-revoke-test-after",
       Number(newPayload.iat) - 1,

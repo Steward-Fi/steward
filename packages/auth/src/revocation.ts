@@ -38,7 +38,10 @@ const DEFAULT_AGENT_REVOCATION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 class InMemoryRevocationStore implements RevocationStore {
   private readonly revokedJtis = new Map<string, number>();
-  private readonly agentIssuedBefore = new Map<string, { issuedBefore: number; expiresAtMs: number }>();
+  private readonly agentIssuedBefore = new Map<
+    string,
+    { issuedBefore: number; expiresAtMs: number }
+  >();
 
   async revokeToken(jti: string, expiresAt: ExpiresAt): Promise<void> {
     const expiresAtMs = toMillis(expiresAt);
@@ -93,7 +96,10 @@ class RedisRevocationStore implements RevocationStore {
         enableReadyCheck: true,
       });
       this.redis.on("error", (err) => {
-        console.warn("[steward:auth] Redis revocation unavailable, using in-memory fallback:", err.message);
+        console.warn(
+          "[steward:auth] Redis revocation unavailable, using in-memory fallback:",
+          err.message,
+        );
       });
     }
     return this.redis;
@@ -175,7 +181,9 @@ export async function assertTokenNotRevoked(payload: {
   if (payload.scope === "agent" && typeof payload.agentId === "string" && payload.iat) {
     const issuedBefore = await revocationStore.getAgentRevokedBefore(payload.agentId);
     if (issuedBefore !== null && payload.iat < issuedBefore) {
-      throw new TokenRevokedError("Agent tokens issued before the revocation line have been revoked");
+      throw new TokenRevokedError(
+        "Agent tokens issued before the revocation line have been revoked",
+      );
     }
   }
 }

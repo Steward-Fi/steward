@@ -34,8 +34,9 @@
  *   3. The JWT's `tenantId` claim is the resolved tenant, not the personal tenant.
  */
 
-import { createPublicKey, randomBytes, randomUUID, verify as verifySignature } from "node:crypto";
+import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 import {
+  assertTokenNotRevoked,
   buildBackend,
   ChallengeStore,
   EmailAuth,
@@ -47,7 +48,6 @@ import {
   OAuthClient,
   PasskeyAuth,
   ResendProvider,
-  assertTokenNotRevoked,
   revocationStore,
   signAccessToken,
   TokenStore,

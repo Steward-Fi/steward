@@ -1,8 +1,16 @@
-import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { jwtVerify, SignJWT } from "jose";
+import { randomUUID } from "node:crypto";
 import { assertTokenNotRevoked, hashSha256Hex, revocationStore } from "@stwd/auth";
-import { closeDb, createPGLiteDb, getDb, refreshTokens, setPGLiteOverride, tenants, users } from "@stwd/db";
+import {
+  closeDb,
+  createPGLiteDb,
+  getDb,
+  refreshTokens,
+  setPGLiteOverride,
+  tenants,
+  users,
+} from "@stwd/db";
+import { jwtVerify, SignJWT } from "jose";
 import { authRoutes, createSessionToken, verifySessionToken } from "../routes/auth";
 
 const JWT_SECRET = new TextEncoder().encode(
@@ -83,7 +91,12 @@ describe("API access-token revocation", () => {
     });
 
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { ok: boolean; token: string; refreshToken: string; expiresIn: number };
+    const json = (await res.json()) as {
+      ok: boolean;
+      token: string;
+      refreshToken: string;
+      expiresIn: number;
+    };
     expect(json.ok).toBe(true);
     expect(json.expiresIn).toBe(900);
     expect(await verifySessionToken(json.token)).toMatchObject({ userId, tenantId });
@@ -106,12 +119,18 @@ describe("API access-token revocation", () => {
     const oldToken = await createAgentToken(agentId, "tenant-agent-revoke");
     const { payload: oldPayload } = await jwtVerify(oldToken, JWT_SECRET, { issuer: JWT_ISSUER });
 
-    await revocationStore.revokeAgentTokens(agentId, Number(oldPayload.iat) + 1, Date.now() + 60_000);
+    await revocationStore.revokeAgentTokens(
+      agentId,
+      Number(oldPayload.iat) + 1,
+      Date.now() + 60_000,
+    );
     expect(await verifyAgentToken(oldToken)).toBeNull();
 
     const freshAgentId = `${agentId}-fresh`;
     const freshToken = await createAgentToken(freshAgentId, "tenant-agent-revoke");
-    const { payload: freshPayload } = await jwtVerify(freshToken, JWT_SECRET, { issuer: JWT_ISSUER });
+    const { payload: freshPayload } = await jwtVerify(freshToken, JWT_SECRET, {
+      issuer: JWT_ISSUER,
+    });
     await revocationStore.revokeAgentTokens(
       freshAgentId,
       Number(freshPayload.iat) - 1,
