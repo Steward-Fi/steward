@@ -34,6 +34,14 @@
  *   3. The JWT's `tenantId` claim is the resolved tenant, not the personal tenant.
  */
 
+// node:crypto under Cloudflare nodejs_compat (GA Sept 2024):
+//   - randomBytes        — supported.
+//   - createPublicKey    — supported, including ed25519 JWK import (workerd
+//                          shipped X25519/Ed25519 in late 2024).
+//   - verify             — supported for ed25519. The (null, msg, key, sig)
+//                          signature is the standard Node form.
+// If any of these fail at runtime on Workers, fall back to tweetnacl for
+// ed25519 verify (lightweight, edge-compatible).
 import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 import {
   assertTokenNotRevoked,
