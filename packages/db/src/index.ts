@@ -4,12 +4,16 @@ import { eq, inArray } from "drizzle-orm";
 export {
   closeDb,
   createDb,
+  createDbForRequest,
+  createNeonHttpDb,
   createPostgresClient,
+  getDatabaseDriver,
   getDatabaseUrl,
   getDb,
   getSql,
   setPGLiteOverride,
 } from "./client";
+export type { DatabaseDriver } from "./client";
 export { runMigrations } from "./migrate";
 export type { PGLiteDb } from "./pglite";
 export {
