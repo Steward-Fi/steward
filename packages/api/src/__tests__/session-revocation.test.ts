@@ -1,15 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { assertTokenNotRevoked, hashSha256Hex, revocationStore } from "@stwd/auth";
-import {
-  closeDb,
-  createPGLiteDb,
-  getDb,
-  refreshTokens,
-  setPGLiteOverride,
-  tenants,
-  users,
-} from "@stwd/db";
+import { closeDb, getDb, refreshTokens, tenants, users } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { jwtVerify, SignJWT } from "jose";
 import { authRoutes, createSessionToken, verifySessionToken } from "../routes/auth";
 

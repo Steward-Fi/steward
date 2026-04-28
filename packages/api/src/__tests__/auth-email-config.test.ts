@@ -1,12 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import {
-  closeDb,
-  createPGLiteDb,
-  getDb,
-  setPGLiteOverride,
-  tenantConfigs,
-  tenants,
-} from "@stwd/db";
+import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import {

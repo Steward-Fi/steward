@@ -2,10 +2,14 @@ import type { AgentIdentity, PolicyRule, SignRequest, TxRecord } from "@stwd/sha
 import { eq, inArray } from "drizzle-orm";
 
 export { and, count, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
+export type { DatabaseDriver } from "./client";
 export {
   closeDb,
   createDb,
+  createDbForRequest,
+  createNeonHttpDb,
   createPostgresClient,
+  getDatabaseDriver,
   getDatabaseUrl,
   getDb,
   getSql,
@@ -13,15 +17,8 @@ export {
 } from "./client";
 export { runMigrations } from "./migrate";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
-export type { PGLiteDb } from "./pglite";
-export {
-  closePGLiteDb,
-  createPGLiteDb,
-  getDataDir,
-  getPGLiteClient,
-  getPGLiteDb,
-  shouldUsePGLite,
-} from "./pglite";
+// PGLite exports live in the `@stwd/db/pglite` subpath so Cloudflare Worker
+// bundles can import `@stwd/db` without pulling node:fs/node:path dependencies.
 export * from "./schema";
 export * from "./schema-auth";
 
