@@ -1,4 +1,9 @@
-export type { PolicyEvaluationContext } from "./engine";
+export type {
+  PolicyEvaluationContext,
+  PolicySimulationRequest,
+  ProxySimulationRequest,
+  TransactionSimulationRequest,
+} from "./engine";
 export { PolicyEngine } from "./engine";
 export type { EvaluatorContext } from "./evaluators";
 export { evaluatePolicy } from "./evaluators";

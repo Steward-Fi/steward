@@ -16,7 +16,7 @@
  *       This file exports a Hono route group ready for mounting.
  */
 
-import { assertTokenNotRevoked, verifyToken } from "@stwd/auth";
+import { assertTokenNotRevoked, generateApiKey, verifyToken } from "@stwd/auth";
 import {
   getDb,
   policies,
@@ -43,6 +43,7 @@ import {
 } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
+import { createSessionToken } from "./auth";
 
 // ─── Session payload types ────────────────────────────────────────────────────
 
@@ -75,6 +76,23 @@ function isValidAddress(value: unknown): boolean {
 
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isValidTenantId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-zA-Z0-9_\-.:]{1,64}$/.test(value);
+}
+
+function slugifyTenantId(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_.:-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+function userTenantCreationAllowed(): boolean {
+  return process.env.ALLOW_USER_TENANT_CREATION !== "false";
 }
 
 /** Build a Vault instance from environment. Same defaults as index.ts. */
@@ -553,6 +571,154 @@ user.get("/me/tenants", async (c) => {
   return c.json<ApiResponse<typeof memberships>>({
     ok: true,
     data: memberships,
+  });
+});
+
+/**
+ * POST /me/tenants
+ * Create a new self-serve tenant owned by the authenticated user.
+ */
+user.post("/me/tenants", async (c) => {
+  if (!userTenantCreationAllowed()) {
+    return c.json<ApiResponse>({ ok: false, error: "User tenant creation is disabled" }, 403);
+  }
+
+  const body = await safeJsonParse<{ name?: string; slug?: string; settings?: unknown }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isNonEmptyString(body.name)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "name is required and must be a non-empty string" },
+      400,
+    );
+  }
+
+  const tenantId = body.slug ? body.slug.trim() : slugifyTenantId(body.name);
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Invalid tenant slug — must be 1-64 alphanumeric chars (plus _ - . :)",
+      },
+      400,
+    );
+  }
+
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  const db = getDb();
+
+  const [existing] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (existing) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant already exists" }, 409);
+  }
+
+  const apiKeyPair = generateApiKey();
+
+  try {
+    const [tenant] = await db
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: body.name.trim(),
+        apiKeyHash: apiKeyPair.hash,
+        ownerAddress: typeof session.address === "string" ? session.address : undefined,
+      })
+      .returning();
+
+    if (!tenant) {
+      return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
+    }
+
+    await db
+      .insert(userTenants)
+      .values({ userId, tenantId: tenant.id, role: "owner" })
+      .onConflictDoNothing();
+
+    return c.json<
+      ApiResponse<{
+        tenantId: string;
+        id: string;
+        name: string;
+        role: string;
+        apiKey: string;
+        createdAt: Date;
+        updatedAt: Date;
+      }>
+    >(
+      {
+        ok: true,
+        data: {
+          tenantId: tenant.id,
+          id: tenant.id,
+          name: tenant.name,
+          role: "owner",
+          apiKey: apiKeyPair.key,
+          createdAt: tenant.createdAt,
+          updatedAt: tenant.updatedAt,
+        },
+      },
+      201,
+    );
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Failed to create tenant";
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
+});
+
+/**
+ * POST /me/tenants/switch
+ * Mint a new session token scoped to an existing tenant membership.
+ */
+user.post("/me/tenants/switch", async (c) => {
+  const body = await safeJsonParse<{ tenantId?: string }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (!isValidTenantId(body.tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "tenantId is required" }, 400);
+  }
+
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  const db = getDb();
+
+  const [membership] = await db
+    .select({ tenantId: userTenants.tenantId, role: userTenants.role })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, body.tenantId)));
+
+  if (!membership) {
+    return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 403);
+  }
+
+  const token = await createSessionToken(
+    typeof session.address === "string" ? session.address : "",
+    membership.tenantId,
+    {
+      ...session,
+      userId,
+      tenantId: membership.tenantId,
+      activeTenantId: membership.tenantId,
+    },
+  );
+
+  return c.json<
+    ApiResponse<{ token: string; tenantId: string; activeTenantId: string; role: string }>
+  >({
+    ok: true,
+    data: {
+      token,
+      tenantId: membership.tenantId,
+      activeTenantId: membership.tenantId,
+      role: membership.role,
+    },
   });
 });
 

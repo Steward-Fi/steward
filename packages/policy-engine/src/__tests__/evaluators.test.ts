@@ -1081,6 +1081,46 @@ describe("PolicyEngine.evaluate()", () => {
     expect(chainsResult?.reason).toContain("eip155:8453");
   });
 
+  it("simulate accepts transaction shape and evaluates as before", async () => {
+    const policies: PolicyRule[] = [
+      makeSpendingRule({
+        maxPerTx: "500000000000000000",
+        maxPerDay: "10000000000000000000",
+        maxPerWeek: "10000000000000000000",
+      }),
+    ];
+
+    const result = await engine.simulate(policies, makeEngineCtx());
+
+    expect(result.approved).toBe(false);
+    expect(result.results[0].type).toBe("spending-limit");
+  });
+
+  it("simulate accepts proxy shape and evaluates rate/spend policies", async () => {
+    const policies: PolicyRule[] = [
+      makeRateRule({ maxTxPerHour: 1, maxTxPerDay: 10 }),
+      makeSpendingRule({
+        maxPerTx: "100",
+        maxPerDay: "1000",
+        maxPerWeek: "1000",
+      }),
+      makeAddressRule({
+        addresses: ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+        mode: "whitelist",
+      }),
+    ];
+
+    const result = await engine.simulate(policies, {
+      ...makeEngineCtx({ recentTxCount1h: 1 }),
+      request: { kind: "proxy", method: "POST", url: "/v1/orders", body: { value: "50" } },
+    });
+
+    expect(result.approved).toBe(false);
+    expect(result.results.map((r) => r.type)).toEqual(["rate-limit", "spending-limit"]);
+    expect(result.results.find((r) => r.type === "rate-limit")?.passed).toBe(false);
+    expect(result.results.find((r) => r.type === "spending-limit")?.passed).toBe(true);
+  });
+
   it("disabled policy inside engine is skipped (treated as passed)", async () => {
     const policies: PolicyRule[] = [
       {

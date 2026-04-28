@@ -45,16 +45,39 @@ interface AssignBody {
   agentIds: string[];
 }
 
+type TransactionSimRequest = {
+  kind?: "transaction";
+  to: string;
+  value: string;
+  data?: string;
+  chainId?: number;
+};
+
+type ProxySimRequest = {
+  kind?: "proxy";
+  method: string;
+  url: string;
+  body?: unknown;
+  data?: unknown;
+  value?: string;
+  chainId?: number;
+};
+
+type SimRequest = TransactionSimRequest | ProxySimRequest;
+
 interface SimulateBody {
   policyId?: string;
   rules?: PolicyRule[];
-  agentId: string;
-  request: {
-    to: string;
-    value: string;
-    data?: string;
-    chainId?: number;
-  };
+  agentId?: string;
+  request?: SimRequest;
+  kind?: "transaction" | "proxy";
+  to?: string;
+  value?: string;
+  data?: unknown;
+  chainId?: number;
+  method?: string;
+  url?: string;
+  body?: unknown;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -136,6 +159,39 @@ async function deleteTemplate(tenantId: string, id: string): Promise<boolean> {
     sql`DELETE FROM policy_templates WHERE id = ${id}::uuid AND tenant_id = ${tenantId} RETURNING id`,
   );
   return (result as any[]).length > 0;
+}
+
+function normalizeSimulationRequest(body: SimulateBody): SimRequest | null {
+  const request = (body.request ?? body) as Record<string, unknown>;
+  const kind = request.kind ?? body.kind;
+
+  if (kind === "proxy" || (isNonEmptyString(request.method) && isNonEmptyString(request.url))) {
+    if (!isNonEmptyString(request.method) || !isNonEmptyString(request.url)) return null;
+    return {
+      kind: "proxy",
+      method: request.method,
+      url: request.url,
+      body: "body" in request ? request.body : undefined,
+      data: "data" in request ? request.data : undefined,
+      value: request.value !== undefined ? String(request.value) : undefined,
+      chainId: typeof request.chainId === "number" ? request.chainId : undefined,
+    };
+  }
+
+  if (kind === "transaction" || (isNonEmptyString(request.to) && request.value !== undefined)) {
+    if (!isNonEmptyString(request.to) || request.value === undefined || request.value === null) {
+      return null;
+    }
+    return {
+      kind: "transaction",
+      to: request.to,
+      value: String(request.value),
+      data: typeof request.data === "string" ? request.data : undefined,
+      chainId: typeof request.chainId === "number" ? request.chainId : undefined,
+    };
+  }
+
+  return null;
 }
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -326,9 +382,14 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
 
-  if (!body.request?.to || !body.request?.value) {
+  const request = normalizeSimulationRequest(body);
+  if (!request) {
     return c.json<ApiResponse>(
-      { ok: false, error: "request.to and request.value are required" },
+      {
+        ok: false,
+        error:
+          "request must be either { to, value, chainId?, data? } or { method, url, body?, data? }",
+      },
       400,
     );
   }
@@ -359,19 +420,14 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
         approved: true,
         results: [],
         requiresManualApproval: false,
-        note: "No rules to evaluate, transaction would be auto-approved",
+        note: "No rules to evaluate, request would be auto-approved",
       },
     });
   }
 
   try {
-    const result = await policyEngine.evaluate(rules, {
-      request: {
-        to: body.request.to,
-        value: body.request.value,
-        data: body.request.data,
-        chainId: body.request.chainId ?? 84532,
-      } as any,
+    const result = await policyEngine.simulate(rules, {
+      request: request as any,
       recentTxCount24h: 0,
       recentTxCount1h: 0,
       spentToday: 0n,
