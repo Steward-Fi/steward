@@ -164,9 +164,21 @@ export function createUpstashIoredisAdapter(upstash: UpstashRedis): IoredisLike 
       return upstash.set(key, value);
     },
 
-    get(key: string): Promise<string | null> {
-      // Upstash auto-parses JSON responses; force string return for our callers.
-      return upstash.get<string>(key) as Promise<string | null>;
+    async get(key: string): Promise<string | null> {
+      // Upstash auto-deserializes any value that looks like JSON — booleans,
+      // numbers, arrays, objects — even though our callers store the value as
+      // a string and call JSON.parse themselves (e.g. policy-cache stores
+      // JSON.stringify(policies)). If we don't normalize back to a string,
+      // policy-cache double-parses, treats the value as corrupted, and deletes
+      // the entry, defeating the cache under the Upstash driver.
+      const raw = (await upstash.get<unknown>(key)) as unknown;
+      if (raw === null || raw === undefined) return null;
+      if (typeof raw === "string") return raw;
+      try {
+        return JSON.stringify(raw);
+      } catch {
+        return null;
+      }
     },
 
     async del(...keys: string[]): Promise<number> {

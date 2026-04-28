@@ -89,9 +89,15 @@ app.use("/agents/*", (c, next) => tenantAuth(c, next));
 app.use("/vault/*", (c, next) => tenantAuth(c, next));
 app.use("/secrets", (c, next) => tenantAuth(c, next));
 app.use("/secrets/*", (c, next) => tenantAuth(c, next));
-app.use("/tenants/:id", (c, next) =>
-  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
-);
+app.use("/tenants/:id", (c, next) => {
+  // GET /tenants/config (no id) is a public discovery endpoint used by the
+  // @stwd/sdk React provider to fetch default-tenant policy/theme/feature
+  // flags before the user has authenticated. The :id wildcard would otherwise
+  // catch it and demand tenant auth, which isn't available pre-signin.
+  const id = c.req.param("id");
+  if (id === "config" && c.req.method === "GET") return next();
+  return tenantAuth(c, next, { requireTenantMatch: id });
+});
 app.use("/tenants/:id/webhook", (c, next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
 );

@@ -78,12 +78,37 @@ function hydrateProcessEnv(env: Env): void {
   }
 }
 
-export default {
-  async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
+let workerInit: Promise<void> | null = null;
+
+async function ensureWorkerInit(env: Env): Promise<void> {
+  if (workerInit) return workerInit;
+  workerInit = (async () => {
     // Workers bindings are only available inside fetch(). Hydrate process.env
     // before importing app modules that read required env at module init.
     hydrateProcessEnv(env);
-    await initRedis(env);
+    const redisOk = await initRedis(env);
+    // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
+    // must be initialized too — without this they stay on the lazy memory
+    // backend and one-time state is lost across isolates / cold starts.
+    const { initAuthStores } = await import("./routes/auth");
+    // usePostgres=false: Workers deployments do not run migrations on startup
+    // (SKIP_MIGRATIONS=1 in wrangler.toml) so auth_kv_store may not exist;
+    // Redis is the canonical store on Workers.
+    await initAuthStores(false).catch((err) => {
+      console.warn("[steward:workers] initAuthStores failed; auth flows may degrade:", err);
+    });
+    if (!redisOk) {
+      console.warn(
+        "[steward:workers] Redis not initialized — passkey/magic-link/SIWE flows will use in-memory backend per isolate",
+      );
+    }
+  })();
+  return workerInit;
+}
+
+export default {
+  async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
+    await ensureWorkerInit(env);
     const { app } = await import("./app");
     return app.fetch(request, env, ctx as never);
   },
