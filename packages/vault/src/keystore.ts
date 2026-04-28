@@ -1,3 +1,12 @@
+// node:crypto under Cloudflare nodejs_compat:
+//   - createCipheriv / createDecipheriv (AES-256-GCM) — supported.
+//   - randomBytes                                      — supported.
+//   - scryptSync                                       — supported. Sync work
+//     runs on the request CPU budget (~10ms by default, configurable). Default
+//     N=16384 derivation is well under budget. If a future caller raises N,
+//     consider crypto.subtle.deriveBits with PBKDF2-SHA256 as an async
+//     alternative — note that switching KDFs invalidates existing encrypted
+//     records (operator decision, not a transparent migration).
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 
 /**
