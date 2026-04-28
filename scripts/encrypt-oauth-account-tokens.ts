@@ -2,7 +2,7 @@
 /**
  * One-time OAuth account token encryption backfill.
  *
- * Run immediately after drizzle migration 0019_oauth_account_token_encryption:
+ * Run immediately after drizzle migration 0021_oauth_account_token_encryption:
  *   STEWARD_MASTER_PASSWORD=... bun run scripts/encrypt-oauth-account-tokens.ts
  *
  * The SQL migration renames access_token/refresh_token to *_encrypted so no
