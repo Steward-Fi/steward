@@ -514,9 +514,7 @@ export interface PolicySimulateProxyRequest {
   value?: string;
 }
 
-export type PolicySimulateRequest =
-  | PolicySimulateTransactionRequest
-  | PolicySimulateProxyRequest;
+export type PolicySimulateRequest = PolicySimulateTransactionRequest | PolicySimulateProxyRequest;
 
 export interface PolicySimulateInput {
   /** Simulate an existing saved template. */
