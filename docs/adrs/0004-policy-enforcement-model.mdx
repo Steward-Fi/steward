@@ -1,0 +1,164 @@
+---
+title: "ADR-0004: Where policies are enforced"
+status: Accepted
+date: 2026-04-24
+---
+
+# ADR-0004 — Where policies are enforced
+
+**Status:** Accepted
+**Last reviewed:** 2026-04-24
+
+## Context
+
+Steward's policy engine is central to the product pitch. Earlier versions
+of `VISION.md` described policies as "enforced at the cryptographic
+signing layer" and "architecture, not advice." Those phrasings overstate
+what the code actually does. This ADR exists to document the **real**
+enforcement model and mark out the difference between the current
+implementation and the aspirational design.
+
+Our obligation to users is honesty about security boundaries. The vision
+document will be toned down to match this ADR (see the flagged lines in
+[`docs/security/threat-model.mdx`](../security/threat-model.mdx)).
+
+## Decision (current reality)
+
+### Where policies actually run
+
+Policies are evaluated in `packages/policy-engine/src/engine.ts`
+(`PolicyEngine.evaluate()`), and are **called from API route handlers**
+before they invoke the vault. Concretely:
+
+- `packages/api/src/routes/vault.ts` — calls `policyEngine.evaluate(...)`
+  at lines ~115, ~597, ~808 (before `vault.signTransaction(...)`).
+- `packages/api/src/routes/user.ts` — line ~357, before signing on the
+  user's embedded wallet path.
+- `packages/api/src/routes/policies-standalone.ts` — line ~368, for the
+  dry-run `/evaluate` endpoint.
+
+The `Vault.signTransaction()` method (`packages/vault/src/vault.ts`
+line ~331) **does not itself invoke the policy engine**. It decrypts,
+signs, and optionally broadcasts. Policy enforcement is a property of
+the calling code path (the API route), not a property of the vault
+primitive.
+
+### Why this is still meaningful
+
+Even though policies are not baked into `Vault.signTransaction()`
+itself, the current architecture gives us **one path** to vault
+operations in production:
+
+1. The only process that imports and constructs a `Vault` is the API.
+2. The API never exposes a "sign without policy evaluation" route.
+   Every route that calls `vault.signTransaction` first calls
+   `policyEngine.evaluate` and returns early on a non-`approved`
+   result.
+3. The vault package is consumed via `@stwd/vault` as a package-private
+   API from within the monorepo. It is not published with an interface
+   that encourages direct calls from outside the API.
+
+Combined, that means a **non-compromised API process enforces every
+policy on every signing call**, and this is the boundary we claim.
+
+### What this does NOT protect against
+
+Be explicit:
+
+- **Code execution on the API process.** An attacker who can run
+  arbitrary code inside the API (RCE, malicious dependency that
+  imports `@stwd/vault` directly, a compromised contributor) can
+  bypass the policy engine by calling `vault.signTransaction` with
+  whatever request they want. Policies are not a sandbox.
+- **A future Steward developer adding a "fast path" that skips
+  policy evaluation.** Nothing in the type system forces the
+  `evaluate → sign` ordering. This is a code-review invariant, not
+  a compile-time one. A lint rule or a `signTransaction` precondition
+  check would help; neither exists yet.
+- **Bugs inside the policy engine itself.** If the evaluator for
+  `spending-limit` has an off-by-one that approves a transaction it
+  shouldn't, the vault happily signs. The policy engine has tests
+  (`packages/policy-engine/src/__tests__/`) but coverage is not
+  exhaustive.
+
+### What policies DO protect against
+
+- **A prompt-injected agent making API calls.** If the agent is
+  constrained by a `spending-limit` of $100/day, the LLM can be
+  socially engineered into trying to send $1M and the API will
+  reject the request before the vault sees it. This is the core
+  product value and it works.
+- **A broadly-scoped API key being used for unintended transactions.**
+  Policies are per-agent; the scope ceiling is policy-controlled.
+- **Simple operator mistakes.** Approved-addresses policies catch
+  typos and wrong chains.
+
+These are real wins. The overclaim is not "policies work" — they do —
+it's "policies are cryptographically impossible to bypass," which is
+not true of the v1 architecture.
+
+## Decision (future direction, sketched)
+
+The way to make the enforcement claim stronger is **process
+separation**: move the vault into a dedicated signer process that
+exposes only a narrow RPC:
+
+```
+┌──────────────┐           ┌──────────────┐
+│   API        │           │   Signer     │
+│  (Hono)      │──RPC────▶│  (vault-only)│
+│              │           │  • decrypt   │
+│  policy ───▶ │           │  • sign      │
+│  engine      │           │  • audit     │
+└──────────────┘           └──────────────┘
+       │                          │
+       └────── no shared mem ─────┘
+```
+
+In that model:
+
+- The signer process owns `STEWARD_MASTER_PASSWORD`; the API does not.
+- The signer exposes `sign(request, policyToken)` where `policyToken`
+  is an HMAC-signed attestation from the policy engine that the
+  request was approved. The signer verifies the attestation before
+  signing.
+- Compromising the API process no longer automatically means
+  compromising the vault. The attacker would need to forge
+  attestations (which requires the signer's verification key) or
+  compromise the signer itself (a smaller, more auditable
+  codebase).
+
+This is **not implemented in v1.** It is on the roadmap as part of
+"production hardening." We deliberately shipped the simpler,
+co-located model first because:
+
+- It is enough for the self-hosted, single-operator use case.
+- A process split adds operational complexity (two more services
+  in Compose, IPC, a signing-key distribution story).
+- The interface contract (`evaluate → sign`) is cleanly factorable
+  when we do split — `PolicyEngine` and `Vault` are already in
+  separate packages.
+
+## Consequences
+
+- **Positive:** simple architecture, every code path is auditable
+  in the API repo, policies do what the docs say for any
+  non-code-execution adversary.
+- **Negative:** the security boundary is "trust the API process,"
+  which is a weaker claim than "trust the vault process." We need
+  to communicate this honestly.
+- **Honesty obligation:** `VISION.md` previously said policies are
+  "enforced at the cryptographic signing layer." They are not.
+  They are enforced in the API process, by convention, before
+  the vault signs. That is a meaningful protection but it is not
+  a cryptographic one. The vision doc should be updated to
+  reflect this.
+
+## Related
+
+- [Threat model](../security/threat-model.mdx) — enumerates
+  what current architecture defends against and what it doesn't.
+- [ADR-0001 — Cryptographic choices](./0001-crypto-choices.mdx)
+- `packages/policy-engine/src/engine.ts`
+- `packages/api/src/routes/vault.ts`
+- `packages/vault/src/vault.ts`

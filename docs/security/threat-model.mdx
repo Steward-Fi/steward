@@ -1,0 +1,431 @@
+---
+title: "Steward Threat Model"
+status: Living document
+date: 2026-04-24
+---
+
+{/*
+VISION.md lines that are directly contradicted by this threat model and
+should be toned down in a follow-up PR (NOT this PR):
+
+  • Line 5:  "Every agent deserves a bank account it can't be robbed of."
+             → aspirational; overclaims absolute security. Suggest:
+               "Every agent deserves strong, policy-bounded custody."
+
+  • Line 9:  "Steward exists to make that impossible. Not through trust,
+             through architecture: … policy enforcement at the signing
+             layer …"
+             → "impossible" is wrong. Policies are enforced in the API
+               process, not the signing layer. See ADR-0004. Suggest:
+               "Steward reduces the blast radius of prompt injection and
+               credential leakage by enforcing operator-defined policies
+               before every signing operation, and by isolating
+               credentials behind a proxy."
+
+  • Line 44: "Policy enforcement | Rules enforced at the vault, not the
+             application layer."
+             → Factually inaccurate today. Rules are enforced at the API
+               layer, which then calls the vault. See ADR-0004.
+               Suggest: "Rules enforced in the API signing path, not in
+               user application code."
+
+  • Line 99: "Policy is architecture, not advice. Rules are enforced at
+             the cryptographic signing layer. Not in middleware. Not in
+             application code. Not as suggestions. If the policy says
+             no, the vault won't sign it."
+             → Overstated. Policies are in-process middleware, not a
+               cryptographic layer. The vault itself will sign anything
+               the API asks it to. Suggest:
+               "Policy is first-class. Every signing API in Steward
+               evaluates policies before calling the vault, and a
+               failed policy stops the request before any key is
+               decrypted. Future versions will move this enforcement
+               into a separate signer process (see ADR-0004)."
+*/}
+
+# Steward Threat Model
+
+**Status:** Living document. Last reviewed 2026-04-24.
+**Scope:** Steward v1 (current `develop` branch).
+
+This document enumerates the adversaries Steward is designed to defend
+against, and — equally importantly — the ones it is **not**. Security
+docs that only describe wins are marketing. This one is meant to be
+useful.
+
+If you find something here that disagrees with the code, the code is
+right and this document is wrong. Please file an issue.
+
+## Glossary
+
+- **Agent:** an autonomous or semi-autonomous program (often LLM-driven)
+  that Steward holds keys for.
+- **Tenant:** an organizational boundary in Steward. A tenant owns
+  agents, policies, secrets, and API keys. In a self-hosted deploy,
+  typically one tenant. In the hosted tier, many tenants share
+  infrastructure.
+- **Operator:** the human/team running Steward. Owns
+  `STEWARD_MASTER_PASSWORD`, `STEWARD_SESSION_SECRET`,
+  `STEWARD_KDF_SALT`.
+- **Vault:** the encrypted key store (`packages/vault`). Holds encrypted
+  private keys.
+- **Policy engine:** `packages/policy-engine`. Pre-sign rules evaluated
+  by the API (see [ADR-0004](../adrs/0004-policy-enforcement-model.mdx)).
+
+## Assumptions we make (security preconditions)
+
+If any of these fails, the threat model below does not hold.
+
+1. **`STEWARD_MASTER_PASSWORD` is kept secret.** It has entropy equivalent
+   to at least 256 bits of random data and is not shared across
+   deployments.
+2. **`STEWARD_SESSION_SECRET` is kept secret.** Treated with the same
+   care as the master password. Leak = arbitrary JWT forgery.
+3. **`STEWARD_KDF_SALT` is set to a unique per-deployment random value**
+   (operator action — the fallback default is documented as weak;
+   see `keystore.ts` lines 37–46).
+4. **Postgres and Redis are not exposed publicly.** The default
+   Compose topology binds them to the internal Docker network. If an
+   operator exposes them, several guarantees degrade sharply.
+5. **The API process is not compromised.** No RCE, no malicious
+   dependency executing in the API's address space. If this fails,
+   see "Attacker with code execution on the API" below — Steward
+   provides limited defense.
+6. **Tenant operators are trusted with their own tenant.** A tenant
+   admin can read the policies, approvals, and audit log for their
+   tenant. They cannot read another tenant's data (isolation is
+   row-level + enforced by the API). In self-hosted mode this is
+   trivially true (there's one tenant). In hosted multi-tenant mode,
+   the hosting operator trusts the tenant owner with their own tenant
+   scope.
+7. **TLS is terminated in front of Steward.** The Compose file binds
+   the API to `127.0.0.1`; the expected topology has Caddy / nginx /
+   Traefik handling TLS. Steward does not itself terminate TLS in the
+   reference deploy.
+
+## Adversaries
+
+For each adversary: what they can do, what Steward defends against,
+what it does not, and what the user/operator should do to mitigate.
+
+---
+
+### 1. Prompt-injecting LLM in the agent runtime
+
+**Capability.** The agent's LLM is tricked (by a malicious user prompt,
+poisoned web content, or jailbreak) into calling Steward API methods
+the operator did not intend. The agent still holds whatever API
+credentials the operator gave it, so all calls are authenticated — the
+problem is semantic, not authentication.
+
+**What Steward defends:**
+
+- Policy engine evaluates every signing call
+  (`packages/api/src/routes/vault.ts` lines ~115, ~597, ~808) and
+  rejects anything outside `spending-limit`, `approved-addresses`,
+  `rate-limit`, `time-window`, `auto-approve-threshold`, and
+  `allowed-chains` rules.
+- Auto-approve thresholds queue high-value transactions for human
+  review rather than auto-signing.
+- Rate limits (both Redis-backed at the API and policy-level)
+  cap burst behavior.
+- API scope: agent tokens can be issued with specific scopes; the
+  LLM cannot call admin routes with an agent token.
+
+**What Steward does NOT defend:**
+
+- **Policies that aren't configured.** If the operator did not set a
+  `spending-limit`, the LLM can drain up to the on-chain balance
+  within one transaction. The policy engine's "no policies ⇒
+  everything auto-approved" behavior (`engine.ts` line ~35) is
+  documented-as-dangerous but still permissive.
+- **Scopes granted too broadly.** An agent token with
+  "sign on any chain, for any address" is bounded only by the
+  policies attached to it. A missing policy ≠ an implicit deny.
+- **Transactions inside policy bounds.** A $99 malicious withdrawal
+  to a policy-allowed address passes. Policies constrain the
+  envelope; they do not distinguish legitimate from illegitimate
+  intent within it.
+
+**Mitigation (operator):**
+
+- Always configure at least one spending limit on every agent.
+- Use approved-address lists for agents that should only interact
+  with known counterparties.
+- Set auto-approve thresholds low enough that surprising
+  transactions require a human.
+- Prefer many narrow agents with tight scopes over one all-powerful
+  agent.
+
+---
+
+### 2. Compromised agent dependency (supply chain)
+
+**Capability.** A package the agent's process loads (npm, pip,
+whatever) contains malicious code. The attacker runs arbitrary code
+inside the agent process and sees everything the agent sees —
+including the Steward API credentials the operator provisioned.
+
+**What Steward defends:**
+
+- Same surface as adversary (1): the malicious code can call Steward,
+  but only within the agent's policy envelope.
+- Credentials injected by the proxy
+  (`packages/proxy`) are never returned to the agent in plaintext.
+  The agent sees responses but not the API key the proxy used. So
+  malware in the agent cannot exfiltrate, e.g., the OpenAI key
+  directly — it can only cause the proxy to use it.
+- Audit logs record every signing call and every proxy call, tagged
+  with the agent identity. Exfiltration leaves a trail.
+
+**What Steward does NOT defend:**
+
+- Any credential the operator put in the agent's environment
+  directly (bypassing Steward's proxy) is freely exfiltrable.
+- The agent's own Steward credential can be used to the full extent
+  of its policy envelope until the operator revokes it.
+
+**Mitigation (operator):**
+
+- Route **all** credentials through the Steward proxy; never put
+  raw API keys in the agent's env.
+- Pin dependencies. Use lockfiles. Review new deps.
+- Treat agent compromise as a detection problem: monitor the audit
+  log for anomalous patterns, revoke agent tokens on suspicion.
+
+---
+
+### 3. Malicious co-tenant in hosted deploy
+
+**Capability.** On the hosted `steward.fi` tier, another tenant on the
+same infrastructure is adversarial. They try to read, modify, or
+exhaust resources belonging to another tenant.
+
+**What Steward defends:**
+
+- Every tenant-scoped query filters on `tenantId` at the route
+  handler level. The `Vault.signTransaction` method verifies that
+  the agent belongs to the claimed tenant (`vault.ts` lines
+  ~336–344) before doing anything else.
+- JWT claims carry a `tenantId`; the API's auth middleware refuses
+  to service a JWT for a tenant the token isn't scoped to.
+- Rate limiting is per-tenant where applicable.
+
+**What Steward does NOT defend:**
+
+- **A SQL-injection or ORM-misuse bug** that escapes the `tenantId`
+  filter would break isolation. We use Drizzle with parameterized
+  queries; we are not claiming formal proof.
+- **Shared infrastructure side-channels** (CPU cache timing, noisy
+  neighbors). Out of scope for a userspace app.
+- **Resource exhaustion.** A tenant that intentionally drives load
+  can affect others' latency. Mitigation is operational, not
+  architectural.
+
+**Mitigation (for self-hosters):** run one tenant per deploy. The
+isolation claim is stronger when there's no multi-tenancy to test.
+
+**Mitigation (for hosted tier operator — us, eventually):**
+per-tenant rate limits, per-tenant DB connection pool caps,
+workload-isolation plans.
+
+---
+
+### 4. Attacker with read access to the database
+
+**Capability.** The attacker obtains a dump of Postgres rows
+(stolen backup, misconfigured S3 bucket, direct DB compromise
+without OS-level code execution on the API host). They see the
+`encrypted_chain_keys` table, the `vault_secrets` table, the
+`users`, `agents`, `policies`, `transactions`, `audit_log` tables.
+
+**What Steward defends:**
+
+- All private keys are encrypted with AES-256-GCM using a key
+  derived via scrypt from a master password the attacker does not
+  have (see [ADR-0001](../adrs/0001-crypto-choices.mdx)). Without
+  the master password, ciphertext is not decryptable.
+- Per-record random salt forces the attacker to run scrypt once
+  per record to test a candidate master password.
+- Secrets stored via `SecretVault` use the same encryption path.
+- Password hashes (for users who use email + password) are
+  stored hashed with the project's password hashing util (not
+  plaintext).
+
+**What Steward does NOT defend:**
+
+- **Any unencrypted row data.** Email addresses, agent IDs, tenant
+  names, transaction history, approval decisions, audit events —
+  all plaintext by design (needed for querying). A DB breach
+  leaks operational metadata even if it does not leak keys.
+- **The master password itself if the default `STEWARD_KDF_SALT`
+  is in use.** The default salt is `"steward-vault-v1"` (a known
+  constant). An attacker can precompute scrypt tables against
+  this salt for common passwords. This is why we warn loudly in
+  production when the env var is unset (`keystore.ts` line ~44)
+  and why operators MUST set `STEWARD_KDF_SALT`.
+- **Weak master passwords.** Scrypt slows attacks by a large
+  factor but does not stop them. A 12-character human-chosen
+  password is crackable. Use ≥256 bits of random entropy.
+
+**Mitigation (operator):**
+
+- Set `STEWARD_KDF_SALT` to a random 64-hex-char string, unique
+  per deployment.
+- Use a high-entropy `STEWARD_MASTER_PASSWORD` (generated with
+  `openssl rand -hex 32` or equivalent).
+- Encrypt your DB backups.
+- Don't expose Postgres publicly.
+
+---
+
+### 5. Attacker with the master password
+
+**Capability.** The attacker has `STEWARD_MASTER_PASSWORD`, and also
+has DB read access (or gets it).
+
+**What Steward defends:** nothing, structurally. This is total
+vault compromise. Every private key decrypts.
+
+**Why we still call it out:** so nobody builds an operational plan
+on the assumption that this state is survivable. It's not. Treat
+the master password as a crown jewel.
+
+**Mitigation (operator):**
+
+- Store the master password in a real secret manager (not a
+  committed `.env`).
+- Rotate it on suspicion of leak. Rotation means: generate new
+  master password, re-encrypt all stored keys with a migration,
+  retire old password. Tooling for bulk re-encryption is not
+  yet shipped — this is tracked as a follow-up.
+- Use OS-level access controls on the Compose host to limit who
+  can read the environment of the API container.
+
+---
+
+### 6. Network MITM between agent and Steward, or between Steward and Postgres/Redis
+
+**Capability.** The attacker is on-path. They can read and/or modify
+TCP streams between agents and Steward, or between the API and its
+data stores.
+
+**What Steward defends:**
+
+- Nothing directly at the TCP layer. Steward assumes TLS is
+  terminated in front of the API by a reverse proxy.
+- JWTs are integrity-protected (HS256) so a MITM cannot forge
+  claims in-flight without the session secret. Tampering breaks
+  signature verification.
+
+**What Steward does NOT defend:**
+
+- Plaintext HTTP. If the operator deploys Steward without TLS,
+  all traffic (including JWTs, which grant bearer access) is
+  exposed.
+- Unencrypted Postgres / Redis links. The reference Compose
+  puts these on an internal Docker network — that's isolation,
+  not encryption.
+
+**Mitigation (operator):**
+
+- TLS everywhere. Use Caddy or Traefik for automatic certs.
+- For distributed Postgres (managed DB in another region),
+  use TLS on the DB connection string (`sslmode=require`).
+
+---
+
+### 7. Compromised admin / malicious insider
+
+**Capability.** A user with legitimate tenant-admin privileges
+turns malicious, or has their session token stolen.
+
+**What Steward defends:**
+
+- Audit log records admin actions: policy changes, API key
+  creation, approval decisions. Not tamper-evident (admin can
+  likely also delete audit rows via DB access), but useful for
+  detection.
+- API key creation requires authenticated admin.
+- Every signed transaction has a policy-evaluation record
+  attached (`transactions.policyResults`).
+
+**What Steward does NOT defend:**
+
+- A tenant admin can change policies. If they broaden a policy
+  and then initiate a large transaction, both actions will
+  log but neither will be blocked.
+- A stolen session is a full compromise of whatever that user
+  could do. JWT revocation is partial (token denylist in Redis,
+  rotation on refresh), but until the denylist entry is in
+  place, the token works.
+
+**Mitigation (operator):**
+
+- Short JWT lifetimes. Rotate refresh tokens aggressively.
+- Require human approval (via `auto-approve-threshold`) for
+  high-value transactions — this means even a malicious admin
+  who broadens a policy still needs to click "approve" on the
+  outbound transaction, leaving an explicit record.
+- Separation of duties: different people for "can change
+  policies" vs "can approve transactions" where possible.
+
+---
+
+### 8. Attacker with code execution on the API process
+
+**Capability.** RCE in a dependency, a malicious PR that merges,
+a compromised CI pipeline that ships a backdoored image. The
+attacker now runs arbitrary code in the API's address space.
+
+**What Steward defends:** very little. The master password is in
+process memory, so keys can be decrypted at will. The policy
+engine runs in the same process, so bypassing it is an
+`import { Vault } from "@stwd/vault"` away.
+
+**What this costs us:** it is the strongest honest reason to not
+claim "enforced at the cryptographic signing layer." Until the
+vault-as-separate-process design in
+[ADR-0004](../adrs/0004-policy-enforcement-model.mdx) ships, this
+adversary defeats the entire architecture.
+
+**Mitigation (operator):**
+
+- Dependency hygiene. Lockfiles. Supply-chain scanning.
+- Run the API container with a read-only filesystem where
+  possible.
+- Network egress controls: the API only needs to reach its DB,
+  Redis, and configured chain RPC endpoints. Deny everything
+  else at the firewall.
+- Watch the roadmap for the process-separated signer.
+
+---
+
+## Known limitations (summarized)
+
+- **Policies run in-process with the vault.** See ADR-0004. The
+  future direction is a separate signer with policy attestations;
+  not shipped in v1.
+- **JS strings cannot be reliably zeroed.** When `Vault.decrypt()`
+  returns a plaintext private key, that string may remain in the V8
+  / JSC heap until garbage collection. We do not hold it longer than
+  needed (`vault.ts` line ~324 comment) but we cannot guarantee
+  erasure. This affects any attacker with a memory-dump primitive.
+- **No HSM / KMS integration in v1.** Planned (VISION.md roadmap).
+- **Default `STEWARD_KDF_SALT` is weak** if the operator doesn't
+  override it. Loud warning; should be an error in v2.
+- **Migrations run at startup with no leader lock.** Not safe for
+  multi-replica rolling deploys.
+- **No tamper-evident audit log.** An attacker with DB write can
+  rewrite the audit trail. Options under consideration: HMAC chain,
+  third-party write-only log (e.g., Loki / Vector → S3 WORM).
+- **No rate limiting on read endpoints.** Rate limits apply to
+  signing and auth; general read traffic is not rate-capped beyond
+  whatever the reverse proxy enforces.
+- **Cross-tenant user identity** means a single set of auth
+  credentials grants access to every tenant the user is a member
+  of. A compromised user account is broader than one tenant.
+
+## Changelog
+
+- 2026-04-24 — Initial version.
