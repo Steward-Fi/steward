@@ -8,6 +8,7 @@
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
     "migrate": "bun src/migrate.ts",
+    "migrate:neon": "drizzle-kit migrate",
     "generate": "drizzle-kit generate",
     "test": "bun test"
   },
