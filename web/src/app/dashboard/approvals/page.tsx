@@ -1,9 +1,9 @@
 "use client";
 
+import type { ApprovalQueueEntry } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import type { ApprovalQueueEntry } from "@stwd/sdk";
 import { useAuth } from "@/components/auth-provider";
 import { ChainBadge } from "@/components/chain-badge";
 import { steward } from "@/lib/api";

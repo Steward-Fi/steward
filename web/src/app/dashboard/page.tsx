@@ -1,5 +1,6 @@
 "use client";
 
+import type { AgentIdentity, TxRecord } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -7,7 +8,6 @@ import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
 import { getChainSymbol } from "@/lib/chains";
-import type { AgentIdentity, TxRecord } from "@stwd/sdk";
 import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];

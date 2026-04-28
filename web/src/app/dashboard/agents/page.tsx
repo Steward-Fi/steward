@@ -1,11 +1,11 @@
 "use client";
 
+import type { AgentIdentity } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { CopyButton } from "@/components/copy-button";
 import { steward } from "@/lib/api";
-import type { AgentIdentity } from "@stwd/sdk";
 import { formatDate, shortenAddress } from "@/lib/utils";
 
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];

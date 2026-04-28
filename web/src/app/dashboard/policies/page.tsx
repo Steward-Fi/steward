@@ -1,8 +1,8 @@
 "use client";
 
+import type { AgentIdentity, PolicyRule, PolicyTemplate } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
-import type { AgentIdentity, PolicyRule, PolicyTemplate } from "@stwd/sdk";
 import { steward } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 

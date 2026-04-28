@@ -1,8 +1,8 @@
 "use client";
 
+import type { AgentIdentity } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
-import type { AgentIdentity } from "@stwd/sdk";
 import { steward } from "@/lib/api";
 import {
   type AuditEntry,

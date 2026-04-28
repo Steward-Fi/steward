@@ -1,5 +1,6 @@
 "use client";
 
+import type { TxRecord } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -7,7 +8,6 @@ import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
 import { getChainSymbol, getExplorerTxLink } from "@/lib/chains";
-import type { TxRecord } from "@stwd/sdk";
 import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 type TxWithAgent = TxRecord & { agentName?: string };
@@ -178,10 +178,7 @@ export default function TransactionsPage() {
               </div>
               <div className="w-28 text-right">
                 <span className="text-sm tabular-nums text-text-secondary">
-                  {formatWei(
-                    tx.request?.value || "0",
-                    getChainSymbol(tx.request?.chainId ?? 8453),
-                  )}
+                  {formatWei(tx.request?.value || "0", getChainSymbol(tx.request?.chainId ?? 8453))}
                 </span>
               </div>
               <div className="w-36 text-right">

@@ -43,13 +43,7 @@ export interface AuditSummary {
   denyCount: number;
 }
 
-const DENY_STATUSES = new Set([
-  "rejected",
-  "denied",
-  "deny",
-  "violation",
-  "policy_violation",
-]);
+const DENY_STATUSES = new Set(["rejected", "denied", "deny", "violation", "policy_violation"]);
 const ERROR_STATUSES = new Set(["error", "failed", "failure"]);
 
 /** Map a raw audit log entry to the dashboard's flattened shape. */
@@ -76,9 +70,7 @@ export function toAuditLogQuery(params?: AuditQueryParams) {
   if (!params) return undefined;
   const limit = params.limit;
   const page =
-    params.offset !== undefined && limit
-      ? Math.floor(params.offset / limit) + 1
-      : undefined;
+    params.offset !== undefined && limit ? Math.floor(params.offset / limit) + 1 : undefined;
   return {
     agentId: params.agentId,
     action: params.action,

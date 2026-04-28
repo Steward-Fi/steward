@@ -1,5 +1,6 @@
 "use client";
 
+import type { AgentIdentity, PolicyRule, PolicyType, TxRecord } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -9,7 +10,6 @@ import { CopyButton } from "@/components/copy-button";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
 import { getChainSymbol, getExplorerAddressLink, getExplorerTxLink } from "@/lib/chains";
-import type { AgentIdentity, PolicyRule, PolicyType, TxRecord } from "@stwd/sdk";
 import { formatDate, formatWei, policyTypeLabel, shortenAddress } from "@/lib/utils";
 
 interface BalanceInfo {

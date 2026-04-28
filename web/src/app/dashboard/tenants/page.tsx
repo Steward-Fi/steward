@@ -27,14 +27,9 @@ interface CreatedTenant {
  * catches up, keep these as direct `fetch` calls so the SDK only exposes
  * routes that actually exist.
  */
-async function createTenantViaApi(
-  name: string,
-  description?: string,
-): Promise<CreatedTenant> {
+async function createTenantViaApi(name: string, description?: string): Promise<CreatedTenant> {
   const token =
-    typeof window !== "undefined"
-      ? localStorage.getItem("steward_session_token") || ""
-      : "";
+    typeof window !== "undefined" ? localStorage.getItem("steward_session_token") || "" : "";
   const res = await fetch(`${API_URL}/user/me/tenants`, {
     method: "POST",
     headers: {
@@ -50,9 +45,7 @@ async function createTenantViaApi(
 
 async function switchTenantViaApi(tenantId: string): Promise<void> {
   const token =
-    typeof window !== "undefined"
-      ? localStorage.getItem("steward_session_token") || ""
-      : "";
+    typeof window !== "undefined" ? localStorage.getItem("steward_session_token") || "" : "";
   const res = await fetch(`${API_URL}/user/me/tenants/switch`, {
     method: "POST",
     headers: {
