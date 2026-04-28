@@ -48,6 +48,9 @@ mock.module("@stwd/db", () => {
   };
   const proxyAuditLog = {};
   return {
+    and: (...args: unknown[]) => args,
+    desc: (arg: unknown) => arg,
+    eq: (...args: unknown[]) => args,
     secretRoutes,
     secrets,
     policies,
