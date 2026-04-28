@@ -1,45 +1,32 @@
 /**
- * Steward API — main entry point.
+ * Steward API — Bun entry point.
  *
- * Sets up global middleware, mounts route modules, and starts the server.
- * All route logic lives in `./routes/*`; shared state lives in `./services/context`.
+ * The Hono application itself lives in `./app.ts` so the same routes can be
+ * served by other runtimes (Cloudflare Workers, Electrobun embedded). This
+ * file only contains code that needs a long-lived Node/Bun process:
+ *
+ *   - The in-memory IP rate-limit log (only safe in single-process mode)
+ *   - `setInterval` GC for expired entries
+ *   - The blocking `runMigrations()` call at boot
+ *   - The /ready readiness probe (depends on migration state + DB ping)
+ *   - `Bun.serve` plus SIGINT/SIGTERM graceful shutdown
  */
 
 import { validateJwtSecretEnv } from "@stwd/auth";
 import { closeDb, getDb, runMigrations, shouldUsePGLite } from "@stwd/db";
 import { sql } from "drizzle-orm";
-import { Hono } from "hono";
-import { bodyLimit } from "hono/body-limit";
-import { logger } from "hono/logger";
-import { correlationId } from "./middleware/correlation";
+import { app } from "./app";
 import { initRedis, shutdownRedis } from "./middleware/redis";
-import { tenantCors } from "./middleware/tenant-cors";
-import { agentRoutes } from "./routes/agents";
-import { approvalRoutes } from "./routes/approvals";
-import { auditRoutes } from "./routes/audit";
-import { authRoutes, initAuthStores } from "./routes/auth";
-import { dashboardRoutes } from "./routes/dashboard";
-import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
-import { platformRoutes } from "./routes/platform";
-import { policiesStandaloneRoutes } from "./routes/policies-standalone";
-import { secretsRoutes } from "./routes/secrets";
-import { tenantConfigRoutes } from "./routes/tenant-config";
-import { tenantRoutes } from "./routes/tenants";
-import { userRoutes } from "./routes/user";
-import { vaultRoutes } from "./routes/vault";
-import { webhookRoutes } from "./routes/webhooks";
+import { initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
   type ApiResponse,
-  type AppVariables,
-  dashboardAuthMiddleware,
   nonceCleanupTimer,
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
-  tenantAuth,
 } from "./services/context";
 
-// ─── App setup ────────────────────────────────────────────────────────────────
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const PORT = parseInt(process.env.PORT || "3200", 10);
 const startTime = Date.now();
@@ -50,45 +37,13 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
 }
 validateJwtSecretEnv();
 
-const app = new Hono<{ Variables: AppVariables }>();
+// ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
+//
+// NOT used by the Workers entry — Workers should rely on the Redis-backed
+// sliding-window rate limiter (or a Workers-native KV-backed alternative).
+
 const requestLog = new Map<string, { count: number; resetAt: number }>();
 let isShuttingDown = false;
-
-// ─── Global error handler ─────────────────────────────────────────────────────
-
-app.onError((err, c) => {
-  const requestId = c.get("requestId") || "unknown";
-
-  if (err instanceof SyntaxError || err.message?.includes("JSON")) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
-  }
-
-  console.error(`[${requestId}] Unhandled API error:`, err);
-  return c.json<ApiResponse>({ ok: false, error: "Internal server error" }, 500);
-});
-
-// ─── 404 fallback ─────────────────────────────────────────────────────────────
-
-app.notFound((c) =>
-  c.json<ApiResponse>({ ok: false, error: `Not found: ${c.req.method} ${c.req.path}` }, 404),
-);
-
-// ─── Global middleware ────────────────────────────────────────────────────────
-
-app.use("*", tenantCors);
-app.use("*", logger());
-app.use("*", correlationId);
-
-app.use(
-  "*",
-  bodyLimit({
-    maxSize: 1024 * 1024,
-    onError: (c) =>
-      c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
-  }),
-);
-
-// ─── Rate limiting + shutdown guard ───────────────────────────────────────────
 
 app.use("*", async (c, next) => {
   if (c.req.path === "/health" || c.req.path === "/ready") return next();
@@ -124,57 +79,24 @@ const requestLogCleanupTimer = setInterval(() => {
   }
 }, RATE_LIMIT_WINDOW_MS);
 
-// ─── Auth middleware per route group ──────────────────────────────────────────
+// ─── /ready — deep readiness probe ───────────────────────────────────────────
+//
+// Only mounted on the Bun entry. Workers expose `/health` (in app.ts) and rely
+// on the Cloudflare control plane for instance health.
 
-app.use("/agents", (c, next) => tenantAuth(c, next));
-app.use("/agents/*", (c, next) => tenantAuth(c, next));
-app.use("/vault/*", (c, next) => tenantAuth(c, next));
-app.use("/secrets", (c, next) => tenantAuth(c, next));
-app.use("/secrets/*", (c, next) => tenantAuth(c, next));
-// Tenant routes apply auth per-handler via the `requireTenantId` middleware
-// inside tenants.ts / tenant-config.ts, so the public `GET /tenants/config`
-// discovery endpoint doesn't need a magic-string skip in a catch-all here.
-app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
-app.use("/webhooks", (c, next) => tenantAuth(c, next));
-app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
-app.use("/approvals", (c, next) => tenantAuth(c, next));
-app.use("/approvals/*", (c, next) => tenantAuth(c, next));
-app.use("/audit", (c, next) => tenantAuth(c, next));
-app.use("/audit/*", (c, next) => tenantAuth(c, next));
-app.use("/policies", (c, next) => tenantAuth(c, next));
-app.use("/policies/*", (c, next) => tenantAuth(c, next));
-
-// ─── Health & root ────────────────────────────────────────────────────────────
-
-app.get("/", (c) => c.json({ name: "steward", version: API_VERSION, status: "running" }));
-app.get("/health", (c) =>
-  c.json({
-    status: "ok",
-    version: API_VERSION,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-  }),
-);
-
-// /ready — deep readiness check for container orchestration (k8s, ECS, etc.)
-// Returns 200 only when: database is reachable, migrations have run, vault is initialized.
-// Use /health for liveness probes, /ready for readiness probes.
 app.get("/ready", async (c) => {
   const checks: Record<string, { ok: boolean; error?: string }> = {};
 
-  // 1. Migrations ran at startup
   checks.migrations = { ok: migrationsRan };
 
-  // 2. Database connectivity
   try {
     const db = getDb();
-    // A cheap query that exercises the connection without touching app tables
     await db.execute(sql`SELECT 1`);
     checks.database = { ok: true };
   } catch (err: unknown) {
     checks.database = { ok: false, error: err instanceof Error ? err.message : "unknown" };
   }
 
-  // 3. Vault initialized (master password present and usable)
   if (!process.env.STEWARD_MASTER_PASSWORD) {
     checks.vault = { ok: false, error: "STEWARD_MASTER_PASSWORD not set" };
   } else {
@@ -192,26 +114,6 @@ app.get("/ready", async (c) => {
     allOk ? 200 : 503,
   );
 });
-
-// ─── Route modules ────────────────────────────────────────────────────────────
-
-app.route("/auth", authRoutes);
-app.route("/platform", platformRoutes);
-app.route("/user", userRoutes);
-app.route("/agents", agentRoutes);
-app.route("/vault", vaultRoutes);
-app.route("/secrets", secretsRoutes);
-// tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler
-// is matched before tenantRoutes' `/:id` wildcard would catch "config" as an id.
-app.route("/tenants", tenantConfigRoutes);
-app.route("/tenants", tenantRoutes);
-app.route("/dashboard", dashboardRoutes);
-app.route("/webhooks", webhookRoutes);
-app.route("/approvals", approvalRoutes);
-app.route("/audit", auditRoutes);
-app.route("/policies", policiesStandaloneRoutes);
-app.route("/agents", erc8004Routes);
-app.route("/discovery", discoveryRoutes);
 
 // ─── Database migrations (blocking — must complete before serving traffic) ───
 
@@ -237,7 +139,6 @@ if (shouldUsePGLite()) {
 
 initRedis()
   .then((redisOk) => {
-    // Initialize auth stores after Redis availability is known.
     // usePostgres=true when migrations have run, so auth_kv_store table exists.
     const usePostgres = migrationsRan && !redisOk;
     return initAuthStores(usePostgres);
@@ -254,7 +155,7 @@ const BIND_HOST = process.env.STEWARD_BIND_HOST || "127.0.0.1";
 const serverOptions = {
   hostname: BIND_HOST,
   port: PORT,
-  fetch: (request) => app.fetch(request),
+  fetch: (request: Request) => app.fetch(request),
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };
 

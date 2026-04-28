@@ -73,7 +73,6 @@
         "postgres": "^3.4.7",
       },
       "devDependencies": {
-        "@stwd/vault": "workspace:*",
         "@types/node": "^22.0.0",
         "drizzle-kit": "^0.31.4",
       },
