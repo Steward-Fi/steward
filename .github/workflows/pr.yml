@@ -6,13 +6,15 @@ on:
 
 jobs:
   validate:
-    name: Validate PR
+    name: Lint + Typecheck + PR Metadata
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -28,12 +30,27 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Test (unit tests, no DB required)
-        run: |
-          bun test packages/sdk
-          bun test packages/policy-engine
+
+      - name: Check public package version bumps
         env:
-          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${BASE_REF}"
+          changed_files=$(git diff --name-only "origin/${BASE_REF}...HEAD")
+
+          status=0
+          for pkg in sdk react eliza-plugin; do
+            pkg_dir="packages/${pkg}"
+            if echo "$changed_files" | grep -qE "^${pkg_dir}/"; then
+              if ! echo "$changed_files" | grep -qE "^${pkg_dir}/(package.json|CHANGELOG.md|CHANGELOG|changelog.md)$"; then
+                echo "::error::${pkg_dir} changed without a package.json version bump or changelog update"
+                status=1
+              fi
+            fi
+          done
+
+          exit "$status"
 
       - name: Check PR title
         run: |
@@ -47,10 +64,88 @@ jobs:
             exit 1
           fi
 
+  unit:
+    name: Unit Tests (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - packages/sdk
+          - packages/policy-engine
+          - packages/vault
+          - packages/auth
+          - packages/proxy
+          - packages/webhooks
+          - packages/db
+          - packages/shared
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build workspace dependencies
+        run: |
+          PKG_NAME="@stwd/$(basename ${{ matrix.package }})"
+          bunx turbo run build --filter="${PKG_NAME}..."
+
+      - name: Test ${{ matrix.package }}
+        run: |
+          if [ "${{ matrix.package }}" = "packages/sdk" ]; then
+            mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
+            bun test "${sdk_tests[@]}"
+          else
+            bun test ${{ matrix.package }}
+          fi
+        env:
+          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+
+  unit-redis:
+    name: Unit Tests (packages/redis)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      REDIS_URL: "redis://localhost:6379"
+      STEWARD_REDIS_TESTS: "1"
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: [6379:6379]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Test packages/redis
+        run: bun test packages/redis
+        env:
+          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+
   integration:
     name: Integration Tests (Postgres)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      REDIS_URL: "redis://localhost:6379"
 
     services:
       postgres:
@@ -66,6 +161,10 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: [6379:6379]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
 
     steps:
       - name: Checkout
@@ -96,7 +195,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
-          STEWARD_SESSION_SECRET: "ci-session-secret"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run packages/api/src/index.ts > /tmp/steward-api-integration.log 2>&1 &
@@ -118,7 +217,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
-          STEWARD_SESSION_SECRET: "ci-session-secret"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
 
       - name: Stop API test server
@@ -135,6 +234,14 @@ jobs:
     name: E2E Smoke (Embedded)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      REDIS_URL: "redis://localhost:6379"
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: [6379:6379]
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
 
     steps:
       - name: Checkout
@@ -155,7 +262,7 @@ jobs:
           STEWARD_PGLITE_PATH: "/tmp/steward-fi-e2e-pglite"
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
-          STEWARD_SESSION_SECRET: "ci-session-secret"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run start:local > /tmp/steward-fi-e2e.log 2>&1 &
@@ -184,3 +291,64 @@ jobs:
           if [ -f /tmp/steward-fi-e2e.log ]; then
             cat /tmp/steward-fi-e2e.log
           fi
+
+
+  e2e-integration:
+    name: E2E Integration (Compose)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Start compose stack
+        env:
+          POSTGRES_DB: "steward_test"
+          POSTGRES_USER: "steward"
+          POSTGRES_PASSWORD: "steward_ci"
+          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          STEWARD_PLATFORM_KEYS: "ci-platform-key"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
+          PORT: "3200"
+          STEWARD_PROXY_PORT: "8080"
+        run: |
+          docker compose up -d --build postgres redis steward-api steward-proxy
+          for url in http://127.0.0.1:3200/health http://127.0.0.1:8080/health; do
+            for _ in $(seq 1 90); do
+              if curl -sf "$url" >/dev/null; then
+                break
+              fi
+              sleep 2
+            done
+            curl -sf "$url" >/dev/null
+          done
+
+      - name: Run e2e integration
+        env:
+          STEWARD_URL: "http://127.0.0.1:3200"
+          PROXY_URL: "http://127.0.0.1:8080"
+          PLATFORM_KEY: "ci-platform-key"
+        run: bun run test:e2e:integration
+
+      - name: Stop compose stack
+        if: always()
+        env:
+          STEWARD_MASTER_PASSWORD: "ci-test-secret"
+          STEWARD_PLATFORM_KEYS: "ci-platform-key"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          POSTGRES_DB: "steward_test"
+          POSTGRES_USER: "steward"
+          POSTGRES_PASSWORD: "steward_ci"
+        run: |
+          docker compose logs steward-api steward-proxy redis postgres || true
+          docker compose down -v

@@ -1,10 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { accounts, createPGLiteDb, encryptOAuthAccountPlaintextTokens, users } from "@stwd/db";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
-
-import { encryptOAuthAccountPlaintextTokens } from "../../../../scripts/encrypt-oauth-account-tokens";
-import { createPGLiteDb } from "../pglite";
-import { accounts, users } from "../schema-auth";
 
 const MASTER_PASSWORD = "oauth-migration-test-master";
 
@@ -34,7 +31,10 @@ describe("OAuth account token encryption migration", () => {
         })
         .returning();
 
-      const encryptedRows = await encryptOAuthAccountPlaintextTokens(db, MASTER_PASSWORD);
+      const encryptedRows = await encryptOAuthAccountPlaintextTokens(
+        db,
+        new KeyStore(MASTER_PASSWORD),
+      );
       expect(encryptedRows).toBe(1);
 
       const [updated] = await db.select().from(accounts).where(eq(accounts.id, account.id));
@@ -62,7 +62,10 @@ describe("OAuth account token encryption migration", () => {
         }),
       ).toBe("legacy-refresh-token");
 
-      const encryptedAgain = await encryptOAuthAccountPlaintextTokens(db, MASTER_PASSWORD);
+      const encryptedAgain = await encryptOAuthAccountPlaintextTokens(
+        db,
+        new KeyStore(MASTER_PASSWORD),
+      );
       expect(encryptedAgain).toBe(0);
     } finally {
       await client.close();

@@ -1822,29 +1822,6 @@ auth.post("/email/verify", async (c) => {
   return c.json(buildAuthResponse(authResult.token, authResult.refreshToken, authResult.user));
 });
 
-// ── OAuth providers list ─────────────────────────────────────────────────────
-
-/**
- * GET /providers
- * Returns which auth methods are enabled based on environment configuration.
- * Used by the React widget to decide which login buttons to show.
- *
- * Response: { passkey: true, email: bool, siwe: true, siws: true, google: bool, discord: bool, github: bool, oauth: string[] }
- */
-auth.get("/providers", (c) => {
-  const oauthProviders = getEnabledProviders();
-  return c.json({
-    passkey: true,
-    email: Boolean(process.env.RESEND_API_KEY),
-    siwe: true,
-    siws: true,
-    google: oauthProviders.includes("google"),
-    discord: oauthProviders.includes("discord"),
-    github: oauthProviders.includes("github"),
-    oauth: oauthProviders,
-  });
-});
-
 // ── OAuth authorization-code flow ─────────────────────────────────────────────
 
 /**

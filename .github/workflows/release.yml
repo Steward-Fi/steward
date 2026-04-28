@@ -42,23 +42,19 @@ jobs:
       - name: Build all packages
         run: bunx turbo run build
 
-      # Publish each public package to npm
-      # continue-on-error allows already-published versions to not block the pipeline
+      # Publish each public package to npm. Publish failures should fail the release.
       - name: Publish @stwd/sdk
         run: cd packages/sdk && npm publish --access public
-        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @stwd/react
         run: cd packages/react && npm publish --access public
-        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @stwd/eliza-plugin
         run: cd packages/eliza-plugin && npm publish --access public
-        continue-on-error: true
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
