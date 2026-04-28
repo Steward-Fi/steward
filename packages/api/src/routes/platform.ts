@@ -11,7 +11,7 @@
  *   { ok: true, data: T }  |  { ok: false, error: string }
  */
 
-import { generateApiKey, platformAuthMiddleware } from "@stwd/auth";
+import { generateApiKey, platformAuthMiddleware, revocationStore } from "@stwd/auth";
 import {
   agents,
   getDb,
@@ -864,6 +864,38 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
     console.error(`[platform] Failed to generate agent token for ${agentId}:`, e);
     return c.json<ApiResponse>({ ok: false, error: "Failed to generate token" }, 500);
   }
+});
+
+/**
+ * POST /agents/:id/revoke-tokens
+ * Revokes all outstanding agent tokens issued before the revocation line.
+ *
+ * Implementation note: Redis stores both a marker key
+ * `revoked-agent:<agentId>:<issuedBefore>` and the latest cutoff pointer. When
+ * REDIS_URL is absent this uses the auth package's in-memory fallback, suitable
+ * only for single-instance/embedded mode.
+ */
+platform.post("/agents/:id/revoke-tokens", async (c) => {
+  const db = getDb();
+  const agentId = c.req.param("id");
+
+  if (!isValidAgentId(agentId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid agent id format" }, 400);
+  }
+
+  const [agent] = await db
+    .select({ id: agents.id, tenantId: agents.tenantId })
+    .from(agents)
+    .where(eq(agents.id, agentId));
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const issuedBefore = await revocationStore.revokeAgentTokens(agentId);
+  return c.json<ApiResponse<{ agentId: string; tenantId: string; issuedBefore: number }>>({
+    ok: true,
+    data: { agentId, tenantId: agent.tenantId, issuedBefore },
+  });
 });
 
 /**

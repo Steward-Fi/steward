@@ -6,7 +6,13 @@
  * re-instantiate them (which would lead to duplicate connections / inconsistent state).
  */
 
-import { signAccessToken, signAgentToken, validateApiKey, verifyToken } from "@stwd/auth";
+import {
+  assertTokenNotRevoked,
+  signAccessToken,
+  signAgentToken,
+  validateApiKey,
+  verifyToken,
+} from "@stwd/auth";
 import { getDb, policies, tenants, toPolicyRule, transactions } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
@@ -33,7 +39,11 @@ export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
-export const JWT_EXPIRY = "24h";
+/**
+ * User access token TTL. Reduced from 24h → 15m to limit blast radius of
+ * stolen access tokens. Refresh tokens (30d) handle long-lived sessions.
+ */
+export const JWT_EXPIRY = "15m";
 export const AGENT_SCOPE = "agent";
 export const PROXY_SCOPE = "api:proxy";
 
@@ -86,7 +96,7 @@ export async function createAgentToken(
 
 export async function verifySessionToken(token: string) {
   try {
-    return (await verifyToken(token)) as {
+    const payload = (await verifyToken(token)) as {
       address: string;
       tenantId: string;
       agentId?: string;
@@ -95,6 +105,8 @@ export async function verifySessionToken(token: string) {
       userId?: string;
       email?: string;
     };
+    await assertTokenNotRevoked(payload);
+    return payload;
   } catch {
     return null;
   }
