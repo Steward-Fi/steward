@@ -13,9 +13,11 @@ import {
   index,
   integer,
   jsonb,
+  numeric,
   pgEnum,
   pgTable,
   primaryKey,
+  serial,
   text,
   timestamp,
   uniqueIndex,
@@ -261,6 +263,98 @@ export const approvalQueue = pgTable(
   }),
 );
 
+// ─── Standalone policy templates ─────────────────────────────────────────────
+
+export const policyTemplates = pgTable(
+  "policy_templates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 255 }).notNull(),
+    description: text("description"),
+    rules: jsonb("rules").$type<Record<string, unknown>[]>().notNull().default([]),
+    isDefault: boolean("is_default").notNull().default(false),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: index("policy_templates_tenant_idx").on(table.tenantId),
+  }),
+);
+
+// ─── ERC-8004 registration and discovery tables ──────────────────────────────
+
+export const agentRegistrations = pgTable(
+  "agent_registrations",
+  {
+    id: serial("id").primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    chainId: integer("chain_id").notNull(),
+    tokenId: varchar("token_id", { length: 256 }),
+    txHash: varchar("tx_hash", { length: 128 }),
+    registryAddress: varchar("registry_address", { length: 64 }).notNull(),
+    agentCardUri: text("agent_card_uri"),
+    agentCardJson: jsonb("agent_card_json").$type<Record<string, unknown>>(),
+    status: varchar("status", { length: 32 }).notNull().default("pending"),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantAgentChainUnique: uniqueIndex("agent_registrations_tenant_agent_chain_idx").on(
+      table.tenantId,
+      table.agentId,
+      table.chainId,
+    ),
+    tenantIdx: index("agent_registrations_tenant_idx").on(table.tenantId),
+    agentIdx: index("agent_registrations_agent_idx").on(table.agentId),
+  }),
+);
+
+export const reputationCache = pgTable(
+  "reputation_cache",
+  {
+    id: serial("id").primaryKey(),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    chainId: integer("chain_id").notNull(),
+    tokenId: varchar("token_id", { length: 256 }).notNull(),
+    scoreOnchain: numeric("score_onchain", { precision: 5, scale: 2 }).notNull().default("0"),
+    scoreInternal: numeric("score_internal", { precision: 5, scale: 2 }).notNull().default("0"),
+    scoreCombined: numeric("score_combined", { precision: 5, scale: 2 }).notNull().default("0"),
+    feedbackCount: integer("feedback_count").notNull().default(0),
+    lastUpdated: timestamp("last_updated", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    agentChainUnique: uniqueIndex("reputation_cache_agent_chain_idx").on(
+      table.agentId,
+      table.chainId,
+    ),
+    agentIdx: index("reputation_cache_agent_idx").on(table.agentId),
+  }),
+);
+
+export const registryIndex = pgTable(
+  "registry_index",
+  {
+    id: serial("id").primaryKey(),
+    chainId: integer("chain_id").notNull(),
+    name: varchar("name", { length: 64 }).notNull(),
+    rpcUrl: text("rpc_url").notNull(),
+    registryAddress: varchar("registry_address", { length: 64 }).notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    chainUnique: uniqueIndex("registry_index_chain_id_idx").on(table.chainId),
+  }),
+);
+
 // ─── Webhook configuration table ──────────────────────────────────────────────
 
 export const webhookConfigs = pgTable(
@@ -342,6 +436,31 @@ export const webhookDeliveries = pgTable(
   }),
 );
 
+export const policyTemplateRelations = relations(policyTemplates, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [policyTemplates.tenantId],
+    references: [tenants.id],
+  }),
+}));
+
+export const agentRegistrationRelations = relations(agentRegistrations, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [agentRegistrations.tenantId],
+    references: [tenants.id],
+  }),
+  agent: one(agents, {
+    fields: [agentRegistrations.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const reputationCacheRelations = relations(reputationCache, ({ one }) => ({
+  agent: one(agents, {
+    fields: [reputationCache.agentId],
+    references: [agents.id],
+  }),
+}));
+
 export const webhookConfigRelations = relations(webhookConfigs, ({ one }) => ({
   tenant: one(tenants, {
     fields: [webhookConfigs.tenantId],
@@ -362,6 +481,8 @@ export const tenantRelations = relations(tenants, ({ many, one }) => ({
     fields: [tenants.id],
     references: [tenantConfigs.tenantId],
   }),
+  policyTemplates: many(policyTemplates),
+  agentRegistrations: many(agentRegistrations),
   webhookConfigs: many(webhookConfigs),
   autoApprovalRule: one(autoApprovalRules, {
     fields: [tenants.id],
@@ -390,6 +511,8 @@ export const agentRelations = relations(agents, ({ one, many }) => ({
   policies: many(policies),
   transactions: many(transactions),
   approvalQueueEntries: many(approvalQueue),
+  registrations: many(agentRegistrations),
+  reputationEntries: many(reputationCache),
 }));
 
 export const encryptedKeyRelations = relations(encryptedKeys, ({ one }) => ({
@@ -460,6 +583,14 @@ export type AgentWallet = typeof agentWallets.$inferSelect;
 export type NewAgentWallet = typeof agentWallets.$inferInsert;
 export type EncryptedChainKey = typeof encryptedChainKeys.$inferSelect;
 export type NewEncryptedChainKey = typeof encryptedChainKeys.$inferInsert;
+export type PolicyTemplateRow = typeof policyTemplates.$inferSelect;
+export type NewPolicyTemplateRow = typeof policyTemplates.$inferInsert;
+export type AgentRegistration = typeof agentRegistrations.$inferSelect;
+export type NewAgentRegistration = typeof agentRegistrations.$inferInsert;
+export type ReputationCache = typeof reputationCache.$inferSelect;
+export type NewReputationCache = typeof reputationCache.$inferInsert;
+export type RegistryIndex = typeof registryIndex.$inferSelect;
+export type NewRegistryIndex = typeof registryIndex.$inferInsert;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
 export type NewWebhookDelivery = typeof webhookDeliveries.$inferInsert;
 export type WebhookConfig = typeof webhookConfigs.$inferSelect;
