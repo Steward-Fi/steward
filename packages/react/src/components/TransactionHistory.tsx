@@ -24,13 +24,17 @@ export function TransactionHistory({
 }: TransactionHistoryProps) {
   const { features } = useStewardContext();
 
-  if (!features.showTransactionHistory) return null;
-
+  // NOTE: All hooks must be called unconditionally on every render (Rules of
+  // Hooks). The feature-flag early return happens *after* hook calls below so
+  // that toggling `features.showTransactionHistory` at runtime never changes
+  // the hook sequence.
   const { transactions, isLoading, error, page, totalPages, nextPage, prevPage } = useTransactions({
     pageSize,
     status: statusFilter,
     chainId: chainFilter?.[0],
   });
+
+  if (!features.showTransactionHistory) return null;
 
   if (isLoading) {
     return (
