@@ -449,7 +449,6 @@ export function decryptOAuthProviderToken(encrypted: {
   }
 }
 
-
 function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: string }): EmailAuth {
   const resendKey = process.env.RESEND_API_KEY;
   const provider = resendKey
