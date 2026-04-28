@@ -17,6 +17,13 @@ export {
 export type { DatabaseDriver } from "./client";
 export { runMigrations } from "./migrate";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
+// PGLite re-exports below pull in node:fs / node:os / node:path at module
+// init time. They are kept here for backward compatibility with the
+// embedded/desktop entry point — but the worker entry must NEVER pull
+// `pglite.ts` into its bundle. Wrangler/esbuild tree-shake unused re-exports
+// when they are pure ESM, which these are. If a future change adds top-level
+// side effects to pglite.ts, move these imports to the dedicated
+// `@stwd/db/pglite` subpath instead so the worker bundle stays clean.
 export type { PGLiteDb } from "./pglite";
 export {
   closePGLiteDb,
