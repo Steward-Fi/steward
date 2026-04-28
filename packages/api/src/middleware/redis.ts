@@ -11,16 +11,16 @@ import {
   checkSpendLimit,
   disconnectRedis,
   getRedis,
+  type IoredisLike,
   type RateLimitResult,
   recordSpend,
   type SpendPeriod,
 } from "@stwd/redis";
-import type Redis from "ioredis";
 
 // ─── Redis availability flag ─────────────────────────────────────────────────
 
 let redisAvailable = false;
-let redisClient: Redis | null = null;
+let redisClient: IoredisLike | null = null;
 
 /**
  * Try to connect to Redis on startup. If it fails, we degrade gracefully —
@@ -55,10 +55,10 @@ export function isRedisAvailable(): boolean {
 }
 
 /**
- * Return the active ioredis client, or null if Redis is not available.
- * Call isRedisAvailable() first to check.
+ * Return the active Redis client (real ioredis or upstash adapter), or null
+ * if Redis is not available. Call isRedisAvailable() first to check.
  */
-export function getRedisClient(): Redis | null {
+export function getRedisClient(): IoredisLike | null {
   return redisAvailable ? redisClient : null;
 }
 
