@@ -9,17 +9,20 @@
  * tokens are dropped. This script encrypts any renamed plaintext values that do
  * not yet have AES-GCM metadata. It is idempotent: rows with iv/tag/salt are
  * skipped.
- *
- * Implementation lives in `@stwd/db/src/oauth-token-encryption.ts`; this file
- * is just the operator entrypoint.
  */
 
 import { createDb, encryptOAuthAccountPlaintextTokens } from "@stwd/db";
+import { KeyStore } from "@stwd/vault";
 
 const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
+if (!masterPassword) {
+  throw new Error("STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens");
+}
+
 const { client, db } = createDb();
+const keyStore = new KeyStore(masterPassword);
 try {
-  const count = await encryptOAuthAccountPlaintextTokens(db, masterPassword ?? "");
+  const count = await encryptOAuthAccountPlaintextTokens(db, keyStore);
   console.log(`[oauth-token-encryption] encrypted ${count} account row(s)`);
 } finally {
   await client.end();

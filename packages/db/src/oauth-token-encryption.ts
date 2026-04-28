@@ -9,9 +9,21 @@
  * - `packages/db/src/__tests__/oauth-token-migration.test.ts` (regression test)
  */
 
-import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { accounts } from "./schema-auth";
+
+/**
+ * Minimal interface required from a KeyStore-compatible encrypter.
+ * Decoupled from @stwd/vault to avoid a circular package dependency.
+ */
+export interface OAuthTokenEncrypter {
+  encrypt(plaintext: string): {
+    ciphertext: string;
+    iv: string;
+    tag: string;
+    salt: string;
+  };
+}
 
 type DbLike = {
   select: (...args: unknown[]) => {
@@ -26,13 +38,9 @@ type DbLike = {
 
 export async function encryptOAuthAccountPlaintextTokens(
   db: DbLike,
-  masterPassword: string,
+  encrypter: OAuthTokenEncrypter,
 ): Promise<number> {
-  if (!masterPassword) {
-    throw new Error("STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens");
-  }
-
-  const keyStore = new KeyStore(masterPassword);
+  const keyStore = encrypter;
   // biome-ignore lint/suspicious/noExplicitAny: drizzle's typed select chain is hard to express here
   const rows = (await (db as any).select().from(accounts)) as (typeof accounts.$inferSelect)[];
   let encryptedCount = 0;
