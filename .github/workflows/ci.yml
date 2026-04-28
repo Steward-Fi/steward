@@ -159,7 +159,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
-          STEWARD_SESSION_SECRET: "ci-session-secret"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run packages/api/src/index.ts > /tmp/steward-api-integration.log 2>&1 &
@@ -181,7 +181,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
-          STEWARD_SESSION_SECRET: "ci-session-secret"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
 
       - name: Stop API test server
@@ -226,7 +226,7 @@ jobs:
           STEWARD_PGLITE_PATH: "/tmp/steward-fi-e2e-pglite"
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
-          STEWARD_SESSION_SECRET: "ci-session-secret"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run start:local > /tmp/steward-fi-e2e.log 2>&1 &
@@ -281,7 +281,7 @@ jobs:
           POSTGRES_PASSWORD: "steward_ci"
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
-          STEWARD_SESSION_SECRET: "ci-session-secret"
+          STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
           PORT: "3200"
           STEWARD_PROXY_PORT: "8080"
