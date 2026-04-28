@@ -30,11 +30,10 @@ STEWARD_MASTER_PASSWORD=$(openssl rand -hex 32)
 POSTGRES_PASSWORD=$(openssl rand -hex 24)
 STEWARD_PLATFORM_KEYS=$(openssl rand -hex 32)
 
-# Current code is in transition between JWT env names.
-# API/user routes read STEWARD_SESSION_SECRET; the proxy still reads STEWARD_JWT_SECRET.
-# Until that is unified, set both to the same random value.
-STEWARD_SESSION_SECRET=$(openssl rand -hex 32)
-STEWARD_JWT_SECRET=$STEWARD_SESSION_SECRET
+# Canonical JWT signing/verification secret. Used by API, proxy, auth, and
+# agent-scoped tokens. Must be ≥32 chars in production. STEWARD_SESSION_SECRET
+# remains a deprecated compatibility fallback for legacy deployments.
+STEWARD_JWT_SECRET=$(openssl rand -hex 32)
 ```
 
 Then start the stack:
@@ -127,7 +126,7 @@ Configure the Railway service with the normal production environment plus Railwa
 - `REDIS_URL` from Railway Redis
 - `STEWARD_MASTER_PASSWORD`
 - `STEWARD_PLATFORM_KEYS`
-- `STEWARD_SESSION_SECRET` and, until JWT env naming is unified, `STEWARD_JWT_SECRET`
+- `STEWARD_JWT_SECRET` (canonical; `STEWARD_SESSION_SECRET` accepted as deprecated fallback)
 - public URL related settings such as `APP_URL`, `PASSKEY_RP_ID`, and `PASSKEY_ORIGIN`
 
 Run the proxy as a separate Railway service/process using the same image and command `bun run packages/proxy/src/index.ts`, with `STEWARD_PROXY_PORT` set to the port Railway expects for that service.
@@ -146,8 +145,8 @@ A hosted instance at `api.steward.fi` is run by the project for trusted testers.
 | `STEWARD_PGLITE_MEMORY` | Use in-memory PGLite | `false` | Set exactly `true`; data is discarded on restart. |
 | `STEWARD_MASTER_PASSWORD` | Root secret for vault encryption and JWT fallback | none | Required by normal API startup; production throws without it. Use a long random value and keep it stable. |
 | `STEWARD_KDF_SALT` | Deployment salt for scrypt master-key derivation | legacy built-in salt | Hex string; at least 32 hex chars recommended. Production warns when absent. |
-| `STEWARD_SESSION_SECRET` | JWT signing secret for API/user/agent tokens in the current API code | falls back to `STEWARD_MASTER_PASSWORD`, then insecure dev secret outside production | Required directly or via master password in production. Set separately from master password. |
-| `STEWARD_JWT_SECRET` | JWT verification secret still read by the proxy middleware | falls back to `STEWARD_MASTER_PASSWORD`, then insecure dev secret outside production | Required directly or via master password in production. TODO: remove or rename after JWT env unification; until then set equal to `STEWARD_SESSION_SECRET`. |
+| `STEWARD_JWT_SECRET` | Canonical JWT signing/verification secret used by API, proxy, auth routes, user sessions, agent-scoped tokens | falls back to `STEWARD_SESSION_SECRET` (deprecated) then `STEWARD_MASTER_PASSWORD` in embedded/dev mode | Required in production; must be ≥32 characters. Set separately from master password. |
+| `STEWARD_SESSION_SECRET` | Deprecated. Backward-compatibility fallback for `STEWARD_JWT_SECRET` | none | Deployments should rename to `STEWARD_JWT_SECRET`. Will be removed in a future release. |
 | `AGENT_TOKEN_EXPIRY` | Expiry for agent-scoped JWTs | API context: `30d`; `.env.example`/Compose set `24h` | Must be accepted by `jose` `setExpirationTime`, e.g. `24h`, `7d`. |
 | `STEWARD_PLATFORM_KEYS` | Comma-separated platform operator keys for `/platform/*` | none | Required to use platform routes. Each request sends one key in `X-Steward-Platform-Key`. |
 | `STEWARD_DEFAULT_TENANT_KEY` | API key hash/plain value field for the default tenant bootstrap path | empty string | Only useful for single/default tenant setups. Platform-created tenants return generated API keys. |
