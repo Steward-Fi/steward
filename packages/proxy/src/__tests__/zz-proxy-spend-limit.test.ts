@@ -127,15 +127,10 @@ describe("proxy spend-limit enforcement", () => {
     };
     fetchCalls = 0;
     audits.length = 0;
-    globalThis.fetch = (async (
-      url: string | URL | Request,
-      init?: RequestInit,
-    ) => {
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       fetchCalls++;
       expect(String(url)).toBe("https://example.com/v1/echo");
-      expect(new Headers(init?.headers).get("x-api-key")).toBe(
-        "Bearer test-secret",
-      );
+      expect(new Headers(init?.headers).get("x-api-key")).toBe("Bearer test-secret");
       return new Response(JSON.stringify({ ok: true }), {
         status: 200,
         headers: { "content-type": "text/plain" },
@@ -144,8 +139,7 @@ describe("proxy spend-limit enforcement", () => {
   });
 
   test("agent under spend limit proceeds to upstream", async () => {
-    const { handleProxy, __setCheckProxySpendLimitForTests } =
-      await import("../handlers/proxy");
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await import("../handlers/proxy");
     __setCheckProxySpendLimitForTests(async () => spendResult);
 
     const res = await handleProxy(makeContext());
@@ -162,11 +156,9 @@ describe("proxy spend-limit enforcement", () => {
       limit: 0.1,
       spent: 0.12,
       remaining: 0,
-      reason:
-        "Daily proxy spend limit exceeded for example.com: spent $0.1200 of $0.1000",
+      reason: "Daily proxy spend limit exceeded for example.com: spent $0.1200 of $0.1000",
     };
-    const { handleProxy, __setCheckProxySpendLimitForTests } =
-      await import("../handlers/proxy");
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await import("../handlers/proxy");
     __setCheckProxySpendLimitForTests(async () => spendResult);
 
     const res = await handleProxy(makeContext());
@@ -176,8 +168,7 @@ describe("proxy spend-limit enforcement", () => {
     expect(fetchCalls).toBe(0);
     expect(body).toEqual({
       ok: false,
-      error:
-        "Daily proxy spend limit exceeded for example.com: spent $0.1200 of $0.1000",
+      error: "Daily proxy spend limit exceeded for example.com: spent $0.1200 of $0.1000",
       limit: {
         type: "spend",
         period: "day",
@@ -191,14 +182,12 @@ describe("proxy spend-limit enforcement", () => {
       tenantId: "tenant-1",
       targetHost: "example.com",
       statusCode: 402,
-      reason:
-        "Daily proxy spend limit exceeded for example.com: spent $0.1200 of $0.1000",
+      reason: "Daily proxy spend limit exceeded for example.com: spent $0.1200 of $0.1000",
     });
   });
 
   test("Redis down with REDIS_REQUIRED=false allows when spend check is permissive", async () => {
-    const { handleProxy, __setCheckProxySpendLimitForTests } =
-      await import("../handlers/proxy");
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await import("../handlers/proxy");
     __setCheckProxySpendLimitForTests(async () => spendResult);
 
     const res = await handleProxy(makeContext());
@@ -217,8 +206,7 @@ describe("proxy spend-limit enforcement", () => {
       remaining: 0,
       reason: "Redis unavailable; spend-limit enforcement is required",
     };
-    const { handleProxy, __setCheckProxySpendLimitForTests } =
-      await import("../handlers/proxy");
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await import("../handlers/proxy");
     __setCheckProxySpendLimitForTests(async () => spendResult);
 
     const res = await handleProxy(makeContext());

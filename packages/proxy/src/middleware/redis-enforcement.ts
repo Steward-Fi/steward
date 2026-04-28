@@ -5,6 +5,7 @@
  * API costs after receiving responses (using the cost estimator).
  */
 
+import { getDb, policies } from "@stwd/db";
 import {
   checkRateLimit,
   checkSpendLimit,
@@ -16,7 +17,6 @@ import {
   recordSpend,
   type SpendPeriod,
 } from "@stwd/redis";
-import { getDb, policies } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
 
 // ─── State ───────────────────────────────────────────────────────────────────
@@ -38,9 +38,7 @@ export async function initProxyRedis(): Promise<boolean> {
     const client = getRedis();
     await client.ping();
     redisAvailable = true;
-    console.log(
-      "[proxy:redis] Redis connected — rate limiting and spend tracking enabled",
-    );
+    console.log("[proxy:redis] Redis connected — rate limiting and spend tracking enabled");
     return true;
   } catch (err) {
     redisAvailable = false;
@@ -91,10 +89,7 @@ export async function checkProxyRateLimit(
     const key = `ratelimit:proxy:${agentId}:${host}:${windowMs}`;
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
-    console.error(
-      "[proxy:redis] Rate limit check failed:",
-      (err as Error).message,
-    );
+    console.error("[proxy:redis] Rate limit check failed:", (err as Error).message);
     return PERMISSIVE;
   }
 }
@@ -128,10 +123,7 @@ export async function trackProxySpend(
     }
     return cost;
   } catch (err) {
-    console.error(
-      "[proxy:redis] Spend tracking failed:",
-      (err as Error).message,
-    );
+    console.error("[proxy:redis] Spend tracking failed:", (err as Error).message);
     return 0;
   }
 }
@@ -165,9 +157,7 @@ function toPositiveNumber(value: unknown): number | undefined {
   return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
-function extractProxySpendLimits(
-  config: Record<string, unknown>,
-): ProxySpendLimits {
+function extractProxySpendLimits(config: Record<string, unknown>): ProxySpendLimits {
   return {
     day: toPositiveNumber(
       config.dailyLimitUsd ??
@@ -186,9 +176,7 @@ function extractProxySpendLimits(
   };
 }
 
-async function getConfiguredProxySpendLimits(
-  agentId: string,
-): Promise<ProxySpendLimits | null> {
+async function getConfiguredProxySpendLimits(agentId: string): Promise<ProxySpendLimits | null> {
   const db = getDb();
   const rows = await db
     .select({ config: policies.config })
@@ -203,13 +191,9 @@ async function getConfiguredProxySpendLimits(
 
   const merged: ProxySpendLimits = {};
   for (const row of rows) {
-    const limits = extractProxySpendLimits(
-      row.config as Record<string, unknown>,
-    );
-    if (limits.day !== undefined)
-      merged.day = Math.min(merged.day ?? Infinity, limits.day);
-    if (limits.month !== undefined)
-      merged.month = Math.min(merged.month ?? Infinity, limits.month);
+    const limits = extractProxySpendLimits(row.config as Record<string, unknown>);
+    if (limits.day !== undefined) merged.day = Math.min(merged.day ?? Infinity, limits.day);
+    if (limits.month !== undefined) merged.month = Math.min(merged.month ?? Infinity, limits.month);
   }
 
   return merged.day !== undefined || merged.month !== undefined ? merged : null;
@@ -300,10 +284,7 @@ export async function checkProxySpendLimit(
       }
     );
   } catch (err) {
-    console.error(
-      "[proxy:redis] Spend limit check failed:",
-      (err as Error).message,
-    );
+    console.error("[proxy:redis] Spend limit check failed:", (err as Error).message);
     if (isRedisRequired()) {
       return {
         allowed: false,
