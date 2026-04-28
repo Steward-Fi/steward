@@ -109,7 +109,7 @@ async function updateTemplate(
   body: Partial<CreateTemplateBody>,
 ): Promise<PolicyTemplate | null> {
   // Build parameterized update using drizzle sql template literals.
-  // Each field is set conditionally via CASE/COALESCE to avoid sql.raw() injection.
+  // Each field is set conditionally via CASE/COALESCE to avoid raw SQL injection.
   const hasName = body.name !== undefined;
   const hasDesc = body.description !== undefined;
   const hasRules = body.rules !== undefined;
