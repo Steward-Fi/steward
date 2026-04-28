@@ -233,19 +233,23 @@ async function testProviderDiscovery() {
       return;
     }
 
+    // /auth/providers returns ApiResponse<{...}> after #27. Some older builds
+    // returned a flat object; tolerate both for forwards compatibility.
+    const providers = data?.ok && data?.data ? data.data : data;
+
     // Validate shape: must have passkey, email, siwe as booleans
     const requiredBools = ["passkey", "email", "siwe", "google", "discord"];
-    const missingKeys = requiredBools.filter((k) => typeof data[k] !== "boolean");
+    const missingKeys = requiredBools.filter((k) => typeof providers[k] !== "boolean");
     if (missingKeys.length > 0) {
       fail("Provider discovery", `missing boolean keys: ${missingKeys.join(", ")}`);
       return;
     }
-    if (!Array.isArray(data.oauth)) {
-      fail("Provider discovery", `oauth should be string[], got ${typeof data.oauth}`);
+    if (!Array.isArray(providers.oauth)) {
+      fail("Provider discovery", `oauth should be string[], got ${typeof providers.oauth}`);
       return;
     }
 
-    const enabledStr = requiredBools.map((k) => `${k}=${data[k]}`).join(", ");
+    const enabledStr = requiredBools.map((k) => `${k}=${providers[k]}`).join(", ");
     pass("Provider discovery", enabledStr);
   } catch (e: any) {
     fail("Provider discovery", e.message);
@@ -448,7 +452,9 @@ async function testCrossTenant() {
       headers: { "X-Steward-Tenant": TEST_TENANT_ID },
     });
 
-    if (providersRes.status === 200 && typeof providersRes.data?.passkey === "boolean") {
+    const providersData =
+      providersRes.data?.ok && providersRes.data?.data ? providersRes.data.data : providersRes.data;
+    if (providersRes.status === 200 && typeof providersData?.passkey === "boolean") {
       pass(testName, `tenant=${TEST_TENANT_ID}, providers ok`);
     } else {
       fail(testName, `providers with tenant header: status=${providersRes.status}`);

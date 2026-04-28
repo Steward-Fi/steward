@@ -51,6 +51,7 @@ mock.module("@stwd/db", () => {
     and: (...args: unknown[]) => args,
     desc: (arg: unknown) => arg,
     eq: (...args: unknown[]) => args,
+    getSql: () => null,
     secretRoutes,
     secrets,
     policies,
