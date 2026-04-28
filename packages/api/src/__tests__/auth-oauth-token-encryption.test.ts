@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { accounts, closeDb, createPGLiteDb, setPGLiteOverride, tenants } from "@stwd/db";
+import { accounts, closeDb, tenants } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import {
   authRoutes,
@@ -9,6 +10,7 @@ import {
 } from "../routes/auth";
 
 const MASTER_PASSWORD = "oauth-token-test-master";
+const originalFetch = globalThis.fetch;
 
 async function setupDb() {
   process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -31,6 +33,7 @@ describe("OAuth provider token encryption", () => {
 
   afterEach(async () => {
     mock.restore();
+    globalThis.fetch = originalFetch;
     clearOAuthTokenKeyStoreForTests();
     await closeDb().catch(() => {});
     delete process.env.STEWARD_PGLITE_MEMORY;

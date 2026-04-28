@@ -26,10 +26,25 @@ let redisClient: IoredisLike | null = null;
  * Try to connect to Redis on startup. If it fails, we degrade gracefully —
  * rate-limit and spend-tracking are skipped (policy engine still works).
  */
-export async function initRedis(): Promise<boolean> {
-  const url = process.env.REDIS_URL;
-  if (!url) {
-    console.log("[steward:redis] REDIS_URL not set — Redis enforcement disabled");
+export async function initRedis(env?: Record<string, unknown>): Promise<boolean> {
+  if (redisAvailable && redisClient) return true;
+
+  if (env) {
+    for (const [key, value] of Object.entries(env)) {
+      if (typeof value === "string") process.env[key] = value;
+    }
+  }
+
+  const driver = process.env.REDIS_DRIVER?.trim().toLowerCase() || "ioredis";
+  const hasIoredisUrl = Boolean(process.env.REDIS_URL);
+  const hasUpstashConfig = Boolean(
+    (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
+      (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN),
+  );
+
+  if (driver === "upstash" ? !hasUpstashConfig : !hasIoredisUrl) {
+    const expected = driver === "upstash" ? "KV_REST_API_URL/KV_REST_API_TOKEN" : "REDIS_URL";
+    console.log(`[steward:redis] ${expected} not set — Redis enforcement disabled`);
     return false;
   }
 

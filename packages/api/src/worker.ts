@@ -27,7 +27,7 @@
  *   - PASSKEY_RP_ID, PASSKEY_ORIGIN, PASSKEY_RP_NAME
  */
 
-import { app } from "./app";
+import { initRedis } from "./middleware/redis";
 
 export interface Env {
   DATABASE_URL: string;
@@ -66,12 +66,13 @@ export interface Env {
  * different deployments (and therefore different binding sets).
  */
 function hydrateProcessEnv(env: Env): void {
-  // biome-ignore lint/suspicious/noExplicitAny: process.env type from nodejs_compat
   const target = (globalThis as any).process?.env;
   if (!target) return;
+
+  target.STEWARD_RUNTIME = "workers";
   for (const key of Object.keys(env)) {
     const value = env[key];
-    if (typeof value === "string" && target[key] === undefined) {
+    if (typeof value === "string") {
       target[key] = value;
     }
   }
@@ -79,7 +80,11 @@ function hydrateProcessEnv(env: Env): void {
 
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
+    // Workers bindings are only available inside fetch(). Hydrate process.env
+    // before importing app modules that read required env at module init.
     hydrateProcessEnv(env);
+    await initRedis(env);
+    const { app } = await import("./app");
     return app.fetch(request, env, ctx as never);
   },
 };

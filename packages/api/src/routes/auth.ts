@@ -49,7 +49,6 @@ import {
   ChallengeStore,
   EmailAuth,
   generateApiKey,
-  getEnabledProviders,
   getProviderConfig,
   hashSha256Hex,
   isBuiltInProvider,

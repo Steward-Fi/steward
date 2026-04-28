@@ -41,7 +41,6 @@ export async function encryptOAuthAccountPlaintextTokens(
   encrypter: OAuthTokenEncrypter,
 ): Promise<number> {
   const keyStore = encrypter;
-  // biome-ignore lint/suspicious/noExplicitAny: drizzle's typed select chain is hard to express here
   const rows = (await (db as any).select().from(accounts)) as (typeof accounts.$inferSelect)[];
   let encryptedCount = 0;
 

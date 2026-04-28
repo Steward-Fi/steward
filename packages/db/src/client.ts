@@ -83,7 +83,6 @@ export function createDb(connectionString = getDatabaseUrl()) {
 export function createNeonHttpDb(connectionString = getDatabaseUrl()) {
   // Lazy-require so Bun/Node entry points don't pull @neondatabase/serverless
   // into their bundle when the postgres-js driver is in use.
-  // biome-ignore lint/suspicious/noExplicitAny: dynamic import shape
   const { neon } = require("@neondatabase/serverless") as { neon: (url: string) => any };
   const client = neon(connectionString);
   const db = drizzleNeon(client, { schema: FULL_SCHEMA });
@@ -133,7 +132,11 @@ export function setPGLiteOverride(
 // ─── Global singleton ─────────────────────────────────────────────────────────
 
 type GlobalDbHandle =
-  | { driver: "postgres-js"; client: ReturnType<typeof postgres>; db: PostgresJsDatabase<FullSchema> }
+  | {
+      driver: "postgres-js";
+      client: ReturnType<typeof postgres>;
+      db: PostgresJsDatabase<FullSchema>;
+    }
   | {
       driver: "neon-http";
       client: ReturnType<typeof createNeonHttpDb>["client"];

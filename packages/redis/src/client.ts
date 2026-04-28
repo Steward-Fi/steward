@@ -18,8 +18,8 @@
  *               (or UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN)
  */
 
-import { Redis } from "ioredis";
 import { Redis as UpstashRedis } from "@upstash/redis";
+import { Redis } from "ioredis";
 import { createUpstashIoredisAdapter, type IoredisLike } from "./upstash-adapter.js";
 
 export type RedisDriver = "ioredis" | "upstash";
@@ -71,14 +71,8 @@ function buildIoredis(): Redis {
 }
 
 function buildUpstash(): IoredisLike {
-  const url =
-    process.env.KV_REST_API_URL ||
-    process.env.UPSTASH_REDIS_REST_URL ||
-    "";
-  const token =
-    process.env.KV_REST_API_TOKEN ||
-    process.env.UPSTASH_REDIS_REST_TOKEN ||
-    "";
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
 
   if (!url || !token) {
     throw new Error(

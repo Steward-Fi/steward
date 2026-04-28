@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { accounts, createPGLiteDb, encryptOAuthAccountPlaintextTokens, users } from "@stwd/db";
+import { accounts, encryptOAuthAccountPlaintextTokens, users } from "@stwd/db";
+import { createPGLiteDb } from "@stwd/db/pglite";
 import { KeyStore } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 

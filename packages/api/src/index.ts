@@ -13,7 +13,8 @@
  */
 
 import { validateJwtSecretEnv } from "@stwd/auth";
-import { closeDb, getDb, runMigrations, shouldUsePGLite } from "@stwd/db";
+import { closeDb, getDb, runMigrations } from "@stwd/db";
+import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
 import { app } from "./app";
 import { initRedis, shutdownRedis } from "./middleware/redis";
@@ -168,7 +169,7 @@ const shutdown = async (signal: string) => {
 
   server.stop(true);
   clearInterval(requestLogCleanupTimer);
-  clearInterval(nonceCleanupTimer);
+  if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   requestLog.clear();
 
   try {

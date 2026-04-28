@@ -2,6 +2,7 @@ import type { AgentIdentity, PolicyRule, SignRequest, TxRecord } from "@stwd/sha
 import { eq, inArray } from "drizzle-orm";
 
 export { and, count, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
+export type { DatabaseDriver } from "./client";
 export {
   closeDb,
   createDb,
@@ -14,25 +15,10 @@ export {
   getSql,
   setPGLiteOverride,
 } from "./client";
-export type { DatabaseDriver } from "./client";
 export { runMigrations } from "./migrate";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
-// PGLite re-exports below pull in node:fs / node:os / node:path at module
-// init time. They are kept here for backward compatibility with the
-// embedded/desktop entry point — but the worker entry must NEVER pull
-// `pglite.ts` into its bundle. Wrangler/esbuild tree-shake unused re-exports
-// when they are pure ESM, which these are. If a future change adds top-level
-// side effects to pglite.ts, move these imports to the dedicated
-// `@stwd/db/pglite` subpath instead so the worker bundle stays clean.
-export type { PGLiteDb } from "./pglite";
-export {
-  closePGLiteDb,
-  createPGLiteDb,
-  getDataDir,
-  getPGLiteClient,
-  getPGLiteDb,
-  shouldUsePGLite,
-} from "./pglite";
+// PGLite exports live in the `@stwd/db/pglite` subpath so Cloudflare Worker
+// bundles can import `@stwd/db` without pulling node:fs/node:path dependencies.
 export * from "./schema";
 export * from "./schema-auth";
 
