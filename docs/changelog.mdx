@@ -7,6 +7,16 @@ description: "Version history for Steward and related packages."
 
 ## @stwd/sdk
 
+### 0.8.1 (2026-04-24)
+
+- **Secrets + routes CRUD** — `listSecrets` / `createSecret` / `getSecret` / `rotateSecret` / `deleteSecret` and `listRoutes` / `createRoute` / `updateRoute` / `deleteRoute` for the credential vault.
+- **Policy templates** — `listPolicyTemplates`, `getPolicyTemplate`, `createPolicyTemplate`, `updatePolicyTemplate`, `deletePolicyTemplate`, `assignPolicyTemplate`, `simulatePolicy`.
+- **Audit** — `getAuditLog(params)`, `getAuditSummary(range)`, `exportAuditCsv(params)`.
+- **User tenants** — `listUserTenants()` for listing the authenticated user's tenant memberships.
+- **`getTransactionHistory()`** — returns the full `TxRecord[]` for an agent. `getHistory()` is preserved as a compact `{ timestamp, value }[]` feed and now derives from the same endpoint.
+- **`setPolicies()`** now returns the stored `PolicyRule[]` instead of `void` (backwards compatible — existing callers simply ignored the return value).
+- Consolidates types previously duplicated in the `@stwd/web` dashboard: `SecretRecord`, `RouteRecord`, `PolicyTemplate`, `AuditLogEntry`, `AuditLogResponse`, `AuditSummaryResponse`, `TenantMembership`, etc.
+
 ### 0.3.0 (2026-03-24)
 
 - **Bearer token auth** — Agent JWTs now sent as `Authorization: Bearer` header (preferred over API key)

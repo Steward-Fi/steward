@@ -1,5 +1,6 @@
 "use client";
 
+import type { AgentIdentity, PolicyRule, PolicyType, TxRecord } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { useParams } from "next/navigation";
@@ -9,7 +10,6 @@ import { CopyButton } from "@/components/copy-button";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
 import { getChainSymbol, getExplorerAddressLink, getExplorerTxLink } from "@/lib/chains";
-import type { AgentIdentity, PolicyRule, TxRecord } from "@/lib/steward-client";
 import { formatDate, formatWei, policyTypeLabel, shortenAddress } from "@/lib/utils";
 
 interface BalanceInfo {
@@ -23,9 +23,9 @@ interface BalanceInfo {
   };
 }
 
-// All 5 canonical policy types with sensible display defaults
+// All canonical policy types with sensible display defaults
 const ALL_POLICY_TYPES: {
-  type: string;
+  type: PolicyType;
   defaultConfig: Record<string, unknown>;
 }[] = [
   {
@@ -91,7 +91,7 @@ export default function AgentDetailPage() {
       const [agentData, policyData, txData] = await Promise.all([
         steward.getAgent(agentId),
         steward.getPolicies(agentId).catch(() => [] as PolicyRule[]),
-        steward.getHistory(agentId).catch(() => [] as TxRecord[]),
+        steward.getTransactionHistory(agentId).catch(() => [] as TxRecord[]),
       ]);
       setAgent(agentData);
       setPolicies(mergePolicies(policyData));
@@ -164,7 +164,7 @@ export default function AgentDetailPage() {
 
   const totalVolume = transactions.reduce((sum: bigint, tx) => {
     try {
-      return sum + BigInt(tx.request?.value || tx.value || "0");
+      return sum + BigInt(tx.request?.value || "0");
     } catch {
       return sum;
     }
@@ -211,7 +211,7 @@ export default function AgentDetailPage() {
           <a
             href={
               getExplorerAddressLink(
-                transactions[0]?.request?.chainId || transactions[0]?.chainId || 8453,
+                transactions[0]?.request?.chainId ?? 8453,
                 agent.walletAddress,
               ) || `https://basescan.org/address/${agent.walletAddress}`
             }
@@ -326,28 +326,25 @@ export default function AgentDetailPage() {
                     <StatusBadge status={tx.status} />
                   </div>
                   <div className="w-20">
-                    <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
+                    <ChainBadge chainId={tx.request?.chainId ?? 8453} compact />
                   </div>
                   <div className="flex-1 min-w-0">
                     <span className="font-mono text-xs text-text-tertiary">
-                      {shortenAddress(tx.request?.to || tx.toAddress || "0x0", 8)}
+                      {shortenAddress(tx.request?.to || "0x0", 8)}
                     </span>
                   </div>
                   <div className="w-28 text-right">
                     <span className="text-sm tabular-nums text-text-secondary">
                       {formatWei(
-                        tx.request?.value || tx.value || "0",
-                        getChainSymbol(tx.request?.chainId || tx.chainId || 8453),
+                        tx.request?.value || "0",
+                        getChainSymbol(tx.request?.chainId ?? 8453),
                       )}
                     </span>
                   </div>
                   <div className="w-36 text-right">
                     {tx.txHash ? (
                       <a
-                        href={
-                          getExplorerTxLink(tx.request?.chainId || tx.chainId || 8453, tx.txHash) ||
-                          "#"
-                        }
+                        href={getExplorerTxLink(tx.request?.chainId ?? 8453, tx.txHash) || "#"}
                         target="_blank"
                         rel="noopener noreferrer"
                         className="font-mono text-xs text-accent hover:text-accent-hover transition-colors"

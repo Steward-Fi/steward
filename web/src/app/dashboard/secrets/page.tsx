@@ -1,9 +1,13 @@
 "use client";
 
+import type {
+  CreateRoutePayload as RouteCreatePayload,
+  RouteRecord,
+  SecretRecord,
+} from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
 import { steward } from "@/lib/api";
-import type { RouteCreatePayload, RouteRecord, SecretRecord } from "@/lib/steward-client";
 import { formatDate } from "@/lib/utils";
 
 const ease: [number, number, number, number] = [0.25, 1, 0.5, 1];
@@ -132,9 +136,7 @@ export default function SecretsPage() {
     if (!selected || !rotateValue) return;
     setRotating(true);
     try {
-      const updated = await steward.rotateSecret(selected.id, {
-        value: rotateValue,
-      });
+      const updated = await steward.rotateSecret(selected.id, rotateValue);
       setSecrets((p) => p.map((s) => (s.id === updated.id ? updated : s)));
       setSelected(updated);
       setShowRotate(false);

@@ -403,3 +403,153 @@ export function toCaip2(numericId: number): string | undefined {
 export function fromCaip2(caip2: string): number | undefined {
   return CHAINS[caip2]?.numericId;
 }
+
+// ─── Secrets ────────────────────────────────────────
+
+export interface SecretRecord {
+  id: string;
+  tenantId: string;
+  name: string;
+  description?: string;
+  version: number;
+  routeCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateSecretPayload {
+  name: string;
+  value: string;
+  description?: string;
+  expiresAt?: string;
+}
+
+export type InjectAs = "header" | "query" | "body";
+
+export interface RouteRecord {
+  id: string;
+  secretId: string;
+  hostPattern: string;
+  pathPattern?: string;
+  method?: string;
+  injectAs: InjectAs;
+  injectKey?: string;
+  injectFormat?: string;
+  /** Legacy alias for `injectKey` when `injectAs === "header"`. */
+  headerName?: string;
+  /** Legacy alias for `injectKey` when `injectAs === "query"`. */
+  queryParam?: string;
+  /** Legacy alias for `injectKey` when `injectAs === "body"`. */
+  bodyPath?: string;
+  priority?: number;
+  enabled?: boolean;
+  createdAt: string;
+}
+
+export interface CreateRoutePayload {
+  secretId: string;
+  hostPattern: string;
+  pathPattern?: string;
+  method?: string;
+  injectAs: InjectAs;
+  /** Preferred: header name / query param / body JSON path. */
+  injectKey?: string;
+  injectFormat?: string;
+  /** Legacy alias — populated when `injectAs === "header"`. */
+  headerName?: string;
+  /** Legacy alias — populated when `injectAs === "query"`. */
+  queryParam?: string;
+  /** Legacy alias — populated when `injectAs === "body"`. */
+  bodyPath?: string;
+  priority?: number;
+  enabled?: boolean;
+}
+
+export type UpdateRoutePayload = Partial<Omit<CreateRoutePayload, "secretId">>;
+
+// ─── Policy Templates ────────────────────────────────
+
+export interface PolicyTemplate {
+  id: string;
+  tenantId: string;
+  name: string;
+  description: string | null;
+  rules: PolicyRule[];
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PolicyTemplateCreate {
+  name: string;
+  description?: string;
+  rules: PolicyRule[];
+  isDefault?: boolean;
+}
+
+export type PolicyTemplateUpdate = Partial<PolicyTemplateCreate>;
+
+export interface PolicySimulateInput {
+  /** Simulate an existing saved template. */
+  policyId?: string;
+  /** Or simulate an inline rule set. */
+  rules?: PolicyRule[];
+  agentId: string;
+  request: {
+    to: string;
+    value: string;
+    data?: string;
+    chainId?: number;
+  };
+}
+
+export interface PolicySimulateResult {
+  approved: boolean;
+  requiresManualApproval: boolean;
+  results: PolicyResult[];
+  /** Present when there are no rules to evaluate. */
+  note?: string;
+}
+
+// ─── Audit ─────────────────────────────────────────
+
+export interface AuditLogEntry {
+  id: string;
+  timestamp: string;
+  agentId: string;
+  action: "sign" | "approve" | "reject" | "proxy" | string;
+  status: string;
+  details?: Record<string, unknown>;
+  policyResults?: PolicyResult[] | unknown;
+  value?: string;
+  to?: string;
+}
+
+export interface AuditLogResponse {
+  data: AuditLogEntry[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
+export interface AuditSummaryResponse {
+  totalTransactions: number;
+  totalApprovals: number;
+  totalRejections: number;
+  totalProxyRequests: number;
+  policyViolations: number;
+  topAgents: Array<{ agentId: string; name: string; txCount: number }>;
+  dailyActivity: Array<{ date: string; txCount: number }>;
+}
+
+// ─── Tenants ────────────────────────────────────────
+
+export interface TenantMembership {
+  tenantId: string;
+  tenantName: string;
+  role: string;
+  joinedAt: string;
+}

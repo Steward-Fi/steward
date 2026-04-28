@@ -1,5 +1,6 @@
 "use client";
 
+import type { AgentIdentity, TxRecord } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -7,7 +8,6 @@ import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
 import { getChainSymbol } from "@/lib/chains";
-import type { AgentIdentity, TxRecord } from "@/lib/steward-client";
 import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
@@ -36,7 +36,7 @@ export default function DashboardOverview() {
 
       for (const agent of agentsList.slice(0, 20)) {
         try {
-          const history = await steward.getHistory(agent.id);
+          const history = await steward.getTransactionHistory(agent.id);
           allTx.push(
             ...history.map((tx) => ({
               ...tx,
@@ -200,7 +200,7 @@ export default function DashboardOverview() {
               >
                 <div className="flex items-center gap-4 min-w-0">
                   <StatusBadge status={tx.status} />
-                  <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
+                  <ChainBadge chainId={tx.request?.chainId ?? 8453} compact />
                   <Link
                     href={`/dashboard/agents/${tx.agentId}`}
                     className="text-sm text-text hover:text-accent transition-colors truncate"
@@ -209,14 +209,14 @@ export default function DashboardOverview() {
                   </Link>
                   <span className="text-text-tertiary text-xs hidden sm:inline">to</span>
                   <span className="font-mono text-xs text-text-tertiary hidden sm:inline">
-                    {shortenAddress(tx.request?.to || tx.toAddress || "0x0", 4)}
+                    {shortenAddress(tx.request?.to || "0x0", 4)}
                   </span>
                 </div>
                 <div className="flex items-center gap-6 flex-shrink-0">
                   <span className="text-sm tabular-nums text-text-secondary">
                     {formatWei(
-                      tx.request?.value || tx.value || "0",
-                      getChainSymbol(tx.request?.chainId || tx.chainId || 8453),
+                      tx.request?.value || "0",
+                      getChainSymbol(tx.request?.chainId ?? 8453),
                     )}
                   </span>
                   <span className="text-xs text-text-tertiary hidden md:inline">

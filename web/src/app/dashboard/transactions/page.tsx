@@ -1,5 +1,6 @@
 "use client";
 
+import type { TxRecord } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -7,7 +8,6 @@ import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
 import { getChainSymbol, getExplorerTxLink } from "@/lib/chains";
-import type { TxRecord } from "@/lib/steward-client";
 import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 type TxWithAgent = TxRecord & { agentName?: string };
@@ -33,7 +33,7 @@ export default function TransactionsPage() {
 
       for (const agent of agents) {
         try {
-          const history = await steward.getHistory(agent.id);
+          const history = await steward.getTransactionHistory(agent.id);
           allTx.push(
             ...history.map((tx) => ({
               ...tx,
@@ -161,7 +161,7 @@ export default function TransactionsPage() {
                 <StatusBadge status={tx.status} />
               </div>
               <div className="w-20">
-                <ChainBadge chainId={tx.request?.chainId || tx.chainId || 8453} compact />
+                <ChainBadge chainId={tx.request?.chainId ?? 8453} compact />
               </div>
               <div className="flex-1 min-w-0">
                 <Link
@@ -173,23 +173,18 @@ export default function TransactionsPage() {
               </div>
               <div className="w-36">
                 <span className="font-mono text-xs text-text-tertiary">
-                  {shortenAddress(tx.request?.to || tx.toAddress || "0x0", 6)}
+                  {shortenAddress(tx.request?.to || "0x0", 6)}
                 </span>
               </div>
               <div className="w-28 text-right">
                 <span className="text-sm tabular-nums text-text-secondary">
-                  {formatWei(
-                    tx.request?.value || tx.value || "0",
-                    getChainSymbol(tx.request?.chainId || tx.chainId || 8453),
-                  )}
+                  {formatWei(tx.request?.value || "0", getChainSymbol(tx.request?.chainId ?? 8453))}
                 </span>
               </div>
               <div className="w-36 text-right">
                 {tx.txHash ? (
                   <a
-                    href={
-                      getExplorerTxLink(tx.request?.chainId || tx.chainId || 8453, tx.txHash) || "#"
-                    }
+                    href={getExplorerTxLink(tx.request?.chainId ?? 8453, tx.txHash) || "#"}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="font-mono text-xs text-text-tertiary hover:text-text-secondary transition-colors"

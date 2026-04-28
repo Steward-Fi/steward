@@ -1,5 +1,6 @@
 "use client";
 
+import type { ApprovalQueueEntry } from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
 import { useEffect, useState } from "react";
@@ -9,17 +10,7 @@ import { steward } from "@/lib/api";
 import { getChainSymbol } from "@/lib/chains";
 import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
-interface PendingItem {
-  id: string;
-  txId: string;
-  agentId: string;
-  agentName?: string;
-  status: "pending" | "approved" | "rejected";
-  requestedAt: string;
-  toAddress?: string;
-  value?: string;
-  chainId?: number;
-}
+type PendingItem = ApprovalQueueEntry;
 
 interface Toast {
   id: string;
@@ -51,7 +42,10 @@ export default function ApprovalsPage() {
     try {
       setLoading(true);
       setError(null);
-      setPending(await steward.listApprovals());
+      // Request the max page size so the dashboard shows all pending items in a single load.
+      // Request the max page size so the dashboard shows all pending items in a single load.
+      const items = await steward.listApprovals({ limit: 200 });
+      setPending(items);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load approvals");
     } finally {
@@ -64,7 +58,7 @@ export default function ApprovalsPage() {
     setActionLoading(key);
     try {
       if (action === "approve") {
-        await steward.approveTransaction(txId, "Approved from dashboard");
+        await steward.approveTransaction(txId, { comment: "Approved from dashboard" });
       } else {
         await steward.denyTransaction(txId, "Rejected from dashboard");
       }
