@@ -18,7 +18,9 @@ import type { Context } from "hono";
 import { recordAudit } from "../middleware/audit";
 import {
   checkProxyRateLimit,
+  checkProxySpendLimit,
   isProxyRedisAvailable,
+  type ProxySpendLimitResult,
   trackProxySpend,
 } from "../middleware/redis-enforcement";
 import { resolveTarget } from "./alias";
@@ -143,6 +145,13 @@ function injectCredential(
   return { headers, url, body };
 }
 
+let checkProxySpendLimitForHandler = checkProxySpendLimit;
+
+/** Test hook for overriding spend-limit enforcement without module mocks. */
+export function __setCheckProxySpendLimitForTests(checker: typeof checkProxySpendLimit): void {
+  checkProxySpendLimitForHandler = checker;
+}
+
 // ─── Main proxy handler ──────────────────────────────────────────────────────
 
 /**
@@ -194,6 +203,47 @@ export async function handleProxy(c: Context): Promise<Response> {
         error: `Rate limit exceeded for ${target.host}. Retry after ${Math.ceil(rlResult.resetMs / 1000)}s`,
       },
       429,
+    );
+  }
+
+  // 2.6. Redis spend-limit check (per agent, configured by spending-limit policy)
+  const spendResult: ProxySpendLimitResult = await checkProxySpendLimitForHandler(
+    agentId,
+    tenantId,
+    target.host,
+  );
+  if (!spendResult.allowed) {
+    const latencyMs = Date.now() - startTime;
+    const limit = spendResult.limit ?? 0;
+    const period = spendResult.period ?? "day";
+    const reason =
+      spendResult.reason ??
+      `${period === "day" ? "Daily" : "Monthly"} proxy spend limit exceeded for ${target.host}`;
+
+    recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 402,
+      latencyMs,
+      reason,
+    });
+
+    return c.json(
+      {
+        ok: false,
+        error: reason,
+        limit: {
+          type: "spend",
+          period,
+          limitUsd: limit,
+          spentUsd: spendResult.spent,
+          remainingUsd: spendResult.remaining,
+        },
+      },
+      402,
     );
   }
 
