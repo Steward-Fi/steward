@@ -131,3 +131,25 @@ worker file in but the deploy won't actually work until 2 and 3 land.
 PR 4 is technically independent of the Workers port — it removes a
 single-process assumption and is a healthy change for any multi-instance
 Bun deployment too.
+
+### Quick-reference branch state
+
+```
+$ git log --oneline cloudflare-workers-adapter ^develop
+cf: pr split plan
+cf: docs — cloudflare deployment guide
+cf: workers build green
+cf: isolate pglite imports from worker entry
+cf: confirm node:crypto under nodejs_compat
+cf: gate runtime migrations on SKIP_MIGRATIONS
+cf: move siwe nonce + rate-limit log to storage backend
+cf: pluggable redis client — upstash for workers
+cf: getSql() neon-http variant
+cf: pluggable db driver — neon-http for workers
+cf: wrangler.toml + nodejs_compat
+cf: add workers entry packages/api/src/worker.ts
+```
+
+Each commit corresponds to one row in the PR split table above (with
+the `pr split plan` and `docs` commits combinable into PR 6).
+
