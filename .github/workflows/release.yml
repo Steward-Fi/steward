@@ -42,19 +42,22 @@ jobs:
       - name: Build all packages
         run: bunx turbo run build
 
-      # Publish each public package to npm. Publish failures should fail the release.
+      # Publish each public package to npm. Skips when the local version is
+      # already on the registry (idempotent: a release tag may bump only some
+      # packages while leaving others on their already-published version).
+      # Network errors / auth failures still fail the release.
       - name: Publish @stwd/sdk
-        run: cd packages/sdk && npm publish --access public
+        run: bash scripts/publish-if-new.sh packages/sdk
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @stwd/react
-        run: cd packages/react && npm publish --access public
+        run: bash scripts/publish-if-new.sh packages/react
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @stwd/eliza-plugin
-        run: cd packages/eliza-plugin && npm publish --access public
+        run: bash scripts/publish-if-new.sh packages/eliza-plugin
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -63,5 +66,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+        if: success() || failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
