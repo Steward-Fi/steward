@@ -336,7 +336,43 @@ const _passkeyAuthByOrigin = new Map<string, PasskeyAuth>();
  *
  * Allowed origins: PASSKEY_ALLOWED_ORIGINS env (comma-separated),
  * defaults to PASSKEY_ORIGIN.
+ *
+ * rpID resolution rule (apex-folding):
+ *   When the request hostname is a strict subdomain of an allowed origin's
+ *   hostname (e.g. request `www.waifu.fun`, allowed `https://waifu.fun`),
+ *   we use the SHORTER allowed hostname as rpID. This keeps a single
+ *   credential valid across apex + www and avoids breaking users who
+ *   registered under one form when their canonical host changes (e.g.
+ *   apex 307s to www, or vice versa).
+ *
+ *   WebAuthn allows rpID to be any registrable suffix of the request
+ *   origin hostname, and the resulting credential is then scoped to
+ *   apex + all subdomains.
  */
+function resolveRpID(requestHostname: string, allowedOrigins: string[], fallback: string): string {
+  let best = requestHostname;
+  for (const o of allowedOrigins) {
+    let host: string;
+    try {
+      host = new URL(o).hostname;
+    } catch {
+      continue;
+    }
+    if (host === requestHostname) {
+      // Exact match. Prefer shortest match seen so far so apex wins over www.
+      if (host.length < best.length || best === requestHostname) best = host;
+    } else if (
+      requestHostname.endsWith(`.${host}`) &&
+      // shortest match wins
+      (best === requestHostname || host.length < best.length)
+    ) {
+      best = host;
+    }
+  }
+  if (!best) return fallback;
+  return best;
+}
+
 function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
   const defaultRpID = process.env.PASSKEY_RP_ID || "steward.fi";
   const defaultOrigin = process.env.PASSKEY_ORIGIN || "https://steward.fi";
@@ -359,10 +395,10 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
     return _passkeyAuth;
   }
 
-  // Parse origin to get rpID (hostname)
-  let rpID = defaultRpID;
+  // Parse origin to get hostname
+  let requestHostname: string;
   try {
-    rpID = new URL(requestOrigin).hostname;
+    requestHostname = new URL(requestOrigin).hostname;
   } catch {
     return getPasskeyAuth(); // invalid origin, fall back to default
   }
@@ -372,18 +408,27 @@ function getPasskeyAuth(requestOrigin?: string): PasskeyAuth {
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean);
-  if (!allowed.includes(requestOrigin) && rpID !== defaultRpID) {
+  if (!allowed.includes(requestOrigin) && requestHostname !== defaultRpID) {
     return getPasskeyAuth(); // not in allowed list, use default
   }
+
+  // Apex-fold: if the request hostname is a subdomain of any allowed origin,
+  // use the allowed origin's apex hostname as rpID so the credential is
+  // shared across apex + all subdomains.
+  const rpID = resolveRpID(requestHostname, allowed, defaultRpID);
 
   // Cache per rpID
   const cached = _passkeyAuthByOrigin.get(rpID);
   if (cached) return cached;
 
+  // Origin list passed to PasskeyAuth covers all variants the browser may
+  // present (apex + www) so SimpleWebAuthn accepts assertions from either.
+  const acceptedOrigins = allowed.length > 0 ? allowed : [requestOrigin];
+
   const auth = new PasskeyAuth({
     rpName,
     rpID,
-    origin: requestOrigin,
+    origin: acceptedOrigins,
     challengeStore: getChallengeStore(),
   });
   _passkeyAuthByOrigin.set(rpID, auth);
