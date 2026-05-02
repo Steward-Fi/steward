@@ -43,6 +43,7 @@
 // If any of these fail at runtime on Workers, fall back to tweetnacl for
 // ed25519 verify (lightweight, edge-compatible).
 import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
+import type { AuthenticatorTransportFuture } from "@stwd/auth";
 import {
   assertTokenNotRevoked,
   buildBackend,
@@ -1099,15 +1100,21 @@ const auth = new Hono();
  * server so a client SDK (e.g. @stwd/sdk) can render the right sign-in UI.
  *
  * Passkey/email/SIWE/SIWS are always wired in this build. OAuth providers are
- * advertised only when their corresponding STEWARD_OAUTH_<PROVIDER>_CLIENT_ID
- * env var is present, so a stripped-down deployment honestly reports what it
- * supports rather than offering a broken Google button.
+ * advertised when their credentials are configured.
+ *
+ * Env var resolution mirrors `getProviderConfig` in @stwd/auth/oauth.ts: the
+ * canonical names are `<PROVIDER>_CLIENT_ID` / `<PROVIDER>_CLIENT_SECRET`.
+ * `STEWARD_OAUTH_<PROVIDER>_CLIENT_ID` is also accepted for backwards-compat
+ * with older deployments. Reading only the prefixed form caused production
+ * to advertise OAuth as disabled even though the underlying authorize
+ * endpoints had working credentials.
  */
 auth.get("/providers", (c) => {
   const oauthClientIds: Record<string, string | undefined> = {
-    google: process.env.STEWARD_OAUTH_GOOGLE_CLIENT_ID,
-    discord: process.env.STEWARD_OAUTH_DISCORD_CLIENT_ID,
-    github: process.env.STEWARD_OAUTH_GITHUB_CLIENT_ID,
+    google: process.env.GOOGLE_CLIENT_ID || process.env.STEWARD_OAUTH_GOOGLE_CLIENT_ID,
+    discord: process.env.DISCORD_CLIENT_ID || process.env.STEWARD_OAUTH_DISCORD_CLIENT_ID,
+    github: process.env.GITHUB_CLIENT_ID || process.env.STEWARD_OAUTH_GITHUB_CLIENT_ID,
+    twitter: process.env.TWITTER_CLIENT_ID || process.env.STEWARD_OAUTH_TWITTER_CLIENT_ID,
   };
   const oauth = Object.entries(oauthClientIds)
     .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
@@ -1122,6 +1129,7 @@ auth.get("/providers", (c) => {
       google: boolean;
       discord: boolean;
       github: boolean;
+      twitter: boolean;
       oauth: string[];
     }>
   >({
@@ -1134,6 +1142,7 @@ auth.get("/providers", (c) => {
       google: oauth.includes("google"),
       discord: oauth.includes("discord"),
       github: oauth.includes("github"),
+      twitter: oauth.includes("twitter"),
       oauth,
     },
   });
@@ -1650,8 +1659,16 @@ auth.post("/passkey/login/options", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "No account found for this email" }, 404);
   }
 
+  // Select transports alongside credentialId. WebAuthn browsers use the
+  // transports hint to know that a credential lives on the local platform
+  // authenticator (e.g. Touch ID, Windows Hello). Without it the browser
+  // conservatively shows the cross-device QR picker even for credentials
+  // that were registered on this device, which is a major UX regression.
   const creds = await db
-    .select({ credentialId: authenticators.credentialId })
+    .select({
+      credentialId: authenticators.credentialId,
+      transports: authenticators.transports,
+    })
     .from(authenticators)
     .where(eq(authenticators.userId, user.id));
 
@@ -1662,7 +1679,12 @@ auth.post("/passkey/login/options", async (c) => {
   const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
     email,
     {
-      allowCredentials: creds.map((cred) => ({ id: cred.credentialId })),
+      allowCredentials: creds.map((cred) => ({
+        id: cred.credentialId,
+        ...(cred.transports && cred.transports.length > 0
+          ? { transports: cred.transports as AuthenticatorTransportFuture[] }
+          : {}),
+      })),
     },
   );
 

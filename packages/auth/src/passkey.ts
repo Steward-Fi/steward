@@ -11,6 +11,7 @@
 
 import type {
   AuthenticationResponseJSON,
+  AuthenticatorTransportFuture,
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON,
@@ -28,6 +29,7 @@ export type {
 } from "@simplewebauthn/server";
 export type {
   AuthenticationResponseJSON,
+  AuthenticatorTransportFuture,
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
   RegistrationResponseJSON,
@@ -181,12 +183,27 @@ export class PasskeyAuth {
    */
   async generateAuthenticationOptions(
     email: string,
-    options?: { allowCredentials?: Array<{ id: string }> },
+    options?: {
+      allowCredentials?: Array<{
+        id: string;
+        /**
+         * Stored transports for this credential. Including these is what
+         * tells the browser the credential lives on the local platform
+         * authenticator (e.g. Touch ID) vs roaming (e.g. phone via QR). When
+         * omitted, browsers conservatively show the QR/cross-device picker
+         * even for credentials that were registered on this device.
+         */
+        transports?: AuthenticatorTransportFuture[];
+      }>;
+    },
   ): Promise<PublicKeyCredentialRequestOptionsJSON> {
     const authOptions = await swGenAuth({
       rpID: this.config.rpID,
       userVerification: "preferred",
-      allowCredentials: options?.allowCredentials?.map((c) => ({ id: c.id })),
+      allowCredentials: options?.allowCredentials?.map((c) => ({
+        id: c.id,
+        ...(c.transports && c.transports.length > 0 ? { transports: c.transports } : {}),
+      })),
     });
 
     this.challenges.set(email, authOptions.challenge);
