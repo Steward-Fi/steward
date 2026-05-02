@@ -1120,31 +1120,26 @@ auth.get("/providers", (c) => {
     .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
     .map(([name]) => name);
 
-  return c.json<
-    ApiResponse<{
-      passkey: boolean;
-      email: boolean;
-      siwe: boolean;
-      siws: boolean;
-      google: boolean;
-      discord: boolean;
-      github: boolean;
-      twitter: boolean;
-      oauth: string[];
-    }>
-  >({
+  // Returns the providers payload at the top level, NOT wrapped in { ok, data }.
+  // The @stwd/sdk authRequest helper returns the full parsed body as `res.data`,
+  // so callers like `getProviders()` then read `res.data` and expect the
+  // StewardProviders shape directly. Wrapping here in ApiResponse caused the
+  // SDK to receive `{ok:true, data: {...providers}}` and treat the wrapper as
+  // the provider object: every provider field became undefined and SPAs hid
+  // the OAuth buttons even when the credentials were configured.
+  // The `ok: true` field is preserved at the top level so older clients that
+  // were checking for it keep working.
+  return c.json({
     ok: true,
-    data: {
-      passkey: true,
-      email: true,
-      siwe: true,
-      siws: true,
-      google: oauth.includes("google"),
-      discord: oauth.includes("discord"),
-      github: oauth.includes("github"),
-      twitter: oauth.includes("twitter"),
-      oauth,
-    },
+    passkey: true,
+    email: true,
+    siwe: true,
+    siws: true,
+    google: oauth.includes("google"),
+    discord: oauth.includes("discord"),
+    github: oauth.includes("github"),
+    twitter: oauth.includes("twitter"),
+    oauth,
   });
 });
 
