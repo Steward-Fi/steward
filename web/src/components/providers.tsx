@@ -1,13 +1,26 @@
 "use client";
 
 import { StewardProvider, useAuth } from "@stwd/react";
-import { EVMWalletProvider, SolanaWalletProvider } from "@stwd/react/wallet";
+import { EVMWalletProvider } from "@stwd/react/wallet";
+import dynamic from "next/dynamic";
 import { createElement, type ReactNode, useEffect, useRef } from "react";
 import { setAuthToken, steward } from "@/lib/api";
 import { SOLANA_RPC_URL, wagmiConfig } from "@/lib/wagmi";
 
 // Pre-import @simplewebauthn/browser so it's in the client bundle.
 import "@simplewebauthn/browser";
+
+// Solana wallet provider must be client-only. Solana's wallet-adapter
+// constructs adapter instances eagerly at module load and several of
+// them touch `indexedDB` / `localStorage` in their constructors, which
+// throw `ReferenceError: indexedDB is not defined` when Next prerenders
+// client components during `next build`. Loading via next/dynamic with
+// ssr:false defers the entire subtree to the browser. This is also what
+// most production Solana dapps (Jupiter, Drift, Magic Eden) do.
+const SolanaWalletProvider = dynamic(
+  () => import("@stwd/react/wallet").then((m) => m.SolanaWalletProvider),
+  { ssr: false },
+);
 
 const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
 
