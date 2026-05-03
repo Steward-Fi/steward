@@ -137,7 +137,7 @@ describe("Wallet provider helpers", () => {
     mockHttp.mockClear();
   });
 
-  test("DEFAULT_SOLANA_WALLETS includes Phantom, Solflare, and expanded coverage", () => {
+  test("DEFAULT_SOLANA_WALLETS includes Phantom, Solflare, and software-only coverage", () => {
     expect(Array.isArray(DEFAULT_SOLANA_WALLETS)).toBe(true);
     expect(DEFAULT_SOLANA_WALLETS.length).toBeGreaterThanOrEqual(6);
     expect(walletNames(DEFAULT_SOLANA_WALLETS)).toEqual([
@@ -145,11 +145,15 @@ describe("Wallet provider helpers", () => {
       "Solflare",
       "Coinbase Wallet",
       "Trust Wallet",
-      "Ledger",
-      "Trezor",
       "MathWallet",
       "Coin98",
     ]);
+  });
+
+  test("DEFAULT_SOLANA_WALLETS excludes hardware adapters (Ledger / Trezor) that lack signMessage", () => {
+    const names = walletNames(DEFAULT_SOLANA_WALLETS);
+    expect(names).not.toContain("Ledger");
+    expect(names).not.toContain("Trezor");
   });
 
   test("SolanaWalletProvider uses DEFAULT_SOLANA_WALLETS when wallets is undefined", () => {

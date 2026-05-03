@@ -125,7 +125,7 @@ If you render `WalletLogin` directly, it is already the wallet UI. To enable wal
 
 ### Solana example with expanded defaults
 
-`SolanaWalletProvider` now defaults to `DEFAULT_SOLANA_WALLETS`, which includes Phantom, Solflare, Coinbase Wallet, Trust Wallet, Ledger, Trezor, MathWallet, and Coin98. Wallets that implement the Solana Wallet Standard, including Backpack and Brave when installed in the browser, are discovered at runtime by wallet-adapter.
+`SolanaWalletProvider` now defaults to `DEFAULT_SOLANA_WALLETS`, which includes Phantom, Solflare, Coinbase Wallet, Trust Wallet, MathWallet, and Coin98. Wallets that implement the Solana Wallet Standard, including Backpack and Brave when installed in the browser, are discovered at runtime by wallet-adapter. Hardware Solana wallets (Ledger, Trezor) are excluded from defaults because their adapters do not implement `signMessage` and cannot complete the SIWS sign-in flow; apps that want hardware support in non-login contexts can extend the wallet list explicitly.
 
 ```tsx
 import { StewardProvider } from "@stwd/react";

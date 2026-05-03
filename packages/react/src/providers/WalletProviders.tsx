@@ -25,11 +25,9 @@ import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
 import {
   Coin98WalletAdapter,
   CoinbaseWalletAdapter,
-  LedgerWalletAdapter,
   MathWalletAdapter,
   PhantomWalletAdapter,
   SolflareWalletAdapter,
-  TrezorWalletAdapter,
   TrustWalletAdapter,
 } from "@solana/wallet-adapter-wallets";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -156,13 +154,18 @@ export function EVMWalletProvider({
 
 // ─── Solana wrapper ──────────────────────────────────────────────────────────
 
+// Default Solana wallet adapters. Hardware wallets (Ledger, Trezor) are
+// intentionally excluded from defaults: their adapter packages do not
+// implement `signMessage`, so they cannot complete the SIWS sign-in flow.
+// Additionally, `@ledgerhq/errors` ships a non-extension import that
+// `ERR_MODULE_NOT_FOUND`s under Node ESM/SSR, which would break apps that
+// import `@stwd/react/wallet` server-side. Apps that want hardware support
+// in non-login contexts can extend the wallet list explicitly.
 export const DEFAULT_SOLANA_WALLETS = [
   new PhantomWalletAdapter(),
   new SolflareWalletAdapter(),
   new CoinbaseWalletAdapter(),
   new TrustWalletAdapter(),
-  new LedgerWalletAdapter(),
-  new TrezorWalletAdapter(),
   new MathWalletAdapter(),
   new Coin98WalletAdapter(),
 ] satisfies WalletProviderProps["wallets"];
