@@ -15,6 +15,19 @@ const { StewardLogin, composeWalletSuccess, composeWalletError } = await import(
   "../components/StewardLogin.js"
 );
 const { StewardAuthContext } = await import("../provider.js");
+const { registerEvmWalletPanel, registerSolanaWalletPanel, _resetWalletPanelRegistry } =
+  await import("../internal/walletPanelRegistry.js");
+
+// Register dummy panel loaders. The registry isolates root entry from
+// wallet peer deps; tests just need a pair of registered loaders so the
+// `<StewardLogin>` wallet UI gates open. Real loaders live in
+// `@stwd/react/wallet`.
+const dummyPanel = ((): React.ComponentType<unknown> => {
+  return () => null;
+})();
+registerEvmWalletPanel({ load: async () => ({ default: dummyPanel }) });
+registerSolanaWalletPanel({ load: async () => ({ default: dummyPanel }) });
+void _resetWalletPanelRegistry; // silence unused (used in registry-empty tests below)
 
 type AuthCtx = {
   isAuthenticated: boolean;
@@ -236,6 +249,26 @@ describe("<StewardLogin /> showWallets prop", () => {
     expect(html).not.toContain("stwd-login-wallets");
     expect(html).not.toContain("stwd-login-wallet-evm-loading");
     expect(html).not.toContain("stwd-login-wallet-sol-loading");
+  });
+
+  test("empty wallet panel registry hides wallet buttons even when providers report siwe + siws", () => {
+    // Reset the registry to simulate a consumer who imported `@stwd/react`
+    // but not `@stwd/react/wallet`. Without registered loaders, rendering
+    // a wallet button would produce a permanently-disabled placeholder,
+    // which is worse than hiding the button.
+    _resetWalletPanelRegistry();
+    try {
+      const html = renderToString(
+        wrap(baseCtx({}), React.createElement(StewardLogin, { showWallets: true })),
+      );
+      expect(html).not.toContain("stwd-login-wallets");
+      expect(html).not.toContain("stwd-login-wallet-evm-loading");
+      expect(html).not.toContain("stwd-login-wallet-sol-loading");
+    } finally {
+      // Restore for subsequent tests.
+      registerEvmWalletPanel({ load: async () => ({ default: dummyPanel }) });
+      registerSolanaWalletPanel({ load: async () => ({ default: dummyPanel }) });
+    }
   });
 });
 

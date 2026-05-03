@@ -234,7 +234,13 @@ export function StewardLogin({
   const googleEnabled = showGoogle && (providers?.google ?? false);
   const discordEnabled = showDiscord && (providers?.discord ?? false);
   const hasOAuth = googleEnabled || discordEnabled;
-  const hasWallet = siweEnabled || siwsEnabled;
+  // Wallet UI requires both: backend confirms support AND a panel loader is
+  // registered (i.e. consumer imported `@stwd/react/wallet`). Without
+  // a registered panel, rendering would show a permanently-disabled
+  // loading placeholder, which is worse than hiding the button.
+  const evmReady = siweEnabled && !!evmRegistered;
+  const solanaReady = siwsEnabled && !!solanaRegistered;
+  const hasWallet = evmReady || solanaReady;
 
   const handleError = (err: unknown) => {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -402,7 +408,7 @@ export function StewardLogin({
           imports stay isolated behind dynamic import. */}
       {hasWallet && (
         <div className="stwd-login__wallets" data-testid="stwd-login-wallets">
-          {siweEnabled &&
+          {evmReady &&
             (EVMPanel ? (
               <EVMPanel
                 classes={walletClasses}
@@ -422,7 +428,7 @@ export function StewardLogin({
                 <span>Loading EVM wallet...</span>
               </button>
             ))}
-          {siwsEnabled &&
+          {solanaReady &&
             (SolanaPanel ? (
               <SolanaPanel
                 classes={walletClasses}
