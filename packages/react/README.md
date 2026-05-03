@@ -114,14 +114,14 @@ export function EvmLogin() {
       auth={{ baseUrl: "https://api.steward.fi" }}
     >
       <EVMWalletProvider config={wagmiConfig}>
-        <WalletLogin chains="evm" showWallets />
+        <WalletLogin chains="evm" />
       </EVMWalletProvider>
     </StewardProvider>
   );
 }
 ```
 
-`showWallets` enables the wallet login UI when paired with the broader Steward login surface. If you render `WalletLogin` directly, it is already the wallet UI.
+If you render `WalletLogin` directly, it is already the wallet UI. To enable wallet sign-in inside the broader `<StewardLogin>` modal (alongside passkey, email, OAuth), pass the `showWallets` prop on `<StewardLogin>` instead.
 
 ### Solana example with expanded defaults
 
@@ -150,7 +150,7 @@ export function SolanaLogin() {
         endpoint="https://api.mainnet-beta.solana.com"
         wallets={[...DEFAULT_SOLANA_WALLETS, customWallet]}
       >
-        <WalletLogin chains="solana" showWallets />
+        <WalletLogin chains="solana" />
       </SolanaWalletProvider>
     </StewardProvider>
   );
@@ -163,7 +163,7 @@ export function SolanaLogin() {
 <StewardProvider client={client} agentId="agent_abc" auth={{ baseUrl: "https://api.steward.fi" }}>
   <EVMWalletProvider config={wagmiConfig}>
     <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
-      <WalletLogin chains="both" showWallets onSuccess={(res, kind) => console.log(kind, res.token)} />
+      <WalletLogin chains="both" onSuccess={(res, kind) => console.log(kind, res.token)} />
     </SolanaWalletProvider>
   </EVMWalletProvider>
 </StewardProvider>

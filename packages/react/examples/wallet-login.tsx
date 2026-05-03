@@ -55,7 +55,6 @@ export function PatternA() {
         <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
           <WalletLogin
             chains="both"
-            showWallets
             onSuccess={(result, kind) => {
               console.log("signed in via", kind, result.token);
             }}
@@ -96,7 +95,7 @@ export function PatternB() {
                   agentId="agent_abc"
                   auth={{ baseUrl: "https://api.steward.fi" }}
                 >
-                  <WalletLogin chains="both" showWallets />
+                  <WalletLogin chains="both" />
                 </StewardProvider>
               </WalletModalProvider>
             </SolanaAdapterProvider>
@@ -117,7 +116,7 @@ export function EvmOnly() {
       auth={{ baseUrl: "https://api.steward.fi" }}
     >
       <EVMWalletProvider config={wagmiConfig}>
-        <WalletLogin chains="evm" showWallets />
+        <WalletLogin chains="evm" />
       </EVMWalletProvider>
     </StewardProvider>
   );
