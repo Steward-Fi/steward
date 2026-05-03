@@ -407,7 +407,7 @@ export function StewardLogin({
           the existing tested SIWE/SIWS flow. The wagmi / @solana/* peer-dep
           imports stay isolated behind dynamic import. */}
       {hasWallet && (
-        <div className="stwd-login__wallets" data-testid="stwd-login-wallets">
+        <div className="stwd-login__wallets stwd-wallet-root" data-testid="stwd-login-wallets">
           {evmReady &&
             (EVMPanel ? (
               <EVMPanel
