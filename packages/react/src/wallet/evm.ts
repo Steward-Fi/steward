@@ -4,9 +4,26 @@
  * @tanstack/react-query.
  *
  * Usage:
- *   import { EVMWalletProvider, createDefaultWagmiConfig } from "@stwd/react/wallet/evm";
+ *   import {
+ *     EVMWalletProvider,
+ *     WalletLogin,
+ *     createDefaultWagmiConfig,
+ *   } from "@stwd/react/wallet/evm";
+ *
+ * Note on `<WalletLogin>`: the component itself dynamic-imports its
+ * EVM and Solana panels. When you only ship the EVM peer install,
+ * always pass `chains="evm"` so the Solana panel loader is never
+ * triggered. Some bundlers (notably webpack) eagerly create chunks
+ * for the literal dynamic import path strings; see the README for
+ * webpack/Vite optimization tips when building EVM-only.
  */
 
+export type {
+  WalletChains,
+  WalletLoginClassOverrides,
+  WalletLoginProps,
+} from "../components/WalletLogin.js";
+export { WalletLogin } from "../components/WalletLogin.js";
 export type {
   CreateDefaultWagmiConfigOptions,
   DefaultWagmiChains,

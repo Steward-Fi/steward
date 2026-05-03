@@ -7,9 +7,23 @@
  *     Coinbase, Trust, MathWallet, Coin98)
  *
  * Usage:
- *   import { SolanaWalletProvider, createDefaultSolanaWallets } from "@stwd/react/wallet/solana";
+ *   import {
+ *     SolanaWalletProvider,
+ *     WalletLogin,
+ *     createDefaultSolanaWallets,
+ *   } from "@stwd/react/wallet/solana";
+ *
+ * Note on `<WalletLogin>`: always pass `chains="solana"` to ensure
+ * the EVM panel loader is never triggered when you only ship the
+ * Solana peer install. See README for bundler tips.
  */
 
+export type {
+  WalletChains,
+  WalletLoginClassOverrides,
+  WalletLoginProps,
+} from "../components/WalletLogin.js";
+export { WalletLogin } from "../components/WalletLogin.js";
 export type { SolanaWalletProviderProps } from "../providers/SolanaProvider.js";
 export {
   createDefaultSolanaWallets,
