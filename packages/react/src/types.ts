@@ -354,6 +354,22 @@ export interface StewardLoginProps {
   showPasskey?: boolean;
   showEmail?: boolean;
   showSIWE?: boolean;
+  /**
+   * First-class wallet sign-in (SIWE / SIWS).
+   *
+   * - `true`  - render both EVM and Solana wallet panels (subject to provider feature-detect).
+   * - `false` (default) - hide both. Backwards-compatible.
+   * - `{ evm: true }` - only EVM.
+   * - `{ solana: true }` - only Solana.
+   *
+   * Backend feature flags from `GET /v1/auth/providers` (`siwe`, `siws`) act
+   * as a hard gate: if the backend reports `siwe: false`, the EVM button is
+   * hidden regardless of this prop.
+   *
+   * Requires the consumer to wrap the app in the matching wallet provider
+   * (see `EVMWalletProvider` and `SolanaWalletProvider` from `@stwd/react/wallet`).
+   */
+  showWallets?: boolean | { evm?: boolean; solana?: boolean };
   showGoogle?: boolean;
   showDiscord?: boolean;
   /** "card" adds bg/border/padding wrapper; "inline" renders with no container styling */

@@ -1,20 +1,87 @@
-import { useContext, useEffect, useRef, useState } from "react";
+import type { StewardAuthResult } from "@stwd/sdk";
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { DiscordIcon, EmailIcon, EthereumIcon, GoogleIcon, PasskeyIcon } from "../icons/index.js";
 import { StewardAuthContext } from "../provider.js";
 import type { StewardLoginProps } from "../types.js";
+import type { WalletLoginPanelProps } from "./WalletLogin.js";
 
 type LoginStep = "idle" | "loading" | "email-sent" | "error";
-type LoadingButton = "passkey" | "email" | "google" | "discord" | "siwe" | null;
+type LoadingButton =
+  | "passkey"
+  | "email"
+  | "google"
+  | "discord"
+  | "siwe"
+  | "wallet-evm"
+  | "wallet-sol"
+  | null;
+
+type WalletPanelComponent = React.ComponentType<WalletLoginPanelProps>;
 
 /**
- * StewardLogin — Drop-in auth widget for Steward-powered apps.
+ * Adapt a `<WalletLogin*>` panel `onSuccess` callback (which yields a full
+ * `StewardAuthResult` plus a `kind` discriminator) to the shape consumers of
+ * `<StewardLogin>` expect (`{ token, user }`). Exported for direct unit
+ * testing of the bubble contract.
+ */
+export function composeWalletSuccess(
+  onSuccess?: StewardLoginProps["onSuccess"],
+): NonNullable<WalletLoginPanelProps["onSuccess"]> {
+  return (result, _kind) => {
+    onSuccess?.({ token: result.token, user: result.user });
+  };
+}
+
+/**
+ * Adapt a `<WalletLogin*>` panel `onError` callback to the shape that
+ * `<StewardLogin>` consumers expect. Exported for direct unit testing.
+ */
+export function composeWalletError(
+  onError?: StewardLoginProps["onError"],
+): NonNullable<WalletLoginPanelProps["onError"]> {
+  return (err, _kind) => {
+    onError?.(err);
+  };
+}
+
+/**
+ * Lazily load a `<WalletLogin*>` panel only when it is actually needed.
  *
- * Must be used inside a <StewardProvider auth={{ baseUrl: "..." }}>.
+ * The panels live in `WalletLogin.EVM.tsx` / `WalletLogin.Solana.tsx` so their
+ * `wagmi` / `@solana/*` peer-dep imports stay off the root bundle. We mirror
+ * the pattern from `<WalletLogin>` itself: dynamic import, fallback while
+ * loading. We avoid `React.lazy` here because `renderToString` does not
+ * support Suspense.
+ */
+function useDynamicWalletPanel(
+  enabled: boolean,
+  loader: () => Promise<{ default: WalletPanelComponent }>,
+): WalletPanelComponent | null {
+  const [Panel, setPanel] = useState<WalletPanelComponent | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    loader().then((mod) => {
+      if (!cancelled) setPanel(() => mod.default);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, loader]);
+  return Panel;
+}
+
+/**
+ * StewardLogin, drop-in auth widget for Steward-powered apps.
+ *
+ * Must be used inside a `<StewardProvider auth={{ baseUrl: "..." }}>`.
  *
  * Supports:
- *   - Passkey (WebAuthn) — browser only
+ *   - Passkey (WebAuthn), browser only
  *   - Email magic link
- *   - SIWE (Sign-In With Ethereum) — requires caller to wire in a wallet
+ *   - Wallet sign-in (SIWE / SIWS), via `showWallets`. Requires the matching
+ *     wallet provider (see `EVMWalletProvider`, `SolanaWalletProvider` from
+ *     `@stwd/react/wallet`).
  *   - Google OAuth (popup)
  *   - Discord OAuth (popup)
  *
@@ -23,6 +90,7 @@ type LoadingButton = "passkey" | "email" | "google" | "discord" | "siwe" | null;
  *   <StewardLogin
  *     variant="card"
  *     title="Welcome back"
+ *     showWallets
  *     showGoogle
  *     showDiscord
  *     onSuccess={({ token }) => console.log("signed in:", token)}
@@ -35,6 +103,7 @@ export function StewardLogin({
   showPasskey = true,
   showEmail = true,
   showSIWE = false,
+  showWallets = false,
   showGoogle = true,
   showDiscord = true,
   variant = "card",
@@ -54,6 +123,34 @@ export function StewardLogin({
   // Track whether we've already fired onSuccess to avoid double-calling
   const didFireSuccess = useRef(false);
 
+  // Resolve `showWallets` into per-chain booleans. Done before any dynamic
+  // import hooks so loader hooks are called unconditionally.
+  const wantWalletEvm =
+    showWallets === true || (typeof showWallets === "object" && !!showWallets?.evm);
+  const wantWalletSolana =
+    showWallets === true || (typeof showWallets === "object" && !!showWallets?.solana);
+
+  // Provider feature-detect. Backend reports siwe/siws via GET /v1/auth/providers.
+  // If the backend explicitly says false, hide the corresponding button.
+  const providers = ctx?.providers;
+  const siweEnabled = wantWalletEvm && (providers?.siwe ?? true);
+  const siwsEnabled = wantWalletSolana && (providers?.siws ?? true);
+
+  const EVMPanel = useDynamicWalletPanel(
+    siweEnabled,
+    () =>
+      import("./WalletLogin.EVM.js") as Promise<{
+        default: WalletPanelComponent;
+      }>,
+  );
+  const SolanaPanel = useDynamicWalletPanel(
+    siwsEnabled,
+    () =>
+      import("./WalletLogin.Solana.js") as Promise<{
+        default: WalletPanelComponent;
+      }>,
+  );
+
   // When auth state changes to authenticated, fire onSuccess for redirect
   useEffect(() => {
     if (ctx?.isAuthenticated && ctx.session?.token && onSuccess && !didFireSuccess.current) {
@@ -62,6 +159,42 @@ export function StewardLogin({
       onSuccess({ token: ctx.session.token, user });
     }
   }, [ctx?.isAuthenticated, ctx?.session, onSuccess]);
+
+  // Wallet panel callbacks. Defined before any early return so hook order
+  // stays stable across the missing-context branch.
+  const handleWalletSuccess = useCallback(
+    (result: StewardAuthResult, kind: "evm" | "solana") => {
+      setLoadingBtn(null);
+      setStep("idle");
+      setErrorMsg(null);
+      composeWalletSuccess(onSuccess)(result, kind);
+    },
+    [onSuccess],
+  );
+
+  const handleWalletError = useCallback(
+    (err: Error, kind: "evm" | "solana") => {
+      setErrorMsg(err.message || "Wallet sign-in failed.");
+      setStep("error");
+      setLoadingBtn(null);
+      composeWalletError(onError)(err, kind);
+    },
+    [onError],
+  );
+
+  // Class overrides for the wallet panels so they slot into the card layout
+  // and look like siblings of the OAuth buttons.
+  const walletClasses = useMemo(
+    () => ({
+      column: "stwd-login__wallet-col",
+      heading: "stwd-login__wallet-heading",
+      status: "stwd-login__wallet-status",
+      signButton: "stwd-login__btn stwd-login__btn--wallet",
+      hint: "stwd-login__wallet-hint",
+      error: "stwd-login__error",
+    }),
+    [],
+  );
 
   if (!ctx) {
     return (
@@ -79,10 +212,10 @@ export function StewardLogin({
   }
 
   // Determine which OAuth providers to show based on API + props
-  const providers = ctx.providers;
   const googleEnabled = showGoogle && (providers?.google ?? false);
   const discordEnabled = showDiscord && (providers?.discord ?? false);
   const hasOAuth = googleEnabled || discordEnabled;
+  const hasWallet = siweEnabled || siwsEnabled;
 
   const handleError = (err: unknown) => {
     const error = err instanceof Error ? err : new Error(String(err));
@@ -102,8 +235,6 @@ export function StewardLogin({
     setLoadingBtn("passkey");
     setErrorMsg(null);
     try {
-      // If tenantId provided, pass through via OAuth config pattern
-      // The SDK will include it in the request body/headers
       const result = await ctx.signInWithPasskey(email.trim());
       onSuccess?.(result);
     } catch (err) {
@@ -247,8 +378,55 @@ export function StewardLogin({
         )}
       </div>
 
+      {/* Wallet sign-in. Renders inline panels (Approach A) so consumers reuse
+          the existing tested SIWE/SIWS flow. The wagmi / @solana/* peer-dep
+          imports stay isolated behind dynamic import. */}
+      {hasWallet && (
+        <div className="stwd-login__wallets" data-testid="stwd-login-wallets">
+          {siweEnabled &&
+            (EVMPanel ? (
+              <EVMPanel
+                classes={walletClasses}
+                onSuccess={handleWalletSuccess}
+                onError={handleWalletError}
+                label="Ethereum"
+                signLabel={(name) => (name ? `Sign in with ${name}` : "Sign in with EVM wallet")}
+              />
+            ) : (
+              <button
+                type="button"
+                className="stwd-login__btn stwd-login__btn--wallet"
+                disabled
+                data-testid="stwd-login-wallet-evm-loading"
+              >
+                <EthereumIcon size={18} />
+                <span>Loading EVM wallet...</span>
+              </button>
+            ))}
+          {siwsEnabled &&
+            (SolanaPanel ? (
+              <SolanaPanel
+                classes={walletClasses}
+                onSuccess={handleWalletSuccess}
+                onError={handleWalletError}
+                label="Solana"
+                signLabel={(name) => (name ? `Sign in with ${name}` : "Sign in with Solana wallet")}
+              />
+            ) : (
+              <button
+                type="button"
+                className="stwd-login__btn stwd-login__btn--wallet"
+                disabled
+                data-testid="stwd-login-wallet-sol-loading"
+              >
+                <span>Loading Solana wallet...</span>
+              </button>
+            ))}
+        </div>
+      )}
+
       {/* Divider */}
-      {hasOAuth && (showPasskey || showEmail) && (
+      {hasOAuth && (showPasskey || showEmail || hasWallet) && (
         <div className="stwd-login__divider">
           <span>or</span>
         </div>
@@ -291,8 +469,10 @@ export function StewardLogin({
         </div>
       )}
 
-      {/* SIWE (placeholder, requires wallet integration) */}
-      {showSIWE && (
+      {/* Legacy SIWE placeholder. Prefer `showWallets` instead. Kept for
+          backward compatibility with any consumer that was relying on the
+          (disabled) placeholder button. */}
+      {showSIWE && !hasWallet && (
         <div className="stwd-login__oauth">
           <button
             className="stwd-login__btn stwd-login__btn--siwe"
