@@ -1104,6 +1104,26 @@
   background: #4752c4;
 }
 
+.stwd-login__btn--github {
+  background: #1a1a1a;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+.stwd-login__btn--github:hover:not(:disabled) {
+  background: #242424;
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.stwd-login__btn--twitter {
+  background: #000000;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.stwd-login__btn--twitter:hover:not(:disabled) {
+  background: #0a0a0a;
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
 .stwd-login__btn--siwe {
   background: rgba(255, 255, 255, 0.06);
   color: var(--stwd-text, #fafafa);
@@ -1139,6 +1159,12 @@
 .stwd-login__oauth {
   display: flex;
   flex-direction: column;
+  gap: 0.5rem;
+}
+
+.stwd-login__oauth--grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 0.5rem;
 }
 

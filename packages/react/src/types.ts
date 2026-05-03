@@ -372,6 +372,8 @@ export interface StewardLoginProps {
   showWallets?: boolean | { evm?: boolean; solana?: boolean };
   showGoogle?: boolean;
   showDiscord?: boolean;
+  showGithub?: boolean;
+  showTwitter?: boolean;
   /** "card" adds bg/border/padding wrapper; "inline" renders with no container styling */
   variant?: "card" | "inline";
   /** Custom logo element rendered at top of the login widget */

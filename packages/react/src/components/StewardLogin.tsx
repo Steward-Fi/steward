@@ -1,6 +1,14 @@
 import type { StewardAuthResult } from "@stwd/sdk";
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { DiscordIcon, EmailIcon, EthereumIcon, GoogleIcon, PasskeyIcon } from "../icons/index.js";
+import {
+  DiscordIcon,
+  EmailIcon,
+  EthereumIcon,
+  GitHubIcon,
+  GoogleIcon,
+  PasskeyIcon,
+  XIcon,
+} from "../icons/index.js";
 import {
   getEvmWalletPanel,
   getSolanaWalletPanel,
@@ -16,6 +24,8 @@ type LoadingButton =
   | "email"
   | "google"
   | "discord"
+  | "github"
+  | "twitter"
   | "siwe"
   | "wallet-evm"
   | "wallet-sol"
@@ -111,6 +121,8 @@ export function StewardLogin({
   showWallets = false,
   showGoogle = true,
   showDiscord = true,
+  showGithub = true,
+  showTwitter = true,
   variant = "card",
   logo,
   title,
@@ -233,7 +245,9 @@ export function StewardLogin({
   // Determine which OAuth providers to show based on API + props
   const googleEnabled = showGoogle && (providers?.google ?? false);
   const discordEnabled = showDiscord && (providers?.discord ?? false);
-  const hasOAuth = googleEnabled || discordEnabled;
+  const githubEnabled = showGithub && (providers?.github ?? false);
+  const twitterEnabled = showTwitter && (providers?.twitter ?? false);
+  const hasOAuth = googleEnabled || discordEnabled || githubEnabled || twitterEnabled;
   // Wallet UI requires both: backend confirms support AND a panel loader is
   // registered (i.e. consumer imported `@stwd/react/wallet`). Without
   // a registered panel, rendering would show a permanently-disabled
@@ -285,7 +299,7 @@ export function StewardLogin({
     }
   };
 
-  const handleOAuth = async (provider: "google" | "discord") => {
+  const handleOAuth = async (provider: "google" | "discord" | "github" | "twitter") => {
     setStep("loading");
     setLoadingBtn(provider);
     setErrorMsg(null);
@@ -457,9 +471,17 @@ export function StewardLogin({
         </div>
       )}
 
-      {/* OAuth buttons */}
+      {/* OAuth buttons. Grid layout when 3+ providers, single column when
+          1-2. Each button gets its real provider glyph (no shared icon). */}
       {hasOAuth && (
-        <div className="stwd-login__oauth">
+        <div
+          className={
+            [googleEnabled, discordEnabled, githubEnabled, twitterEnabled].filter(Boolean).length >=
+            3
+              ? "stwd-login__oauth stwd-login__oauth--grid"
+              : "stwd-login__oauth"
+          }
+        >
           {googleEnabled && (
             <button
               className="stwd-login__btn stwd-login__btn--google"
@@ -472,7 +494,7 @@ export function StewardLogin({
               ) : (
                 <GoogleIcon size={18} />
               )}
-              <span>Continue with Google</span>
+              <span>Google</span>
             </button>
           )}
 
@@ -488,7 +510,39 @@ export function StewardLogin({
               ) : (
                 <DiscordIcon size={18} />
               )}
-              <span>Continue with Discord</span>
+              <span>Discord</span>
+            </button>
+          )}
+
+          {githubEnabled && (
+            <button
+              className="stwd-login__btn stwd-login__btn--github"
+              onClick={() => void handleOAuth("github")}
+              disabled={isLoading}
+              type="button"
+            >
+              {loadingBtn === "github" ? (
+                <span className="stwd-login__spinner" />
+              ) : (
+                <GitHubIcon size={18} />
+              )}
+              <span>GitHub</span>
+            </button>
+          )}
+
+          {twitterEnabled && (
+            <button
+              className="stwd-login__btn stwd-login__btn--twitter"
+              onClick={() => void handleOAuth("twitter")}
+              disabled={isLoading}
+              type="button"
+            >
+              {loadingBtn === "twitter" ? (
+                <span className="stwd-login__spinner" />
+              ) : (
+                <XIcon size={16} />
+              )}
+              <span>X</span>
             </button>
           )}
         </div>
