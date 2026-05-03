@@ -342,6 +342,26 @@ describe("<StewardLogin /> OAuth providers (google + discord + github + twitter)
     expect(html).toContain("stwd-login__oauth--grid");
   });
 
+  test("three enabled also triggers grid layout class", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: false,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {}),
+      ),
+    );
+    expect(html).toContain("stwd-login__oauth--grid");
+    expect(html).not.toContain("stwd-login__btn--twitter");
+  });
+
   test("only two enabled stays single-column (no grid class)", () => {
     const html = renderToString(
       wrap(

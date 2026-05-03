@@ -374,12 +374,6 @@ export interface StewardLoginProps {
   showDiscord?: boolean;
   showGithub?: boolean;
   showTwitter?: boolean;
-  /**
-   * Layout variant.
-   *  - "tabs" (default): tabbed UI separating passkey, email, oauth, and wallets.
-   *  - "stacked": legacy vertical stack (kept for consumers that depended on it).
-   */
-  layout?: "tabs" | "stacked";
   /** "card" adds bg/border/padding wrapper; "inline" renders with no container styling */
   variant?: "card" | "inline";
   /** Custom logo element rendered at top of the login widget */

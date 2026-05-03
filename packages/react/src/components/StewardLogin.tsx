@@ -476,7 +476,8 @@ export function StewardLogin({
       {hasOAuth && (
         <div
           className={
-            googleEnabled && discordEnabled && githubEnabled && twitterEnabled
+            [googleEnabled, discordEnabled, githubEnabled, twitterEnabled].filter(Boolean).length >=
+            3
               ? "stwd-login__oauth stwd-login__oauth--grid"
               : "stwd-login__oauth"
           }
