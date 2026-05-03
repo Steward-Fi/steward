@@ -5,12 +5,16 @@
 
 declare module "wagmi" {
   export type Config = unknown;
+  export type CreateConnectorFn = unknown;
+  export type Transport = unknown;
   export interface WagmiProviderProps {
     config: Config;
     reconnectOnMount?: boolean;
     children?: import("react").ReactNode;
   }
   export const WagmiProvider: import("react").FC<WagmiProviderProps>;
+  export function createConfig(config: Record<string, unknown>): Config;
+  export function http(url?: string): Transport;
   export function useAccount(): {
     address?: `0x${string}`;
     isConnected: boolean;
@@ -25,6 +29,12 @@ declare module "wagmi" {
 
 declare module "viem" {
   export type Address = `0x${string}`;
+  export interface Chain {
+    id: number;
+    name?: string;
+    [key: string]: unknown;
+  }
+  export type Transport = unknown;
 }
 
 declare module "@rainbow-me/rainbowkit" {
@@ -46,6 +56,28 @@ declare module "@rainbow-me/rainbowkit" {
     showBalance?: boolean;
   }
   export const ConnectButton: FC<ConnectButtonProps>;
+  export type CreateWalletFn = (params?: Record<string, unknown>) => unknown;
+  export interface WalletGroup {
+    groupName: string;
+    wallets: CreateWalletFn[];
+  }
+  export function connectorsForWallets(
+    walletList: WalletGroup[],
+    options: { appName: string; projectId: string },
+  ): unknown[];
+}
+
+declare module "@rainbow-me/rainbowkit/wallets" {
+  export const coinbaseWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const injectedWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const ledgerWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const metaMaskWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const phantomWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const rabbyWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const rainbowWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const safeWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const trustWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
+  export const walletConnectWallet: import("@rainbow-me/rainbowkit").CreateWalletFn;
 }
 
 declare module "@rainbow-me/rainbowkit/styles.css" {
@@ -107,8 +139,14 @@ declare module "@solana/wallet-adapter-react-ui/styles.css" {
 }
 
 declare module "@solana/wallet-adapter-wallets" {
+  export class Coin98WalletAdapter {}
+  export class CoinbaseWalletAdapter {}
+  export class LedgerWalletAdapter {}
+  export class MathWalletAdapter {}
   export class PhantomWalletAdapter {}
   export class SolflareWalletAdapter {}
+  export class TrezorWalletAdapter {}
+  export class TrustWalletAdapter {}
 }
 
 declare module "@solana/web3.js" {
