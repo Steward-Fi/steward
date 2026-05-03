@@ -144,7 +144,7 @@ describe("Wallet provider helpers", () => {
       "Phantom",
       "Solflare",
       "Coinbase Wallet",
-      "Trust Wallet",
+      "Trust",
       "MathWallet",
       "Coin98",
     ]);

@@ -16,20 +16,25 @@ import {
   trustWallet,
   walletConnectWallet,
 } from "@rainbow-me/rainbowkit/wallets";
+// Import each Solana adapter from its own subpath rather than from the
+// barrel `@solana/wallet-adapter-wallets`. The barrel re-exports every
+// adapter (including @solana/wallet-adapter-ledger and -trezor) so any
+// import from it forces Node ESM to resolve the entire dependency tree,
+// which fails with ERR_MODULE_NOT_FOUND because @ledgerhq/errors ships
+// extension-less imports incompatible with strict ESM resolution. By
+// going directly to subpackages we keep the SSR/Node import path clean.
+import { Coin98WalletAdapter } from "@solana/wallet-adapter-coin98";
+import { CoinbaseWalletAdapter } from "@solana/wallet-adapter-coinbase";
+import { MathWalletAdapter } from "@solana/wallet-adapter-mathwallet";
+import { PhantomWalletAdapter } from "@solana/wallet-adapter-phantom";
 import {
   ConnectionProvider,
   WalletProvider,
   type WalletProviderProps,
 } from "@solana/wallet-adapter-react";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
-import {
-  Coin98WalletAdapter,
-  CoinbaseWalletAdapter,
-  MathWalletAdapter,
-  PhantomWalletAdapter,
-  SolflareWalletAdapter,
-  TrustWalletAdapter,
-} from "@solana/wallet-adapter-wallets";
+import { SolflareWalletAdapter } from "@solana/wallet-adapter-solflare";
+import { TrustWalletAdapter } from "@solana/wallet-adapter-trust";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 import type { Chain, Transport } from "viem";

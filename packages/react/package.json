@@ -39,7 +39,13 @@
     "@solana/wallet-adapter-react-ui": "^0.9.0",
     "@solana/wallet-adapter-wallets": "^0.19.38",
     "@solana/web3.js": "^1.98.0",
-    "bs58": "^5.0.0"
+    "bs58": "^5.0.0",
+    "@solana/wallet-adapter-phantom": "^0.9.29",
+    "@solana/wallet-adapter-solflare": "^0.6.33",
+    "@solana/wallet-adapter-coinbase": "^0.1.23",
+    "@solana/wallet-adapter-trust": "^0.1.17",
+    "@solana/wallet-adapter-mathwallet": "^0.9.22",
+    "@solana/wallet-adapter-coin98": "^0.5.24"
   },
   "peerDependenciesMeta": {
     "wagmi": {
@@ -68,6 +74,24 @@
     },
     "bs58": {
       "optional": true
+    },
+    "@solana/wallet-adapter-phantom": {
+      "optional": true
+    },
+    "@solana/wallet-adapter-solflare": {
+      "optional": true
+    },
+    "@solana/wallet-adapter-coinbase": {
+      "optional": true
+    },
+    "@solana/wallet-adapter-trust": {
+      "optional": true
+    },
+    "@solana/wallet-adapter-mathwallet": {
+      "optional": true
+    },
+    "@solana/wallet-adapter-coin98": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -84,7 +108,13 @@
     "@solana/wallet-adapter-react-ui": "^0.9.0",
     "@solana/wallet-adapter-wallets": "^0.19.38",
     "@solana/web3.js": "^1.98.0",
-    "bs58": "^5.0.0"
+    "bs58": "^5.0.0",
+    "@solana/wallet-adapter-phantom": "^0.9.29",
+    "@solana/wallet-adapter-solflare": "^0.6.33",
+    "@solana/wallet-adapter-coinbase": "^0.1.23",
+    "@solana/wallet-adapter-trust": "^0.1.17",
+    "@solana/wallet-adapter-mathwallet": "^0.9.22",
+    "@solana/wallet-adapter-coin98": "^0.5.24"
   },
   "keywords": [
     "steward",
