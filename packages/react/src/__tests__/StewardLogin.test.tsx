@@ -37,6 +37,8 @@ type AuthCtx = {
   providers: null | {
     google?: boolean;
     discord?: boolean;
+    github?: boolean;
+    twitter?: boolean;
     siwe?: boolean;
     siws?: boolean;
   };
@@ -64,7 +66,7 @@ function baseCtx(overrides: Partial<AuthCtx> = {}): AuthCtx {
     isLoading: false,
     user: null,
     session: null,
-    providers: { google: true, discord: true, siwe: true, siws: true },
+    providers: { google: true, discord: true, github: true, twitter: true, siwe: true, siws: true },
     isProvidersLoading: false,
     signOut: () => {},
     getToken: () => null,
@@ -269,6 +271,96 @@ describe("<StewardLogin /> showWallets prop", () => {
       registerEvmWalletPanel({ load: async () => ({ default: dummyPanel }) });
       registerSolanaWalletPanel({ load: async () => ({ default: dummyPanel }) });
     }
+  });
+});
+
+describe("<StewardLogin /> OAuth providers (google + discord + github + twitter)", () => {
+  test("all four OAuth buttons render when backend reports all four enabled", () => {
+    const html = renderToString(wrap(baseCtx({}), React.createElement(StewardLogin, {})));
+    expect(html).toContain("stwd-login__btn--google");
+    expect(html).toContain("stwd-login__btn--discord");
+    expect(html).toContain("stwd-login__btn--github");
+    expect(html).toContain("stwd-login__btn--twitter");
+  });
+
+  test("providers.github=false hides GitHub button", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: true,
+            discord: true,
+            github: false,
+            twitter: true,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {}),
+      ),
+    );
+    expect(html).not.toContain("stwd-login__btn--github");
+    expect(html).toContain("stwd-login__btn--twitter");
+  });
+
+  test("providers.twitter=false hides X button", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: false,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {}),
+      ),
+    );
+    expect(html).toContain("stwd-login__btn--github");
+    expect(html).not.toContain("stwd-login__btn--twitter");
+  });
+
+  test("showGithub={false} hides GitHub even if backend enabled it", () => {
+    const html = renderToString(
+      wrap(baseCtx({}), React.createElement(StewardLogin, { showGithub: false })),
+    );
+    expect(html).not.toContain("stwd-login__btn--github");
+  });
+
+  test("showTwitter={false} hides X even if backend enabled it", () => {
+    const html = renderToString(
+      wrap(baseCtx({}), React.createElement(StewardLogin, { showTwitter: false })),
+    );
+    expect(html).not.toContain("stwd-login__btn--twitter");
+  });
+
+  test("all four enabled triggers grid layout class", () => {
+    const html = renderToString(wrap(baseCtx({}), React.createElement(StewardLogin, {})));
+    expect(html).toContain("stwd-login__oauth--grid");
+  });
+
+  test("only two enabled stays single-column (no grid class)", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: true,
+            discord: true,
+            github: false,
+            twitter: false,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {}),
+      ),
+    );
+    expect(html).toContain("stwd-login__btn--google");
+    expect(html).toContain("stwd-login__btn--discord");
+    expect(html).not.toContain("stwd-login__oauth--grid");
   });
 });
 

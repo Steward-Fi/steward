@@ -135,6 +135,7 @@ describe("getProviders", () => {
     google: true,
     discord: false,
     github: false,
+    twitter: false,
     oauth: ["google"],
   };
 
@@ -163,6 +164,7 @@ describe("getProviders", () => {
       google: false,
       discord: false,
       github: false,
+      twitter: false,
       oauth: [],
     });
     const second = await auth.getProviders();

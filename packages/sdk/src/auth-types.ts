@@ -140,6 +140,7 @@ export interface StewardProviders {
   google: boolean;
   discord: boolean;
   github: boolean;
+  twitter: boolean;
   /** List of all enabled OAuth provider names */
   oauth: string[];
 }
