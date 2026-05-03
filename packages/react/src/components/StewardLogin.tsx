@@ -305,7 +305,7 @@ export function StewardLogin({
     setErrorMsg(null);
     try {
       if (typeof ctx.signInWithOAuth !== "function") {
-        throw new Error("oauth unavailable. update @stwd/sdk");
+        throw new Error("OAuth unavailable. update @stwd/sdk");
       }
       const result = await ctx.signInWithOAuth(provider, tenantId ? { tenantId } : undefined);
       onSuccess?.(result);
@@ -493,7 +493,7 @@ export function StewardLogin({
               ) : (
                 <GoogleIcon size={18} />
               )}
-              <span>google</span>
+              <span>Google</span>
             </button>
           )}
 
@@ -509,7 +509,7 @@ export function StewardLogin({
               ) : (
                 <DiscordIcon size={18} />
               )}
-              <span>discord</span>
+              <span>Discord</span>
             </button>
           )}
 
@@ -525,7 +525,7 @@ export function StewardLogin({
               ) : (
                 <GitHubIcon size={18} />
               )}
-              <span>github</span>
+              <span>GitHub</span>
             </button>
           )}
 
@@ -541,7 +541,7 @@ export function StewardLogin({
               ) : (
                 <XIcon size={16} />
               )}
-              <span>x</span>
+              <span>X</span>
             </button>
           )}
         </div>

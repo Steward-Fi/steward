@@ -378,7 +378,7 @@ export interface StewardLoginProps {
   variant?: "card" | "inline";
   /** Custom logo element rendered at top of the login widget */
   logo?: React.ReactNode;
-  /** Title text (default: "Sign in") */
+  /** Title text (e.g. "sign in", "welcome back"). */
   title?: string;
   /** Subtitle text below the title */
   subtitle?: string;

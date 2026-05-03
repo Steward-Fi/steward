@@ -97,9 +97,7 @@ export default function WalletLoginEVM({
           </button>
         </>
       )}
-      {!isConnected && (
-        <p className={cx("stwd-wallet-hint", classes?.hint)}>connect a wallet</p>
-      )}
+      {!isConnected && <p className={cx("stwd-wallet-hint", classes?.hint)}>connect a wallet</p>}
       {error && (
         <div className={cx("stwd-wallet-error", classes?.error)} role="alert">
           {error}

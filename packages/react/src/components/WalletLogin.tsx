@@ -1,7 +1,6 @@
 import type { StewardAuthResult } from "@stwd/sdk";
 import React, { useEffect, useMemo, useState } from "react";
 
-
 export type WalletChains = "evm" | "solana" | "both";
 
 export interface WalletLoginClassOverrides {
@@ -79,7 +78,7 @@ function useDynamicPanel(
 }
 
 /**
- * WalletLogin, first-class Steward wallet sign-in.
+ * WalletLogin: first-class Steward wallet sign-in.
  *
  * Supports EVM (wagmi + RainbowKit) and Solana (@solana/wallet-adapter-react).
  * Must live inside a `<StewardProvider auth={...}>` and, for each enabled chain,

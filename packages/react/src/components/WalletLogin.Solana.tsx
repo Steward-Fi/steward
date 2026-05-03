@@ -25,9 +25,7 @@ export default function WalletLoginSolana({
       return;
     }
     if (!ctx.signInWithSolana) {
-      const err = new Error(
-        "solana sign-in unavailable. upgrade @stwd/sdk to >= 0.8.0",
-      );
+      const err = new Error("solana sign-in unavailable. upgrade @stwd/sdk to >= 0.8.0");
       setError(err.message);
       onError?.(err, "solana");
       return;
