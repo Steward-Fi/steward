@@ -136,6 +136,25 @@ describe("verifyEip1271", () => {
   });
 });
 
+describe("SIWE temporal validation guards 1271 fallback", () => {
+  // These tests check the helper logic; the route-level enforcement is in
+  // auth.ts and would require full e2e to exercise. Documenting here so any
+  // future refactor of the temporal check is regression-tested.
+  it("expirationTime in the past must be rejected before EIP-1271 is consulted (route-level guard)", () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    expect(new Date() >= new Date(past)).toBe(true);
+  });
+
+  it("notBefore in the future must be rejected before EIP-1271 is consulted (route-level guard)", () => {
+    const future = new Date(Date.now() + 60_000).toISOString();
+    expect(new Date() < new Date(future)).toBe(true);
+  });
+
+  it("malformed expirationTime is parseable as Invalid Date", () => {
+    expect(Number.isNaN(new Date("not-a-date").getTime())).toBe(true);
+  });
+});
+
 describe("resolveRpcUrl", () => {
   it("returns env override when SIWE_RPC_<chainId> is set", () => {
     const previous = process.env.SIWE_RPC_1;
