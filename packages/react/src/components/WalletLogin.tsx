@@ -1,8 +1,6 @@
 import type { StewardAuthResult } from "@stwd/sdk";
 import React, { useEffect, useMemo, useState } from "react";
 
-// ─── Props ───────────────────────────────────────────────────────────────────
-
 export type WalletChains = "evm" | "solana" | "both";
 
 export interface WalletLoginClassOverrides {
@@ -14,11 +12,11 @@ export interface WalletLoginClassOverrides {
   heading?: string;
   /** Status line under the connector (address, chain name). */
   status?: string;
-  /** The "Sign in with..." action button. */
+  /** The sign action button. */
   signButton?: string;
   /** Inline error row. */
   error?: string;
-  /** Muted hint text ("Connect a wallet to continue"). */
+  /** Muted hint text ("connect a wallet"). */
   hint?: string;
 }
 
@@ -33,13 +31,13 @@ export interface WalletLoginProps {
   className?: string;
   /** Fine-grained className overrides for internal slots. */
   classes?: WalletLoginClassOverrides;
-  /** Label for the EVM column. Default: "Ethereum". */
+  /** Label for the EVM column. Default: "ethereum". */
   evmLabel?: string;
-  /** Label for the Solana column. Default: "Solana". */
+  /** Label for the Solana column. Default: "solana". */
   solanaLabel?: string;
-  /** Override the EVM sign button label. Default: "Sign in with {wallet}". */
+  /** Override the EVM sign button label. Default: "sign in with {wallet}". */
   evmSignLabel?: (walletName: string | undefined) => string;
-  /** Override the Solana sign button label. Default: "Sign in with {wallet}". */
+  /** Override the Solana sign button label. Default: "sign in with {wallet}". */
   solanaSignLabel?: (walletName: string | undefined) => string;
 }
 
@@ -80,7 +78,7 @@ function useDynamicPanel(
 }
 
 /**
- * WalletLogin, first-class Steward wallet sign-in.
+ * WalletLogin: first-class Steward wallet sign-in.
  *
  * Supports EVM (wagmi + RainbowKit) and Solana (@solana/wallet-adapter-react).
  * Must live inside a `<StewardProvider auth={...}>` and, for each enabled chain,
@@ -98,8 +96,8 @@ export function WalletLogin({
   onError,
   className,
   classes,
-  evmLabel = "Ethereum",
-  solanaLabel = "Solana",
+  evmLabel = "ethereum",
+  solanaLabel = "solana",
   evmSignLabel,
   solanaSignLabel,
 }: WalletLoginProps) {

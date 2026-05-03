@@ -162,19 +162,19 @@ describe("EVM panel (direct render)", () => {
     const html = renderToString(
       wrap(
         React.createElement(WalletLoginEVM, {
-          label: "Ethereum",
+          label: "ethereum",
         }),
       ),
     );
-    expect(html).toContain("Ethereum");
+    expect(html).toContain("ethereum");
     expect(html).toContain("[ConnectButton]");
-    expect(html).toContain("Sign in with MetaMask");
+    expect(html).toContain("sign in with MetaMask");
   });
 
   test("renders hint when not connected", () => {
     mockEvmConnected = false;
-    const html = renderToString(wrap(React.createElement(WalletLoginEVM, { label: "Ethereum" })));
-    expect(html).toContain("Connect a wallet to continue");
+    const html = renderToString(wrap(React.createElement(WalletLoginEVM, { label: "ethereum" })));
+    expect(html).toContain("connect a wallet");
   });
 
   test("signInWithSIWE is invoked via panel signer callback", async () => {
@@ -204,13 +204,13 @@ describe("Solana panel (direct render)", () => {
     const html = renderToString(
       wrap(
         React.createElement(WalletLoginSolana, {
-          label: "Solana",
+          label: "solana",
         }),
       ),
     );
-    expect(html).toContain("Solana");
+    expect(html).toContain("solana");
     expect(html).toContain("[WalletMultiButton]");
-    expect(html).toContain("Sign in with Phantom");
+    expect(html).toContain("sign in with Phantom");
   });
 
   test("signInWithSolana is invoked via panel signer callback", async () => {
@@ -230,7 +230,7 @@ describe("Solana panel (direct render)", () => {
 
   test("sign button is disabled when signInWithSolana is not on context", () => {
     const html = renderToString(
-      wrap(React.createElement(WalletLoginSolana, { label: "Solana" }), {
+      wrap(React.createElement(WalletLoginSolana, { label: "solana" }), {
         signInWithSolana: undefined,
       }),
     );

@@ -59,7 +59,7 @@ describe("<StewardLoginWithWallets />", () => {
   test("wraps both EVM and Solana providers by default and renders <StewardLogin>", () => {
     const html = renderToString(
       React.createElement(StewardLoginWithWallets, {
-        title: "Sign in",
+        title: "sign in",
         evm: { projectId: "test-pid" },
       }),
     );
@@ -124,11 +124,11 @@ describe("<StewardLoginWithWallets />", () => {
   test("forwards StewardLogin props (title)", () => {
     const html = renderToString(
       React.createElement(StewardLoginWithWallets, {
-        title: "Custom Title",
+        title: "custom title",
         evm: { projectId: "p" },
       }),
     );
-    expect(html).toContain('data-title="Custom Title"');
+    expect(html).toContain('data-title="custom title"');
   });
 
   test("explicit showWallets prop wins over the auto default", () => {

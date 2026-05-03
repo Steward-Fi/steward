@@ -1,10 +1,10 @@
 /**
- * StewardLogin tests — Rules-of-Hooks regression coverage.
+ * StewardLogin tests: rules-of-hooks regression coverage.
  *
  * The previously-fixed bug placed `useRef` + `useEffect` after an early
  * return on `!ctx`. This test locks in the correct structure by mounting
- * the component in each branch — missing auth context, signed-in, and
- * signed-out — and asserting no throw.
+ * the component in each branch (missing auth context, signed-in, and
+ * signed-out) and asserting no throw.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -97,7 +97,7 @@ function wrap(value: AuthCtx | null, node: React.ReactNode) {
   );
 }
 
-describe("<StewardLogin /> — rules-of-hooks branch coverage", () => {
+describe("<StewardLogin /> rules-of-hooks branch coverage", () => {
   test("mounts when no auth context is present (renders inline error)", () => {
     // Provider missing → ctx is null → component shows error message.
     // Critically, this path must still call all hooks unconditionally before
@@ -110,11 +110,11 @@ describe("<StewardLogin /> — rules-of-hooks branch coverage", () => {
     const html = renderToString(
       wrap(
         baseCtx({ isAuthenticated: false }),
-        React.createElement(StewardLogin, { title: "Welcome" }),
+        React.createElement(StewardLogin, { title: "welcome" }),
       ),
     );
-    expect(html).toContain("Welcome");
-    expect(html).toContain("Sign in with Passkey");
+    expect(html).toContain("welcome");
+    expect(html).toContain("passkey");
   });
 
   test("mounts in signed-in branch (renders nothing)", () => {
@@ -140,7 +140,7 @@ describe("<StewardLogin /> — rules-of-hooks branch coverage", () => {
   });
 
   test("hook order is stable across ctx transitions", () => {
-    // Render three different ctx shapes — with the old bug (hooks after
+    // Render three different ctx shapes. With the old bug (hooks after
     // early return), the null ctx path would have called fewer hooks than
     // the authed path. Each render is fresh (SSR), but the invariant we
     // care about is that hook calls are unconditional. If they weren't,
