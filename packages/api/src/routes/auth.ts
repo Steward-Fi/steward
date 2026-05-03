@@ -79,6 +79,7 @@ import bs58 from "bs58";
 import { and, eq, gte, lt } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { generateNonce, SiweMessage } from "siwe";
+import { verifyEip1271 } from "../services/eip1271";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -1188,10 +1189,26 @@ auth.post("/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
   }
 
+  // Try EOA verification first (siwe uses ECDSA recover internally). If that
+  // fails, fall back to EIP-1271 for smart contract wallets (Safes, Argent, etc).
+  let eoaVerified = false;
   try {
     await siweMessage.verify({ signature: body.signature });
+    eoaVerified = true;
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid signature" }, 401);
+    eoaVerified = false;
+  }
+
+  if (!eoaVerified) {
+    const eip1271Result = await verifyEip1271({
+      address: siweMessage.address as `0x${string}`,
+      message: body.message,
+      signature: body.signature as `0x${string}`,
+      chainId: siweMessage.chainId,
+    });
+    if (!eip1271Result.ok) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid signature" }, 401);
+    }
   }
 
   const address = siweMessage.address.toLowerCase();
