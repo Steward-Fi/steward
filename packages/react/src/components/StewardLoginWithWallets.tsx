@@ -80,22 +80,26 @@ export interface StewardLoginWithWalletsProps extends StewardLoginProps {
   enable?: { evm?: boolean; solana?: boolean };
 }
 
-// Bundlers (Next, Vite, etc) only inline STATIC references to public env
-// vars like `process.env.NEXT_PUBLIC_*`. A dynamic lookup such as
-// `process.env[key]` is left as a runtime read, which fails in browsers
-// because `process` does not exist there. We read each var individually
-// and guard `process` for environments without it.
+// Bundlers (Next, Vite, esbuild, etc) inline public env vars at build
+// time but ONLY when they see the bare member expression
+// `process.env.NEXT_PUBLIC_X`. Webpack's DefinePlugin and Vite's `define`
+// match a MemberExpression AST node; an OptionalMemberExpression
+// (`process?.env?.X`) is a different node shape and is left alone.
+// We therefore reference each var via plain `process.env.X` and guard
+// `process` itself with `typeof` so this still works in browser-only
+// runtimes that lack a `process` global.
 //
-// Build-time replacement happens at the `process.env.X` references below,
-// so the resolved string ends up baked into the consumer's client bundle.
+// In server (Node) builds: this is just a runtime env read.
+// In bundler-targeted client builds: Webpack/Vite/esbuild rewrite each
+// `process.env.NEXT_PUBLIC_X` to the literal string at compile time, so
+// the value is baked into the consumer's bundle.
 
-declare const process: { env?: Record<string, string | undefined> } | undefined;
+declare const process: { env: Record<string, string | undefined> } | undefined;
 
 function readWalletConnectProjectIdEnv(): string | undefined {
   try {
-    return typeof process !== "undefined"
-      ? process?.env?.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
-      : undefined;
+    if (typeof process === "undefined") return undefined;
+    return process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID;
   } catch {
     return undefined;
   }
@@ -103,7 +107,8 @@ function readWalletConnectProjectIdEnv(): string | undefined {
 
 function readSolanaRpcEnv(): string | undefined {
   try {
-    return typeof process !== "undefined" ? process?.env?.NEXT_PUBLIC_SOLANA_RPC_URL : undefined;
+    if (typeof process === "undefined") return undefined;
+    return process.env.NEXT_PUBLIC_SOLANA_RPC_URL;
   } catch {
     return undefined;
   }
