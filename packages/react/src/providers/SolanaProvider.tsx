@@ -15,7 +15,6 @@
 
 import { Coin98WalletAdapter } from "@solana/wallet-adapter-coin98";
 import { CoinbaseWalletAdapter } from "@solana/wallet-adapter-coinbase";
-import { MathWalletAdapter } from "@solana/wallet-adapter-mathwallet";
 import { PhantomWalletAdapter } from "@solana/wallet-adapter-phantom";
 import {
   ConnectionProvider,
@@ -49,7 +48,6 @@ export function createDefaultSolanaWallets(): WalletProviderProps["wallets"] {
     new SolflareWalletAdapter(),
     new CoinbaseWalletAdapter(),
     new TrustWalletAdapter(),
-    new MathWalletAdapter(),
     new Coin98WalletAdapter(),
   ];
 }

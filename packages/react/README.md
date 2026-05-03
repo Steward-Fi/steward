@@ -77,7 +77,7 @@ bun add @solana/wallet-adapter-react @solana/wallet-adapter-react-ui \
 # Solana wallet adapters (the curated default set)
 bun add @solana/wallet-adapter-phantom @solana/wallet-adapter-solflare \
         @solana/wallet-adapter-coinbase @solana/wallet-adapter-trust \
-        @solana/wallet-adapter-mathwallet @solana/wallet-adapter-coin98
+        @solana/wallet-adapter-coin98
 ```
 
 All wallet packages are declared as optional peer dependencies. Install only the families you need. `@tanstack/react-query` is required whenever you use `EVMWalletProvider` or anything wagmi downstream.

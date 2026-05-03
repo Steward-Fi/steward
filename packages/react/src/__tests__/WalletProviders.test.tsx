@@ -139,13 +139,12 @@ describe("Wallet provider helpers", () => {
 
   test("DEFAULT_SOLANA_WALLETS includes Phantom, Solflare, and software-only coverage", () => {
     expect(Array.isArray(DEFAULT_SOLANA_WALLETS)).toBe(true);
-    expect(DEFAULT_SOLANA_WALLETS.length).toBeGreaterThanOrEqual(6);
+    expect(DEFAULT_SOLANA_WALLETS.length).toBeGreaterThanOrEqual(5);
     expect(walletNames(DEFAULT_SOLANA_WALLETS)).toEqual([
       "Phantom",
       "Solflare",
       "Coinbase Wallet",
       "Trust",
-      "MathWallet",
       "Coin98",
     ]);
   });
