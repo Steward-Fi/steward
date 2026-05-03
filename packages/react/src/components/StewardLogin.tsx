@@ -104,7 +104,7 @@ function useDynamicWalletPanel(
  * <StewardProvider client={client} agentId="..." auth={{ baseUrl: "https://api.steward.fi" }}>
  *   <StewardLogin
  *     variant="card"
- *     title="Welcome back"
+ *     title="welcome back"
  *     showWallets
  *     showGoogle
  *     showDiscord
@@ -205,7 +205,7 @@ export function StewardLogin({
 
   const handleWalletError = useCallback(
     (err: Error, kind: "evm" | "solana") => {
-      setErrorMsg(err.message || "Wallet sign-in failed.");
+      setErrorMsg(err.message || "wallet sign-in failed");
       setStep("error");
       setLoadingBtn(null);
       composeWalletError(onError)(err, kind);
@@ -231,7 +231,7 @@ export function StewardLogin({
     return (
       <div className={`stwd-login stwd-login--error ${className ?? ""}`}>
         <p className="stwd-login__error">
-          StewardLogin must be used inside a &lt;StewardProvider&gt; with an <code>auth</code> prop.
+          StewardLogin needs a &lt;StewardProvider&gt; with an <code>auth</code> prop.
         </p>
       </div>
     );
@@ -266,7 +266,7 @@ export function StewardLogin({
 
   const handlePasskey = async () => {
     if (!email.trim()) {
-      setErrorMsg("Enter your email address first.");
+      setErrorMsg("enter your email first");
       setStep("error");
       return;
     }
@@ -283,7 +283,7 @@ export function StewardLogin({
 
   const handleEmail = async () => {
     if (!email.trim()) {
-      setErrorMsg("Enter your email address.");
+      setErrorMsg("enter your email");
       setStep("error");
       return;
     }
@@ -305,7 +305,7 @@ export function StewardLogin({
     setErrorMsg(null);
     try {
       if (typeof ctx.signInWithOAuth !== "function") {
-        throw new Error("OAuth not available. Update @stwd/sdk.");
+        throw new Error("oauth unavailable. update @stwd/sdk");
       }
       const result = await ctx.signInWithOAuth(provider, tenantId ? { tenantId } : undefined);
       onSuccess?.(result);
@@ -321,11 +321,10 @@ export function StewardLogin({
     return (
       <div className={`stwd-login ${variantClass} stwd-login--sent ${className ?? ""}`}>
         <div className="stwd-login__notice">
-          <span className="stwd-login__notice-icon">✉️</span>
           <p>
-            Magic link sent to <strong>{email}</strong>
+            link sent to <strong>{email}</strong>
           </p>
-          <p className="stwd-login__notice-sub">Check your inbox and click the link to sign in.</p>
+          <p className="stwd-login__notice-sub">check your inbox, then tap the link</p>
         </div>
         <button
           className="stwd-login__btn stwd-login__btn--back"
@@ -335,7 +334,7 @@ export function StewardLogin({
           }}
           type="button"
         >
-          ← Back to login
+          back to login
         </button>
       </div>
     );
@@ -354,7 +353,7 @@ export function StewardLogin({
             (() => {
               const tenant = ctx.tenants.find((t) => t.tenantId === tenantId);
               return tenant ? (
-                <p className="stwd-login__tenant-name">Signing in to {tenant.tenantName}</p>
+                <p className="stwd-login__tenant-name">signing in to {tenant.tenantName}</p>
               ) : null;
             })()}
         </div>
@@ -377,7 +376,7 @@ export function StewardLogin({
             }}
             disabled={isLoading}
             autoComplete="email webauthn"
-            aria-label="Email address"
+            aria-label="email"
           />
         </div>
       )}
@@ -396,7 +395,7 @@ export function StewardLogin({
             ) : (
               <PasskeyIcon size={18} />
             )}
-            <span>Sign in with Passkey</span>
+            <span>passkey</span>
           </button>
         )}
 
@@ -412,7 +411,7 @@ export function StewardLogin({
             ) : (
               <EmailIcon size={18} />
             )}
-            <span>Send Magic Link</span>
+            <span>email me a link</span>
           </button>
         )}
       </div>
@@ -428,8 +427,8 @@ export function StewardLogin({
                 classes={walletClasses}
                 onSuccess={handleWalletSuccess}
                 onError={handleWalletError}
-                label="Ethereum"
-                signLabel={(name) => (name ? `Sign in with ${name}` : "Sign in with EVM wallet")}
+                label="ethereum"
+                signLabel={(name) => (name ? `sign in with ${name}` : "sign in with EVM wallet")}
               />
             ) : (
               <button
@@ -439,7 +438,7 @@ export function StewardLogin({
                 data-testid="stwd-login-wallet-evm-loading"
               >
                 <EthereumIcon size={18} />
-                <span>Loading EVM wallet...</span>
+                <span>loading EVM wallet...</span>
               </button>
             ))}
           {solanaReady &&
@@ -448,8 +447,8 @@ export function StewardLogin({
                 classes={walletClasses}
                 onSuccess={handleWalletSuccess}
                 onError={handleWalletError}
-                label="Solana"
-                signLabel={(name) => (name ? `Sign in with ${name}` : "Sign in with Solana wallet")}
+                label="solana"
+                signLabel={(name) => (name ? `sign in with ${name}` : "sign in with solana wallet")}
               />
             ) : (
               <button
@@ -458,7 +457,7 @@ export function StewardLogin({
                 disabled
                 data-testid="stwd-login-wallet-sol-loading"
               >
-                <span>Loading Solana wallet...</span>
+                <span>loading solana wallet...</span>
               </button>
             ))}
         </div>
@@ -494,7 +493,7 @@ export function StewardLogin({
               ) : (
                 <GoogleIcon size={18} />
               )}
-              <span>Google</span>
+              <span>google</span>
             </button>
           )}
 
@@ -510,7 +509,7 @@ export function StewardLogin({
               ) : (
                 <DiscordIcon size={18} />
               )}
-              <span>Discord</span>
+              <span>discord</span>
             </button>
           )}
 
@@ -526,7 +525,7 @@ export function StewardLogin({
               ) : (
                 <GitHubIcon size={18} />
               )}
-              <span>GitHub</span>
+              <span>github</span>
             </button>
           )}
 
@@ -542,7 +541,7 @@ export function StewardLogin({
               ) : (
                 <XIcon size={16} />
               )}
-              <span>X</span>
+              <span>x</span>
             </button>
           )}
         </div>
@@ -557,10 +556,10 @@ export function StewardLogin({
             className="stwd-login__btn stwd-login__btn--siwe"
             disabled={true}
             type="button"
-            title="Connect your wallet to sign in with Ethereum"
+            title="connect a wallet to sign in"
           >
             <EthereumIcon size={18} />
-            <span>Sign in with Ethereum</span>
+            <span>sign in with ethereum</span>
           </button>
         </div>
       )}

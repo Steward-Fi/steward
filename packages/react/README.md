@@ -158,7 +158,7 @@ export default function Login() {
   return (
     <StewardProvider auth={{ baseUrl: "https://api.steward.fi" }}>
       <StewardLoginWithWallets
-        title="Sign in"
+        title="sign in"
         showPasskey
         showEmail
         showGoogle
@@ -252,8 +252,8 @@ export function SolanaLogin() {
 | `onError` | `(error, kind) => void` | - | Fires on wallet reject, network errors, etc. |
 | `className` | `string` | - | Appended to the root element. |
 | `classes` | `WalletLoginClassOverrides` | - | Per-slot className overrides. |
-| `evmLabel` | `string` | `"Ethereum"` | Column heading for EVM. |
-| `solanaLabel` | `string` | `"Solana"` | Column heading for Solana. |
+| `evmLabel` | `string` | `"ethereum"` | Column heading for EVM. |
+| `solanaLabel` | `string` | `"solana"` | Column heading for Solana. |
 | `evmSignLabel` | `(walletName) => string` | - | Override the sign button label. |
 | `solanaSignLabel` | `(walletName) => string` | - | Override the sign button label. |
 

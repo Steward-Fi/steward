@@ -29,13 +29,13 @@ export default function WalletLoginEVM({
   const handleSignIn = useCallback(async () => {
     setError(null);
     if (!ctx) {
-      const err = new Error("WalletLogin must be used inside <StewardProvider auth={...}>.");
+      const err = new Error("WalletLogin needs <StewardProvider auth={...}>.");
       setError(err.message);
       onError?.(err, "evm");
       return;
     }
     if (!address) {
-      const err = new Error("No EVM wallet connected.");
+      const err = new Error("no EVM wallet connected");
       setError(err.message);
       onError?.(err, "evm");
       return;
@@ -46,7 +46,7 @@ export default function WalletLoginEVM({
       onSuccess?.(result, "evm");
     } catch (e) {
       const err = e instanceof Error ? e : new Error(String(e));
-      setError(err.message || "Sign-in failed.");
+      setError(err.message || "sign-in failed");
       onError?.(err, "evm");
     } finally {
       setBusy(false);
@@ -57,15 +57,15 @@ export default function WalletLoginEVM({
   const labelText = signLabel
     ? signLabel(walletName)
     : walletName
-      ? `Sign in with ${walletName}`
-      : "Sign in";
+      ? `sign in with ${walletName}`
+      : "sign in";
 
   return (
     <div className={cx("stwd-wallet-col", classes?.column)}>
       <h3 className={cx("stwd-wallet-heading", classes?.heading)}>{label}</h3>
       <div className="stwd-wallet-connector">
         <ConnectButton
-          label="Connect wallet"
+          label="connect wallet"
           accountStatus="address"
           chainStatus="name"
           showBalance={false}
@@ -85,7 +85,7 @@ export default function WalletLoginEVM({
             onClick={handleSignIn}
             disabled={busy}
           >
-            {busy ? "Signing…" : labelText}
+            {busy ? "signing..." : labelText}
           </button>
           <button
             type="button"
@@ -93,12 +93,12 @@ export default function WalletLoginEVM({
             onClick={() => disconnect()}
             disabled={busy}
           >
-            Disconnect
+            disconnect
           </button>
         </>
       )}
       {!isConnected && (
-        <p className={cx("stwd-wallet-hint", classes?.hint)}>Connect a wallet to continue.</p>
+        <p className={cx("stwd-wallet-hint", classes?.hint)}>connect a wallet</p>
       )}
       {error && (
         <div className={cx("stwd-wallet-error", classes?.error)} role="alert">
