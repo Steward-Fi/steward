@@ -143,6 +143,54 @@ export function EvmLogin() {
 
 If you render `WalletLogin` directly, it is already the wallet UI. To enable wallet sign-in inside the broader `<StewardLogin>` modal (alongside passkey, email, OAuth), pass the `showWallets` prop on `<StewardLogin>` instead.
 
+### Drop-in: `<StewardLoginWithWallets>`
+
+The simplest possible wallet-login surface, one component, no provider wiring. Bundles `<EVMWalletProvider>` + `<SolanaWalletProvider>` and renders `<StewardLogin showWallets>` inside. All `<StewardLogin>` props (passkey, email, OAuth, title, callbacks, etc) are forwarded.
+
+```tsx
+import { StewardProvider } from "@stwd/react";
+import { StewardLoginWithWallets } from "@stwd/react/wallet";
+import "@stwd/react/styles.css";
+import "@rainbow-me/rainbowkit/styles.css";
+import "@solana/wallet-adapter-react-ui/styles.css";
+
+export default function Login() {
+  return (
+    <StewardProvider auth={{ baseUrl: "https://api.steward.fi" }}>
+      <StewardLoginWithWallets
+        title="Sign in"
+        showPasskey
+        showEmail
+        showGoogle
+        showDiscord
+        evm={{ appName: "My App" }}
+        solana={{ endpoint: "https://api.mainnet-beta.solana.com" }}
+        onSuccess={({ token }) => console.log("signed in:", token)}
+      />
+    </StewardProvider>
+  );
+}
+```
+
+**Sensible defaults:**
+- WalletConnect projectId falls back to `process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`, then to a Steward shared default for first-time testing. Production apps should set their own.
+- EVM chains default to `[mainnet, base, polygon, optimism, arbitrum, bsc]`. Pass `evm.chains` to override.
+- Solana endpoint defaults to public mainnet-beta (rate-limited; not for production). Pass `solana.endpoint` with a private RPC.
+- Solana wallet list defaults to the curated software-only set (`createDefaultSolanaWallets()`). Pass `solana.wallets` to override.
+
+**Per-chain gates:**
+```tsx
+<StewardLoginWithWallets enable={{ solana: false }} ... />
+```
+Disables the Solana wrap entirely. Same for `enable.evm`.
+
+**Bring your own wagmi config:**
+```tsx
+<StewardLoginWithWallets evm={{ config: myWagmiConfig }} ... />
+```
+
+This component pulls BOTH EVM and Solana peer dep trees. Apps that want only one chain should use `<StewardLogin showWallets={{ evm: true }}>` directly with `<EVMWalletProvider>` and import from the chain-specific subpath `@stwd/react/wallet/evm` to skip the Solana peer install entirely.
+
 ### Solana example with expanded defaults
 
 `SolanaWalletProvider` now defaults to `DEFAULT_SOLANA_WALLETS`, which includes Phantom, Solflare, Coinbase Wallet, Trust Wallet, MathWallet, and Coin98. Wallets that implement the Solana Wallet Standard, including Backpack and Brave when installed in the browser, are discovered at runtime by wallet-adapter. Hardware Solana wallets (Ledger, Trezor) are excluded from defaults because their adapters do not implement `signMessage` and cannot complete the SIWS sign-in flow; apps that want hardware support in non-login contexts can extend the wallet list explicitly.
