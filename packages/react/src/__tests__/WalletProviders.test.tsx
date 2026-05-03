@@ -156,14 +156,38 @@ describe("Wallet provider helpers", () => {
     expect(names).not.toContain("Trezor");
   });
 
-  test("SolanaWalletProvider uses DEFAULT_SOLANA_WALLETS when wallets is undefined", () => {
+  test("SolanaWalletProvider builds the default wallet list when wallets is undefined", () => {
     renderToString(
       React.createElement(SolanaWalletProvider, {
         endpoint: "https://api.mainnet-beta.solana.com",
       }),
     );
 
-    expect(capturedSolanaWallets).toBe(DEFAULT_SOLANA_WALLETS);
+    // Provider builds fresh adapter instances per mount (factory pattern)
+    // to avoid leaking adapter state between providers. We assert by name
+    // rather than identity.
+    expect(walletNames(capturedSolanaWallets)).toEqual(walletNames(DEFAULT_SOLANA_WALLETS));
+  });
+
+  test("SolanaWalletProvider builds fresh adapters per mount (no shared state)", () => {
+    renderToString(
+      React.createElement(SolanaWalletProvider, {
+        endpoint: "https://api.mainnet-beta.solana.com",
+      }),
+    );
+    const firstMount = capturedSolanaWallets;
+
+    renderToString(
+      React.createElement(SolanaWalletProvider, {
+        endpoint: "https://api.mainnet-beta.solana.com",
+      }),
+    );
+    const secondMount = capturedSolanaWallets;
+
+    // Different array instances. Adapter instances should also differ
+    // (each adapter is `new`d per call).
+    expect(firstMount).not.toBe(secondMount);
+    expect(firstMount?.[0]).not.toBe(secondMount?.[0]);
   });
 
   test("SolanaWalletProvider wallets prop overrides defaults", () => {

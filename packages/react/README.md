@@ -57,12 +57,18 @@ Consumers that do not use wallet login can continue importing everything else fr
 bun add @stwd/react @stwd/sdk
 # EVM
 bun add wagmi viem @rainbow-me/rainbowkit @tanstack/react-query
-# Solana
+# Solana (core)
 bun add @solana/wallet-adapter-react @solana/wallet-adapter-react-ui \
         @solana/wallet-adapter-wallets @solana/web3.js bs58
+# Solana wallet adapters (the curated default set)
+bun add @solana/wallet-adapter-phantom @solana/wallet-adapter-solflare \
+        @solana/wallet-adapter-coinbase @solana/wallet-adapter-trust \
+        @solana/wallet-adapter-mathwallet @solana/wallet-adapter-coin98
 ```
 
 All wallet packages are declared as optional peer dependencies. Install only the families you need. `@tanstack/react-query` is required whenever you use `EVMWalletProvider` or anything wagmi downstream.
+
+The Solana adapters are imported from their own subpackages rather than from the `@solana/wallet-adapter-wallets` barrel because the barrel re-exports every adapter (including hardware ones) and forces strict ESM (Node SSR, pnpm, Yarn PnP) to resolve dependencies that are not actually used. Strict package managers will not let `@stwd/react` reach those subpackages transitively, so they must be installed directly when you want default Solana coverage.
 
 ### WalletConnect project ID
 

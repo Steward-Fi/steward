@@ -166,14 +166,35 @@ export function EVMWalletProvider({
 // `ERR_MODULE_NOT_FOUND`s under Node ESM/SSR, which would break apps that
 // import `@stwd/react/wallet` server-side. Apps that want hardware support
 // in non-login contexts can extend the wallet list explicitly.
-export const DEFAULT_SOLANA_WALLETS = [
-  new PhantomWalletAdapter(),
-  new SolflareWalletAdapter(),
-  new CoinbaseWalletAdapter(),
-  new TrustWalletAdapter(),
-  new MathWalletAdapter(),
-  new Coin98WalletAdapter(),
-] satisfies WalletProviderProps["wallets"];
+//
+// Factory function: each call returns FRESH adapter instances. Solana
+// wallet adapters keep mutable connection state and event listeners on
+// the instance, so sharing one set across multiple <SolanaWalletProvider>
+// mounts would leak state/events between providers. Always call this
+// from a useMemo inside the provider so each provider mount gets its
+// own adapters.
+export function createDefaultSolanaWallets(): WalletProviderProps["wallets"] {
+  return [
+    new PhantomWalletAdapter(),
+    new SolflareWalletAdapter(),
+    new CoinbaseWalletAdapter(),
+    new TrustWalletAdapter(),
+    new MathWalletAdapter(),
+    new Coin98WalletAdapter(),
+  ];
+}
+
+/**
+ * @deprecated Module-level array kept for backwards compatibility with
+ * consumers who imported `DEFAULT_SOLANA_WALLETS` directly. Adapter
+ * instances in this array are SHARED across all consumers, so passing
+ * this to multiple <SolanaWalletProvider> mounts will leak connection
+ * state. Prefer calling `createDefaultSolanaWallets()` per provider, or
+ * just leave `<SolanaWalletProvider>`'s `wallets` prop unset (the
+ * provider builds fresh adapters internally).
+ */
+export const DEFAULT_SOLANA_WALLETS =
+  createDefaultSolanaWallets() satisfies WalletProviderProps["wallets"];
 
 export interface SolanaWalletProviderProps {
   /** JSON-RPC endpoint (`https://api.mainnet-beta.solana.com`, Helius, etc.). */
@@ -203,7 +224,11 @@ export function SolanaWalletProvider({
   autoConnect = true,
   children,
 }: SolanaWalletProviderProps) {
-  const resolvedWallets = wallets ?? DEFAULT_SOLANA_WALLETS;
+  // Build a fresh adapter list per provider mount when no wallets prop
+  // was passed. Sharing a single module-level array across mounts would
+  // leak connection state between providers (the previous behavior was
+  // a P2 codex finding).
+  const resolvedWallets = useMemo(() => wallets ?? createDefaultSolanaWallets(), [wallets]);
 
   return (
     <ConnectionProvider endpoint={endpoint}>
