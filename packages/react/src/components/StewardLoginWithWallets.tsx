@@ -80,26 +80,43 @@ export interface StewardLoginWithWalletsProps extends StewardLoginProps {
   enable?: { evm?: boolean; solana?: boolean };
 }
 
-/** Read a build-time env var without depending on @types/node. Bundlers
- *  (Next, Vite, etc) inline `process.env.NEXT_PUBLIC_*` at build time so
- *  this works in any runtime that the bundler targets. The optional chain
- *  via globalThis avoids ReferenceError in pure browser runtimes that do
- *  not define `process`. */
-function readEnv(key: string): string | undefined {
-  const proc = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
-  return proc?.env?.[key];
+// Bundlers (Next, Vite, etc) only inline STATIC references to public env
+// vars like `process.env.NEXT_PUBLIC_*`. A dynamic lookup such as
+// `process.env[key]` is left as a runtime read, which fails in browsers
+// because `process` does not exist there. We read each var individually
+// and guard `process` for environments without it.
+//
+// Build-time replacement happens at the `process.env.X` references below,
+// so the resolved string ends up baked into the consumer's client bundle.
+
+declare const process: { env?: Record<string, string | undefined> } | undefined;
+
+function readWalletConnectProjectIdEnv(): string | undefined {
+  try {
+    return typeof process !== "undefined"
+      ? process?.env?.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readSolanaRpcEnv(): string | undefined {
+  try {
+    return typeof process !== "undefined" ? process?.env?.NEXT_PUBLIC_SOLANA_RPC_URL : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function resolveProjectId(override: string | undefined): string {
   if (override) return override;
-  return (
-    readEnv("NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID") ?? STEWARD_DEFAULT_WALLETCONNECT_PROJECT_ID
-  );
+  return readWalletConnectProjectIdEnv() ?? STEWARD_DEFAULT_WALLETCONNECT_PROJECT_ID;
 }
 
 function resolveSolanaEndpoint(override: string | undefined): string {
   if (override) return override;
-  return readEnv("NEXT_PUBLIC_SOLANA_RPC_URL") ?? DEFAULT_SOLANA_ENDPOINT;
+  return readSolanaRpcEnv() ?? DEFAULT_SOLANA_ENDPOINT;
 }
 
 /**
