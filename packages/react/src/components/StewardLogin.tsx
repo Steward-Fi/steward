@@ -131,10 +131,12 @@ export function StewardLogin({
     showWallets === true || (typeof showWallets === "object" && !!showWallets?.solana);
 
   // Provider feature-detect. Backend reports siwe/siws via GET /v1/auth/providers.
-  // If the backend explicitly says false, hide the corresponding button.
+  // Default to false until the backend confirms; we don't want to render wallet
+  // buttons during initial load (providers === null) or when discovery failed.
+  // This mirrors the OAuth gating pattern used elsewhere in this component.
   const providers = ctx?.providers;
-  const siweEnabled = wantWalletEvm && (providers?.siwe ?? true);
-  const siwsEnabled = wantWalletSolana && (providers?.siws ?? true);
+  const siweEnabled = wantWalletEvm && providers?.siwe === true;
+  const siwsEnabled = wantWalletSolana && providers?.siws === true;
 
   const EVMPanel = useDynamicWalletPanel(
     siweEnabled,

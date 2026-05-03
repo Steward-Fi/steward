@@ -228,6 +228,15 @@ describe("<StewardLogin /> showWallets prop", () => {
     expect(html).toContain("stwd-login-wallet-evm-loading");
     expect(html).not.toContain("stwd-login-wallet-sol-loading");
   });
+
+  test("providers === null (initial load / discovery failed) hides wallet buttons", () => {
+    const html = renderToString(
+      wrap(baseCtx({ providers: null }), React.createElement(StewardLogin, { showWallets: true })),
+    );
+    expect(html).not.toContain("stwd-login-wallets");
+    expect(html).not.toContain("stwd-login-wallet-evm-loading");
+    expect(html).not.toContain("stwd-login-wallet-sol-loading");
+  });
 });
 
 describe("<StewardLogin /> wallet success/error bubbling", () => {
