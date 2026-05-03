@@ -1,3 +1,26 @@
+import {
+  registerEvmWalletPanel,
+  registerSolanaWalletPanel,
+} from "./internal/walletPanelRegistry.js";
+
+// Side-effect registration: importing `@stwd/react/wallet` registers the
+// wallet panel loaders so `<StewardLogin showWallets>` can find them.
+// This keeps the root entry (`@stwd/react`) free of any references to
+// wallet peer deps. Bundlers that don't see this subpath imported never
+// pull wagmi / RainbowKit / @solana/* into their dep graph.
+registerEvmWalletPanel({
+  load: () =>
+    import("./components/WalletLogin.EVM.js") as Promise<{
+      default: import("react").ComponentType<unknown>;
+    }>,
+});
+registerSolanaWalletPanel({
+  load: () =>
+    import("./components/WalletLogin.Solana.js") as Promise<{
+      default: import("react").ComponentType<unknown>;
+    }>,
+});
+
 export type {
   WalletChains,
   WalletLoginClassOverrides,

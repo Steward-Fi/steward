@@ -1,6 +1,11 @@
 import type { StewardAuthResult } from "@stwd/sdk";
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { DiscordIcon, EmailIcon, EthereumIcon, GoogleIcon, PasskeyIcon } from "../icons/index.js";
+import {
+  getEvmWalletPanel,
+  getSolanaWalletPanel,
+  type WalletPanelLoader,
+} from "../internal/walletPanelRegistry.js";
 import { StewardAuthContext } from "../provider.js";
 import type { StewardLoginProps } from "../types.js";
 import type { WalletLoginPanelProps } from "./WalletLogin.js";
@@ -55,11 +60,11 @@ export function composeWalletError(
  */
 function useDynamicWalletPanel(
   enabled: boolean,
-  loader: () => Promise<{ default: WalletPanelComponent }>,
+  loader: (() => Promise<{ default: WalletPanelComponent }>) | undefined,
 ): WalletPanelComponent | null {
   const [Panel, setPanel] = useState<WalletPanelComponent | null>(null);
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !loader) return;
     let cancelled = false;
     loader().then((mod) => {
       if (!cancelled) setPanel(() => mod.default);
@@ -138,19 +143,25 @@ export function StewardLogin({
   const siweEnabled = wantWalletEvm && providers?.siwe === true;
   const siwsEnabled = wantWalletSolana && providers?.siws === true;
 
+  // Read panel loaders from the wallet registry. The registry is populated
+  // as a side effect when the consumer imports `@stwd/react/wallet`. If they
+  // didn't import that subpath, the loaders are undefined and we render no
+  // wallet buttons (consistent with optional peer dep contract).
+  const evmRegistered = useMemo<WalletPanelLoader | undefined>(
+    () => (siweEnabled ? getEvmWalletPanel() : undefined),
+    [siweEnabled],
+  );
+  const solanaRegistered = useMemo<WalletPanelLoader | undefined>(
+    () => (siwsEnabled ? getSolanaWalletPanel() : undefined),
+    [siwsEnabled],
+  );
   const EVMPanel = useDynamicWalletPanel(
-    siweEnabled,
-    () =>
-      import("./WalletLogin.EVM.js") as Promise<{
-        default: WalletPanelComponent;
-      }>,
+    siweEnabled && !!evmRegistered,
+    evmRegistered?.load as (() => Promise<{ default: WalletPanelComponent }>) | undefined,
   );
   const SolanaPanel = useDynamicWalletPanel(
-    siwsEnabled,
-    () =>
-      import("./WalletLogin.Solana.js") as Promise<{
-        default: WalletPanelComponent;
-      }>,
+    siwsEnabled && !!solanaRegistered,
+    solanaRegistered?.load as (() => Promise<{ default: WalletPanelComponent }>) | undefined,
   );
 
   // When auth state changes to authenticated, fire onSuccess for redirect
@@ -169,6 +180,12 @@ export function StewardLogin({
       setLoadingBtn(null);
       setStep("idle");
       setErrorMsg(null);
+      // Mark didFireSuccess BEFORE invoking onSuccess so the auth-state
+      // effect (which fires when ctx.isAuthenticated flips) does not
+      // double-invoke. The wallet sign helpers already wrote the session
+      // into the auth context, so the effect would otherwise see the new
+      // authenticated state on its next render and fire again.
+      didFireSuccess.current = true;
       composeWalletSuccess(onSuccess)(result, kind);
     },
     [onSuccess],
