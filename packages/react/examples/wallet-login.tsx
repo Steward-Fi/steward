@@ -1,5 +1,5 @@
 /**
- * Wallet Login example — two usage patterns.
+ * Wallet Login example, two usage patterns.
  *
  * Pattern A: Use the bundled <EVMWalletProvider> / <SolanaWalletProvider>
  *            wrappers. Fastest path for greenfield apps.
@@ -11,23 +11,32 @@
  */
 
 import { StewardProvider } from "@stwd/react";
-import { EVMWalletProvider, SolanaWalletProvider, WalletLogin } from "@stwd/react/wallet";
+import {
+  createDefaultWagmiConfig,
+  DEFAULT_SOLANA_WALLETS,
+  EVMWalletProvider,
+  SolanaWalletProvider,
+  WalletLogin,
+} from "@stwd/react/wallet";
 import { StewardClient } from "@stwd/sdk";
 
 import "@stwd/react/styles.css";
 import "@rainbow-me/rainbowkit/styles.css";
 import "@solana/wallet-adapter-react-ui/styles.css";
 
-import { getDefaultConfig } from "@rainbow-me/rainbowkit";
 import { base, mainnet } from "wagmi/chains";
+
+// Use your own production WalletConnect project ID when possible. The fallback
+// below is Steward-owned and keeps the example working for first-time testing.
+const walletConnectProjectId =
+  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "2c7ddf841a48e522748c5e2782d73443";
 
 // ─── Pattern A: bundled wrappers ─────────────────────────────────────────────
 
-const wagmiConfig = getDefaultConfig({
+const wagmiConfig = createDefaultWagmiConfig({
   appName: "Steward",
-  projectId: "YOUR_WALLETCONNECT_PROJECT_ID",
+  projectId: walletConnectProjectId,
   chains: [mainnet, base],
-  ssr: true,
 });
 
 const stewardClient = new StewardClient({
@@ -46,6 +55,7 @@ export function PatternA() {
         <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
           <WalletLogin
             chains="both"
+            showWallets
             onSuccess={(result, kind) => {
               console.log("signed in via", kind, result.token);
             }}
@@ -67,28 +77,32 @@ import {
   WalletProvider as SolanaAdapterProvider,
 } from "@solana/wallet-adapter-react";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
-import { PhantomWalletAdapter } from "@solana/wallet-adapter-wallets";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WagmiProvider } from "wagmi";
 
+const queryClient = new QueryClient();
+
 export function PatternB() {
-  const solanaWallets = [new PhantomWalletAdapter()];
+  const solanaWallets = [...DEFAULT_SOLANA_WALLETS];
   return (
     <WagmiProvider config={wagmiConfig}>
-      <RainbowKitProvider theme={darkTheme()} modalSize="compact">
-        <ConnectionProvider endpoint="https://api.mainnet-beta.solana.com">
-          <SolanaAdapterProvider wallets={solanaWallets} autoConnect>
-            <WalletModalProvider>
-              <StewardProvider
-                client={stewardClient}
-                agentId="agent_abc"
-                auth={{ baseUrl: "https://api.steward.fi" }}
-              >
-                <WalletLogin chains="both" />
-              </StewardProvider>
-            </WalletModalProvider>
-          </SolanaAdapterProvider>
-        </ConnectionProvider>
-      </RainbowKitProvider>
+      <QueryClientProvider client={queryClient}>
+        <RainbowKitProvider theme={darkTheme()} modalSize="compact">
+          <ConnectionProvider endpoint="https://api.mainnet-beta.solana.com">
+            <SolanaAdapterProvider wallets={solanaWallets} autoConnect>
+              <WalletModalProvider>
+                <StewardProvider
+                  client={stewardClient}
+                  agentId="agent_abc"
+                  auth={{ baseUrl: "https://api.steward.fi" }}
+                >
+                  <WalletLogin chains="both" showWallets />
+                </StewardProvider>
+              </WalletModalProvider>
+            </SolanaAdapterProvider>
+          </ConnectionProvider>
+        </RainbowKitProvider>
+      </QueryClientProvider>
     </WagmiProvider>
   );
 }
@@ -103,7 +117,7 @@ export function EvmOnly() {
       auth={{ baseUrl: "https://api.steward.fi" }}
     >
       <EVMWalletProvider config={wagmiConfig}>
-        <WalletLogin chains="evm" />
+        <WalletLogin chains="evm" showWallets />
       </EVMWalletProvider>
     </StewardProvider>
   );

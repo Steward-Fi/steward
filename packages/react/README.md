@@ -1,6 +1,6 @@
 # @stwd/react
 
-Embeddable React components for Steward agent wallet management. Drop-in UI for wallet overview, transaction history, policy controls, approval queues, and spend analytics.
+Embeddable React components for Steward agent wallet management. Drop-in UI for wallet overview, transaction history, policy controls, approval queues, spend analytics, and wallet login.
 
 ## Install
 
@@ -31,16 +31,195 @@ function AgentWalletPage({ agentId }: { agentId: string }) {
 }
 ```
 
+## Wallet Login
+
+First-class EVM and Solana sign-in. Uses [wagmi](https://wagmi.sh) and [RainbowKit](https://rainbowkit.com) on EVM, and [`@solana/wallet-adapter-react`](https://github.com/anza-xyz/wallet-adapter) on Solana.
+
+Adding wallet login does not require backend changes. The component signs SIWE or SIWS messages and exchanges them through the Steward auth SDK.
+
+Wallet login is imported from a subpath to keep optional wallet peer deps off the root entrypoint:
+
+```ts
+import {
+  createDefaultWagmiConfig,
+  DEFAULT_SOLANA_WALLETS,
+  EVMWalletProvider,
+  SolanaWalletProvider,
+  WalletLogin,
+} from "@stwd/react/wallet";
+```
+
+Consumers that do not use wallet login can continue importing everything else from `@stwd/react` without installing wagmi, RainbowKit, or Solana wallet packages.
+
+### Wallet packages
+
+```bash
+bun add @stwd/react @stwd/sdk
+# EVM
+bun add wagmi viem @rainbow-me/rainbowkit @tanstack/react-query
+# Solana
+bun add @solana/wallet-adapter-react @solana/wallet-adapter-react-ui \
+        @solana/wallet-adapter-wallets @solana/web3.js bs58
+```
+
+All wallet packages are declared as optional peer dependencies. Install only the families you need. `@tanstack/react-query` is required whenever you use `EVMWalletProvider` or anything wagmi downstream.
+
+### WalletConnect project ID
+
+RainbowKit WalletConnect connectors require a WalletConnect Cloud project ID. Get one free at <https://cloud.walletconnect.com>, or use Steward's shared development project ID for first-time testing:
+
+```txt
+2c7ddf841a48e522748c5e2782d73443
+```
+
+Recommended env var pattern:
+
+```ts
+const walletConnectProjectId =
+  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "2c7ddf841a48e522748c5e2782d73443";
+```
+
+Use your own project ID for production apps when possible. The shared ID is intentionally not baked into the library.
+
+### EVM example with curated RainbowKit wallets
+
+`createDefaultWagmiConfig` returns a wagmi config with Steward's curated wallet order:
+MetaMask, Coinbase Wallet, WalletConnect, Rainbow, Rabby, Trust Wallet, Phantom EVM, Ledger, Safe, and generic injected. Brave is discovered by the browser injected provider and EIP-6963 support.
+
+```tsx
+import { StewardProvider } from "@stwd/react";
+import {
+  createDefaultWagmiConfig,
+  EVMWalletProvider,
+  WalletLogin,
+} from "@stwd/react/wallet";
+import "@stwd/react/styles.css";
+import "@rainbow-me/rainbowkit/styles.css";
+import { mainnet, base } from "wagmi/chains";
+
+const walletConnectProjectId =
+  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "2c7ddf841a48e522748c5e2782d73443";
+
+const wagmiConfig = createDefaultWagmiConfig({
+  appName: "Steward",
+  projectId: walletConnectProjectId,
+  chains: [mainnet, base],
+});
+
+export function EvmLogin() {
+  return (
+    <StewardProvider
+      client={client}
+      agentId="agent_abc"
+      auth={{ baseUrl: "https://api.steward.fi" }}
+    >
+      <EVMWalletProvider config={wagmiConfig}>
+        <WalletLogin chains="evm" showWallets />
+      </EVMWalletProvider>
+    </StewardProvider>
+  );
+}
+```
+
+`showWallets` enables the wallet login UI when paired with the broader Steward login surface. If you render `WalletLogin` directly, it is already the wallet UI.
+
+### Solana example with expanded defaults
+
+`SolanaWalletProvider` now defaults to `DEFAULT_SOLANA_WALLETS`, which includes Phantom, Solflare, Coinbase Wallet, Trust Wallet, Ledger, Trezor, MathWallet, and Coin98. Wallets that implement the Solana Wallet Standard, including Backpack and Brave when installed in the browser, are discovered at runtime by wallet-adapter.
+
+```tsx
+import { StewardProvider } from "@stwd/react";
+import {
+  DEFAULT_SOLANA_WALLETS,
+  SolanaWalletProvider,
+  WalletLogin,
+} from "@stwd/react/wallet";
+import "@stwd/react/styles.css";
+import "@solana/wallet-adapter-react-ui/styles.css";
+
+const customWallet = createMySolanaWalletAdapter();
+
+export function SolanaLogin() {
+  return (
+    <StewardProvider
+      client={client}
+      agentId="agent_abc"
+      auth={{ baseUrl: "https://api.steward.fi" }}
+    >
+      <SolanaWalletProvider
+        endpoint="https://api.mainnet-beta.solana.com"
+        wallets={[...DEFAULT_SOLANA_WALLETS, customWallet]}
+      >
+        <WalletLogin chains="solana" showWallets />
+      </SolanaWalletProvider>
+    </StewardProvider>
+  );
+}
+```
+
+### Combined EVM and Solana example
+
+```tsx
+<StewardProvider client={client} agentId="agent_abc" auth={{ baseUrl: "https://api.steward.fi" }}>
+  <EVMWalletProvider config={wagmiConfig}>
+    <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
+      <WalletLogin chains="both" showWallets onSuccess={(res, kind) => console.log(kind, res.token)} />
+    </SolanaWalletProvider>
+  </EVMWalletProvider>
+</StewardProvider>
+```
+
+### Bring your own providers
+
+`<EVMWalletProvider>` and `<SolanaWalletProvider>` are optional convenience wrappers. `<EVMWalletProvider>` also mounts a `QueryClientProvider` for wagmi v2 hooks. Pass your own `queryClient` prop if your app already has one. If your app already mounts wagmi, RainbowKit, TanStack Query, and Solana wallet-adapter providers elsewhere, `<WalletLogin />` will pick them up automatically.
+
+`<EVMWalletProvider>` still accepts any consumer-supplied wagmi `config`. `createDefaultWagmiConfig` is additive and recommended for apps that want Steward's curated wallet order.
+
+### WalletLogin props
+
+| Prop | Type | Default | Notes |
+| ---- | ---- | ------- | ----- |
+| `chains` | `"evm" \| "solana" \| "both"` | `"both"` | Two-column layout on desktop when `"both"`. |
+| `onSuccess` | `(result, kind) => void` | - | Fires after SIWE or SIWS exchange. |
+| `onError` | `(error, kind) => void` | - | Fires on wallet reject, network errors, etc. |
+| `className` | `string` | - | Appended to the root element. |
+| `classes` | `WalletLoginClassOverrides` | - | Per-slot className overrides. |
+| `evmLabel` | `string` | `"Ethereum"` | Column heading for EVM. |
+| `solanaLabel` | `string` | `"Solana"` | Column heading for Solana. |
+| `evmSignLabel` | `(walletName) => string` | - | Override the sign button label. |
+| `solanaSignLabel` | `(walletName) => string` | - | Override the sign button label. |
+
+### Wallet login FAQ
+
+**Does it work without `<EVMWalletProvider>` or `<SolanaWalletProvider>`?**
+Yes. They are optional convenience wrappers. `<WalletLogin />` only needs ambient wagmi and RainbowKit context for EVM, plus Solana wallet-adapter context for Solana.
+
+**Can I ship EVM only?**
+Yes. Install only the EVM peer deps, pass `chains="evm"`, and skip the Solana providers entirely. The Solana panel is tree-shaken out when unused.
+
+**Can I ship Solana only?**
+Yes. Install only the Solana peer deps, pass `chains="solana"`, and skip wagmi and RainbowKit providers.
+
+**How do errors surface?**
+Inline under the relevant column and via `onError(error, kind)`.
+
+**Does `<WalletLogin />` disconnect the wallet after sign-in?**
+No. The wallet stays connected so the user can re-sign or sign transactions. Call `useDisconnect()` or `useWallet().disconnect()` yourself if you want to drop the connection.
+
+**Solana sign-in is disabled.**
+This means either the connected wallet does not implement `signMessage`, or `@stwd/sdk` has not been upgraded to a version that exposes `signInWithSolana`. Upgrade to `@stwd/sdk >= 0.8.0`.
+
 ## Components
 
 | Component | Description |
 |-----------|-------------|
-| `<StewardProvider>` | Context provider — wraps all other components |
+| `<StewardProvider>` | Context provider, wraps all other components |
 | `<WalletOverview>` | Wallet address, balance, chain info, funding QR |
 | `<TransactionHistory>` | Paginated tx list with status badges and explorer links |
-| `<PolicyControls>` | Human-friendly policy toggles (spending limits, address lists, etc.) |
+| `<PolicyControls>` | Human-friendly policy toggles, spending limits, address lists, etc. |
 | `<ApprovalQueue>` | Pending transaction review with approve/deny |
 | `<SpendDashboard>` | Spend tracking with budget bars and charts |
+| `<WalletLogin>` | EVM and Solana wallet sign-in UI from `@stwd/react/wallet` |
 
 ## Hooks
 
@@ -54,9 +233,9 @@ import { useSteward, useWallet, useTransactions, usePolicies, useApprovals, useS
 |------|---------|
 | `useSteward()` | Client, agentId, features, theme, tenant config |
 | `useWallet()` | Agent data, balance, addresses with auto-refresh |
-| `useTransactions(opts?)` | Paginated tx history |
-| `usePolicies()` | Policy CRUD + template support |
-| `useApprovals(interval?)` | Pending approvals + approve/reject actions |
+| `useTransactions(opts?)` | Paginated transaction history |
+| `usePolicies()` | Policy CRUD and template support |
+| `useApprovals(interval?)` | Pending approvals plus approve/reject actions |
 | `useSpend(range?)` | Spend analytics for time range |
 
 ## Theming
@@ -89,151 +268,18 @@ Or pass theme overrides to the provider:
 >
 ```
 
-## Wallet Login
-
-First-class EVM + Solana sign-in. Uses [wagmi](https://wagmi.sh) + [RainbowKit](https://rainbowkit.com) on EVM and [`@solana/wallet-adapter-react`](https://github.com/anza-xyz/wallet-adapter) on Solana.
-
-**Imported from a subpath to keep wallet peer deps off the root entrypoint:**
-
-```ts
-import { WalletLogin, EVMWalletProvider, SolanaWalletProvider } from "@stwd/react/wallet";
-```
-
-Consumers that don't use wallet login can continue to import everything else from `@stwd/react` without installing wagmi / rainbowkit / @solana/*. The wallet entrypoint itself loads each chain's panel dynamically, so `chains="evm"` never resolves `@solana/*` at runtime (and vice versa).
-
-### Install
-
-```bash
-bun add @stwd/react @stwd/sdk
-# EVM
-bun add wagmi viem @rainbow-me/rainbowkit @tanstack/react-query
-# Solana
-bun add @solana/wallet-adapter-react @solana/wallet-adapter-react-ui \
-        @solana/wallet-adapter-wallets @solana/web3.js bs58
-```
-
-All wallet packages are declared as **optional peer dependencies**. Install only the families you need. `@tanstack/react-query` is required whenever you use `EVMWalletProvider` or anything wagmi downstream.
-
-### Basic usage
-
-```tsx
-import { StewardProvider } from "@stwd/react";
-import {
-  EVMWalletProvider,
-  SolanaWalletProvider,
-  WalletLogin,
-} from "@stwd/react/wallet";
-import "@stwd/react/styles.css";
-import "@rainbow-me/rainbowkit/styles.css";
-import "@solana/wallet-adapter-react-ui/styles.css";
-import { getDefaultConfig } from "@rainbow-me/rainbowkit";
-import { mainnet, base } from "wagmi/chains";
-
-const wagmiConfig = getDefaultConfig({
-  appName: "Steward",
-  projectId: "YOUR_WC_PROJECT_ID",
-  chains: [mainnet, base],
-});
-
-export function App() {
-  return (
-    <StewardProvider
-      client={client}
-      agentId="agent_abc"
-      auth={{ baseUrl: "https://api.steward.fi" }}
-    >
-      <EVMWalletProvider config={wagmiConfig}>
-        <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
-          <WalletLogin
-            chains="both"
-            onSuccess={(res, kind) => console.log(kind, res.token)}
-          />
-        </SolanaWalletProvider>
-      </EVMWalletProvider>
-    </StewardProvider>
-  );
-}
-```
-
-### Advanced: bring your own providers
-
-`<EVMWalletProvider>` and `<SolanaWalletProvider>` are optional convenience wrappers. `<EVMWalletProvider>` also mounts a `QueryClientProvider` for wagmi v2 hooks; pass your own `queryClient` prop if your app already has one. If your app already mounts wagmi + RainbowKit + TanStack Query + Solana wallet-adapter providers elsewhere, `<WalletLogin />` will pick them up automatically.
-
-```tsx
-<WagmiProvider config={wagmiConfig}>
-  <RainbowKitProvider theme={darkTheme()}>
-    <ConnectionProvider endpoint={rpc}>
-      <SolanaWalletProvider wallets={wallets} autoConnect>
-        <WalletModalProvider>
-          <StewardProvider client={client} agentId="..." auth={{ baseUrl: "..." }}>
-            <WalletLogin chains="both" />
-          </StewardProvider>
-        </WalletModalProvider>
-      </SolanaWalletProvider>
-    </ConnectionProvider>
-  </RainbowKitProvider>
-</WagmiProvider>
-```
-
-### Props
-
-| Prop              | Type                                           | Default  | Notes                                                    |
-| ----------------- | ---------------------------------------------- | -------- | -------------------------------------------------------- |
-| `chains`          | `"evm" \| "solana" \| "both"`                  | `"both"` | Two-column layout on desktop when `"both"`.              |
-| `onSuccess`       | `(result, kind) => void`                       | -        | Fires after SIWE / SIWS exchange.                        |
-| `onError`         | `(error, kind) => void`                        | -        | Fires on wallet reject, network errors, etc.             |
-| `className`       | `string`                                       | -        | Appended to the root element.                            |
-| `classes`         | `WalletLoginClassOverrides`                    | -        | Per-slot className overrides (root, column, button, …). |
-| `evmLabel`        | `string`                                       | `"Ethereum"` | Column heading for EVM.                              |
-| `solanaLabel`     | `string`                                       | `"Solana"`   | Column heading for Solana.                           |
-| `evmSignLabel`    | `(walletName) => string`                       | -        | Override the sign button label.                          |
-| `solanaSignLabel` | `(walletName) => string`                       | -        | Override the sign button label.                          |
-
-### Styling
-
-Dark first. Cream text (`#eaeaea`) on black (`#000`), sharp corners, JetBrains Mono font stack. Override any `--stwd-wallet-*` custom property on the root or pass a `classes` override per slot.
-
-```css
-.my-wallet {
-  --stwd-wallet-bg: #0b0b0b;
-  --stwd-wallet-accent: #ff6b35;
-}
-```
-
-```tsx
-<WalletLogin
-  className="my-wallet"
-  classes={{ signButton: "my-sign-btn" }}
-/>
-```
-
-### FAQ
-
-**Does it work without `<EVMWalletProvider>` / `<SolanaWalletProvider>`?**
-Yes. They are optional convenience wrappers. `<WalletLogin />` only needs the ambient wagmi + RainbowKit context (for EVM) and the Solana wallet-adapter context (for Solana) to exist somewhere above it.
-
-**Can I ship EVM only?**
-Yes. Install only the EVM peer deps, pass `chains="evm"`, and skip the Solana providers entirely. The Solana panel is tree-shaken out when unused.
-
-**How do errors surface?**
-Inline under the relevant column (rejected signatures, wrong chain, server errors) and via `onError(error, kind)`.
-
-**Does `<WalletLogin />` disconnect the wallet after sign-in?**
-No. The wallet stays connected so the user can re-sign, sign transactions, etc. Call `useDisconnect()` / `useWallet().disconnect()` yourself if you want to drop the connection.
-
-**Solana sign-in is disabled.**
-This means either the connected wallet does not implement `signMessage`, or `@stwd/sdk` has not been upgraded to a version that exposes `signInWithSolana`. Upgrade to `@stwd/sdk >= 0.8.0`.
-
 ## Peer Dependencies
 
 Required:
+
 - `react >= 18`
 - `react-dom >= 18`
 - `@stwd/sdk >= 0.7.3`
 
-Optional (install only what you use):
-- `wagmi ^2.0.0` + `viem ^2.0.0` + `@rainbow-me/rainbowkit ^2.0.0` (EVM)
-- `@solana/wallet-adapter-react ^0.15.0`, `@solana/wallet-adapter-react-ui ^0.9.0`, `@solana/wallet-adapter-wallets ^0.19.0`, `@solana/web3.js ^1.90.0`, `bs58 ^5.0.0` (Solana)
+Optional, install only what you use:
+
+- EVM: `wagmi ^2.0.0`, `viem ^2.0.0`, `@rainbow-me/rainbowkit ^2.0.0`, `@tanstack/react-query ^5.0.0`
+- Solana: `@solana/wallet-adapter-react ^0.15.0`, `@solana/wallet-adapter-react-ui ^0.9.0`, `@solana/wallet-adapter-wallets ^0.19.38`, `@solana/web3.js ^1.98.0`, `bs58 ^5.0.0`
 
 ## License
 

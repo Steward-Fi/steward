@@ -1,18 +1,115 @@
-import { darkTheme, RainbowKitProvider, type Theme } from "@rainbow-me/rainbowkit";
-import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react";
+import {
+  connectorsForWallets,
+  darkTheme,
+  RainbowKitProvider,
+  type Theme,
+} from "@rainbow-me/rainbowkit";
+import {
+  coinbaseWallet,
+  injectedWallet,
+  ledgerWallet,
+  metaMaskWallet,
+  phantomWallet,
+  rabbyWallet,
+  rainbowWallet,
+  safeWallet,
+  trustWallet,
+  walletConnectWallet,
+} from "@rainbow-me/rainbowkit/wallets";
+import {
+  ConnectionProvider,
+  WalletProvider,
+  type WalletProviderProps,
+} from "@solana/wallet-adapter-react";
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui";
-import { PhantomWalletAdapter, SolflareWalletAdapter } from "@solana/wallet-adapter-wallets";
+import {
+  Coin98WalletAdapter,
+  CoinbaseWalletAdapter,
+  LedgerWalletAdapter,
+  MathWalletAdapter,
+  PhantomWalletAdapter,
+  SolflareWalletAdapter,
+  TrezorWalletAdapter,
+  TrustWalletAdapter,
+} from "@solana/wallet-adapter-wallets";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
+import type { Chain, Transport } from "viem";
 // All imports from optional peer dependencies are intentional. These two
 // wrappers are opt-in utilities; consumers who ship their own wagmi / Solana
 // providers should import them directly instead of using these.
-import { type Config as WagmiConfig, WagmiProvider } from "wagmi";
+import { createConfig, http, type Config as WagmiConfig, WagmiProvider } from "wagmi";
 
 // ─── EVM wrapper ─────────────────────────────────────────────────────────────
 
+export type DefaultWagmiChains = readonly [Chain, ...Chain[]];
+
+type DefaultWagmiTransports<TChains extends DefaultWagmiChains> = Record<
+  TChains[number]["id"],
+  Transport
+>;
+
+export interface CreateDefaultWagmiConfigOptions<TChains extends DefaultWagmiChains> {
+  /** WalletConnect Cloud project ID. Get one at https://cloud.walletconnect.com. */
+  projectId: string;
+  /** wagmi chains to support. Must include at least one chain. */
+  chains: TChains;
+  /** App name shown in wallet connection prompts. Defaults to "Steward". */
+  appName?: string;
+  /** Enable wagmi SSR support. Defaults to true. */
+  ssr?: boolean;
+}
+
+function createDefaultTransports<TChains extends DefaultWagmiChains>(
+  chains: TChains,
+): DefaultWagmiTransports<TChains> {
+  return Object.fromEntries(
+    chains.map((chain) => [chain.id, http()]),
+  ) as DefaultWagmiTransports<TChains>;
+}
+
+/**
+ * Creates a wagmi config with Steward's curated RainbowKit wallet order.
+ * Consumers can keep passing their own config to EVMWalletProvider when they
+ * need full control.
+ */
+export function createDefaultWagmiConfig<TChains extends DefaultWagmiChains>({
+  projectId,
+  chains,
+  appName = "Steward",
+  ssr = true,
+}: CreateDefaultWagmiConfigOptions<TChains>): WagmiConfig {
+  const connectors = connectorsForWallets(
+    [
+      {
+        groupName: "Recommended",
+        wallets: [
+          metaMaskWallet,
+          coinbaseWallet,
+          walletConnectWallet,
+          rainbowWallet,
+          rabbyWallet,
+          trustWallet,
+          phantomWallet,
+          ledgerWallet,
+          safeWallet,
+          injectedWallet,
+        ],
+      },
+    ],
+    { appName, projectId },
+  );
+
+  return createConfig({
+    chains,
+    connectors,
+    transports: createDefaultTransports(chains),
+    ssr,
+  }) as WagmiConfig;
+}
+
 export interface EVMWalletProviderProps {
-  /** wagmi v2 `Config` created with `createConfig()` or `getDefaultConfig()`. */
+  /** wagmi v2 `Config` created with `createConfig()` or `createDefaultWagmiConfig()`. */
   config: WagmiConfig;
   /**
    * TanStack Query client. Pass yours if the host app already has one;
@@ -59,14 +156,28 @@ export function EVMWalletProvider({
 
 // ─── Solana wrapper ──────────────────────────────────────────────────────────
 
+export const DEFAULT_SOLANA_WALLETS = [
+  new PhantomWalletAdapter(),
+  new SolflareWalletAdapter(),
+  new CoinbaseWalletAdapter(),
+  new TrustWalletAdapter(),
+  new LedgerWalletAdapter(),
+  new TrezorWalletAdapter(),
+  new MathWalletAdapter(),
+  new Coin98WalletAdapter(),
+] satisfies WalletProviderProps["wallets"];
+
 export interface SolanaWalletProviderProps {
   /** JSON-RPC endpoint (`https://api.mainnet-beta.solana.com`, Helius, etc.). */
   endpoint: string;
   /**
-   * Wallet adapters. Defaults to Phantom, Solflare, Backpack. Pass an explicit
-   * array to narrow or extend the list.
+   * Wallet adapters. Defaults to DEFAULT_SOLANA_WALLETS. Pass an explicit
+   * array to narrow, replace, or extend the list.
+   *
+   * Backpack, Brave, and other Solana Wallet Standard wallets are discovered
+   * by wallet-adapter at runtime when the browser wallet is present.
    */
-  wallets?: unknown[];
+  wallets?: WalletProviderProps["wallets"];
   /** Auto-connect previously selected wallet on mount. Defaults to true. */
   autoConnect?: boolean;
   children?: ReactNode;
@@ -84,14 +195,11 @@ export function SolanaWalletProvider({
   autoConnect = true,
   children,
 }: SolanaWalletProviderProps) {
-  const defaultWallets = useMemo(
-    () => wallets ?? [new PhantomWalletAdapter(), new SolflareWalletAdapter()],
-    [wallets],
-  );
+  const resolvedWallets = wallets ?? DEFAULT_SOLANA_WALLETS;
 
   return (
     <ConnectionProvider endpoint={endpoint}>
-      <WalletProvider wallets={defaultWallets} autoConnect={autoConnect}>
+      <WalletProvider wallets={resolvedWallets} autoConnect={autoConnect}>
         <WalletModalProvider>{children}</WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
