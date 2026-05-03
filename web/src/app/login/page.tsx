@@ -22,6 +22,11 @@ export default function LoginPage() {
           title="Sign in to Steward"
           subtitle="Manage your agents, wallets, and policies"
           logo={Logo}
+          showPasskey
+          showEmail
+          showGoogle
+          showDiscord
+          showWallets
           onSuccess={() => router.push("/dashboard")}
           onError={(err) => console.error("Login error:", err)}
         />

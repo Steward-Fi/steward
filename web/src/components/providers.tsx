@@ -1,8 +1,10 @@
 "use client";
 
 import { StewardProvider, useAuth } from "@stwd/react";
+import { EVMWalletProvider, SolanaWalletProvider } from "@stwd/react/wallet";
 import { createElement, type ReactNode, useEffect, useRef } from "react";
 import { setAuthToken, steward } from "@/lib/api";
+import { SOLANA_RPC_URL, wagmiConfig } from "@/lib/wagmi";
 
 // Pre-import @simplewebauthn/browser so it's in the client bundle.
 import "@simplewebauthn/browser";
@@ -39,6 +41,14 @@ export function Providers({ children }: { children: ReactNode }) {
       client: steward as any,
       auth: { baseUrl: API_URL },
     },
-    createElement(AuthTokenSync, null, children),
+    createElement(
+      EVMWalletProvider as any,
+      { config: wagmiConfig },
+      createElement(
+        SolanaWalletProvider as any,
+        { endpoint: SOLANA_RPC_URL },
+        createElement(AuthTokenSync, null, children),
+      ),
+    ),
   ) as any;
 }

@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import "@stwd/react/styles.css";
+import "@rainbow-me/rainbowkit/styles.css";
+import "@solana/wallet-adapter-react-ui/styles.css";
 import { Providers } from "@/components/providers";
 
 const metadataBase = (() => {
