@@ -1,7 +1,7 @@
 import {
   registerEvmWalletPanel,
   registerSolanaWalletPanel,
-} from "./internal/walletPanelRegistry.js";
+} from "../internal/walletPanelRegistry.js";
 
 // Side-effect registration: importing `@stwd/react/wallet` registers the
 // wallet panel loaders so `<StewardLogin showWallets>` can find them.
@@ -10,13 +10,13 @@ import {
 // pull wagmi / RainbowKit / @solana/* into their dep graph.
 registerEvmWalletPanel({
   load: () =>
-    import("./components/WalletLogin.EVM.js") as Promise<{
+    import("../components/WalletLogin.EVM.js") as Promise<{
       default: import("react").ComponentType<unknown>;
     }>,
 });
 registerSolanaWalletPanel({
   load: () =>
-    import("./components/WalletLogin.Solana.js") as Promise<{
+    import("../components/WalletLogin.Solana.js") as Promise<{
       default: import("react").ComponentType<unknown>;
     }>,
 });
@@ -31,17 +31,17 @@ export type {
   WalletChains,
   WalletLoginClassOverrides,
   WalletLoginProps,
-} from "./components/WalletLogin.js";
-export { WalletLogin } from "./components/WalletLogin.js";
+} from "../components/WalletLogin.js";
+export { WalletLogin } from "../components/WalletLogin.js";
 export type {
   CreateDefaultWagmiConfigOptions,
   DefaultWagmiChains,
   EVMWalletProviderProps,
   SolanaWalletProviderProps,
-} from "./providers/WalletProviders.js";
+} from "../providers/WalletProviders.js";
 export {
   createDefaultWagmiConfig,
   DEFAULT_SOLANA_WALLETS,
   EVMWalletProvider,
   SolanaWalletProvider,
-} from "./providers/WalletProviders.js";
+} from "../providers/WalletProviders.js";

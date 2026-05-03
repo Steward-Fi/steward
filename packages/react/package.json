@@ -8,20 +8,24 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./wallet": {
-      "types": "./dist/wallet.d.ts",
-      "import": "./dist/wallet.js"
+      "types": "./dist/wallet/index.d.ts",
+      "import": "./dist/wallet/index.js",
+      "default": "./dist/wallet/index.js"
     },
     "./styles.css": "./dist/styles.css",
     "./wallet/evm": {
       "types": "./dist/wallet/evm.d.ts",
-      "import": "./dist/wallet/evm.js"
+      "import": "./dist/wallet/evm.js",
+      "default": "./dist/wallet/evm.js"
     },
     "./wallet/solana": {
       "types": "./dist/wallet/solana.d.ts",
-      "import": "./dist/wallet/solana.js"
+      "import": "./dist/wallet/solana.js",
+      "default": "./dist/wallet/solana.js"
     }
   },
   "files": [
