@@ -1,0 +1,18 @@
+/**
+ * Solana-only wallet entry. Import this when your app only needs SIWS
+ * (no EVM). Requires only Solana peer deps:
+ *   - @solana/wallet-adapter-react / -react-ui
+ *   - @solana/web3.js, bs58
+ *   - the curated default adapter subpackages (Phantom, Solflare,
+ *     Coinbase, Trust, MathWallet, Coin98)
+ *
+ * Usage:
+ *   import { SolanaWalletProvider, createDefaultSolanaWallets } from "@stwd/react/wallet/solana";
+ */
+
+export type { SolanaWalletProviderProps } from "../providers/SolanaProvider.js";
+export {
+  createDefaultSolanaWallets,
+  DEFAULT_SOLANA_WALLETS,
+  SolanaWalletProvider,
+} from "../providers/SolanaProvider.js";

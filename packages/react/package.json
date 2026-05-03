@@ -14,7 +14,15 @@
       "types": "./dist/wallet.d.ts",
       "import": "./dist/wallet.js"
     },
-    "./styles.css": "./dist/styles.css"
+    "./styles.css": "./dist/styles.css",
+    "./wallet/evm": {
+      "types": "./dist/wallet/evm.d.ts",
+      "import": "./dist/wallet/evm.js"
+    },
+    "./wallet/solana": {
+      "types": "./dist/wallet/solana.d.ts",
+      "import": "./dist/wallet/solana.js"
+    }
   },
   "files": [
     "dist",

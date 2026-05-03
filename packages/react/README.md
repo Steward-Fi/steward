@@ -37,12 +37,24 @@ First-class EVM and Solana sign-in. Uses [wagmi](https://wagmi.sh) and [RainbowK
 
 Adding wallet login does not require backend changes. The component signs SIWE or SIWS messages and exchanges them through the Steward auth SDK.
 
-Wallet login is imported from a subpath to keep optional wallet peer deps off the root entrypoint:
+Wallet login is imported from subpaths to keep optional wallet peer deps off the root entrypoint. Pick the chain(s) you actually need:
 
 ```ts
+// EVM only (no Solana peers required)
 import {
   createDefaultWagmiConfig,
-  DEFAULT_SOLANA_WALLETS,
+  EVMWalletProvider,
+} from "@stwd/react/wallet/evm";
+
+// Solana only (no EVM peers required)
+import {
+  createDefaultSolanaWallets,
+  SolanaWalletProvider,
+} from "@stwd/react/wallet/solana";
+
+// Both chains (combined entry; requires both peer families)
+import {
+  createDefaultWagmiConfig,
   EVMWalletProvider,
   SolanaWalletProvider,
   WalletLogin,
@@ -50,6 +62,8 @@ import {
 ```
 
 Consumers that do not use wallet login can continue importing everything else from `@stwd/react` without installing wagmi, RainbowKit, or Solana wallet packages.
+
+The per-chain entries (`/wallet/evm` and `/wallet/solana`) are the recommended way to consume wallet login: they let you skip the peer install for the chain you don't use. The combined `/wallet` entry remains for apps that support both chains.
 
 ### Wallet packages
 
