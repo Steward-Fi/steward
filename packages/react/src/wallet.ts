@@ -22,6 +22,12 @@ registerSolanaWalletPanel({
 });
 
 export type {
+  StewardLoginWithWalletsEvmConfig,
+  StewardLoginWithWalletsProps,
+  StewardLoginWithWalletsSolanaConfig,
+} from "./components/StewardLoginWithWallets.js";
+export { StewardLoginWithWallets } from "./components/StewardLoginWithWallets.js";
+export type {
   WalletChains,
   WalletLoginClassOverrides,
   WalletLoginProps,
