@@ -2039,22 +2039,21 @@ auth.get("/oauth/:provider/authorize", async (c) => {
   // is trimmed defensively for the same reason we trim headers elsewhere.
   const tenantId = c.req.query("tenant_id")?.trim() || c.req.query("tenantId")?.trim() || undefined;
 
-  // `response_type=code` opts the caller into the nonce-exchange flow. Instead
-  // of leaking `?token=...&refreshToken=...` in the redirect URL (which gets
-  // captured by browser history, server access logs, Referer headers from any
-  // resource the landing page loads, and the user clipboard), the callback
-  // issues a one-time `?code=<nonce>` that the caller's backend exchanges for
-  // the real tokens server-side via POST /oauth/exchange. Legacy callers that
-  // omit response_type still get the token-in-query redirect for one release.
-  const responseType = c.req.query("response_type")?.trim() || undefined;
+  // The callback always uses the nonce-exchange flow: it issues a one-time
+  // `?code=<nonce>` that the caller's backend exchanges for the real tokens
+  // server-side via POST /oauth/exchange. This keeps tokens out of browser
+  // history, server access logs, Referer headers, and the clipboard. The
+  // only accepted `response_type` is `code`; it defaults to `code` when
+  // omitted so callers that don't set it still get the secure flow.
+  const responseType = c.req.query("response_type")?.trim() || "code";
 
   if (!redirectUri) {
     return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
   }
 
-  if (responseType !== undefined && responseType !== "code" && responseType !== "token") {
+  if (responseType !== "code") {
     return c.json<ApiResponse>(
-      { ok: false, error: "response_type must be 'code' or 'token'" },
+      { ok: false, error: "response_type must be 'code'" },
       400,
     );
   }
@@ -2074,7 +2073,6 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     provider: providerName,
     tenantId,
     redirectUri,
-    responseType,
     ...(codeVerifier ? { codeVerifier } : {}),
   });
   getChallengeStore().set(`oauth:${state}`, statePayload);
@@ -2093,7 +2091,9 @@ auth.get("/oauth/:provider/authorize", async (c) => {
  *   4. Find/create user by email
  *   5. Upsert entry in `accounts` table
  *   6. Link user to requested tenant
- *   7. Mint JWT → redirect to app redirect_uri with ?token=<jwt>
+ *   7. Mint JWT → issue a one-time nonce, redirect to app redirect_uri with
+ *      ?code=<nonce> (the caller's backend then POSTs /oauth/exchange to
+ *      trade the nonce for the real tokens).
  */
 auth.get("/oauth/:provider/callback", async (c) => {
   const providerName = c.req.param("provider");
@@ -2123,7 +2123,6 @@ auth.get("/oauth/:provider/callback", async (c) => {
     provider: string;
     tenantId?: string;
     redirectUri: string;
-    responseType?: string;
     codeVerifier?: string;
   };
   try {
@@ -2208,40 +2207,28 @@ auth.get("/oauth/:provider/callback", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: result.error }, 500);
   }
 
-  // Branch: nonce-exchange (`response_type=code`) vs legacy token-in-query.
-  //
-  // Nonce-exchange path: issue a one-time, short-lived (60s) code that the
-  // caller's backend trades for the real tokens via POST /oauth/exchange.
-  // This keeps the tokens off the address bar / browser history / Referer /
-  // upstream access logs / any window the user copy-pastes. The pair
+  // Nonce-exchange: issue a one-time, short-lived code that the caller's
+  // backend trades for the real tokens via POST /oauth/exchange. This keeps
+  // the tokens off the address bar / browser history / Referer / upstream
+  // access logs / any window the user copy-pastes. The pair
   // {redirectUri, tenantId} is bound to the code so a stolen code cannot be
   // redeemed against a different redirect_uri or pivoted to another tenant.
-  if (stateData.responseType === "code") {
-    const nonceBytes = new Uint8Array(32);
-    crypto.getRandomValues(nonceBytes);
-    const code = uint8ArrayToBase64url(nonceBytes);
-    const issuedAt = Date.now();
-    const expiresAt = issuedAt + OAUTH_CODE_TTL_MS;
-    const codePayload = JSON.stringify({
-      token: result.token,
-      refreshToken: result.refreshToken,
-      redirectUri: stateData.redirectUri,
-      tenantId: stateData.tenantId ?? null,
-      expiresAt,
-      expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
-    });
-    getOAuthCodeStore().set(`oauth-code:${code}`, codePayload);
-    const redirectUrl = new URL(stateData.redirectUri);
-    redirectUrl.searchParams.set("code", code);
-    return c.redirect(redirectUrl.toString(), 302);
-  }
-
-  // Legacy: redirect with tokens directly in the query string. Kept for one
-  // release cycle so existing integrators don't break. Mark for removal in a
-  // follow-up once all callers have moved to `response_type=code`.
+  const nonceBytes = new Uint8Array(32);
+  crypto.getRandomValues(nonceBytes);
+  const code = uint8ArrayToBase64url(nonceBytes);
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + OAUTH_CODE_TTL_MS;
+  const codePayload = JSON.stringify({
+    token: result.token,
+    refreshToken: result.refreshToken,
+    redirectUri: stateData.redirectUri,
+    tenantId: stateData.tenantId ?? null,
+    expiresAt,
+    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+  });
+  getOAuthCodeStore().set(`oauth-code:${code}`, codePayload);
   const redirectUrl = new URL(stateData.redirectUri);
-  redirectUrl.searchParams.set("token", result.token);
-  redirectUrl.searchParams.set("refreshToken", result.refreshToken);
+  redirectUrl.searchParams.set("code", code);
   return c.redirect(redirectUrl.toString(), 302);
 });
 
