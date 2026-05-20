@@ -17,6 +17,7 @@ import {
   safeJsonParse,
   transactions,
 } from "../services/context";
+import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const approvalRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -156,6 +157,11 @@ approvalRoutes.post("/:txId/approve", async (c) => {
   // Update transaction status to approved
   await db.update(transactions).set({ status: "approved" }).where(eq(transactions.id, txId));
 
+  dispatchWebhook(tenantId, entry.agentId, "tx.approved", {
+    txId,
+    approvalId: entry.id,
+  });
+
   return c.json<ApiResponse>({
     ok: true,
     data: {
@@ -217,6 +223,12 @@ approvalRoutes.post("/:txId/deny", async (c) => {
 
   // Update transaction status to rejected
   await db.update(transactions).set({ status: "rejected" }).where(eq(transactions.id, txId));
+
+  dispatchWebhook(tenantId, entry.agentId, "tx.denied", {
+    txId,
+    approvalId: entry.id,
+    reason: body.reason,
+  });
 
   return c.json<ApiResponse>({
     ok: true,

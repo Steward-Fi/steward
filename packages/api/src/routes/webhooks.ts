@@ -17,18 +17,12 @@ import {
   webhookConfigs,
   webhookDeliveries,
 } from "../services/context";
+import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "../services/webhook-events";
 
 export const webhookRoutes = new Hono<{ Variables: AppVariables }>();
 
 // Valid webhook event types
-const VALID_EVENTS = [
-  "tx.pending",
-  "tx.approved",
-  "tx.denied",
-  "tx.signed",
-  "spend.threshold",
-  "policy.violation",
-] as const;
+const VALID_EVENTS = CONFIGURED_WEBHOOK_EVENT_TYPES;
 
 function isValidUrl(url: string): boolean {
   try {
