@@ -75,19 +75,7 @@ docs(readme): update quickstart section
 chore(ci): add docker build workflow
 ```
 
-### 4. Include the co-author line
-
-All commits must include:
-```
-Co-authored-by: wakesync <shadow@shad0w.xyz>
-```
-
-Add it with:
-```bash
-git commit -m "feat(sdk): add batch support" -m "" -m "Co-authored-by: wakesync <shadow@shad0w.xyz>"
-```
-
-### 5. Open a PR
+### 4. Open a PR
 
 - Target branch: `develop` (not `main`)
 - Fill out the PR template completely

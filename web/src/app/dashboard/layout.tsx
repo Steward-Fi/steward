@@ -6,6 +6,8 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { SelfHostPrompt } from "@/components/self-host-prompt";
+import { useApiReachability } from "@/lib/api-reachability";
 
 function RedirectToLogin() {
   const router = useRouter();
@@ -178,6 +180,25 @@ function LoadingSpinner() {
 }
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  // The public steward.fi deployment does not run a control plane. If the
+  // configured API origin is unreachable, render the self-host CTA instead
+  // of letting users bounce off auth-guard → login → "Failed to fetch" toast.
+  // Self-hosted dashboards have NEXT_PUBLIC_STEWARD_API_URL pointed at their
+  // own API and will pass this probe.
+  const api = useApiReachability();
+
+  if (api.status === "checking") {
+    return <LoadingSpinner />;
+  }
+
+  if (api.status === "unreachable") {
+    return (
+      <div className="min-h-screen bg-bg">
+        <SelfHostPrompt detail={api.detail} onRetry={api.refresh} />
+      </div>
+    );
+  }
+
   return (
     <StewardAuthGuard fallback={<RedirectToLogin />} loadingFallback={<LoadingSpinner />}>
       <div className="min-h-screen bg-bg">
