@@ -27,5 +27,4 @@ None
 - [ ] Documentation updated if needed
 - [ ] CI passes (`bun test`, typecheck)
 - [ ] PR targets `develop` (not `main`)
-- [ ] Commits include `Co-authored-by: wakesync <shadow@shad0w.xyz>`
 - [ ] Commit messages follow conventional format (`type(scope): description`)
