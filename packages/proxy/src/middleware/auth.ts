@@ -5,7 +5,7 @@
  * and sets them on the Hono context for downstream handlers.
  */
 
-import { verifyToken } from "@stwd/auth";
+import { assertTokenNotRevoked, verifyToken } from "@stwd/auth";
 import type { Context, Next } from "hono";
 import { PROXY_SCOPE } from "../config";
 
@@ -40,6 +40,7 @@ export async function authMiddleware(c: Context, next: Next) {
 
   try {
     const payload = await verifyToken(token);
+    await assertTokenNotRevoked(payload);
 
     const agentId = payload.agentId as string | undefined;
     const tenantId = payload.tenantId as string | undefined;
