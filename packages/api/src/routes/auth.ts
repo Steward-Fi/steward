@@ -81,6 +81,7 @@ import bs58 from "bs58";
 import { and, eq, gte, lt } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { generateNonce, SiweMessage } from "siwe";
+import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { trackAuditEvent } from "../services/audit";
 import { verifyEip1271 } from "../services/eip1271";
 
@@ -1270,11 +1271,46 @@ auth.post("/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "message and signature are required" }, 400);
   }
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // Lenient EIP-55 path: the `siwe` library strictly enforces EIP-55 checksum
+  // on the address line and throws "invalid EIP-55 address" when wallets emit
+  // a lower-case address (wagmi default for many adapters, including the most
+  // common MetaMask path). The signature is over the EXACT bytes the user
+  // signed, so we MUST verify against `body.message` literally, not against a
+  // normalized copy. We split the work:
+  //   1. Try parsing as-is. If that works, fall through to the canonical path.
+  //   2. If parsing fails because of EIP-55 casing, build a normalized copy
+  //      with the address line re-checksummed via viem, parse THAT to extract
+  //      fields (nonce / domain / chainId / etc), and verify the signature
+  //      against the ORIGINAL untouched message with viem's verifyMessage.
+  // This preserves cryptographic integrity while accepting SDK clients that
+  // forgot to checksum.
+  // ──────────────────────────────────────────────────────────────────────────
+  function normalizeAddressLine(msg: string): string {
+    const lines = msg.split("\n");
+    if (lines.length < 2) return msg;
+    const candidate = lines[1].trim();
+    if (!/^0x[a-fA-F0-9]{40}$/.test(candidate)) return msg;
+    try {
+      lines[1] = getAddress(candidate);
+    } catch {
+      // not a valid hex address; let siwe surface the right error
+    }
+    return lines.join("\n");
+  }
+
   let siweMessage: SiweMessage;
+  let usedNormalizedParse = false;
   try {
     siweMessage = new SiweMessage(body.message);
   } catch {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid SIWE message format" }, 400);
+    // Retry with EIP-55 normalized address line.
+    try {
+      siweMessage = new SiweMessage(normalizeAddressLine(body.message));
+      usedNormalizedParse = true;
+    } catch {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid SIWE message format" }, 400);
+    }
   }
 
   const allowedDomains = getAllowedSiweDomains();
@@ -1314,12 +1350,30 @@ auth.post("/verify", async (c) => {
 
   // Try EOA verification first (siwe uses ECDSA recover internally). If that
   // fails, fall back to EIP-1271 for smart contract wallets (Safes, Argent, etc).
+  //
+  // When we used the EIP-55 normalized parse path above, siwe.verify would
+  // reconstruct the message FROM the normalized fields and recover against
+  // that, which won't match a signature taken over the original lower-case
+  // bytes. So in that path we use viem's verifyMessage which verifies the
+  // signature against the raw `body.message` literally.
   let eoaVerified = false;
-  try {
-    await siweMessage.verify({ signature: body.signature });
-    eoaVerified = true;
-  } catch {
-    eoaVerified = false;
+  if (usedNormalizedParse) {
+    try {
+      eoaVerified = await viemVerifyMessage({
+        address: siweMessage.address as `0x${string}`,
+        message: body.message,
+        signature: body.signature as `0x${string}`,
+      });
+    } catch {
+      eoaVerified = false;
+    }
+  } else {
+    try {
+      await siweMessage.verify({ signature: body.signature });
+      eoaVerified = true;
+    } catch {
+      eoaVerified = false;
+    }
   }
 
   if (!eoaVerified) {
