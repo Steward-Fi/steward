@@ -61,7 +61,7 @@ COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
-RUN bun install --frozen-lockfile
+RUN BUN_FROZEN_LOCKFILE=0 bun install --no-frozen-lockfile
 
 # ── Stage 2: Build ────────────────────────────────────────────────────────────
 FROM base AS build
@@ -93,7 +93,7 @@ COPY packages/examples/                      packages/examples/
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
 # Install deps fresh in build stage (bun symlinks don't survive COPY --from in BuildKit)
-RUN bun install --frozen-lockfile
+RUN BUN_FROZEN_LOCKFILE=0 bun install --no-frozen-lockfile
 
 # Copy full source for all packages needed by api + proxy
 COPY packages/api         packages/api
@@ -160,7 +160,7 @@ COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
 COPY --from=deps /app/bun.lock ./bun.lock
-RUN bun install --production --frozen-lockfile
+RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile
 
 # Copy compiled output from build stage
 COPY --from=build /app/packages/api         packages/api
