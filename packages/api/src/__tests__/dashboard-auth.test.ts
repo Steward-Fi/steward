@@ -1,42 +1,51 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAccessToken, signAgentToken } from "@stwd/auth";
-import { closeDb, getDb, tenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { getDb, tenants } from "@stwd/db";
+import { eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
 
-const TENANT_ID = "dashboard-auth-tenant";
+/**
+ * NOTE on test isolation:
+ *   This file deliberately uses the ambient `DATABASE_URL` set by the
+ *   `Integration Tests (Postgres)` CI job and does NOT swap pglite via
+ *   `setPGLiteOverride`. An earlier version of this file replaced the
+ *   global db handle in `beforeAll` and closed it in `afterAll`, which
+ *   broke every subsequent test in `bun test packages/api` with
+ *   `error: PGlite is closed`. We use a unique tenant id and clean up
+ *   the row instead of swapping the connection.
+ */
+
+const TENANT_ID = "test-dashboard-auth";
+const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
+
 let app: typeof import("../app")["app"];
 
 beforeAll(async () => {
-  process.env.DATABASE_URL = "pglite://embedded";
-  process.env.STEWARD_PGLITE_MEMORY = "true";
-  process.env.STEWARD_MASTER_PASSWORD = "dashboard-auth-master-password";
-  process.env.STEWARD_JWT_SECRET = "dashboard-auth-jwt-secret-with-enough-bytes";
-
-  const { db, client } = await createPGLiteDb("memory://");
-  setPGLiteOverride(db, async () => {
-    await client.close();
-  });
+  if (!hasDatabaseUrl) return;
 
   ({ app } = await import("../app"));
 
-  await getDb().insert(tenants).values({
-    id: TENANT_ID,
-    name: "Dashboard Auth Tenant",
-    apiKeyHash: "hash",
-  });
+  await getDb()
+    .insert(tenants)
+    .values({
+      id: TENANT_ID,
+      name: "Dashboard Auth Tenant",
+      apiKeyHash: "hash",
+    })
+    .onConflictDoNothing();
 });
 
 afterAll(async () => {
-  await closeDb().catch(() => {});
-  delete process.env.DATABASE_URL;
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
+  if (!hasDatabaseUrl) return;
+  await getDb()
+    .delete(tenants)
+    .where(eq(tenants.id, TENANT_ID))
+    .catch(() => {});
 });
 
-describe("dashboardAuthMiddleware", () => {
+describeWithDatabase("dashboardAuthMiddleware", () => {
   it("explicitly rejects agent tokens", async () => {
     const token = await signAgentToken({ agentId: "agent-1", tenantId: TENANT_ID }, "1h");
 
