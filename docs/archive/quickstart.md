@@ -345,4 +345,3 @@ curl -s -X POST http://localhost:3200/vault/trading-bot/sign \
 - [React Components](./react.md) — Component API reference
 - [SDK Reference](./sdk.md) — Full TypeScript SDK docs
 - [Deployment](./deployment.md) — Production setup, TLS, monitoring
-- [Privy Migration](./migration-from-privy.md) — Step-by-step migration guide

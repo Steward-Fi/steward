@@ -8,6 +8,7 @@
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
+import { trackAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -143,6 +144,24 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         });
       });
 
+      trackAuditEvent({
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: "vault.sign.queued_for_approval",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          chainId: signRequest.chainId,
+          to: signRequest.to,
+          value: signRequest.value,
+          policyResults: evaluation.results,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+
       dispatchWebhook(tenantId, agentId, "approval_required", {
         txId,
         results: evaluation.results,
@@ -171,6 +190,24 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       data: signRequest.data,
       chainId: signRequest.chainId,
       policyResults: evaluation.results,
+    });
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign.rejected_by_policy",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: {
+        chainId: signRequest.chainId,
+        to: signRequest.to,
+        value: signRequest.value,
+        policyResults: evaluation.results,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
     });
 
     dispatchWebhook(tenantId, agentId, "tx_rejected", {
@@ -211,6 +248,25 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
       console.error("[vault] Failed to record spend:", err),
     );
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: {
+        chainId: resolvedChainId,
+        to: signRequest.to,
+        value: signRequest.value,
+        broadcast: shouldBroadcast,
+        txHash: shouldBroadcast ? result : undefined,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
 
     dispatchWebhook(tenantId, agentId, "tx_signed", {
       txId,
@@ -328,6 +384,19 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       .set({ status: "signed", txHash, signedAt: resolvedAt })
       .where(eq(transactions.id, txId));
 
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "vault.approve",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: { agentId, chainId: transaction.chainId, txHash },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+
     dispatchWebhook(tenantId, agentId, "tx_signed", { txId, txHash });
 
     return c.json<ApiResponse<{ txId: string; txHash: string }>>({
@@ -402,6 +471,19 @@ vaultRoutes.post("/:agentId/reject/:txId", async (c) => {
     .update(transactions)
     .set({ status: "rejected" })
     .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
+
+  trackAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: tenantId,
+    action: "vault.reject",
+    resourceType: "transaction",
+    resourceId: txId,
+    metadata: { agentId },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   return c.json<ApiResponse>({ ok: true });
 });

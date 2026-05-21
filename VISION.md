@@ -45,13 +45,13 @@ Six capabilities define the space. Most platforms cover two or three:
 | **Agent-native** | Built for autonomous operation, not retrofitted from consumer auth. |
 | **Credential proxy** | Manages all sensitive credentials, not just wallet keys. |
 
-Steward checks all six. The closest competitors each miss critical boxes: Privy is closed and hosted-only. Vincent requires the Lit MPC network. Turnkey has no auth or policies. Coinbase AgentKit is open but low-abstraction (signing primitives only, no auth/policies/proxy).
+Steward checks all six. Existing platforms each miss critical boxes — most are closed and hosted-only, depend on an external MPC network, lack auth or policy enforcement, or expose only low-level signing primitives without auth, policies, or a credential proxy.
 
 ---
 
 ## Two Deployment Modes
 
-**Hosted** (steward.fi / your cloud): Multi-tenant, production-grade. Drop-in replacement for Privy. Your app is a tenant. Zero infra overhead.
+**Hosted** (steward.fi / your cloud): Multi-tenant, production-grade. Drop-in replacement for closed embedded-wallet platforms. Your app is a tenant. Zero infra overhead.
 
 **Embedded** (PGLite): Local-first, runs in-process. Same vault, same policies, same SDK. For desktop apps, CLI agents, self-hosted deployments. No third-party database, no network dependency.
 
@@ -77,7 +77,7 @@ Same API surface. Same guarantees. Write the integration once.
 - Webhook system with HMAC-signed delivery
 
 ### Next
-- Milady Cloud integration (replace Privy as auth + wallet layer)
+- Milady Cloud integration as auth + wallet layer
 - Dashboard self-service (tenant creation, policy configuration, API key management)
 - Production hardening (security audit, token store persistence, monitoring)
 - Babylon integration

@@ -11,7 +11,7 @@ import {
   walletConnectWallet,
 } from "@rainbow-me/rainbowkit/wallets";
 import { type Config, createConfig, http } from "wagmi";
-import { arbitrum, base, bsc, mainnet, optimism, polygon } from "wagmi/chains";
+import { arbitrum, base, bsc, gnosis, mainnet, optimism, polygon } from "wagmi/chains";
 
 /**
  * WalletConnect projectId.
@@ -59,11 +59,12 @@ export function getWagmiConfig(): Config {
   );
   cachedConfig = createConfig({
     connectors,
-    chains: [mainnet, base, polygon, optimism, arbitrum, bsc],
+    chains: [mainnet, base, polygon, gnosis, optimism, arbitrum, bsc],
     transports: {
       [mainnet.id]: http(),
       [base.id]: http(),
       [polygon.id]: http(),
+      [gnosis.id]: http(),
       [optimism.id]: http(),
       [arbitrum.id]: http(),
       [bsc.id]: http(),

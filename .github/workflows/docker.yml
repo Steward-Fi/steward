@@ -6,6 +6,15 @@ on:
   push:
     branches: [develop]
     tags: ["v*"]
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "package.json"
+      - "bun.lock"
+      - "packages/**/package.json"
+      - ".github/workflows/docker.yml"
 
 jobs:
   build-and-push:

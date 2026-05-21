@@ -1,5 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { CHAINS, chainFromCaip2, chainFromNumeric, fromCaip2, toCaip2 } from "../index";
+import {
+  CHAIN_PROVIDERS,
+  CHAINS,
+  chainFromCaip2,
+  chainFromNumeric,
+  fromCaip2,
+  getChainProviderByCaip2,
+  getChainProviderByNumeric,
+  toCaip2,
+} from "../index";
 
 // ─── CHAINS registry ─────────────────────────────────────────────────────────
 
@@ -8,10 +17,29 @@ describe("CHAINS registry", () => {
     expect(CHAINS["eip155:1"]).toBeDefined();
     expect(CHAINS["eip155:56"]).toBeDefined();
     expect(CHAINS["eip155:97"]).toBeDefined();
+    expect(CHAINS["eip155:100"]).toBeDefined();
     expect(CHAINS["eip155:137"]).toBeDefined();
     expect(CHAINS["eip155:8453"]).toBeDefined();
     expect(CHAINS["eip155:42161"]).toBeDefined();
     expect(CHAINS["eip155:84532"]).toBeDefined();
+  });
+
+  it("has correct metadata for Gnosis", () => {
+    const chain = CHAINS["eip155:100"];
+    expect(chain.numericId).toBe(100);
+    expect(chain.family).toBe("evm");
+    expect(chain.name).toBe("Gnosis");
+    expect(chain.symbol).toBe("xDAI");
+    expect(chain.testnet).toBe(false);
+  });
+
+  it("has correct metadata for Polygon", () => {
+    const chain = CHAINS["eip155:137"];
+    expect(chain.numericId).toBe(137);
+    expect(chain.family).toBe("evm");
+    expect(chain.name).toBe("Polygon");
+    expect(chain.symbol).toBe("POL");
+    expect(chain.testnet).toBe(false);
   });
 
   it("contains Solana mainnet and devnet", () => {
@@ -85,6 +113,10 @@ describe("toCaip2", () => {
     expect(toCaip2(137)).toBe("eip155:137");
   });
 
+  it("converts Gnosis chainId to CAIP-2", () => {
+    expect(toCaip2(100)).toBe("eip155:100");
+  });
+
   it("converts Arbitrum chainId to CAIP-2", () => {
     expect(toCaip2(42161)).toBe("eip155:42161");
   });
@@ -127,6 +159,59 @@ describe("fromCaip2", () => {
 
   it("returns undefined for a malformed CAIP-2 string", () => {
     expect(fromCaip2("not-a-caip2")).toBeUndefined();
+  });
+
+  it("converts eip155:100 to numeric 100 (Gnosis)", () => {
+    expect(fromCaip2("eip155:100")).toBe(100);
+  });
+});
+
+// ─── ChainProvider registry (extensible) ─────────────────────────────────────
+
+describe("CHAIN_PROVIDERS registry", () => {
+  it("exposes Gnosis and Polygon as providers with explorer/color metadata", () => {
+    const gnosis = getChainProviderByNumeric(100);
+    expect(gnosis).toBeDefined();
+    expect(gnosis?.name).toBe("Gnosis");
+    expect(gnosis?.explorerUrl).toBe("https://gnosisscan.io");
+    expect(gnosis?.explorerTxUrl("0xabc")).toBe("https://gnosisscan.io/tx/0xabc");
+    expect(gnosis?.explorerAddressUrl("0xdef")).toBe("https://gnosisscan.io/address/0xdef");
+    expect(gnosis?.color).toBeTruthy();
+
+    const polygon = getChainProviderByCaip2("eip155:137");
+    expect(polygon).toBeDefined();
+    expect(polygon?.name).toBe("Polygon");
+    expect(polygon?.explorerTxUrl("0x123")).toBe("https://polygonscan.com/tx/0x123");
+  });
+
+  it("every provider entry round-trips through both lookup helpers", () => {
+    for (const p of CHAIN_PROVIDERS) {
+      expect(getChainProviderByCaip2(p.caip2)).toBe(p);
+      expect(getChainProviderByNumeric(p.numericId)).toBe(p);
+    }
+  });
+
+  it("every provider entry has a matching CHAINS entry", () => {
+    for (const p of CHAIN_PROVIDERS) {
+      const ci = CHAINS[p.caip2];
+      expect(ci).toBeDefined();
+      expect(ci.numericId).toBe(p.numericId);
+      expect(ci.family).toBe(p.family);
+      expect(ci.name).toBe(p.name);
+      expect(ci.symbol).toBe(p.symbol);
+      expect(ci.testnet).toBe(p.testnet);
+    }
+  });
+
+  it("Solana devnet provider URLs include cluster=devnet", () => {
+    const devnet = getChainProviderByNumeric(102);
+    expect(devnet?.explorerTxUrl("sig")).toContain("?cluster=devnet");
+    expect(devnet?.explorerAddressUrl("addr")).toContain("?cluster=devnet");
+  });
+
+  it("returns undefined for unknown chain provider lookups", () => {
+    expect(getChainProviderByNumeric(999999)).toBeUndefined();
+    expect(getChainProviderByCaip2("eip155:999999")).toBeUndefined();
   });
 });
 

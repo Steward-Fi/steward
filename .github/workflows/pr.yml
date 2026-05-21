@@ -30,6 +30,14 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      # Supply-chain audit (SOC2 CC7.1 / CC8.1).
+      # Fail the build on any CRITICAL CVE; report HIGH non-blockingly so the
+      # backlog stays visible without permanently red CI while we drive it down.
+      - name: Audit dependencies (critical)
+        run: bun audit --audit-level=critical
+      - name: Audit dependencies (high — report only)
+        if: always()
+        run: bun audit --audit-level=high || true
 
       - name: Check public package version bumps
         env:
@@ -201,6 +209,7 @@ jobs:
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_AUDIT_HMAC_KEY: "ci0000000000000000000000000000000000000000000000000000000000000ff"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run packages/api/src/index.ts > /tmp/steward-api-integration.log 2>&1 &
@@ -223,6 +232,7 @@ jobs:
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_AUDIT_HMAC_KEY: "ci0000000000000000000000000000000000000000000000000000000000000ff"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
 
       - name: Stop API test server
@@ -268,6 +278,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_AUDIT_HMAC_KEY: "ci0000000000000000000000000000000000000000000000000000000000000ff"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run start:local > /tmp/steward-fi-e2e.log 2>&1 &
@@ -323,6 +334,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_AUDIT_HMAC_KEY: "ci0000000000000000000000000000000000000000000000000000000000000ff"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
           PORT: "3200"
           STEWARD_PROXY_PORT: "8080"

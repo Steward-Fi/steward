@@ -7,7 +7,7 @@
  * wagmi + RainbowKit + Solana provider trees so consumers can mount wallet
  * login with a single component, no manual provider wiring.
  *
- * This is the "Privy parity" surface. It is purely additive over
+ * This is the bundled wallet-login surface. It is purely additive over
  * `<StewardLogin>` + the manual provider wrap path, which still works for
  * consumers who want full control of their wallet provider configuration.
  *

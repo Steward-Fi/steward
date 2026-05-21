@@ -80,7 +80,6 @@ docker compose up -d
 - [**SDK Reference**](./sdk.md) — `@stwd/sdk` TypeScript client
 - [**React Components**](./react.md) — `@stwd/react` embeddable UI
 - [**Deployment Guide**](./deployment.md) — Docker, environment variables, database setup
-- [**Migrate from Privy**](./migration-from-privy.md) — Drop-in replacement guide
 
 ## Who Uses Steward
 

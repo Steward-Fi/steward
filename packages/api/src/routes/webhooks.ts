@@ -304,7 +304,7 @@ webhookRoutes.post("/deliveries/:id/retry", async (c) => {
       nextRetryAt: new Date(),
       lastError: null,
     })
-    .where(eq(webhookDeliveries.id, deliveryId))
+    .where(and(eq(webhookDeliveries.id, deliveryId), eq(webhookDeliveries.tenantId, tenantId)))
     .returning();
 
   return c.json<ApiResponse>({ ok: true, data: updated });

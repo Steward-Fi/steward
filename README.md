@@ -13,7 +13,7 @@ Auth + wallet infrastructure for autonomous agents. Open source. Self-hostable. 
 
 AI agents need wallet keys, API keys, database credentials. Today these live as plaintext environment variables, one prompt injection away from exfiltration. No spending controls, no audit trail, no kill switch.
 
-Auth platforms like Privy were built for consumer apps, not agents. They're closed source, can't be self-hosted, charge per-transaction fees, and have no concept of policy enforcement or autonomous operation.
+Existing embedded-wallet platforms were built for consumer apps, not agents. They're closed source, can't be self-hosted, charge per-transaction fees, and have no concept of policy enforcement or autonomous operation.
 
 ## The Solution
 
@@ -182,18 +182,14 @@ Full list in [`.env.example`](.env.example). See [Deployment Guide](docs/deploym
 
 ---
 
-## Competitive Landscape
+## What Steward Offers
 
-| | Steward | Privy (Stripe) | Vincent (Lit) | Turnkey | Crossmint | AgentKit (Coinbase) |
-|---|---|---|---|---|---|---|
-| **Open Source** | ✅ MIT | ❌ | ✅ | ❌ | ❌ | ✅ |
-| **Self-Hostable** | ✅ | ❌ | ❌ (needs Lit network) | ❌ | ❌ | ✅ |
-| **Auth** | ✅ Passkey/email/SIWE/OAuth | ✅ All methods | ❌ | ❌ | ❌ | ❌ |
-| **Policy Enforcement** | ✅ 6 types, vault-level | Partial (app-layer) | ✅ On-chain | ❌ | ✅ | ❌ |
-| **Agent-Native** | ✅ | Bolted on | ✅ | Partial | ✅ | ✅ |
-| **Credential Proxy** | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
-
-Steward is the only platform that checks all six boxes. The proxy gateway (credential injection for any API, not just wallets) is unique.
+- **Open Source** — MIT licensed, full source available.
+- **Self-Hostable** — Docker, embedded PGLite, or hosted.
+- **Full Auth Surface** — Passkey / email / SIWE / OAuth.
+- **Policy Enforcement at the Vault Layer** — 6 composable rule types evaluated before any signature is produced; compromised app code cannot bypass.
+- **Agent-Native** — Built from day one for autonomous operation: approval queues, audit log, kill-switch.
+- **Credential Proxy** — Inject keys for any third-party API; agents never see raw secrets.
 
 ---
 

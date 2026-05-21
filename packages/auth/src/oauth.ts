@@ -101,6 +101,19 @@ export function getEnabledProviders(): string[] {
  *
  * @throws Error if the required environment variables are not set.
  */
+// Per-provider URL overrides — used to point OAuth flows at a local fake
+// provider in non-production environments. Reading these from env (rather
+// than threading config through every call site) keeps the production path
+// unchanged when the overrides are unset.
+function overrideUrl(
+  provider: string,
+  kind: "AUTHORIZATION" | "TOKEN" | "USERINFO",
+): string | undefined {
+  const key = `${provider.toUpperCase()}_${kind}_URL`;
+  const value = process.env[key];
+  return value && value.trim().length > 0 ? value.trim() : undefined;
+}
+
 export function getProviderConfig(provider: string): OAuthProvider {
   switch (provider) {
     case "google": {
@@ -114,9 +127,11 @@ export function getProviderConfig(provider: string): OAuthProvider {
       return {
         clientId,
         clientSecret,
-        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth",
-        tokenUrl: "https://oauth2.googleapis.com/token",
-        userInfoUrl: "https://www.googleapis.com/oauth2/v3/userinfo",
+        authorizationUrl:
+          overrideUrl("google", "AUTHORIZATION") ?? "https://accounts.google.com/o/oauth2/v2/auth",
+        tokenUrl: overrideUrl("google", "TOKEN") ?? "https://oauth2.googleapis.com/token",
+        userInfoUrl:
+          overrideUrl("google", "USERINFO") ?? "https://www.googleapis.com/oauth2/v3/userinfo",
         scopes: ["openid", "email", "profile"],
       };
     }
@@ -132,9 +147,10 @@ export function getProviderConfig(provider: string): OAuthProvider {
       return {
         clientId,
         clientSecret,
-        authorizationUrl: "https://discord.com/api/oauth2/authorize",
-        tokenUrl: "https://discord.com/api/oauth2/token",
-        userInfoUrl: "https://discord.com/api/users/@me",
+        authorizationUrl:
+          overrideUrl("discord", "AUTHORIZATION") ?? "https://discord.com/api/oauth2/authorize",
+        tokenUrl: overrideUrl("discord", "TOKEN") ?? "https://discord.com/api/oauth2/token",
+        userInfoUrl: overrideUrl("discord", "USERINFO") ?? "https://discord.com/api/users/@me",
         scopes: ["identify", "email"],
       };
     }

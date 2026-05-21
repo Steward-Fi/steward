@@ -33,7 +33,7 @@ function decodeJwtPayload(token: string): Record<string, unknown> {
   return JSON.parse(atob(padded)) as Record<string, unknown>;
 }
 
-function buildSiweMessage(address: string, nonce: string): string {
+function buildSiweMessage(address: string, nonce: string, chainId = 1): string {
   const issuedAt = new Date().toISOString();
   return [
     "steward.fi wants you to sign in with your Ethereum account:",
@@ -43,7 +43,7 @@ function buildSiweMessage(address: string, nonce: string): string {
     "",
     "URI: https://steward.fi",
     "Version: 1",
-    "Chain ID: 1",
+    `Chain ID: ${chainId}`,
     `Nonce: ${nonce}`,
     `Issued At: ${issuedAt}`,
   ].join("\n");
@@ -192,6 +192,35 @@ describeWithDatabase("wallet auth flows", () => {
       }
     }
   });
+
+  // Parameterised SIWE auth across multiple EVM chains (Gnosis, Polygon).
+  // Confirms the auth flow is chain-agnostic and auto-detects regardless of
+  // which EVM chain the signer is currently on.
+  for (const { name, chainId } of [
+    { name: "Polygon", chainId: 137 },
+    { name: "Gnosis", chainId: 100 },
+  ]) {
+    it(`accepts SIWE auth signed on ${name} (chainId ${chainId})`, async () => {
+      const account = privateKeyToAccount(generatePrivateKey());
+      const nonce = await fetchNonce();
+      const message = buildSiweMessage(account.address, nonce, chainId);
+      const signature = await account.signMessage({ message });
+
+      const res = await fetch(`${BASE_URL}/auth/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message, signature }),
+      });
+
+      expect(res.status).toBe(200);
+      const json = (await res.json()) as VerifyResponse;
+      createdEvmAddresses.add(account.address.toLowerCase());
+      expect(json.address).toBe(account.address.toLowerCase());
+
+      const payload = decodeJwtPayload(json.token);
+      expect(payload.address).toBe(account.address.toLowerCase());
+    });
+  }
 
   it("verifies a known-good Solana signature and provisions a solana user/tenant", async () => {
     const nonce = await fetchNonce();

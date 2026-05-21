@@ -1,7 +1,10 @@
 // @stwd/shared - types, constants, utils
 
+import { CHAIN_PROVIDERS, type ChainProvider } from "./chains/index.js";
 import type { VenueId } from "./types/venue.js";
 
+// ─── Chain providers (extensible registry) ───
+export * from "./chains/index.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 // ─── Token Registry & Price Oracle ───
@@ -113,87 +116,30 @@ export interface ChainIdentifier {
 /**
  * Registry of all supported chains, keyed by CAIP-2 identifier.
  *
+ * Derived from the per-chain `ChainProvider` modules under `chains/`. To add
+ * a new chain, create a new file there and register it in `chains/index.ts`.
+ *
  * CAIP-2 format:
  *   EVM:    `eip155:{chainId}`
  *   Solana: `solana:{genesisHashPrefix}`
  *
  * Solana convention IDs used internally: 101 = mainnet-beta, 102 = devnet.
  */
-export const CHAINS: Record<string, ChainIdentifier> = {
-  "eip155:1": {
-    caip2: "eip155:1",
-    numericId: 1,
-    family: "evm",
-    name: "Ethereum",
-    symbol: "ETH",
-    testnet: false,
-  },
-  "eip155:56": {
-    caip2: "eip155:56",
-    numericId: 56,
-    family: "evm",
-    name: "BSC",
-    symbol: "BNB",
-    testnet: false,
-  },
-  "eip155:97": {
-    caip2: "eip155:97",
-    numericId: 97,
-    family: "evm",
-    name: "BSC Testnet",
-    symbol: "tBNB",
-    testnet: true,
-  },
-  "eip155:137": {
-    caip2: "eip155:137",
-    numericId: 137,
-    family: "evm",
-    name: "Polygon",
-    symbol: "POL",
-    testnet: false,
-  },
-  "eip155:8453": {
-    caip2: "eip155:8453",
-    numericId: 8453,
-    family: "evm",
-    name: "Base",
-    symbol: "ETH",
-    testnet: false,
-  },
-  "eip155:42161": {
-    caip2: "eip155:42161",
-    numericId: 42161,
-    family: "evm",
-    name: "Arbitrum",
-    symbol: "ETH",
-    testnet: false,
-  },
-  "eip155:84532": {
-    caip2: "eip155:84532",
-    numericId: 84532,
-    family: "evm",
-    name: "Base Sepolia",
-    symbol: "ETH",
-    testnet: true,
-  },
-  // Solana: genesis hash prefix used as the reference identifier
-  "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp": {
-    caip2: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
-    numericId: 101,
-    family: "solana",
-    name: "Solana",
-    symbol: "SOL",
-    testnet: false,
-  },
-  "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1": {
-    caip2: "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
-    numericId: 102,
-    family: "solana",
-    name: "Solana Devnet",
-    symbol: "SOL",
-    testnet: true,
-  },
-};
+export const CHAINS: Record<string, ChainIdentifier> = Object.freeze(
+  Object.fromEntries(
+    CHAIN_PROVIDERS.map((p: ChainProvider): [string, ChainIdentifier] => [
+      p.caip2,
+      {
+        caip2: p.caip2,
+        numericId: p.numericId,
+        family: p.family,
+        name: p.name,
+        symbol: p.symbol,
+        testnet: p.testnet,
+      },
+    ]),
+  ),
+);
 
 /** Look up a chain by its internal numeric ID. Returns undefined if not found. */
 export function chainFromNumeric(id: number): ChainIdentifier | undefined {

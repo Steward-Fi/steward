@@ -8,12 +8,14 @@
 import { proxyAuditLog } from "@stwd/db";
 import { and, count, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { verifyAuditChain } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
   agents,
   approvalQueue,
   db,
+  requireTenantLevel,
   transactions,
 } from "../services/context";
 
@@ -477,6 +479,78 @@ auditRoutes.get("/export", async (c) => {
   c.header("Content-Type", "text/csv");
   c.header("Content-Disposition", 'attachment; filename="audit-export.csv"');
   return c.body(`${rows.join("\n")}\n`);
+});
+
+// ─── GET /audit/events ────────────────────────────────────────────────────────
+//
+// Read raw tamper-evident audit events for the calling tenant. Returns only
+// the calling tenant's chain (enforced by tenantId filter); operators with
+// platform-level access should query directly.
+auditRoutes.get("/events", async (c) => {
+  const tenantId = c.get("tenantId");
+  const page = parsePage(c.req.query("page"));
+  const limit = parseLimit(c.req.query("limit"));
+  const offset = (page - 1) * limit;
+  const action = c.req.query("action");
+
+  const rows = (await db.execute(
+    action
+      ? sql`SELECT id, seq, actor_type, actor_id, action, resource_type, resource_id, metadata, ip_address, user_agent, request_id, created_at
+            FROM audit_events
+            WHERE tenant_id = ${tenantId} AND action = ${action}
+            ORDER BY seq DESC LIMIT ${limit} OFFSET ${offset}`
+      : sql`SELECT id, seq, actor_type, actor_id, action, resource_type, resource_id, metadata, ip_address, user_agent, request_id, created_at
+            FROM audit_events
+            WHERE tenant_id = ${tenantId}
+            ORDER BY seq DESC LIMIT ${limit} OFFSET ${offset}`,
+  )) as Array<Record<string, unknown>>;
+
+  const [{ total } = { total: 0 }] = (await db.execute(
+    sql`SELECT COUNT(*)::int AS total FROM audit_events WHERE tenant_id = ${tenantId}`,
+  )) as Array<{ total: number }>;
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: {
+      data: rows.map((r) => ({
+        ...r,
+        seq: Number(r.seq),
+        created_at:
+          r.created_at instanceof Date
+            ? (r.created_at as Date).toISOString()
+            : String(r.created_at),
+      })),
+      pagination: {
+        page,
+        limit,
+        total: Number(total),
+        totalPages: Math.ceil(Number(total) / limit),
+      },
+    },
+  });
+});
+
+// ─── POST /audit/verify ───────────────────────────────────────────────────────
+//
+// Walk the tenant's audit chain and verify every HMAC. A break here means
+// either (a) the HMAC key has rotated without a documented re-keying or
+// (b) somebody with DB write access has tampered with historical rows.
+// Tenant-level auth required — agent tokens cannot verify.
+auditRoutes.post("/verify", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Audit verification requires tenant-level authentication" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const fromSeqRaw = c.req.query("fromSeq");
+  const toSeqRaw = c.req.query("toSeq");
+  const fromSeq = fromSeqRaw ? Math.max(1, parseInt(fromSeqRaw, 10)) : 1;
+  const toSeq = toSeqRaw ? parseInt(toSeqRaw, 10) : undefined;
+
+  const result = await verifyAuditChain(tenantId, { fromSeq, toSeq });
+  return c.json<ApiResponse>({ ok: true, data: result });
 });
 
 function csvRow(fields: string[]): string {

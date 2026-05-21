@@ -6,6 +6,7 @@
 
 import { eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { trackAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -234,6 +235,22 @@ policiesStandaloneRoutes.post("/", async (c) => {
 
   try {
     const template = await insertTemplate(tenantId, body);
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "policy.template.create",
+      resourceType: "policy_template",
+      resourceId: template.id,
+      metadata: {
+        name: template.name,
+        ruleCount: template.rules.length,
+        isDefault: template.isDefault,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
     return c.json<ApiResponse<PolicyTemplate>>({ ok: true, data: template }, 201);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -280,6 +297,23 @@ policiesStandaloneRoutes.put("/:id", async (c) => {
     if (!template) {
       return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
     }
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "policy.template.update",
+      resourceType: "policy_template",
+      resourceId: template.id,
+      metadata: {
+        name: template.name,
+        ruleCount: template.rules.length,
+        isDefault: template.isDefault,
+        fields: Object.keys(body),
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
     return c.json<ApiResponse<PolicyTemplate>>({ ok: true, data: template });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -303,6 +337,18 @@ policiesStandaloneRoutes.delete("/:id", async (c) => {
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Policy template not found" }, 404);
   }
+
+  trackAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: tenantId,
+    action: "policy.template.delete",
+    resourceType: "policy_template",
+    resourceId: id,
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   return c.json<ApiResponse>({ ok: true, data: { deleted: true } });
 });
@@ -363,6 +409,19 @@ policiesStandaloneRoutes.post("/:id/assign", async (c) => {
     assigned.push(agentId);
   }
 
+  trackAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: tenantId,
+    action: "policy.template.assign",
+    resourceType: "policy_template",
+    resourceId: id,
+    metadata: { assignedAgents: assigned, rulesApplied: template.rules.length },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
   return c.json<ApiResponse>({
     ok: true,
     data: {
@@ -406,6 +465,10 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
     }
     rules = template.rules;
   } else if (body.agentId) {
+    const owned = await ensureAgentForTenant(tenantId, body.agentId);
+    if (!owned) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+    }
     const storedPolicies = await db
       .select()
       .from(policies)

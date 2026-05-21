@@ -44,9 +44,3 @@ export function tenantAuthMiddleware() {
     await next();
   });
 }
-
-export function dashboardAuthMiddleware() {
-  return createMiddleware(async (c) => {
-    return c.json<ApiResponse>({ ok: false, error: "Dashboard auth not implemented" }, 501);
-  });
-}

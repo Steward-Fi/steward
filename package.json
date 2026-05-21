@@ -19,6 +19,8 @@
     "test:e2e:auth": "bun run scripts/e2e-auth-test.ts",
     "test:e2e:integration": "bun run scripts/e2e-integration-test.ts",
     "test:e2e:smoke": "bun run scripts/run-e2e-smoke.ts",
+    "test:e2e:browser": "cd web && bun run build && bun run e2e",
+    "test:e2e:browser:chromium": "cd web && bun run build && bun run e2e:chromium",
     "test:e2e:all": "bun run test:e2e:smoke && bun run test:e2e:auth && bun run test:e2e:integration",
     "seed": "bun packages/seed/src/index.ts",
     "start:local": "bun run scripts/start-local.ts"

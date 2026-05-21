@@ -12,6 +12,7 @@
 
 import { SecretVault } from "@stwd/vault";
 import { Hono } from "hono";
+import { trackAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -70,6 +71,18 @@ secretsRoutes.post("/", async (c) => {
     const secret = await sv.createSecret(tenantId, body.name, body.value, {
       description: body.description,
       expiresAt: body.expiresAt ? new Date(body.expiresAt) : undefined,
+    });
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "secret.create",
+      resourceType: "secret",
+      resourceId: secret.id,
+      metadata: { name: body.name, hasExpiry: !!body.expiresAt },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
     });
     return c.json<ApiResponse>({ ok: true, data: secret }, 201);
   } catch (e: unknown) {
@@ -327,6 +340,18 @@ secretsRoutes.put("/:id", async (c) => {
 
   try {
     const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "secret.rotate",
+      resourceType: "secret",
+      resourceId: secretId,
+      metadata: { name: existing.name },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
     return c.json<ApiResponse>({ ok: true, data: rotated });
   } catch (e: unknown) {
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
@@ -353,6 +378,18 @@ secretsRoutes.delete("/:id", async (c) => {
   if (!deleted) {
     return c.json<ApiResponse>({ ok: false, error: "Secret not found" }, 404);
   }
+
+  trackAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: tenantId,
+    action: "secret.delete",
+    resourceType: "secret",
+    resourceId: secretId,
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   return c.json<ApiResponse>({ ok: true, data: { deleted: secretId } });
 });
@@ -385,6 +422,18 @@ secretsRoutes.post("/:id/rotate", async (c) => {
 
   try {
     const rotated = await sv.rotateSecret(tenantId, existing.name, body.value);
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "secret.rotate",
+      resourceType: "secret",
+      resourceId: secretId,
+      metadata: { name: existing.name },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
     return c.json<ApiResponse>({ ok: true, data: rotated });
   } catch (e: unknown) {
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);

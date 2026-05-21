@@ -43,16 +43,22 @@ export class KeyStore {
     const envSalt = masterSalt ?? process.env.STEWARD_KDF_SALT;
     let salt: Buffer;
     if (envSalt) {
-      salt = Buffer.from(envSalt, "hex");
-    } else {
-      // Legacy default: deterministic but known. Acceptable because encrypt() adds
-      // per-record randomness, but a per-deployment salt is strongly recommended.
-      salt = Buffer.from("steward-vault-v1");
-      if (process.env.NODE_ENV === "production") {
-        console.warn(
-          "\u26a0\ufe0f [KeyStore] Using default KDF salt. Set STEWARD_KDF_SALT to a random hex string for production.",
+      if (envSalt.length < 32) {
+        throw new Error(
+          "STEWARD_KDF_SALT must be at least 32 hex characters (16 bytes). Generate with: openssl rand -hex 32",
         );
       }
+      salt = Buffer.from(envSalt, "hex");
+      if (salt.length < 16) {
+        throw new Error("STEWARD_KDF_SALT must decode to at least 16 bytes of randomness.");
+      }
+    } else {
+      if (process.env.NODE_ENV === "production") {
+        throw new Error(
+          "STEWARD_KDF_SALT is required in production. Generate with: openssl rand -hex 32",
+        );
+      }
+      salt = Buffer.from("steward-vault-v1");
     }
     this.masterKey = scryptSync(masterPassword, salt, 32) as Buffer;
   }

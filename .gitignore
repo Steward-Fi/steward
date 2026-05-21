@@ -48,3 +48,4 @@ docker-compose.override.yml
 # ─── Misc ──────────────────────────────────────────────────────────────────────
 *.tgz
 *.tar.gz
+web/test-results/

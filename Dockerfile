@@ -39,46 +39,61 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 # Create stub for excluded workspaces so bun doesn't fail on missing references
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
-# Package manifests for every workspace package
+# Package manifests for every workspace package. ALL package.json files declared
+# by the `workspaces` glob in the root package.json must be present, or
+# --frozen-lockfile rejects the install (CC8.1 supply-chain integrity).
+COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
+COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
+COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/react/package.json             packages/react/package.json
 COPY packages/redis/package.json             packages/redis/package.json
+COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
+COPY packages/examples/                      packages/examples/
 
-RUN BUN_FROZEN_LOCKFILE=0 bun install
+RUN bun install --frozen-lockfile
 
 # ── Stage 2: Build ────────────────────────────────────────────────────────────
 FROM base AS build
 
 COPY package.json bun.lock turbo.json tsconfig.json ./
 
-# Copy package.json files for workspace resolution
+# Copy package.json files for workspace resolution — every workspace declared
+# in the root package.json must be present for --frozen-lockfile to succeed.
+COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
+COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
+COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/react/package.json             packages/react/package.json
 COPY packages/redis/package.json             packages/redis/package.json
+COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
+COPY packages/examples/                      packages/examples/
 
 # Create stub for excluded workspaces
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
 # Install deps fresh in build stage (bun symlinks don't survive COPY --from in BuildKit)
-RUN BUN_FROZEN_LOCKFILE=0 bun install
+RUN bun install --frozen-lockfile
 
 # Copy full source for all packages needed by api + proxy
 COPY packages/api         packages/api
@@ -125,21 +140,27 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 # Create stub for excluded workspaces
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
+COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
+COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
+COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/react/package.json             packages/react/package.json
 COPY packages/redis/package.json             packages/redis/package.json
+COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
 COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
+COPY packages/examples/                      packages/examples/
 
 COPY --from=deps /app/bun.lock ./bun.lock
-RUN bun install --production
+RUN bun install --production --frozen-lockfile
 
 # Copy compiled output from build stage
 COPY --from=build /app/packages/api         packages/api

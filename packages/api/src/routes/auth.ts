@@ -53,6 +53,8 @@ import {
   getProviderConfig,
   hashSha256Hex,
   isBuiltInProvider,
+  MockEmailInbox,
+  MockEmailProvider,
   OAuthClient,
   PasskeyAuth,
   ResendProvider,
@@ -79,6 +81,7 @@ import bs58 from "bs58";
 import { and, eq, gte, lt } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { generateNonce, SiweMessage } from "siwe";
+import { trackAuditEvent } from "../services/audit";
 import { verifyEip1271 } from "../services/eip1271";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -556,14 +559,26 @@ export function decryptOAuthProviderToken(encrypted: {
   }
 }
 
+function isMockEmailEnabled(): boolean {
+  if (process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV === "production") {
+    throw new Error(
+      "EMAIL_PROVIDER=mock is forbidden in production. Unset EMAIL_PROVIDER or set RESEND_API_KEY.",
+    );
+  }
+  return process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV !== "production";
+}
+
 function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: string }): EmailAuth {
   const resendKey = process.env.RESEND_API_KEY;
-  const provider = resendKey
-    ? new ResendProvider({
-        apiKey: resendKey,
-        from: process.env.EMAIL_FROM || "login@steward.fi",
-      })
-    : undefined;
+  // Mock takes precedence in non-production for deterministic e2e testing.
+  const provider = isMockEmailEnabled()
+    ? new MockEmailProvider()
+    : resendKey
+      ? new ResendProvider({
+          apiKey: resendKey,
+          from: process.env.EMAIL_FROM || "login@steward.fi",
+        })
+      : undefined;
 
   return new EmailAuth({
     from: process.env.EMAIL_FROM || "login@steward.fi",
@@ -1200,6 +1215,33 @@ auth.get("/providers", (c) => {
   });
 });
 
+/**
+ * GET /test/inbox/:email
+ *
+ * Test-only endpoint. Returns the most recent magic-link email captured by
+ * the in-memory MockEmailProvider. Gated by EMAIL_PROVIDER=mock + non-production
+ * — returns 404 in any other configuration so it cannot leak in prod.
+ */
+auth.get("/test/inbox/:email", (c) => {
+  if (!isMockEmailEnabled()) {
+    return c.json<ApiResponse>({ ok: false, error: "Not found" }, 404);
+  }
+  const email = decodeURIComponent(c.req.param("email"));
+  const msg = MockEmailInbox.last(email);
+  if (!msg) {
+    return c.json<ApiResponse>({ ok: false, error: "No message" }, 404);
+  }
+  return c.json({
+    ok: true,
+    to: msg.to,
+    subject: msg.subject,
+    text: msg.text,
+    token: msg.token,
+    magicLink: msg.magicLink,
+    sentAt: msg.sentAt.toISOString(),
+  });
+});
+
 // ── SIWE ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -1327,6 +1369,18 @@ auth.post("/verify", async (c) => {
     userId: user.id,
   });
   const refreshToken = await createRefreshToken(user.id, effectiveTenantId);
+
+  trackAuditEvent({
+    tenantId: effectiveTenantId,
+    actorType: "user",
+    actorId: user.id,
+    action: "auth.login",
+    resourceType: "session",
+    metadata: { method: "siwe", address, walletChain: "ethereum" },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   const responseData: Record<string, unknown> = {
     ok: true,
@@ -1479,15 +1533,39 @@ auth.get("/session", async (c) => {
  */
 auth.post("/logout", async (c) => {
   const authHeader = c.req.header("Authorization");
+  let auditCtx: { tenantId?: string; userId?: string; jti?: string } = {};
   if (authHeader?.startsWith("Bearer ")) {
     try {
-      const payload = await verifyToken(authHeader.slice(7));
+      const payload = (await verifyToken(authHeader.slice(7))) as {
+        jti?: string;
+        exp?: number;
+        userId?: string;
+        tenantId?: string;
+      };
       if (typeof payload.jti === "string" && typeof payload.exp === "number") {
         await revocationStore.revokeToken(payload.jti, payload.exp);
+        auditCtx = {
+          tenantId: payload.tenantId,
+          userId: payload.userId,
+          jti: payload.jti,
+        };
       }
     } catch {
       // Logout remains idempotent: invalid/expired tokens are already unusable.
     }
+  }
+  if (auditCtx.tenantId) {
+    trackAuditEvent({
+      tenantId: auditCtx.tenantId,
+      actorType: "user",
+      actorId: auditCtx.userId ?? null,
+      action: "auth.logout",
+      resourceType: "session",
+      resourceId: auditCtx.jti ?? null,
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
   }
   return c.json<ApiResponse>({ ok: true });
 });

@@ -169,6 +169,13 @@
       "when": 1779671700000,
       "tag": "0023_trade_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1779672300000,
+      "tag": "0024_audit_events",
+      "breakpoints": true
     }
   ]
 }

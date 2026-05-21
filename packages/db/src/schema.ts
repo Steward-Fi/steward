@@ -9,7 +9,10 @@ import type {
 } from "@stwd/shared";
 import { relations, sql } from "drizzle-orm";
 import {
+  bigint,
+  bigserial,
   boolean,
+  customType,
   index,
   integer,
   jsonb,
@@ -23,6 +26,16 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+
+// Postgres BYTEA column. Typed as Uint8Array to avoid the Node `Buffer` vs
+// Cloudflare workers-types Buffer conflict that bites when both type packs
+// are in scope. The runtime value is whatever the driver returns; callers
+// normalize it (see packages/api/src/services/audit.ts toU8 helper).
+const bytea = customType<{ data: Uint8Array; default: false; notNull: false }>({
+  dataType() {
+    return "bytea";
+  },
+});
 
 export interface TenantEmailConfig {
   /**
@@ -761,3 +774,41 @@ export const tradeSessions = pgTable(
 
 export type TradeSessionRow = typeof tradeSessions.$inferSelect;
 export type NewTradeSessionRow = typeof tradeSessions.$inferInsert;
+
+// ─── Tamper-evident audit log ────────────────────────────────────────────────
+//
+// Per-tenant append-only HMAC chain. Each row's `hmac` commits to the previous
+// row's `hmac` plus a canonical encoding of the event, so tampering with any
+// historical row invalidates verification of every subsequent row. The HMAC
+// key is held in app config (STEWARD_AUDIT_HMAC_KEY) separately from DB
+// credentials, so DB-only write access cannot forge rows that verify.
+// See packages/api/src/services/audit.ts for the writer and verifier.
+export const auditEvents = pgTable(
+  "audit_events",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    prevHash: bytea("prev_hash").notNull(),
+    hmac: bytea("hmac").notNull(),
+    actorType: varchar("actor_type", { length: 32 }).notNull(),
+    actorId: varchar("actor_id", { length: 255 }),
+    action: varchar("action", { length: 128 }).notNull(),
+    resourceType: varchar("resource_type", { length: 64 }),
+    resourceId: varchar("resource_id", { length: 255 }),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    requestId: text("request_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantSeqIdx: uniqueIndex("audit_events_tenant_seq_idx").on(table.tenantId, table.seq),
+    tenantCreatedIdx: index("audit_events_tenant_created_idx").on(table.tenantId, table.createdAt),
+    actionIdx: index("audit_events_action_idx").on(table.action),
+    actorIdx: index("audit_events_actor_idx").on(table.actorType, table.actorId),
+  }),
+);
+
+export type AuditEventRow = typeof auditEvents.$inferSelect;
+export type NewAuditEventRow = typeof auditEvents.$inferInsert;
