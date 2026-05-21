@@ -8,8 +8,18 @@
  * credential injection into proxied requests.
  */
 
-import { getDb, type Secret, type SecretRoute, secretRoutes, secrets } from "@stwd/db";
-import { and, desc, eq, isNull } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  getDb,
+  inArray,
+  isNull,
+  type Secret,
+  type SecretRoute,
+  secretRoutes,
+  secrets,
+} from "@stwd/db";
 import { type EncryptedKey, KeyStore } from "./keystore";
 
 export interface SecretMetadata {
@@ -141,30 +151,37 @@ export class SecretVault {
 
     const encrypted = this.keyStore.encrypt(newValue);
     const newVersion = current.version + 1;
+    const now = new Date();
 
-    const [row] = await db
-      .insert(secrets)
-      .values({
-        tenantId,
-        name,
-        description: current.description,
-        ciphertext: encrypted.ciphertext,
-        iv: encrypted.iv,
-        authTag: encrypted.tag,
-        salt: encrypted.salt,
-        version: newVersion,
-        rotatedAt: new Date(),
-        expiresAt: current.expiresAt,
-      })
-      .returning();
+    return db.transaction(async (tx) => {
+      const [row] = await tx
+        .insert(secrets)
+        .values({
+          tenantId,
+          name,
+          description: current.description,
+          ciphertext: encrypted.ciphertext,
+          iv: encrypted.iv,
+          authTag: encrypted.tag,
+          salt: encrypted.salt,
+          version: newVersion,
+          rotatedAt: now,
+          expiresAt: current.expiresAt,
+        })
+        .returning();
 
-    // Soft-delete old version
-    await db
-      .update(secrets)
-      .set({ deletedAt: new Date() })
-      .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
+      await tx
+        .update(secretRoutes)
+        .set({ secretId: row.id })
+        .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.secretId, current.id)));
 
-    return this.toMetadata(row);
+      await tx
+        .update(secrets)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(and(eq(secrets.id, current.id), eq(secrets.tenantId, tenantId)));
+
+      return this.toMetadata(row);
+    });
   }
 
   /**
@@ -182,13 +199,37 @@ export class SecretVault {
 
     if (!row) return false;
 
-    // Soft-delete all versions with this name
-    await db
-      .update(secrets)
-      .set({ deletedAt: new Date(), updatedAt: new Date() })
-      .where(
-        and(eq(secrets.tenantId, tenantId), eq(secrets.name, row.name), isNull(secrets.deletedAt)),
-      );
+    const relatedSecretRows = await db
+      .select({ id: secrets.id })
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.name, row.name)));
+
+    const relatedSecretIds = relatedSecretRows.map((secretRow) => secretRow.id);
+    const now = new Date();
+
+    await db.transaction(async (tx) => {
+      if (relatedSecretIds.length > 0) {
+        await tx
+          .delete(secretRoutes)
+          .where(
+            and(
+              eq(secretRoutes.tenantId, tenantId),
+              inArray(secretRoutes.secretId, relatedSecretIds),
+            ),
+          );
+      }
+
+      await tx
+        .update(secrets)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(
+          and(
+            eq(secrets.tenantId, tenantId),
+            eq(secrets.name, row.name),
+            isNull(secrets.deletedAt),
+          ),
+        );
+    });
 
     return true;
   }
@@ -238,6 +279,9 @@ export class SecretVault {
     const secret = await this.getSecretById(tenantId, secretId);
     if (!secret) {
       throw new Error(`Secret ${secretId} not found for tenant ${tenantId}`);
+    }
+    if (secret.expiresAt && secret.expiresAt < new Date()) {
+      throw new Error(`Secret ${secretId} has expired`);
     }
 
     const [row] = await db
