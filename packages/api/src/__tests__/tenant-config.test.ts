@@ -237,7 +237,14 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
 describe.skipIf(SKIP)("Dashboard API", () => {
   it("returns 404 for non-existent agent", async () => {
     const { createSessionToken } = await import("../routes/auth");
-    const token = await createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID);
+    // dashboardAuthMiddleware requires a userId on session tokens, so we
+    // mint a session that includes one. The dashboard route itself only
+    // cares about the agent lookup result, hence the synthetic userId.
+    const token = await createSessionToken(
+      "0x0000000000000000000000000000000000000000",
+      TENANT_ID,
+      { userId: "test-dashboard-404-user" },
+    );
     const res = await fetch(`${BASE_URL}/dashboard/nonexistent-agent`, {
       headers: { Authorization: `Bearer ${token}` },
     });
