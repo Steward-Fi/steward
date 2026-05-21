@@ -130,4 +130,60 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(ids).toContain(AGENT_A);
     expect(ids).toContain(AGENT_B);
   });
+
+  it("blocks agent tokens from batch-creating agents", async () => {
+    const token = await signAgentToken({ agentId: AGENT_A, tenantId: TENANT_ID }, "1h");
+
+    const res = await app.request("/agents/batch", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        agents: [{ id: "test-ars-batch-x", name: "test-ars-batch-x" }],
+      }),
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("tenant-level authentication");
+  });
+
+  it("only allows an agent token to read its own policies", async () => {
+    const token = await signAgentToken({ agentId: AGENT_A, tenantId: TENANT_ID }, "1h");
+
+    const ownRes = await app.request(`/agents/${AGENT_A}/policies`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(ownRes.status).toBe(200);
+
+    const otherRes = await app.request(`/agents/${AGENT_B}/policies`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(otherRes.status).toBe(403);
+    const otherBody = (await otherRes.json()) as { ok: boolean; error: string };
+    expect(otherBody.ok).toBe(false);
+    expect(otherBody.error).toContain("scope does not match");
+  });
+
+  it("only allows an agent token to write its own policies", async () => {
+    const token = await signAgentToken({ agentId: AGENT_A, tenantId: TENANT_ID }, "1h");
+
+    // Cross-agent policy write was the most severe path of the three
+    // (compromised agent token could grant itself auto-approval on a
+    // sibling agent and drain its wallet). Verify the gate rejects it.
+    const writeOtherRes = await app.request(`/agents/${AGENT_B}/policies`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify([{ type: "auto-approve-threshold", config: { thresholdUsd: "10000" } }]),
+    });
+    expect(writeOtherRes.status).toBe(403);
+    const writeOtherBody = (await writeOtherRes.json()) as { ok: boolean; error: string };
+    expect(writeOtherBody.ok).toBe(false);
+    expect(writeOtherBody.error).toContain("scope does not match");
+  });
 });
