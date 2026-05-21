@@ -1987,6 +1987,15 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
   }
 
+  try {
+    await assertAllowedOAuthRedirectUri(redirectUri, tenantId);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      400,
+    );
+  }
+
   // Generate a cryptographically random state value
   const stateBytes = new Uint8Array(16);
   crypto.getRandomValues(stateBytes);
@@ -2062,6 +2071,16 @@ auth.get("/oauth/:provider/callback", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
   }
 
+  let redirectUrl: URL;
+  try {
+    redirectUrl = await assertAllowedOAuthRedirectUri(stateData.redirectUri, stateData.tenantId);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      400,
+    );
+  }
+
   let oauthClient: OAuthClient;
   try {
     oauthClient = new OAuthClient(getProviderConfig(providerName));
@@ -2135,7 +2154,6 @@ auth.get("/oauth/:provider/callback", async (c) => {
   }
 
   // Redirect to the app with the JWT
-  const redirectUrl = new URL(stateData.redirectUri);
   redirectUrl.searchParams.set("token", result.token);
   redirectUrl.searchParams.set("refreshToken", result.refreshToken);
   return c.redirect(redirectUrl.toString(), 302);
@@ -2163,6 +2181,17 @@ auth.post("/oauth/:provider/token", async (c) => {
 
   if (!body?.code || !body?.redirectUri) {
     return c.json<ApiResponse>({ ok: false, error: "code and redirectUri are required" }, 400);
+  }
+
+  const requestedTenantId =
+    body.tenantId?.trim() || c.req.header("X-Steward-Tenant")?.trim() || undefined;
+  try {
+    await assertAllowedOAuthRedirectUri(body.redirectUri, requestedTenantId);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid redirectUri" },
+      400,
+    );
   }
 
   let oauthClient: OAuthClient;
@@ -2352,6 +2381,110 @@ function buildOAuthCallbackUrl(c: Context, providerName: string): string {
     ? process.env.APP_URL.replace(/\/$/, "")
     : `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
   return `${appUrl}/auth/oauth/${providerName}/callback`;
+}
+
+const OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS = [
+  "STEWARD_OAUTH_ALLOWED_REDIRECTS",
+  "STEWARD_OAUTH_REDIRECT_ALLOWLIST",
+] as const;
+
+function parseOAuthRedirectAllowlistEnv(): string[] {
+  const entries = new Set<string>();
+
+  for (const envName of OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS) {
+    const raw = process.env[envName];
+    if (!raw) continue;
+
+    for (const entry of raw.split(",")) {
+      const trimmed = entry.trim();
+      if (trimmed && trimmed !== "*") {
+        entries.add(trimmed);
+      }
+    }
+  }
+
+  return [...entries];
+}
+
+function parseOAuthRedirectUri(redirectUri: string): URL {
+  let redirectUrl: URL;
+  try {
+    redirectUrl = new URL(redirectUri);
+  } catch {
+    throw new Error("redirect_uri must be a valid absolute URL");
+  }
+
+  if (redirectUrl.protocol !== "https:" && redirectUrl.protocol !== "http:") {
+    throw new Error("redirect_uri must use http or https");
+  }
+
+  if (redirectUrl.username || redirectUrl.password) {
+    throw new Error("redirect_uri must not contain credentials");
+  }
+
+  return redirectUrl;
+}
+
+function isOAuthRedirectEntryMatch(redirectUrl: URL, allowedEntry: string): boolean {
+  let allowedUrl: URL;
+  try {
+    allowedUrl = new URL(allowedEntry);
+  } catch {
+    return false;
+  }
+
+  if (allowedUrl.protocol !== "https:" && allowedUrl.protocol !== "http:") {
+    return false;
+  }
+
+  const isOriginOnly =
+    allowedUrl.pathname === "/" && !allowedUrl.search && !allowedUrl.hash && !allowedUrl.username;
+
+  if (isOriginOnly) {
+    return allowedUrl.origin === redirectUrl.origin;
+  }
+
+  return (
+    allowedUrl.origin === redirectUrl.origin &&
+    allowedUrl.pathname === redirectUrl.pathname &&
+    allowedUrl.search === redirectUrl.search
+  );
+}
+
+async function getAllowedOAuthRedirectEntries(tenantId?: string): Promise<string[]> {
+  const entries = new Set(parseOAuthRedirectAllowlistEnv());
+  const resolvedTenantId = tenantId?.trim() || _DEFAULT_TENANT_ID;
+
+  const [row] = await getDb()
+    .select({ allowedOrigins: tenantConfigs.allowedOrigins })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, resolvedTenantId));
+
+  for (const origin of row?.allowedOrigins ?? []) {
+    const trimmed = origin.trim();
+    if (trimmed && trimmed !== "*") {
+      entries.add(trimmed);
+    }
+  }
+
+  return [...entries];
+}
+
+async function assertAllowedOAuthRedirectUri(redirectUri: string, tenantId?: string): Promise<URL> {
+  const redirectUrl = parseOAuthRedirectUri(redirectUri);
+  const allowlist = await getAllowedOAuthRedirectEntries(tenantId);
+
+  if (allowlist.length === 0) {
+    throw new Error(
+      "OAuth redirect_uri allowlist is not configured for this tenant. Configure tenant allowedOrigins or STEWARD_OAUTH_ALLOWED_REDIRECTS.",
+    );
+  }
+
+  if (!allowlist.some((entry) => isOAuthRedirectEntryMatch(redirectUrl, entry))) {
+    throw new Error("redirect_uri is not allowed for this tenant");
+  }
+
+  return redirectUrl;
 }
 
 export { auth as authRoutes };

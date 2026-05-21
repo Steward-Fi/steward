@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { accounts, closeDb, tenants } from "@stwd/db";
+import { accounts, closeDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import {
@@ -84,6 +84,13 @@ describe("OAuth provider token encryption", () => {
       id: "oauth-test-tenant",
       name: "OAuth Test Tenant",
       apiKeyHash: "hash",
+    });
+    // OAuth redirect_uri allowlist now requires either a tenant config
+    // entry or the STEWARD_OAUTH_ALLOWED_REDIRECTS env var. Configure the
+    // tenant explicitly so the redirect target this test uses is allowed.
+    await db.insert(tenantConfigs).values({
+      tenantId: "oauth-test-tenant",
+      allowedOrigins: ["https://app.example.test"],
     });
 
     mock.restore();
