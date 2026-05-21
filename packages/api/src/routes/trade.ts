@@ -107,13 +107,16 @@ async function enforceOrderRateLimit(
 async function checkDailyCap(agentId: string, sizeUsd: number): Promise<boolean> {
   const since = new Date();
   since.setUTCHours(0, 0, 0, 0);
+  // postgres-js does not auto-stringify Date objects in raw sql template
+  // params. Convert to ISO and cast on the SQL side instead.
+  const sinceIso = since.toISOString();
   const [row] = await db
     .select({
       total: sql<string>`coalesce(sum((${proxyAuditLog.targetPath}::jsonb ->> 'sizeUsd')::numeric), 0)::text`,
     })
     .from(proxyAuditLog)
     .where(
-      sql`${proxyAuditLog.agentId} = ${agentId} and ${proxyAuditLog.reason} = 'trade.order.submitted' and ${proxyAuditLog.createdAt} >= ${since}`,
+      sql`${proxyAuditLog.agentId} = ${agentId} and ${proxyAuditLog.reason} = 'trade.order.submitted' and ${proxyAuditLog.createdAt} >= ${sinceIso}::timestamptz`,
     );
   const spent = Number(row?.total ?? 0);
   return spent + sizeUsd <= 100;
