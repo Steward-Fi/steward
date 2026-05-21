@@ -1546,3 +1546,118 @@
   padding: 8px 10px;
   background: rgba(255, 92, 92, 0.05);
 }
+
+/* ─── Passkey enrollment prompt ──────────────────────────────────────────── */
+
+.stwd-passkey-enroll {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 14px 18px;
+  background: var(--stwd-bg-elevated, #f8f9fa);
+  border: 1px solid var(--stwd-border-subtle, rgba(0, 0, 0, 0.08));
+  color: var(--stwd-text, inherit);
+  font-family: inherit;
+}
+
+.stwd-passkey-enroll--banner {
+  width: 100%;
+  border-radius: 0;
+  border-left: 0;
+  border-right: 0;
+}
+
+.stwd-passkey-enroll--inline {
+  border-radius: 6px;
+}
+
+.stwd-passkey-enroll--toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  max-width: 420px;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  z-index: 1000;
+}
+
+.stwd-passkey-enroll__icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--stwd-accent-subtle, rgba(0, 122, 204, 0.08));
+  color: var(--stwd-accent, #007acc);
+}
+
+.stwd-passkey-enroll__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.stwd-passkey-enroll__title {
+  margin: 0 0 2px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--stwd-text, inherit);
+}
+
+.stwd-passkey-enroll__description {
+  margin: 0;
+  font-size: 13px;
+  color: var(--stwd-text-secondary, #555);
+  line-height: 1.4;
+}
+
+.stwd-passkey-enroll__error {
+  margin: 8px 0 0 0;
+  font-size: 12px;
+  color: var(--stwd-error, #c0392b);
+}
+
+.stwd-passkey-enroll__actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.stwd-passkey-enroll__btn {
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+
+.stwd-passkey-enroll__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.stwd-passkey-enroll__btn--primary {
+  background: var(--stwd-accent, #111);
+  color: var(--stwd-accent-text, #fff);
+  border-color: var(--stwd-accent, #111);
+}
+
+.stwd-passkey-enroll__btn--primary:hover:not(:disabled) {
+  background: var(--stwd-accent-hover, #222);
+  border-color: var(--stwd-accent-hover, #222);
+}
+
+.stwd-passkey-enroll__btn--dismiss {
+  background: transparent;
+  color: var(--stwd-text-secondary, #555);
+  border-color: var(--stwd-border, rgba(0, 0, 0, 0.15));
+}
+
+.stwd-passkey-enroll__btn--dismiss:hover:not(:disabled) {
+  border-color: var(--stwd-border-strong, rgba(0, 0, 0, 0.3));
+  color: var(--stwd-text, inherit);
+}

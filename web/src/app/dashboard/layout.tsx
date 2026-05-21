@@ -1,6 +1,6 @@
 "use client";
 
-import { StewardAuthGuard, StewardUserButton } from "@stwd/react";
+import { PasskeyEnrollmentPrompt, StewardAuthGuard, StewardUserButton } from "@stwd/react";
 import { AnimatePresence, motion } from "framer-motion";
 import Image from "next/image";
 import Link from "next/link";
@@ -202,6 +202,13 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   return (
     <StewardAuthGuard fallback={<RedirectToLogin />} loadingFallback={<LoadingSpinner />}>
       <div className="min-h-screen bg-bg">
+        {/*
+          Shown only when the user just signed in via magic-link fallback after
+          a failed passkey attempt on this origin (e.g. their existing passkey
+          is bound to another relying party). The component self-hides when
+          no fallback flag is present.
+        */}
+        <PasskeyEnrollmentPrompt variant="banner" />
         <DashboardNav />
         <main className="max-w-[1400px] mx-auto px-4 md:px-6 lg:px-10 py-6 md:py-8 lg:py-12">
           {children}

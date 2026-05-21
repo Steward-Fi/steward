@@ -303,6 +303,12 @@ export interface StewardAuthContextValue {
   getToken: () => string | null;
   /** Sign in with a passkey (WebAuthn). Browser-only. */
   signInWithPasskey: (email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  /**
+   * Register an additional passkey for the current email on this device /
+   * relying party. Use after a successful magic-link or OAuth sign-in to
+   * upgrade the user to one-tap passkey login on this domain. Browser-only.
+   */
+  addPasskey: (email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
   /** Send a magic link email. */
   signInWithEmail: (email: string) => Promise<import("@stwd/sdk").StewardEmailResult>;
   /** Verify a magic link callback token. */

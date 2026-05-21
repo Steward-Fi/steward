@@ -18,7 +18,7 @@ import { StewardAuthContext } from "../provider.js";
 import type { StewardLoginProps } from "../types.js";
 import type { WalletLoginPanelProps } from "./WalletLogin.js";
 
-type LoginStep = "idle" | "loading" | "email-sent" | "error";
+type LoginStep = "idle" | "loading" | "email-sent" | "passkey-fallback-pending" | "error";
 type LoadingButton =
   | "passkey"
   | "email"
@@ -32,6 +32,38 @@ type LoadingButton =
   | null;
 
 type WalletPanelComponent = React.ComponentType<WalletLoginPanelProps>;
+
+/**
+ * sessionStorage flag set when a passkey login fails because the credential
+ * lives on a different relying party (e.g. user has a passkey registered on
+ * elizacloud.ai but is now signing in on waifu.fun). After the magic-link
+ * sign-in completes the app can use this flag to surface a
+ * "register a passkey on this device" prompt rather than silently leaving
+ * the user without one. Consumers read via PASSKEY_ENROLL_PROMPT_KEY.
+ */
+export const PASSKEY_ENROLL_PROMPT_KEY = "stwd:enroll-passkey-after-login";
+
+/**
+ * Heuristic check: did this passkey attempt fail because the browser had no
+ * usable credential for this relying party (a common cross-domain scenario),
+ * or because the user cancelled / dismissed the prompt? In both cases the
+ * right next move is the same: fall back to a magic-link sign-in. We are
+ * deliberately permissive here — the magic-link fallback is non-destructive,
+ * and the worst case is we send an email the user could have avoided.
+ */
+function isRecoverablePasskeyFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return true;
+  const msg = err.message.toLowerCase();
+  return (
+    msg.includes("cancelled") ||
+    msg.includes("canceled") ||
+    msg.includes("timed out") ||
+    msg.includes("not allowed") ||
+    msg.includes("notallowederror") ||
+    msg.includes("no credentials") ||
+    msg.includes("invalidstateerror")
+  );
+}
 
 /**
  * Adapt a `<WalletLogin*>` panel `onSuccess` callback (which yields a full
@@ -265,7 +297,8 @@ export function StewardLogin({
   };
 
   const handlePasskey = async () => {
-    if (!email.trim()) {
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) {
       setErrorMsg("enter your email first");
       setStep("error");
       return;
@@ -274,9 +307,38 @@ export function StewardLogin({
     setLoadingBtn("passkey");
     setErrorMsg(null);
     try {
-      const result = await ctx.signInWithPasskey(email.trim());
+      const result = await ctx.signInWithPasskey(trimmedEmail);
       onSuccess?.(result);
     } catch (err) {
+      // The user might have an account whose passkey was registered against
+      // a different relying party (e.g. they originally signed up on
+      // elizacloud.ai and are now trying to sign in on waifu.fun). In that
+      // case the WebAuthn handshake fails because the browser refuses to
+      // surface a credential bound to another RP — even though their
+      // account is real and a magic link would work. Treat recoverable
+      // failures as a transparent fall-through to email sign-in and queue
+      // a "register passkey here" prompt for the post-login surface.
+      if (showEmail && isRecoverablePasskeyFailure(err)) {
+        try {
+          if (typeof window !== "undefined") {
+            window.sessionStorage.setItem(PASSKEY_ENROLL_PROMPT_KEY, trimmedEmail);
+          }
+        } catch {
+          // sessionStorage unavailable (private mode, sandboxed iframe) — the
+          // enrollment prompt simply won’t appear, which is acceptable.
+        }
+        setStep("passkey-fallback-pending");
+        setLoadingBtn("email");
+        try {
+          await ctx.signInWithEmail(trimmedEmail);
+          setStep("email-sent");
+          setLoadingBtn(null);
+          return;
+        } catch (emailErr) {
+          handleError(emailErr);
+          return;
+        }
+      }
       handleError(err);
     }
   };
@@ -318,13 +380,20 @@ export function StewardLogin({
   const variantClass = variant === "card" ? "stwd-login--card" : "stwd-login--inline";
 
   if (step === "email-sent") {
+    const wasFallback =
+      typeof window !== "undefined" &&
+      window.sessionStorage.getItem(PASSKEY_ENROLL_PROMPT_KEY) === email.trim();
     return (
       <div className={`stwd-login ${variantClass} stwd-login--sent ${className ?? ""}`}>
         <div className="stwd-login__notice">
           <p>
             link sent to <strong>{email}</strong>
           </p>
-          <p className="stwd-login__notice-sub">check your inbox, then tap the link</p>
+          <p className="stwd-login__notice-sub">
+            {wasFallback
+              ? "no passkey on this site yet. we sent you a link instead, you can add one after signing in."
+              : "check your inbox, then tap the link"}
+          </p>
         </div>
         <button
           className="stwd-login__btn stwd-login__btn--back"
