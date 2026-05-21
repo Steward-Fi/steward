@@ -15,6 +15,24 @@ import {
 } from "@stwd/sdk";
 import type { StewardPluginConfig } from "../types.js";
 
+export interface HyperliquidSubmitOrderInput {
+  sessionId: string;
+  asset: "BTC" | "ETH";
+  side: "buy" | "sell";
+  size: number;
+  leverage: number;
+  reduceOnly?: boolean;
+  idempotencyKey?: string;
+}
+
+export interface HyperliquidOrderResult {
+  orderId: string;
+  status: string;
+  filledQty: number;
+  avgPrice: number;
+  txHash: string | null;
+}
+
 /**
  * Singleton service wrapping StewardClient for the ElizaOS runtime.
  *
@@ -24,7 +42,7 @@ import type { StewardPluginConfig } from "../types.js";
 export class StewardService extends Service {
   static serviceType = "steward" as const;
   capabilityDescription =
-    "Steward managed wallet — policy-enforced signing, balances, and approval flows";
+    "Steward managed wallet - policy-enforced signing, balances, and approval flows";
 
   private client: StewardClient | null = null;
   private pluginConfig: StewardPluginConfig | null = null;
@@ -154,6 +172,13 @@ export class StewardService extends Service {
   async getDashboard(): Promise<AgentDashboardResponse> {
     this.assertConnected();
     return this.getClient().getAgentDashboard(this.getAgentId());
+  }
+
+  async submitHyperliquidOrder(
+    input: HyperliquidSubmitOrderInput,
+  ): Promise<HyperliquidOrderResult> {
+    this.assertConnected();
+    return this.getClient().trade.hyperliquid.submitOrder(input);
   }
 
   async listApprovals(opts?: {

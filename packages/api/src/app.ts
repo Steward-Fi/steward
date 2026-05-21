@@ -1,17 +1,17 @@
 /**
- * app.ts — Runtime-agnostic Hono app construction.
+ * app.ts - Runtime-agnostic Hono app construction.
  *
  * This module exports the fully-configured `Hono` instance with all routes,
  * middleware, and per-route auth wired up. It deliberately contains NO server
  * boot code (no `Bun.serve`, no `setInterval` GC, no signal handlers, no
  * blocking `runMigrations()` call) so that it can be reused by:
  *
- *   - `index.ts`   — Bun entry point (long-lived process; runs migrations,
+ *   - `index.ts`   - Bun entry point (long-lived process; runs migrations,
  *                    sets up GC timers, wires SIGINT/SIGTERM, calls
  *                    `Bun.serve`).
- *   - `worker.ts`  — Cloudflare Workers entry point (per-request fetch,
+ *   - `worker.ts`  - Cloudflare Workers entry point (per-request fetch,
  *                    no setInterval/Bun, migrations run out-of-band).
- *   - `embedded.ts`— Electrobun/desktop entry point.
+ *   - `embedded.ts`- Electrobun/desktop entry point.
  *
  * Anything that must NOT run on Workers (timers, blocking I/O at module init,
  * Node-only APIs) belongs in `index.ts`, not here.
@@ -33,6 +33,7 @@ import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { secretsRoutes } from "./routes/secrets";
 import { tenantConfigRoutes } from "./routes/tenant-config";
 import { tenantRoutes } from "./routes/tenants";
+import { tradeRoutes } from "./routes/trade";
 import { userRoutes } from "./routes/user";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
@@ -116,6 +117,10 @@ app.use("/audit", (c, next) => tenantAuth(c, next));
 app.use("/audit/*", (c, next) => tenantAuth(c, next));
 app.use("/policies", (c, next) => tenantAuth(c, next));
 app.use("/policies/*", (c, next) => tenantAuth(c, next));
+app.use("/trade", (c, next) => tenantAuth(c, next));
+app.use("/trade/*", (c, next) => tenantAuth(c, next));
+app.use("/v1/trade", (c, next) => tenantAuth(c, next));
+app.use("/v1/trade/*", (c, next) => tenantAuth(c, next));
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
@@ -145,6 +150,8 @@ app.route("/webhooks", webhookRoutes);
 app.route("/approvals", approvalRoutes);
 app.route("/audit", auditRoutes);
 app.route("/policies", policiesStandaloneRoutes);
+app.route("/trade", tradeRoutes);
+app.route("/v1/trade", tradeRoutes);
 app.route("/agents", erc8004Routes);
 app.route("/discovery", discoveryRoutes);
 

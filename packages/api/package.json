@@ -19,17 +19,20 @@
     "@stwd/redis": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
     "@stwd/shared": "workspace:*",
+    "@stwd/trade-sessions": "workspace:*",
+    "@stwd/venue-hyperliquid": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/webhooks": "workspace:*",
     "bs58": "^6.0.0",
     "drizzle-orm": "^0.44.5",
     "hono": "^4.7.0",
-    "viem": "^2.30.0"
+    "viem": "^2.30.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0",
     "@types/node": "^25.5.0",
     "wrangler": "^4.0.0"
   },
-  "description": "Hono REST API for Steward — agents, policies, approvals, and transaction signing"
+  "description": "Hono REST API for Steward - agents, policies, approvals, and transaction signing"
 }

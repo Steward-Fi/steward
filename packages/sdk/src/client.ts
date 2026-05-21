@@ -48,7 +48,7 @@ export type GetBalanceResult = AgentBalance;
 export interface StewardClientConfig {
   baseUrl: string;
   apiKey?: string;
-  /** Agent-scoped JWT — sent as `Authorization: Bearer <token>`. Preferred over apiKey when both are set. */
+  /** Agent-scoped JWT - sent as `Authorization: Bearer <token>`. Preferred over apiKey when both are set. */
   bearerToken?: string;
   tenantId?: string;
 }
@@ -92,6 +92,36 @@ export interface StewardHistoryEntry {
 
 export interface SignMessageResult {
   signature: string;
+}
+
+export interface CreateTradeSessionInput {
+  venue: "hyperliquid";
+  scopes: Array<"read" | "write">;
+  ttlSeconds?: number;
+}
+
+export interface CreateTradeSessionResult {
+  sessionId: string;
+  jwt: string;
+  expiresAt: string;
+}
+
+export interface HyperliquidSubmitOrderInput {
+  sessionId: string;
+  asset: "BTC" | "ETH";
+  side: "buy" | "sell";
+  size: number;
+  leverage: number;
+  reduceOnly?: boolean;
+  idempotencyKey?: string;
+}
+
+export interface HyperliquidOrderResult {
+  orderId: string;
+  status: string;
+  filledQty: number;
+  avgPrice: number;
+  txHash: string | null;
 }
 
 /**
@@ -154,6 +184,50 @@ export class StewardClient {
     this.bearerToken = bearerToken;
     this.tenantId = tenantId;
   }
+
+  readonly tradeSessions = {
+    create: async (input: CreateTradeSessionInput): Promise<CreateTradeSessionResult> => {
+      const response = await this.request<CreateTradeSessionResult, StewardErrorResponse>(
+        "/v1/trade/sessions",
+        {
+          method: "POST",
+          body: JSON.stringify(input),
+        },
+      );
+      if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+      return response.data;
+    },
+    revoke: async (sessionId: string): Promise<void> => {
+      const response = await this.request<undefined, StewardErrorResponse>(
+        `/v1/trade/sessions/${encodeURIComponent(sessionId)}/revoke`,
+        { method: "POST" },
+      );
+      if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    },
+  };
+
+  readonly trade = {
+    hyperliquid: {
+      submitOrder: async (
+        input: HyperliquidSubmitOrderInput,
+        options?: { idempotencyKey?: string },
+      ): Promise<HyperliquidOrderResult> => {
+        const idempotencyKey = options?.idempotencyKey ?? input.idempotencyKey;
+        const response = await this.request<HyperliquidOrderResult, StewardErrorResponse>(
+          "/v1/trade/hyperliquid/order",
+          {
+            method: "POST",
+            headers: idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+            body: JSON.stringify(input),
+          },
+        );
+        if (!response.ok) {
+          throw new StewardApiError(response.error, response.status, response.data);
+        }
+        return response.data;
+      },
+    },
+  };
 
   getBaseUrl(): string {
     return this.baseUrl;
@@ -253,7 +327,7 @@ export class StewardClient {
 
   /**
    * Return a compact history feed for an agent. Each entry is a
-   * `{ timestamp, value }` pair — suitable for trend charts and volume
+   * `{ timestamp, value }` pair - suitable for trend charts and volume
    * windows. For the full signed-transaction objects, prefer
    * {@link getTransactionHistory}.
    */
@@ -857,7 +931,7 @@ export class StewardClient {
 
   /**
    * Download the audit log as CSV. Returns the raw CSV body as a string.
-   * Does not use the `/api/v1` JSON envelope — streams text directly.
+   * Does not use the `/api/v1` JSON envelope - streams text directly.
    */
   async exportAuditCsv(params?: {
     agentId?: string;

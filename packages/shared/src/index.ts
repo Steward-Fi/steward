@@ -1,9 +1,14 @@
-// @stwd/shared — types, constants, utils
+// @stwd/shared - types, constants, utils
+
+import type { VenueId } from "./types/venue.js";
 
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
+export type { TradeAsset, TradePolicyContext, VenueId } from "./types/venue.js";
+// ─── Trading venues (Sprint 4) ───
+export * from "./types/venue.js";
 
 // ─── Tenancy ───
 
@@ -79,7 +84,7 @@ export interface AgentIdentity {
   id: string;
   tenantId: string;
   name: string;
-  /** Primary EVM address — kept for backwards compatibility. */
+  /** Primary EVM address - kept for backwards compatibility. */
   walletAddress: string;
   /**
    * All addresses for this agent, keyed by chain family.
@@ -227,7 +232,9 @@ export type PolicyType =
   | "rate-limit"
   | "allowed-chains"
   | "reputation-threshold"
-  | "reputation-scaling";
+  | "reputation-scaling"
+  | "venue-allowlist"
+  | "leverage-cap";
 
 export interface PolicyRule {
   id: string;
@@ -241,7 +248,7 @@ export interface SpendingLimitConfig {
   maxPerTx?: string;
   maxPerDay?: string;
   maxPerWeek?: string;
-  // USD-based (preferred — takes precedence when price oracle is available)
+  // USD-based (preferred - takes precedence when price oracle is available)
   maxPerTxUsd?: number;
   maxPerDayUsd?: number;
   maxPerWeekUsd?: number;
@@ -253,8 +260,8 @@ export interface ApprovedAddressesConfig {
 }
 
 export interface AutoApproveConfig {
-  threshold?: string; // wei — below this, auto-approve (legacy)
-  thresholdUsd?: number; // USD — below this, auto-approve (preferred)
+  threshold?: string; // wei - below this, auto-approve (legacy)
+  thresholdUsd?: number; // USD - below this, auto-approve (preferred)
 }
 
 export interface TimeWindowConfig {
@@ -270,6 +277,27 @@ export interface RateLimitConfig {
 export interface AllowedChainsConfig {
   /** Array of CAIP-2 chain identifiers that are permitted. e.g. ["eip155:8453", "eip155:1"] */
   chains: string[];
+}
+
+/**
+ * `venue-allowlist` policy config (Sprint 4).
+ *
+ * Allows trades only on the named venues. Evaluator NACKs if the eval
+ * context's `venue` is absent or not in the list.
+ */
+export interface VenueAllowlistConfig {
+  allowedVenues: string[];
+}
+
+/**
+ * `leverage-cap` policy config (Sprint 4).
+ *
+ * Caps requested leverage at `maxLeverage`. Non-leveraged trades (no
+ * `leverage` in eval context) always pass. Per-venue refinement is
+ * Phase 2 work; for now this is a single cap per agent.
+ */
+export interface LeverageCapConfig {
+  maxLeverage: number;
 }
 
 // ─── Transactions ───
@@ -292,7 +320,7 @@ export interface SignRequest {
   chainId: number;
   nonce?: number;
   gasLimit?: string;
-  broadcast?: boolean; // default true — set false to return signed tx without broadcasting
+  broadcast?: boolean; // default true - set false to return signed tx without broadcasting
 }
 
 /**
@@ -301,6 +329,7 @@ export interface SignRequest {
 export interface SignTypedDataRequest {
   agentId: string;
   tenantId: string;
+  venue?: VenueId;
   domain: TypedDataDomain;
   types: Record<string, TypedDataField[]>;
   primaryType: string;
@@ -536,7 +565,7 @@ export const SUPPORTED_CHAINS = {
   base: 8453,
   arbitrum: 42161,
   baseSepolia: 84532,
-  // Solana — convention IDs (not EVM chainIds)
+  // Solana - convention IDs (not EVM chainIds)
   solana: 101,
   solanaDevnet: 102,
 } as const;

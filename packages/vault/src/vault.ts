@@ -18,7 +18,7 @@ import type {
   TxStatus,
 } from "@stwd/shared";
 import { toCaip2 } from "@stwd/shared";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   type Chain,
   createPublicClient,
@@ -96,7 +96,7 @@ export interface SignTransactionOptions {
 }
 
 /**
- * Vault — the core signing service.
+ * Vault - the core signing service.
  *
  * Manages agent wallets: generates keypairs, stores encrypted private keys,
  * and signs transactions. The private key is decrypted only for the duration
@@ -152,7 +152,7 @@ export class Vault {
 
     const createdAt = new Date();
 
-    // ── Persist all rows atomically — roll back everything on any failure ─
+    // ── Persist all rows atomically - roll back everything on any failure ─
     await db.transaction(async (tx) => {
       // ── Persist agent row (walletAddress = EVM for backward compat) ────
       await tx.insert(agents).values({
@@ -432,7 +432,7 @@ export class Vault {
           gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
         });
       } else {
-        // Sign without broadcasting — return the serialized signed transaction
+        // Sign without broadcasting - return the serialized signed transaction
         const rpcUrl = CHAIN_RPCS[chainId] ?? this.config.rpcUrl;
         const publicClient = createPublicClient({
           chain,
@@ -607,11 +607,11 @@ export class Vault {
 
     if (chainType === "solana") {
       // For Solana, the private key should be a 64-byte hex string (seed + pubkey)
-      // or a 32-byte hex seed — we'll handle both
+      // or a 32-byte hex seed - we'll handle both
       const kp = restoreSolanaKeypair(privateKey);
       walletAddress = kp.publicKey.toBase58();
     } else {
-      // EVM — expect 0x-prefixed hex private key
+      // EVM - expect 0x-prefixed hex private key
       const normalizedKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
       const account = privateKeyToAccount(normalizedKey as `0x${string}`);
       walletAddress = account.address;
@@ -626,7 +626,7 @@ export class Vault {
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
-    // Wrap all writes atomically — roll back on any failure
+    // Wrap all writes atomically - roll back on any failure
     await db.transaction(async (tx) => {
       if (existingAgent) {
         // Update wallet address and replace encrypted key
@@ -787,15 +787,17 @@ export class Vault {
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), fall back to legacy encryptedKeys
     let secretKey: string;
-    const [chainKey] = await db
-      .select()
-      .from(encryptedChainKeys)
-      .where(
-        and(
+    const chainKeyWhere = request.venue
+      ? and(
           eq(encryptedChainKeys.agentId, request.agentId),
           eq(encryptedChainKeys.chainFamily, "evm"),
-        ),
-      );
+          eq(encryptedChainKeys.venue, request.venue),
+        )
+      : and(
+          eq(encryptedChainKeys.agentId, request.agentId),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+        );
+    const [chainKey] = await db.select().from(encryptedChainKeys).where(chainKeyWhere);
 
     if (chainKey) {
       secretKey = this.keyStore.decrypt({
@@ -804,6 +806,10 @@ export class Vault {
         tag: chainKey.tag,
         salt: chainKey.salt,
       });
+    } else if (request.venue) {
+      throw new Error(
+        `No signing key found for agent ${request.agentId} on venue ${request.venue}`,
+      );
     } else {
       // Fallback: legacy encrypted_keys table
       const [legacyKey] = await db
@@ -1053,7 +1059,7 @@ export class Vault {
       throw new Error(`No RPC URL configured for chainId ${chainId}`);
     }
 
-    // Block signing/state-modifying methods — this is read-only passthrough
+    // Block signing/state-modifying methods - this is read-only passthrough
     const blockedMethods = [
       "eth_sendTransaction",
       "eth_sendRawTransaction",
@@ -1065,7 +1071,7 @@ export class Vault {
     ];
     if (blockedMethods.includes(request.method)) {
       throw new Error(
-        `Method ${request.method} is not allowed via RPC passthrough — use the signing endpoints`,
+        `Method ${request.method} is not allowed via RPC passthrough - use the signing endpoints`,
       );
     }
 
@@ -1086,4 +1092,223 @@ export class Vault {
 
     return (await response.json()) as RpcResponse;
   }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Sprint 4 Phase 1 Day 1: venue-scoped wallet API
+  // ──────────────────────────────────────────────────────────────────────
+  //
+  // Wallets used to be keyed by (agentId, chainFamily). Trade-sessions now
+  // need to address them per (agentId, venue) because Sol's BSC wallet
+  // and Sol's Hyperliquid wallet sit on the same chainFamily (EVM) but
+  // must hold distinct keys. `venue` is optional: legacy callers still
+  // pass `chainId` (mapped to chainFamily), which resolves to the
+  // NULL-venue row written by `createAgent`.
+
+  /**
+   * Look up a wallet for an agent.
+   *
+   * Priority:
+   *   1. If `venue` is provided, return the row with that exact venue. If
+   *      no row matches, throw - we never silently downgrade to a legacy
+   *      wallet when a venue was explicitly requested.
+   *   2. If only `chainId` is provided, map to chainFamily and return the
+   *      legacy (venue IS NULL) row for that family. This preserves
+   *      backward compat for @stwd/agent-trader and direct SDK callers.
+   *
+   * Throws if neither is provided, or if no matching row exists.
+   */
+  async getWallet(args: { agentId: string; venue?: string; chainId?: number }): Promise<{
+    agentId: string;
+    chainFamily: "evm" | "solana";
+    venue: string | null;
+    purpose: string | null;
+    address: string;
+  }> {
+    const { agentId, venue, chainId } = args;
+    if (!venue && chainId === undefined) {
+      throw new Error("getWallet requires either `venue` or `chainId`");
+    }
+
+    const db = getDb();
+
+    if (venue) {
+      const [row] = await db
+        .select()
+        .from(agentWallets)
+        .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.venue, venue)));
+
+      if (!row) {
+        throw new Error(`No wallet found for agent ${agentId} on venue ${venue}`);
+      }
+      return {
+        agentId: row.agentId,
+        chainFamily: row.chainFamily as "evm" | "solana",
+        venue: row.venue,
+        purpose: row.purpose,
+        address: row.address,
+      };
+    }
+
+    // Legacy fallback: chainId → chainFamily, then look up the NULL-venue row.
+    const chainFamily = chainIdToChainFamily(chainId as number);
+    const [row] = await db
+      .select()
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, agentId),
+          eq(agentWallets.chainFamily, chainFamily),
+          isNull(agentWallets.venue),
+        ),
+      );
+
+    if (!row) {
+      throw new Error(`No legacy wallet found for agent ${agentId} on chain family ${chainFamily}`);
+    }
+    return {
+      agentId: row.agentId,
+      chainFamily: row.chainFamily as "evm" | "solana",
+      venue: row.venue,
+      purpose: row.purpose,
+      address: row.address,
+    };
+  }
+
+  /**
+   * Provision a fresh, venue-scoped wallet for an agent.
+   *
+   * Generates a new keypair (EVM via viem's `generatePrivateKey`, Solana
+   * via Ed25519 in @solana/web3.js), encrypts the secret under the
+   * vault's master KDF (AES-256-GCM + scrypt), and writes one row to
+   * `agent_wallets` plus one to `encrypted_chain_keys`.
+   *
+   * Venue uniqueness is enforced by the DB index on
+   * (agent_id, chain_family, COALESCE(venue, '')). A duplicate venue
+   * request rejects at the DB layer.
+   *
+   * Returns the new public address. The private key is NEVER returned
+   * and NEVER logged.
+   */
+  async createWallet(args: {
+    agentId: string;
+    venue: string;
+    chainType: "evm" | "solana";
+    purpose?: string;
+  }): Promise<{
+    agentId: string;
+    chainFamily: "evm" | "solana";
+    venue: string;
+    purpose: string | null;
+    address: string;
+  }> {
+    const { agentId, venue, chainType, purpose } = args;
+    if (!venue) throw new Error("createWallet requires a venue");
+    if (chainType !== "evm" && chainType !== "solana") {
+      throw new Error(`createWallet: unsupported chainType ${chainType}`);
+    }
+
+    const db = getDb();
+
+    // Verify the agent exists. Surfacing a clear error here beats a
+    // foreign-key violation from Postgres.
+    const [agentRow] = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(eq(agents.id, agentId));
+    if (!agentRow) {
+      throw new Error(`Agent ${agentId} not found`);
+    }
+
+    let address: string;
+    let secret: string;
+    if (chainType === "evm") {
+      const pk = generatePrivateKey();
+      const account = privateKeyToAccount(pk);
+      address = account.address;
+      secret = pk;
+    } else {
+      const kp = generateSolanaKeypair();
+      address = kp.publicKey;
+      secret = kp.secretKey;
+    }
+
+    const encrypted = this.keyStore.encrypt(secret);
+    const createdAt = new Date();
+
+    await db.transaction(async (tx) => {
+      await tx.insert(encryptedChainKeys).values({
+        agentId,
+        chainFamily: chainType,
+        venue,
+        purpose: purpose ?? null,
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        tag: encrypted.tag,
+        salt: encrypted.salt,
+      });
+
+      await tx.insert(agentWallets).values({
+        agentId,
+        chainFamily: chainType,
+        venue,
+        purpose: purpose ?? null,
+        address,
+        createdAt,
+      });
+    });
+
+    return {
+      agentId,
+      chainFamily: chainType,
+      venue,
+      purpose: purpose ?? null,
+      address,
+    };
+  }
+
+  /**
+   * List every wallet an agent owns, across venues and chain families.
+   * Used by the agent dashboard and by Worker A's trade-sessions package
+   * to enumerate available trading surfaces.
+   *
+   * Legacy NULL-venue rows are included. Order: legacy first, then
+   * venue-scoped, by creation time ascending.
+   */
+  async listWallets(args: { agentId: string }): Promise<
+    Array<{
+      agentId: string;
+      chainFamily: "evm" | "solana";
+      venue: string | null;
+      purpose: string | null;
+      address: string;
+      createdAt: Date;
+    }>
+  > {
+    const { agentId } = args;
+    const db = getDb();
+
+    const rows = await db
+      .select()
+      .from(agentWallets)
+      .where(eq(agentWallets.agentId, agentId))
+      .orderBy(sql`${agentWallets.venue} NULLS FIRST`, agentWallets.createdAt);
+
+    return rows.map((row) => ({
+      agentId: row.agentId,
+      chainFamily: row.chainFamily as "evm" | "solana",
+      venue: row.venue,
+      purpose: row.purpose,
+      address: row.address,
+      createdAt: row.createdAt,
+    }));
+  }
+}
+
+/**
+ * Map an EVM chainId (or 101/102 for Solana) to its chain family.
+ * Exposed at module scope so non-method callers (tests) can use it.
+ */
+function chainIdToChainFamily(chainId: number): "evm" | "solana" {
+  if (chainId === 101 || chainId === 102) return "solana";
+  return "evm";
 }

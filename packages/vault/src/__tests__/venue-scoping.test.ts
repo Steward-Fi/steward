@@ -1,0 +1,224 @@
+// Sprint 4 Phase 1 Day 1 tests: venue-scoped vault API.
+//
+// Uses PGLite (in-process Postgres via WASM) so the test runs against the
+// real Drizzle schema and the real 0022_vault_venue_scope migration, with
+// no third-party infra. Master password is fixed for determinism; the
+// underlying KeyStore still adds per-record IV + salt randomness.
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+
+import { getDb, tenants } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { Vault } from "../vault";
+
+const MASTER_PASSWORD = "test-vault-venue-scope";
+const TENANT_ID = "test-tenant";
+
+async function freshVault(): Promise<Vault> {
+  const { db, client } = await createPGLiteDb("memory://");
+  setPGLiteOverride(db as never, async () => {
+    await client.close();
+  });
+
+  // Seed the tenant the vault will write under.
+  await getDb().insert(tenants).values({
+    id: TENANT_ID,
+    name: "Test Tenant",
+    apiKeyHash: "test-hash",
+  });
+
+  return new Vault({ masterPassword: MASTER_PASSWORD });
+}
+
+describe("Vault venue scoping (Sprint 4 Day 1)", () => {
+  let vault: Vault;
+
+  beforeEach(async () => {
+    vault = await freshVault();
+  });
+
+  afterEach(async () => {
+    // Detaching the override + letting GC drop the PGLite instance is
+    // enough for our in-memory case; there's no global handle to close.
+  });
+
+  test("createWallet provisions a venue-scoped EVM wallet and returns the address", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+
+    const wallet = await vault.createWallet({
+      agentId: "sol",
+      venue: "hyperliquid",
+      chainType: "evm",
+      purpose: "perp",
+    });
+
+    expect(wallet.agentId).toBe("sol");
+    expect(wallet.chainFamily).toBe("evm");
+    expect(wallet.venue).toBe("hyperliquid");
+    expect(wallet.purpose).toBe("perp");
+    expect(wallet.address).toMatch(/^0x[0-9a-fA-F]{40}$/);
+  });
+
+  test("createWallet provisions a venue-scoped Solana wallet", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+
+    const wallet = await vault.createWallet({
+      agentId: "sol",
+      venue: "drift",
+      chainType: "solana",
+    });
+
+    expect(wallet.chainFamily).toBe("solana");
+    expect(wallet.venue).toBe("drift");
+    expect(wallet.purpose).toBeNull();
+    // Solana addresses are base58, not 0x-prefixed.
+    expect(wallet.address.startsWith("0x")).toBe(false);
+    expect(wallet.address.length).toBeGreaterThan(30);
+  });
+
+  test("getWallet({ agentId, venue }) returns the venue-scoped row", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+    const created = await vault.createWallet({
+      agentId: "sol",
+      venue: "hyperliquid",
+      chainType: "evm",
+    });
+
+    const fetched = await vault.getWallet({ agentId: "sol", venue: "hyperliquid" });
+
+    expect(fetched.address).toBe(created.address);
+    expect(fetched.venue).toBe("hyperliquid");
+    expect(fetched.chainFamily).toBe("evm");
+  });
+
+  test("getWallet({ agentId, chainId }) returns the legacy NULL-venue row (backward compat)", async () => {
+    // createAgent writes legacy NULL-venue rows for both chain families.
+    const identity = await vault.createAgent(TENANT_ID, "legacy-agent", "Legacy");
+
+    const fetched = await vault.getWallet({ agentId: "legacy-agent", chainId: 8453 });
+
+    expect(fetched.venue).toBeNull();
+    expect(fetched.chainFamily).toBe("evm");
+    expect(fetched.address).toBe(identity.walletAddresses?.evm ?? identity.walletAddress);
+  });
+
+  test("getWallet({ chainId }) of a Solana chainId resolves to the Solana legacy row", async () => {
+    const identity = await vault.createAgent(TENANT_ID, "legacy-agent", "Legacy");
+
+    const fetched = await vault.getWallet({ agentId: "legacy-agent", chainId: 101 });
+
+    expect(fetched.chainFamily).toBe("solana");
+    expect(fetched.venue).toBeNull();
+    expect(fetched.address).toBe(identity.walletAddresses?.solana ?? "");
+  });
+
+  test("getWallet({ venue }) does NOT silently fall back to the legacy row", async () => {
+    await vault.createAgent(TENANT_ID, "legacy-agent", "Legacy");
+
+    // No hyperliquid wallet has been provisioned, so this MUST throw,
+    // not return the legacy EVM row. Trade-sessions relies on this.
+    await expect(
+      vault.getWallet({ agentId: "legacy-agent", venue: "hyperliquid" }),
+    ).rejects.toThrow(/No wallet found for agent legacy-agent on venue hyperliquid/);
+  });
+
+  test("getWallet with neither venue nor chainId throws", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+    await expect(vault.getWallet({ agentId: "sol" })).rejects.toThrow(
+      /getWallet requires either `venue` or `chainId`/,
+    );
+  });
+
+  test("createWallet enforces venue uniqueness per (agentId, chainFamily)", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+    await vault.createWallet({ agentId: "sol", venue: "hyperliquid", chainType: "evm" });
+
+    // Second insert for the same (agentId, chainFamily, venue) tuple must
+    // be rejected by the unique index from migration 0022.
+    await expect(
+      vault.createWallet({ agentId: "sol", venue: "hyperliquid", chainType: "evm" }),
+    ).rejects.toThrow();
+  });
+
+  test("two distinct venues for the same agent + chainFamily coexist (the whole point)", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+    const hl = await vault.createWallet({
+      agentId: "sol",
+      venue: "hyperliquid",
+      chainType: "evm",
+      purpose: "perp",
+    });
+    const pm = await vault.createWallet({
+      agentId: "sol",
+      venue: "polymarket",
+      chainType: "evm",
+      purpose: "predictions",
+    });
+
+    expect(hl.address).not.toBe(pm.address);
+
+    const hlFetch = await vault.getWallet({ agentId: "sol", venue: "hyperliquid" });
+    const pmFetch = await vault.getWallet({ agentId: "sol", venue: "polymarket" });
+    expect(hlFetch.address).toBe(hl.address);
+    expect(pmFetch.address).toBe(pm.address);
+  });
+
+  test("legacy + venue-scoped wallets coexist for the same agent + chainFamily", async () => {
+    const identity = await vault.createAgent(TENANT_ID, "sol", "Sol");
+    await vault.createWallet({ agentId: "sol", venue: "hyperliquid", chainType: "evm" });
+
+    const legacy = await vault.getWallet({ agentId: "sol", chainId: 8453 });
+    const hl = await vault.getWallet({ agentId: "sol", venue: "hyperliquid" });
+
+    expect(legacy.address).toBe(identity.walletAddresses?.evm ?? "");
+    expect(hl.address).not.toBe(legacy.address);
+  });
+
+  test("listWallets returns every wallet across venues and chain families", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+    await vault.createWallet({ agentId: "sol", venue: "hyperliquid", chainType: "evm" });
+    await vault.createWallet({ agentId: "sol", venue: "polymarket", chainType: "evm" });
+    await vault.createWallet({ agentId: "sol", venue: "drift", chainType: "solana" });
+
+    const all = await vault.listWallets({ agentId: "sol" });
+
+    // 2 legacy (EVM + Solana from createAgent) + 3 venue-scoped = 5
+    expect(all.length).toBe(5);
+
+    const venues = all.map((w) => w.venue);
+    expect(venues).toContain(null);
+    expect(venues).toContain("hyperliquid");
+    expect(venues).toContain("polymarket");
+    expect(venues).toContain("drift");
+
+    // Legacy NULL rows come first (NULLS FIRST in the ORDER BY).
+    expect(all[0]!.venue).toBeNull();
+  });
+
+  test("createWallet rejects unknown chainType", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+    await expect(
+      vault.createWallet({ agentId: "sol", venue: "x", chainType: "bitcoin" as any }),
+    ).rejects.toThrow(/unsupported chainType/);
+  });
+
+  test("createWallet rejects unknown agentId with a clear error (no FK leak)", async () => {
+    await expect(
+      vault.createWallet({ agentId: "ghost", venue: "hyperliquid", chainType: "evm" }),
+    ).rejects.toThrow(/Agent ghost not found/);
+  });
+
+  test("private key is never returned by createWallet", async () => {
+    await vault.createAgent(TENANT_ID, "sol", "Sol");
+    const wallet = await vault.createWallet({
+      agentId: "sol",
+      venue: "hyperliquid",
+      chainType: "evm",
+    });
+    // Type-level: the return type has no `privateKey` / `secretKey`. Runtime:
+    // verify the returned object has no key-shaped fields.
+    expect(Object.keys(wallet).sort()).toEqual(
+      ["address", "agentId", "chainFamily", "purpose", "venue"].sort(),
+    );
+  });
+});

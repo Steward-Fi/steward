@@ -27,6 +27,12 @@ export interface PolicyEvaluationContext {
   priceOracle?: PriceOracle;
   /** Optional reputation score for reputation-based policies */
   reputationScore?: number;
+  /** Sprint 4: trading venue (for `venue-allowlist`). */
+  venue?: string;
+  /** Sprint 4: requested leverage multiple (for `leverage-cap`). */
+  leverage?: number;
+  /** Sprint 4: pre-computed USD value of the action. */
+  valueUsd?: number;
 }
 
 export interface EvaluationResult {
@@ -56,7 +62,7 @@ function extractProxyValue(request: ProxySimulationRequest): string {
 }
 
 /**
- * Policy Engine — evaluates a set of policy rules against a transaction request.
+ * Policy Engine - evaluates a set of policy rules against a transaction request.
  *
  * Logic:
  * - All enabled policies must pass for auto-approval
@@ -83,6 +89,9 @@ export class PolicyEngine {
       spentThisWeek: ctx.spentThisWeek,
       priceOracle: ctx.priceOracle,
       reputationScore: ctx.reputationScore,
+      venue: ctx.venue,
+      leverage: ctx.leverage,
+      valueUsd: ctx.valueUsd,
     };
 
     const results: PolicyResult[] = await Promise.all(
@@ -105,7 +114,7 @@ export class PolicyEngine {
       return { approved: false, results, requiresManualApproval: true };
     }
 
-    // Hard policy failed — reject
+    // Hard policy failed - reject
     return { approved: false, results, requiresManualApproval: false };
   }
 

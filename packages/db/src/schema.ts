@@ -16,7 +16,6 @@ import {
   numeric,
   pgEnum,
   pgTable,
-  primaryKey,
   serial,
   text,
   timestamp,
@@ -27,7 +26,7 @@ import {
 
 export interface TenantEmailConfig {
   /**
-   * Per-tenant Resend provider config. Optional — a tenant can also leave
+   * Per-tenant Resend provider config. Optional - a tenant can also leave
    * this entirely empty and only set `magicLinkBaseUrl` to override the
    * magic-link target while continuing to use the global RESEND_API_KEY.
    */
@@ -67,6 +66,8 @@ export const policyTypeEnum = pgEnum("policy_type", [
   "allowed-chains",
   "reputation-threshold",
   "reputation-scaling",
+  "venue-allowlist",
+  "leverage-cap",
 ]);
 
 export const transactionStatusEnum = pgEnum("transaction_status", [
@@ -174,12 +175,21 @@ export const agentWallets = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     address: varchar("address", { length: 128 }).notNull(),
+    /**
+     * Sprint 4: trading venue this wallet is scoped to (e.g. "hyperliquid").
+     * NULL on legacy rows; vault lookups fall back to chainFamily when
+     * venue isn't provided. See VenueId in @stwd/shared.
+     */
+    venue: text("venue"),
+    /** Optional human-readable label, e.g. "perp", "spot", "ops". */
+    purpose: text("purpose"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentChainUniqueIdx: uniqueIndex("agent_wallets_agent_chain_idx").on(
+    agentChainVenueUniqueIdx: uniqueIndex("agent_wallets_agent_chain_venue_idx").on(
       table.agentId,
       table.chainFamily,
+      sql`COALESCE(${table.venue}, '')`,
     ),
     agentIdIdx: index("agent_wallets_agent_id_idx").on(table.agentId),
   }),
@@ -194,17 +204,36 @@ export const agentWallets = pgTable(
 export const encryptedChainKeys = pgTable(
   "encrypted_chain_keys",
   {
+    /**
+     * Sprint 4: surrogate PK so a single (agentId, chainFamily) can have
+     * multiple rows, one per venue. The uniqueness invariant moves to
+     * `agent_chain_venue_idx` below.
+     */
+    id: uuid("id").primaryKey().defaultRandom(),
     agentId: varchar("agent_id", { length: 64 })
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
     chainFamily: chainFamilyEnum("chain_family").notNull(),
+    /**
+     * Sprint 4: trading venue this key is scoped to (e.g. "hyperliquid").
+     * NULL on legacy rows; vault lookups fall back to chainFamily when
+     * venue isn't provided.
+     */
+    venue: text("venue"),
+    /** Optional human-readable label, e.g. "perp", "spot", "ops". */
+    purpose: text("purpose"),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),
     tag: text("tag").notNull(),
     salt: text("salt").notNull(),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.agentId, table.chainFamily] }),
+    agentChainVenueUniqueIdx: uniqueIndex("encrypted_chain_keys_agent_chain_venue_idx").on(
+      table.agentId,
+      table.chainFamily,
+      sql`COALESCE(${table.venue}, '')`,
+    ),
+    agentIdIdx: index("encrypted_chain_keys_agent_id_idx").on(table.agentId),
   }),
 );
 
@@ -692,3 +721,35 @@ export const proxyAuditLog = pgTable(
 
 export type ProxyAuditLogEntry = typeof proxyAuditLog.$inferSelect;
 export type NewProxyAuditLogEntry = typeof proxyAuditLog.$inferInsert;
+
+export const tradeSessions = pgTable(
+  "trade_sessions",
+  {
+    id: varchar("id", { length: 128 }).primaryKey(),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    venue: varchar("venue", { length: 64 }).notNull(),
+    scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+    status: varchar("status", { length: 32 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedBy: varchar("revoked_by", { length: 255 }),
+  },
+  (table) => ({
+    agentVenueStatusIdx: index("trade_sessions_agent_venue_status_idx").on(
+      table.agentId,
+      table.venue,
+      table.status,
+    ),
+    tenantIdx: index("trade_sessions_tenant_idx").on(table.tenantId),
+    expiresAtIdx: index("trade_sessions_expires_at_idx").on(table.expiresAt),
+  }),
+);
+
+export type TradeSessionRow = typeof tradeSessions.$inferSelect;
+export type NewTradeSessionRow = typeof tradeSessions.$inferInsert;

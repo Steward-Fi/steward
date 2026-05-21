@@ -11,8 +11,10 @@ import {
   type TimeWindowConfig,
   toCaip2,
 } from "@stwd/shared";
+import { evaluateLeverageCap } from "./evaluators/leverage-cap";
 import { evaluateReputationScaling } from "./evaluators/reputation-scaling";
 import { evaluateReputationThreshold } from "./evaluators/reputation-threshold";
+import { evaluateVenueAllowlist } from "./evaluators/venue-allowlist";
 
 export interface EvaluatorContext {
   request: SignRequest;
@@ -24,6 +26,23 @@ export interface EvaluatorContext {
   priceOracle?: PriceOracle;
   /** Optional reputation score for reputation-based policies */
   reputationScore?: number;
+  /**
+   * Sprint 4: trading venue the request is destined for. Required by the
+   * `venue-allowlist` evaluator. Trade-sessions sets this from the venue
+   * adapter dispatch step; non-trade signing requests leave it undefined.
+   */
+  venue?: string;
+  /**
+   * Sprint 4: requested leverage multiple (e.g. 2 = 2x). Required by the
+   * `leverage-cap` evaluator. Undefined for non-leveraged trades and for
+   * spot transfers.
+   */
+  leverage?: number;
+  /**
+   * Optional pre-computed USD value of the action. Trade-sessions can
+   * populate this so evaluators don't all re-quote the oracle.
+   */
+  valueUsd?: number;
 }
 
 /**
@@ -67,6 +86,10 @@ export async function evaluatePolicy(
         reputationScore: ctx.reputationScore,
         txValue: BigInt(ctx.request.value),
       });
+    case "venue-allowlist":
+      return evaluateVenueAllowlist(rule, { venue: ctx.venue });
+    case "leverage-cap":
+      return evaluateLeverageCap(rule, { leverage: ctx.leverage });
     default:
       return {
         policyId: rule.id,
@@ -171,7 +194,7 @@ async function evaluateSpendingLimit(
         };
       }
 
-      // Daily USD limit — convert spentToday from wei to USD
+      // Daily USD limit - convert spentToday from wei to USD
       if (config.maxPerDayUsd !== undefined) {
         const spentTodayUsd = await ctx.priceOracle.weiToUsd(ctx.spentToday.toString(), chainId);
         if (spentTodayUsd !== null) {
@@ -185,7 +208,7 @@ async function evaluateSpendingLimit(
         }
       }
 
-      // Weekly USD limit — convert spentThisWeek from wei to USD
+      // Weekly USD limit - convert spentThisWeek from wei to USD
       if (config.maxPerWeekUsd !== undefined) {
         const spentWeekUsd = await ctx.priceOracle.weiToUsd(ctx.spentThisWeek.toString(), chainId);
         if (spentWeekUsd !== null) {
@@ -202,7 +225,7 @@ async function evaluateSpendingLimit(
       return { ...base, passed: true };
     }
 
-    // Price unavailable — fall through to wei comparison with a warning
+    // Price unavailable - fall through to wei comparison with a warning
     console.warn(
       `[policy] USD price unavailable for chain ${chainId}, falling back to wei comparison`,
     );
@@ -288,7 +311,7 @@ async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Pro
       };
     }
 
-    // Price unavailable — fall through to wei if available
+    // Price unavailable - fall through to wei if available
     console.warn(
       `[policy] USD price unavailable for chain ${chainId}, falling back to wei threshold`,
     );
@@ -306,7 +329,7 @@ async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Pro
     };
   }
 
-  // No threshold configured at all — pass (policy misconfigured but don't block)
+  // No threshold configured at all - pass (policy misconfigured but don't block)
   return { ...base, passed: true, reason: "No threshold configured" };
 }
 
