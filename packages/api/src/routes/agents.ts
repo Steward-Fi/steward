@@ -39,6 +39,16 @@ export const agentRoutes = new Hono<{ Variables: AppVariables }>();
 // ─── Create agent ─────────────────────────────────────────────────────────────
 
 agentRoutes.post("/", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Agent creation requires tenant-level authentication",
+      },
+      403,
+    );
+  }
+
   const tenantId = c.get("tenantId");
   const body = await safeJsonParse<{
     id: string;
@@ -79,6 +89,16 @@ agentRoutes.post("/", async (c) => {
 // ─── List agents ──────────────────────────────────────────────────────────────
 
 agentRoutes.get("/", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Agent listing requires tenant-level authentication",
+      },
+      403,
+    );
+  }
+
   const tenantId = c.get("tenantId");
   const tenantAgents = await vault.listAgentsByTenant(tenantId);
   return c.json<ApiResponse<AgentIdentity[]>>({ ok: true, data: tenantAgents });
@@ -137,6 +157,13 @@ agentRoutes.post("/:agentId/token", async (c) => {
 // ─── Get agent ────────────────────────────────────────────────────────────────
 
 agentRoutes.get("/:agentId", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
   const tenantId = c.get("tenantId");
   const agent = await vault.getAgent(tenantId, c.req.param("agentId"));
   if (!agent) {
