@@ -13,7 +13,7 @@ import {
   validateApiKey,
   verifyToken,
 } from "@stwd/auth";
-import { getDb, policies, tenants, toPolicyRule, transactions } from "@stwd/db";
+import { getDb, policies, tenants, toPolicyRule, transactions, userTenants } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
   type AgentIdentity,
@@ -272,6 +272,7 @@ export type AppVariables = {
   tenantConfig: TenantConfig;
   tenantId: string;
   userId?: string;
+  tenantRole?: string;
   agentScope?: string;
   authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt";
 };
@@ -291,6 +292,14 @@ export function getTenantPayload(tenant: Tenant): Tenant & TenantConfig {
 export async function findTenant(tenantId: string): Promise<Tenant | undefined> {
   const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId));
   return tenant;
+}
+
+async function findUserTenantMembership(userId: string, tenantId: string) {
+  const [membership] = await db
+    .select({ role: userTenants.role })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+  return membership ?? null;
 }
 
 export async function ensureAgentForTenant(
@@ -369,6 +378,23 @@ export async function tenantAuth(
         if (options?.requireTenantMatch && payload.tenantId !== options.requireTenantMatch) {
           return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
         }
+
+        const isAgentToken = payload.scope === "agent" && typeof payload.agentId === "string";
+        if (!isAgentToken) {
+          if (!payload.userId) {
+            return c.json<ApiResponse>(
+              { ok: false, error: "User session token is missing userId" },
+              401,
+            );
+          }
+
+          const membership = await findUserTenantMembership(payload.userId, payload.tenantId);
+          if (!membership) {
+            return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 403);
+          }
+          c.set("tenantRole", membership.role);
+        }
+
         c.set("tenantId", payload.tenantId);
         c.set("tenant", jwtTenant);
         c.set(
@@ -380,7 +406,7 @@ export async function tenantAuth(
         );
 
         if (payload.userId) c.set("userId", payload.userId);
-        if (payload.scope === "agent" && payload.agentId) {
+        if (isAgentToken) {
           c.set("agentScope", payload.agentId);
           c.set("authType", "agent-token");
         } else {
@@ -451,7 +477,12 @@ export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boo
 }
 
 export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boolean {
-  return c.get("authType") !== "agent-token";
+  const authType = c.get("authType");
+  if (authType === "api-key") return true;
+  if (authType === "agent-token") return false;
+
+  const tenantRole = c.get("tenantRole");
+  return tenantRole === "owner" || tenantRole === "admin";
 }
 
 /**
