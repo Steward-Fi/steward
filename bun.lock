@@ -84,7 +84,7 @@
       "name": "@stwd/eliza-plugin",
       "version": "0.4.0",
       "dependencies": {
-        "@stwd/sdk": "^0.8.0",
+        "@stwd/sdk": "^0.9.0",
       },
       "devDependencies": {
         "@elizaos/core": "2.0.0-alpha.77",
@@ -141,9 +141,9 @@
     },
     "packages/react": {
       "name": "@stwd/react",
-      "version": "0.8.0",
+      "version": "0.9.0",
       "dependencies": {
-        "@stwd/sdk": "^0.8.0",
+        "@stwd/sdk": "^0.9.0",
       },
       "devDependencies": {
         "@rainbow-me/rainbowkit": "^2.0.0",
@@ -215,7 +215,7 @@
     },
     "packages/sdk": {
       "name": "@stwd/sdk",
-      "version": "0.8.2",
+      "version": "0.9.0",
       "dependencies": {
         "bs58": "^6.0.0",
       },

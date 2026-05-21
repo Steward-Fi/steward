@@ -126,6 +126,19 @@ export function StewardProvider({
     [authInstance],
   );
 
+  const addPasskey = useCallback(
+    async (email: string) => {
+      if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+      setAuthLoading(true);
+      try {
+        return await authInstance.addPasskey(email);
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [authInstance],
+  );
+
   const signInWithEmail = useCallback(
     async (email: string) => {
       if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
@@ -335,6 +348,7 @@ export function StewardProvider({
       signOut,
       getToken,
       signInWithPasskey,
+      addPasskey,
       signInWithEmail,
       verifyEmailCallback,
       signInWithSIWE,
@@ -359,6 +373,7 @@ export function StewardProvider({
     signOut,
     getToken,
     signInWithPasskey,
+    addPasskey,
     signInWithEmail,
     verifyEmailCallback,
     signInWithSIWE,

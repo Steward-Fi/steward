@@ -1,12 +1,13 @@
 // ─── Provider ───
 
 export { ApprovalQueue } from "./components/ApprovalQueue.js";
+export { PasskeyEnrollmentPrompt } from "./components/PasskeyEnrollmentPrompt.js";
 export { PolicyControls } from "./components/PolicyControls.js";
 export { SpendDashboard } from "./components/SpendDashboard.js";
 export { StewardAuthGuard } from "./components/StewardAuthGuard.js";
 export { StewardEmailCallback } from "./components/StewardEmailCallback.js";
 // ─── Components ───
-export { StewardLogin } from "./components/StewardLogin.js";
+export { PASSKEY_ENROLL_PROMPT_KEY, StewardLogin } from "./components/StewardLogin.js";
 export { StewardOAuthCallback } from "./components/StewardOAuthCallback.js";
 export { StewardTenantPicker } from "./components/StewardTenantPicker.js";
 export { StewardUserButton } from "./components/StewardUserButton.js";

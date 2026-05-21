@@ -413,6 +413,38 @@ export class StewardAuth {
     throw new StewardApiError(loginOptsRes.error, loginOptsRes.status);
   }
 
+  /**
+   * Register a new passkey for the given email, regardless of whether the
+   * user already has other passkeys on other relying parties (RPs).
+   *
+   * Use this after a successful magic-link / OAuth sign-in to offer the
+   * user one-tap passkey login on the current device. Existing passkeys
+   * for this user on OTHER RPs (e.g. a passkey from `elizacloud.ai` when
+   * the user is now on `waifu.fun`) won’t be removed; this just adds a
+   * fresh credential bound to the current origin’s RP.
+   *
+   * Behavior mirrors `signInWithPasskey` when no credentials exist, except
+   * it skips the login-options probe and goes straight to registration.
+   *
+   * Requires a browser environment and `@simplewebauthn/browser` installed.
+   * Throws `StewardApiError` otherwise.
+   */
+  async addPasskey(email: string): Promise<StewardAuthResult> {
+    if (!isBrowser()) {
+      throw new StewardApiError("Passkeys require a browser environment.", 0);
+    }
+    let browserLib: SimpleWebAuthnBrowser;
+    try {
+      browserLib = await import("@simplewebauthn/browser");
+    } catch {
+      throw new StewardApiError(
+        "Missing peer dependency: @simplewebauthn/browser. Install it to use passkeys.",
+        0,
+      );
+    }
+    return this.completePasskeyRegister(email, browserLib);
+  }
+
   private async completePasskeyLogin(
     email: string,
     options: unknown,
