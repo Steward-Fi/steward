@@ -1,51 +1,77 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAccessToken } from "@stwd/auth";
-import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { getDb, tenants, users, userTenants } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
 
-const TENANT_ID = "tenant-role-auth";
+/**
+ * NOTE on test isolation:
+ *   Uses the ambient `DATABASE_URL` set by the `Integration Tests (Postgres)`
+ *   CI job. The original implementation called `setPGLiteOverride` in
+ *   `beforeAll` and `closeDb()` in `afterAll`, which poisoned every
+ *   subsequent test in `bun test packages/api` with `error: PGlite is
+ *   closed`. We use a unique tenant id and clean up rows in afterAll
+ *   instead of swapping the connection.
+ */
+
+const TENANT_ID = "test-tenant-role-auth";
 const OWNER_USER_ID = crypto.randomUUID();
 const MEMBER_USER_ID = crypto.randomUUID();
+const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
+
 let app: typeof import("../app")["app"];
 
 beforeAll(async () => {
-  process.env.DATABASE_URL = "pglite://embedded";
-  process.env.STEWARD_PGLITE_MEMORY = "true";
-  process.env.STEWARD_MASTER_PASSWORD = "tenant-role-auth-master-password";
-  process.env.STEWARD_JWT_SECRET = "tenant-role-auth-jwt-secret-with-enough-bytes";
-
-  const { db, client } = await createPGLiteDb("memory://");
-  setPGLiteOverride(db, async () => {
-    await client.close();
-  });
+  if (!hasDatabaseUrl) return;
 
   ({ app } = await import("../app"));
 
   const dbHandle = getDb();
-  await dbHandle.insert(tenants).values({
-    id: TENANT_ID,
-    name: "Tenant Role Auth",
-    apiKeyHash: "hash",
-  });
-  await dbHandle.insert(users).values([
-    { id: OWNER_USER_ID, email: "owner@example.test" },
-    { id: MEMBER_USER_ID, email: "member@example.test" },
-  ]);
-  await dbHandle.insert(userTenants).values([
-    { userId: OWNER_USER_ID, tenantId: TENANT_ID, role: "owner" },
-    { userId: MEMBER_USER_ID, tenantId: TENANT_ID, role: "member" },
-  ]);
+  await dbHandle
+    .insert(tenants)
+    .values({
+      id: TENANT_ID,
+      name: "Tenant Role Auth",
+      apiKeyHash: "hash",
+    })
+    .onConflictDoNothing();
+  await dbHandle
+    .insert(users)
+    .values([
+      { id: OWNER_USER_ID, email: `owner-${OWNER_USER_ID}@example.test` },
+      { id: MEMBER_USER_ID, email: `member-${MEMBER_USER_ID}@example.test` },
+    ])
+    .onConflictDoNothing();
+  await dbHandle
+    .insert(userTenants)
+    .values([
+      { userId: OWNER_USER_ID, tenantId: TENANT_ID, role: "owner" },
+      { userId: MEMBER_USER_ID, tenantId: TENANT_ID, role: "member" },
+    ])
+    .onConflictDoNothing();
 });
 
 afterAll(async () => {
-  await closeDb().catch(() => {});
-  delete process.env.DATABASE_URL;
-  delete process.env.STEWARD_PGLITE_MEMORY;
-  delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
+  if (!hasDatabaseUrl) return;
+  const dbHandle = getDb();
+  await dbHandle
+    .delete(userTenants)
+    .where(eq(userTenants.tenantId, TENANT_ID))
+    .catch(() => {});
+  await dbHandle
+    .delete(users)
+    .where(eq(users.id, OWNER_USER_ID))
+    .catch(() => {});
+  await dbHandle
+    .delete(users)
+    .where(eq(users.id, MEMBER_USER_ID))
+    .catch(() => {});
+  await dbHandle
+    .delete(tenants)
+    .where(eq(tenants.id, TENANT_ID))
+    .catch(() => {});
 });
 
 async function createUserToken(userId: string) {
@@ -59,7 +85,7 @@ async function createUserToken(userId: string) {
   );
 }
 
-describe("tenantAuth membership checks and requireTenantLevel role checks", () => {
+describeWithDatabase("tenantAuth membership checks and requireTenantLevel role checks", () => {
   it("allows owner sessions to use tenant-level routes but rejects member sessions", async () => {
     const ownerToken = await createUserToken(OWNER_USER_ID);
     const memberToken = await createUserToken(MEMBER_USER_ID);
