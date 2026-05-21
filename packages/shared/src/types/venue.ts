@@ -73,3 +73,17 @@ export const VENUE_METADATA: Record<VenueId, VenueMetadata> = {
     supportsLeverage: true,
   },
 };
+
+// ─── Sprint 4 Day 1-2 (Worker A): trade execution types ─────────────────────
+// TradeAsset is the asset enum that venue-hyperliquid + trade-sessions use.
+// Keep tight: only assets Steward will actively support for perps trading.
+
+export type TradeAsset = "BTC" | "ETH";
+
+export interface TradePolicyContext {
+  venue: VenueId;
+  asset: TradeAsset;
+  leverage: number;
+  size: number;
+  sizeUsd?: number;
+}

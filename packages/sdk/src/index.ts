@@ -16,10 +16,14 @@ export type {
 export type {
   BatchAgentSpec,
   BatchCreateResult,
+  CreateTradeSessionInput,
+  CreateTradeSessionResult,
   CreateWalletResult,
   GetAddressesResult,
   GetBalanceResult,
   GetHistoryResult,
+  HyperliquidOrderResult,
+  HyperliquidSubmitOrderInput,
   SignMessageResult,
   SignTransactionInput,
   SignTransactionResult,
@@ -29,7 +33,7 @@ export type {
   StewardPendingApproval,
 } from "./client.ts";
 export { StewardApiError, StewardClient } from "./client.ts";
-// v0.4.0 — Tenant config, dashboard, approvals, webhooks
+// v0.4.0 - Tenant config, dashboard, approvals, webhooks
 export type {
   AgentBalance,
   AgentDashboardResponse,
