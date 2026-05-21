@@ -13,7 +13,8 @@
 
 import type { SecretRoute } from "@stwd/db";
 import { and, desc, eq, getDb, secretRoutes, secrets } from "@stwd/db";
-import { KeyStore } from "@stwd/vault";
+import { SecretVault } from "@stwd/vault";
+import { gt, isNull, or } from "drizzle-orm";
 import type { Context } from "hono";
 import { recordAudit } from "../middleware/audit";
 import {
@@ -26,19 +27,19 @@ import {
 import { resolveTarget } from "./alias";
 import { matchHost, matchPath } from "./matching";
 
-// ─── Keystore singleton ──────────────────────────────────────────────────────
+// ─── Secret Vault singleton ──────────────────────────────────────────────────
 
-let _keyStore: KeyStore | null = null;
+let _secretVault: SecretVault | null = null;
 
-function getKeyStore(): KeyStore {
-  if (!_keyStore) {
+function getSecretVault(): SecretVault {
+  if (!_secretVault) {
     const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
     if (!masterPassword) {
       throw new Error("STEWARD_MASTER_PASSWORD is required for secret decryption");
     }
-    _keyStore = new KeyStore(masterPassword);
+    _secretVault = new SecretVault(masterPassword);
   }
-  return _keyStore;
+  return _secretVault;
 }
 
 // ─── Route matching ──────────────────────────────────────────────────────────
@@ -62,16 +63,26 @@ async function findMatchingRoute(
   method: string,
 ): Promise<SecretRoute | null> {
   const db = getDb();
+  const now = new Date();
 
-  // Fetch all enabled routes for this tenant, ordered by priority desc
+  // Fetch all enabled routes whose backing secret is currently active.
   const routes = await db
-    .select()
+    .select({ route: secretRoutes })
     .from(secretRoutes)
+    .innerJoin(
+      secrets,
+      and(
+        eq(secrets.id, secretRoutes.secretId),
+        eq(secrets.tenantId, tenantId),
+        isNull(secrets.deletedAt),
+        or(isNull(secrets.expiresAt), gt(secrets.expiresAt, now)),
+      ),
+    )
     .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.enabled, true)))
     .orderBy(desc(secretRoutes.priority));
 
   // Match in priority order (first match wins)
-  for (const route of routes) {
+  for (const { route } of routes) {
     if (!matchHost(route.hostPattern, host)) continue;
     if (!matchPath(route.pathPattern ?? "/*", path)) continue;
     if (route.method !== "*" && route.method?.toUpperCase() !== method.toUpperCase()) continue;
@@ -86,24 +97,11 @@ async function findMatchingRoute(
 // ─── Secret decryption ───────────────────────────────────────────────────────
 
 /**
- * Decrypt a secret by its ID using the vault keystore.
+ * Decrypt a secret by its ID using the shared SecretVault lifecycle checks.
  * Returns the plaintext credential value.
  */
-async function decryptSecret(secretId: string): Promise<string> {
-  const db = getDb();
-  const [secret] = await db.select().from(secrets).where(eq(secrets.id, secretId)).limit(1);
-
-  if (!secret) {
-    throw new Error(`Secret ${secretId} not found`);
-  }
-
-  const keyStore = getKeyStore();
-  return keyStore.decrypt({
-    ciphertext: secret.ciphertext,
-    iv: secret.iv,
-    tag: secret.authTag,
-    salt: secret.salt,
-  });
+async function decryptSecret(tenantId: string, secretId: string): Promise<string> {
+  return getSecretVault().decryptSecret(tenantId, secretId);
 }
 
 // ─── Credential injection ────────────────────────────────────────────────────
@@ -250,7 +248,7 @@ export async function handleProxy(c: Context): Promise<Response> {
   // 3. Decrypt credential
   let credential: string;
   try {
-    credential = await decryptSecret(route.secretId);
+    credential = await decryptSecret(tenantId, route.secretId);
   } catch (err) {
     console.error(`[proxy] Failed to decrypt secret ${route.secretId}:`, err);
     return c.json({ ok: false, error: "Failed to decrypt credential" }, 500);
