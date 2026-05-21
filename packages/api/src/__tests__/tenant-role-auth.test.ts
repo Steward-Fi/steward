@@ -105,19 +105,23 @@ describeWithDatabase("tenantAuth membership checks and requireTenantLevel role c
   });
 
   it("re-validates tenant membership on every request", async () => {
-    const memberToken = await createUserToken(MEMBER_USER_ID);
+    // Use the OWNER token, because `/agents` is tenant-level (per #56) and
+    // the new requireTenantLevel gate enforces role=owner. The point of
+    // this test is to verify that revoking the user's membership rejects
+    // the very next request even though the JWT is otherwise still valid.
+    const ownerToken = await createUserToken(OWNER_USER_ID);
 
     const beforeRemoval = await app.request("/agents", {
-      headers: { Authorization: `Bearer ${memberToken}` },
+      headers: { Authorization: `Bearer ${ownerToken}` },
     });
     expect(beforeRemoval.status).toBe(200);
 
     await getDb()
       .delete(userTenants)
-      .where(and(eq(userTenants.userId, MEMBER_USER_ID), eq(userTenants.tenantId, TENANT_ID)));
+      .where(and(eq(userTenants.userId, OWNER_USER_ID), eq(userTenants.tenantId, TENANT_ID)));
 
     const afterRemoval = await app.request("/agents", {
-      headers: { Authorization: `Bearer ${memberToken}` },
+      headers: { Authorization: `Bearer ${ownerToken}` },
     });
     expect(afterRemoval.status).toBe(403);
     const body = (await afterRemoval.json()) as { ok: boolean; error: string };
