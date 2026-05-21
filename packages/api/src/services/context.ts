@@ -476,6 +476,20 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
   }
 
+  if (payload.scope === "agent" || payload.agentId) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Dashboard routes do not accept agent tokens" },
+      403,
+    );
+  }
+
+  if (!payload.userId) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Dashboard routes require a user session token" },
+      401,
+    );
+  }
+
   const tenant = await findTenant(payload.tenantId);
   if (!tenant) {
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
