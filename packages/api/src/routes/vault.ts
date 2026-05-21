@@ -33,13 +33,12 @@ import {
   type SignTypedDataRequest,
   safeJsonParse,
   sanitizeErrorMessage,
-  tenantConfigs,
   toSignRequest,
   toTxRecord,
   transactions,
   vault,
-  webhookDispatcher,
 } from "../services/context";
+import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const vaultRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -1117,26 +1116,3 @@ vaultRoutes.post("/:agentId/export", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
 });
-
-// ─── Webhook dispatch helper ──────────────────────────────────────────────────
-
-type WebhookEventType =
-  | "approval_required"
-  | "tx_signed"
-  | "tx_confirmed"
-  | "tx_failed"
-  | "tx_rejected";
-
-function dispatchWebhook(
-  tenantId: string,
-  agentId: string,
-  type: WebhookEventType,
-  data: Record<string, unknown>,
-) {
-  const webhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
-  if (webhookUrl) {
-    webhookDispatcher
-      .dispatch({ type, tenantId, agentId, data, timestamp: new Date() }, webhookUrl)
-      .catch(console.error);
-  }
-}
