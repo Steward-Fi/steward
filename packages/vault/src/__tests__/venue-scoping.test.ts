@@ -5,7 +5,7 @@
 // no third-party infra. Master password is fixed for determinism; the
 // underlying KeyStore still adds per-record IV + salt randomness.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 
 import { getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -14,8 +14,11 @@ import { Vault } from "../vault";
 const MASTER_PASSWORD = "test-vault-venue-scope";
 const TENANT_ID = "test-tenant";
 
+const openClients: Array<{ close: () => Promise<void> }> = [];
+
 async function freshVault(): Promise<Vault> {
   const { db, client } = await createPGLiteDb("memory://");
+  openClients.push(client);
   setPGLiteOverride(db as never, async () => {
     await client.close();
   });
@@ -37,9 +40,13 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     vault = await freshVault();
   });
 
-  afterEach(async () => {
-    // Detaching the override + letting GC drop the PGLite instance is
-    // enough for our in-memory case; there's no global handle to close.
+  afterAll(async () => {
+    // Close every PGLite client we opened so Bun's process exits cleanly
+    // under CI (exit code 99 surfaces dangling async handles otherwise).
+    for (const client of openClients) {
+      await client.close().catch(() => {});
+    }
+    openClients.length = 0;
   });
 
   test("createWallet provisions a venue-scoped EVM wallet and returns the address", async () => {

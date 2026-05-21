@@ -1,6 +1,6 @@
 // Sprint 4 Phase 1 Day 3: tests for the default Sol policy seeder.
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 
 import { agents, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -8,8 +8,11 @@ import { eq } from "drizzle-orm";
 
 import { seedSolDefaultPolicy } from "../sol-default-policy";
 
+const openClients: Array<{ close: () => Promise<void> }> = [];
+
 async function freshDb(): Promise<void> {
   const { db, client } = await createPGLiteDb("memory://");
+  openClients.push(client);
   setPGLiteOverride(db as never, async () => {
     await client.close();
   });
@@ -30,8 +33,14 @@ describe("seedSolDefaultPolicy", () => {
   beforeEach(async () => {
     await freshDb();
   });
-  afterEach(() => {
-    // PGLite memory instance gets garbage-collected per test.
+
+  afterAll(async () => {
+    // Close every PGLite client we opened so Bun's process exits cleanly
+    // under CI (exit code 99 otherwise on dangling async handles).
+    for (const client of openClients) {
+      await client.close().catch(() => {});
+    }
+    openClients.length = 0;
   });
 
   test("creates spending-limit, venue-allowlist, and leverage-cap policies", async () => {
