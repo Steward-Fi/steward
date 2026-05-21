@@ -8,8 +8,18 @@
  * credential injection into proxied requests.
  */
 
-import { getDb, type Secret, type SecretRoute, secretRoutes, secrets } from "@stwd/db";
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
+import {
+  and,
+  desc,
+  eq,
+  getDb,
+  inArray,
+  isNull,
+  type Secret,
+  type SecretRoute,
+  secretRoutes,
+  secrets,
+} from "@stwd/db";
 import { type EncryptedKey, KeyStore } from "./keystore";
 
 export interface SecretMetadata {

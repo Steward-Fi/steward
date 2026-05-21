@@ -27,10 +27,27 @@ const route = {
   createdAt: new Date(),
 };
 
+// Drizzle helpers are mocked to no-op factories. The real ones build SQL
+// AST nodes which the rest of this test would have to mock around. We
+// just need them to be functions so the imports at the top of proxy.ts
+// (and any module the test happens to load) resolve. `relations` is
+// needed because `@stwd/db/schema*.ts` calls it at module init time.
+const noopFn = (...args: unknown[]) => args;
+const dummyRelations = (..._args: unknown[]) => ({});
 mock.module("drizzle-orm", () => ({
-  and: (...args: unknown[]) => args,
+  and: noopFn,
   desc: (arg: unknown) => arg,
-  eq: (...args: unknown[]) => args,
+  eq: noopFn,
+  gt: noopFn,
+  gte: noopFn,
+  inArray: noopFn,
+  isNotNull: noopFn,
+  isNull: noopFn,
+  lt: noopFn,
+  lte: noopFn,
+  or: noopFn,
+  sql: noopFn,
+  relations: dummyRelations,
 }));
 
 mock.module("@stwd/db", () => {
@@ -48,9 +65,17 @@ mock.module("@stwd/db", () => {
   };
   const proxyAuditLog = {};
   return {
-    and: (...args: unknown[]) => args,
+    and: noopFn,
     desc: (arg: unknown) => arg,
-    eq: (...args: unknown[]) => args,
+    eq: noopFn,
+    gt: noopFn,
+    gte: noopFn,
+    inArray: noopFn,
+    isNotNull: noopFn,
+    isNull: noopFn,
+    lt: noopFn,
+    lte: noopFn,
+    or: noopFn,
     getSql: () => null,
     secretRoutes,
     secrets,
@@ -59,6 +84,16 @@ mock.module("@stwd/db", () => {
     getDb: () => ({
       select: () => ({
         from: (table: unknown) => ({
+          // findMatchingRoute now joins secret_routes against active secrets
+          // (`isNull(deletedAt)` + `expiresAt > now`) before applying the
+          // tenant + enabled filter. We mock the chain so it still yields
+          // a single `{ route }` row regardless of join semantics, which
+          // is what the rest of the spend-limit assertions assume.
+          innerJoin: () => ({
+            where: () => ({
+              orderBy: async () => [{ route }],
+            }),
+          }),
           where: () => {
             if (table === secretRoutes) {
               return { orderBy: async () => [route] };
@@ -89,6 +124,15 @@ mock.module("@stwd/db", () => {
 mock.module("@stwd/vault", () => ({
   KeyStore: class {
     decrypt() {
+      return "test-secret";
+    }
+  },
+  // SecretVault is the new entrypoint for secret decryption in proxy.ts.
+  // We stub it to mimic the keystore-style decrypt path so the spend-limit
+  // assertions, which are upstream of the actual decryption call, stay
+  // exercising the same code path as before.
+  SecretVault: class {
+    async decryptSecret() {
       return "test-secret";
     }
   },

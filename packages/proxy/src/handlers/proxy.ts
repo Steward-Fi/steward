@@ -12,9 +12,8 @@
  */
 
 import type { SecretRoute } from "@stwd/db";
-import { and, desc, eq, getDb, secretRoutes, secrets } from "@stwd/db";
+import { and, desc, eq, getDb, gt, isNull, or, secretRoutes, secrets } from "@stwd/db";
 import { SecretVault } from "@stwd/vault";
-import { gt, isNull, or } from "drizzle-orm";
 import type { Context } from "hono";
 import { recordAudit } from "../middleware/audit";
 import {
