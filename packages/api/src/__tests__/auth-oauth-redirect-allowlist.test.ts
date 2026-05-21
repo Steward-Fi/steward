@@ -11,26 +11,29 @@ import {
 
 setDefaultTimeout(30000);
 
-import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { getDb, tenantConfigs, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { authRoutes, clearOAuthTokenKeyStoreForTests } from "../routes/auth";
 
-const TENANT_ID = "oauth-allowlist-tenant";
+/**
+ * NOTE on test isolation:
+ *   Uses the ambient `DATABASE_URL` from the `Integration Tests (Postgres)`
+ *   CI job rather than swapping pglite into the global handle. Closing a
+ *   pglite handle in `afterAll` previously poisoned every subsequent test
+ *   in `bun test packages/api` with `error: PGlite is closed`. We use a
+ *   unique tenant prefix and clean up the rows in `afterAll` instead.
+ */
 
-async function setupDb() {
-  process.env.STEWARD_PGLITE_MEMORY = "true";
-  const { db, client } = await createPGLiteDb("memory://");
-  setPGLiteOverride(db, async () => {
-    await client.close();
-  });
-}
+const TENANT_ID = "test-oauth-allowlist";
+const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
-describe("OAuth redirect_uri allowlist", () => {
+describeWithDatabase("OAuth redirect_uri allowlist", () => {
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
-    process.env.STEWARD_MASTER_PASSWORD = "oauth-allowlist-master-password";
-    process.env.STEWARD_JWT_SECRET = "oauth-allowlist-jwt-secret-with-enough-bytes";
+    process.env.STEWARD_MASTER_PASSWORD =
+      process.env.STEWARD_MASTER_PASSWORD || "oauth-allowlist-master-password";
+    process.env.STEWARD_JWT_SECRET =
+      process.env.STEWARD_JWT_SECRET || "oauth-allowlist-jwt-secret-with-enough-bytes";
     process.env.APP_URL = "https://api.example.test";
     process.env.GOOGLE_CLIENT_ID = "google-client";
     process.env.GOOGLE_CLIENT_SECRET = "google-secret";
@@ -38,17 +41,22 @@ describe("OAuth redirect_uri allowlist", () => {
     delete process.env.STEWARD_OAUTH_REDIRECT_ALLOWLIST;
     clearOAuthTokenKeyStoreForTests();
 
-    await setupDb();
     const db = getDb();
-    await db.insert(tenants).values({
-      id: TENANT_ID,
-      name: "OAuth Allowlist Tenant",
-      apiKeyHash: "hash",
-    });
-    await db.insert(tenantConfigs).values({
-      tenantId: TENANT_ID,
-      allowedOrigins: ["https://app.example.test"],
-    });
+    await db
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "OAuth Allowlist Tenant",
+        apiKeyHash: "hash",
+      })
+      .onConflictDoNothing();
+    await db
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        allowedOrigins: ["https://app.example.test"],
+      })
+      .onConflictDoNothing();
   });
 
   afterEach(() => {
@@ -59,10 +67,15 @@ describe("OAuth redirect_uri allowlist", () => {
   });
 
   afterAll(async () => {
-    await closeDb().catch(() => {});
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.STEWARD_MASTER_PASSWORD;
-    delete process.env.STEWARD_JWT_SECRET;
+    const db = getDb();
+    await db
+      .delete(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID))
+      .catch(() => {});
+    await db
+      .delete(tenants)
+      .where(eq(tenants.id, TENANT_ID))
+      .catch(() => {});
     delete process.env.APP_URL;
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
