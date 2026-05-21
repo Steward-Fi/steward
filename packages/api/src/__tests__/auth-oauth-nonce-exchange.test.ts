@@ -65,7 +65,7 @@ describe("POST /auth/oauth/exchange", () => {
     expect(json.token).toBe("access-jwt");
     expect(json.refreshToken).toBe("refresh-raw");
     expect(typeof json.expiresAt).toBe("number");
-    expect(json.expiresIn).toBe(900);
+    expect(json.expiresIn).toBe(86400);
   });
 
   it("rejects unknown / already-consumed codes with code_invalid", async () => {

@@ -136,9 +136,9 @@ async function checkAuthRateLimit(
 
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
-/** Access token lifetime: 15 minutes */
-const ACCESS_TOKEN_EXPIRY = "15m";
-const ACCESS_TOKEN_EXPIRY_SECONDS = 900;
+/** Access token lifetime: 24 hours */
+const ACCESS_TOKEN_EXPIRY = "24h";
+const ACCESS_TOKEN_EXPIRY_SECONDS = 86400;
 
 /** Refresh token lifetime: 30 days */
 const REFRESH_TOKEN_EXPIRY_DAYS = 30;
@@ -1655,7 +1655,7 @@ auth.post("/refresh", async (c) => {
   const walletAddress = user?.walletAddress ?? "";
   const email = user?.email ?? undefined;
 
-  // Issue new access token (15min)
+  // Issue new access token (24h)
   const newAccessToken = await createSessionToken(walletAddress, record.tenantId, {
     userId: record.userId,
     ...(email ? { email } : {}),

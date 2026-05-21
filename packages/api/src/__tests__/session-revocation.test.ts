@@ -91,7 +91,7 @@ describe("API access-token revocation", () => {
       expiresIn: number;
     };
     expect(json.ok).toBe(true);
-    expect(json.expiresIn).toBe(900);
+    expect(json.expiresIn).toBe(86400);
     expect(await verifySessionToken(json.token)).toMatchObject({ userId, tenantId });
   });
 

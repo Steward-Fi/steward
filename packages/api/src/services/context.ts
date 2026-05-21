@@ -43,10 +43,9 @@ export const isWorkersRuntime =
 // ─── JWT helpers ──────────────────────────────────────────────────────────────
 
 /**
- * User access token TTL. Reduced from 24h → 15m to limit blast radius of
- * stolen access tokens. Refresh tokens (30d) handle long-lived sessions.
+ * User access token TTL. Refresh tokens (30d) handle long-lived sessions.
  */
-export const JWT_EXPIRY = "15m";
+export const JWT_EXPIRY = "24h";
 export const AGENT_SCOPE = "agent";
 export const PROXY_SCOPE = "api:proxy";
 
