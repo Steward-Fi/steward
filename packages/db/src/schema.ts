@@ -16,7 +16,6 @@ import {
   numeric,
   pgEnum,
   pgTable,
-  primaryKey,
   serial,
   text,
   timestamp,
@@ -67,6 +66,8 @@ export const policyTypeEnum = pgEnum("policy_type", [
   "allowed-chains",
   "reputation-threshold",
   "reputation-scaling",
+  "venue-allowlist",
+  "leverage-cap",
 ]);
 
 export const transactionStatusEnum = pgEnum("transaction_status", [
@@ -174,13 +175,30 @@ export const agentWallets = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     chainFamily: chainFamilyEnum("chain_family").notNull(),
     address: varchar("address", { length: 128 }).notNull(),
+    /**
+     * Sprint 4: trading venue this wallet is scoped to (e.g. "hyperliquid").
+     * NULL on legacy rows; vault lookups fall back to chainFamily when
+     * venue isn't provided. See VenueId in @stwd/shared.
+     */
+    venue: text("venue"),
+    /** Optional human-readable label, e.g. "perp", "spot", "ops". */
+    purpose: text("purpose"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    agentChainUniqueIdx: uniqueIndex("agent_wallets_agent_chain_idx").on(
+    agentChainVenueUniqueIdx: uniqueIndex("agent_wallets_agent_chain_venue_idx").on(
       table.agentId,
       table.chainFamily,
+      sql`COALESCE(${table.venue}, '')`,
     ),
+    /**
+     * Sprint 4: partial unique index on the legacy NULL-venue subset.
+     * Targeted by importKey()'s upsert (drizzle's onConflictDoUpdate
+     * needs a named unique index, not an expression index).
+     */
+    agentChainLegacyIdx: uniqueIndex("agent_wallets_agent_chain_legacy_idx")
+      .on(table.agentId, table.chainFamily)
+      .where(sql`${table.venue} IS NULL`),
     agentIdIdx: index("agent_wallets_agent_id_idx").on(table.agentId),
   }),
 );
@@ -194,17 +212,40 @@ export const agentWallets = pgTable(
 export const encryptedChainKeys = pgTable(
   "encrypted_chain_keys",
   {
+    /**
+     * Sprint 4: surrogate PK so a single (agentId, chainFamily) can have
+     * multiple rows, one per venue. The uniqueness invariant moves to
+     * `agent_chain_venue_idx` below.
+     */
+    id: uuid("id").primaryKey().defaultRandom(),
     agentId: varchar("agent_id", { length: 64 })
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
     chainFamily: chainFamilyEnum("chain_family").notNull(),
+    /**
+     * Sprint 4: trading venue this key is scoped to (e.g. "hyperliquid").
+     * NULL on legacy rows; vault lookups fall back to chainFamily when
+     * venue isn't provided.
+     */
+    venue: text("venue"),
+    /** Optional human-readable label, e.g. "perp", "spot", "ops". */
+    purpose: text("purpose"),
     ciphertext: text("ciphertext").notNull(),
     iv: text("iv").notNull(),
     tag: text("tag").notNull(),
     salt: text("salt").notNull(),
   },
   (table) => ({
-    pk: primaryKey({ columns: [table.agentId, table.chainFamily] }),
+    agentChainVenueUniqueIdx: uniqueIndex("encrypted_chain_keys_agent_chain_venue_idx").on(
+      table.agentId,
+      table.chainFamily,
+      sql`COALESCE(${table.venue}, '')`,
+    ),
+    /** Sprint 4: partial unique index for legacy upsert targets. */
+    agentChainLegacyIdx: uniqueIndex("encrypted_chain_keys_agent_chain_legacy_idx")
+      .on(table.agentId, table.chainFamily)
+      .where(sql`${table.venue} IS NULL`),
+    agentIdIdx: index("encrypted_chain_keys_agent_id_idx").on(table.agentId),
   }),
 );
 

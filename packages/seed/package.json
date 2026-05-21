@@ -4,12 +4,19 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./sol-default-policy": "./src/sol-default-policy.ts"
+  },
   "scripts": {
-    "seed": "bun src/index.ts"
+    "seed": "bun src/index.ts",
+    "seed:sol": "bun src/sol-default-policy.ts",
+    "test": "bun test"
   },
   "dependencies": {
     "@stwd/db": "workspace:*",
     "@stwd/vault": "workspace:*",
+    "drizzle-orm": "^0.44.5",
     "viem": "^2.30.0"
   },
   "description": "Database seed scripts for local development and demos"

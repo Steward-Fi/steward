@@ -1,9 +1,11 @@
-// @stwd/shared — types, constants, utils
+// @stwd/shared - types, constants, utils
 
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
+// ─── Trading venues (Sprint 4) ───
+export * from "./types/venue.js";
 
 // ─── Tenancy ───
 
@@ -227,7 +229,9 @@ export type PolicyType =
   | "rate-limit"
   | "allowed-chains"
   | "reputation-threshold"
-  | "reputation-scaling";
+  | "reputation-scaling"
+  | "venue-allowlist"
+  | "leverage-cap";
 
 export interface PolicyRule {
   id: string;
@@ -270,6 +274,27 @@ export interface RateLimitConfig {
 export interface AllowedChainsConfig {
   /** Array of CAIP-2 chain identifiers that are permitted. e.g. ["eip155:8453", "eip155:1"] */
   chains: string[];
+}
+
+/**
+ * `venue-allowlist` policy config (Sprint 4).
+ *
+ * Allows trades only on the named venues. Evaluator NACKs if the eval
+ * context's `venue` is absent or not in the list.
+ */
+export interface VenueAllowlistConfig {
+  allowedVenues: string[];
+}
+
+/**
+ * `leverage-cap` policy config (Sprint 4).
+ *
+ * Caps requested leverage at `maxLeverage`. Non-leveraged trades (no
+ * `leverage` in eval context) always pass. Per-venue refinement is
+ * Phase 2 work; for now this is a single cap per agent.
+ */
+export interface LeverageCapConfig {
+  maxLeverage: number;
 }
 
 // ─── Transactions ───

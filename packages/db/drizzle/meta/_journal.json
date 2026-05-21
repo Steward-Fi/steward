@@ -155,6 +155,20 @@
       "when": 1777018500000,
       "tag": "0021_oauth_account_token_encryption",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1779671100000,
+      "tag": "0022_vault_venue_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1779671700000,
+      "tag": "0023_trade_sessions",
+      "breakpoints": true
     }
   ]
 }
