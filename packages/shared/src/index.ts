@@ -1,5 +1,7 @@
 // @stwd/shared - types, constants, utils
 
+import type { VenueId } from "./types/venue.js";
+
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 // ─── Token Registry & Price Oracle ───
@@ -326,6 +328,13 @@ export interface SignRequest {
 export interface SignTypedDataRequest {
   agentId: string;
   tenantId: string;
+  /**
+   * Sprint 4: optional venue scope. When set, vault.signTypedData will
+   * look up the venue-scoped wallet under (agentId, venue) instead of
+   * the legacy NULL-venue row. Phase 1 is hyperliquid-only; the field is
+   * accepted but not yet routed through the new lookup path.
+   */
+  venue?: VenueId;
   domain: TypedDataDomain;
   types: Record<string, TypedDataField[]>;
   primaryType: string;

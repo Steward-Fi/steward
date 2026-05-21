@@ -162,6 +162,13 @@
       "when": 1779671100000,
       "tag": "0022_vault_venue_scope",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1779671700000,
+      "tag": "0023_trade_sessions",
+      "breakpoints": true
     }
   ]
 }
