@@ -25,4 +25,4 @@ export {
   USER_WALLET_DEFAULT_POLICIES,
 } from "./user-wallet";
 export type { VaultConfig } from "./vault";
-export { Vault } from "./vault";
+export { Vault, Vault as VaultClient } from "./vault";

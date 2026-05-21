@@ -27,6 +27,12 @@ export interface PolicyEvaluationContext {
   priceOracle?: PriceOracle;
   /** Optional reputation score for reputation-based policies */
   reputationScore?: number;
+  /** Sprint 4: trading venue (for `venue-allowlist`). */
+  venue?: string;
+  /** Sprint 4: requested leverage multiple (for `leverage-cap`). */
+  leverage?: number;
+  /** Sprint 4: pre-computed USD value of the action. */
+  valueUsd?: number;
 }
 
 export interface EvaluationResult {
@@ -56,6 +62,39 @@ function extractProxyValue(request: ProxySimulationRequest): string {
 }
 
 /**
+ * `policy.evaluated` audit event.
+ *
+ * Engine emits one of these per `evaluate()` call when an audit hook is
+ * attached. The shape is intentionally JSON-serialisable so callers can
+ * persist it as a row in any audit log table without further mapping.
+ * Contains no private keys, no SIWE signatures, no oracle internals.
+ */
+export interface PolicyEvaluatedEvent {
+  event: "policy.evaluated";
+  agentId: string;
+  tenantId: string;
+  venue?: string;
+  leverage?: number;
+  verdict: "ALLOW" | "NACK" | "NEEDS_MANUAL";
+  results: PolicyResult[];
+  /** Caller-provided correlation id (e.g. trade-session id, request id). */
+  correlationId?: string;
+  timestamp: string;
+}
+
+export type AuditHook = (event: PolicyEvaluatedEvent) => void | Promise<void>;
+
+export interface PolicyEngineOptions {
+  /**
+   * Sprint 4: optional sink for `policy.evaluated` audit events. Trade-
+   * sessions wires this to the proxy audit log so every evaluation is
+   * traceable to its inputs and verdict. Failures inside the hook are
+   * swallowed so they don't block the trade.
+   */
+  auditHook?: AuditHook;
+}
+
+/**
  * Policy Engine — evaluates a set of policy rules against a transaction request.
  *
  * Logic:
@@ -64,12 +103,21 @@ function extractProxyValue(request: ProxySimulationRequest): string {
  * - If any hard policy (spending-limit, approved-addresses, rate-limit, time-window) fails, tx is rejected
  */
 export class PolicyEngine {
+  private readonly auditHook?: AuditHook;
+
+  constructor(options: PolicyEngineOptions = {}) {
+    if (options.auditHook) this.auditHook = options.auditHook;
+  }
+
   /**
    * Evaluate all policies for an agent's transaction request.
    *
    * Now async to support USD-based evaluations that require price oracle lookups.
    */
-  async evaluate(policies: PolicyRule[], ctx: PolicyEvaluationContext): Promise<EvaluationResult> {
+  async evaluate(
+    policies: PolicyRule[],
+    ctx: PolicyEvaluationContext & { correlationId?: string },
+  ): Promise<EvaluationResult> {
     if (policies.length === 0) {
       // No policies = everything auto-approved (dangerous but valid for testing)
       return { approved: true, results: [], requiresManualApproval: false };
@@ -83,6 +131,9 @@ export class PolicyEngine {
       spentThisWeek: ctx.spentThisWeek,
       priceOracle: ctx.priceOracle,
       reputationScore: ctx.reputationScore,
+      venue: ctx.venue,
+      leverage: ctx.leverage,
+      valueUsd: ctx.valueUsd,
     };
 
     const results: PolicyResult[] = await Promise.all(
@@ -95,18 +146,49 @@ export class PolicyEngine {
     const allHardPass = hardPolicies.every((r) => r.passed);
     const autoApprovePass = autoApproveResult ? autoApproveResult.passed : true;
 
+    let evaluationResult: EvaluationResult;
     if (allHardPass && autoApprovePass) {
-      return { approved: true, results, requiresManualApproval: false };
-    }
-
-    if (allHardPass && !autoApprovePass) {
+      evaluationResult = { approved: true, results, requiresManualApproval: false };
+    } else if (allHardPass && !autoApprovePass) {
       // Hard policies pass but value exceeds auto-approve threshold
       // Queue for manual approval
-      return { approved: false, results, requiresManualApproval: true };
+      evaluationResult = { approved: false, results, requiresManualApproval: true };
+    } else {
+      // Hard policy failed - reject
+      evaluationResult = { approved: false, results, requiresManualApproval: false };
     }
 
-    // Hard policy failed — reject
-    return { approved: false, results, requiresManualApproval: false };
+    await this.emitAuditEvent(ctx, results, evaluationResult);
+    return evaluationResult;
+  }
+
+  private async emitAuditEvent(
+    ctx: PolicyEvaluationContext & { correlationId?: string },
+    results: PolicyResult[],
+    evaluation: EvaluationResult,
+  ): Promise<void> {
+    if (!this.auditHook) return;
+    const verdict: PolicyEvaluatedEvent["verdict"] = evaluation.approved
+      ? "ALLOW"
+      : evaluation.requiresManualApproval
+        ? "NEEDS_MANUAL"
+        : "NACK";
+    const event: PolicyEvaluatedEvent = {
+      event: "policy.evaluated",
+      agentId: ctx.request.agentId,
+      tenantId: ctx.request.tenantId,
+      ...(ctx.venue !== undefined ? { venue: ctx.venue } : {}),
+      ...(ctx.leverage !== undefined ? { leverage: ctx.leverage } : {}),
+      verdict,
+      results,
+      ...(ctx.correlationId !== undefined ? { correlationId: ctx.correlationId } : {}),
+      timestamp: new Date().toISOString(),
+    };
+    try {
+      await this.auditHook(event);
+    } catch {
+      // Audit failures must never block a trade. The engine swallows.
+    }
   }
 
   /**
