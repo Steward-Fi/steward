@@ -154,6 +154,72 @@ agentRoutes.post("/:agentId/token", async (c) => {
   }
 });
 
+// Create venue-scoped wallet (Sprint 4)
+//
+// POST /agents/:agentId/wallets
+// Body: { venue: string, chainType: "evm" | "solana", purpose?: string }
+//
+// Creates a venue-scoped wallet under (agentId, chainFamily, venue).
+// Required before trading on a venue: /v1/trade/sessions and
+// /v1/trade/orders/hyperliquid both call vault.getWallet({ agentId, venue })
+// and reject if no row exists.
+//
+// Tenant-level auth required (provisions wallets, not Sol's own JWT).
+
+agentRoutes.post("/:agentId/wallets", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Venue wallet creation requires tenant-level authentication" },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    venue?: string;
+    chainType?: "evm" | "solana";
+    purpose?: string;
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (!isNonEmptyString(body.venue)) {
+    return c.json<ApiResponse>({ ok: false, error: "venue is required" }, 400);
+  }
+  if (body.chainType !== "evm" && body.chainType !== "solana") {
+    return c.json<ApiResponse>({ ok: false, error: 'chainType must be "evm" or "solana"' }, 400);
+  }
+
+  try {
+    const wallet = await vault.createWallet({
+      agentId,
+      venue: body.venue,
+      chainType: body.chainType,
+      purpose: body.purpose,
+    });
+    return c.json<
+      ApiResponse<{
+        agentId: string;
+        chainFamily: "evm" | "solana";
+        venue: string;
+        purpose: string | null;
+        address: string;
+      }>
+    >({ ok: true, data: wallet });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
+});
+
 // ─── Get agent ────────────────────────────────────────────────────────────────
 
 agentRoutes.get("/:agentId", async (c) => {
