@@ -40,16 +40,18 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
 # Package manifests for every workspace package
-COPY packages/api/package.json       packages/api/package.json
-COPY packages/auth/package.json      packages/auth/package.json
-COPY packages/db/package.json        packages/db/package.json
-COPY packages/policy-engine/package.json packages/policy-engine/package.json
-COPY packages/proxy/package.json     packages/proxy/package.json
-COPY packages/redis/package.json     packages/redis/package.json
-COPY packages/shared/package.json    packages/shared/package.json
-COPY packages/sdk/package.json       packages/sdk/package.json
-COPY packages/vault/package.json     packages/vault/package.json
-COPY packages/webhooks/package.json  packages/webhooks/package.json
+COPY packages/api/package.json               packages/api/package.json
+COPY packages/auth/package.json              packages/auth/package.json
+COPY packages/db/package.json                packages/db/package.json
+COPY packages/policy-engine/package.json     packages/policy-engine/package.json
+COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/redis/package.json             packages/redis/package.json
+COPY packages/shared/package.json            packages/shared/package.json
+COPY packages/sdk/package.json               packages/sdk/package.json
+COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
+COPY packages/vault/package.json             packages/vault/package.json
+COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/webhooks/package.json          packages/webhooks/package.json
 
 RUN BUN_FROZEN_LOCKFILE=0 bun install
 
@@ -59,16 +61,18 @@ FROM base AS build
 COPY package.json bun.lock turbo.json tsconfig.json ./
 
 # Copy package.json files for workspace resolution
-COPY packages/api/package.json       packages/api/package.json
-COPY packages/auth/package.json      packages/auth/package.json
-COPY packages/db/package.json        packages/db/package.json
-COPY packages/policy-engine/package.json packages/policy-engine/package.json
-COPY packages/proxy/package.json     packages/proxy/package.json
-COPY packages/redis/package.json     packages/redis/package.json
-COPY packages/shared/package.json    packages/shared/package.json
-COPY packages/sdk/package.json       packages/sdk/package.json
-COPY packages/vault/package.json     packages/vault/package.json
-COPY packages/webhooks/package.json  packages/webhooks/package.json
+COPY packages/api/package.json               packages/api/package.json
+COPY packages/auth/package.json              packages/auth/package.json
+COPY packages/db/package.json                packages/db/package.json
+COPY packages/policy-engine/package.json     packages/policy-engine/package.json
+COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/redis/package.json             packages/redis/package.json
+COPY packages/shared/package.json            packages/shared/package.json
+COPY packages/sdk/package.json               packages/sdk/package.json
+COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
+COPY packages/vault/package.json             packages/vault/package.json
+COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/webhooks/package.json          packages/webhooks/package.json
 
 # Create stub for excluded workspaces
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
@@ -85,7 +89,9 @@ COPY packages/proxy       packages/proxy
 COPY packages/redis       packages/redis
 COPY packages/shared      packages/shared
 COPY packages/sdk         packages/sdk
+COPY packages/trade-sessions    packages/trade-sessions
 COPY packages/vault       packages/vault
+COPY packages/venue-hyperliquid packages/venue-hyperliquid
 COPY packages/webhooks    packages/webhooks
 
 # Create workspace symlinks (Bun 1.3 doesn't auto-link in Docker)
@@ -98,7 +104,9 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/redis         node_modules/@stwd/redis && \
     ln -sf ../../../packages/proxy         node_modules/@stwd/proxy && \
     ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
-    ln -sf ../../../packages/policy-engine node_modules/@stwd/policy-engine
+    ln -sf ../../../packages/policy-engine     node_modules/@stwd/policy-engine && \
+    ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
+    ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid
 
 # Build api and proxy (and their deps) via turborepo
 RUN bunx turbo run build --filter=@stwd/api --filter=@stwd/proxy
@@ -117,16 +125,18 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 # Create stub for excluded workspaces
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
-COPY packages/api/package.json       packages/api/package.json
-COPY packages/auth/package.json      packages/auth/package.json
-COPY packages/db/package.json        packages/db/package.json
-COPY packages/policy-engine/package.json packages/policy-engine/package.json
-COPY packages/proxy/package.json     packages/proxy/package.json
-COPY packages/redis/package.json     packages/redis/package.json
-COPY packages/shared/package.json    packages/shared/package.json
-COPY packages/sdk/package.json       packages/sdk/package.json
-COPY packages/vault/package.json     packages/vault/package.json
-COPY packages/webhooks/package.json  packages/webhooks/package.json
+COPY packages/api/package.json               packages/api/package.json
+COPY packages/auth/package.json              packages/auth/package.json
+COPY packages/db/package.json                packages/db/package.json
+COPY packages/policy-engine/package.json     packages/policy-engine/package.json
+COPY packages/proxy/package.json             packages/proxy/package.json
+COPY packages/redis/package.json             packages/redis/package.json
+COPY packages/shared/package.json            packages/shared/package.json
+COPY packages/sdk/package.json               packages/sdk/package.json
+COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
+COPY packages/vault/package.json             packages/vault/package.json
+COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/webhooks/package.json          packages/webhooks/package.json
 
 COPY --from=deps /app/bun.lock ./bun.lock
 RUN bun install --production
@@ -140,7 +150,9 @@ COPY --from=build /app/packages/proxy       packages/proxy
 COPY --from=build /app/packages/redis       packages/redis
 COPY --from=build /app/packages/shared      packages/shared
 COPY --from=build /app/packages/sdk         packages/sdk
+COPY --from=build /app/packages/trade-sessions    packages/trade-sessions
 COPY --from=build /app/packages/vault       packages/vault
+COPY --from=build /app/packages/venue-hyperliquid packages/venue-hyperliquid
 COPY --from=build /app/packages/webhooks    packages/webhooks
 
 # Create workspace symlinks manually — bun 1.3 doesn't auto-link workspace packages
@@ -155,6 +167,8 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/proxy         node_modules/@stwd/proxy && \
     ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
     ln -sf ../../../packages/policy-engine node_modules/@stwd/policy-engine && \
+    ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
+    ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
     ln -sf ../../../packages/eliza-plugin  node_modules/@stwd/eliza-plugin 2>/dev/null; true
 
 # ── Non-root user ─────────────────────────────────────────────────────────────
