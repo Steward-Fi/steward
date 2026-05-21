@@ -314,6 +314,16 @@ agentRoutes.get("/:agentId/tokens", async (c) => {
 // ─── Batch create agents ──────────────────────────────────────────────────────
 
 agentRoutes.post("/batch", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Batch agent creation requires tenant-level authentication",
+      },
+      403,
+    );
+  }
+
   const tenantId = c.get("tenantId");
   const body = await safeJsonParse<{
     agents: Array<{ id: string; name: string; platformId?: string }>;
@@ -398,6 +408,13 @@ agentRoutes.post("/batch", async (c) => {
 // ─── Get agent policies ───────────────────────────────────────────────────────
 
 agentRoutes.get("/:agentId/policies", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -417,6 +434,13 @@ agentRoutes.get("/:agentId/policies", async (c) => {
 // ─── Update agent policies ────────────────────────────────────────────────────
 
 agentRoutes.put("/:agentId/policies", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
