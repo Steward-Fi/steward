@@ -99,12 +99,17 @@ jobs:
           bunx turbo run build --filter="${PKG_NAME}..."
 
       - name: Test ${{ matrix.package }}
+        # --isolate gives each test file a fresh global object so module
+        # replacements installed via `mock.module()` in one file don't
+        # leak into the next. Without this, e.g. zz-proxy-spend-limit's
+        # `mock.module("@stwd/db")` stub poisoned every subsequent file
+        # that imported the real `@stwd/db` schema. See issue #59.
         run: |
           if [ "${{ matrix.package }}" = "packages/sdk" ]; then
             mapfile -t sdk_tests < <(find packages/sdk/src -type f \( -name '*.test.ts' -o -name '*.spec.ts' \) | sort)
-            bun test "${sdk_tests[@]}"
+            bun test --isolate "${sdk_tests[@]}"
           else
-            bun test ${{ matrix.package }}
+            bun test --isolate ${{ matrix.package }}
           fi
         env:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
@@ -136,7 +141,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Test packages/redis
-        run: bun test packages/redis
+        run: bun test --isolate packages/redis
         env:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
 
@@ -210,7 +215,7 @@ jobs:
           exit 1
 
       - name: Integration tests (API)
-        run: bun test packages/api
+        run: bun test --isolate packages/api
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
           PORT: "3299"
