@@ -282,6 +282,16 @@ async function consumeSiweNonce(nonce: string): Promise<boolean> {
 
 let _challengeStore: ChallengeStore | null = null;
 let _tokenStore: TokenStore | null = null;
+let _oauthCodeStore: ChallengeStore | null = null;
+
+/**
+ * One-time OAuth nonce-exchange codes (response_type=code) live for 60s —
+ * long enough for the user's browser to redirect back and the caller's
+ * backend to POST the code to /oauth/exchange, short enough that a captured
+ * code in an access log or Referer leak is useless by the time anyone reads
+ * it. Codes are single-use (consume() deletes on first read).
+ */
+const OAUTH_CODE_TTL_MS = 60 * 1000;
 
 /**
  * Initialize auth token/challenge stores with the best available backend.
@@ -311,6 +321,13 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
   _challengeStore = new ChallengeStore({ backend: challengeBackend });
   _tokenStore = new TokenStore({ backend: tokenBackend });
   _nonceBackend = nonceBackend;
+  // Reuse the challenge backend (Redis when available) for OAuth nonce codes
+  // so they survive worker restarts and round-robin between isolates. The
+  // 60s TTL is enforced at write time by ChallengeStore.
+  _oauthCodeStore = new ChallengeStore({
+    backend: challengeBackend,
+    ttlMs: OAUTH_CODE_TTL_MS,
+  });
 
   // Reset singletons so they pick up the new stores on next use
   _passkeyAuth = null;
@@ -321,6 +338,11 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
 function getChallengeStore(): ChallengeStore {
   _challengeStore ??= new ChallengeStore();
   return _challengeStore;
+}
+
+function getOAuthCodeStore(): ChallengeStore {
+  _oauthCodeStore ??= new ChallengeStore({ ttlMs: OAUTH_CODE_TTL_MS });
+  return _oauthCodeStore;
 }
 
 function getTokenStore(): TokenStore {
@@ -662,6 +684,40 @@ export function clearEmailAuthTenantCacheForTests(): void {
 
 export function clearOAuthTokenKeyStoreForTests(): void {
   _oauthKeyStore = null;
+}
+
+/**
+ * Test-only seam: write a fully-formed OAuth nonce payload into the code
+ * store so the /oauth/exchange route can be exercised end-to-end without
+ * running a real provider callback. Production callers should never use
+ * this — the only writer of the code store is the `/oauth/<provider>/callback`
+ * handler.
+ */
+export function _seedOAuthExchangeCodeForTests(
+  code: string,
+  payload: {
+    token: string;
+    refreshToken: string;
+    redirectUri: string;
+    tenantId: string | null;
+    expiresAt?: number;
+    expiresIn?: number;
+  },
+): void {
+  const fullPayload = {
+    token: payload.token,
+    refreshToken: payload.refreshToken,
+    redirectUri: payload.redirectUri,
+    tenantId: payload.tenantId,
+    expiresAt: payload.expiresAt ?? Date.now() + OAUTH_CODE_TTL_MS,
+    expiresIn: payload.expiresIn ?? ACCESS_TOKEN_EXPIRY_SECONDS,
+  };
+  getOAuthCodeStore().set(`oauth-code:${code}`, JSON.stringify(fullPayload));
+}
+
+export function _clearOAuthCodeStoreForTests(): void {
+  _oauthCodeStore?.destroy();
+  _oauthCodeStore = null;
 }
 
 // ─── Vault helper ─────────────────────────────────────────────────────────────
@@ -1983,6 +2039,15 @@ auth.get("/oauth/:provider/authorize", async (c) => {
   // is trimmed defensively for the same reason we trim headers elsewhere.
   const tenantId = c.req.query("tenant_id")?.trim() || c.req.query("tenantId")?.trim() || undefined;
 
+  // `response_type=code` opts the caller into the nonce-exchange flow. Instead
+  // of leaking `?token=...&refreshToken=...` in the redirect URL (which gets
+  // captured by browser history, server access logs, Referer headers from any
+  // resource the landing page loads, and the user clipboard), the callback
+  // issues a one-time `?code=<nonce>` that the caller's backend exchanges for
+  // the real tokens server-side via POST /oauth/exchange. Legacy callers that
+  // omit response_type still get the token-in-query redirect for one release.
+  const responseType = c.req.query("response_type")?.trim() || undefined;
+
   if (!redirectUri) {
     return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
   }
@@ -1992,6 +2057,13 @@ auth.get("/oauth/:provider/authorize", async (c) => {
   } catch (err) {
     return c.json<ApiResponse>(
       { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      400,
+    );
+  }
+
+  if (responseType !== undefined && responseType !== "code" && responseType !== "token") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "response_type must be 'code' or 'token'" },
       400,
     );
   }
@@ -2011,6 +2083,7 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     provider: providerName,
     tenantId,
     redirectUri,
+    responseType,
     ...(codeVerifier ? { codeVerifier } : {}),
   });
   getChallengeStore().set(`oauth:${state}`, statePayload);
@@ -2059,6 +2132,7 @@ auth.get("/oauth/:provider/callback", async (c) => {
     provider: string;
     tenantId?: string;
     redirectUri: string;
+    responseType?: string;
     codeVerifier?: string;
   };
   try {
@@ -2153,10 +2227,154 @@ auth.get("/oauth/:provider/callback", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: result.error }, 500);
   }
 
-  // Redirect to the app with the JWT
+  // Branch: nonce-exchange (`response_type=code`) vs legacy token-in-query.
+  //
+  // Nonce-exchange path: issue a one-time, short-lived (60s) code that the
+  // caller's backend trades for the real tokens via POST /oauth/exchange.
+  // This keeps the tokens off the address bar / browser history / Referer /
+  // upstream access logs / any window the user copy-pastes. The pair
+  // {redirectUri, tenantId} is bound to the code so a stolen code cannot be
+  // redeemed against a different redirect_uri or pivoted to another tenant.
+  if (stateData.responseType === "code") {
+    const nonceBytes = new Uint8Array(32);
+    crypto.getRandomValues(nonceBytes);
+    const code = uint8ArrayToBase64url(nonceBytes);
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + OAUTH_CODE_TTL_MS;
+    const codePayload = JSON.stringify({
+      token: result.token,
+      refreshToken: result.refreshToken,
+      redirectUri: stateData.redirectUri,
+      tenantId: stateData.tenantId ?? null,
+      expiresAt,
+      expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    });
+    getOAuthCodeStore().set(`oauth-code:${code}`, codePayload);
+    redirectUrl.searchParams.set("code", code);
+    return c.redirect(redirectUrl.toString(), 302);
+  }
+
+  // Legacy: redirect with tokens directly in the query string. Kept for one
+  // release cycle so existing integrators don't break. Mark for removal in a
+  // follow-up once all callers have moved to `response_type=code`.
   redirectUrl.searchParams.set("token", result.token);
   redirectUrl.searchParams.set("refreshToken", result.refreshToken);
   return c.redirect(redirectUrl.toString(), 302);
+});
+
+/**
+ * POST /auth/oauth/exchange
+ *
+ * Nonce-exchange endpoint for the `response_type=code` OAuth flow above.
+ * Trades a one-time `code` for the real `{token, refreshToken, expiresAt}`
+ * payload. The code is bound to the `redirect_uri` and `tenant_id` that were
+ * supplied at /authorize time; both must match or the exchange is rejected.
+ *
+ * Body: { code: string; redirect_uri: string; tenant_id?: string | null }
+ * Returns 200 { ok: true, token, refreshToken, expiresIn, expiresAt }
+ * Errors:
+ *   400 invalid_request        — missing/blank `code` or `redirect_uri`
+ *   401 code_invalid           — unknown / already-consumed / expired code
+ *   401 code_expired           — found but past `expiresAt` (defense-in-depth;
+ *                                the store TTL already evicts these)
+ *   401 code_redirect_mismatch — `redirect_uri` does not match
+ *   401 code_tenant_mismatch   — `tenant_id` does not match
+ *
+ * The code is consumed (deleted) on the FIRST lookup, before any validation,
+ * so a redirect_uri / tenant mismatch still burns the nonce. This prevents an
+ * attacker who guesses or steals a code from probing for the bound redirect.
+ */
+auth.post("/oauth/exchange", async (c) => {
+  const body = await safeJsonParse<{
+    code?: unknown;
+    redirect_uri?: unknown;
+    redirectUri?: unknown;
+    tenant_id?: unknown;
+    tenantId?: unknown;
+  }>(c);
+
+  const code = typeof body?.code === "string" ? body.code.trim() : "";
+  const redirectUri =
+    typeof body?.redirect_uri === "string"
+      ? body.redirect_uri.trim()
+      : typeof body?.redirectUri === "string"
+        ? body.redirectUri.trim()
+        : "";
+  const rawTenantId =
+    typeof body?.tenant_id === "string"
+      ? body.tenant_id.trim()
+      : typeof body?.tenantId === "string"
+        ? body.tenantId.trim()
+        : "";
+  const tenantId = rawTenantId.length > 0 ? rawTenantId : null;
+
+  if (!code || !redirectUri) {
+    return c.json<ApiResponse>({ ok: false, error: "code and redirect_uri are required" }, 400);
+  }
+
+  // One-shot consume — even on mismatch, the code is burned so an attacker
+  // cannot retry with corrected parameters.
+  const raw = await getOAuthCodeStore().consume(`oauth-code:${code}`);
+  if (!raw) {
+    return c.json<ApiResponse & { code: string }>(
+      { ok: false, error: "Invalid or already-used code", code: "code_invalid" },
+      401,
+    );
+  }
+
+  let payload: {
+    token: string;
+    refreshToken: string;
+    redirectUri: string;
+    tenantId: string | null;
+    expiresAt: number;
+    expiresIn: number;
+  };
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return c.json<ApiResponse & { code: string }>(
+      { ok: false, error: "Malformed code payload", code: "code_invalid" },
+      401,
+    );
+  }
+
+  if (Date.now() > payload.expiresAt) {
+    return c.json<ApiResponse & { code: string }>(
+      { ok: false, error: "Code expired", code: "code_expired" },
+      401,
+    );
+  }
+
+  if (payload.redirectUri !== redirectUri) {
+    return c.json<ApiResponse & { code: string }>(
+      {
+        ok: false,
+        error: "redirect_uri does not match the one issued with the code",
+        code: "code_redirect_mismatch",
+      },
+      401,
+    );
+  }
+
+  if ((payload.tenantId ?? null) !== tenantId) {
+    return c.json<ApiResponse & { code: string }>(
+      {
+        ok: false,
+        error: "tenant_id does not match the one issued with the code",
+        code: "code_tenant_mismatch",
+      },
+      401,
+    );
+  }
+
+  return c.json({
+    ok: true,
+    token: payload.token,
+    refreshToken: payload.refreshToken,
+    expiresIn: payload.expiresIn,
+    expiresAt: payload.expiresAt,
+  });
 });
 
 /**
