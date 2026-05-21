@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { revocationStore, verifyToken } from "@stwd/auth";
 import { Hono } from "hono";
 import { SignJWT } from "jose";
 import { PROXY_SCOPE } from "../config";
@@ -7,7 +8,7 @@ import { authMiddleware } from "../middleware/auth";
 const JWT_SECRET = new TextEncoder().encode(process.env.STEWARD_JWT_SECRET || "dev-secret");
 const JWT_ISSUER = "steward";
 
-async function signAgentToken(claims: Record<string, unknown>) {
+async function signAgentToken(claims: Record<string, unknown>, jti?: string) {
   return new SignJWT({
     agentId: "agent-1",
     tenantId: "tenant-1",
@@ -17,6 +18,7 @@ async function signAgentToken(claims: Record<string, unknown>) {
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setIssuer(JWT_ISSUER)
+    .setJti(jti ?? crypto.randomUUID())
     .setExpirationTime("1h")
     .sign(JWT_SECRET);
 }
@@ -70,5 +72,37 @@ describe("proxy auth middleware", () => {
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]?.[0]).toContain("Legacy agent token without scopes accepted");
     expect(warn.mock.calls[0]?.[0]).toContain(PROXY_SCOPE);
+  });
+
+  test("rejects individually revoked agent tokens", async () => {
+    const jti = crypto.randomUUID();
+    const token = await signAgentToken({ scopes: ["agent", PROXY_SCOPE] }, jti);
+    await revocationStore.revokeToken(jti, Date.now() + 60_000);
+
+    const res = await app().request("/", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toContain("revoked");
+  });
+
+  test("rejects agent tokens revoked by the agent-wide revocation line", async () => {
+    const token = await signAgentToken({ scopes: ["agent", PROXY_SCOPE] });
+    const payload = await verifyToken(token);
+    await revocationStore.revokeAgentTokens(
+      String(payload.agentId),
+      Number(payload.iat) + 1,
+      Date.now() + 60_000,
+    );
+
+    const res = await app().request("/", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(401);
+    const body = await res.json();
+    expect(body.error).toContain("revoked");
   });
 });
