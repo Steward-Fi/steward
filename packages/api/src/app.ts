@@ -20,6 +20,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
+import { requireAgentJwt } from "./middleware/agent-jwt";
 import { correlationId } from "./middleware/correlation";
 import { tenantCors } from "./middleware/tenant-cors";
 import { agentRoutes } from "./routes/agents";
@@ -117,10 +118,16 @@ app.use("/audit", (c, next) => tenantAuth(c, next));
 app.use("/audit/*", (c, next) => tenantAuth(c, next));
 app.use("/policies", (c, next) => tenantAuth(c, next));
 app.use("/policies/*", (c, next) => tenantAuth(c, next));
+app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
+app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/trade", (c, next) => tenantAuth(c, next));
-app.use("/trade/*", (c, next) => tenantAuth(c, next));
+app.use("/trade/*", (c, next) =>
+  c.req.path.endsWith("/trade/hyperliquid/order") ? next() : tenantAuth(c, next),
+);
 app.use("/v1/trade", (c, next) => tenantAuth(c, next));
-app.use("/v1/trade/*", (c, next) => tenantAuth(c, next));
+app.use("/v1/trade/*", (c, next) =>
+  c.req.path.endsWith("/v1/trade/hyperliquid/order") ? next() : tenantAuth(c, next),
+);
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
