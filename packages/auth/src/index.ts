@@ -9,6 +9,7 @@ export * from "./middleware";
 export * from "./oauth";
 export * from "./passkey";
 export * from "./platform";
+export * from "./recovery-codes";
 export * from "./revocation";
 export * from "./session";
 export * from "./store-backends";

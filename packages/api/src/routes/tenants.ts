@@ -6,6 +6,7 @@
 
 import { hashApiKey } from "@stwd/auth";
 import { type Context, Hono, type Next } from "hono";
+import { trackAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -92,6 +93,22 @@ tenantRoutes.post("/", async (c) => {
     defaultPolicies: body.defaultPolicies,
   });
 
+  trackAuditEvent({
+    tenantId: body.id,
+    actorType: "platform",
+    action: "tenant.create",
+    resourceType: "tenant",
+    resourceId: body.id,
+    metadata: {
+      name: body.name,
+      hasWebhook: !!body.webhookUrl,
+      defaultPolicyCount: body.defaultPolicies?.length ?? 0,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
   return c.json<ApiResponse<Tenant & TenantConfig>>({
     ok: true,
     data: getTenantPayload(tenant),
@@ -135,6 +152,22 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
   };
 
   tenantConfigs.set(tenant.id, updatedConfig);
+
+  trackAuditEvent({
+    tenantId: tenant.id,
+    actorType: "user",
+    actorId: tenant.id,
+    action: "tenant.update",
+    resourceType: "tenant",
+    resourceId: tenant.id,
+    metadata: {
+      webhookUrlChanged: body.webhookUrl !== undefined,
+      defaultPoliciesChanged: body.defaultPolicies !== undefined,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   return c.json<ApiResponse<TenantConfig>>({
     ok: true,

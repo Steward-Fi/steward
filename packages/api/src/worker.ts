@@ -90,6 +90,23 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     // Auth stores (passkey challenges, magic-link tokens, SIWE/SIWS nonces)
     // must be initialized too — without this they stay on the lazy memory
     // backend and one-time state is lost across isolates / cold starts.
+    const { trackAuditEvent } = await import("./services/audit");
+    const { isHstsEnabled } = await import("./middleware/security-headers");
+    const dbUrl = (env.DATABASE_URL || "").toLowerCase();
+    trackAuditEvent({
+      tenantId: "system",
+      actorType: "system",
+      action: "system.tls.config",
+      metadata: {
+        dbTlsEnforced:
+          dbUrl.includes("sslmode=require") ||
+          dbUrl.includes("sslmode=verify-ca") ||
+          dbUrl.includes("sslmode=verify-full"),
+        hstsEnabled: isHstsEnabled(),
+        insecureDbAllowed: process.env.STEWARD_ALLOW_INSECURE_DB === "true",
+        runtime: "workers",
+      },
+    });
     const { initAuthStores } = await import("./routes/auth");
     // usePostgres=false: Workers deployments do not run migrations on startup
     // (SKIP_MIGRATIONS=1 in wrangler.toml) so auth_kv_store may not exist;

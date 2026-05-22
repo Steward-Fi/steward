@@ -14,7 +14,7 @@
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
     "drizzle-orm": "^0.44.5",
-    "hono": "^4",
+    "hono": "^4.12.18",
     "@stwd/redis": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/shared": "workspace:*"

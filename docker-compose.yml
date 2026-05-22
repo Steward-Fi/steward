@@ -54,6 +54,9 @@ services:
       GOOGLE_CLIENT_SECRET: "${GOOGLE_CLIENT_SECRET:-}"
       DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
       DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
+      STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:-}"
+      SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
     ports:
       - "127.0.0.1:${PORT:-3200}:3200"
     healthcheck:
@@ -73,6 +76,9 @@ services:
 
   # ── Steward Proxy ────────────────────────────────────────────────────────────
   steward-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
     image: steward:latest
     container_name: steward-proxy
     restart: unless-stopped
@@ -87,6 +93,7 @@ services:
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
+      STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
       REDIS_URL: "redis://redis:6379"
     ports:
       - "127.0.0.1:${STEWARD_PROXY_PORT:-8080}:8080"

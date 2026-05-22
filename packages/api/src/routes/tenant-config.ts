@@ -19,6 +19,7 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { DEFAULT_TENANT_CONFIGS } from "../defaults/tenant-configs";
 import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
+import { trackAuditEvent } from "../services/audit";
 import { type ApiResponse, type AppVariables, db, safeJsonParse } from "../services/context";
 import { requireTenantId } from "./tenants";
 
@@ -132,6 +133,24 @@ tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
 
   // Evict the cached origins so the next request picks up the new config
   invalidateTenantCorsCache(tenantId);
+
+  trackAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: tenantId,
+    action: "tenant.config.update",
+    resourceType: "tenant_config",
+    resourceId: tenantId,
+    metadata: {
+      templatesCount: values.policyTemplates.length,
+      presetsCount: values.secretRoutePresets.length,
+      allowedOriginsCount: values.allowedOrigins.length,
+      hasTheme: !!values.theme,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   const config: TenantControlPlaneConfig = {
     tenantId: row.tenantId,
@@ -247,6 +266,24 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", requireTenantId, as
       .returning();
     if (inserted) insertedPolicies.push(inserted);
   }
+
+  trackAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: tenantId,
+    action: "policy.template.apply",
+    resourceType: "agent",
+    resourceId: body.agentId,
+    metadata: {
+      templateId: template.id,
+      templateName: template.name,
+      policiesApplied: insertedPolicies.length,
+      hasOverrides: !!body.overrides,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   return c.json<ApiResponse>({
     ok: true,
