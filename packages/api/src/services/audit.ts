@@ -124,6 +124,9 @@ export async function writeAuditEvent(ev: AuditEventInput): Promise<void> {
     const prevHash = head ? toU8(head.hmac) : ZERO_HASH;
 
     const createdAt = new Date();
+    // postgres-js does not auto-stringify Date objects in raw sql template
+    // params. Convert to ISO and cast on the SQL side instead. See dcf772e.
+    const createdAtIso = createdAt.toISOString();
     const metadata = ev.metadata ?? {};
     const canonical = canonicalize({
       tenant_id: ev.tenantId,
@@ -152,7 +155,7 @@ export async function writeAuditEvent(ev: AuditEventInput): Promise<void> {
          ${ev.actorId ?? null}, ${ev.action}, ${ev.resourceType ?? null},
          ${ev.resourceId ?? null}, ${JSON.stringify(metadata)}::jsonb,
          ${ev.ipAddress ?? null}, ${ev.userAgent ?? null},
-         ${ev.requestId ?? null}, ${createdAt})
+         ${ev.requestId ?? null}, ${createdAtIso}::timestamptz)
     `);
   });
 }

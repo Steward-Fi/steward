@@ -28,8 +28,21 @@ import type { AgentIdentity, ApiResponse, PolicyRule, Tenant } from "@stwd/share
 import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { trackAuditEvent } from "../services/audit";
 import { createAgentToken, parseAgentTokenScopes } from "../services/context";
 import { invalidateEmailAuthForTenant } from "./auth";
+
+function auditCtx(c: { req: { header(name: string): string | undefined }; get: (k: string) => unknown }): {
+  ipAddress: string | null;
+  userAgent: string | null;
+  requestId: string | null;
+} {
+  return {
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: (c.get("requestId") as string | undefined) ?? null,
+  };
+}
 
 // ─── Vault singleton ──────────────────────────────────────────────────────────
 // Platform routes share the same vault as the main API.
@@ -215,6 +228,24 @@ platform.post("/tenants", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
   }
 
+  trackAuditEvent({
+    tenantId: tenant.id,
+    actorType: "platform",
+    action: "tenant.create",
+    resourceType: "tenant",
+    resourceId: tenant.id,
+    metadata: { name: tenant.name, viaPlatform: true },
+    ...auditCtx(c),
+  });
+  trackAuditEvent({
+    tenantId: tenant.id,
+    actorType: "platform",
+    action: "tenant.api_key.create",
+    resourceType: "tenant",
+    resourceId: tenant.id,
+    ...auditCtx(c),
+  });
+
   return c.json<
     ApiResponse<
       Tenant & {
@@ -374,6 +405,16 @@ platform.patch("/tenants/:tenantId/email-config", async (c) => {
 
   invalidateEmailAuthForTenant(tenantId);
 
+  trackAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.email_config.update",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { from: emailConfig.from, hasReplyTo: !!emailConfig.replyTo },
+    ...auditCtx(c),
+  });
+
   return c.json<
     ApiResponse<{
       provider: "resend";
@@ -484,6 +525,15 @@ platform.delete("/tenants/:tenantId/email-config", async (c) => {
 
   invalidateEmailAuthForTenant(tenantId);
 
+  trackAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.email_config.delete",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    ...auditCtx(c),
+  });
+
   return c.json<ApiResponse>({ ok: true });
 });
 
@@ -509,6 +559,15 @@ platform.delete("/tenants/:id", async (c) => {
   }
 
   await db.delete(tenants).where(eq(tenants.id, tenantId));
+
+  trackAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.delete",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    ...auditCtx(c),
+  });
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -603,6 +662,16 @@ platform.put("/tenants/:id/policies", async (c) => {
 
   // Default policies are not persisted yet, so return the validated payload for caller-side caching.
 
+  trackAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.default_policies.set",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { count: body.length, types: body.map((r) => r.type) },
+    ...auditCtx(c),
+  });
+
   return c.json<ApiResponse<{ tenantId: string; defaultPolicies: PolicyRule[] }>>({
     ok: true,
     data: { tenantId, defaultPolicies: body },
@@ -664,6 +733,15 @@ platform.post("/tenants/:id/agents", async (c) => {
 
   try {
     const identity = await vault().createAgent(tenantId, body.id, body.name, body.platformId);
+    trackAuditEvent({
+      tenantId,
+      actorType: "platform",
+      action: "agent.create",
+      resourceType: "agent",
+      resourceId: body.id,
+      metadata: { name: body.name, platformId: body.platformId ?? null },
+      ...auditCtx(c),
+    });
     return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity }, 201);
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -759,6 +837,20 @@ platform.post("/tenants/:id/agents/batch", async (c) => {
       }
 
       created.push(identity);
+      trackAuditEvent({
+        tenantId,
+        actorType: "platform",
+        action: "agent.create",
+        resourceType: "agent",
+        resourceId: spec.id,
+        metadata: {
+          name: spec.name,
+          platformId: spec.platformId ?? null,
+          batch: true,
+          appliedPolicyCount: body.applyPolicies?.length ?? 0,
+        },
+        ...auditCtx(c),
+      });
     } catch (e: unknown) {
       errors.push({
         id: spec.id,
@@ -848,6 +940,15 @@ platform.post("/tenants/:id/agents/:agentId/token", async (c) => {
 
   try {
     const token = await createAgentToken(agentId, tenantId, expiresIn, scopes);
+    trackAuditEvent({
+      tenantId,
+      actorType: "platform",
+      action: "agent.token.create",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { scopes, expiresIn: expiresIn ?? null },
+      ...auditCtx(c),
+    });
     return c.json<
       ApiResponse<{
         token: string;
@@ -892,6 +993,15 @@ platform.post("/agents/:id/revoke-tokens", async (c) => {
   }
 
   const issuedBefore = await revocationStore.revokeAgentTokens(agentId);
+  trackAuditEvent({
+    tenantId: agent.tenantId,
+    actorType: "platform",
+    action: "agent.token.revoke_all",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { issuedBefore },
+    ...auditCtx(c),
+  });
   return c.json<ApiResponse<{ agentId: string; tenantId: string; issuedBefore: number }>>({
     ok: true,
     data: { agentId, tenantId: agent.tenantId, issuedBefore },
@@ -1028,6 +1138,16 @@ platform.post("/tenants/:id/members", async (c) => {
   // Upsert user_tenants link
   await db.insert(userTenants).values({ userId: user.id, tenantId, role }).onConflictDoNothing();
 
+  trackAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.member.add",
+    resourceType: "user",
+    resourceId: user.id,
+    metadata: { email, role },
+    ...auditCtx(c),
+  });
+
   return c.json<
     ApiResponse<{
       userId: string;
@@ -1060,6 +1180,15 @@ platform.delete("/tenants/:id/members/:userId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
 
+  trackAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.member.remove",
+    resourceType: "user",
+    resourceId: userId,
+    ...auditCtx(c),
+  });
+
   return c.json<ApiResponse>({ ok: true });
 });
 
@@ -1091,6 +1220,16 @@ platform.patch("/tenants/:id/members/:userId", async (c) => {
   if (!updated) {
     return c.json<ApiResponse>({ ok: false, error: "Member not found in tenant" }, 404);
   }
+
+  trackAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.member.role.update",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { role: body.role },
+    ...auditCtx(c),
+  });
 
   return c.json<ApiResponse<{ userId: string; tenantId: string; role: string }>>({
     ok: true,

@@ -7,6 +7,7 @@
 import { isPersistedPolicyType, toPersistedPolicyRule } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
+import { trackAuditEvent } from "../services/audit";
 import {
   AGENT_TOKEN_EXPIRY,
   type AgentIdentity,
@@ -79,6 +80,18 @@ agentRoutes.post("/", async (c) => {
 
   try {
     const identity = await vault.createAgent(tenantId, body.id, body.name, body.platformId);
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "agent.create",
+      resourceType: "agent",
+      resourceId: body.id,
+      metadata: { name: body.name, platformId: body.platformId ?? null },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
     return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: identity });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
@@ -134,6 +147,18 @@ agentRoutes.post("/:agentId/token", async (c) => {
 
   try {
     const token = await createAgentToken(agentId, tenantId, expiresIn, scopes);
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "agent.token.create",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { scopes, expiresIn },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
     return c.json<
       ApiResponse<{
         token: string;
@@ -205,6 +230,23 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
       chainType: body.chainType,
       purpose: body.purpose,
     });
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "agent.wallet.create",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: {
+        venue: body.venue,
+        chainType: body.chainType,
+        purpose: body.purpose ?? null,
+        address: wallet.address,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
     return c.json<
       ApiResponse<{
         agentId: string;
@@ -269,6 +311,18 @@ agentRoutes.delete("/:agentId", async (c) => {
       await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
       await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
       await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    });
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "agent.delete",
+      resourceType: "agent",
+      resourceId: agentId,
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
     });
 
     return c.json<ApiResponse<{ deleted: string }>>({
@@ -452,6 +506,23 @@ agentRoutes.post("/batch", async (c) => {
       }
 
       created.push(identity);
+      trackAuditEvent({
+        tenantId,
+        actorType: "user",
+        actorId: tenantId,
+        action: "agent.create",
+        resourceType: "agent",
+        resourceId: agentSpec.id,
+        metadata: {
+          name: agentSpec.name,
+          platformId: agentSpec.platformId ?? null,
+          batch: true,
+          appliedPolicyCount: body.applyPolicies?.length ?? 0,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
     } catch (e: unknown) {
       errors.push({
         id: agentSpec.id,
@@ -590,6 +661,22 @@ agentRoutes.put("/:agentId/policies", async (c) => {
   }
 
   const storedPolicies = await db.select().from(policies).where(eq(policies.agentId, agentId));
+
+  trackAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: tenantId,
+    action: "agent.policies.update",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: {
+      count: storedPolicies.length,
+      types: storedPolicies.map((p) => p.type),
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   return c.json<ApiResponse<PolicyRule[]>>({
     ok: true,

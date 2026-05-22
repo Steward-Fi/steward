@@ -52,7 +52,45 @@ export function getDatabaseUrl(): string {
     throw new Error("DATABASE_URL is required");
   }
 
+  assertDatabaseUrlTls(connectionString);
   return connectionString;
+}
+
+/**
+ * Refuse to start in production if DATABASE_URL is not using TLS (sslmode=require
+ * or stricter). Localhost connections are exempt. Set STEWARD_ALLOW_INSECURE_DB=true
+ * to override for private-network deployments (logs a loud warning).
+ */
+export function assertDatabaseUrlTls(connectionString: string): void {
+  if (process.env.NODE_ENV !== "production") return;
+
+  let host = "";
+  try {
+    host = new URL(connectionString).hostname.toLowerCase();
+  } catch {
+    return;
+  }
+  if (host === "localhost" || host === "127.0.0.1" || host === "::1") return;
+
+  const lower = connectionString.toLowerCase();
+  const hasTls =
+    lower.includes("sslmode=require") ||
+    lower.includes("sslmode=verify-ca") ||
+    lower.includes("sslmode=verify-full");
+  if (hasTls) return;
+
+  if (process.env.STEWARD_ALLOW_INSECURE_DB === "true") {
+    console.warn(
+      "[db] WARNING: STEWARD_ALLOW_INSECURE_DB=true — DATABASE_URL has no sslmode=require. " +
+        "This is only safe on a private network. SOC2 CC6.7 requires encryption in transit.",
+    );
+    return;
+  }
+
+  throw new Error(
+    "DATABASE_URL must include sslmode=require (or verify-full) in production. " +
+      "Set STEWARD_ALLOW_INSECURE_DB=true to override for private-network deployments.",
+  );
 }
 
 export function createPostgresClient(connectionString = getDatabaseUrl()) {
