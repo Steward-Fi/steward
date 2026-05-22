@@ -1,17 +1,17 @@
-import { signAgentToken } from "@stwd/auth";
 import { proxyAuditLog } from "@stwd/db";
+import { evaluateTradeOrder } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
-import { TradeSessionManager, tradeSessionScopeSchema } from "@stwd/trade-sessions";
+import { TradeSessionManager } from "@stwd/trade-sessions";
 import {
   HyperliquidAdapter,
   type HyperliquidOrder,
   hyperliquidAssetSchema,
 } from "@stwd/venue-hyperliquid";
-import { sql } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import { getRedisClient } from "../middleware/redis";
+import { writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -24,20 +24,33 @@ import {
 export const tradeRoutes = new Hono<{ Variables: AppVariables }>();
 
 const createSessionSchema = z.object({
+  agentId: z.string().min(1).optional(),
   venue: z.literal("hyperliquid"),
-  scopes: z.array(tradeSessionScopeSchema).min(1),
-  ttlSeconds: z.number().int().positive().max(3600).default(900),
+  walletAddress: z.string().min(1).optional(),
+  dailyCap: z.number().positive().max(100).default(100),
+  perOrderCap: z.number().positive().max(100).default(50),
+  leverageCap: z.number().positive().max(2).default(2),
+  allowedAssets: z
+    .array(z.enum(["BTC", "ETH"]))
+    .min(1)
+    .default(["BTC", "ETH"]),
+  ttlSeconds: z.number().int().positive().max(86_400).default(900),
 });
 
-const submitOrderSchema = z.object({
-  sessionId: z.string().min(1),
-  asset: hyperliquidAssetSchema,
-  side: z.enum(["buy", "sell"]),
-  size: z.number().positive(),
-  leverage: z.number().positive().max(2),
-  reduceOnly: z.boolean().default(false),
-  idempotencyKey: z.string().min(1).max(256).optional(),
-});
+const submitOrderSchema = z
+  .object({
+    sessionId: z.string().min(1),
+    coin: z.string().min(1).optional(),
+    asset: z.string().min(1).optional(),
+    side: z.enum(["buy", "sell"]),
+    size: z.number().positive(),
+    leverage: z.number().positive(),
+    limitPx: z.union([z.string(), z.number()]).optional(),
+    limitPrice: z.union([z.string(), z.number()]).optional(),
+    reduceOnly: z.boolean().default(false),
+    idempotencyKey: z.string().min(1).max(256).optional(),
+  })
+  .refine((value) => value.coin ?? value.asset, "coin is required");
 
 type SubmitOrderBody = z.infer<typeof submitOrderSchema>;
 
@@ -55,6 +68,11 @@ function callerAgentId(c: Context<{ Variables: AppVariables }>): string | null {
   return c.get("agentScope") ?? null;
 }
 
+function canAccessAgent(c: Context<{ Variables: AppVariables }>, agentId: string): boolean {
+  const scopedAgent = callerAgentId(c);
+  return !scopedAgent || scopedAgent === agentId;
+}
+
 function responseData<T>(data: T): ApiResponse<T> {
   return { ok: true, data };
 }
@@ -62,9 +80,25 @@ function responseData<T>(data: T): ApiResponse<T> {
 async function auditTradeEvent(
   tenantId: string,
   agentId: string,
-  event: "trade.session.created" | "trade.session.revoked" | "trade.order.submitted",
+  event:
+    | "trade.session.created"
+    | "trade.session.revoked"
+    | "trade.order.submitted"
+    | "trade.order.policy-rejected"
+    | "trade.order.canceled",
   details: Record<string, unknown>,
 ): Promise<void> {
+  const correlationId = typeof details.sessionId === "string" ? details.sessionId : undefined;
+  await writeAuditEvent({
+    tenantId,
+    actorType: "agent",
+    actorId: agentId,
+    action: event,
+    resourceType: "trade",
+    resourceId: correlationId ?? agentId,
+    metadata: { ...details, correlationId },
+    requestId: correlationId,
+  });
   await db
     .insert(proxyAuditLog)
     .values({
@@ -102,24 +136,6 @@ async function enforceOrderRateLimit(
   if (current.count >= 10) return { allowed: false, resetMs: current.resetAt - now };
   current.count += 1;
   return { allowed: true, resetMs: current.resetAt - now };
-}
-
-async function checkDailyCap(agentId: string, sizeUsd: number): Promise<boolean> {
-  const since = new Date();
-  since.setUTCHours(0, 0, 0, 0);
-  // postgres-js does not auto-stringify Date objects in raw sql template
-  // params. Convert to ISO and cast on the SQL side instead.
-  const sinceIso = since.toISOString();
-  const [row] = await db
-    .select({
-      total: sql<string>`coalesce(sum((${proxyAuditLog.targetPath}::jsonb ->> 'sizeUsd')::numeric), 0)::text`,
-    })
-    .from(proxyAuditLog)
-    .where(
-      sql`${proxyAuditLog.agentId} = ${agentId} and ${proxyAuditLog.reason} = 'trade.order.submitted' and ${proxyAuditLog.createdAt} >= ${sinceIso}::timestamptz`,
-    );
-  const spent = Number(row?.total ?? 0);
-  return spent + sizeUsd <= 100;
 }
 
 function getIdempotency(
@@ -168,19 +184,33 @@ async function resolveHyperliquidWallet(
 
 tradeRoutes.post("/sessions", async (c) => {
   const tenantId = c.get("tenantId");
-  const agentId = callerAgentId(c);
-  if (!agentId) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent JWT required for trade sessions" }, 403);
-  }
   const raw = await safeJsonParse(c);
   const parsed = createSessionSchema.safeParse(raw);
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
 
+  const scopedAgentId = callerAgentId(c);
+  const agentId = parsed.data.agentId ?? scopedAgentId;
+  if (!agentId) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent id required" }, 400);
+  }
+  const { venue, dailyCap, perOrderCap, leverageCap, allowedAssets, ttlSeconds } = parsed.data;
+
+  if (!canAccessAgent(c, agentId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: agent token cannot create sessions for another agent" },
+      403,
+    );
+  }
+  if (perOrderCap > dailyCap) {
+    return c.json<ApiResponse>({ ok: false, error: "perOrderCap cannot exceed dailyCap" }, 400);
+  }
+
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  const walletAddress = await resolveHyperliquidWallet(agentId, agent);
+  const walletAddress =
+    parsed.data.walletAddress ?? (await resolveHyperliquidWallet(agentId, agent));
   if (!walletAddress) {
     return c.json<ApiResponse>(
       {
@@ -191,61 +221,86 @@ tradeRoutes.post("/sessions", async (c) => {
     );
   }
 
-  const session = await getSessionManager().create({
+  const session = await getSessionManager().createSession({
     agentId,
     tenantId,
-    venue: parsed.data.venue,
-    scopes: parsed.data.scopes,
-    ttlSeconds: parsed.data.ttlSeconds,
+    venue,
+    walletId: walletAddress,
+    dailyCapUsd: dailyCap,
+    perOrderCapUsd: perOrderCap,
+    leverageCap,
+    allowedAssets,
+    ttlSeconds,
   });
-  const jwt = await signAgentToken(
-    {
-      agentId,
-      tenantId,
-      scopes: ["agent", "trade:read", "trade:hyperliquid:write"],
-      ses: session.id,
-    },
-    `${parsed.data.ttlSeconds}s`,
-  );
+
   await auditTradeEvent(tenantId, agentId, "trade.session.created", {
     sessionId: session.id,
     venue: session.venue,
-    scopes: session.scopes,
+    walletId: session.walletId,
+    dailyCapUsd: session.dailyCapUsd,
+    perOrderCapUsd: session.perOrderCapUsd,
+    leverageCap: session.leverageCap,
+    allowedAssets: session.allowedAssets,
   });
 
   return c.json(
     responseData({
       sessionId: session.id,
-      jwt,
       expiresAt: session.expiresAt.toISOString(),
     }),
     201,
   );
 });
 
-tradeRoutes.post("/sessions/:id/revoke", async (c) => {
+tradeRoutes.get("/sessions/:id", async (c) => {
   const tenantId = c.get("tenantId");
-  const agentId = callerAgentId(c);
-  if (!agentId) return c.body(null, 204);
-  const existing = await getSessionManager().getActive(tenantId, c.req.param("id"));
-  if (existing && existing.agentId !== agentId) {
+  const session = await getSessionManager().getSession({ tenantId, id: c.req.param("id") });
+  if (!session) return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+  if (!canAccessAgent(c, session.agentId)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Forbidden: session belongs to another agent" },
       403,
     );
   }
-  const revoked = await getSessionManager().revoke({
+
+  return c.json(
+    responseData({
+      ...session,
+      createdAt: session.createdAt.toISOString(),
+      expiresAt: session.expiresAt.toISOString(),
+      revokedAt: session.revokedAt?.toISOString() ?? null,
+      remainingCapUsd: Math.max(0, session.dailyCapUsd - session.dailySpendUsd),
+    }),
+  );
+});
+
+tradeRoutes.post("/sessions/:id/revoke", async (c) => {
+  const tenantId = c.get("tenantId");
+  const existing = await getSessionManager().getSession({ tenantId, id: c.req.param("id") });
+  if (existing && !canAccessAgent(c, existing.agentId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: session belongs to another agent" },
+      403,
+    );
+  }
+
+  const revoked = await getSessionManager().revokeSession({
     id: c.req.param("id"),
     tenantId,
-    revokedBy: agentId,
+    revokedBy: callerAgentId(c) ?? c.get("userId") ?? c.get("authType") ?? "api-key",
   });
-  if (revoked) {
-    await auditTradeEvent(tenantId, revoked.agentId, "trade.session.revoked", {
+  if (!revoked) return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+
+  await auditTradeEvent(tenantId, revoked.agentId, "trade.session.revoked", {
+    sessionId: revoked.id,
+    revokedBy: callerAgentId(c) ?? c.get("authType") ?? "api-key",
+  });
+  return c.json(
+    responseData({
       sessionId: revoked.id,
-      revokedBy: agentId,
-    });
-  }
-  return c.body(null, 204);
+      revokedAt: (revoked.revokedAt ?? new Date()).toISOString(),
+    }),
+  );
 });
 
 tradeRoutes.post("/hyperliquid/order", async (c) => {
@@ -286,36 +341,54 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
   if (!session || session.agentId !== agentId || session.venue !== "hyperliquid") {
     return c.json<ApiResponse>({ ok: false, error: "Active Hyperliquid session required" }, 403);
   }
-  if (!session.scopes.includes("write")) {
-    return c.json<ApiResponse>({ ok: false, error: "Trade session missing write scope" }, 403);
+  const coin = body.coin ?? body.asset;
+  const sizeUsd = body.size * Number(body.limitPx ?? body.limitPrice ?? 1);
+  const policy = evaluateTradeOrder(
+    {
+      venue: session.venue,
+      allowedVenues: [session.venue],
+      leverageCap: session.leverageCap,
+      allowedAssets: session.allowedAssets,
+      dailySpendUsd: session.dailySpendUsd,
+      dailyCapUsd: session.dailyCapUsd,
+      perOrderCapUsd: session.perOrderCapUsd,
+    },
+    {
+      venue: "hyperliquid",
+      asset: coin,
+      leverage: body.leverage,
+      estimatedOrderUsd: sizeUsd,
+    },
+  );
+  if (!policy.allow) {
+    const reason = policy.reason ?? "order violates trading policy";
+    await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+      sessionId: session.id,
+      venue: "hyperliquid",
+      asset: coin,
+      leverage: body.leverage,
+      size: body.size,
+      limitPx: body.limitPx ?? body.limitPrice,
+      sizeUsd,
+      dailySpendUsd: session.dailySpendUsd,
+      reason,
+    });
+    return c.json({ code: "policy-violation", reason }, 400);
   }
 
-  if (body.leverage > 2 || !["BTC", "ETH"].includes(body.asset)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Policy rejected: BTC/ETH only and leverage <= 2" },
-      412,
-    );
-  }
-  const sizeUsd = body.size;
-  if (!(await checkDailyCap(agentId, sizeUsd))) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Policy rejected: daily cap $100 exceeded" },
-      412,
-    );
+  const parsedAsset = hyperliquidAssetSchema.safeParse(coin);
+  if (!parsedAsset.success) {
+    const reason = `asset-allowlist: asset ${coin} is not supported by Hyperliquid adapter`;
+    await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+      sessionId: session.id,
+      venue: "hyperliquid",
+      asset: coin,
+      reason,
+    });
+    return c.json({ code: "policy-violation", reason }, 400);
   }
 
-  const agent = await ensureAgentForTenant(tenantId, agentId);
-  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  const walletAddress = await resolveHyperliquidWallet(agentId, agent);
-  if (!walletAddress) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Hyperliquid venue wallet not found. Create a venue-scoped wallet before trading.",
-      },
-      404,
-    );
-  }
+  const walletAddress = session.walletId;
 
   const vaultClient = {
     signTypedData: (input: Omit<Parameters<typeof vault.signTypedData>[0], "tenantId">) =>
@@ -323,7 +396,7 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
   };
   const adapter = new HyperliquidAdapter(vaultClient, agentId, walletAddress);
   const order: HyperliquidOrder = {
-    asset: body.asset,
+    asset: parsedAsset.data,
     side: body.side,
     size: body.size,
     leverage: body.leverage,
@@ -339,10 +412,12 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     txHash: result.txHash ?? null,
   };
 
+  await getSessionManager().incrementSpend({ tenantId, id: session.id, amountUsd: sizeUsd });
+
   await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
     sessionId: session.id,
     venue: "hyperliquid",
-    asset: body.asset,
+    asset: parsedAsset.data,
     leverage: body.leverage,
     size: body.size,
     sizeUsd,
