@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { type JWTPayload, jwtVerify, SignJWT } from "jose";
 
 export const JWT_ISSUER = "steward";
+export const JWT_AUDIENCE = "steward-api";
 export const ACCESS_TOKEN_EXPIRY = "15m";
 export const ACCESS_TOKEN_EXPIRY_SECONDS = 900;
 export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
@@ -152,6 +153,7 @@ export async function signJwtPayload(
   expiresIn: string,
   secretKey: Uint8Array = getJwtSecretKey(),
   issuer: string = JWT_ISSUER,
+  audience: string = JWT_AUDIENCE,
 ): Promise<string> {
   // Always assign a jti so tokens can be individually revoked via the
   // revocation store. Callers may pre-set payload.jti to override.
@@ -160,6 +162,7 @@ export async function signJwtPayload(
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setIssuer(issuer)
+    .setAudience(audience)
     .setJti(jti)
     .setExpirationTime(expiresIn as Parameters<SignJWT["setExpirationTime"]>[0])
     .sign(secretKey);
@@ -169,9 +172,11 @@ export async function verifyJwtPayload(
   token: string,
   secretKey: Uint8Array = getJwtSecretKey(),
   issuer: string = JWT_ISSUER,
+  audience: string = JWT_AUDIENCE,
 ): Promise<JWTPayload> {
   const { payload } = await jwtVerify(token, secretKey, {
     issuer,
+    audience,
     algorithms: ["HS256"],
   });
   return payload;

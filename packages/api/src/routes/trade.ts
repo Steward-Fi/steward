@@ -40,13 +40,16 @@ const createSessionSchema = z.object({
 const submitOrderSchema = z
   .object({
     sessionId: z.string().min(1),
-    coin: z.string().min(1).optional(),
-    asset: z.string().min(1).optional(),
+    coin: hyperliquidAssetSchema.optional(),
+    asset: hyperliquidAssetSchema.optional(),
     side: z.enum(["buy", "sell"]),
     size: z.number().positive(),
-    leverage: z.number().positive().default(1),
     limitPx: z.union([z.string(), z.number()]).optional(),
     limitPrice: z.union([z.string(), z.number()]).optional(),
+    // No max here: the policy engine (`evaluateTradeOrder`) is the source of
+    // truth for leverage caps. Schema-level rejection would short-circuit the
+    // policy audit trail.
+    leverage: z.number().positive().default(1),
     reduceOnly: z.boolean().default(false),
     idempotencyKey: z.string().min(1).max(256).optional(),
   })
@@ -376,6 +379,10 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     return c.json({ code: "policy-violation", reason }, 400);
   }
 
+  // Re-validate against the Hyperliquid adapter's strict asset enum. The
+  // session-level allowlist (BTC/ETH) is covered by evaluateTradeOrder; this
+  // second check defends the adapter contract if the session ever permits
+  // a coin the adapter does not implement.
   const parsedAsset = hyperliquidAssetSchema.safeParse(coin);
   if (!parsedAsset.success) {
     const reason = `asset-allowlist: asset ${coin} is not supported by Hyperliquid adapter`;
@@ -399,6 +406,7 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     asset: parsedAsset.data,
     side: body.side,
     size: body.size,
+    limitPx: body.limitPx ?? body.limitPrice,
     leverage: body.leverage,
     reduceOnly: body.reduceOnly,
   };

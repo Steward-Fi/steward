@@ -27,12 +27,26 @@
   },
   "packageManager": "bun@1.3.9",
   "devDependencies": {
-    "turbo": "^2.5.0",
+    "turbo": "^2.9.14",
     "typescript": "^5.8.0"
   },
   "dependencies": {
     "ioredis": "^5.10.1",
     "jose": "^6.2.1",
     "siwe": "^3.0.0"
+  },
+  "//overrides": "Transitive CVE pins. Each entry corresponds to one or more GHSA advisories surfaced by `bun audit`; bump (or remove) once upstream parents publish fixed releases. See docs/security/threat-model.mdx#known-accepted-cves for details.",
+  "overrides": {
+    "axios": "^1.16.1",
+    "langsmith": "^0.7.1",
+    "lodash": "^4.17.23",
+    "brace-expansion": "^5.0.6",
+    "postcss": "^8.5.15",
+    "protobufjs": "^7.6.0",
+    "ws": "^8.20.1",
+    "esbuild": "^0.25.0",
+    "uuid": "^11.1.1",
+    "glob": "^10.5.0",
+    "drizzle-orm": "^0.45.2"
   }
 }

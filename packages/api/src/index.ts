@@ -26,6 +26,7 @@ import {
   RATE_LIMIT_MAX_REQUESTS,
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
+import { startRetentionScheduler } from "./services/retention";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ validateJwtSecretEnv();
 
 const requestLog = new Map<string, { count: number; resetAt: number }>();
 let isShuttingDown = false;
+let cancelRetention: (() => void) | undefined;
 
 app.use("*", async (c, next) => {
   if (c.req.path === "/health" || c.req.path === "/ready") return next();
@@ -127,13 +129,34 @@ if (shouldUsePGLite()) {
 } else {
   try {
     console.log("[steward] Running database migrations...");
-    await runMigrations();
+    const { applied } = await runMigrations();
     migrationsRan = true;
-    console.log("[steward] Migrations complete.");
+    if (applied.length > 0) {
+      console.log(`[steward] Applied ${applied.length} migration(s): ${applied.join(", ")}`);
+      const { writeAuditEvent } = await import("./services/audit");
+      try {
+        await writeAuditEvent({
+          tenantId: "system",
+          actorType: "system",
+          action: "system.migration.applied",
+          metadata: { count: applied.length, names: applied },
+        });
+      } catch (auditErr) {
+        console.error("[steward] Failed to record migration audit event:", auditErr);
+      }
+    } else {
+      console.log("[steward] Migrations already up to date.");
+    }
   } catch (err) {
     console.error("[steward] Migration failed — cannot start:", err);
     process.exit(1);
   }
+}
+
+// ─── Data retention scheduler (SOC2 CC2) ────────────────────────────────────
+
+if (migrationsRan) {
+  cancelRetention = startRetentionScheduler();
 }
 
 // ─── Redis + auth store initialization (non-blocking) ───────────────────────
@@ -170,6 +193,7 @@ const shutdown = async (signal: string) => {
   server.stop(true);
   clearInterval(requestLogCleanupTimer);
   if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
+  if (cancelRetention) cancelRetention();
   requestLog.clear();
 
   try {

@@ -22,6 +22,7 @@ import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { requireAgentJwt } from "./middleware/agent-jwt";
 import { correlationId } from "./middleware/correlation";
+import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
 import { agentRoutes } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
@@ -71,6 +72,7 @@ app.notFound((c) =>
 
 // ─── Global middleware ────────────────────────────────────────────────────────
 
+app.use("*", securityHeaders);
 app.use("*", tenantCors);
 app.use("*", logger());
 app.use("*", correlationId);

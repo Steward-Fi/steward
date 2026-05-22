@@ -4,8 +4,8 @@ import { z } from "zod";
 
 export const hyperliquidAssetSchema = z.enum(["BTC", "ETH"]);
 export type HyperliquidAsset = z.infer<typeof hyperliquidAssetSchema>;
-export const hyperliquidTifSchema = z.enum(["Alo", "Ioc", "Gtc"]);
-export type HyperliquidTif = z.infer<typeof hyperliquidTifSchema>;
+const ASSET_INDEX: Record<HyperliquidAsset, number> = { BTC: 0, ETH: 1 };
+const DEFAULT_BASE_URL = "https://api.hyperliquid.xyz";
 
 export const hyperliquidOrderSchema = z.object({
   coin: hyperliquidAssetSchema.optional(),
@@ -16,12 +16,21 @@ export const hyperliquidOrderSchema = z.object({
   sz: z.union([z.string(), z.number()]).optional(),
   limitPx: z.union([z.string(), z.number()]).optional(),
   limitPrice: z.union([z.string(), z.number()]).optional(),
-  orderType: z.object({ limit: z.object({ tif: hyperliquidTifSchema }).optional() }).optional(),
+  orderType: z
+    .object({ limit: z.object({ tif: z.enum(["Alo", "Ioc", "Gtc"]) }).optional() })
+    .optional(),
   reduceOnly: z.boolean().default(false),
   leverage: z.number().positive().max(2).optional(),
   nonce: z.number().int().positive().optional(),
 });
 export type HyperliquidOrder = z.input<typeof hyperliquidOrderSchema>;
+export type CancelOrderInput = { coin: HyperliquidAsset; orderId: number | string; nonce?: number };
+export type SignOptions = {
+  nonce?: number;
+  isMainnet?: boolean;
+  vaultAddress?: string;
+  expiresAfter?: number;
+};
 
 export const signedOrderSchema = z.object({
   action: z.record(z.string(), z.unknown()),
@@ -55,8 +64,6 @@ export const openOrderSchema = z.object({
   side: z.string(),
   sz: z.string(),
   timestamp: z.number().optional(),
-  reduceOnly: z.boolean().optional(),
-  orderType: z.string().optional(),
   raw: z.unknown().optional(),
 });
 export type Order = z.infer<typeof openOrderSchema>;
@@ -97,161 +104,85 @@ export interface HyperliquidAdapterOptions {
   vaultAddress?: string;
   expiresAfter?: number;
 }
-export interface SignOptions {
-  nonce?: number;
-  isMainnet?: boolean;
-  vaultAddress?: string;
-  expiresAfter?: number;
-}
-export interface CancelOrderInput {
-  coin: HyperliquidAsset;
-  orderId: number | string;
-  nonce?: number;
-}
 
-const ASSET_INDEX: Record<HyperliquidAsset, number> = { BTC: 0, ETH: 1 };
-const DEFAULT_BASE_URL = "https://api.hyperliquid.xyz";
-const TESTNET_HOST_RE = /hyperliquid-testnet/i;
-const L1_DOMAIN = {
-  name: "Exchange",
-  version: "1",
-  chainId: 1337,
-  verifyingContract: "0x0000000000000000000000000000000000000000",
-} as const;
-const L1_TYPES: Record<string, Array<{ name: string; type: string }>> = {
-  Agent: [
-    { name: "source", type: "string" },
-    { name: "connectionId", type: "bytes32" },
-  ],
-};
-
-function normalizeDecimal(value: string | number | undefined, fallback?: string): string {
-  if (value === undefined) {
+function dec(v: unknown, fallback?: string) {
+  if (v == null) {
     if (fallback !== undefined) return fallback;
-    throw new Error("Missing decimal value");
+    throw new Error("missing decimal");
   }
-  if (typeof value === "string") return value;
-  if (!Number.isFinite(value)) throw new Error("Invalid decimal value");
-  const rounded = value.toFixed(8);
-  if (Math.abs(Number(rounded) - value) >= 1e-12)
-    throw new Error(`Hyperliquid decimal would round: ${value}`);
-  return rounded.replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+  if (typeof v === "string") return v;
+  return Number(v)
+    .toFixed(8)
+    .replace(/\.0+$/, "")
+    .replace(/(\.\d*?)0+$/, "$1");
 }
-
-function normalizeOrder(order: HyperliquidOrder): {
-  coin: HyperliquidAsset;
-  isBuy: boolean;
-  sz: string;
-  limitPx: string;
-  reduceOnly: boolean;
-  tif: HyperliquidTif;
-  nonce?: number;
-} {
-  const parsed = hyperliquidOrderSchema.parse(order);
-  const coin = parsed.coin ?? parsed.asset;
-  if (!coin) throw new Error("Hyperliquid order requires coin");
-  const isBuy = parsed.isBuy ?? (parsed.side ? parsed.side === "buy" : undefined);
-  if (isBuy === undefined) throw new Error("Hyperliquid order requires side/isBuy");
+function normalized(order: HyperliquidOrder) {
+  const p = hyperliquidOrderSchema.parse(order);
+  const coin = p.coin ?? p.asset;
+  if (!coin) throw new Error("coin is required");
+  const isBuy = p.isBuy ?? (p.side ? p.side === "buy" : undefined);
+  if (isBuy === undefined) throw new Error("side is required");
   return {
     coin,
     isBuy,
-    sz: normalizeDecimal(parsed.sz ?? parsed.size),
-    limitPx: normalizeDecimal(parsed.limitPx ?? parsed.limitPrice, "0"),
-    reduceOnly: parsed.reduceOnly ?? false,
-    tif: parsed.orderType?.limit?.tif ?? "Ioc",
-    nonce: parsed.nonce,
+    sz: dec(p.sz ?? p.size),
+    limitPx: dec(p.limitPx ?? p.limitPrice, "0"),
+    reduceOnly: p.reduceOnly ?? false,
+    tif: p.orderType?.limit?.tif ?? "Ioc",
+    nonce: p.nonce,
   };
 }
-
 export function toExchangeAction(order: HyperliquidOrder): Record<string, unknown> {
-  const n = normalizeOrder(order);
+  const o = normalized(order);
   return {
     type: "order",
     orders: [
       {
-        a: ASSET_INDEX[n.coin],
-        b: n.isBuy,
-        p: n.limitPx,
-        s: n.sz,
-        r: n.reduceOnly,
-        t: { limit: { tif: n.tif } },
+        a: ASSET_INDEX[o.coin],
+        b: o.isBuy,
+        p: o.limitPx,
+        s: o.sz,
+        r: o.reduceOnly,
+        t: { limit: { tif: o.tif } },
       },
     ],
     grouping: "na",
   };
 }
 function toCancelAction(input: CancelOrderInput): Record<string, unknown> {
-  const coin = hyperliquidAssetSchema.parse(input.coin);
-  const oid = Number(input.orderId);
-  if (!Number.isSafeInteger(oid) || oid <= 0) throw new Error("Invalid Hyperliquid order id");
-  return { type: "cancel", cancels: [{ a: ASSET_INDEX[coin], o: oid }] };
+  return { type: "cancel", cancels: [{ a: ASSET_INDEX[input.coin], o: Number(input.orderId) }] };
 }
-function u8(...bytes: number[]) {
-  return new Uint8Array(bytes);
-}
-function utf8(value: string) {
-  return new TextEncoder().encode(value);
-}
-function uintBytes(value: number, byteLength: number) {
-  const bytes = new Uint8Array(byteLength);
-  let r = BigInt(value);
-  for (let i = byteLength - 1; i >= 0; i -= 1) {
-    bytes[i] = Number(r & 0xffn);
-    r >>= 8n;
+
+const u8 = (...b: number[]) => new Uint8Array(b);
+const uint = (n: number, l: number) => {
+  const out = new Uint8Array(l);
+  let x = BigInt(n);
+  for (let i = l - 1; i >= 0; i--) {
+    out[i] = Number(x & 255n);
+    x >>= 8n;
   }
-  return bytes;
-}
-function encodeMsgpack(value: unknown): Uint8Array {
-  if (value == null) return u8(0xc0);
-  if (typeof value === "boolean") return u8(value ? 0xc3 : 0xc2);
-  if (typeof value === "number") {
-    if (!Number.isSafeInteger(value) || value < 0)
-      throw new Error(`Unsupported msgpack number: ${value}`);
-    if (value <= 0x7f) return u8(value);
-    if (value <= 0xff) return u8(0xcc, value);
-    if (value <= 0xffff) return concatBytes([u8(0xcd), uintBytes(value, 2)]);
-    if (value <= 0xffffffff) return concatBytes([u8(0xce), uintBytes(value, 4)]);
-    return concatBytes([u8(0xcf), uintBytes(value, 8)]);
+  return out;
+};
+function mp(v: unknown): Uint8Array {
+  if (v == null) return u8(0xc0);
+  if (typeof v === "boolean") return u8(v ? 0xc3 : 0xc2);
+  if (typeof v === "number") {
+    if (v <= 0x7f) return u8(v);
+    if (v <= 0xff) return u8(0xcc, v);
+    if (v <= 0xffff) return concatBytes([u8(0xcd), uint(v, 2)]);
+    return concatBytes([u8(0xce), uint(v, 4)]);
   }
-  if (typeof value === "string") {
-    const e = utf8(value);
-    const len = e.length;
-    if (len <= 31) return concatBytes([u8(0xa0 | len), e]);
-    if (len <= 0xff) return concatBytes([u8(0xd9, len), e]);
-    if (len <= 0xffff) return concatBytes([u8(0xda), uintBytes(len, 2), e]);
-    return concatBytes([u8(0xdb), uintBytes(len, 4), e]);
+  if (typeof v === "string") {
+    const e = new TextEncoder().encode(v);
+    if (e.length <= 31) return concatBytes([u8(0xa0 | e.length), e]);
+    return concatBytes([u8(0xd9, e.length), e]);
   }
-  if (Array.isArray(value)) {
-    const items = value.map(encodeMsgpack);
-    const len = items.length;
-    const prefix =
-      len <= 15
-        ? u8(0x90 | len)
-        : len <= 0xffff
-          ? concatBytes([u8(0xdc), uintBytes(len, 2)])
-          : concatBytes([u8(0xdd), uintBytes(len, 4)]);
-    return concatBytes([prefix, ...items]);
+  if (Array.isArray(v)) return concatBytes([u8(0x90 | v.length), ...v.map(mp)]);
+  if (typeof v === "object") {
+    const ent = Object.entries(v as Record<string, unknown>).filter(([, x]) => x !== undefined);
+    return concatBytes([u8(0x80 | ent.length), ...ent.flatMap(([k, x]) => [mp(k), mp(x)])]);
   }
-  if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>).filter(
-      ([, v]) => v !== undefined,
-    );
-    const len = entries.length;
-    const prefix =
-      len <= 15
-        ? u8(0x80 | len)
-        : len <= 0xffff
-          ? concatBytes([u8(0xde), uintBytes(len, 2)])
-          : concatBytes([u8(0xdf), uintBytes(len, 4)]);
-    return concatBytes([
-      prefix,
-      ...entries.flatMap(([k, v]) => [encodeMsgpack(k), encodeMsgpack(v)]),
-    ]);
-  }
-  throw new Error(`Unsupported msgpack value: ${typeof value}`);
-}
-function addressToBytes(address: string) {
-  return toBytes((address.startsWith("0x") ? address : `0x${address}`) as Hex);
+  throw new Error("bad msgpack");
 }
 export function actionHash(
   action: Record<string, unknown>,
@@ -259,10 +190,12 @@ export function actionHash(
   vaultAddress?: string,
   expiresAfter?: number,
 ): Hex {
-  const parts = [encodeMsgpack(action), uintBytes(nonce, 8)];
-  if (vaultAddress) parts.push(u8(0x01), addressToBytes(vaultAddress));
-  else parts.push(u8(0x00));
-  if (expiresAfter !== undefined) parts.push(u8(0x00), uintBytes(expiresAfter, 8));
+  const parts = [mp(action), uint(nonce, 8), vaultAddress ? u8(1) : u8(0)];
+  if (vaultAddress)
+    parts.push(
+      toBytes((vaultAddress.startsWith("0x") ? vaultAddress : `0x${vaultAddress}`) as Hex),
+    );
+  if (expiresAfter !== undefined) parts.push(u8(0), uint(expiresAfter, 8));
   return keccak256(concatBytes(parts));
 }
 export function createL1TypedData(
@@ -273,8 +206,18 @@ export function createL1TypedData(
   expiresAfter?: number,
 ): Omit<VaultSignTypedDataInput, "agentId"> {
   return {
-    domain: L1_DOMAIN,
-    types: L1_TYPES,
+    domain: {
+      name: "Exchange",
+      version: "1",
+      chainId: 1337,
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    },
+    types: {
+      Agent: [
+        { name: "source", type: "string" },
+        { name: "connectionId", type: "bytes32" },
+      ],
+    },
     primaryType: "Agent",
     value: {
       source: isMainnet ? "a" : "b",
@@ -282,59 +225,52 @@ export function createL1TypedData(
     },
   };
 }
-
-async function signActionWithPrivateKey(
-  walletPrivateKey: Hex,
+async function signAction(
+  pk: Hex,
   action: Record<string, unknown>,
-  options: SignOptions = {},
+  opts: SignOptions = {},
 ): Promise<SignedOrder> {
-  const nonce = options.nonce ?? Date.now();
-  const typedData = createL1TypedData(
+  const nonce = opts.nonce ?? Date.now();
+  const td = createL1TypedData(
     action,
     nonce,
-    options.isMainnet ?? true,
-    options.vaultAddress,
-    options.expiresAfter,
+    opts.isMainnet ?? true,
+    opts.vaultAddress,
+    opts.expiresAfter,
   );
-  const account = privateKeyToAccount(walletPrivateKey);
-  const sigHex = await (account.signTypedData as (args: unknown) => Promise<Hex>)({
-    domain: typedData.domain,
-    types: typedData.types,
-    primaryType: typedData.primaryType,
-    message: typedData.value,
-  });
-  const sig = parseSignature(sigHex);
-  if (sig.v === undefined) throw new Error("EIP-712 signature missing recovery id");
+  const hex = await privateKeyToAccount(pk).signTypedData({
+    domain: td.domain,
+    types: td.types,
+    primaryType: td.primaryType,
+    message: td.value,
+  } as never);
+  const s = parseSignature(hex);
   return signedOrderSchema.parse({
     action,
     nonce,
-    signature: { r: sig.r, s: sig.s, v: Number(sig.v) },
-    vaultAddress: options.vaultAddress,
-    expiresAfter: options.expiresAfter,
+    signature: { r: s.r, s: s.s, v: Number(s.v) },
+    vaultAddress: opts.vaultAddress,
+    expiresAfter: opts.expiresAfter,
   });
 }
-export async function signOrder(
+export const signOrder = (
   walletPrivateKey: Hex,
   order: HyperliquidOrder,
   options: SignOptions = {},
-) {
-  return signActionWithPrivateKey(walletPrivateKey, toExchangeAction(order), {
+) =>
+  signAction(walletPrivateKey, toExchangeAction(order), {
     ...options,
     nonce: options.nonce ?? order.nonce,
   });
-}
-
 async function postExchange(signed: SignedOrder, transport: HyperliquidTransport, baseUrl: string) {
-  const body = signedOrderSchema.parse(signed);
-  const res = await transport.fetch(`${baseUrl}/exchange`, {
+  const r = await transport.fetch(`${baseUrl}/exchange`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify(signedOrderSchema.parse(signed)),
   });
-  const json = await res.json().catch(() => null);
-  if (!res.ok)
-    throw new Error(`Hyperliquid exchange returned ${res.status}: ${JSON.stringify(json)}`);
-  return json as unknown;
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(`Hyperliquid exchange returned ${r.status}: ${JSON.stringify(j)}`);
+  return j;
 }
 export async function submitOrder(
   signedOrder: SignedOrder,
@@ -352,15 +288,17 @@ export async function getOpenOrders(
   userAddress: string,
   options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
 ): Promise<Order[]> {
-  const transport = options.transport ?? { fetch };
-  const res = await transport.fetch(`${options.baseUrl ?? DEFAULT_BASE_URL}/info`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "openOrders", user: userAddress }),
-  });
-  const json = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(`Hyperliquid info returned ${res.status}: ${JSON.stringify(json)}`);
-  return (Array.isArray(json) ? json : []).map((o) =>
+  const r = await (options.transport ?? { fetch }).fetch(
+    `${options.baseUrl ?? DEFAULT_BASE_URL}/info`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "openOrders", user: userAddress }),
+    },
+  );
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
+  return (Array.isArray(j) ? j : []).map((o) =>
     openOrderSchema.parse({ ...(o as Record<string, unknown>), raw: o }),
   );
 }
@@ -369,153 +307,134 @@ export async function cancelOrder(
   input: CancelOrderInput,
   options: SignOptions & { transport?: HyperliquidTransport; baseUrl?: string } = {},
 ) {
-  const signed = await signActionWithPrivateKey(walletPrivateKey, toCancelAction(input), {
-    nonce: options.nonce ?? input.nonce,
-    isMainnet: options.isMainnet,
-    vaultAddress: options.vaultAddress,
-    expiresAfter: options.expiresAfter,
-  });
-  return normalizeCancelResult(
-    await postExchange(signed, options.transport ?? { fetch }, options.baseUrl ?? DEFAULT_BASE_URL),
-    String(input.orderId),
+  const raw = await postExchange(
+    await signAction(walletPrivateKey, toCancelAction(input), {
+      ...options,
+      nonce: options.nonce ?? input.nonce,
+    }),
+    options.transport ?? { fetch },
+    options.baseUrl ?? DEFAULT_BASE_URL,
   );
+  return normalizeCancelResult(raw, String(input.orderId));
 }
 
 export class HyperliquidAdapter {
   private readonly transport: HyperliquidTransport;
   private readonly baseUrl: string;
   private readonly isMainnet: boolean;
-  private readonly vaultAddress?: string;
-  private readonly expiresAfter?: number;
   constructor(
     private readonly vault: VaultClient,
     private readonly agentId: string,
     private readonly walletAddress: string,
-    options: HyperliquidAdapterOptions = {},
+    private readonly options: HyperliquidAdapterOptions = {},
   ) {
     this.transport = options.transport ?? { fetch };
     this.baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
-    this.isMainnet = options.isMainnet ?? !TESTNET_HOST_RE.test(this.baseUrl);
-    this.vaultAddress = options.vaultAddress;
-    this.expiresAfter = options.expiresAfter;
+    this.isMainnet = options.isMainnet ?? !/testnet/i.test(this.baseUrl);
   }
   async signOrder(order: HyperliquidOrder): Promise<SignedOrder> {
-    const parsed = hyperliquidOrderSchema.parse(order);
-    const nonce = parsed.nonce ?? Date.now();
-    const action = toExchangeAction(parsed);
+    const nonce = order.nonce ?? Date.now();
+    const action = toExchangeAction(order);
     const td = createL1TypedData(
       action,
       nonce,
       this.isMainnet,
-      this.vaultAddress,
-      this.expiresAfter,
+      this.options.vaultAddress,
+      this.options.expiresAfter,
     );
-    const sigHex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
-    const sig = parseSignature(sigHex as Hex);
-    if (sig.v === undefined)
-      throw new Error("Vault returned an EIP-712 signature without a recovery id");
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
     return signedOrderSchema.parse({
       action,
       nonce,
-      signature: { r: sig.r, s: sig.s, v: Number(sig.v) },
-      vaultAddress: this.vaultAddress,
-      expiresAfter: this.expiresAfter,
+      signature: { r: s.r, s: s.s, v: Number(s.v) },
+      vaultAddress: this.options.vaultAddress,
+      expiresAfter: this.options.expiresAfter,
     });
   }
-  async submitOrder(signed: SignedOrder) {
+  submitOrder(signed: SignedOrder) {
     return submitOrder(signed, { transport: this.transport, baseUrl: this.baseUrl });
   }
-  async getOpenOrders(userAddress = this.walletAddress) {
+  getOpenOrders(userAddress = this.walletAddress) {
     return getOpenOrders(userAddress, { transport: this.transport, baseUrl: this.baseUrl });
   }
   async cancelOrder(input: CancelOrderInput) {
-    const action = toCancelAction(input);
     const nonce = input.nonce ?? Date.now();
+    const action = toCancelAction(input);
     const td = createL1TypedData(
       action,
       nonce,
       this.isMainnet,
-      this.vaultAddress,
-      this.expiresAfter,
+      this.options.vaultAddress,
+      this.options.expiresAfter,
     );
-    const sigHex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
-    const sig = parseSignature(sigHex as Hex);
-    if (sig.v === undefined)
-      throw new Error("Vault returned an EIP-712 signature without a recovery id");
-    const signed = signedOrderSchema.parse({
-      action,
-      nonce,
-      signature: { r: sig.r, s: sig.s, v: Number(sig.v) },
-      vaultAddress: this.vaultAddress,
-      expiresAfter: this.expiresAfter,
-    });
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
     return normalizeCancelResult(
-      await postExchange(signed, this.transport, this.baseUrl),
+      await postExchange(
+        signedOrderSchema.parse({
+          action,
+          nonce,
+          signature: { r: s.r, s: s.s, v: Number(s.v) },
+          vaultAddress: this.options.vaultAddress,
+          expiresAfter: this.options.expiresAfter,
+        }),
+        this.transport,
+        this.baseUrl,
+      ),
       String(input.orderId),
     );
   }
   async getPositions(): Promise<Position[]> {
-    const res = await this.transport.fetch(`${this.baseUrl}/info`, {
+    const r = await this.transport.fetch(`${this.baseUrl}/info`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type: "clearinghouseState", user: this.walletAddress }),
     });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(`Hyperliquid info returned ${res.status}`);
-    return normalizePositions(json);
+    const j = await r.json().catch(() => null);
+    if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
+    return normalizePositions(j);
   }
 }
 function firstStatus(raw: unknown) {
-  const payload = raw as Record<string, unknown>;
-  const response = payload.response as Record<string, unknown> | undefined;
-  const data = response?.data as Record<string, unknown> | undefined;
-  const statuses = Array.isArray(data?.statuses) ? data.statuses : [];
-  return statuses[0];
+  const data = ((raw as any).response?.data?.statuses ?? []) as unknown[];
+  return data[0];
 }
 function normalizeOrderResult(raw: unknown): OrderResult {
-  const status = firstStatus(raw);
-  if (typeof status === "object" && status && "error" in status)
+  const st = firstStatus(raw);
+  if (st && typeof st === "object" && "error" in st)
     return orderResultSchema.parse({
       status: "rejected",
+      error: String((st as any).error),
       txHash: null,
       raw,
-      error: String((status as Record<string, unknown>).error),
     });
-  const resting = (status as Record<string, unknown> | undefined)?.resting as
-    | Record<string, unknown>
-    | undefined;
-  const filled = (status as Record<string, unknown> | undefined)?.filled as
-    | Record<string, unknown>
-    | undefined;
-  const src = filled ?? resting ?? (status as Record<string, unknown> | undefined) ?? {};
+  const resting = (st as any)?.resting,
+    filled = (st as any)?.filled,
+    src = filled ?? resting ?? {};
   return orderResultSchema.parse({
     orderId: src.oid !== undefined ? String(src.oid) : undefined,
-    status: filled
-      ? "filled"
-      : resting
-        ? "resting"
-        : String((raw as Record<string, unknown>).status ?? "submitted"),
-    filledQty: filled?.totalSz !== undefined ? Number(filled.totalSz) : undefined,
-    avgPrice: filled?.avgPx !== undefined ? Number(filled.avgPx) : undefined,
+    status: filled ? "filled" : resting ? "resting" : String((raw as any).status ?? "submitted"),
+    filledQty: filled?.totalSz ? Number(filled.totalSz) : undefined,
+    avgPrice: filled?.avgPx ? Number(filled.avgPx) : undefined,
     txHash: null,
     raw,
   });
 }
 function normalizeCancelResult(raw: unknown, orderId: string): CancelResult {
-  const status = firstStatus(raw);
-  if (typeof status === "object" && status && "error" in status)
+  const st = firstStatus(raw);
+  if (st && typeof st === "object" && "error" in st)
     return cancelResultSchema.parse({
       orderId,
       status: "rejected",
+      error: String((st as any).error),
       raw,
-      error: String((status as Record<string, unknown>).error),
     });
-  return cancelResultSchema.parse({ orderId, status: String(status ?? "submitted"), raw });
+  return cancelResultSchema.parse({ orderId, status: String(st ?? "submitted"), raw });
 }
 function normalizePositions(raw: unknown): Position[] {
-  const payload = raw as { assetPositions?: Array<{ position?: Record<string, unknown> }> };
-  return (payload.assetPositions ?? []).map((entry) => {
-    const p = entry.position ?? {};
+  return (((raw as any).assetPositions ?? []) as any[]).map((e) => {
+    const p = e.position ?? {};
     const size = Number(p.szi ?? 0);
     return positionSchema.parse({
       asset: String(p.coin ?? ""),
@@ -523,10 +442,7 @@ function normalizePositions(raw: unknown): Position[] {
       size: Math.abs(size),
       entryPrice: p.entryPx ? Number(p.entryPx) : undefined,
       unrealizedPnlUsd: p.unrealizedPnl ? Number(p.unrealizedPnl) : undefined,
-      leverage:
-        typeof p.leverage === "object" && p.leverage
-          ? Number((p.leverage as Record<string, unknown>).value ?? 0)
-          : undefined,
+      leverage: p.leverage ? Number(p.leverage.value ?? 0) : undefined,
     });
   });
 }

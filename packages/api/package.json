@@ -25,7 +25,7 @@
     "@stwd/webhooks": "workspace:*",
     "bs58": "^6.0.0",
     "drizzle-orm": "^0.44.5",
-    "hono": "^4.7.0",
+    "hono": "^4.12.18",
     "viem": "^2.30.0",
     "zod": "^4.3.6",
     "jose": "^6.2.1"

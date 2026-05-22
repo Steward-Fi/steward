@@ -706,6 +706,23 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
         });
       });
 
+      trackAuditEvent({
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: "vault.sign.typed_data.queued_for_approval",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          chainId: signRequest.chainId,
+          primaryType: body.primaryType,
+          policyResults: evaluation.results,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+
       dispatchWebhook(tenantId, agentId, "approval_required", {
         txId,
         results: evaluation.results,
@@ -733,6 +750,23 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       value: signRequest.value,
       chainId: signRequest.chainId,
       policyResults: evaluation.results,
+    });
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign.typed_data.rejected_by_policy",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: {
+        chainId: signRequest.chainId,
+        primaryType: body.primaryType,
+        policyResults: evaluation.results,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
     });
 
     dispatchWebhook(tenantId, agentId, "tx_rejected", {
@@ -771,6 +805,22 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       chainId: signRequest.chainId,
       policyResults: evaluation.results,
       signedAt: new Date(),
+    });
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign.typed_data",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: {
+        chainId: signRequest.chainId,
+        primaryType: body.primaryType,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
     });
 
     dispatchWebhook(tenantId, agentId, "tx_signed", { txId });
@@ -918,6 +968,24 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         });
       });
 
+      trackAuditEvent({
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: "vault.sign.solana.queued_for_approval",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          chainId,
+          to: toAddress,
+          value: txValue,
+          policyResults: evaluation.results,
+        },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+
       dispatchWebhook(tenantId, agentId, "approval_required", {
         txId,
         results: evaluation.results,
@@ -945,6 +1013,24 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       value: txValue,
       chainId,
       policyResults: evaluation.results,
+    });
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign.solana.rejected_by_policy",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: {
+        chainId,
+        to: toAddress,
+        value: txValue,
+        policyResults: evaluation.results,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
     });
 
     dispatchWebhook(tenantId, agentId, "tx_rejected", {
@@ -989,6 +1075,25 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
       console.error("[vault] Failed to record Solana spend:", err),
     );
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign.solana",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: {
+        chainId,
+        to: toAddress,
+        value: txValue,
+        broadcast: result.broadcast,
+        signature: result.broadcast ? result.signature : undefined,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
 
     dispatchWebhook(tenantId, agentId, "tx_signed", {
       txId,

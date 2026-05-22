@@ -10,6 +10,7 @@
 
 import { sql } from "drizzle-orm";
 import { Hono } from "hono";
+import { trackAuditEvent } from "../services/audit";
 import { type ApiResponse, type AppVariables, db, ensureAgentForTenant } from "../services/context";
 
 export const erc8004Routes = new Hono<{ Variables: AppVariables }>();
@@ -65,6 +66,19 @@ erc8004Routes.post("/:id/register-onchain", async (c) => {
       RETURNING id, status, created_at
     `);
     const rows = getRows(result);
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "erc8004.register",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { chainId, registryAddress, walletAddress: body.walletAddress ?? null },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
 
     return c.json<ApiResponse>({
       ok: true,
@@ -163,6 +177,24 @@ erc8004Routes.post("/:id/feedback", async (c) => {
         feedback_count = reputation_cache.feedback_count + 1,
         last_updated = NOW()
     `);
+
+    trackAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: tenantId,
+      action: "erc8004.feedback",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: {
+        chainId,
+        score,
+        taskId: body.taskId ?? null,
+        fromAddress: body.fromAddress ?? null,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
 
     return c.json<ApiResponse>({
       ok: true,
