@@ -211,7 +211,7 @@ jobs:
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
-          STEWARD_AUDIT_HMAC_KEY: "ci0000000000000000000000000000000000000000000000000000000000000ff"
+          STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run packages/api/src/index.ts > /tmp/steward-api-integration.log 2>&1 &
@@ -234,7 +234,7 @@ jobs:
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
-          STEWARD_AUDIT_HMAC_KEY: "ci0000000000000000000000000000000000000000000000000000000000000ff"
+          STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
 
       - name: Stop API test server
@@ -280,7 +280,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
-          STEWARD_AUDIT_HMAC_KEY: "ci0000000000000000000000000000000000000000000000000000000000000ff"
+          STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run start:local > /tmp/steward-fi-e2e.log 2>&1 &
@@ -336,8 +336,8 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
-          STEWARD_AUDIT_HMAC_KEY: "ci0000000000000000000000000000000000000000000000000000000000000ff"
-          STEWARD_KDF_SALT: "ci00000000000000000000000000000000000000000000000000000000000aa1"
+          STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+          STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           STEWARD_ALLOW_INSECURE_DB: "true"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
           PORT: "3200"
@@ -367,7 +367,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
-          STEWARD_KDF_SALT: "ci00000000000000000000000000000000000000000000000000000000000aa1"
+          STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           POSTGRES_DB: "steward_test"
           POSTGRES_USER: "steward"
           POSTGRES_PASSWORD: "steward_ci"

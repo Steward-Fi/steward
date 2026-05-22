@@ -104,7 +104,8 @@ describe.skipIf(SKIP)("retention sweep", () => {
       ON CONFLICT (id) DO NOTHING
     `);
     await db.execute(sql`
-      INSERT INTO agents (id, tenant_id, name) VALUES (${AGENT}, ${TENANT}, 'retention-agent')
+      INSERT INTO agents (id, tenant_id, name, wallet_address)
+      VALUES (${AGENT}, ${TENANT}, 'retention-agent', '0x0000000000000000000000000000000000000000')
       ON CONFLICT (id) DO NOTHING
     `);
 
