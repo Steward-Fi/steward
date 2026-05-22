@@ -57,6 +57,7 @@ services:
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:-}"
       SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
     ports:
       - "127.0.0.1:${PORT:-3200}:3200"
     healthcheck:
@@ -94,6 +95,7 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       REDIS_URL: "redis://redis:6379"
     ports:
       - "127.0.0.1:${STEWARD_PROXY_PORT:-8080}:8080"

@@ -100,7 +100,7 @@ describe.skipIf(SKIP)("retention sweep", () => {
 
     // We need a real agent FK; create a minimal tenant + agent.
     await db.execute(sql`
-      INSERT INTO tenants (id, name) VALUES (${TENANT}, 'retention-test')
+      INSERT INTO tenants (id, name, api_key_hash) VALUES (${TENANT}, 'retention-test', 'test-hash')
       ON CONFLICT (id) DO NOTHING
     `);
     await db.execute(sql`

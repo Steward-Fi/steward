@@ -47,11 +47,19 @@ function readPositiveInt(envName: string): number | undefined {
 async function deleteRows(query: ReturnType<typeof sql>): Promise<number> {
   const db = getDb();
   const res = (await db.execute(query)) as unknown;
-  // drizzle pg result shapes vary; cover both array (postgres-js) and { rowCount } (node-pg).
-  if (Array.isArray(res)) return res.length;
-  if (res && typeof res === "object" && "rowCount" in res) {
-    const rc = (res as { rowCount: number | null }).rowCount;
-    return typeof rc === "number" ? rc : 0;
+  // drizzle pg result shapes vary across drivers:
+  //   - postgres-js: returns an array (empty for DELETE without RETURNING) with a `.count` property
+  //   - node-pg: returns `{ rowCount }`
+  //   - pglite: returns `{ affectedRows }` or similar
+  if (Array.isArray(res)) {
+    const count = (res as unknown as { count?: number }).count;
+    if (typeof count === "number") return count;
+    return res.length;
+  }
+  if (res && typeof res === "object") {
+    const obj = res as { rowCount?: number | null; affectedRows?: number | null };
+    if (typeof obj.rowCount === "number") return obj.rowCount;
+    if (typeof obj.affectedRows === "number") return obj.affectedRows;
   }
   return 0;
 }
