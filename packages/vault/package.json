@@ -10,6 +10,9 @@
     "test": "bun test"
   },
   "dependencies": {
+    "@noble/curves": "^1.6.0",
+    "@scure/bip32": "^1.6.0",
+    "@scure/bip39": "^1.6.0",
     "@solana/web3.js": "^1",
     "@stwd/db": "workspace:*",
     "@stwd/shared": "workspace:*",

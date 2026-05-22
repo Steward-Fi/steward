@@ -940,7 +940,16 @@ function isAllowedSiwsUri(uri: string | undefined, domain: string): boolean {
   if (!uri) return false;
   try {
     const parsedUri = new URL(uri);
-    return parsedUri.protocol === "https:" && parsedUri.host === domain;
+    if (parsedUri.host !== domain) return false;
+    if (parsedUri.protocol === "https:") return true;
+    // http:// is only acceptable for loopback hosts. Production deployments
+    // never see localhost here, so the relaxation is naturally scoped to
+    // dev / e2e — no env flag needed.
+    if (parsedUri.protocol === "http:") {
+      const host = parsedUri.hostname;
+      return host === "localhost" || host === "127.0.0.1" || host === "::1";
+    }
+    return false;
   } catch {
     return false;
   }

@@ -1,4 +1,7 @@
+export type { EncryptedKey } from "./keystore";
 export { KeyStore } from "./keystore";
+export type { KeystoreBackend, KeystoreContext } from "./keystore-backend";
+export { backendFromKeyStore } from "./keystore-backend";
 export type { MatchedRoute } from "./route-matcher";
 export {
   findMatchingRoute,

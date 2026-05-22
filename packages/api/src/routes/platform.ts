@@ -32,7 +32,10 @@ import { trackAuditEvent } from "../services/audit";
 import { createAgentToken, parseAgentTokenScopes } from "../services/context";
 import { invalidateEmailAuthForTenant } from "./auth";
 
-function auditCtx(c: { req: { header(name: string): string | undefined }; get: (k: string) => unknown }): {
+function auditCtx(c: {
+  req: { header(name: string): string | undefined };
+  get: (k: string) => unknown;
+}): {
   ipAddress: string | null;
   userAgent: string | null;
   requestId: string | null;

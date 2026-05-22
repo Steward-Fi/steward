@@ -35,7 +35,7 @@
   "scripts": {
     "build": "tsc && cp src/styles.css dist/styles.css",
     "dev": "tsc --watch",
-    "test": "bun test src/__tests__"
+    "test": "for f in src/__tests__/*.test.*; do echo \"\\n▶ $f\"; bun test \"$f\" || exit 1; done"
   },
   "dependencies": {
     "@stwd/sdk": "^0.10.0"

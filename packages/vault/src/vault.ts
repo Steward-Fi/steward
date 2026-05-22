@@ -780,6 +780,91 @@ export class Vault {
   }
 
   /**
+   * Sign an EIP-7702 set-code authorization. Lets an EOA temporarily delegate
+   * execution to smart-contract code per transaction (Pectra, May 2025).
+   * Returns { contractAddress, chainId, nonce, r, s, yParity, v } which the
+   * caller attaches to the `authorizationList` of a type-4 transaction.
+   *
+   * Per EIP-7702, signing chainId=0 designates "any chain" — useful when the
+   * delegation target is chain-agnostic. The vault accepts 0 explicitly so
+   * callers can opt in; default is the chainId on the request.
+   */
+  async signAuthorization(
+    tenantId: string,
+    agentId: string,
+    params: { contractAddress: `0x${string}`; chainId: number; nonce: number },
+  ): Promise<{
+    contractAddress: `0x${string}`;
+    chainId: number;
+    nonce: number;
+    r: `0x${string}`;
+    s: `0x${string}`;
+    yParity: 0 | 1;
+  }> {
+    if (!/^0x[0-9a-fA-F]{40}$/.test(params.contractAddress)) {
+      throw new Error("contractAddress must be a 20-byte hex address");
+    }
+    if (!Number.isInteger(params.chainId) || params.chainId < 0) {
+      throw new Error("chainId must be a non-negative integer (0 = any chain)");
+    }
+    if (!Number.isInteger(params.nonce) || params.nonce < 0) {
+      throw new Error("nonce must be a non-negative integer");
+    }
+
+    const db = getDb();
+    const [agentRow] = await db
+      .select({ walletAddress: agents.walletAddress })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    if (!agentRow) throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    if (detectChainType(agentRow.walletAddress) !== "evm") {
+      throw new Error("signAuthorization requires an EVM agent");
+    }
+
+    let secretKey: string;
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+          isNull(encryptedChainKeys.venue),
+        ),
+      );
+    if (chainKey) {
+      secretKey = this.keyStore.decrypt({
+        ciphertext: chainKey.ciphertext,
+        iv: chainKey.iv,
+        tag: chainKey.tag,
+        salt: chainKey.salt,
+      });
+    } else {
+      const [legacyKey] = await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, agentId));
+      if (!legacyKey) throw new Error(`No EVM signing key for agent ${agentId}`);
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+    }
+
+    const account = privateKeyToAccount(secretKey as `0x${string}`);
+    const signed = await account.signAuthorization({
+      contractAddress: params.contractAddress,
+      chainId: params.chainId,
+      nonce: params.nonce,
+    });
+    return {
+      contractAddress: params.contractAddress,
+      chainId: params.chainId,
+      nonce: params.nonce,
+      r: signed.r as `0x${string}`,
+      s: signed.s as `0x${string}`,
+      yParity: signed.yParity as 0 | 1,
+    };
+  }
+
+  /**
    * Sign EIP-712 typed data (`eth_signTypedData_v4`).
    * Used for DEX approvals, ERC-20 permits, and structured data signatures.
    */

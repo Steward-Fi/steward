@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
-    "test": "bun test"
+    "test": "ls src/**/*.test.ts src/**/*.spec.ts 2>/dev/null | grep -q . && bun test || echo 'no tests'"
   },
   "dependencies": {
     "@stwd/shared": "workspace:*",

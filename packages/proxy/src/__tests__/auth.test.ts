@@ -7,6 +7,7 @@ import { authMiddleware } from "../middleware/auth";
 
 const JWT_SECRET = new TextEncoder().encode(process.env.STEWARD_JWT_SECRET || "dev-secret");
 const JWT_ISSUER = "steward";
+const JWT_AUDIENCE = "steward-api";
 
 async function signAgentToken(claims: Record<string, unknown>, jti?: string) {
   return new SignJWT({
@@ -18,6 +19,7 @@ async function signAgentToken(claims: Record<string, unknown>, jti?: string) {
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
     .setIssuer(JWT_ISSUER)
+    .setAudience(JWT_AUDIENCE)
     .setJti(jti ?? crypto.randomUUID())
     .setExpirationTime("1h")
     .sign(JWT_SECRET);
