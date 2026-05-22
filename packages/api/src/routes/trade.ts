@@ -44,7 +44,7 @@ const submitOrderSchema = z
     asset: z.string().min(1).optional(),
     side: z.enum(["buy", "sell"]),
     size: z.number().positive(),
-    leverage: z.number().positive(),
+    leverage: z.number().positive().default(1),
     limitPx: z.union([z.string(), z.number()]).optional(),
     limitPrice: z.union([z.string(), z.number()]).optional(),
     reduceOnly: z.boolean().default(false),
