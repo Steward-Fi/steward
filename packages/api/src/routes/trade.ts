@@ -46,7 +46,10 @@ const submitOrderSchema = z
     size: z.number().positive(),
     limitPx: z.union([z.string(), z.number()]).optional(),
     limitPrice: z.union([z.string(), z.number()]).optional(),
-    leverage: z.number().positive().max(2).default(1),
+    // No max here: the policy engine (`evaluateTradeOrder`) is the source of
+    // truth for leverage caps. Schema-level rejection would short-circuit the
+    // policy audit trail.
+    leverage: z.number().positive().default(1),
     reduceOnly: z.boolean().default(false),
     idempotencyKey: z.string().min(1).max(256).optional(),
   })
