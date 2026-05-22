@@ -800,10 +800,9 @@ export class Vault {
       throw new Error("EIP-712 typed data signing is not supported for Solana wallets");
     }
 
-    // Resolve signing key: prefer encryptedChainKeys (multi-wallet), fall back to legacy encryptedKeys.
-    // Note: venue-aware EIP-712 signing arrives in Worker A's PR, which extends
-    // SignTypedDataRequest with an optional venue field. This file stays on
-    // the legacy (agentId, chainFamily) lookup until then.
+    // Resolve signing key: prefer encryptedChainKeys (multi-wallet), scoped by
+    // venue when requested, then fall back to legacy encryptedKeys only for
+    // legacy NULL-venue requests.
     let secretKey: string;
     const [chainKey] = await db
       .select()
@@ -812,7 +811,9 @@ export class Vault {
         and(
           eq(encryptedChainKeys.agentId, request.agentId),
           eq(encryptedChainKeys.chainFamily, "evm"),
-          isNull(encryptedChainKeys.venue),
+          request.venue
+            ? eq(encryptedChainKeys.venue, request.venue)
+            : isNull(encryptedChainKeys.venue),
         ),
       );
 
@@ -824,6 +825,11 @@ export class Vault {
         salt: chainKey.salt,
       });
     } else {
+      if (request.venue) {
+        throw new Error(
+          `No signing key found for agent ${request.agentId} on venue ${request.venue}`,
+        );
+      }
       // Fallback: legacy encrypted_keys table
       const [legacyKey] = await db
         .select()

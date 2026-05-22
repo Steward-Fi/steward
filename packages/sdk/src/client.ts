@@ -95,15 +95,43 @@ export interface SignMessageResult {
 }
 
 export interface CreateTradeSessionInput {
+  agentId?: string;
   venue: "hyperliquid";
-  scopes: Array<"read" | "write">;
+  walletAddress?: string;
+  dailyCap?: number;
+  perOrderCap?: number;
+  leverageCap?: number;
+  allowedAssets?: Array<"BTC" | "ETH">;
   ttlSeconds?: number;
 }
 
 export interface CreateTradeSessionResult {
   sessionId: string;
-  jwt: string;
   expiresAt: string;
+}
+
+export interface RevokeTradeSessionResult {
+  sessionId: string;
+  revokedAt: string;
+}
+
+export interface TradeSessionState {
+  id: string;
+  agentId: string;
+  tenantId: string;
+  venue: "hyperliquid" | string;
+  walletId: string;
+  status: "active" | "revoked" | "expired";
+  dailySpendUsd: number;
+  dailyCapUsd: number;
+  remainingCapUsd: number;
+  perOrderCapUsd: number;
+  leverageCap: number;
+  allowedAssets: Array<"BTC" | "ETH">;
+  createdAt: string;
+  expiresAt: string;
+  revokedAt?: string | null;
+  revokedBy?: string | null;
 }
 
 export interface HyperliquidSubmitOrderInput {
@@ -197,12 +225,20 @@ export class StewardClient {
       if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
       return response.data;
     },
-    revoke: async (sessionId: string): Promise<void> => {
-      const response = await this.request<undefined, StewardErrorResponse>(
+    revoke: async (sessionId: string): Promise<RevokeTradeSessionResult> => {
+      const response = await this.request<RevokeTradeSessionResult, StewardErrorResponse>(
         `/v1/trade/sessions/${encodeURIComponent(sessionId)}/revoke`,
         { method: "POST" },
       );
       if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+      return response.data;
+    },
+    get: async (sessionId: string): Promise<TradeSessionState> => {
+      const response = await this.request<TradeSessionState, StewardErrorResponse>(
+        `/v1/trade/sessions/${encodeURIComponent(sessionId)}`,
+      );
+      if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+      return response.data;
     },
   };
 

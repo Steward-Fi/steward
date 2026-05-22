@@ -23,3 +23,19 @@ export type { VenueAllowlistContext } from "./evaluators/venue-allowlist";
 export { evaluateVenueAllowlist } from "./evaluators/venue-allowlist";
 export type { ReputationInput } from "./reputation";
 export { calculateInternalReputation } from "./reputation";
+export type {
+  EvaluationResult as TradeOrderEvaluationResult,
+  TradeOrderEvaluation,
+  TradeOrderEvaluator,
+  TradeOrderPolicyInput,
+  TradePolicySession,
+} from "./trade-order";
+export {
+  assetAllowlistEvaluator,
+  dailySpendCapEvaluator,
+  defaultTradeOrderEvaluators,
+  evaluateTradeOrder,
+  leverageCapEvaluator as tradeLeverageCapEvaluator,
+  perOrderCapEvaluator,
+  venueAllowlistEvaluator as tradeVenueAllowlistEvaluator,
+} from "./trade-order";
