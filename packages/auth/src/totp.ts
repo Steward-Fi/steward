@@ -83,7 +83,10 @@ async function hmacSha1(key: Uint8Array, message: Uint8Array): Promise<Uint8Arra
   const sig = await crypto.subtle.sign(
     "HMAC",
     cryptoKey,
-    message.buffer.slice(message.byteOffset, message.byteOffset + message.byteLength) as ArrayBuffer,
+    message.buffer.slice(
+      message.byteOffset,
+      message.byteOffset + message.byteLength,
+    ) as ArrayBuffer,
   );
   return new Uint8Array(sig);
 }

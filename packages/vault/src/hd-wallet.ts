@@ -131,12 +131,7 @@ export async function deriveSolanaKey(
   let key = initial.slice(0, 32);
   let chain = initial.slice(32, 64);
 
-  const indices = [
-    44 | 0x80000000,
-    501 | 0x80000000,
-    account | 0x80000000,
-    0 | 0x80000000,
-  ];
+  const indices = [44 | 0x80000000, 501 | 0x80000000, account | 0x80000000, 0 | 0x80000000];
   for (const idx of indices) {
     const data = new Uint8Array(37);
     data[0] = 0x00;
@@ -178,7 +173,8 @@ function uncompressSecp256k1(compressed: Uint8Array): Uint8Array {
     throw new Error("expected compressed secp256k1 public key (33 bytes, 0x02/0x03 prefix)");
   }
   // Defer to noble — @scure/bip32 depends on it, so it's already installed.
-  const { secp256k1 } = require("@noble/curves/secp256k1") as typeof import("@noble/curves/secp256k1");
+  const { secp256k1 } =
+    require("@noble/curves/secp256k1") as typeof import("@noble/curves/secp256k1");
   const point = secp256k1.ProjectivePoint.fromHex(compressed);
   return point.toRawBytes(false);
 }

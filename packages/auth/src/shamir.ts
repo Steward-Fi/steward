@@ -113,9 +113,7 @@ export function splitSecret(
     }
   }
 
-  return out.map((bytes) =>
-    bytes.map((b) => b.toString(16).padStart(2, "0")).join(""),
-  );
+  return out.map((bytes) => bytes.map((b) => b.toString(16).padStart(2, "0")).join(""));
 }
 
 function parseShare(hex: string): { x: number; y: Uint8Array } {
