@@ -811,7 +811,9 @@ export class Vault {
         and(
           eq(encryptedChainKeys.agentId, request.agentId),
           eq(encryptedChainKeys.chainFamily, "evm"),
-          request.venue ? eq(encryptedChainKeys.venue, request.venue) : isNull(encryptedChainKeys.venue),
+          request.venue
+            ? eq(encryptedChainKeys.venue, request.venue)
+            : isNull(encryptedChainKeys.venue),
         ),
       );
 
@@ -824,7 +826,9 @@ export class Vault {
       });
     } else {
       if (request.venue) {
-        throw new Error(`No signing key found for agent ${request.agentId} on venue ${request.venue}`);
+        throw new Error(
+          `No signing key found for agent ${request.agentId} on venue ${request.venue}`,
+        );
       }
       // Fallback: legacy encrypted_keys table
       const [legacyKey] = await db
