@@ -74,6 +74,7 @@ export class StewardService extends Service {
     this.client = new StewardClient({
       baseUrl: this.pluginConfig.apiUrl,
       apiKey: this.pluginConfig.apiKey,
+      bearerToken: this.pluginConfig.bearerToken,
       tenantId: this.pluginConfig.tenantId,
     });
 
@@ -119,6 +120,7 @@ export class StewardService extends Service {
     return {
       apiUrl,
       apiKey: settings.apiKey ?? env.STEWARD_API_KEY,
+      bearerToken: settings.bearerToken ?? env.STEWARD_JWT,
       agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId ?? "default",
       tenantId: settings.tenantId ?? env.STEWARD_TENANT_ID,
       autoRegister: settings.autoRegister ?? env.STEWARD_AUTO_REGISTER !== "false",

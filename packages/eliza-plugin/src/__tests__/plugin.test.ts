@@ -15,6 +15,7 @@ describe("@stwd/eliza-plugin", () => {
     const names = stewardPlugin.actions?.map((a) => a.name);
     expect(names).toContain("STEWARD_SIGN_TRANSACTION");
     expect(names).toContain("STEWARD_TRANSFER");
+    expect(names).toContain("SUBMIT_TRADE");
   });
 
   it("registers expected providers", () => {

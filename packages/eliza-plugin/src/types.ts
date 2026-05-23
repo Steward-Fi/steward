@@ -5,6 +5,7 @@
 export interface StewardPluginConfig {
   apiUrl: string;
   apiKey?: string;
+  bearerToken?: string;
   agentId: string;
   tenantId?: string;
   autoRegister: boolean;
