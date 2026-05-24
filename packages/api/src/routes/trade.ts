@@ -27,14 +27,14 @@ const createSessionSchema = z.object({
   agentId: z.string().min(1).optional(),
   venue: z.literal("hyperliquid"),
   walletAddress: z.string().min(1).optional(),
-  dailyCap: z.number().positive().max(100).default(100),
-  perOrderCap: z.number().positive().max(100).default(50),
-  leverageCap: z.number().positive().max(2).default(2),
+  dailyCap: z.number().positive().max(1_000).default(300),
+  perOrderCap: z.number().positive().max(500).default(100),
+  leverageCap: z.number().positive().max(10).default(5),
   allowedAssets: z
-    .array(z.enum(["BTC", "ETH"]))
+    .array(z.enum(["BTC", "ETH", "BNB", "SOL"]))
     .min(1)
-    .default(["BTC", "ETH"]),
-  ttlSeconds: z.number().int().positive().max(86_400).default(900),
+    .default(["BTC", "ETH", "BNB"]),
+  ttlSeconds: z.number().int().positive().max(86_400).default(3_600),
 });
 
 const submitOrderSchema = z
