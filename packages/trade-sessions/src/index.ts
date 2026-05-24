@@ -6,7 +6,7 @@ import { z } from "zod";
 export const tradeSessionStatusSchema = z.enum(["active", "revoked", "expired"]);
 export type TradeSessionStatus = z.infer<typeof tradeSessionStatusSchema>;
 
-export const allowedAssetSchema = z.enum(["BTC", "ETH"]);
+export const allowedAssetSchema = z.enum(["BTC", "ETH", "BNB", "SOL"]);
 export type AllowedAsset = z.infer<typeof allowedAssetSchema>;
 
 export const tradeSessionSchema = z.object({
