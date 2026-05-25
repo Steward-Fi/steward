@@ -578,6 +578,7 @@ function AllowedChainsEditor({
     { caip2: "eip155:1", name: "Ethereum", symbol: "ETH" },
     { caip2: "eip155:8453", name: "Base", symbol: "ETH" },
     { caip2: "eip155:137", name: "Polygon", symbol: "POL" },
+    { caip2: "eip155:100", name: "Gnosis", symbol: "xDAI" },
     { caip2: "eip155:42161", name: "Arbitrum", symbol: "ETH" },
     { caip2: "eip155:56", name: "BSC", symbol: "BNB" },
     {

@@ -512,6 +512,7 @@ export const SUPPORTED_CHAINS = {
   ethereum: 1,
   bsc: 56,
   bscTestnet: 97,
+  gnosis: 100,
   polygon: 137,
   base: 8453,
   arbitrum: 42161,
@@ -554,6 +555,13 @@ export const CHAIN_META: Record<number, ChainMeta> = {
     symbol: "tBNB",
     explorerUrl: "https://testnet.bscscan.com",
     explorerTxUrl: "https://testnet.bscscan.com/tx/",
+  },
+  100: {
+    id: 100,
+    name: "Gnosis",
+    symbol: "xDAI",
+    explorerUrl: "https://gnosisscan.io",
+    explorerTxUrl: "https://gnosisscan.io/tx/",
   },
   137: {
     id: 137,

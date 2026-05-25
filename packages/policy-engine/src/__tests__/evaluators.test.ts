@@ -727,6 +727,16 @@ describe("Allowed Chains Policy", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("passes when request chainId is Gnosis", async () => {
+    const rule = makeAllowedChainsRule(["eip155:100"]);
+    const ctx = makeContext({
+      request: { ...makeContext().request, chainId: 100 },
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
+  });
+
   it("fails when request chainId is not in the allowed list", async () => {
     const rule = makeAllowedChainsRule(["eip155:1"]); // Ethereum only
     const ctx = makeContext({

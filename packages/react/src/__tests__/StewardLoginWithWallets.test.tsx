@@ -78,6 +78,18 @@ describe("<StewardLoginWithWallets />", () => {
     expect(html).toContain('data-show-wallets="{&quot;evm&quot;:true,&quot;solana&quot;:true}"');
   });
 
+  test("default EVM config includes Gnosis", () => {
+    renderToString(
+      React.createElement(StewardLoginWithWallets, {
+        evm: { projectId: "p" },
+      }),
+    );
+    const opts = mockCreateDefaultWagmiConfig.mock.calls.at(-1)?.[0] as {
+      chains?: Array<{ id: number }>;
+    };
+    expect(opts.chains?.map((chain) => chain.id)).toContain(100);
+  });
+
   test("enable={{ evm: false }} skips EVM wrap", () => {
     const html = renderToString(
       React.createElement(StewardLoginWithWallets, {

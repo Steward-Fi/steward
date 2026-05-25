@@ -16,6 +16,7 @@ const CHAIN_IDS: Record<string, number> = {
   "base-sepolia": 84532,
   bsc: 56,
   "bsc-testnet": 97,
+  gnosis: 100,
 };
 
 /**
@@ -69,11 +70,11 @@ export const transferAction: Action = {
     },
     {
       name: "chain",
-      description: "Target chain name (base, ethereum, bsc)",
+      description: "Target chain name (base, ethereum, bsc, gnosis)",
       required: false,
       schema: {
         type: "string",
-        enum: ["base", "ethereum", "bsc", "base-sepolia", "bsc-testnet"],
+        enum: ["base", "ethereum", "bsc", "gnosis", "base-sepolia", "bsc-testnet"],
       },
     },
   ],

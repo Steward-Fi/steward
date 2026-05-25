@@ -5,8 +5,11 @@ import {
   chainFromCaip2,
   chainFromNumeric,
   fromCaip2,
+  getChainMeta,
   getChainProviderByCaip2,
   getChainProviderByNumeric,
+  getExplorerTxLink,
+  SUPPORTED_CHAINS,
   toCaip2,
 } from "../index";
 
@@ -31,6 +34,18 @@ describe("CHAINS registry", () => {
     expect(chain.name).toBe("Gnosis");
     expect(chain.symbol).toBe("xDAI");
     expect(chain.testnet).toBe(false);
+  });
+
+  it("exposes Gnosis through legacy metadata helpers", () => {
+    expect(SUPPORTED_CHAINS.gnosis).toBe(100);
+    expect(getChainMeta(100)).toEqual({
+      id: 100,
+      name: "Gnosis",
+      symbol: "xDAI",
+      explorerUrl: "https://gnosisscan.io",
+      explorerTxUrl: "https://gnosisscan.io/tx/",
+    });
+    expect(getExplorerTxLink(100, "0xabc")).toBe("https://gnosisscan.io/tx/0xabc");
   });
 
   it("has correct metadata for Polygon", () => {

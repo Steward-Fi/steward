@@ -3,7 +3,7 @@
  */
 
 import { type Chain, createPublicClient, formatUnits, http } from "viem";
-import { arbitrum, base, baseSepolia, bsc, mainnet, polygon } from "viem/chains";
+import { arbitrum, base, baseSepolia, bsc, gnosis, mainnet, polygon } from "viem/chains";
 
 // ─── ERC-20 ABI (minimal for balance queries) ────────────────────────────────
 
@@ -127,6 +127,24 @@ export const COMMON_TOKENS: Record<number, TokenDef[]> = {
       decimals: 18,
     },
   ],
+  // Gnosis
+  100: [
+    {
+      address: "0xddafbb505ad214d7b80b1f830fccc89b60fb7a83",
+      symbol: "USDC",
+      decimals: 6,
+    },
+    {
+      address: "0x4ECaBa5870353805a9F068101A40E0f32ed605C6",
+      symbol: "USDT",
+      decimals: 6,
+    },
+    {
+      address: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d",
+      symbol: "WXDAI",
+      decimals: 18,
+    },
+  ],
   // Arbitrum
   42161: [
     {
@@ -152,6 +170,7 @@ export const COMMON_TOKENS: Record<number, TokenDef[]> = {
 const CHAINS: Record<number, Chain> = {
   1: mainnet,
   56: bsc,
+  100: gnosis,
   137: polygon,
   8453: base,
   42161: arbitrum,
@@ -161,6 +180,7 @@ const CHAINS: Record<number, Chain> = {
 const CHAIN_RPCS: Record<number, string> = {
   1: "https://eth.llamarpc.com",
   56: "https://bsc-dataseed.binance.org",
+  100: "https://rpc.gnosischain.com",
   137: "https://polygon-rpc.com",
   8453: "https://mainnet.base.org",
   42161: "https://arb1.arbitrum.io/rpc",

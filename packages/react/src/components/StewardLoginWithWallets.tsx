@@ -21,7 +21,7 @@
 import { type ReactNode, useMemo } from "react";
 import type { Chain } from "viem";
 import type { Config as WagmiConfig } from "wagmi";
-import { arbitrum, base, bsc, mainnet, optimism, polygon } from "wagmi/chains";
+import { arbitrum, base, bsc, gnosis, mainnet, optimism, polygon } from "wagmi/chains";
 import {
   createDefaultWagmiConfig,
   EVMWalletProvider,
@@ -39,7 +39,7 @@ import { StewardLogin } from "./StewardLogin.js";
 const STEWARD_DEFAULT_WALLETCONNECT_PROJECT_ID = "2c7ddf841a48e522748c5e2782d73443";
 
 /** Default chain set for the bundled EVM wagmi config. */
-const DEFAULT_EVM_CHAINS = [mainnet, base, polygon, optimism, arbitrum, bsc] as const;
+const DEFAULT_EVM_CHAINS = [mainnet, base, polygon, gnosis, optimism, arbitrum, bsc] as const;
 
 /** Default Solana JSON-RPC endpoint. Production apps should pass a private RPC
  *  (Helius, QuickNode) via `solana.endpoint`. The public mainnet-beta

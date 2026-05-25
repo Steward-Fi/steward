@@ -27,6 +27,12 @@ export const REGISTRY_CONFIGS: Record<number, RegistryConfig> = {
     rpcUrl: "https://bsc-dataseed.binance.org",
     registryAddress: PLACEHOLDER_REGISTRY,
   },
+  100: {
+    chainId: 100,
+    name: "Gnosis",
+    rpcUrl: "https://rpc.gnosischain.com",
+    registryAddress: PLACEHOLDER_REGISTRY,
+  },
   42161: {
     chainId: 42161,
     name: "Arbitrum",

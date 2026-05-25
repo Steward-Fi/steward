@@ -50,6 +50,17 @@ describe("Token constants", () => {
     expect(polyTokens.length).toBeGreaterThanOrEqual(3);
   });
 
+  it("should have common tokens for Gnosis (100)", () => {
+    const gnosisTokens = COMMON_TOKENS[100];
+    expect(gnosisTokens).toBeDefined();
+    expect(gnosisTokens.length).toBeGreaterThanOrEqual(3);
+
+    const symbols = gnosisTokens.map((t) => t.symbol);
+    expect(symbols).toContain("USDC");
+    expect(symbols).toContain("USDT");
+    expect(symbols).toContain("WXDAI");
+  });
+
   it("should have common tokens for Arbitrum (42161)", () => {
     const arbTokens = COMMON_TOKENS[42161];
     expect(arbTokens).toBeDefined();

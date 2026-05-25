@@ -282,6 +282,7 @@ export const SUPPORTED_CHAINS = {
   baseSepolia: 84532,
   bsc: 56,
   bscTestnet: 97,
+  gnosis: 100,
 } as const;
 
 // ─── CAIP-2 Chain Identifiers ───
@@ -337,6 +338,14 @@ export const CHAINS: Record<string, ChainIdentifier> = {
     name: "BSC Testnet",
     symbol: "tBNB",
     testnet: true,
+  },
+  "eip155:100": {
+    caip2: "eip155:100",
+    numericId: 100,
+    family: "evm",
+    name: "Gnosis",
+    symbol: "xDAI",
+    testnet: false,
   },
   "eip155:137": {
     caip2: "eip155:137",

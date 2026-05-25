@@ -36,10 +36,11 @@
   "homepage": "https://steward.fi",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Steward-Fi/steward"
+    "url": "git+https://github.com/Steward-Fi/steward.git"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
     "bs58": "^6.0.0"
