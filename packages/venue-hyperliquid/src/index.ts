@@ -22,7 +22,7 @@ export const hyperliquidOrderSchema = z.object({
     .object({ limit: z.object({ tif: z.enum(["Alo", "Ioc", "Gtc"]) }).optional() })
     .optional(),
   reduceOnly: z.boolean().default(false),
-  leverage: z.number().positive().max(2).optional(),
+  leverage: z.number().positive().max(20).optional(),
   nonce: z.number().int().positive().optional(),
 });
 export type HyperliquidOrder = z.input<typeof hyperliquidOrderSchema>;
