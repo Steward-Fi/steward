@@ -94,7 +94,18 @@ export interface SignMessageResult {
   signature: string;
 }
 
-export type HyperliquidAsset = "BTC" | "ETH" | "BNB" | "SOL" | "AVAX" | "ARB" | "OP";
+export type HyperliquidAsset =
+  | "BTC"
+  | "ETH"
+  | "BNB"
+  | "SOL"
+  | "AVAX"
+  | "ARB"
+  | "OP"
+  | "NEAR"
+  | "HYPE"
+  | "ZEC"
+  | "XMR";
 
 export interface CreateTradeSessionInput {
   agentId?: string;
