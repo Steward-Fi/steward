@@ -33,9 +33,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Authenticate with GHCR only when publishing a tagged release image.
+      # Authenticate with GHCR when publishing images from push events.
       - name: Login to GHCR
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -61,14 +61,13 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
-      # Build on branch pushes and publish only on version tags. Branch builds still
-      # validate the Dockerfile, but avoid failing on repo tokens that cannot write
-      # to the org GHCR package.
+      # Build pull requests to validate the Dockerfile; publish images for pushes
+      # to develop and version tags so deploys can pull the expected tags.
       - name: Build and optionally push
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          push: ${{ github.event_name == 'push' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
