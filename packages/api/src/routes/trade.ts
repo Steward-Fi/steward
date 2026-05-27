@@ -3,6 +3,7 @@ import { evaluateTradeOrder } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
 import { TradeSessionManager } from "@stwd/trade-sessions";
 import {
+  getMarketableLimitPx,
   HyperliquidAdapter,
   type HyperliquidOrder,
   hyperliquidAssetSchema,
@@ -27,11 +28,11 @@ const createSessionSchema = z.object({
   agentId: z.string().min(1).optional(),
   venue: z.literal("hyperliquid"),
   walletAddress: z.string().min(1).optional(),
-  dailyCap: z.number().positive().max(1_000).default(300),
-  perOrderCap: z.number().positive().max(500).default(100),
-  leverageCap: z.number().positive().max(10).default(5),
+  dailyCap: z.number().positive().max(50_000).default(300),
+  perOrderCap: z.number().positive().max(10_000).default(100),
+  leverageCap: z.number().positive().max(50).default(5),
   allowedAssets: z
-    .array(z.enum(["BTC", "ETH", "BNB", "SOL"]))
+    .array(z.enum(["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP"]))
     .min(1)
     .default(["BTC", "ETH", "BNB"]),
   ttlSeconds: z.number().int().positive().max(86_400).default(3_600),
@@ -345,44 +346,11 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Active Hyperliquid session required" }, 403);
   }
   const coin = body.coin ?? body.asset;
-  const sizeUsd = body.size * Number(body.limitPx ?? body.limitPrice ?? 1);
-  const policy = evaluateTradeOrder(
-    {
-      venue: session.venue,
-      allowedVenues: [session.venue],
-      leverageCap: session.leverageCap,
-      allowedAssets: session.allowedAssets,
-      dailySpendUsd: session.dailySpendUsd,
-      dailyCapUsd: session.dailyCapUsd,
-      perOrderCapUsd: session.perOrderCapUsd,
-    },
-    {
-      venue: "hyperliquid",
-      asset: coin,
-      leverage: body.leverage,
-      estimatedOrderUsd: sizeUsd,
-    },
-  );
-  if (!policy.allow) {
-    const reason = policy.reason ?? "order violates trading policy";
-    await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
-      sessionId: session.id,
-      venue: "hyperliquid",
-      asset: coin,
-      leverage: body.leverage,
-      size: body.size,
-      limitPx: body.limitPx ?? body.limitPrice,
-      sizeUsd,
-      dailySpendUsd: session.dailySpendUsd,
-      reason,
-    });
-    return c.json({ code: "policy-violation", reason }, 400);
-  }
 
   // Re-validate against the Hyperliquid adapter's strict asset enum. The
-  // session-level allowlist (BTC/ETH) is covered by evaluateTradeOrder; this
-  // second check defends the adapter contract if the session ever permits
-  // a coin the adapter does not implement.
+  // session-level allowlist is covered by evaluateTradeOrder; this second check
+  // defends the adapter contract if the session ever permits a coin the adapter
+  // does not implement.
   const parsedAsset = hyperliquidAssetSchema.safeParse(coin);
   if (!parsedAsset.success) {
     const reason = `asset-allowlist: asset ${coin} is not supported by Hyperliquid adapter`;
@@ -393,6 +361,52 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
       reason,
     });
     return c.json({ code: "policy-violation", reason }, 400);
+  }
+
+  const sessionPolicy = {
+    venue: session.venue,
+    allowedVenues: [session.venue],
+    leverageCap: session.leverageCap,
+    allowedAssets: session.allowedAssets,
+    dailySpendUsd: session.dailySpendUsd,
+    dailyCapUsd: session.dailyCapUsd,
+    perOrderCapUsd: session.perOrderCapUsd,
+  };
+  const orderPolicy = (estimatedOrderUsd: number) =>
+    evaluateTradeOrder(sessionPolicy, {
+      venue: "hyperliquid",
+      asset: coin,
+      leverage: body.leverage,
+      estimatedOrderUsd,
+    });
+  const rejectPolicy = async (reason: string, sizeUsd: number, limitPx?: string | number) => {
+    await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+      sessionId: session.id,
+      venue: "hyperliquid",
+      asset: coin,
+      leverage: body.leverage,
+      size: body.size,
+      limitPx,
+      sizeUsd,
+      dailySpendUsd: session.dailySpendUsd,
+      reason,
+    });
+    return c.json({ code: "policy-violation", reason }, 400);
+  };
+
+  const limitPx = body.limitPx ?? body.limitPrice;
+  if (limitPx === undefined) {
+    const preliminaryPolicy = orderPolicy(0);
+    if (!preliminaryPolicy.allow) {
+      return rejectPolicy(preliminaryPolicy.reason ?? "order violates trading policy", 0);
+    }
+  }
+  const policyLimitPx =
+    limitPx ?? (await getMarketableLimitPx(parsedAsset.data, body.side === "buy"));
+  const sizeUsd = body.size * Number(policyLimitPx);
+  const policy = orderPolicy(sizeUsd);
+  if (!policy.allow) {
+    return rejectPolicy(policy.reason ?? "order violates trading policy", sizeUsd, policyLimitPx);
   }
 
   const walletAddress = session.walletId;
@@ -406,7 +420,7 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     asset: parsedAsset.data,
     side: body.side,
     size: body.size,
-    limitPx: body.limitPx ?? body.limitPrice,
+    limitPx: policyLimitPx,
     leverage: body.leverage,
     reduceOnly: body.reduceOnly,
   };
