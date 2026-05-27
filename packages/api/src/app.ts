@@ -90,6 +90,8 @@ app.use(
 
 app.use("/agents", (c, next) => tenantAuth(c, next));
 app.use("/agents/*", (c, next) => tenantAuth(c, next));
+app.use("/v1/agents", (c, next) => tenantAuth(c, next));
+app.use("/v1/agents/*", (c, next) => tenantAuth(c, next));
 app.use("/vault/*", (c, next) => tenantAuth(c, next));
 app.use("/secrets", (c, next) => tenantAuth(c, next));
 app.use("/secrets/*", (c, next) => tenantAuth(c, next));
@@ -148,6 +150,7 @@ app.route("/auth", authRoutes);
 app.route("/platform", platformRoutes);
 app.route("/user", userRoutes);
 app.route("/agents", agentRoutes);
+app.route("/v1/agents", agentRoutes);
 app.route("/vault", vaultRoutes);
 app.route("/secrets", secretsRoutes);
 // tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler

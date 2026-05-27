@@ -4,10 +4,10 @@
  * Mount: app.route("/agents", agentRoutes)
  */
 
-import { isPersistedPolicyType, toPersistedPolicyRule } from "@stwd/db";
+import { agentPolicies, isPersistedPolicyType, toPersistedPolicyRule } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
-import { trackAuditEvent } from "../services/audit";
+import { trackAuditEvent, writeAuditEvent } from "../services/audit";
 import {
   AGENT_TOKEN_EXPIRY,
   type AgentIdentity,
@@ -36,6 +36,110 @@ import {
 } from "../services/context";
 
 export const agentRoutes = new Hono<{ Variables: AppVariables }>();
+
+const TRADE_POLICY_DEFAULTS = {
+  dailyCap: 1000,
+  perOrderCap: 500,
+  leverageCap: 10,
+  allowedAssets: ["BTC", "ETH", "BNB"],
+  allowedVenues: ["hyperliquid"],
+} as const;
+
+const TRADE_POLICY_LAYER_1_MAX = {
+  dailyCap: 50_000,
+  perOrderCap: 10_000,
+  leverageCap: 50,
+} as const;
+
+type AgentTradePolicyResponse = {
+  agentId: string;
+  dailyCap: number;
+  perOrderCap: number;
+  leverageCap: number;
+  allowedAssets: string[];
+  allowedVenues: string[];
+  updatedAt: string;
+  updatedBy: string;
+  updatedReason: string | null;
+};
+
+type AgentTradePolicySnapshot = Omit<
+  AgentTradePolicyResponse,
+  "updatedAt" | "updatedBy" | "updatedReason"
+>;
+
+type AgentTradePolicyPatch = {
+  dailyCap?: unknown;
+  perOrderCap?: unknown;
+  leverageCap?: unknown;
+  allowedAssets?: unknown;
+  allowedVenues?: unknown;
+  reason?: unknown;
+  multisigApproval?: unknown;
+};
+
+function parseNumericPolicyValue(value: string | number): number {
+  return typeof value === "number" ? value : Number(value);
+}
+
+function policyRowToResponse(row: typeof agentPolicies.$inferSelect): AgentTradePolicyResponse {
+  return {
+    agentId: row.agentId,
+    dailyCap: parseNumericPolicyValue(row.dailyCapUsd),
+    perOrderCap: parseNumericPolicyValue(row.perOrderCapUsd),
+    leverageCap: parseNumericPolicyValue(row.leverageCap),
+    allowedAssets: row.allowedAssets,
+    allowedVenues: row.allowedVenues,
+    updatedAt: row.updatedAt.toISOString(),
+    updatedBy: row.updatedBy,
+    updatedReason: row.updatedReason ?? null,
+  };
+}
+
+function defaultPolicySnapshot(agentId: string): AgentTradePolicySnapshot {
+  return {
+    agentId,
+    dailyCap: TRADE_POLICY_DEFAULTS.dailyCap,
+    perOrderCap: TRADE_POLICY_DEFAULTS.perOrderCap,
+    leverageCap: TRADE_POLICY_DEFAULTS.leverageCap,
+    allowedAssets: [...TRADE_POLICY_DEFAULTS.allowedAssets],
+    allowedVenues: [...TRADE_POLICY_DEFAULTS.allowedVenues],
+  };
+}
+
+function policyDiff(before: AgentTradePolicySnapshot, after: AgentTradePolicyResponse) {
+  return {
+    dailyCap: { before: before.dailyCap, after: after.dailyCap },
+    perOrderCap: { before: before.perOrderCap, after: after.perOrderCap },
+    leverageCap: { before: before.leverageCap, after: after.leverageCap },
+    allowedAssets: { before: before.allowedAssets, after: after.allowedAssets },
+    allowedVenues: { before: before.allowedVenues, after: after.allowedVenues },
+  };
+}
+
+function validatePolicyNumber(
+  name: "dailyCap" | "perOrderCap" | "leverageCap",
+  value: unknown,
+): number | string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return `${name} must be a positive number`;
+  }
+  if (value > TRADE_POLICY_LAYER_1_MAX[name]) {
+    return `${name} exceeds platform ceiling ${TRADE_POLICY_LAYER_1_MAX[name]}`;
+  }
+  return value;
+}
+
+function validatePolicyStringArray(name: string, value: unknown): string[] | string {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((item) => typeof item !== "string" || item.length === 0)
+  ) {
+    return `${name} must be a non-empty string array`;
+  }
+  return [...new Set(value)];
+}
 
 // ─── Create agent ─────────────────────────────────────────────────────────────
 
@@ -260,6 +364,178 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
     const message = e instanceof Error ? e.message : "Unknown error";
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
   }
+});
+
+// ─── Agent trade policy ──────────────────────────────────────────────────────
+
+agentRoutes.get("/:agentId/policy", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const [policy] = await db
+    .select()
+    .from(agentPolicies)
+    .where(and(eq(agentPolicies.agentId, agentId), eq(agentPolicies.tenantId, tenantId)));
+
+  if (!policy) {
+    return c.json<ApiResponse<{ defaults: typeof TRADE_POLICY_DEFAULTS; message: string }>>(
+      {
+        ok: false,
+        error: "Agent policy not found",
+        data: {
+          defaults: TRADE_POLICY_DEFAULTS,
+          message: "No agent policy row exists. Defaults apply until PUT creates one.",
+        },
+      },
+      404,
+    );
+  }
+
+  return c.json<ApiResponse<AgentTradePolicyResponse>>({
+    ok: true,
+    data: policyRowToResponse(policy),
+  });
+});
+
+agentRoutes.put("/:agentId/policy", async (c) => {
+  if (c.get("authType") !== "agent-token") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent policy updates require agent JWT authentication" },
+      403,
+    );
+  }
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const body = await safeJsonParse<AgentTradePolicyPatch>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  if (typeof body.reason !== "string" || body.reason.trim().length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "reason is required" }, 400);
+  }
+
+  const [existing] = await db
+    .select()
+    .from(agentPolicies)
+    .where(and(eq(agentPolicies.agentId, agentId), eq(agentPolicies.tenantId, tenantId)));
+  const before = existing ? policyRowToResponse(existing) : defaultPolicySnapshot(agentId);
+
+  const nextDailyCap =
+    body.dailyCap === undefined ? before.dailyCap : validatePolicyNumber("dailyCap", body.dailyCap);
+  const nextPerOrderCap =
+    body.perOrderCap === undefined
+      ? before.perOrderCap
+      : validatePolicyNumber("perOrderCap", body.perOrderCap);
+  const nextLeverageCap =
+    body.leverageCap === undefined
+      ? before.leverageCap
+      : validatePolicyNumber("leverageCap", body.leverageCap);
+  const nextAllowedAssets =
+    body.allowedAssets === undefined
+      ? before.allowedAssets
+      : validatePolicyStringArray("allowedAssets", body.allowedAssets);
+  const nextAllowedVenues =
+    body.allowedVenues === undefined
+      ? before.allowedVenues
+      : validatePolicyStringArray("allowedVenues", body.allowedVenues);
+
+  const validationError = [
+    nextDailyCap,
+    nextPerOrderCap,
+    nextLeverageCap,
+    nextAllowedAssets,
+    nextAllowedVenues,
+  ].find((value) => typeof value === "string");
+  if (typeof validationError === "string") {
+    return c.json<ApiResponse>({ ok: false, error: validationError }, 400);
+  }
+
+  const dailyCapValue = nextDailyCap as number;
+  const perOrderCapValue = nextPerOrderCap as number;
+  const leverageCapValue = nextLeverageCap as number;
+  const allowedAssetsValue = nextAllowedAssets as string[];
+  const allowedVenuesValue = nextAllowedVenues as string[];
+
+  if (perOrderCapValue > dailyCapValue) {
+    return c.json<ApiResponse>({ ok: false, error: "perOrderCap cannot exceed dailyCap" }, 400);
+  }
+
+  const updatedBy = c.get("agentSubject") ?? `agent:${agentId}`;
+  const updatedReason = body.reason.trim();
+  const [upserted] = await db
+    .insert(agentPolicies)
+    .values({
+      agentId,
+      tenantId,
+      dailyCapUsd: String(dailyCapValue),
+      perOrderCapUsd: String(perOrderCapValue),
+      leverageCap: String(leverageCapValue),
+      allowedAssets: allowedAssetsValue,
+      allowedVenues: allowedVenuesValue,
+      updatedAt: new Date(),
+      updatedBy,
+      updatedReason,
+    })
+    .onConflictDoUpdate({
+      target: agentPolicies.agentId,
+      set: {
+        dailyCapUsd: String(dailyCapValue),
+        perOrderCapUsd: String(perOrderCapValue),
+        leverageCap: String(leverageCapValue),
+        allowedAssets: allowedAssetsValue,
+        allowedVenues: allowedVenuesValue,
+        updatedAt: new Date(),
+        updatedBy,
+        updatedReason,
+      },
+    })
+    .returning();
+
+  const after = policyRowToResponse(upserted);
+  const diff = policyDiff(before, after);
+  await writeAuditEvent({
+    tenantId,
+    actorType: "agent",
+    actorId: updatedBy,
+    action: "agent.policy.updated",
+    resourceType: "agent_policy",
+    resourceId: agentId,
+    metadata: {
+      agentId,
+      reason: updatedReason,
+      diff,
+      before,
+      after,
+      multisigApprovalProvided: body.multisigApproval !== undefined,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
+  return c.json<
+    ApiResponse<{ policy: AgentTradePolicyResponse; diff: ReturnType<typeof policyDiff> }>
+  >({
+    ok: true,
+    data: { policy: after, diff },
+  });
 });
 
 // ─── Get agent ────────────────────────────────────────────────────────────────

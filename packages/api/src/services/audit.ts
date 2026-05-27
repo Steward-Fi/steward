@@ -116,9 +116,12 @@ export async function writeAuditEvent(ev: AuditEventInput): Promise<void> {
       sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${ev.tenantId}`}, 0))`,
     );
 
-    const headRows = (await tx.execute(
+    const headResult = (await tx.execute(
       sql`SELECT seq, hmac FROM audit_events WHERE tenant_id = ${ev.tenantId} ORDER BY seq DESC LIMIT 1`,
-    )) as Array<{ seq: number | string; hmac: unknown }>;
+    )) as
+      | Array<{ seq: number | string; hmac: unknown }>
+      | { rows?: Array<{ seq: number | string; hmac: unknown }> };
+    const headRows = Array.isArray(headResult) ? headResult : (headResult.rows ?? []);
     const head = headRows[0];
     const seq = head ? Number(head.seq) + 1 : 1;
     const prevHash = head ? toU8(head.hmac) : ZERO_HASH;

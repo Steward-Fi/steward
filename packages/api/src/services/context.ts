@@ -278,6 +278,7 @@ export type AppVariables = {
   userId?: string;
   tenantRole?: string;
   agentScope?: string;
+  agentSubject?: string;
   authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt";
 };
 
@@ -412,6 +413,11 @@ export async function tenantAuth(
         if (payload.userId) c.set("userId", payload.userId);
         if (isAgentToken) {
           c.set("agentScope", payload.agentId);
+          const tokenSubject = (payload as { sub?: unknown }).sub;
+          c.set(
+            "agentSubject",
+            typeof tokenSubject === "string" ? tokenSubject : `agent:${payload.agentId}`,
+          );
           c.set("authType", "agent-token");
         } else {
           c.set("authType", "session-jwt");

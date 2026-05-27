@@ -1,4 +1,4 @@
-import { proxyAuditLog } from "@stwd/db";
+import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
 import { evaluateTradeOrder } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
 import { TradeSessionManager } from "@stwd/trade-sessions";
@@ -79,6 +79,14 @@ function canAccessAgent(c: Context<{ Variables: AppVariables }>, agentId: string
 
 function responseData<T>(data: T): ApiResponse<T> {
   return { ok: true, data };
+}
+
+function hasOwnBodyValue(body: unknown, key: string): boolean {
+  return typeof body === "object" && body !== null && Object.hasOwn(body, key);
+}
+
+function policyViolation(message: string) {
+  return { code: "policy-violation", message };
 }
 
 async function auditTradeEvent(
@@ -213,6 +221,65 @@ tradeRoutes.post("/sessions", async (c) => {
 
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const [agentPolicy] = await getDb()
+    .select()
+    .from(agentPolicies)
+    .where(eq(agentPolicies.agentId, agentId));
+
+  let sessionDailyCap = dailyCap;
+  let sessionPerOrderCap = perOrderCap;
+  let sessionLeverageCap = leverageCap;
+  let sessionAllowedAssets = allowedAssets;
+
+  if (agentPolicy) {
+    if (agentPolicy.tenantId !== tenantId) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+    }
+
+    const policyDailyCap = Number(agentPolicy.dailyCapUsd);
+    const policyPerOrderCap = Number(agentPolicy.perOrderCapUsd);
+    const policyLeverageCap = Number(agentPolicy.leverageCap);
+
+    if (hasOwnBodyValue(raw, "dailyCap") && dailyCap > policyDailyCap) {
+      return c.json(
+        policyViolation(`session cap ${dailyCap} exceeds agent policy cap ${policyDailyCap}`),
+        400,
+      );
+    }
+    if (hasOwnBodyValue(raw, "perOrderCap") && perOrderCap > policyPerOrderCap) {
+      return c.json(
+        policyViolation(`session cap ${perOrderCap} exceeds agent policy cap ${policyPerOrderCap}`),
+        400,
+      );
+    }
+    if (hasOwnBodyValue(raw, "leverageCap") && leverageCap > policyLeverageCap) {
+      return c.json(
+        policyViolation(`session cap ${leverageCap} exceeds agent policy cap ${policyLeverageCap}`),
+        400,
+      );
+    }
+    if (!agentPolicy.allowedVenues.includes(venue)) {
+      return c.json(policyViolation(`venue ${venue} is not allowed by agent policy`), 400);
+    }
+    const disallowedAsset = allowedAssets.find(
+      (asset) => !agentPolicy.allowedAssets.includes(asset),
+    );
+    if (disallowedAsset) {
+      return c.json(
+        policyViolation(`asset ${disallowedAsset} is not allowed by agent policy`),
+        400,
+      );
+    }
+
+    sessionDailyCap = Math.min(dailyCap, policyDailyCap);
+    sessionPerOrderCap = Math.min(perOrderCap, policyPerOrderCap);
+    sessionLeverageCap = Math.min(leverageCap, policyLeverageCap);
+    sessionAllowedAssets = allowedAssets.filter((asset) =>
+      agentPolicy.allowedAssets.includes(asset),
+    );
+  }
+
   const walletAddress =
     parsed.data.walletAddress ?? (await resolveHyperliquidWallet(agentId, agent));
   if (!walletAddress) {
@@ -230,10 +297,10 @@ tradeRoutes.post("/sessions", async (c) => {
     tenantId,
     venue,
     walletId: walletAddress,
-    dailyCapUsd: dailyCap,
-    perOrderCapUsd: perOrderCap,
-    leverageCap,
-    allowedAssets,
+    dailyCapUsd: sessionDailyCap,
+    perOrderCapUsd: sessionPerOrderCap,
+    leverageCap: sessionLeverageCap,
+    allowedAssets: sessionAllowedAssets,
     ttlSeconds,
   });
 
