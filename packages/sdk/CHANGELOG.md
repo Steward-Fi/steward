@@ -1,5 +1,9 @@
 # @stwd/sdk Changelog
 
+## Unreleased
+
+- Expands Hyperliquid trade asset types to include BNB, SOL, AVAX, ARB, and OP.
+
 ## 0.10.0
 
 BREAKING-CHANGES:

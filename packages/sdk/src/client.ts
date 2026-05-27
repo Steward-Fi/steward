@@ -94,6 +94,8 @@ export interface SignMessageResult {
   signature: string;
 }
 
+export type HyperliquidAsset = "BTC" | "ETH" | "BNB" | "SOL" | "AVAX" | "ARB" | "OP";
+
 export interface CreateTradeSessionInput {
   agentId?: string;
   venue: "hyperliquid";
@@ -101,7 +103,7 @@ export interface CreateTradeSessionInput {
   dailyCap?: number;
   perOrderCap?: number;
   leverageCap?: number;
-  allowedAssets?: Array<"BTC" | "ETH">;
+  allowedAssets?: HyperliquidAsset[];
   ttlSeconds?: number;
 }
 
@@ -127,7 +129,7 @@ export interface TradeSessionState {
   remainingCapUsd: number;
   perOrderCapUsd: number;
   leverageCap: number;
-  allowedAssets: Array<"BTC" | "ETH">;
+  allowedAssets: HyperliquidAsset[];
   createdAt: string;
   expiresAt: string;
   revokedAt?: string | null;
@@ -136,7 +138,7 @@ export interface TradeSessionState {
 
 export interface HyperliquidSubmitOrderInput {
   sessionId: string;
-  asset: "BTC" | "ETH";
+  asset: HyperliquidAsset;
   side: "buy" | "sell";
   size: number;
   leverage: number;
