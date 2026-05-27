@@ -2,10 +2,23 @@ import { concatBytes, type Hex, keccak256, parseSignature, toBytes } from "viem"
 import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 
-export const hyperliquidAssetSchema = z.enum(["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP"]);
+export const hyperliquidAssetSchema = z.enum([
+  "BTC",
+  "ETH",
+  "BNB",
+  "SOL",
+  "AVAX",
+  "ARB",
+  "OP",
+  "NEAR",
+  "HYPE",
+  "ZEC",
+  "XMR",
+]);
 export type HyperliquidAsset = z.infer<typeof hyperliquidAssetSchema>;
-// HL perp universe indices. Verified live 2026-05-26:
-// 0=BTC, 1=ETH, 5=SOL, 6=AVAX, 7=BNB, 9=OP, 11=ARB.
+// HL perp universe indices. Verified live 2026-05-27:
+// 0=BTC, 1=ETH, 5=SOL, 6=AVAX, 7=BNB, 9=OP, 11=ARB,
+// 74=NEAR, 159=HYPE, 214=ZEC, 224=XMR.
 // Source: POST api.hyperliquid.xyz/info {"type":"meta"}.universe
 const ASSET_INDEX: Record<HyperliquidAsset, number> = {
   BTC: 0,
@@ -15,6 +28,10 @@ const ASSET_INDEX: Record<HyperliquidAsset, number> = {
   BNB: 7,
   OP: 9,
   ARB: 11,
+  NEAR: 74,
+  HYPE: 159,
+  ZEC: 214,
+  XMR: 224,
 };
 const DEFAULT_BASE_URL = "https://api.hyperliquid.xyz";
 

@@ -32,7 +32,7 @@ const createSessionSchema = z.object({
   perOrderCap: z.number().positive().max(10_000).default(100),
   leverageCap: z.number().positive().max(50).default(5),
   allowedAssets: z
-    .array(z.enum(["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP"]))
+    .array(z.enum(["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP", "NEAR", "HYPE", "ZEC", "XMR"]))
     .min(1)
     .default(["BTC", "ETH", "BNB"]),
   ttlSeconds: z.number().int().positive().max(86_400).default(3_600),
