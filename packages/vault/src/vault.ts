@@ -84,6 +84,31 @@ const SOLANA_RPCS: Record<number, string> = {
   102: "https://api.devnet.solana.com",
 };
 
+export function resolveSignVenueSelector(request: Pick<SignRequest, "venue">): string | null {
+  return request.venue ?? null;
+}
+
+export function missingSigningKeyError(
+  agentId: string,
+  chainFamily: string,
+  venue?: string | null,
+): Error {
+  const venueSuffix = venue ? ` with venue ${venue}` : "";
+  return new Error(
+    `No signing key found for agent ${agentId} on chain family ${chainFamily}${venueSuffix}`,
+  );
+}
+
+export function assertEvmWalletAddressMatches(secretKey: string, walletAddress?: string): void {
+  if (!walletAddress) return;
+  const derivedAddress = privateKeyToAccount(secretKey as `0x${string}`).address;
+  if (derivedAddress.toLowerCase() !== walletAddress.toLowerCase()) {
+    throw new Error(
+      `Wallet address mismatch: resolved ${derivedAddress} but request specified ${walletAddress}`,
+    );
+  }
+}
+
 /**
  * Detect chain type from wallet address format.
  * EVM addresses start with "0x"; Solana addresses are base58 (no "0x" prefix).
@@ -365,6 +390,7 @@ export class Vault {
     // 1. Try the multi-chain key table (new agents)
     // 2. Fall back to legacy single-key table (old EVM-only agents)
     let secretKey: string;
+    const venue = resolveSignVenueSelector(request);
     const [chainKey] = await db
       .select()
       .from(encryptedChainKeys)
@@ -372,8 +398,7 @@ export class Vault {
         and(
           eq(encryptedChainKeys.agentId, request.agentId),
           eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
-          // Sprint 4: legacy lookup, restrict to NULL-venue row.
-          isNull(encryptedChainKeys.venue),
+          venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
         ),
       );
 
@@ -385,15 +410,16 @@ export class Vault {
         salt: chainKey.salt,
       });
     } else {
+      if (venue) {
+        throw missingSigningKeyError(request.agentId, chainFamilyToUse, venue);
+      }
       // Fallback: legacy encrypted_keys table (EVM only)
       const [legacyKey] = await db
         .select()
         .from(encryptedKeys)
         .where(eq(encryptedKeys.agentId, request.agentId));
       if (!legacyKey) {
-        throw new Error(
-          `No signing key found for agent ${request.agentId} on chain family ${chainFamilyToUse}`,
-        );
+        throw missingSigningKeyError(request.agentId, chainFamilyToUse);
       }
       secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
     }
@@ -408,7 +434,7 @@ export class Vault {
           and(
             eq(agentWallets.agentId, request.agentId),
             eq(agentWallets.chainFamily, "solana"),
-            isNull(agentWallets.venue),
+            venue ? eq(agentWallets.venue, venue) : isNull(agentWallets.venue),
           ),
         );
       if (solWallet) _walletAddress = solWallet.address;
@@ -420,9 +446,17 @@ export class Vault {
     let hash: string;
 
     if (isSolana) {
+      if (request.walletAddress && _walletAddress) {
+        if (_walletAddress.toLowerCase() !== request.walletAddress.toLowerCase()) {
+          throw new Error(
+            `Wallet address mismatch: resolved ${_walletAddress} but request specified ${request.walletAddress}`,
+          );
+        }
+      }
       const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(chainId);
       hash = await signSolanaTransaction(secretKey, request.to, BigInt(request.value), rpcUrl);
     } else {
+      assertEvmWalletAddressMatches(secretKey, request.walletAddress);
       const account = privateKeyToAccount(secretKey as `0x${string}`);
       const chain = CHAINS[chainId];
       if (!chain) {

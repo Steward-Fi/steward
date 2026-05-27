@@ -266,6 +266,20 @@ export interface SignRequest {
   nonce?: number;
   gasLimit?: string;
   broadcast?: boolean; // default true — set false to return signed tx without broadcasting
+  /**
+   * Optional venue selector. When set, the vault looks up the venue-scoped
+   * signing key for (agentId, chainFamily, venue) instead of the legacy
+   * NULL-venue key. Used by venue-aware integrations like Hyperliquid where
+   * the agent has a per-venue wallet distinct from its main EVM wallet.
+   */
+  venue?: string;
+  /**
+   * Optional explicit wallet address selector. When set, validates the
+   * resolved key derives this address (defense-in-depth). If venue is set,
+   * this serves as an assertion; otherwise it's used to disambiguate when
+   * multiple non-venue keys exist (which should not happen but defends).
+   */
+  walletAddress?: string;
 }
 
 /**
