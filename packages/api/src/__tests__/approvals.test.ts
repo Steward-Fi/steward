@@ -4,9 +4,18 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 const SKIP = !process.env.DATABASE_URL;
 
 import { generateApiKey } from "@stwd/auth";
-import { agents, approvalQueue, autoApprovalRules, getDb, tenants, transactions, users, userTenants } from "@stwd/db";
-import { createSessionToken } from "../routes/auth";
+import {
+  agents,
+  approvalQueue,
+  autoApprovalRules,
+  getDb,
+  tenants,
+  transactions,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { eq } from "drizzle-orm";
+import { createSessionToken } from "../routes/auth";
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
 const BASE_URL = `http://localhost:${TEST_PORT}`;

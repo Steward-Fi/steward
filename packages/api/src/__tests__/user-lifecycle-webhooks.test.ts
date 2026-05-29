@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setDefaultTimeout,
+} from "bun:test";
 
 setDefaultTimeout(30000);
 
@@ -33,11 +42,13 @@ describe("user lifecycle webhook dispatch", () => {
       await client.close();
     });
 
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "User Lifecycle Webhooks Tenant",
-      apiKeyHash: `hash-${TENANT_ID}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "User Lifecycle Webhooks Tenant",
+        apiKeyHash: `hash-${TENANT_ID}`,
+      });
 
     ({ authRoutes } = await import("../routes/auth"));
     ({ platformRoutes } = await import("../routes/platform"));

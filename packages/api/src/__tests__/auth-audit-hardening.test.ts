@@ -66,9 +66,9 @@ describe("auth and audit hardening", () => {
     expect(
       authSource.indexOf("revocationStore.getUserRevokedBefore(record.userId)", rotationStart),
     ).toBeGreaterThan(rotationStart);
-    expect(authSource.indexOf("revocationStore.getUserRevokedBefore(record.userId)", rotationStart)).toBeLessThan(
-      authSource.indexOf(".insert(refreshTokens)", rotationStart),
-    );
+    expect(
+      authSource.indexOf("revocationStore.getUserRevokedBefore(record.userId)", rotationStart),
+    ).toBeLessThan(authSource.indexOf(".insert(refreshTokens)", rotationStart));
     expect(
       authSource.indexOf("Session was revoked. Please sign in again.", routeStart),
     ).toBeGreaterThan(routeStart);
@@ -98,7 +98,9 @@ describe("auth and audit hardening", () => {
       expect(authSource).toContain(action);
     }
     const revokeAllRouteStart = authSource.indexOf('auth.delete("/sessions"');
-    expect(authSource.indexOf('action: "auth.sessions.revoke_all.authorized"', revokeAllRouteStart)).toBeLessThan(
+    expect(
+      authSource.indexOf('action: "auth.sessions.revoke_all.authorized"', revokeAllRouteStart),
+    ).toBeLessThan(
       authSource.indexOf("revokeUserRefreshSessions(payload.userId)", revokeAllRouteStart),
     );
   });

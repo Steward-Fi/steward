@@ -5,8 +5,8 @@ const SKIP = !process.env.DATABASE_URL;
 
 import { generateApiKey, signAgentToken, verifyToken } from "@stwd/auth";
 import { agents, encryptedKeys, getDb, tenants, users, userTenants } from "@stwd/db";
-import { createSessionToken } from "../routes/auth";
 import { and, eq } from "drizzle-orm";
+import { createSessionToken } from "../routes/auth";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
@@ -74,12 +74,16 @@ beforeAll(async () => {
     tenantId: TEST_TENANT_ID,
     role: "owner",
   });
-  adminToken = await createSessionToken("0x0000000000000000000000000000000000000001", TEST_TENANT_ID, {
-    userId: OWNER_USER_ID,
-    email: `agent-auth-${RUN_ID}@example.test`,
-    mfaVerifiedAt: Date.now(),
-    mfaMethod: "totp",
-  });
+  adminToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000001",
+    TEST_TENANT_ID,
+    {
+      userId: OWNER_USER_ID,
+      email: `agent-auth-${RUN_ID}@example.test`,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
+  );
 
   await db.insert(agents).values([
     {

@@ -25,7 +25,8 @@ import { authRoutes, clearOAuthTokenKeyStoreForTests } from "../routes/auth";
  */
 
 const TENANT_ID = "test-oauth-allowlist";
-const PKCE_QUERY = "&response_type=code&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256";
+const PKCE_QUERY =
+  "&response_type=code&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256";
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 

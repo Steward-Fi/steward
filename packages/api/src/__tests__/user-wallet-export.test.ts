@@ -31,9 +31,22 @@ beforeAll(async () => {
   process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT = "true";
   ({ createSessionToken } = await import("../routes/auth"));
   ({ userRoutes } = await import("../routes/user"));
-  await getDb().insert(tenants).values({ id: PERSONAL_TENANT_ID, name: "User Wallet Export Tenant", apiKeyHash: `hash-user-wallet-export-${USER_ID}` }).onConflictDoNothing();
-  await getDb().insert(users).values({ id: USER_ID, walletAddress: USER_ADDRESS, walletChain: "ethereum" }).onConflictDoNothing();
-  await getDb().insert(userTenants).values({ userId: USER_ID, tenantId: PERSONAL_TENANT_ID, role: "owner" }).onConflictDoNothing();
+  await getDb()
+    .insert(tenants)
+    .values({
+      id: PERSONAL_TENANT_ID,
+      name: "User Wallet Export Tenant",
+      apiKeyHash: `hash-user-wallet-export-${USER_ID}`,
+    })
+    .onConflictDoNothing();
+  await getDb()
+    .insert(users)
+    .values({ id: USER_ID, walletAddress: USER_ADDRESS, walletChain: "ethereum" })
+    .onConflictDoNothing();
+  await getDb()
+    .insert(userTenants)
+    .values({ userId: USER_ID, tenantId: PERSONAL_TENANT_ID, role: "owner" })
+    .onConflictDoNothing();
 });
 
 beforeEach(() => {
@@ -47,9 +60,18 @@ afterAll(() => {
     process.env.DATABASE_URL = previousDatabaseUrl;
   }
   if (!hasDatabaseUrl) return;
-  void getDb().delete(userTenants).where(eq(userTenants.userId, USER_ID)).catch(() => {});
-  void getDb().delete(users).where(eq(users.id, USER_ID)).catch(() => {});
-  void getDb().delete(tenants).where(eq(tenants.id, PERSONAL_TENANT_ID)).catch(() => {});
+  void getDb()
+    .delete(userTenants)
+    .where(eq(userTenants.userId, USER_ID))
+    .catch(() => {});
+  void getDb()
+    .delete(users)
+    .where(eq(users.id, USER_ID))
+    .catch(() => {});
+  void getDb()
+    .delete(tenants)
+    .where(eq(tenants.id, PERSONAL_TENANT_ID))
+    .catch(() => {});
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT;
   delete process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT;

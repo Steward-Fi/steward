@@ -1,6 +1,16 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setDefaultTimeout,
+} from "bun:test";
 
 setDefaultTimeout(30000);
+
 import { randomUUID } from "node:crypto";
 
 import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
@@ -37,11 +47,13 @@ describe("user wallet creation webhooks", () => {
       walletAddress: USER_ADDRESS,
       walletChain: "ethereum",
     });
-    await getDb().insert(tenants).values({
-      id: PERSONAL_TENANT_ID,
-      name: "User Wallet Personal Tenant",
-      apiKeyHash: `hash-${PERSONAL_TENANT_ID}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: PERSONAL_TENANT_ID,
+        name: "User Wallet Personal Tenant",
+        apiKeyHash: `hash-${PERSONAL_TENANT_ID}`,
+      });
     await getDb().insert(userTenants).values({
       userId: USER_ID,
       tenantId: PERSONAL_TENANT_ID,

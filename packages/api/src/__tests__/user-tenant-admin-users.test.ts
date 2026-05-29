@@ -24,21 +24,27 @@ describe("user tenant-admin user directory routes", () => {
       await client.close();
     });
 
-    await getDb().insert(tenants).values({
-      id: OWNER_PERSONAL_TENANT_ID,
-      name: "Owner Personal Tenant",
-      apiKeyHash: `${OWNER_PERSONAL_TENANT_ID}-hash`,
-    });
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "User Tenant Admin Users",
-      apiKeyHash: `${TENANT_ID}-hash`,
-    });
-    await getDb().insert(tenants).values({
-      id: OTHER_TENANT_ID,
-      name: "Other User Tenant Admin Users",
-      apiKeyHash: `${OTHER_TENANT_ID}-hash`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: OWNER_PERSONAL_TENANT_ID,
+        name: "Owner Personal Tenant",
+        apiKeyHash: `${OWNER_PERSONAL_TENANT_ID}-hash`,
+      });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "User Tenant Admin Users",
+        apiKeyHash: `${TENANT_ID}-hash`,
+      });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: OTHER_TENANT_ID,
+        name: "Other User Tenant Admin Users",
+        apiKeyHash: `${OTHER_TENANT_ID}-hash`,
+      });
     const [owner] = await getDb()
       .insert(users)
       .values({ email: "owner@example.test", emailVerified: true, name: "Owner" })

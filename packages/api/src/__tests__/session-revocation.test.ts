@@ -67,7 +67,10 @@ describe("API access-token revocation", () => {
         id: tenantId,
         name: "Refresh Test Tenant",
         apiKeyHash: `test-hash-${tenantId}`,
-        ownerAddress: `0x${tenantId.replace(/[^a-f0-9]/gi, "").padEnd(40, "0").slice(0, 40)}`,
+        ownerAddress: `0x${tenantId
+          .replace(/[^a-f0-9]/gi, "")
+          .padEnd(40, "0")
+          .slice(0, 40)}`,
       })
       .onConflictDoNothing();
     await db.insert(users).values({ id: userId, email: `${userId}@example.com` });

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 
 setDefaultTimeout(30000);
+
 import {
   agentKeyQuorums,
   agentSigners,
@@ -75,7 +76,11 @@ describe("generic intents API", () => {
       .insert(tenants)
       .values([
         { id: TENANT_ID, name: "Intents Tenant", apiKeyHash: `hash-${TENANT_ID}` },
-        { id: OTHER_TENANT_ID, name: "Other Intents Tenant", apiKeyHash: `hash-${OTHER_TENANT_ID}` },
+        {
+          id: OTHER_TENANT_ID,
+          name: "Other Intents Tenant",
+          apiKeyHash: `hash-${OTHER_TENANT_ID}`,
+        },
       ]);
     await getDb().insert(agents).values({
       id: AGENT_ID,

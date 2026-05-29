@@ -38,16 +38,20 @@ describe("wallet transfer actions", () => {
     setPGLiteOverride(db, async () => {
       await client.close();
     });
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "Wallet Actions Tenant",
-      apiKeyHash: `hash-${TENANT_ID}`,
-    });
-    await getDb().insert(tenants).values({
-      id: OTHER_TENANT_ID,
-      name: "Other Wallet Actions Tenant",
-      apiKeyHash: `hash-${OTHER_TENANT_ID}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "Wallet Actions Tenant",
+        apiKeyHash: `hash-${TENANT_ID}`,
+      });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: OTHER_TENANT_ID,
+        name: "Other Wallet Actions Tenant",
+        apiKeyHash: `hash-${OTHER_TENANT_ID}`,
+      });
     await getDb().insert(agents).values({
       id: AGENT_ID,
       tenantId: TENANT_ID,

@@ -148,7 +148,7 @@ describe("enforceRateLimit (no Redis)", () => {
     ];
 
     const result = await enforceRateLimit(`test-agent-${crypto.randomUUID()}`, policies);
-    expect(result.allowed).toBe(process.env.REDIS_URL ? false : true);
+    expect(result.allowed).toBe(!process.env.REDIS_URL);
   });
 
   it("allows requests when no rate-limit policy exists", async () => {

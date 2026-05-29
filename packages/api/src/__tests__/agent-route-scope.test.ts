@@ -56,7 +56,10 @@ beforeAll(async () => {
         id: agentId,
         tenantId: TENANT_ID,
         name: agentId,
-        walletAddress: `0x${agentId.replace(/[^a-f0-9]/gi, "").padEnd(40, "0").slice(0, 40)}`,
+        walletAddress: `0x${agentId
+          .replace(/[^a-f0-9]/gi, "")
+          .padEnd(40, "0")
+          .slice(0, 40)}`,
       })
       .onConflictDoNothing();
   }

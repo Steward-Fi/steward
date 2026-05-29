@@ -13,7 +13,6 @@ const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
 const BASE_URL = `http://localhost:${TEST_PORT}`;
 const TEST_TENANT = "test-webhooks-tenant";
 
-let validApiKey: string;
 let sessionToken: string;
 let createdWebhookId: string;
 const testUserId = randomUUID();
@@ -25,7 +24,6 @@ beforeAll(async () => {
   if (SKIP) return;
   const db = getDb();
   const apiKeyPair = generateApiKey();
-  validApiKey = apiKeyPair.key;
 
   await db
     .insert(tenants)

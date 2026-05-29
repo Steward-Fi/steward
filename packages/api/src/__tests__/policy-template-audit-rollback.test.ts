@@ -17,7 +17,10 @@ describe("policy template audit rollback hardening", () => {
     expect(routeSource).toContain("DELETE FROM policy_templates WHERE id = ${snapshot.id}::uuid");
     expect(routeSource).toContain("INSERT INTO policy_templates");
 
-    const createStart = (routeSource.indexOf('policiesStandaloneRoutes.post("/")') >= 0 ? routeSource.indexOf('policiesStandaloneRoutes.post("/")') : routeSource.indexOf('policiesStandaloneRoutes.post("/", async'));
+    const createStart =
+      routeSource.indexOf('policiesStandaloneRoutes.post("/")') >= 0
+        ? routeSource.indexOf('policiesStandaloneRoutes.post("/")')
+        : routeSource.indexOf('policiesStandaloneRoutes.post("/", async');
     const createRoute = routeSource.slice(
       createStart,
       routeSource.indexOf('policiesStandaloneRoutes.get("/:id"', createStart),
@@ -54,9 +57,7 @@ describe("policy template audit rollback hardening", () => {
     expect(routeSource).toContain("async function restoreAgentPolicies");
     expect(routeSource).toContain("inArray(policies.agentId, agentIds)");
 
-    const assignStart = routeSource.indexOf(
-      'policiesStandaloneRoutes.post("/:id/assign"',
-    );
+    const assignStart = routeSource.indexOf('policiesStandaloneRoutes.post("/:id/assign"');
     expect(assignStart).toBeGreaterThanOrEqual(0);
     const assignRoute = routeSource.slice(assignStart);
 

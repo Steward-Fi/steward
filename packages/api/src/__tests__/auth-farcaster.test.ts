@@ -39,7 +39,11 @@ async function signedPayload(overrides: { fid?: string; nonce?: string } = {}) {
   const account = privateKeyToAccount(generatePrivateKey());
   const nonce =
     overrides.nonce ??
-    ((await (await authRoutes.request("/nonce", { headers: { Origin: "https://steward.fi" } })).json()) as { nonce: string }).nonce;
+    (
+      (await (
+        await authRoutes.request("/nonce", { headers: { Origin: "https://steward.fi" } })
+      ).json()) as { nonce: string }
+    ).nonce;
   const fid = overrides.fid ?? "4242";
   const message = buildSiwfMessage(account.address, nonce, fid);
   return {

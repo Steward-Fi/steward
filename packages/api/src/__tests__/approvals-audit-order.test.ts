@@ -53,10 +53,7 @@ describe("approval route audit ordering", () => {
   });
 
   it("writes durable authorization audit events before sensitive mutations", () => {
-    expectBefore(
-      'action: "approval.deny.authorized"',
-      '.update(approvalQueue)',
-    );
+    expectBefore('action: "approval.deny.authorized"', ".update(approvalQueue)");
     expectBefore('action: "approval_rule.update.authorized"', ".update(autoApprovalRules)");
     expectBefore('action: "approval_rule.create.authorized"', ".insert(autoApprovalRules)");
   });

@@ -144,8 +144,10 @@ describe("tenant app clients hardening", () => {
       ],
     ] as const) {
       let start = tenantConfig.indexOf(marker);
-      if (start < 0 && marker.includes('delete')) {
-        start = tenantConfig.indexOf('tenantConfigRoutes.delete(\n  "/:id/app-clients/:clientId/secrets/:secretId"');
+      if (start < 0 && marker.includes("delete")) {
+        start = tenantConfig.indexOf(
+          'tenantConfigRoutes.delete(\n  "/:id/app-clients/:clientId/secrets/:secretId"',
+        );
       }
       if (start < 0) start = tenantConfig.indexOf(marker.slice(0, -2));
       expect(start).toBeGreaterThanOrEqual(0);
