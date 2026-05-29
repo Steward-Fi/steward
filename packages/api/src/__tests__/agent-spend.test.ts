@@ -105,6 +105,10 @@ describe("agent spend API", () => {
       "month",
     ]);
     expect(body.data.realtime.periods.every((period) => period.spentUsd === null)).toBe(true);
-    expect(body.data.sponsorship).toEqual({ enabled: false, provider: null });
+    expect(body.data.sponsorship).toEqual({
+      enabled: false,
+      provider: null,
+      circuitBreakerEnabled: false,
+    });
   });
 });

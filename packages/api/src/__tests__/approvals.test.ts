@@ -4,19 +4,23 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 const SKIP = !process.env.DATABASE_URL;
 
 import { generateApiKey } from "@stwd/auth";
-import { agents, approvalQueue, autoApprovalRules, getDb, tenants, transactions } from "@stwd/db";
+import { agents, approvalQueue, autoApprovalRules, getDb, tenants, transactions, users, userTenants } from "@stwd/db";
+import { createSessionToken } from "../routes/auth";
 import { eq } from "drizzle-orm";
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
 const BASE_URL = `http://localhost:${TEST_PORT}`;
-const TEST_TENANT = "test-approvals-tenant";
-const TEST_AGENT = "test-approvals-agent";
-const TEST_TX_APPROVE = "test-tx-approve";
-const TEST_TX_DENY = "test-tx-deny";
-const TEST_APPROVAL_APPROVE = "test-approval-approve";
-const TEST_APPROVAL_DENY = "test-approval-deny";
+const RUN_ID = Date.now();
+const TEST_TENANT = `test-approvals-tenant-${RUN_ID}`;
+const TEST_AGENT = `test-approvals-agent-${RUN_ID}`;
+const TEST_TX_APPROVE = `test-tx-approve-${RUN_ID}`;
+const TEST_TX_DENY = `test-tx-deny-${RUN_ID}`;
+const TEST_APPROVAL_APPROVE = `test-approval-approve-${RUN_ID}`;
+const TEST_APPROVAL_DENY = `test-approval-deny-${RUN_ID}`;
+const OWNER_USER_ID = crypto.randomUUID();
 
 let validApiKey: string;
+let adminToken: string;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -34,6 +38,23 @@ beforeAll(async () => {
       apiKeyHash: apiKeyPair.hash,
     })
     .onConflictDoNothing();
+
+  await db.insert(users).values({
+    id: OWNER_USER_ID,
+    email: `approvals-${RUN_ID}@example.test`,
+    emailVerified: true,
+  });
+  await db.insert(userTenants).values({
+    userId: OWNER_USER_ID,
+    tenantId: TEST_TENANT,
+    role: "owner",
+  });
+  adminToken = await createSessionToken("0x0000000000000000000000000000000000000001", TEST_TENANT, {
+    userId: OWNER_USER_ID,
+    email: `approvals-${RUN_ID}@example.test`,
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
+  });
 
   await db
     .insert(agents)
@@ -89,6 +110,8 @@ afterAll(async () => {
   await db.delete(transactions).where(eq(transactions.agentId, TEST_AGENT));
   await db.delete(autoApprovalRules).where(eq(autoApprovalRules.tenantId, TEST_TENANT));
   await db.delete(agents).where(eq(agents.id, TEST_AGENT));
+  await db.delete(userTenants).where(eq(userTenants.tenantId, TEST_TENANT));
+  await db.delete(users).where(eq(users.id, OWNER_USER_ID));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT));
 });
 
@@ -100,13 +123,21 @@ function authHeaders() {
   };
 }
 
+function adminHeaders() {
+  return {
+    Authorization: `Bearer ${adminToken}`,
+    "X-Steward-Tenant": TEST_TENANT,
+    "Content-Type": "application/json",
+  };
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe.skipIf(SKIP)("Approval Workflow API", () => {
   describe("GET /approvals", () => {
     it("lists pending approvals for tenant", async () => {
       const res = await fetch(`${BASE_URL}/approvals`, {
-        headers: authHeaders(),
+        headers: adminHeaders(),
       });
 
       expect(res.status).toBe(200);
@@ -119,7 +150,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
 
     it("filters by status", async () => {
       const res = await fetch(`${BASE_URL}/approvals?status=approved`, {
-        headers: authHeaders(),
+        headers: adminHeaders(),
       });
 
       expect(res.status).toBe(200);
@@ -133,7 +164,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
   describe("GET /approvals/stats", () => {
     it("returns approval statistics", async () => {
       const res = await fetch(`${BASE_URL}/approvals/stats`, {
-        headers: authHeaders(),
+        headers: adminHeaders(),
       });
 
       expect(res.status).toBe(200);
@@ -176,7 +207,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
     it("requires a reason", async () => {
       const res = await fetch(`${BASE_URL}/approvals/${TEST_TX_DENY}/deny`, {
         method: "POST",
-        headers: authHeaders(),
+        headers: adminHeaders(),
         body: JSON.stringify({}),
       });
 
@@ -188,7 +219,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
     it("denies a pending transaction with reason", async () => {
       const res = await fetch(`${BASE_URL}/approvals/${TEST_TX_DENY}/deny`, {
         method: "POST",
-        headers: authHeaders(),
+        headers: adminHeaders(),
         body: JSON.stringify({ reason: "Suspicious destination address" }),
       });
 
@@ -202,7 +233,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
     it("returns 404 for non-existent transaction", async () => {
       const res = await fetch(`${BASE_URL}/approvals/nonexistent-tx/deny`, {
         method: "POST",
-        headers: authHeaders(),
+        headers: adminHeaders(),
         body: JSON.stringify({ reason: "test" }),
       });
 
@@ -215,7 +246,7 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
   describe("GET /approvals/rules", () => {
     it("returns null when no rules configured", async () => {
       const res = await fetch(`${BASE_URL}/approvals/rules`, {
-        headers: authHeaders(),
+        headers: adminHeaders(),
       });
 
       expect(res.status).toBe(200);

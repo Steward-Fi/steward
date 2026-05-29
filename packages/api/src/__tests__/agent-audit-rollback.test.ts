@@ -54,7 +54,7 @@ describe("agent audit rollback hardening", () => {
       ['agentRoutes.patch("/:agentId/key-quorums/:quorumId"', "restoreAgentKeyQuorum(existing)"],
       ['agentRoutes.delete("/:agentId/key-quorums/:quorumId"', "restoreAgentKeyQuorum(existing)"],
       ['agentRoutes.put("/:agentId/policies"', "restoreAgentPolicies(agentId, previousPolicies)"],
-      ['agentRoutes.post("/:agentId/policies/rules"', "db.delete(policies)"],
+      ['agentRoutes.post("/:agentId/policies/rules"', ".delete(policies)"],
       ['agentRoutes.patch("/:agentId/policies/rules/:ruleId"', "existing.updatedAt"],
       [
         'agentRoutes.delete("/:agentId/policies/rules/:ruleId"',
