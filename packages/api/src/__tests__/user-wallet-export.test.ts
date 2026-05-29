@@ -3,6 +3,12 @@ import { getDb, tenants, users, userTenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 const previousDatabaseUrl = process.env.DATABASE_URL;
+// This suite seeds real rows (tenants/users/userTenants) and exercises the
+// hardened export routes against an actual database. It cannot run against a
+// dummy localhost URL, so it skips when no real DATABASE_URL is configured
+// (matching agent-route-scope.test.ts). CI's integration job always provides one.
+const hasDatabaseUrl = Boolean(previousDatabaseUrl);
+const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 process.env.DATABASE_URL ||= "postgres://unused:unused@localhost:5432/unused";
 
 const dispatchWebhookMock = mock(() => {});
@@ -19,6 +25,7 @@ let createSessionToken: Awaited<typeof import("../routes/auth")>["createSessionT
 let userRoutes: Awaited<typeof import("../routes/user")>["userRoutes"];
 
 beforeAll(async () => {
+  if (!hasDatabaseUrl) return;
   process.env.STEWARD_MASTER_PASSWORD = "user-wallet-export-master-password";
   process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT = "true";
   process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT = "true";
@@ -39,6 +46,7 @@ afterAll(() => {
   } else {
     process.env.DATABASE_URL = previousDatabaseUrl;
   }
+  if (!hasDatabaseUrl) return;
   void getDb().delete(userTenants).where(eq(userTenants.userId, USER_ID)).catch(() => {});
   void getDb().delete(users).where(eq(users.id, USER_ID)).catch(() => {});
   void getDb().delete(tenants).where(eq(tenants.id, PERSONAL_TENANT_ID)).catch(() => {});
@@ -47,7 +55,7 @@ afterAll(() => {
   delete process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT;
 });
 
-describe("user wallet private key export hardening", () => {
+describeWithDatabase("user wallet private key export hardening", () => {
   it("requires a recent MFA step-up before wallet transaction signing reaches vault setup", async () => {
     const token = await createSessionToken(USER_ADDRESS, PERSONAL_TENANT_ID, { userId: USER_ID });
 
