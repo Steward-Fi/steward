@@ -1,18 +1,21 @@
--- Data-integrity hardening for audit/retention + sensitive-table tenant FKs.
+-- Data-integrity hardening for audit/retention + wei CHECK constraints.
 --
 -- 1. audit_chain_heads: out-of-band high-water-mark per tenant so verification
 --    can detect tail-truncation / whole-chain deletion that an in-band walk of
 --    the surviving rows cannot. Updated atomically inside the advisory-locked
 --    append transaction. floor_seq/floor_hmac anchor the chain after a
 --    legitimate retention archive+drop of a prefix.
--- 2. Foreign keys binding free-text tenant_id columns to tenants(id).
---    - secrets, audit_events, audit_chain_heads -> ON DELETE RESTRICT
---      (sensitive / immutable: never silently dropped on tenant delete).
---    - proxy_audit_log, webhook_deliveries -> ON DELETE CASCADE
---      (operational telemetry: fine to remove with the tenant).
--- 3. CHECK constraints enforcing wei amounts are non-empty decimal digit
+-- 2. CHECK constraints enforcing wei amounts are non-empty decimal digit
 --    strings (transactions.value, auto_approval_rules.max_amount_wei /
 --    escalate_above_wei).
+--
+-- NOTE: We deliberately do NOT add foreign keys from tenant_id columns to
+-- tenants(id). audit_events / audit_chain_heads / secrets / proxy_audit_log /
+-- webhook_deliveries legitimately record platform/system principals whose ids
+-- are not rows in `tenants`, and an FK would reject those inserts and block
+-- tenant deletion. Cross-tenant isolation is enforced at the application layer
+-- (all queries scope by tenant_id); audit tamper-evidence comes from the HMAC
+-- chain + audit_chain_heads high-water-mark, not referential integrity.
 --
 -- All DDL is idempotent so re-running against a partially-migrated DB is safe.
 
@@ -27,54 +30,18 @@ CREATE TABLE IF NOT EXISTS "audit_chain_heads" (
 );
 --> statement-breakpoint
 
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'audit_chain_heads_tenant_id_tenants_id_fk') THEN
-    ALTER TABLE "audit_chain_heads"
-      ADD CONSTRAINT "audit_chain_heads_tenant_id_tenants_id_fk"
-      FOREIGN KEY ("tenant_id") REFERENCES "tenants"("id") ON DELETE restrict;
-  END IF;
-END $$;
+-- Drop tenant FKs if a prior revision of this migration installed them: they
+-- reject legitimate platform/system-principal audit writes and block tenant
+-- deletion. Safe no-ops when the constraints were never created.
+ALTER TABLE "audit_chain_heads" DROP CONSTRAINT IF EXISTS "audit_chain_heads_tenant_id_tenants_id_fk";
 --> statement-breakpoint
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'secrets_tenant_id_tenants_id_fk') THEN
-    ALTER TABLE "secrets"
-      ADD CONSTRAINT "secrets_tenant_id_tenants_id_fk"
-      FOREIGN KEY ("tenant_id") REFERENCES "tenants"("id") ON DELETE restrict;
-  END IF;
-END $$;
+ALTER TABLE "secrets" DROP CONSTRAINT IF EXISTS "secrets_tenant_id_tenants_id_fk";
 --> statement-breakpoint
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'audit_events_tenant_id_tenants_id_fk') THEN
-    ALTER TABLE "audit_events"
-      ADD CONSTRAINT "audit_events_tenant_id_tenants_id_fk"
-      FOREIGN KEY ("tenant_id") REFERENCES "tenants"("id") ON DELETE restrict;
-  END IF;
-END $$;
+ALTER TABLE "audit_events" DROP CONSTRAINT IF EXISTS "audit_events_tenant_id_tenants_id_fk";
 --> statement-breakpoint
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'proxy_audit_log_tenant_id_tenants_id_fk') THEN
-    ALTER TABLE "proxy_audit_log"
-      ADD CONSTRAINT "proxy_audit_log_tenant_id_tenants_id_fk"
-      FOREIGN KEY ("tenant_id") REFERENCES "tenants"("id") ON DELETE cascade;
-  END IF;
-END $$;
+ALTER TABLE "proxy_audit_log" DROP CONSTRAINT IF EXISTS "proxy_audit_log_tenant_id_tenants_id_fk";
 --> statement-breakpoint
-
-DO $$
-BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'webhook_deliveries_tenant_id_tenants_id_fk') THEN
-    ALTER TABLE "webhook_deliveries"
-      ADD CONSTRAINT "webhook_deliveries_tenant_id_tenants_id_fk"
-      FOREIGN KEY ("tenant_id") REFERENCES "tenants"("id") ON DELETE cascade;
-  END IF;
-END $$;
+ALTER TABLE "webhook_deliveries" DROP CONSTRAINT IF EXISTS "webhook_deliveries_tenant_id_tenants_id_fk";
 --> statement-breakpoint
 
 DO $$

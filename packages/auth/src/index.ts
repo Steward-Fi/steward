@@ -14,6 +14,7 @@ export * from "./phone";
 export * from "./platform";
 export * from "./recovery-codes";
 export * from "./revocation";
+export * from "./saml";
 export * from "./session";
 export * from "./siwe-guard";
 export * from "./sms-provider";

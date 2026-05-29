@@ -5,8 +5,8 @@ import { TradeSessionManager } from "@stwd/trade-sessions";
 import {
   HyperliquidAdapter,
   type HyperliquidOrder,
-  hyperliquidOrderSchema,
   hyperliquidAssetSchema,
+  hyperliquidOrderSchema,
 } from "@stwd/venue-hyperliquid";
 import type { Context } from "hono";
 import { Hono } from "hono";

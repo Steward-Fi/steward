@@ -146,8 +146,7 @@ function shouldEmitStillPending(
 ): boolean {
   if (now.getTime() - row.createdAt.getTime() < afterMs) return false;
   const polling =
-    row.actionPayload?.lifecyclePolling &&
-    typeof row.actionPayload.lifecyclePolling === "object"
+    row.actionPayload?.lifecyclePolling && typeof row.actionPayload.lifecyclePolling === "object"
       ? (row.actionPayload.lifecyclePolling as Record<string, unknown>)
       : {};
   const lastStillPendingAt = polling.lastStillPendingAt;
@@ -225,14 +224,10 @@ async function markStillPending(row: PollableTransaction, now: Date): Promise<vo
     status: "broadcast",
     chainId: row.chainId,
   });
-  dispatchTransactionLifecycleWebhook(
-    { ...row, actionPayload },
-    "transaction.still_pending",
-    {
-      status: "broadcast",
-      transactionRequest: transactionRequestPayload(row),
-    },
-  );
+  dispatchTransactionLifecycleWebhook({ ...row, actionPayload }, "transaction.still_pending", {
+    status: "broadcast",
+    transactionRequest: transactionRequestPayload(row),
+  });
 }
 
 async function finalizeReceipt(
@@ -288,7 +283,8 @@ async function finalizeReceipt(
   const userOperationPayload = userOperationEventPayload(row.agentId, updated, {
     txHash: row.txHash,
     status: eventType === "transaction.confirmed" ? "completed" : "failed",
-    error: eventType === "transaction.execution_reverted" ? "Transaction execution reverted" : undefined,
+    error:
+      eventType === "transaction.execution_reverted" ? "Transaction execution reverted" : undefined,
     blockNumber,
     confirmations,
   });
@@ -324,12 +320,7 @@ async function pollOneTransaction(
 
   if (!receipt) {
     if (
-      shouldEmitStillPending(
-        row,
-        now,
-        options.stillPendingAfterMs,
-        options.stillPendingIntervalMs,
-      )
+      shouldEmitStillPending(row, now, options.stillPendingAfterMs, options.stillPendingIntervalMs)
     ) {
       await markStillPending(row, now);
       return "pending";
@@ -362,7 +353,13 @@ async function pollOneTransaction(
 
 export async function pollBroadcastTransactionReceipts(
   options: TransactionReceiptPollerOptions = {},
-): Promise<{ checked: number; confirmed: number; reverted: number; pending: number; skipped: number }> {
+): Promise<{
+  checked: number;
+  confirmed: number;
+  reverted: number;
+  pending: number;
+  skipped: number;
+}> {
   const resolvedOptions: Required<TransactionReceiptPollerOptions> = {
     batchSize: options.batchSize ?? DEFAULT_RECEIPT_POLL_BATCH_SIZE,
     minConfirmations: options.minConfirmations ?? DEFAULT_MIN_CONFIRMATIONS,

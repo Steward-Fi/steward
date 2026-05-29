@@ -91,7 +91,10 @@ export function normalizeSamlSsoUpdate(
   if (groupsAttribute !== undefined && typeof groupsAttribute !== "string") return groupsAttribute;
 
   const nameIdFormat = cleanOptionalString(value.nameIdFormat) ?? DEFAULT_NAME_ID_FORMAT;
-  if (nameIdFormat.length > 512 || !/^urn:oasis:names:tc:SAML:[A-Za-z0-9:._-]+$/.test(nameIdFormat)) {
+  if (
+    nameIdFormat.length > 512 ||
+    !/^urn:oasis:names:tc:SAML:[A-Za-z0-9:._-]+$/.test(nameIdFormat)
+  ) {
     return "nameIdFormat must be a SAML URN";
   }
 

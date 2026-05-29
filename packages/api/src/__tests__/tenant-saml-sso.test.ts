@@ -72,7 +72,7 @@ describe("tenant SAML SSO config foundation", () => {
     ).toBe("IdP certificate must not contain private key material");
   });
 
-  it("adds MFA-gated tenant routes, audit rollback, metadata, and disabled ACS guardrails", () => {
+  it("adds MFA-gated tenant routes, audit rollback, metadata, login, and ACS guardrails", () => {
     const tenantConfigSource = read("packages/api/src/routes/tenant-config.ts");
     const authSource = read("packages/api/src/routes/auth.ts");
     const migration = read("packages/db/drizzle/0050_tenant_saml_sso_configs.sql");
@@ -85,13 +85,17 @@ describe("tenant SAML SSO config foundation", () => {
     expect(tenantConfigSource).toContain("restoreTenantSamlSsoConfig");
 
     expect(authSource).toContain('auth.get("/saml/:tenantId/metadata"');
+    expect(authSource).toContain('auth.get("/saml/:tenantId/login"');
     expect(authSource).toContain('auth.post("/saml/:tenantId/acs"');
     expect(authSource).toContain("application/samlmetadata+xml");
-    expect(authSource).toContain("WantAssertionsSigned=\"true\"");
-    expect(authSource).toContain("SAML ACS is not enabled until signed assertion validation");
+    expect(authSource).toContain('WantAssertionsSigned="true"');
+    expect(authSource).toContain("verifySamlAcsResponse");
+    expect(authSource).toContain("isVerifiedSsoEmailDomainForTenant");
+    expect(authSource).toContain("recordSamlAssertionReplay");
+    expect(authSource).toContain('tenantRole: "viewer"');
 
-    expect(migration).toContain('"jit_default_role" varchar(32) NOT NULL DEFAULT \'viewer\'');
+    expect(migration).toContain("\"jit_default_role\" varchar(32) NOT NULL DEFAULT 'viewer'");
     expect(migration).toContain('"tenant_saml_sso_configs_viewer_jit_role_check"');
-    expect(migration).toContain("cardinality(\"idp_cert_pems\") BETWEEN 1 AND 5");
+    expect(migration).toContain('cardinality("idp_cert_pems") BETWEEN 1 AND 5');
   });
 });

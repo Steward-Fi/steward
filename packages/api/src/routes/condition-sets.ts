@@ -182,12 +182,11 @@ async function restoreConditionSet(
     await tx
       .delete(conditionSetItems)
       .where(
-        and(
-          eq(conditionSetItems.tenantId, tenantId),
-          eq(conditionSetItems.conditionSetId, set.id),
-        ),
+        and(eq(conditionSetItems.tenantId, tenantId), eq(conditionSetItems.conditionSetId, set.id)),
       );
-    await tx.delete(conditionSets).where(and(eq(conditionSets.id, set.id), eq(conditionSets.tenantId, tenantId)));
+    await tx
+      .delete(conditionSets)
+      .where(and(eq(conditionSets.id, set.id), eq(conditionSets.tenantId, tenantId)));
     await tx.insert(conditionSets).values(set);
     if (items.length > 0) {
       await tx.insert(conditionSetItems).values(items);

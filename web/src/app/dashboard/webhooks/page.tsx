@@ -414,9 +414,7 @@ export default function WebhooksPage() {
                       >
                         <button
                           type="button"
-                          onClick={() =>
-                            setExpanded(expanded === delivery.id ? null : delivery.id)
-                          }
+                          onClick={() => setExpanded(expanded === delivery.id ? null : delivery.id)}
                           className="w-full text-left"
                         >
                           <div

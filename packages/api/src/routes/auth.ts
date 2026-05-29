@@ -52,6 +52,7 @@ import {
   assertTokenNotRevoked,
   buildBackend,
   buildOtpauthUri,
+  buildSamlAuthorizeUrl,
   ChallengeStore,
   EmailAuth,
   evaluateSiwePolicy,
@@ -90,6 +91,7 @@ import {
   verifyFarcasterLogin,
   verifyOidcJwt,
   verifyRecoveryCode,
+  verifySamlAcsResponse,
   verifyTelegramLogin,
   verifyToken,
   verifyTotp,
@@ -99,8 +101,10 @@ import {
   authenticators,
   getDb,
   refreshTokens,
-  tenantAppClients,
+  tenantSamlAssertionReplays,
+  tenantSamlAuthnRequests,
   type TenantEmailConfig,
+  tenantAppClients,
   tenantConfigs,
   tenantSamlSsoConfigs,
   tenantSsoDomains,
@@ -111,11 +115,11 @@ import {
 import type {
   ApiResponse,
   SsoDiscoveryResult,
+  TenantAuthAbuseConfig,
   TenantOidcProviderConfig,
   TenantSamlSsoConfig,
   TenantTestAccountConfig,
 } from "@stwd/shared";
-import type { TenantAuthAbuseConfig } from "@stwd/shared";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
 import { and, eq, gte, lt, sql } from "drizzle-orm";
@@ -123,7 +127,6 @@ import { type Context, Hono } from "hono";
 import { generateNonce, SiweMessage } from "siwe";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
-import { lockUserSession } from "../services/session-lock";
 import {
   publicAuthAbuseConfig,
   validateEmailAbusePolicy,
@@ -133,6 +136,7 @@ import {
 } from "../services/auth-abuse";
 import { verifyEip1271 } from "../services/eip1271";
 import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
+import { lockUserSession } from "../services/session-lock";
 import { testAccountOtpMatches } from "../services/test-account-credentials";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
@@ -161,7 +165,11 @@ function normalizeEmailDomain(value: unknown): string | null {
   const at = email.lastIndexOf("@");
   if (at <= 0 || at >= email.length - 1) return null;
   const domain = email.slice(at + 1);
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(domain)) {
+  if (
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(
+      domain,
+    )
+  ) {
     return null;
   }
   return domain;
@@ -394,7 +402,10 @@ async function requireNonSsoEmailLoginAllowed(
   );
 }
 
-async function isVerifiedSsoEmailDomainForTenant(tenantId: string, email: string): Promise<boolean> {
+async function isVerifiedSsoEmailDomainForTenant(
+  tenantId: string,
+  email: string,
+): Promise<boolean> {
   const domain = normalizeEmailDomain(email);
   if (!domain) return false;
   const [row] = await getDb()
@@ -2756,6 +2767,130 @@ async function provisionOidcUser(opts: {
   }
 }
 
+async function provisionSamlUser(opts: {
+  c: Context;
+  tenantId: string;
+  config: TenantSamlSsoConfig;
+  subject: string;
+  email: string;
+  tenantRole?: string;
+}): Promise<
+  | {
+      ok: true;
+      userId: string;
+      response: Record<string, unknown>;
+    }
+  | { ok: false; status?: 400 | 403 | 404 | 409 | 500; error: string }
+> {
+  const { c, tenantId, config, subject, email, tenantRole } = opts;
+  const db = getDb();
+  const providerAccountId = hashSha256Hex(`${tenantId}:${config.idpEntityId}:${subject}`);
+  const providerName = "saml";
+
+  try {
+    const authAbuseConfig = await getTenantAuthAbuseConfig(tenantId);
+    const emailPolicyError = validateEmailAbusePolicy(email, authAbuseConfig);
+    if (emailPolicyError) return { ok: false, status: 400, error: emailPolicyError };
+
+    const [existingAccount] = await db
+      .select({ userId: accounts.userId })
+      .from(accounts)
+      .where(
+        and(eq(accounts.provider, providerName), eq(accounts.providerAccountId, providerAccountId)),
+      );
+
+    let user: typeof users.$inferSelect;
+    let createdUser = false;
+    if (existingAccount) {
+      const [existingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, existingAccount.userId));
+      if (!existingUser) return { ok: false, status: 500, error: "SAML account user missing" };
+      user = existingUser;
+    } else {
+      if (!config.allowJitProvisioning) {
+        return { ok: false, status: 403, error: "SAML JIT provisioning is disabled" };
+      }
+      const jitTenant = await validateOidcJitTenant(tenantId);
+      if (!jitTenant.ok) return jitTenant;
+      const [existingEmailUser] = await db.select().from(users).where(eq(users.email, email));
+      if (existingEmailUser) {
+        user = existingEmailUser;
+      } else {
+        const [created] = await db
+          .insert(users)
+          .values({ email, emailVerified: true })
+          .returning();
+        user = created;
+        createdUser = true;
+      }
+      await db
+        .insert(accounts)
+        .values({ userId: user.id, provider: providerName, providerAccountId })
+        .onConflictDoNothing();
+    }
+
+    if (user.email !== email || user.emailVerified !== true) {
+      await db.update(users).set({ email, emailVerified: true }).where(eq(users.id, user.id));
+      user = { ...user, email, emailVerified: true };
+    }
+
+    const tenantResult = await resolveAndValidateTenant(c, user.id, tenantId);
+    if (!tenantResult.ok) {
+      return { ok: false, status: tenantResult.status, error: tenantResult.error };
+    }
+    await ensureUserTenantLink(user.id, tenantResult.tenantId, tenantRole ?? "viewer");
+
+    let walletAddress = user.walletAddress;
+    try {
+      const wallet = await provisionWalletForUser(user.id, email);
+      walletAddress = wallet.walletAddress;
+    } catch (err) {
+      console.error("[SamlAuth] Wallet provision failed:", err);
+      return { ok: false, status: 500, error: "Wallet provisioning failed" };
+    }
+
+    if (createdUser) {
+      dispatchUserCreated(tenantResult.tenantId, user.id, "auth.saml", {
+        idpEntityId: config.idpEntityId,
+      });
+    }
+    await writeAuditEvent({
+      tenantId: tenantResult.tenantId,
+      actorType: "user",
+      actorId: user.id,
+      action: "auth.saml.login",
+      resourceType: "user",
+      metadata: { idpEntityId: config.idpEntityId },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+
+    return {
+      ok: true,
+      userId: user.id,
+      response: await buildAuthOrMfaResponse(
+        user.id,
+        tenantResult.tenantId,
+        walletAddress ?? "",
+        {
+          userId: user.id,
+          samlSubject: subject,
+          authMethod: "saml",
+          email,
+          emailVerified: true,
+        },
+        { id: user.id, email, emailVerified: true, walletAddress },
+      ),
+    };
+  } catch (err) {
+    console.error("[SamlAuth] provisionSamlUser failed:", err);
+    return { ok: false, error: err instanceof Error ? err.message : "Internal server error" };
+  }
+}
+
 type CompletedEmailAuthResult =
   | {
       ok: true;
@@ -2776,7 +2911,8 @@ async function completeEmailAuth(
     return { ok: false, status: 403, error: hintedEmailPolicyError };
   }
 
-  const requestedTenantId = c.req.header("X-Steward-Tenant")?.trim() || tenantId?.trim() || undefined;
+  const requestedTenantId =
+    c.req.header("X-Steward-Tenant")?.trim() || tenantId?.trim() || undefined;
   const existingUser = await findUserByEmail(email);
   const preResolvedTenant =
     opts.allowTenantJoin && tenantId
@@ -2829,7 +2965,8 @@ async function completeEmailAuth(
     }
     resolvedTenantId = tenantId;
   } else {
-    const tenantResult = preResolvedTenant ?? (await resolveAndValidateTenant(c, user.id, tenantId));
+    const tenantResult =
+      preResolvedTenant ?? (await resolveAndValidateTenant(c, user.id, tenantId));
     if (!tenantResult.ok) {
       return {
         ok: false,
@@ -2935,7 +3072,9 @@ const auth = new Hono();
  */
 auth.post("/sso/discover", async (c) => {
   const body = await c.req.json().catch(() => null);
-  const domain = normalizeEmailDomain(body && typeof body === "object" ? (body as { email?: unknown }).email : null);
+  const domain = normalizeEmailDomain(
+    body && typeof body === "object" ? (body as { email?: unknown }).email : null,
+  );
   if (!domain) {
     return c.json<ApiResponse>({ ok: false, error: "Valid email is required" }, 400);
   }
@@ -3015,6 +3154,116 @@ async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoCo
   };
 }
 
+async function consumeSamlAuthnRequest(tenantId: string, relayState: string) {
+  const db = getDb();
+  const [request] = await db
+    .select()
+    .from(tenantSamlAuthnRequests)
+    .where(
+      and(
+        eq(tenantSamlAuthnRequests.tenantId, tenantId),
+        eq(tenantSamlAuthnRequests.relayState, relayState),
+      ),
+    );
+  if (!request) throw new Error("Invalid or expired SAML RelayState");
+  if (request.consumedAt) throw new Error("SAML RelayState has already been consumed");
+  if (request.expiresAt.getTime() < Date.now()) throw new Error("SAML RelayState has expired");
+  await db
+    .update(tenantSamlAuthnRequests)
+    .set({ consumedAt: new Date(), updatedAt: new Date() })
+    .where(eq(tenantSamlAuthnRequests.id, request.id));
+  return request;
+}
+
+async function recordSamlAssertionReplay(
+  tenantId: string,
+  assertionId: string,
+  responseId: string | undefined,
+): Promise<void> {
+  await getDb().insert(tenantSamlAssertionReplays).values({
+    tenantId,
+    assertionId,
+    responseId,
+    expiresAt: new Date(Date.now() + 10 * 60_000),
+  });
+}
+
+/**
+ * GET /saml/:tenantId/login
+ * SP-initiated dashboard/team SSO. Stores an app-bound PKCE exchange request
+ * and redirects to the tenant IdP with opaque RelayState.
+ */
+auth.get("/saml/:tenantId/login", async (c) => {
+  const tenantId = c.req.param("tenantId") as string;
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id" }, 400);
+  }
+  const redirectUri = c.req.query("redirect_uri")?.trim() || c.req.query("redirectUri")?.trim();
+  const appState = c.req.query("state")?.trim() || undefined;
+  const rawClientId = c.req.query("app_client_id") ?? c.req.query("appClientId");
+  const clientId = rawClientId ? normalizePublicClientId(rawClientId) : undefined;
+  const responseType = c.req.query("response_type")?.trim() || "code";
+  const codeChallenge = c.req.query("code_challenge")?.trim() || undefined;
+  const codeChallengeMethod = c.req.query("code_challenge_method")?.trim() || "S256";
+
+  if (!redirectUri) {
+    return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
+  }
+  if (rawClientId && !clientId) {
+    return c.json<ApiResponse>({ ok: false, error: "app_client_id is invalid" }, 400);
+  }
+  if (responseType !== "code") {
+    return c.json<ApiResponse>({ ok: false, error: "response_type must be 'code'" }, 400);
+  }
+  if (!codeChallenge) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "code_challenge is required for response_type=code" },
+      400,
+    );
+  }
+  if (codeChallengeMethod !== "S256") {
+    return c.json<ApiResponse>({ ok: false, error: "code_challenge_method must be 'S256'" }, 400);
+  }
+
+  const config = await getActiveSamlSsoConfig(tenantId);
+  if (!config) return c.json<ApiResponse>({ ok: false, error: "SAML SSO is not configured" }, 404);
+  try {
+    await assertAllowedOAuthRedirectUri(redirectUri, tenantId, clientId);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      400,
+    );
+  }
+
+  const relayState = randomBase64Url(32);
+  const requestId = `_${randomBase64Url(32)}`;
+  const built = await buildSamlAuthorizeUrl({
+    relayState,
+    requestId,
+    idpSsoUrl: config.idpSsoUrl,
+    idpEntityId: config.idpEntityId,
+    idpCertPems: config.idpCertPems,
+    spEntityId: config.spEntityId,
+    acsUrl: config.acsUrl,
+  });
+  await getDb().insert(tenantSamlAuthnRequests).values({
+    tenantId,
+    requestId: built.requestId,
+    relayState,
+    redirectUri,
+    appClientId: clientId,
+    codeChallenge,
+    codeChallengeMethod: "S256",
+    expiresAt: new Date(Date.now() + 5 * 60_000),
+  });
+
+  if (appState) {
+    await getChallengeStore().set(`saml-app-state:${relayState}`, appState);
+  }
+  return c.redirect(built.url, 302);
+});
+
 /**
  * GET /saml/:tenantId/metadata
  * Public SAML SP metadata for dashboard/team SSO IdP setup.
@@ -3029,23 +3278,104 @@ auth.get("/saml/:tenantId/metadata", async (c) => {
   return c.text(samlMetadataXml(config), 200, { "Content-Type": "application/samlmetadata+xml" });
 });
 
-/**
- * POST /saml/:tenantId/acs
- * Placeholder ACS endpoint. Login remains disabled until SAML signature,
- * audience, recipient, expiry, domain, and replay fixtures are enforced.
- */
 auth.post("/saml/:tenantId/acs", async (c) => {
   const tenantId = c.req.param("tenantId") as string;
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id" }, 400);
   }
-  return c.json<ApiResponse>(
-    {
-      ok: false,
-      error: "SAML ACS is not enabled until signed assertion validation and replay protection are configured",
-    },
-    501,
-  );
+  const config = await getActiveSamlSsoConfig(tenantId);
+  if (!config) return c.json<ApiResponse>({ ok: false, error: "SAML SSO is not configured" }, 404);
+
+  const body = await c.req.parseBody().catch(() => null);
+  const samlResponse = typeof body?.SAMLResponse === "string" ? body.SAMLResponse : "";
+  const relayState = typeof body?.RelayState === "string" ? body.RelayState : "";
+  if (!samlResponse || !relayState) {
+    return c.json<ApiResponse>({ ok: false, error: "SAMLResponse and RelayState are required" }, 400);
+  }
+
+  let request: Awaited<ReturnType<typeof consumeSamlAuthnRequest>>;
+  let redirectUrl: URL;
+  try {
+    request = await consumeSamlAuthnRequest(tenantId, relayState);
+    redirectUrl = await assertAllowedOAuthRedirectUri(
+      request.redirectUri,
+      tenantId,
+      request.appClientId ?? undefined,
+    );
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid SAML RelayState" },
+      401,
+    );
+  }
+
+  try {
+    const verified = await verifySamlAcsResponse({
+      samlResponse,
+      expectedRequestId: request.requestId,
+      tenantId,
+      idpEntityId: config.idpEntityId,
+      idpSsoUrl: config.idpSsoUrl,
+      idpCertPems: config.idpCertPems,
+      spEntityId: config.spEntityId,
+      acsUrl: config.acsUrl,
+      emailAttribute: config.emailAttribute,
+      groupsAttribute: config.groupsAttribute,
+    });
+    if (!(await isVerifiedSsoEmailDomainForTenant(tenantId, verified.email))) {
+      redirectUrl.searchParams.set("error", "saml_email_domain_not_verified");
+      return c.redirect(redirectUrl.toString(), 302);
+    }
+    try {
+      await recordSamlAssertionReplay(tenantId, verified.assertionId, undefined);
+    } catch {
+      redirectUrl.searchParams.set("error", "saml_assertion_replay");
+      return c.redirect(redirectUrl.toString(), 302);
+    }
+
+    const result = await provisionSamlUser({
+      c,
+      tenantId,
+      config,
+      subject: verified.nameId || verified.assertionId,
+      email: verified.email,
+      tenantRole: "viewer",
+    });
+    if (!result.ok) {
+      redirectUrl.searchParams.set("error", result.error);
+      return c.redirect(redirectUrl.toString(), 302);
+    }
+    if (result.response.ok === false || result.response.mfaRequired) {
+      redirectUrl.searchParams.set("error", "auth_failed");
+      return c.redirect(redirectUrl.toString(), 302);
+    }
+
+    const exchangeCode = randomBase64Url(32);
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + OAUTH_CODE_TTL_MS;
+    await getOAuthCodeStore().set(
+      `oauth-code:${exchangeCode}`,
+      JSON.stringify({
+        providerName: "saml",
+        token: result.response.token,
+        refreshToken: result.response.refreshToken,
+        redirectUri: request.redirectUri,
+        tenantId,
+        codeChallenge: request.codeChallenge,
+        codeChallengeMethod: request.codeChallengeMethod,
+        expiresAt,
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+      }),
+    );
+    const appState = await getChallengeStore().consume(`saml-app-state:${relayState}`);
+    setRedirectFragment(redirectUrl, { code: exchangeCode, state: appState ?? undefined });
+    return c.redirect(redirectUrl.toString(), 302);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "SAML verification failed" },
+      401,
+    );
+  }
 });
 
 /**
@@ -7652,7 +7982,9 @@ async function postPublicOidcTokenEndpoint(
         });
         response.on("end", () => {
           finish(resolve, {
-            ok: Boolean(response.statusCode && response.statusCode >= 200 && response.statusCode < 300),
+            ok: Boolean(
+              response.statusCode && response.statusCode >= 200 && response.statusCode < 300,
+            ),
             status: response.statusCode ?? 0,
             text: responseText,
           });
@@ -7827,7 +8159,9 @@ async function getAllowedOAuthRedirectEntries(
       allowedOrigins: tenantAppClients.allowedOrigins,
     })
     .from(tenantAppClients)
-    .where(and(eq(tenantAppClients.tenantId, resolvedTenantId), eq(tenantAppClients.enabled, true)));
+    .where(
+      and(eq(tenantAppClients.tenantId, resolvedTenantId), eq(tenantAppClients.enabled, true)),
+    );
 
   if (normalizedClientId) {
     const client = appClientRows.find((candidate) => candidate.id === normalizedClientId);

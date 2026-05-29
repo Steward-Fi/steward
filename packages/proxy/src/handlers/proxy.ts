@@ -1049,7 +1049,8 @@ export async function handleProxy(c: Context): Promise<Response> {
     return c.json(
       {
         ok: false,
-        error: "Query credential injection is disabled because upstream responses can reflect credentials",
+        error:
+          "Query credential injection is disabled because upstream responses can reflect credentials",
       },
       403,
     );
@@ -1515,7 +1516,10 @@ export async function handleProxy(c: Context): Promise<Response> {
     });
     injectedCredentialValue = null;
     proxySlot.release();
-    return c.json({ ok: false, error: "Streaming response blocked after credential injection" }, 502);
+    return c.json(
+      { ok: false, error: "Streaming response blocked after credential injection" },
+      502,
+    );
   }
 
   if (

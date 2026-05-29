@@ -60,7 +60,7 @@ describe("transaction receipt poller", () => {
   });
 
   it("starts and stops the scheduler from the long-lived API runtime", () => {
-    expect(apiIndexSource).toContain('import { startTransactionReceiptPollingScheduler }');
+    expect(apiIndexSource).toContain("import { startTransactionReceiptPollingScheduler }");
     expect(apiIndexSource).toContain(
       "cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler()",
     );

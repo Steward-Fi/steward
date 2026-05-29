@@ -113,7 +113,7 @@ describe("webhook audit ordering", () => {
     expect(historyRoute).toContain("webhookDeliveryFilter");
     expect(historyRoute).toContain("payload}->>'webhookConfigId' = ${webhookId}");
     expect(historyRoute).toContain("deliveryCount.count === 0");
-    expect(historyRoute).not.toContain('if (!webhook) {\n    return c.json<ApiResponse>');
+    expect(historyRoute).not.toContain("if (!webhook) {\n    return c.json<ApiResponse>");
   });
 
   it("redacts stored webhook delivery payloads from manual retry responses", () => {

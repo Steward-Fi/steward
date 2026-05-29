@@ -204,8 +204,7 @@ describe("proxy auth middleware", () => {
     const originalJwtSecret = process.env.STEWARD_JWT_SECRET;
     try {
       process.env.NODE_ENV = "production";
-      process.env.STEWARD_JWT_SECRET =
-        "proxy-auth-test-secret-with-at-least-thirty-two-characters";
+      process.env.STEWARD_JWT_SECRET = "proxy-auth-test-secret-with-at-least-thirty-two-characters";
       process.env.STEWARD_PROXY_ALLOW_UNSIGNED_REQUESTS = "true";
       process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = "proxy-signing-secret";
       const token = await signAgentToken({ scopes: ["agent", PROXY_SCOPE] });

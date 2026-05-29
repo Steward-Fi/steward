@@ -71,10 +71,7 @@ function createdAtMs(value: Date | string | null | undefined): number {
  * exact host over wildcard host, exact/longer path over broad wildcard path,
  * exact method over method wildcard, then stable age/id ordering.
  */
-export function compareRouteMatchSpecificity(
-  a: RouteMatchPattern,
-  b: RouteMatchPattern,
-): number {
+export function compareRouteMatchSpecificity(a: RouteMatchPattern, b: RouteMatchPattern): number {
   const priorityDelta = (b.priority ?? 0) - (a.priority ?? 0);
   if (priorityDelta !== 0) return priorityDelta;
 

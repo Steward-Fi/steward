@@ -333,11 +333,8 @@ describe("proxy spend-limit enforcement", () => {
 
   test("rate-limit denials are audited and do not call upstream", async () => {
     spendResult.configured = false;
-    const {
-      handleProxy,
-      __setCheckProxyRateLimitForTests,
-      __setCheckProxySpendLimitForTests,
-    } = await loadProxy();
+    const { handleProxy, __setCheckProxyRateLimitForTests, __setCheckProxySpendLimitForTests } =
+      await loadProxy();
     __setCheckProxySpendLimitForTests(async () => spendResult);
     __setCheckProxyRateLimitForTests(async () => ({ allowed: false, resetMs: 2000 }));
 

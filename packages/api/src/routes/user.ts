@@ -2309,39 +2309,33 @@ user.get("/me/account", async (c) => {
   }
   const activeVault = vault as Vault;
 
-  const [
-    walletRows,
-    txStats,
-    monthWei,
-    balanceResult,
-    tokenBalancesResult,
-    gasSponsorshipConfig,
-  ] = await Promise.all([
-    db
-      .select({
-        id: agentWallets.id,
-        chainFamily: agentWallets.chainFamily,
-        address: agentWallets.address,
-        venue: agentWallets.venue,
-        purpose: agentWallets.purpose,
-        createdAt: agentWallets.createdAt,
-      })
-      .from(agentWallets)
-      .where(eq(agentWallets.agentId, wallet.id)),
-    getTransactionStats(wallet.id),
-    getMonthlySpend(wallet.id),
-    activeVault.getBalance(personalTenant, wallet.id, chainId).catch((error: unknown) => ({
-      unavailable: true as const,
-      reason: error instanceof Error ? error.message : "Balance unavailable",
-    })),
-    activeVault
-      .getTokenBalances(personalTenant, wallet.id, chainId, customTokens)
-      .catch((error) => ({
+  const [walletRows, txStats, monthWei, balanceResult, tokenBalancesResult, gasSponsorshipConfig] =
+    await Promise.all([
+      db
+        .select({
+          id: agentWallets.id,
+          chainFamily: agentWallets.chainFamily,
+          address: agentWallets.address,
+          venue: agentWallets.venue,
+          purpose: agentWallets.purpose,
+          createdAt: agentWallets.createdAt,
+        })
+        .from(agentWallets)
+        .where(eq(agentWallets.agentId, wallet.id)),
+      getTransactionStats(wallet.id),
+      getMonthlySpend(wallet.id),
+      activeVault.getBalance(personalTenant, wallet.id, chainId).catch((error: unknown) => ({
         unavailable: true as const,
-        reason: error instanceof Error ? error.message : "Token balances unavailable",
+        reason: error instanceof Error ? error.message : "Balance unavailable",
       })),
-    readTenantGasSponsorshipConfig(personalTenant),
-  ]);
+      activeVault
+        .getTokenBalances(personalTenant, wallet.id, chainId, customTokens)
+        .catch((error) => ({
+          unavailable: true as const,
+          reason: error instanceof Error ? error.message : "Token balances unavailable",
+        })),
+      readTenantGasSponsorshipConfig(personalTenant),
+    ]);
   const sponsorship = publicGasSponsorshipState(gasSponsorshipConfig);
 
   const wallets = userWalletRowsToAccountWallets(wallet, walletRows);

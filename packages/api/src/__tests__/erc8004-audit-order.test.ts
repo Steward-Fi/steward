@@ -24,7 +24,7 @@ describe("ERC-8004 audit ordering", () => {
   it("does not let proxy-only agent tokens read on-chain registration data", () => {
     expect(routeSource).toContain("hasAgentTokenScope");
     expect(routeSource).toContain(
-      "if (agentScope) return agentScope === agentId && hasAgentTokenScope(c.get(\"agentScopes\"))",
+      'if (agentScope) return agentScope === agentId && hasAgentTokenScope(c.get("agentScopes"))',
     );
   });
 
@@ -43,7 +43,9 @@ describe("ERC-8004 audit ordering", () => {
   });
 
   it("restores the previous agent registration when final registration audit fails", () => {
-    expect(routeSource).toContain("type AgentRegistrationRow = typeof agentRegistrations.$inferSelect");
+    expect(routeSource).toContain(
+      "type AgentRegistrationRow = typeof agentRegistrations.$inferSelect",
+    );
     expect(routeSource).toContain("async function snapshotAgentRegistration");
     expect(routeSource).toContain("async function restoreAgentRegistration");
 

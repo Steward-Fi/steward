@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { generateApiKey } from "@stwd/auth";
 import { getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 

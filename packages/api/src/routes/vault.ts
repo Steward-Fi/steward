@@ -17,11 +17,6 @@ import { type Context, Hono } from "hono";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
 import { type AuditEventInput, writeAuditEvent } from "../services/audit";
 import {
-  recordSponsoredGasEvent,
-  resolveGasSponsorshipRequest,
-  reserveSponsoredGasEvent,
-} from "../services/gas-sponsorship";
-import {
   type ApiResponse,
   type AppVariables,
   agentKeyQuorums,
@@ -54,6 +49,11 @@ import {
   transactions,
   vault,
 } from "../services/context";
+import {
+  recordSponsoredGasEvent,
+  reserveSponsoredGasEvent,
+  resolveGasSponsorshipRequest,
+} from "../services/gas-sponsorship";
 import { verifySignerCredential } from "../services/signer-credentials";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
@@ -249,9 +249,9 @@ function parseSendCallsActionInput(body: SendCallsActionInput):
     chainId,
     broadcast: body.broadcast !== false,
     totalValue: totalValue.toString(),
-      referenceId,
-      sponsor: body.sponsor === true,
-    };
+    referenceId,
+    sponsor: body.sponsor === true,
+  };
 }
 
 function transferActionResponse(input: {
@@ -363,19 +363,14 @@ async function recordSponsoredActionIfNeeded(input: {
   status?: "pending" | "rejected" | "failed" | "reserved" | "signed" | "submitted";
 }) {
   if (!input.sponsorship || input.sponsorship.sponsored !== true) return;
-  if (
-    input.status === "pending" ||
-    input.status === "rejected"
-  ) {
+  if (input.status === "pending" || input.status === "rejected") {
     return;
   }
   const provider = input.sponsorship.provider;
   const mode = input.sponsorship.mode;
   if (typeof provider !== "string" || typeof mode !== "string") return;
   const estimatedUsd =
-    typeof input.sponsorship.estimatedUsd === "number"
-      ? input.sponsorship.estimatedUsd
-      : undefined;
+    typeof input.sponsorship.estimatedUsd === "number" ? input.sponsorship.estimatedUsd : undefined;
   if (input.status === "reserved") {
     if (estimatedUsd === undefined) return "Gas sponsorship estimate is unavailable";
     return reserveSponsoredGasEvent({
@@ -1140,8 +1135,7 @@ async function nativeTransferGasAccountingGuard(
     return c.json<ApiResponse>(
       {
         ok: false,
-        error:
-          "Native transfers cannot set gasLimit because gas spend is not policy-accounted",
+        error: "Native transfers cannot set gasLimit because gas spend is not policy-accounted",
       },
       403,
     );
@@ -1158,8 +1152,7 @@ async function nativeTransferGasAccountingGuard(
     return c.json<ApiResponse>(
       {
         ok: false,
-        error:
-          "Native transfers cannot be signed until recipient contract code is verified",
+        error: "Native transfers cannot be signed until recipient contract code is verified",
       },
       502,
     );
@@ -1168,8 +1161,7 @@ async function nativeTransferGasAccountingGuard(
     return c.json<ApiResponse>(
       {
         ok: false,
-        error:
-          "Native transfers cannot be signed until recipient contract code is verified",
+        error: "Native transfers cannot be signed until recipient contract code is verified",
       },
       502,
     );
@@ -1949,7 +1941,8 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Gas sponsorship requires broadcast=true because signed-only actions do not spend sponsored gas",
+        error:
+          "Gas sponsorship requires broadcast=true because signed-only actions do not spend sponsored gas",
       },
       400,
     );
@@ -2008,7 +2001,12 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       403,
     );
   }
-  const gasGuard = await nativeTransferGasAccountingGuard(c, transfer.to, transfer.chainId, undefined);
+  const gasGuard = await nativeTransferGasAccountingGuard(
+    c,
+    transfer.to,
+    transfer.chainId,
+    undefined,
+  );
   if (gasGuard) return gasGuard;
   const signRequest: SignRequest = {
     tenantId,
@@ -2186,10 +2184,10 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         chainId: signRequest.chainId,
         to: transfer.to,
         value: transfer.value,
-          token: transfer.token,
-          policyResults: evaluation.results,
-          sponsorship: sponsorshipPayload,
-        });
+        token: transfer.token,
+        policyResults: evaluation.results,
+        sponsorship: sponsorshipPayload,
+      });
       return c.json<ApiResponse>(
         {
           ok: evaluation.requiresManualApproval,

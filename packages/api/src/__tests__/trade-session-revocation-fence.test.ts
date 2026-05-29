@@ -55,7 +55,10 @@ describe("trade session revocation fence", () => {
 
   it("does not mutate venue leverage during order submission", () => {
     const submitStart = tradeRouteSource.indexOf('tradeRoutes.post("/hyperliquid/order"');
-    const routeEnd = tradeRouteSource.indexOf('tradeRoutes.post("/hyperliquid/session', submitStart + 1);
+    const routeEnd = tradeRouteSource.indexOf(
+      'tradeRoutes.post("/hyperliquid/session',
+      submitStart + 1,
+    );
     const orderRoute = tradeRouteSource.slice(submitStart, routeEnd === -1 ? undefined : routeEnd);
 
     expect(orderRoute).not.toContain("adapter.updateLeverage");

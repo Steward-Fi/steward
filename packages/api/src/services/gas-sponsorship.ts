@@ -1,8 +1,4 @@
-import {
-  getDb,
-  sponsoredGasEvents,
-  tenantConfigs as tenantConfigsTable,
-} from "@stwd/db";
+import { getDb, sponsoredGasEvents, tenantConfigs as tenantConfigsTable } from "@stwd/db";
 import type {
   ChainFamily,
   GasSponsorshipMode,
@@ -70,7 +66,8 @@ function normalizeNumberList(value: unknown, field: string, max = 100): number[]
   if (value.length > max) return `${field} can include at most ${max} entries`;
   const numbers = new Set<number>();
   for (const item of value) {
-    if (!Number.isSafeInteger(item) || item <= 0) return `${field} entries must be positive integers`;
+    if (!Number.isSafeInteger(item) || item <= 0)
+      return `${field} entries must be positive integers`;
     numbers.add(item);
   }
   return [...numbers];
@@ -100,9 +97,7 @@ function normalizeUsdLimit(value: unknown, field: string): number | undefined | 
   return Math.round(value * 100) / 100;
 }
 
-export function normalizeGasSponsorshipConfig(
-  value: unknown,
-): TenantGasSponsorshipConfig | string {
+export function normalizeGasSponsorshipConfig(value: unknown): TenantGasSponsorshipConfig | string {
   if (value === undefined || value === null) return {};
   if (!isPlainObject(value)) return "gasSponsorshipConfig must be an object";
 
@@ -227,10 +222,7 @@ export async function resolveGasSponsorshipRequest(input: {
       status: 403,
     };
   }
-  if (
-    config.allowedChainIds?.length &&
-    !config.allowedChainIds.includes(input.chainId)
-  ) {
+  if (config.allowedChainIds?.length && !config.allowedChainIds.includes(input.chainId)) {
     return {
       requested: true,
       sponsored: false,

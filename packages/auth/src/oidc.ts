@@ -268,11 +268,7 @@ export async function verifyOidcJwt(
   // verifies that *one* of the configured audiences matches, so we enforce azp
   // here. Fail closed. clientId is optional config (id-token-only providers may
   // omit it); when absent we cannot bind azp, so single-aud back-compat applies.
-  const audiences = Array.isArray(payload.aud)
-    ? payload.aud
-    : payload.aud
-      ? [payload.aud]
-      : [];
+  const audiences = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
   const azp = claimString(payload, "azp");
   const clientId = provider.clientId?.trim() || undefined;
   if (azp !== undefined) {

@@ -79,12 +79,6 @@ export type {
   WalletActionOptions,
 } from "./client.ts";
 export { StewardApiError, StewardClient } from "./client.ts";
-export {
-  signWebhookPayload,
-  verifyWebhookSignature,
-  type VerifyWebhookOptions,
-  type VerifyWebhookResult,
-} from "./webhook-verify.ts";
 // v0.4.0 - Tenant config, dashboard, approvals, webhooks
 export type {
   AgentAccountCapability,
@@ -177,3 +171,9 @@ export {
   toCaip2,
   WEBHOOK_EVENT_TYPES,
 } from "./types.ts";
+export {
+  signWebhookPayload,
+  type VerifyWebhookOptions,
+  type VerifyWebhookResult,
+  verifyWebhookSignature,
+} from "./webhook-verify.ts";

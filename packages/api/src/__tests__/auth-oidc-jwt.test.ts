@@ -4,8 +4,8 @@ import {
   closeDb,
   getDb,
   tenantConfigs,
-  tenants,
   tenantSsoDomains,
+  tenants,
   users,
   userTenants,
 } from "@stwd/db";
@@ -372,11 +372,7 @@ describe("OIDC JWT auth", () => {
   });
 
   // ─── OIDC §3.1.3.7 azp (authorized party) enforcement ────────────────────
-  async function azpToken(
-    subject: string,
-    audience: string | string[],
-    azp?: string,
-  ) {
+  async function azpToken(subject: string, audience: string | string[], azp?: string) {
     const claims: Record<string, unknown> = {
       sub: subject,
       email: `${subject}@azp.example.test`,

@@ -279,9 +279,7 @@ describe("getProviderConfig", () => {
         scopes: ["openid", "email"],
       },
     ]);
-    expect(() => getProviderConfig("custom:bad-email")).toThrow(
-      "emailUrl must be an https URL",
-    );
+    expect(() => getProviderConfig("custom:bad-email")).toThrow("emailUrl must be an https URL");
     if (original === undefined) {
       delete process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
     } else {

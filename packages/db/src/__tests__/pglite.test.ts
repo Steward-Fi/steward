@@ -490,11 +490,60 @@ AQIDAQAB
       `),
     ).rejects.toThrow();
 
+    await client.query(`
+      INSERT INTO tenant_saml_authn_requests (
+        tenant_id, request_id, relay_state, redirect_uri, code_challenge, expires_at
+      ) VALUES (
+        'tenant-saml', 'saml-request-1', 'relay-1', 'https://app.example.com/callback',
+        'code-challenge-1', now() + interval '5 minutes'
+      )
+    `);
+    await expect(
+      client.query(`
+        INSERT INTO tenant_saml_authn_requests (
+          tenant_id, request_id, relay_state, redirect_uri, code_challenge, expires_at
+        ) VALUES (
+          'tenant-saml', 'saml-request-2', 'relay-1', 'https://app.example.com/callback',
+          'code-challenge-2', now() + interval '5 minutes'
+        )
+      `),
+    ).rejects.toThrow();
+    await expect(
+      client.query(`
+        UPDATE tenant_saml_authn_requests
+        SET code_challenge_method = 'plain'
+        WHERE relay_state = 'relay-1'
+      `),
+    ).rejects.toThrow();
+
+    await client.query(`
+      INSERT INTO tenant_saml_assertion_replays (
+        tenant_id, assertion_id, response_id, expires_at
+      ) VALUES (
+        'tenant-saml', 'assertion-1', 'response-1', now() + interval '5 minutes'
+      )
+    `);
+    await expect(
+      client.query(`
+        INSERT INTO tenant_saml_assertion_replays (
+          tenant_id, assertion_id, response_id, expires_at
+        ) VALUES (
+          'tenant-saml', 'assertion-1', 'response-2', now() + interval '5 minutes'
+        )
+      `),
+    ).rejects.toThrow();
+
     await client.query("DELETE FROM tenants WHERE id = 'tenant-saml'");
-    const remaining = await client.query(
-      "SELECT COUNT(*)::int AS cnt FROM tenant_saml_sso_configs WHERE tenant_id = 'tenant-saml'",
-    );
-    expect(readCountRow(remaining.rows)).toBe(0);
+    for (const tableName of [
+      "tenant_saml_sso_configs",
+      "tenant_saml_authn_requests",
+      "tenant_saml_assertion_replays",
+    ]) {
+      const remaining = await client.query(
+        `SELECT COUNT(*)::int AS cnt FROM ${tableName} WHERE tenant_id = 'tenant-saml'`,
+      );
+      expect(readCountRow(remaining.rows)).toBe(0);
+    }
 
     await client.close();
   });

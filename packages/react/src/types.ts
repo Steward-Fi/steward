@@ -271,11 +271,14 @@ export interface StewardLinkedAccountsProps {
   showSocialLinking?: boolean;
   oauthProviders?: string[];
   oauthRedirectUri?: string;
-  onOAuthLinkRequest?: (provider: string, challenge: {
-    state: string;
-    redirectUri: string;
-    expiresIn: number;
-  }) => Promise<{
+  onOAuthLinkRequest?: (
+    provider: string,
+    challenge: {
+      state: string;
+      redirectUri: string;
+      expiresIn: number;
+    },
+  ) => Promise<{
     code: string;
     redirectUri?: string;
     state?: string;

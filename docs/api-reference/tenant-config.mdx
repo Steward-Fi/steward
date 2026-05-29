@@ -208,6 +208,7 @@ Tenant admins can configure one SAML 2.0 IdP for dashboard/team SSO. The SAML co
 GET /tenants/:id/saml-sso
 PUT /tenants/:id/saml-sso
 DELETE /tenants/:id/saml-sso
+GET /auth/saml/:tenantId/login
 GET /auth/saml/:tenantId/metadata
 POST /auth/saml/:tenantId/acs
 ```
@@ -240,7 +241,13 @@ POST /auth/saml/:tenantId/acs
 
 Steward validates that the IdP SSO URL is a public `https` URL, certificate entries are PEM certificates without private key material, at most five IdP certs are configured, and JIT-created SSO memberships can only default to `viewer`. The metadata route emits unsigned SP metadata with `WantAssertionsSigned=true` and stable Entity ID/ACS URLs derived from `APP_URL`, not the request host.
 
-The ACS route is intentionally disabled until signed assertion validation, audience/recipient checks, expiry enforcement, verified-domain enforcement, and replay protection are implemented with SAML fixtures. It returns `501` instead of accepting assertions.
+The SP-initiated login route mirrors OIDC auth-code SSO and requires app-side PKCE:
+
+```bash
+GET /auth/saml/:tenantId/login?redirect_uri=https%3A%2F%2Fapp.example.com%2Fauth%2Fcallback&code_challenge=...&code_challenge_method=S256
+```
+
+Steward stores an opaque `RelayState` and `InResponseTo` request ID, redirects to the tenant IdP, then the ACS route validates the signed SAML response/assertion against the tenant IdP certs, SP Entity ID, ACS URL, request ID, assertion timestamps, verified email domain, and assertion replay table. Successful ACS returns the app to `redirect_uri` with a short-lived exchange `code`; the app redeems it through `POST /auth/oauth/exchange`.
 
 Client IDs must match `^[a-z0-9][a-z0-9_-]{2,63}$`. Redirect URLs must be exact `https` URLs, except loopback development URLs. Origins must be exact origins; app clients cannot use wildcard origins.
 

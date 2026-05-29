@@ -70,7 +70,10 @@ export function normalizeOidcProviders(value: unknown): TenantOidcProviderConfig
     if (clientSecretEnv && !/^[A-Z_][A-Z0-9_]{0,127}$/.test(clientSecretEnv)) {
       return `clientSecretEnv for provider ${id} must be an environment variable name`;
     }
-    if (authorizationUrl && (authorizationUrl.length > 2048 || !isPublicHttpsUrl(authorizationUrl))) {
+    if (
+      authorizationUrl &&
+      (authorizationUrl.length > 2048 || !isPublicHttpsUrl(authorizationUrl))
+    ) {
       return `authorizationUrl for provider ${id} must be a public https URL`;
     }
     if (tokenUrl && (tokenUrl.length > 2048 || !isPublicHttpsUrl(tokenUrl))) {

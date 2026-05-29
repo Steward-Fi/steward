@@ -50,7 +50,9 @@ async function getTenantOrigins(tenantId: string): Promise<string[]> {
   const clientRows = await db
     .select({ allowedOrigins: tenantAppClientsTable.allowedOrigins })
     .from(tenantAppClientsTable)
-    .where(and(eq(tenantAppClientsTable.tenantId, tenantId), eq(tenantAppClientsTable.enabled, true)));
+    .where(
+      and(eq(tenantAppClientsTable.tenantId, tenantId), eq(tenantAppClientsTable.enabled, true)),
+    );
 
   if (!row && clientRows.length === 0) return [];
 

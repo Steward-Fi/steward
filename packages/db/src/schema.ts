@@ -4,8 +4,8 @@ import type {
   PolicyResult,
   PolicyTemplate,
   SecretRoutePreset,
-  TenantAuthAbuseConfig,
   TenantAppClient,
+  TenantAuthAbuseConfig,
   TenantFeatureFlags,
   TenantGasSponsorshipConfig,
   TenantOidcProviderConfig,
@@ -181,10 +181,7 @@ export const tenantAppClients = pgTable(
     ...timestamps,
   },
   (table) => ({
-    tenantClientPk: uniqueIndex("tenant_app_clients_tenant_id_id_idx").on(
-      table.tenantId,
-      table.id,
-    ),
+    tenantClientPk: uniqueIndex("tenant_app_clients_tenant_id_id_idx").on(table.tenantId, table.id),
     tenantIdx: index("tenant_app_clients_tenant_id_idx").on(table.tenantId),
   }),
 );
@@ -241,9 +238,7 @@ export const tenantSsoDomains = pgTable(
       table.tenantId,
       sql`lower(trim(trailing '.' from ${table.domain}))`,
     ),
-    verifiedCanonicalDomainUnique: uniqueIndex(
-      "tenant_sso_domains_verified_canonical_domain_idx",
-    )
+    verifiedCanonicalDomainUnique: uniqueIndex("tenant_sso_domains_verified_canonical_domain_idx")
       .on(sql`lower(trim(trailing '.' from ${table.domain}))`)
       .where(sql`${table.status} = 'verified'`),
     domainIdx: index("tenant_sso_domains_domain_idx").on(table.domain),
@@ -279,6 +274,57 @@ export const tenantSamlSsoConfigs = pgTable(
 
 export type TenantSamlSsoConfigRow = typeof tenantSamlSsoConfigs.$inferSelect;
 export type TenantSamlSsoConfigInsert = typeof tenantSamlSsoConfigs.$inferInsert;
+
+export const tenantSamlAuthnRequests = pgTable(
+  "tenant_saml_authn_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    requestId: varchar("request_id", { length: 128 }).notNull(),
+    relayState: varchar("relay_state", { length: 128 }).notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    appClientId: varchar("app_client_id", { length: 64 }),
+    codeChallenge: varchar("code_challenge", { length: 128 }).notNull(),
+    codeChallengeMethod: varchar("code_challenge_method", { length: 16 }).notNull().default("S256"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: index("tenant_saml_authn_requests_tenant_idx").on(table.tenantId),
+    relayStateUnique: uniqueIndex("tenant_saml_authn_requests_relay_state_idx").on(
+      table.relayState,
+    ),
+    tenantRequestUnique: uniqueIndex("tenant_saml_authn_requests_tenant_request_idx").on(
+      table.tenantId,
+      table.requestId,
+    ),
+    expiresAtIdx: index("tenant_saml_authn_requests_expires_at_idx").on(table.expiresAt),
+  }),
+);
+
+export const tenantSamlAssertionReplays = pgTable(
+  "tenant_saml_assertion_replays",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    assertionId: varchar("assertion_id", { length: 256 }).notNull(),
+    responseId: varchar("response_id", { length: 256 }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantAssertionUnique: uniqueIndex("tenant_saml_assertion_replays_tenant_assertion_idx").on(
+      table.tenantId,
+      table.assertionId,
+    ),
+    expiresAtIdx: index("tenant_saml_assertion_replays_expires_at_idx").on(table.expiresAt),
+  }),
+);
 
 export const agents = pgTable(
   "agents",
@@ -843,7 +889,10 @@ export const autoApprovalRules = pgTable(
   (table) => ({
     tenantIdx: uniqueIndex("auto_approval_rules_tenant_idx").on(table.tenantId),
     // wei thresholds must be non-empty decimal digit strings (escalate is nullable).
-    maxAmountIsWei: check("auto_approval_rules_max_amount_wei_chk", sql`${table.maxAmountWei} ~ '^[0-9]+$'`),
+    maxAmountIsWei: check(
+      "auto_approval_rules_max_amount_wei_chk",
+      sql`${table.maxAmountWei} ~ '^[0-9]+$'`,
+    ),
     escalateIsWei: check(
       "auto_approval_rules_escalate_above_wei_chk",
       sql`${table.escalateAboveWei} IS NULL OR ${table.escalateAboveWei} ~ '^[0-9]+$'`,
@@ -867,10 +916,9 @@ export const webhookDeliveries = pgTable(
   "webhook_deliveries",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    // CASCADE: delivery records are operational; remove with the tenant.
-    tenantId: text("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
+    // No tenant FK: isolation is enforced at the app layer (every query scopes by
+    // tenant_id) and deliveries may reference platform/system principals.
+    tenantId: text("tenant_id").notNull(),
     webhookConfigId: uuid("webhook_config_id").references(() => webhookConfigs.id, {
       onDelete: "set null",
     }),
@@ -1139,10 +1187,9 @@ export const secrets = pgTable(
   "secrets",
   {
     id: uuid("id").defaultRandom().primaryKey(),
-    // RESTRICT: secrets are sensitive; deleting a tenant must not silently drop them.
-    tenantId: text("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "restrict" }),
+    // No tenant FK: secrets are app-layer scoped by tenant_id; platform-scoped
+    // secrets may use non-tenant principals not present in `tenants`.
+    tenantId: text("tenant_id").notNull(),
     name: varchar("name", { length: 255 }).notNull(),
     description: text("description"),
     ciphertext: text("ciphertext").notNull(),
@@ -1214,10 +1261,9 @@ export const proxyAuditLog = pgTable(
   {
     id: uuid("id").defaultRandom().primaryKey(),
     agentId: text("agent_id").notNull(),
-    // CASCADE: proxy logs are operational telemetry; remove with the tenant.
-    tenantId: text("tenant_id")
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
+    // No tenant FK: proxy logs are app-layer scoped by tenant_id and may record
+    // platform/system principals not present in `tenants`.
+    tenantId: text("tenant_id").notNull(),
     targetHost: varchar("target_host", { length: 512 }).notNull(),
     targetPath: varchar("target_path", { length: 512 }).notNull(),
     method: varchar("method", { length: 10 }).notNull(),
@@ -1285,11 +1331,10 @@ export const auditEvents = pgTable(
   "audit_events",
   {
     id: bigserial("id", { mode: "number" }).primaryKey(),
-    // RESTRICT: audit rows are immutable; a tenant delete must not silently
-    // destroy the tamper-evident chain (would also break verification).
-    tenantId: varchar("tenant_id", { length: 64 })
-      .notNull()
-      .references(() => tenants.id, { onDelete: "restrict" }),
+    // No tenant FK: audit events also record platform/system principals whose ids
+    // are not rows in `tenants`. Isolation is app-layer; tamper-evidence comes from
+    // the HMAC chain + audit_chain_heads high-water-mark.
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
     seq: bigint("seq", { mode: "number" }).notNull(),
     prevHash: bytea("prev_hash").notNull(),
     hmac: bytea("hmac").notNull(),
@@ -1325,9 +1370,7 @@ export type NewAuditEventRow = typeof auditEvents.$inferInsert;
 // No FK ON DELETE: this mirrors audit_events (RESTRICT) — heads are never
 // silently dropped while audit rows exist.
 export const auditChainHeads = pgTable("audit_chain_heads", {
-  tenantId: varchar("tenant_id", { length: 64 })
-    .primaryKey()
-    .references(() => tenants.id, { onDelete: "restrict" }),
+  tenantId: varchar("tenant_id", { length: 64 }).primaryKey(),
   expectedSeq: bigint("expected_seq", { mode: "number" }).notNull(),
   expectedCount: bigint("expected_count", { mode: "number" }).notNull(),
   headHmac: bytea("head_hmac").notNull(),

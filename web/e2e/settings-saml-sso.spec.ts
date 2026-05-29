@@ -33,7 +33,10 @@ type SamlSsoConfig = {
 };
 
 test.describe("Dashboard SAML SSO settings", () => {
-  test("authenticated users can configure SAML IdP settings", async ({ page, request }, testInfo) => {
+  test("authenticated users can configure SAML IdP settings", async ({
+    page,
+    request,
+  }, testInfo) => {
     const email = `saml-settings-${Date.now()}@example.test`;
     const tenantId = "e2e-tenant";
     const now = "2026-05-28T12:00:00.000Z";

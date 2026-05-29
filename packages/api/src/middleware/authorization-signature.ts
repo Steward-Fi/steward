@@ -197,7 +197,8 @@ export async function createAuthorizationSignature(
 export function authorizationSignature(options?: AuthorizationSignatureOptions) {
   const required =
     options?.required ??
-    (process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" || process.env.NODE_ENV === "production");
+    (process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" ||
+      process.env.NODE_ENV === "production");
   const secrets = options?.secrets ?? configuredSecrets();
   const maxClockSkewMs = parsePositiveInt(
     process.env.STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS,

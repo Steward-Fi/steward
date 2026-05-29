@@ -444,14 +444,11 @@ describe("generic intents API", () => {
       },
     );
     expect(policyAuthorize.status).toBe(200);
-    const policyExecute = await otherAdminApp.request(
-      `/intents/${policyCreated.data.id}/execute`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      },
-    );
+    const policyExecute = await otherAdminApp.request(`/intents/${policyCreated.data.id}/execute`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     expect(policyExecute.status).toBe(200);
     const storedPolicies = await getDb()
       .select()
@@ -573,14 +570,11 @@ describe("generic intents API", () => {
       headers: { "content-type": "application/json" },
       body: "{}",
     });
-    const quorumExecute = await otherAdminApp.request(
-      `/intents/${quorumCreated.data.id}/execute`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      },
-    );
+    const quorumExecute = await otherAdminApp.request(`/intents/${quorumCreated.data.id}/execute`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     expect(quorumExecute.status).toBe(200);
     const storedQuorums = await getDb()
       .select()

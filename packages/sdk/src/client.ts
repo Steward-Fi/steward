@@ -28,7 +28,6 @@ import type {
   CreateRoutePayload,
   CreateSecretPayload,
   ExportKeyResult,
-  TenantGasSponsorshipConfig,
   Intent,
   IntentCreate,
   IntentListOptions,
@@ -52,15 +51,16 @@ import type {
   SecretRecord,
   SponsoredGasSpendSummary,
   SsoDiscoveryResult,
-  TenantAdminUser,
-  TenantAdminUserSearchResult,
   TenantAccessAllowlistEntry,
   TenantAccessAllowlistEntryInput,
+  TenantAdminUser,
+  TenantAdminUserSearchResult,
   TenantAppClient,
   TenantAppClientSecret,
   TenantAppClientSecretCreateResult,
   TenantAuthAbuseConfig,
   TenantControlPlaneConfig,
+  TenantGasSponsorshipConfig,
   TenantMembership,
   TenantOidcProviderConfig,
   TenantSamlSsoConfig,
@@ -2000,10 +2000,7 @@ export class StewardClient {
   }
 
   /** Create one tenant app client/environment. Requires tenant-admin MFA server-side. */
-  async createTenantAppClient(
-    tenantId: string,
-    client: TenantAppClient,
-  ): Promise<TenantAppClient> {
+  async createTenantAppClient(tenantId: string, client: TenantAppClient): Promise<TenantAppClient> {
     const response = await this.request<{ client: TenantAppClient }, StewardErrorResponse>(
       `/tenants/${encodeURIComponent(tenantId)}/app-clients`,
       {

@@ -1,6 +1,6 @@
+import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import {
   agents,
   agentWallets,
@@ -411,7 +411,7 @@ describe("trade policy audit", () => {
       tradeSource.indexOf('tradeRoutes.get("/sessions/:id"', createStart),
     );
     const managerCreate = createRoute.indexOf("sessionManager.createSession");
-    const finalAudit = createRoute.indexOf('trade.session.created', managerCreate);
+    const finalAudit = createRoute.indexOf("trade.session.created", managerCreate);
     const rollback = createRoute.indexOf("sessionManager.deleteSession", finalAudit);
     expect(managerCreate).toBeGreaterThanOrEqual(0);
     expect(finalAudit).toBeGreaterThan(managerCreate);

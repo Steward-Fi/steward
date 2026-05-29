@@ -8,8 +8,8 @@ import { hashApiKey, hasPlatformScope, platformAuthMiddleware } from "@stwd/auth
 import {
   auditEvents as auditEventRows,
   proxyAuditLog as proxyAuditLogRows,
-  secrets as secretRows,
   secretRoutes as secretRouteRows,
+  secrets as secretRows,
 } from "@stwd/db";
 import { encryptWebhookSecret } from "@stwd/webhooks";
 import { and, eq, ne } from "drizzle-orm";
@@ -130,7 +130,9 @@ async function upsertLegacyTenantWebhook(tenantId: string, url: string): Promise
   });
 }
 
-async function snapshotLegacyTenantWebhooks(tenantId: string): Promise<LegacyTenantWebhookConfig[]> {
+async function snapshotLegacyTenantWebhooks(
+  tenantId: string,
+): Promise<LegacyTenantWebhookConfig[]> {
   return db
     .select()
     .from(webhookConfigs)

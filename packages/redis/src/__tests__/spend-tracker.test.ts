@@ -119,9 +119,7 @@ describeRedis("Spend Tracker", () => {
     await recordSpend(TEST_AGENT, TEST_TENANT, 0, "api.unknown.com");
     // A sign error upstream must not silently floor to a free spend.
     await expect(recordSpend(TEST_AGENT, TEST_TENANT, -1, "api.unknown.com")).rejects.toThrow();
-    await expect(
-      reserveSpend(TEST_AGENT, TEST_TENANT, -1, { day: 1 }),
-    ).rejects.toThrow();
+    await expect(reserveSpend(TEST_AGENT, TEST_TENANT, -1, { day: 1 })).rejects.toThrow();
     await expect(
       recordSpend(TEST_AGENT, TEST_TENANT, Number.NaN, "api.unknown.com"),
     ).rejects.toThrow();

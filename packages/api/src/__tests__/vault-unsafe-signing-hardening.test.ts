@@ -84,7 +84,10 @@ describe("vault unsafe signing hardening", () => {
   it("guards direct native transaction signing against contract-recipient gas burn", () => {
     const routeStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign"');
     expect(routeStart).toBeGreaterThanOrEqual(0);
-    const routeEnd = vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer/quote"', routeStart);
+    const routeEnd = vaultSource.indexOf(
+      'vaultRoutes.post("/:agentId/actions/transfer/quote"',
+      routeStart,
+    );
     const routeBody = vaultSource.slice(routeStart, routeEnd);
     const guard = routeBody.indexOf("nativeTransferGasAccountingGuard");
     const policyEvaluation = routeBody.indexOf("policyEngine.evaluate");
@@ -99,7 +102,10 @@ describe("vault unsafe signing hardening", () => {
   it("does not mark direct transfers failed after signing or broadcast succeeds", () => {
     const routeStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"');
     expect(routeStart).toBeGreaterThanOrEqual(0);
-    const routeEnd = vaultSource.indexOf('vaultRoutes.get("/:agentId/actions/:actionId"', routeStart);
+    const routeEnd = vaultSource.indexOf(
+      'vaultRoutes.get("/:agentId/actions/:actionId"',
+      routeStart,
+    );
     const routeBody = vaultSource.slice(routeStart, routeEnd);
     const signCall = routeBody.indexOf("vault.signTransaction(signRequest");
     const completedResult = routeBody.indexOf("completedResult = result", signCall);

@@ -47,7 +47,8 @@ function assertSecureApiUrl(apiUrl: string): void {
   }
   if (parsed.protocol === "http:") {
     const host = parsed.hostname;
-    const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+    const isLocal =
+      host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
     if (!isLocal) {
       throw new Error(
         `[Steward] Insecure apiUrl "${apiUrl}": http:// is only allowed for localhost. Use https:// for remote hosts.`,

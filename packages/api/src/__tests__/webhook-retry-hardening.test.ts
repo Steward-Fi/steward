@@ -110,9 +110,11 @@ describe("webhook retry hardening", () => {
   });
 
   it("starts a persistent webhook retry scheduler in the long-lived API runtime", () => {
-    expect(apiIndexSource).toContain('import { startWebhookRetryScheduler }');
+    expect(apiIndexSource).toContain("import { startWebhookRetryScheduler }");
     expect(apiIndexSource).toContain("cancelWebhookRetryScheduler = startWebhookRetryScheduler()");
-    expect(apiIndexSource).toContain("if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler()");
+    expect(apiIndexSource).toContain(
+      "if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler()",
+    );
     expect(webhookRetrySchedulerSource).toContain("new PersistentQueue");
     expect(webhookRetrySchedulerSource).toContain(".processQueue()");
     expect(webhookRetrySchedulerSource).toContain("STEWARD_WEBHOOK_RETRY_WORKER");

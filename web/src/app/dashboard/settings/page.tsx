@@ -1724,8 +1724,8 @@ const policies = await steward.getPolicies("my-agent")`;
               App Clients
             </h2>
             <p className="text-xs text-text-tertiary max-w-2xl mt-1">
-              Group redirect URLs and browser origins by development, preview, and production
-              client environments.
+              Group redirect URLs and browser origins by development, preview, and production client
+              environments.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -2136,9 +2136,7 @@ const policies = await steward.getPolicies("my-agent")`;
               <input
                 type="checkbox"
                 checked={samlSso.allowJitProvisioning}
-                onChange={(event) =>
-                  updateSamlSso({ allowJitProvisioning: event.target.checked })
-                }
+                onChange={(event) => updateSamlSso({ allowJitProvisioning: event.target.checked })}
                 className="h-4 w-4 accent-accent"
               />
               Auto-create SSO users as Viewer
@@ -2955,9 +2953,7 @@ const policies = await steward.getPolicies("my-agent")`;
                   <span className="text-xs text-text-tertiary block">Client Secret Env Var</span>
                   <input
                     value={provider.clientSecretEnv}
-                    onChange={(e) =>
-                      updateOidcProvider(index, { clientSecretEnv: e.target.value })
-                    }
+                    onChange={(e) => updateOidcProvider(index, { clientSecretEnv: e.target.value })}
                     placeholder="ACME_SSO_CLIENT_SECRET"
                     className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                   />

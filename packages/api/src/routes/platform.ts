@@ -24,8 +24,8 @@ import {
   accounts,
   agents,
   agentWallets,
-  auditEvents,
   approvalQueue,
+  auditEvents,
   encryptedChainKeys,
   encryptedKeys,
   getDb,
@@ -33,8 +33,8 @@ import {
   policies,
   proxyAuditLog,
   refreshTokens,
-  secrets,
   secretRoutes,
+  secrets,
   tenantConfigs,
   tenants,
   toPersistedPolicyRule,
@@ -54,24 +54,21 @@ import { KeyStore, Vault } from "@stwd/vault";
 import { and, count, eq, ilike, isNull, ne, or, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
-import { lockUserSession, lockUserSessions } from "../services/session-lock";
 import {
   type AppVariables,
   createAgentToken,
   getConditionSetReferenceValidationError,
   parseAgentTokenScopes,
 } from "../services/context";
+import { normalizeGasSpendQuery, querySponsoredGasSpend } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
+import { lockUserSession, lockUserSessions } from "../services/session-lock";
 import {
   createTenantTestAccountConfig,
   publicTestAccount,
   redactedTestAccount,
 } from "../services/test-account-credentials";
-import {
-  normalizeGasSpendQuery,
-  querySponsoredGasSpend,
-} from "../services/gas-sponsorship";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import { invalidateEmailAuthForTenant } from "./auth";
 
@@ -2240,7 +2237,11 @@ platform.post("/users/wallet/address", async (c) => {
 });
 
 platform.post("/users/smart-wallet/address", async (c) => {
-  const body = await safeJsonParse<{ smartWalletId?: unknown; smartWalletAddress?: unknown; tenantId?: unknown }>(c);
+  const body = await safeJsonParse<{
+    smartWalletId?: unknown;
+    smartWalletAddress?: unknown;
+    tenantId?: unknown;
+  }>(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   return platformUserLookupAlias(c, {
     smartWalletId:
@@ -2264,8 +2265,15 @@ platform.post("/users/custom-auth/id", async (c) => {
 
 function providerLookupAlias(provider: string) {
   return async (c: Context<{ Variables: AppVariables }>) => {
-    const body = await safeJsonParse<{ providerAccountId?: unknown; subject?: unknown; username?: unknown; id?: unknown; tenantId?: unknown }>(c);
-    if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    const body = await safeJsonParse<{
+      providerAccountId?: unknown;
+      subject?: unknown;
+      username?: unknown;
+      id?: unknown;
+      tenantId?: unknown;
+    }>(c);
+    if (!body)
+      return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
     const providerAccountId =
       typeof body.providerAccountId === "string"
         ? body.providerAccountId

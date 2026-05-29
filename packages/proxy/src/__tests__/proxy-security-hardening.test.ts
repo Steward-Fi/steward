@@ -18,7 +18,9 @@ describe("proxy security hardening", () => {
   it("requires replay protection for every non-safe proxy method", () => {
     expect(proxySource).toContain('const SAFE_PROXY_METHODS = new Set(["GET", "HEAD", "OPTIONS"])');
     expect(proxySource).not.toContain("UNSAFE_PROXY_METHODS");
-    expect(proxySource).toContain('const requestType = signedRequest ? "signed proxy requests" : "mutating proxy requests"');
+    expect(proxySource).toContain(
+      'const requestType = signedRequest ? "signed proxy requests" : "mutating proxy requests"',
+    );
     expect(proxySource).toContain("Idempotency-Key header is required for ${requestType}");
   });
 
@@ -91,7 +93,9 @@ describe("proxy security hardening", () => {
 
   it("fails closed for query credential injection before decrypting or forwarding", () => {
     const routeCheck = proxySource.indexOf('route.injectAs === "query"');
-    const decrypt = proxySource.indexOf("credential = await decryptSecret(tenantId, route.secretId)");
+    const decrypt = proxySource.indexOf(
+      "credential = await decryptSecret(tenantId, route.secretId)",
+    );
     const forward = proxySource.indexOf("response = await forwardProxyRequestForHandler(");
     expect(routeCheck).toBeGreaterThanOrEqual(0);
     expect(routeCheck).toBeLessThan(decrypt);

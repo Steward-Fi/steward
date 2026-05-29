@@ -155,26 +155,29 @@ describe("tenant-admin OIDC provider config routes", () => {
     const unsafeBody = (await unsafeResponse.json()) as { error: string };
     expect(unsafeBody.error).toContain("jwksUri for provider private-jwks");
 
-    const unsafeAuthCodeResponse = await tenantConfigRoutes.request(`/${TENANT_ID}/oidc-providers`, {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${ownerToken}`,
-        "Content-Type": "application/json",
+    const unsafeAuthCodeResponse = await tenantConfigRoutes.request(
+      `/${TENANT_ID}/oidc-providers`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${ownerToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          providers: [
+            {
+              id: "unsafe-code-flow",
+              issuer: "https://tenant.example.com",
+              audience: ["steward-api"],
+              jwksUri: "https://tenant.example.com/.well-known/jwks.json",
+              clientId: "enterprise-client",
+              authorizationUrl: "https://tenant.example.com/oauth2/v1/authorize",
+              tokenUrl: "https://127.0.0.1/oauth2/v1/token",
+            },
+          ],
+        }),
       },
-      body: JSON.stringify({
-        providers: [
-          {
-            id: "unsafe-code-flow",
-            issuer: "https://tenant.example.com",
-            audience: ["steward-api"],
-            jwksUri: "https://tenant.example.com/.well-known/jwks.json",
-            clientId: "enterprise-client",
-            authorizationUrl: "https://tenant.example.com/oauth2/v1/authorize",
-            tokenUrl: "https://127.0.0.1/oauth2/v1/token",
-          },
-        ],
-      }),
-    });
+    );
     expect(unsafeAuthCodeResponse.status).toBe(400);
     const unsafeAuthCodeBody = (await unsafeAuthCodeResponse.json()) as { error: string };
     expect(unsafeAuthCodeBody.error).toContain("tokenUrl for provider unsafe-code-flow");

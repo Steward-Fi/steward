@@ -63,7 +63,8 @@ function getHmacKey(): Uint8Array {
           "Generate with `openssl rand -hex 32`.",
       );
     }
-    cachedKey = isHex && env.length >= MIN_HMAC_RAW_BYTES * 2 ? toU8(env) : new TextEncoder().encode(env);
+    cachedKey =
+      isHex && env.length >= MIN_HMAC_RAW_BYTES * 2 ? toU8(env) : new TextEncoder().encode(env);
     return cachedKey;
   }
   if (process.env.NODE_ENV === "production") {
@@ -348,7 +349,10 @@ export async function verifyAuditChain(
     // head outranks / outcounts what survives on disk. Point brokenAt at the
     // first missing seq.
     if (actualMaxSeq < expectedSeqHwm || actualCount < expectedLiveCount) {
-      return { valid: false, brokenAt: actualMaxSeq + 1 < genesisSeq ? genesisSeq : actualMaxSeq + 1 };
+      return {
+        valid: false,
+        brokenAt: actualMaxSeq + 1 < genesisSeq ? genesisSeq : actualMaxSeq + 1,
+      };
     }
   }
   // A request that starts at genesis but there is NO head row yet means either a

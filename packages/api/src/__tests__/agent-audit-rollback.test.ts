@@ -31,7 +31,9 @@ describe("agent audit rollback hardening", () => {
     expect(walletRoute).toContain("vault.createWallet");
     expect(walletRoute).toContain('action: "agent.wallet.create"');
     expect(walletRoute).toContain("try {");
-    expect(walletRoute).toContain("deleteAgentWalletRows(agentId, wallet.chainFamily, wallet.venue)");
+    expect(walletRoute).toContain(
+      "deleteAgentWalletRows(agentId, wallet.chainFamily, wallet.venue)",
+    );
   });
 
   it("restores signer, quorum, and policy rows when final audit writes fail", () => {
@@ -54,7 +56,10 @@ describe("agent audit rollback hardening", () => {
       ['agentRoutes.put("/:agentId/policies"', "restoreAgentPolicies(agentId, previousPolicies)"],
       ['agentRoutes.post("/:agentId/policies/rules"', "db.delete(policies)"],
       ['agentRoutes.patch("/:agentId/policies/rules/:ruleId"', "existing.updatedAt"],
-      ['agentRoutes.delete("/:agentId/policies/rules/:ruleId"', "db.insert(policies).values(deleted)"],
+      [
+        'agentRoutes.delete("/:agentId/policies/rules/:ruleId"',
+        "db.insert(policies).values(deleted)",
+      ],
     ] as const) {
       const start = routeSource.indexOf(marker);
       expect(start).toBeGreaterThanOrEqual(0);
@@ -73,7 +78,9 @@ describe("agent audit rollback hardening", () => {
     );
     const authorizedAudit = deleteRoute.indexOf('action: "agent.delete.authorized"');
     const finalAudit = deleteRoute.indexOf('action: "agent.delete"', authorizedAudit + 1);
-    const revocation = deleteRoute.indexOf("revocationStore.revokeAgentTokens(agentId, issuedBefore)");
+    const revocation = deleteRoute.indexOf(
+      "revocationStore.revokeAgentTokens(agentId, issuedBefore)",
+    );
     const rowDelete = deleteRoute.indexOf("tx.delete(agents)");
     expect(authorizedAudit).toBeGreaterThanOrEqual(0);
     expect(revocation).toBeGreaterThan(authorizedAudit);

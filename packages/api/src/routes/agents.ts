@@ -12,10 +12,6 @@ import { Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
 import { writeAuditEvent } from "../services/audit";
 import {
-  publicGasSponsorshipState,
-  readTenantGasSponsorshipConfig,
-} from "../services/gas-sponsorship";
-import {
   AGENT_TOKEN_EXPIRY,
   type AgentIdentity,
   type ApiResponse,
@@ -46,6 +42,10 @@ import {
   transactions,
   vault,
 } from "../services/context";
+import {
+  publicGasSponsorshipState,
+  readTenantGasSponsorshipConfig,
+} from "../services/gas-sponsorship";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { createSignerCredentialHash } from "../services/signer-credentials";
 
@@ -928,14 +928,20 @@ agentRoutes.delete("/:agentId", async (c) => {
       .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
     return {
       agent: agentRow ?? null,
-      approvalQueue: await tx.select().from(approvalQueue).where(eq(approvalQueue.agentId, agentId)),
+      approvalQueue: await tx
+        .select()
+        .from(approvalQueue)
+        .where(eq(approvalQueue.agentId, agentId)),
       transactions: await tx.select().from(transactions).where(eq(transactions.agentId, agentId)),
       policies: await tx.select().from(policies).where(eq(policies.agentId, agentId)),
       encryptedChainKeys: await tx
         .select()
         .from(encryptedChainKeys)
         .where(eq(encryptedChainKeys.agentId, agentId)),
-      encryptedKeys: await tx.select().from(encryptedKeys).where(eq(encryptedKeys.agentId, agentId)),
+      encryptedKeys: await tx
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, agentId)),
       agentWallets: await tx.select().from(agentWallets).where(eq(agentWallets.agentId, agentId)),
     };
   });
@@ -1206,38 +1212,38 @@ agentRoutes.get("/:agentId/account", async (c) => {
     tokenBalancesResult,
     gasSponsorshipConfig,
   ] = await Promise.all([
-      db
-        .select({
-          id: agentWallets.id,
-          chainFamily: agentWallets.chainFamily,
-          address: agentWallets.address,
-          venue: agentWallets.venue,
-          purpose: agentWallets.purpose,
-          createdAt: agentWallets.createdAt,
-        })
-        .from(agentWallets)
-        .where(eq(agentWallets.agentId, agentId)),
-      getTransactionStats(agentId),
-      db
-        .select({
-          spentThisMonth: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
-        })
-        .from(transactions)
-        .where(
-          and(
-            eq(transactions.agentId, agentId),
-            gte(transactions.createdAt, new Date(Date.now() - 30 * 86400_000)),
-            sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
-          ),
+    db
+      .select({
+        id: agentWallets.id,
+        chainFamily: agentWallets.chainFamily,
+        address: agentWallets.address,
+        venue: agentWallets.venue,
+        purpose: agentWallets.purpose,
+        createdAt: agentWallets.createdAt,
+      })
+      .from(agentWallets)
+      .where(eq(agentWallets.agentId, agentId)),
+    getTransactionStats(agentId),
+    db
+      .select({
+        spentThisMonth: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
+      })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.agentId, agentId),
+          gte(transactions.createdAt, new Date(Date.now() - 30 * 86400_000)),
+          sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
         ),
-      vault.getBalance(tenantId, agentId, chainId).catch((error: unknown) => ({
-        unavailable: true as const,
-        reason: sanitizeErrorMessage(error),
-      })),
-      vault.getTokenBalances(tenantId, agentId, chainId, customTokens).catch((error: unknown) => ({
-        unavailable: true as const,
-        reason: sanitizeErrorMessage(error),
-      })),
+      ),
+    vault.getBalance(tenantId, agentId, chainId).catch((error: unknown) => ({
+      unavailable: true as const,
+      reason: sanitizeErrorMessage(error),
+    })),
+    vault.getTokenBalances(tenantId, agentId, chainId, customTokens).catch((error: unknown) => ({
+      unavailable: true as const,
+      reason: sanitizeErrorMessage(error),
+    })),
     readTenantGasSponsorshipConfig(tenantId),
   ]);
   const sponsorship = publicGasSponsorshipState(gasSponsorshipConfig);
@@ -2176,12 +2182,7 @@ agentRoutes.post("/batch", async (c) => {
         },
       });
       let identity: AgentIdentity | null = null;
-      identity = await vault.createAgent(
-        tenantId,
-        agentId,
-        agentSpec.name,
-        agentSpec.platformId,
-      );
+      identity = await vault.createAgent(tenantId, agentId, agentSpec.name, agentSpec.platformId);
 
       try {
         if (body.applyPolicies && body.applyPolicies.length > 0) {
@@ -2460,7 +2461,9 @@ agentRoutes.post("/:agentId/policies/rules", async (c) => {
       metadata: { agentId, type: nextRule.type },
     });
   } catch (error) {
-    await db.delete(policies).where(and(eq(policies.agentId, agentId), eq(policies.id, nextRule.id)));
+    await db
+      .delete(policies)
+      .where(and(eq(policies.agentId, agentId), eq(policies.id, nextRule.id)));
     throw error;
   }
 

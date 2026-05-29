@@ -23,11 +23,11 @@ import type {
   PolicyRule,
   PolicyTemplate,
   SecretRoutePreset,
-  TenantAuthAbuseConfig,
   TenantAppClient,
+  TenantAppClientEnvironment,
   TenantAppClientSecret,
   TenantAppClientSecretCreateResult,
-  TenantAppClientEnvironment,
+  TenantAuthAbuseConfig,
   TenantControlPlaneConfig,
   TenantFeatureFlags,
   TenantGasSponsorshipConfig,
@@ -43,7 +43,6 @@ import { DEFAULT_TENANT_CONFIGS } from "../defaults/tenant-configs";
 import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
 import { writeAuditEvent } from "../services/audit";
 import { normalizeAuthAbuseConfig } from "../services/auth-abuse";
-import { normalizeGasSponsorshipConfig } from "../services/gas-sponsorship";
 import {
   type ApiResponse,
   type AppVariables,
@@ -53,6 +52,7 @@ import {
   requireTenantLevel,
   safeJsonParse,
 } from "../services/context";
+import { normalizeGasSponsorshipConfig } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { buildSamlServiceProviderUrls, normalizeSamlSsoUpdate } from "../services/saml-sso-config";
@@ -95,9 +95,8 @@ const APP_CLIENT_ENVIRONMENTS = new Set<TenantAppClientEnvironment>([
   "production",
 ]);
 
-type AccessAllowlistEntryType = typeof ACCESS_ALLOWLIST_TYPES extends Set<infer Type>
-  ? Type
-  : never;
+type AccessAllowlistEntryType =
+  typeof ACCESS_ALLOWLIST_TYPES extends Set<infer Type> ? Type : never;
 
 interface AccessAllowlistEntry {
   id: string;
@@ -145,9 +144,7 @@ async function restoreTenantAppClients(
   const clientIds = new Set(snapshot.map((client) => client.id));
   const secretsToRestore = secretSnapshot.filter((secret) => clientIds.has(secret.clientId));
   await db.transaction(async (tx) => {
-    await tx
-      .delete(tenantAppClientSecrets)
-      .where(eq(tenantAppClientSecrets.tenantId, tenantId));
+    await tx.delete(tenantAppClientSecrets).where(eq(tenantAppClientSecrets.tenantId, tenantId));
     if (secretsToRestore.length > 0) {
       await tx.insert(tenantAppClientSecrets).values(secretsToRestore);
     }
@@ -224,7 +221,9 @@ async function restoreTenantSsoDomain(
   });
 }
 
-async function snapshotTenantSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoConfigRow | null> {
+async function snapshotTenantSamlSsoConfig(
+  tenantId: string,
+): Promise<TenantSamlSsoConfigRow | null> {
   const [row] = await db
     .select()
     .from(tenantSamlSsoConfigs)
@@ -599,7 +598,11 @@ function normalizeSsoDomain(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const domain = value.trim().toLowerCase();
   if (domain.length < 3 || domain.length > 253) return null;
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(domain)) {
+  if (
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(
+      domain,
+    )
+  ) {
     return null;
   }
   return domain;
@@ -760,7 +763,10 @@ function normalizeTenantTheme(value: unknown): TenantTheme | null | string {
   }
 
   if (input.colorScheme !== undefined) {
-    if (typeof input.colorScheme !== "string" || !THEME_COLOR_SCHEMES.has(input.colorScheme as never)) {
+    if (
+      typeof input.colorScheme !== "string" ||
+      !THEME_COLOR_SCHEMES.has(input.colorScheme as never)
+    ) {
       return "theme.colorScheme must be light, dark, or system";
     }
     theme.colorScheme = input.colorScheme as TenantTheme["colorScheme"];
@@ -882,7 +888,9 @@ function removeAccessAllowlistEntriesFromConfig(
     !removals.ids.has(accessAllowlistEntryId(type, value)) && !removeByPair.has(`${type}:${value}`);
   const email = {
     ...config.email,
-    allowedEmails: (config.email?.allowedEmails ?? []).filter((value) => shouldKeep("email", value)),
+    allowedEmails: (config.email?.allowedEmails ?? []).filter((value) =>
+      shouldKeep("email", value),
+    ),
     allowedDomains: (config.email?.allowedDomains ?? []).filter((value) =>
       shouldKeep("email_domain", value),
     ),
@@ -989,7 +997,10 @@ async function readTenantAppClientsForTenant(tenantId: string): Promise<TenantAp
     .where(eq(tenantAppClientsTable.tenantId, tenantId));
   return rows
     .map(serializeTenantAppClient)
-    .sort((a, b) => Number(b.isDefault === true) - Number(a.isDefault === true) || a.id.localeCompare(b.id));
+    .sort(
+      (a, b) =>
+        Number(b.isDefault === true) - Number(a.isDefault === true) || a.id.localeCompare(b.id),
+    );
 }
 
 async function persistTenantAppClientsForTenant(
@@ -1007,7 +1018,9 @@ async function persistTenantAppClientsForTenant(
       .from(tenantAppClientSecrets)
       .where(eq(tenantAppClientSecrets.tenantId, tenantId));
     const nextClientIds = new Set(normalized.map((client) => client.id));
-    const secretsToPreserve = existingSecrets.filter((secret) => nextClientIds.has(secret.clientId));
+    const secretsToPreserve = existingSecrets.filter((secret) =>
+      nextClientIds.has(secret.clientId),
+    );
 
     await tx.delete(tenantAppClientsTable).where(eq(tenantAppClientsTable.tenantId, tenantId));
     if (normalized.length > 0) {
@@ -1481,12 +1494,7 @@ tenantConfigRoutes.post("/:id/sso-domains/:domain/verify", requireTenantId, asyn
   const [existingVerifiedDomain] = await db
     .select({ tenantId: tenantSsoDomains.tenantId })
     .from(tenantSsoDomains)
-    .where(
-      and(
-        eq(tenantSsoDomains.domain, domain),
-        eq(tenantSsoDomains.status, "verified"),
-      ),
-    )
+    .where(and(eq(tenantSsoDomains.domain, domain), eq(tenantSsoDomains.status, "verified")))
     .limit(1);
   if (existingVerifiedDomain && existingVerifiedDomain.tenantId !== tenantId) {
     return c.json<ApiResponse>(
@@ -1859,7 +1867,10 @@ tenantConfigRoutes.post("/:id/access-allowlist", requireTenantId, async (c) => {
       action: "tenant.access_allowlist.add",
       resourceType: "tenant_config",
       resourceId: tenantId,
-      metadata: { added: additions.map(({ type, value }) => ({ type, value })), count: entries.length },
+      metadata: {
+        added: additions.map(({ type, value }) => ({ type, value })),
+        count: entries.length,
+      },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
@@ -1908,8 +1919,7 @@ tenantConfigRoutes.delete("/:id/access-allowlist", requireTenantId, async (c) =>
         : body.type !== undefined || body.value !== undefined
           ? { type: body.type, value: body.value }
           : undefined;
-  const removals =
-    rawEntries === undefined ? [] : normalizeAccessAllowlistEntries(rawEntries);
+  const removals = rawEntries === undefined ? [] : normalizeAccessAllowlistEntries(rawEntries);
   if (typeof removals === "string") {
     return c.json<ApiResponse>({ ok: false, error: removals }, 400);
   }
@@ -1990,11 +2000,7 @@ tenantConfigRoutes.post("/:id/redirect-urls", requireTenantId, async (c) => {
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
-  const additions = Array.isArray(body.urls)
-    ? body.urls
-    : body.url !== undefined
-      ? [body.url]
-      : [];
+  const additions = Array.isArray(body.urls) ? body.urls : body.url !== undefined ? [body.url] : [];
   if (additions.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "url or urls is required" }, 400);
   }
@@ -2052,11 +2058,7 @@ tenantConfigRoutes.delete("/:id/redirect-urls", requireTenantId, async (c) => {
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
-  const removals = Array.isArray(body.urls)
-    ? body.urls
-    : body.url !== undefined
-      ? [body.url]
-      : [];
+  const removals = Array.isArray(body.urls) ? body.urls : body.url !== undefined ? [body.url] : [];
   if (removals.length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "url or urls is required" }, 400);
   }
@@ -2081,10 +2083,7 @@ tenantConfigRoutes.delete("/:id/redirect-urls", requireTenantId, async (c) => {
     requestId: c.get("requestId") ?? null,
   });
   const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const entries = await persistAllowedRedirectUrlsForTenant(
-    tenantId,
-    next,
-  );
+  const entries = await persistAllowedRedirectUrlsForTenant(tenantId, next);
   try {
     await writeAuditEvent({
       tenantId,
@@ -2217,10 +2216,7 @@ tenantConfigRoutes.delete("/:id/app-origins", requireTenantId, async (c) => {
     requestId: c.get("requestId") ?? null,
   });
   const previousConfigRow = await snapshotTenantConfigRow(tenantId);
-  const entries = await persistAllowedOriginsForTenant(
-    tenantId,
-    next,
-  );
+  const entries = await persistAllowedOriginsForTenant(tenantId, next);
   try {
     await writeAuditEvent({
       tenantId,
@@ -2422,7 +2418,9 @@ tenantConfigRoutes.post("/:id/app-clients/:clientId/secrets", requireTenantId, a
   const [client] = await db
     .select({ id: tenantAppClientsTable.id })
     .from(tenantAppClientsTable)
-    .where(and(eq(tenantAppClientsTable.tenantId, tenantId), eq(tenantAppClientsTable.id, clientId)));
+    .where(
+      and(eq(tenantAppClientsTable.tenantId, tenantId), eq(tenantAppClientsTable.id, clientId)),
+    );
   if (!client) return c.json<ApiResponse>({ ok: false, error: "app client not found" }, 404);
 
   const generated = generateAppSecret();
@@ -2495,66 +2493,71 @@ tenantConfigRoutes.post("/:id/app-clients/:clientId/secrets", requireTenantId, a
   );
 });
 
-tenantConfigRoutes.delete("/:id/app-clients/:clientId/secrets/:secretId", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App client secret revocation");
-  if (mfaResponse) return mfaResponse;
+tenantConfigRoutes.delete(
+  "/:id/app-clients/:clientId/secrets/:secretId",
+  requireTenantId,
+  async (c) => {
+    const mfaResponse = requireRecentTenantAdminMfa(c, "App client secret revocation");
+    if (mfaResponse) return mfaResponse;
 
-  const tenantId = c.req.param("id") as string;
-  const clientId = normalizeAppClientId(c.req.param("clientId"));
-  const secretId = c.req.param("secretId");
-  if (!clientId) return c.json<ApiResponse>({ ok: false, error: "Invalid app client id" }, 400);
-  if (!secretId) return c.json<ApiResponse>({ ok: false, error: "Invalid app client secret id" }, 400);
+    const tenantId = c.req.param("id") as string;
+    const clientId = normalizeAppClientId(c.req.param("clientId"));
+    const secretId = c.req.param("secretId");
+    if (!clientId) return c.json<ApiResponse>({ ok: false, error: "Invalid app client id" }, 400);
+    if (!secretId)
+      return c.json<ApiResponse>({ ok: false, error: "Invalid app client secret id" }, 400);
 
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? tenantId,
-    action: "tenant.app_client_secret.revoke.authorized",
-    resourceType: "tenant_app_client_secret",
-    resourceId: secretId,
-    metadata: { appId: appIdFor(tenantId, clientId) },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
-
-  const previousSecrets = await snapshotTenantAppClientSecrets(tenantId, clientId);
-  const [row] = await db
-    .update(tenantAppClientSecrets)
-    .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
-    .where(
-      and(
-        eq(tenantAppClientSecrets.tenantId, tenantId),
-        eq(tenantAppClientSecrets.clientId, clientId),
-        eq(tenantAppClientSecrets.id, secretId),
-      ),
-    )
-    .returning();
-  if (!row) return c.json<ApiResponse>({ ok: false, error: "app client secret not found" }, 404);
-
-  try {
     await writeAuditEvent({
       tenantId,
       actorType: "user",
       actorId: c.get("userId") ?? tenantId,
-      action: "tenant.app_client_secret.revoke",
+      action: "tenant.app_client_secret.revoke.authorized",
       resourceType: "tenant_app_client_secret",
-      resourceId: row.id,
+      resourceId: secretId,
       metadata: { appId: appIdFor(tenantId, clientId) },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
     });
-  } catch (error) {
-    await restoreTenantAppClientSecrets(tenantId, clientId, previousSecrets);
-    throw error;
-  }
 
-  return c.json<ApiResponse<{ secret: TenantAppClientSecret }>>({
-    ok: true,
-    data: { secret: serializeTenantAppClientSecret(row) },
-  });
-});
+    const previousSecrets = await snapshotTenantAppClientSecrets(tenantId, clientId);
+    const [row] = await db
+      .update(tenantAppClientSecrets)
+      .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(tenantAppClientSecrets.tenantId, tenantId),
+          eq(tenantAppClientSecrets.clientId, clientId),
+          eq(tenantAppClientSecrets.id, secretId),
+        ),
+      )
+      .returning();
+    if (!row) return c.json<ApiResponse>({ ok: false, error: "app client secret not found" }, 404);
+
+    try {
+      await writeAuditEvent({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "tenant.app_client_secret.revoke",
+        resourceType: "tenant_app_client_secret",
+        resourceId: row.id,
+        metadata: { appId: appIdFor(tenantId, clientId) },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+    } catch (error) {
+      await restoreTenantAppClientSecrets(tenantId, clientId, previousSecrets);
+      throw error;
+    }
+
+    return c.json<ApiResponse<{ secret: TenantAppClientSecret }>>({
+      ok: true,
+      data: { secret: serializeTenantAppClientSecret(row) },
+    });
+  },
+);
 
 tenantConfigRoutes.delete("/:id/app-clients/:clientId", requireTenantId, async (c) => {
   const mfaResponse = requireRecentTenantAdminMfa(c, "App client updates");

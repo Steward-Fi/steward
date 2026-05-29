@@ -12,7 +12,10 @@ describe("auth refresh revocation race hardening", () => {
 
     const rotateStart = routeSource.indexOf("async function rotateRefreshTokenForUserSession");
     expect(rotateStart).toBeGreaterThanOrEqual(0);
-    const rotateRoute = routeSource.slice(rotateStart, routeSource.indexOf("/** Build", rotateStart));
+    const rotateRoute = routeSource.slice(
+      rotateStart,
+      routeSource.indexOf("/** Build", rotateStart),
+    );
     expect(rotateRoute).toContain("await lockUserSession(tx, refreshCandidate.userId)");
     expect(rotateRoute).toContain("revokedBefore >= refreshTokenIssuedAtSeconds(record)");
     expect(rotateRoute).not.toContain("revokedBefore >= refreshStartedAt");

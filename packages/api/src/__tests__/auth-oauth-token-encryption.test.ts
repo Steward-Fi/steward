@@ -272,10 +272,7 @@ describe("OAuth provider token encryption", () => {
     expect(body.ok).toBe(false);
     expect(body.error).toContain("reserved internal domain");
 
-    const linkedAccounts = await db
-      .select()
-      .from(accounts)
-      .where(eq(accounts.userId, victim.id));
+    const linkedAccounts = await db.select().from(accounts).where(eq(accounts.userId, victim.id));
     expect(linkedAccounts).toHaveLength(0);
   });
 });

@@ -229,10 +229,13 @@ export function createWebhookServer(
             }
             const body = await readBunRequestBody(req, maxBodyBytes);
             if (body === null) {
-              return new Response(JSON.stringify({ ok: false, message: "Webhook body too large" }), {
-                status: 413,
-                headers: { "Content-Type": "application/json" },
-              });
+              return new Response(
+                JSON.stringify({ ok: false, message: "Webhook body too large" }),
+                {
+                  status: 413,
+                  headers: { "Content-Type": "application/json" },
+                },
+              );
             }
             const result = await handleRequest(body, req.headers);
             return new Response(

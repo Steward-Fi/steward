@@ -341,7 +341,9 @@ export function getTenantPayload(tenant: Tenant): Omit<Tenant, "apiKeyHash"> & T
   };
 }
 
-function parseAppId(value: string | undefined | null): { tenantId: string; clientId: string } | null {
+function parseAppId(
+  value: string | undefined | null,
+): { tenantId: string; clientId: string } | null {
   if (!value) return null;
   const index = value.lastIndexOf("/");
   if (index <= 0 || index >= value.length - 1) return null;
@@ -351,7 +353,9 @@ function parseAppId(value: string | undefined | null): { tenantId: string; clien
   return { tenantId, clientId };
 }
 
-function parseBasicAuth(value: string | undefined | null): { username: string; password: string } | null {
+function parseBasicAuth(
+  value: string | undefined | null,
+): { username: string; password: string } | null {
   if (!value?.startsWith("Basic ")) return null;
   let decoded = "";
   try {

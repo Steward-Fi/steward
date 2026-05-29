@@ -1,4 +1,4 @@
-import { sql, type SQLWrapper } from "drizzle-orm";
+import { type SQLWrapper, sql } from "drizzle-orm";
 
 function userSessionLockKey(userId: string): string {
   return `user_session_${userId}`;

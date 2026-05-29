@@ -102,11 +102,14 @@ describe("agent policy rule CRUD", () => {
     expect(getResponse.status).toBe(200);
     expect(fetched.data.id).toBe(createdRuleId);
 
-    const updateResponse = await app.request(`/agents/${AGENT_ID}/policies/rules/${createdRuleId}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabled: false }),
-    });
+    const updateResponse = await app.request(
+      `/agents/${AGENT_ID}/policies/rules/${createdRuleId}`,
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: false }),
+      },
+    );
     const updated = (await updateResponse.json()) as {
       ok: boolean;
       data: { id: string; enabled: boolean };
@@ -114,14 +117,19 @@ describe("agent policy rule CRUD", () => {
     expect(updateResponse.status).toBe(200);
     expect(updated.data.enabled).toBe(false);
 
-    const deleteResponse = await app.request(`/agents/${AGENT_ID}/policies/rules/${createdRuleId}`, {
-      method: "DELETE",
-    });
+    const deleteResponse = await app.request(
+      `/agents/${AGENT_ID}/policies/rules/${createdRuleId}`,
+      {
+        method: "DELETE",
+      },
+    );
     const deleted = (await deleteResponse.json()) as { ok: boolean; data: { id: string } };
     expect(deleteResponse.status).toBe(200);
     expect(deleted.data.id).toBe(createdRuleId);
 
-    const missingResponse = await app.request(`/agents/${AGENT_ID}/policies/rules/${createdRuleId}`);
+    const missingResponse = await app.request(
+      `/agents/${AGENT_ID}/policies/rules/${createdRuleId}`,
+    );
     expect(missingResponse.status).toBe(404);
   });
 

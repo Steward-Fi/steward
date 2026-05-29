@@ -15,7 +15,9 @@ describe("tenant app clients hardening", () => {
 
     expect(schema).toContain("export const tenantAppClients");
     expect(schema).toContain('varchar("tenant_id"');
-    expect(schema).toContain('allowedOrigins: text("allowed_origins").array().notNull().default([])');
+    expect(schema).toContain(
+      'allowedOrigins: text("allowed_origins").array().notNull().default([])',
+    );
     expect(schema).toContain(
       'allowedRedirectUrls: text("allowed_redirect_urls").array().notNull().default([])',
     );
@@ -61,7 +63,9 @@ describe("tenant app clients hardening", () => {
       expect(route.indexOf(authorizedAction)).toBeLessThan(
         route.indexOf("persistTenantAppClientsForTenant"),
       );
-      expect(route).toContain("const previousAppClients = await snapshotTenantAppClients(tenantId)");
+      expect(route).toContain(
+        "const previousAppClients = await snapshotTenantAppClients(tenantId)",
+      );
       expect(route).toContain(
         "const previousAppClientSecrets = await snapshotTenantAppClientSecretsForTenant(tenantId)",
       );
@@ -77,11 +81,16 @@ describe("tenant app clients hardening", () => {
     const source = read("packages/api/src/routes/tenant-config.ts");
     const helperStart = source.indexOf("async function persistTenantAppClientsForTenant");
     expect(helperStart).toBeGreaterThanOrEqual(0);
-    const helperEnd = source.indexOf("\nasync function validatePolicyTemplatesForTenant", helperStart);
+    const helperEnd = source.indexOf(
+      "\nasync function validatePolicyTemplatesForTenant",
+      helperStart,
+    );
     const helper = source.slice(helperStart, helperEnd);
 
     expect(helper).toContain(".from(tenantAppClientSecrets)");
-    expect(helper).toContain("const nextClientIds = new Set(normalized.map((client) => client.id))");
+    expect(helper).toContain(
+      "const nextClientIds = new Set(normalized.map((client) => client.id))",
+    );
     expect(helper).toContain(
       "const secretsToPreserve = existingSecrets.filter((secret) => nextClientIds.has(secret.clientId))",
     );
@@ -142,7 +151,9 @@ describe("tenant app clients hardening", () => {
       expect(route).toContain("const previousSecrets = await snapshotTenantAppClientSecrets");
       expect(route).toContain("try {");
       expect(route).toContain(finalAction);
-      expect(route).toContain("await restoreTenantAppClientSecrets(tenantId, clientId, previousSecrets)");
+      expect(route).toContain(
+        "await restoreTenantAppClientSecrets(tenantId, clientId, previousSecrets)",
+      );
     }
   });
 });

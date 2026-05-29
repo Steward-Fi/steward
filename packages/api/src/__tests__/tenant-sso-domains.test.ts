@@ -18,9 +18,11 @@ describe("tenant SSO domain hardening", () => {
 
     expect(source).toContain('import { resolveTxt } from "node:dns/promises"');
     expect(source).toContain("async function hasSsoDomainVerificationTxt");
-    expect(source).toContain('resolveTxt(`_steward-sso.${domain}`)');
+    expect(source).toContain("resolveTxt(`_steward-sso.${domain}`)");
     expect(verifyRoute).toContain("previousDomain.verificationToken");
-    expect(verifyRoute).toContain("hasSsoDomainVerificationTxt(domain, previousDomain.verificationToken)");
+    expect(verifyRoute).toContain(
+      "hasSsoDomainVerificationTxt(domain, previousDomain.verificationToken)",
+    );
     expect(verifyRoute).toContain('action: "tenant.sso_domain.verify.authorized"');
     expect(verifyRoute.indexOf('action: "tenant.sso_domain.verify.authorized"')).toBeLessThan(
       verifyRoute.indexOf(".update(tenantSsoDomains)"),

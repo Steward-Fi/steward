@@ -28,7 +28,7 @@ describe("user wallet signing hardening", () => {
     expect(signRequest).toBeGreaterThan(valueGuard);
     expect(routeBody).toContain("non-negative uint256 wei amount");
     // Validator must reject negative/garbage (only digits accepted, bounded to uint256).
-    expect(userSource).toContain('!/^\\d+$/.test(value)');
+    expect(userSource).toContain("!/^\\d+$/.test(value)");
   });
 
   it("rejects caller-controlled gas limits before user wallet signing", () => {
@@ -36,7 +36,7 @@ describe("user wallet signing hardening", () => {
     expect(routeStart).toBeGreaterThanOrEqual(0);
     const routeEnd = userSource.indexOf('user.post("/me/wallet/sign-message"', routeStart);
     const routeBody = userSource.slice(routeStart, routeEnd);
-    const gasLimitGuard = routeBody.indexOf('gasLimit !== undefined');
+    const gasLimitGuard = routeBody.indexOf("gasLimit !== undefined");
     const signRequest = routeBody.indexOf("const signRequest");
 
     expect(gasLimitGuard).toBeGreaterThanOrEqual(0);

@@ -1092,9 +1092,7 @@ describe("HTTP request building", () => {
 
   it("app origin helpers use tenant app-origin aliases", async () => {
     installMockFetch({ ok: true, data: { entries: ["https://app.example.test"] } });
-    const entries = await makeClient({ bearerToken: "user-token" }).listAppOrigins(
-      "tenant/one",
-    );
+    const entries = await makeClient({ bearerToken: "user-token" }).listAppOrigins("tenant/one");
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe(
       `https://api.steward.example/tenants/${encodeURIComponent("tenant/one")}/app-origins`,
@@ -1122,9 +1120,7 @@ describe("HTTP request building", () => {
 
   it("redirect URL helpers use tenant redirect-url aliases", async () => {
     installMockFetch({ ok: true, data: { entries: ["https://app.example.test/callback"] } });
-    const entries = await makeClient({ bearerToken: "user-token" }).listRedirectUrls(
-      "tenant/one",
-    );
+    const entries = await makeClient({ bearerToken: "user-token" }).listRedirectUrls("tenant/one");
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe(
       `https://api.steward.example/tenants/${encodeURIComponent("tenant/one")}/redirect-urls`,
@@ -1176,26 +1172,17 @@ describe("HTTP request building", () => {
     expect(listed).toEqual(clients);
 
     installMockFetch({ ok: true, data: { clients } });
-    await makeClient({ bearerToken: "user-token" }).replaceTenantAppClients(
-      "tenant/one",
-      clients,
-    );
+    await makeClient({ bearerToken: "user-token" }).replaceTenantAppClients("tenant/one", clients);
     expect(lastCapture?.method).toBe("PUT");
     expect(lastCapture?.body).toEqual({ clients });
 
     installMockFetch({ ok: true, data: { client: clients[0] } });
-    await makeClient({ bearerToken: "user-token" }).createTenantAppClient(
-      "tenant/one",
-      clients[0],
-    );
+    await makeClient({ bearerToken: "user-token" }).createTenantAppClient("tenant/one", clients[0]);
     expect(lastCapture?.method).toBe("POST");
     expect(lastCapture?.body).toEqual({ client: clients[0] });
 
     installMockFetch({ ok: true, data: { clients: [] } });
-    await makeClient({ bearerToken: "user-token" }).deleteTenantAppClient(
-      "tenant/one",
-      "web/prod",
-    );
+    await makeClient({ bearerToken: "user-token" }).deleteTenantAppClient("tenant/one", "web/prod");
     expect(lastCapture?.method).toBe("DELETE");
     expect(lastCapture?.url).toBe(
       `https://api.steward.example/tenants/${encodeURIComponent("tenant/one")}/app-clients/${encodeURIComponent("web/prod")}`,

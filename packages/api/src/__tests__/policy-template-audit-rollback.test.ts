@@ -54,12 +54,16 @@ describe("policy template audit rollback hardening", () => {
     expect(routeSource).toContain("async function restoreAgentPolicies");
     expect(routeSource).toContain("inArray(policies.agentId, agentIds)");
 
-    const assignStart = routeSource.indexOf('policiesStandaloneRoutes.post("/templates/:id/assign"');
+    const assignStart = routeSource.indexOf(
+      'policiesStandaloneRoutes.post("/templates/:id/assign"',
+    );
     expect(assignStart).toBeGreaterThanOrEqual(0);
     const assignRoute = routeSource.slice(assignStart);
 
     expect(assignRoute).toContain('action: "policy.template.assign.authorized"');
-    expect(assignRoute).toContain("const previousPolicies = await snapshotAgentPolicies(uniqueAgentIds)");
+    expect(assignRoute).toContain(
+      "const previousPolicies = await snapshotAgentPolicies(uniqueAgentIds)",
+    );
     expect(assignRoute).toContain('action: "policy.template.assign"');
     expect(assignRoute).toContain("try {");
     expect(assignRoute).toContain("restoreAgentPolicies(uniqueAgentIds, previousPolicies)");

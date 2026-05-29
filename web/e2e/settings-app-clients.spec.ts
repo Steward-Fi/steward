@@ -109,9 +109,7 @@ test.describe("Dashboard app client settings", () => {
     await firstClient.getByLabel("Environment").selectOption("preview");
     await firstClient.getByLabel("Enabled").uncheck();
     await firstClient.getByLabel("Allowed Origins").fill("https://preview.example.com");
-    await firstClient
-      .getByLabel("Redirect URLs")
-      .fill("https://preview.example.com/auth/callback");
+    await firstClient.getByLabel("Redirect URLs").fill("https://preview.example.com/auth/callback");
     await firstClient.getByRole("button", { name: "Rotate Secret" }).click();
     await expect(firstClient.getByText("stw_app_created_once")).toBeVisible();
 
@@ -121,9 +119,7 @@ test.describe("Dashboard app client settings", () => {
     await secondClient.getByLabel("Name").fill("Mobile Development");
     await secondClient.getByLabel("Environment").selectOption("development");
     await secondClient.getByLabel("Allowed Origins").fill("http://localhost:3000");
-    await secondClient
-      .getByLabel("Redirect URLs")
-      .fill("http://localhost:3000/auth/callback");
+    await secondClient.getByLabel("Redirect URLs").fill("http://localhost:3000/auth/callback");
 
     await appClientsForm.getByRole("button", { name: "Save Clients" }).click();
     await expect(appClientsForm.getByText("Saved")).toBeVisible();

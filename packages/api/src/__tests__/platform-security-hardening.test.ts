@@ -295,7 +295,10 @@ describe("platform security hardening", () => {
   it("restores platform user and membership mutations when final audit events fail", () => {
     for (const [marker, rollback] of [
       ['platform.patch("/users/:userId/metadata"', "customMetadata: existing.customMetadata"],
-      ['platform.patch("/users/:userId/deactivate"', "deactivatedAt: result.previous.deactivatedAt"],
+      [
+        'platform.patch("/users/:userId/deactivate"',
+        "deactivatedAt: result.previous.deactivatedAt",
+      ],
       [
         'platform.post("/users/:userId/accounts/:provider/:providerAccountId/transfer"',
         "set({ userId: fromUserId })",
@@ -363,8 +366,12 @@ describe("platform security hardening", () => {
     expect(revocationSource).toContain("Shared user revocation store unavailable");
     expect(revocationSource).not.toContain("catch {\n      await this.fallback.revokeAgentTokens");
     expect(revocationSource).not.toContain("catch {\n      await this.fallback.revokeUserTokens");
-    expect(revocationSource).not.toContain("catch {\n      return this.fallback.getAgentRevokedBefore");
-    expect(revocationSource).not.toContain("catch {\n      return this.fallback.getUserRevokedBefore");
+    expect(revocationSource).not.toContain(
+      "catch {\n      return this.fallback.getAgentRevokedBefore",
+    );
+    expect(revocationSource).not.toContain(
+      "catch {\n      return this.fallback.getUserRevokedBefore",
+    );
   });
 
   it("revokes user access tokens for tenant membership removal and tenant deletion", () => {

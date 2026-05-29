@@ -27,14 +27,14 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     );
     expect(authorizeRoute).toContain("const nonce = randomBase64Url(24)");
     expect(authorizeRoute).toContain("const codeVerifier = randomBase64Url(48)");
-    expect(authorizeRoute).toContain("pkceChallengeForVerifier(codeVerifier, \"S256\")");
+    expect(authorizeRoute).toContain('pkceChallengeForVerifier(codeVerifier, "S256")');
     expect(authorizeRoute).toContain('authUrl.searchParams.set("nonce", nonce)');
     expect(authorizeRoute).toContain(
       'authUrl.searchParams.set("code_challenge", providerCodeChallenge)',
     );
-    expect(authorizeRoute).toContain('`oidc:${state}`');
+    expect(authorizeRoute).toContain("`oidc:${state}`");
 
-    expect(callbackRoute).toContain('await getChallengeStore().consume(`oidc:${state}`)');
+    expect(callbackRoute).toContain("await getChallengeStore().consume(`oidc:${state}`)");
     expect(callbackRoute).toContain("stateData.providerId !== providerId");
     expect(callbackRoute).toContain("exchangeOidcAuthorizationCode");
     expect(callbackRoute).toContain("verifyOidcJwt(stateData.tenantId, provider, idToken)");
@@ -58,7 +58,7 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(callbackRoute).not.toContain('searchParams.set("refreshToken"');
     expect(callbackRoute).toContain("OAUTH_CODE_TTL_MS");
     expect(source).toContain("async function exchangeOidcAuthorizationCode");
-    expect(source).toContain('if (!provider.clientId || !provider.tokenUrl)');
+    expect(source).toContain("if (!provider.clientId || !provider.tokenUrl)");
     expect(source).toContain('body.set("client_secret", secret)');
     expect(source).toContain("postPublicOidcTokenEndpoint(provider.tokenUrl, body)");
     expect(source).toContain("OIDC token endpoint redirects are not allowed");

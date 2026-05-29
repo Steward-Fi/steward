@@ -167,7 +167,9 @@ describe("gas sponsorship config", () => {
       vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"'),
       vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"'),
     );
-    const signedOnlyGuard = transferRoute.indexOf("transfer.sponsor === true && transfer.broadcast === false");
+    const signedOnlyGuard = transferRoute.indexOf(
+      "transfer.sponsor === true && transfer.broadcast === false",
+    );
     const sponsorshipResolve = transferRoute.indexOf("resolveGasSponsorshipRequest");
     const reservation = transferRoute.indexOf('status: "reserved"');
     expect(signedOnlyGuard).toBeGreaterThanOrEqual(0);

@@ -12,7 +12,9 @@ describe("user account unlink audit rollback hardening", () => {
     expect(routeSource).toContain("tx.insert(authenticators).values(mutation.deletedPasskey)");
     expect(routeSource).toContain("tx.insert(refreshTokens).values(mutation.deletedRefreshTokens)");
 
-    const unlinkStart = routeSource.indexOf('user.delete("/me/accounts/:provider/:providerAccountId"');
+    const unlinkStart = routeSource.indexOf(
+      'user.delete("/me/accounts/:provider/:providerAccountId"',
+    );
     expect(unlinkStart).toBeGreaterThanOrEqual(0);
     const unlinkRoute = routeSource.slice(
       unlinkStart,
