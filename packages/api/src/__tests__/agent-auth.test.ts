@@ -278,11 +278,20 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
   });
 
   describe("GET /vault/:agentId/pending", () => {
-    it("allows agent to access own pending", async () => {
+    // Reading pending (approval-queue) transactions was hardened to require an
+    // owner/admin session with recent MFA — agent tokens are no longer sufficient.
+    it("allows an owner/admin session to access agent pending", async () => {
+      const res = await fetch(`${BASE_URL}/vault/${TEST_AGENT_ID}/pending`, {
+        headers: await adminSessionHeaders(),
+      });
+      expect(res.status).not.toBe(403);
+    });
+
+    it("blocks agent tokens from accessing pending (admin+MFA required)", async () => {
       const res = await fetch(`${BASE_URL}/vault/${TEST_AGENT_ID}/pending`, {
         headers: agentBearerHeaders(agentToken),
       });
-      expect(res.status).not.toBe(403);
+      expect(res.status).toBe(403);
     });
 
     it("blocks agent from accessing another agent's pending", async () => {
