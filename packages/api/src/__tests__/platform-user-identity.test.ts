@@ -38,12 +38,12 @@ beforeAll(async () => {
   await db.insert(tenants).values({
     id: TENANT_ID,
     name: "Platform Identity Test",
-    apiKeyHash: "test-hash",
+    apiKeyHash: `test-hash-${TENANT_ID}`,
   });
   await db.insert(tenants).values({
     id: OTHER_TENANT_ID,
     name: "Platform Identity Other Tenant",
-    apiKeyHash: "test-hash",
+    apiKeyHash: `test-hash-${OTHER_TENANT_ID}`,
   });
   const [user] = await db
     .insert(users)
