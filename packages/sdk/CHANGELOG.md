@@ -1,6 +1,9 @@
 # @stwd/sdk Changelog
 
-## Unreleased
+## 0.10.1
+
+- chainId threaded through SIWE/SIWS sign-in (signInWithSIWE/signInWithSolana accept the connected chain).
+- Security audit hardening release.
 
 - Expands Hyperliquid trade asset types to include NEAR, HYPE, ZEC, XMR.
 - Expands Hyperliquid trade asset types to include BNB, SOL, AVAX, ARB, and OP.
