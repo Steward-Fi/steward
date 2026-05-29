@@ -5,6 +5,7 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 
 const TENANT_ID = "user-tenant-admin-users";
 const OTHER_TENANT_ID = "user-tenant-admin-users-other";
+const OWNER_PERSONAL_TENANT_ID = "personal-user-tenant-admin-owner";
 
 describe("user tenant-admin user directory routes", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
@@ -24,14 +25,19 @@ describe("user tenant-admin user directory routes", () => {
     });
 
     await getDb().insert(tenants).values({
+      id: OWNER_PERSONAL_TENANT_ID,
+      name: "Owner Personal Tenant",
+      apiKeyHash: `${OWNER_PERSONAL_TENANT_ID}-hash`,
+    });
+    await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "User Tenant Admin Users",
-      apiKeyHash: "hash",
+      apiKeyHash: `${TENANT_ID}-hash`,
     });
     await getDb().insert(tenants).values({
       id: OTHER_TENANT_ID,
       name: "Other User Tenant Admin Users",
-      apiKeyHash: "hash",
+      apiKeyHash: `${OTHER_TENANT_ID}-hash`,
     });
     const [owner] = await getDb()
       .insert(users)
@@ -44,8 +50,18 @@ describe("user tenant-admin user directory routes", () => {
     ownerId = owner.id;
     memberId = member.id;
     await getDb()
+      .insert(tenants)
+      .values({
+        id: `personal-${ownerId}`,
+        name: "Owner Dynamic Personal Tenant",
+        apiKeyHash: `personal-${ownerId}-hash`,
+      })
+      .onConflictDoNothing();
+    await getDb()
       .insert(userTenants)
       .values([
+        { userId: ownerId, tenantId: `personal-${ownerId}`, role: "owner" },
+        { userId: ownerId, tenantId: OWNER_PERSONAL_TENANT_ID, role: "owner" },
         { userId: ownerId, tenantId: TENANT_ID, role: "owner" },
         { userId: ownerId, tenantId: OTHER_TENANT_ID, role: "owner" },
         {
@@ -79,6 +95,15 @@ describe("user tenant-admin user directory routes", () => {
     return createSessionToken("0x0000000000000000000000000000000000000000", tenantId, {
       userId,
       tenantId,
+      mfaVerifiedAt: Date.now(),
+    });
+  }
+
+  async function personalTokenFor(userId: string): Promise<string> {
+    const personalTenantId = `personal-${userId}`;
+    return createSessionToken("0x0000000000000000000000000000000000000000", personalTenantId, {
+      userId,
+      tenantId: personalTenantId,
       mfaVerifiedAt: Date.now(),
     });
   }
@@ -177,11 +202,11 @@ describe("user tenant-admin user directory routes", () => {
   });
 
   it("does not carry MFA freshness across tenant switches", async () => {
-    const tenantAToken = await tokenForTenant(ownerId, TENANT_ID);
+    const personalToken = await personalTokenFor(ownerId);
     const switchResponse = await userRoutes.request("/me/tenants/switch", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${tenantAToken}`,
+        Authorization: `Bearer ${personalToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ tenantId: OTHER_TENANT_ID }),

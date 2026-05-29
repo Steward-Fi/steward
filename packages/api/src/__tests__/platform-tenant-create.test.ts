@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, getDb, refreshTokens, tenants } from "@stwd/db";
+import { agents, closeDb, getDb, refreshTokens, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 
@@ -19,6 +19,8 @@ describe("platform tenant creation", () => {
         "platform:write",
         "platform:tenant:create",
         "platform:agent:create",
+        "platform:tenant:delete",
+        "platform:tenant-policy:write",
       ],
     });
 
@@ -116,7 +118,7 @@ describe("platform tenant creation", () => {
       .values({
         id: `${TENANT_ID}-policies`,
         name: "Platform Tenant Policies",
-        apiKeyHash: "hash",
+        apiKeyHash: `${TENANT_ID}-policies-hash`,
       });
 
     const putResponse = await platformRoutes.request(`/tenants/${TENANT_ID}-policies/policies`, {
@@ -142,7 +144,7 @@ describe("platform tenant creation", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Platform Tenant Delete",
-      apiKeyHash: "hash",
+      apiKeyHash: `${tenantId}-hash`,
     });
     await getDb()
       .insert(agents)
@@ -152,6 +154,10 @@ describe("platform tenant creation", () => {
         name: "Delete Agent",
         walletAddress: "0x0000000000000000000000000000000000000001",
       });
+    await getDb()
+      .insert(users)
+      .values({ id: "00000000-0000-0000-0000-000000000001", email: "tenant-delete-refresh@example.test" })
+      .onConflictDoNothing();
     await getDb()
       .insert(refreshTokens)
       .values({
@@ -181,7 +187,7 @@ describe("platform tenant creation", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Platform Tenant Batch",
-      apiKeyHash: "hash",
+      apiKeyHash: `${tenantId}-hash`,
     });
 
     const response = await platformRoutes.request(`/tenants/${tenantId}/agents/batch`, {

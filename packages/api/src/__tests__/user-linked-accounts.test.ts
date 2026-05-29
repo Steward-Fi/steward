@@ -317,7 +317,11 @@ describe("user linked account routes", () => {
     expect(Array.isArray(body.data.portfolio.tokens)).toBe(true);
     expect(body.data.spend).toEqual({ todayWei: "123", weekWei: "123", monthWei: "123" });
     expect(body.data.capabilities).toContain("sign_transaction");
-    expect(body.data.sponsorship).toEqual({ enabled: false, provider: null });
+    expect(body.data.sponsorship).toEqual({
+      enabled: false,
+      provider: null,
+      circuitBreakerEnabled: false,
+    });
   });
 
   it("links an Ethereum wallet with a one-time user proof and blocks replay/cross-user reuse", async () => {
