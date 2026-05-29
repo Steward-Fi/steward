@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 const SKIP = !process.env.DATABASE_URL;
 
 import { generateApiKey, signAgentToken, verifyToken } from "@stwd/auth";
-import { agents, encryptedKeys, getDb, tenants } from "@stwd/db";
+import { agents, encryptedKeys, getDb, tenants, users, userTenants } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
@@ -14,8 +14,10 @@ const BASE_URL = `http://localhost:${TEST_PORT}`;
 const TEST_TENANT_ID = "test-agent-auth";
 const TEST_AGENT_ID = "agent-001";
 const OTHER_AGENT_ID = "agent-002";
+const TEST_USER_EMAIL = "agent-auth-owner@example.com";
 
 let testApiKey: string;
+let testUserId: string;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -30,6 +32,24 @@ function tenantHeaders(apiKey: string, tenantId = TEST_TENANT_ID) {
 function agentBearerHeaders(token: string) {
   return {
     Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+}
+
+// Owner session headers. Agent-token minting and agent creation now require a
+// session-jwt scoped to the tenant with an owner/admin role and a recent MFA
+// step-up — the tenant API key alone is no longer sufficient.
+async function adminSessionHeaders(tenantId = TEST_TENANT_ID) {
+  const { createSessionToken } = await import("../routes/auth");
+  const token = await createSessionToken("0x0000000000000000000000000000000000000000", tenantId, {
+    userId: testUserId,
+    email: TEST_USER_EMAIL,
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
+  });
+  return {
+    Authorization: `Bearer ${token}`,
+    "X-Steward-Tenant": tenantId,
     "Content-Type": "application/json",
   };
 }
@@ -56,18 +76,44 @@ beforeAll(async () => {
     })
     .onConflictDoNothing();
 
-  // Create test agents via API
-  await fetch(`${BASE_URL}/agents`, {
-    method: "POST",
-    headers: tenantHeaders(testApiKey),
-    body: JSON.stringify({ id: TEST_AGENT_ID, name: "Agent One" }),
-  });
+  // Owner user for the tenant — required to mint owner sessions that pass the
+  // session-jwt + owner-role checks now guarding agent creation/token minting.
+  const [user] = await db
+    .insert(users)
+    .values({ email: TEST_USER_EMAIL, emailVerified: true })
+    .onConflictDoNothing()
+    .returning();
+  if (user) {
+    testUserId = user.id;
+  } else {
+    const [existing] = await db.select().from(users).where(eq(users.email, TEST_USER_EMAIL));
+    testUserId = existing.id;
+  }
+  await db
+    .insert(userTenants)
+    .values({ userId: testUserId, tenantId: TEST_TENANT_ID, role: "owner" })
+    .onConflictDoNothing();
 
-  await fetch(`${BASE_URL}/agents`, {
-    method: "POST",
-    headers: tenantHeaders(testApiKey),
-    body: JSON.stringify({ id: OTHER_AGENT_ID, name: "Agent Two" }),
-  });
+  // Create test agents directly in the DB with deterministic IDs. The agent
+  // creation route now generates server-side IDs and ignores any client-supplied
+  // id, so the only way to get fixed test IDs is a direct insert.
+  await db
+    .insert(agents)
+    .values([
+      {
+        id: TEST_AGENT_ID,
+        tenantId: TEST_TENANT_ID,
+        name: "Agent One",
+        walletAddress: "0x1111111111111111111111111111111111111111",
+      },
+      {
+        id: OTHER_AGENT_ID,
+        tenantId: TEST_TENANT_ID,
+        name: "Agent Two",
+        walletAddress: "0x2222222222222222222222222222222222222222",
+      },
+    ])
+    .onConflictDoNothing();
 });
 
 afterAll(async () => {
@@ -77,16 +123,18 @@ afterAll(async () => {
   await db.delete(encryptedKeys).where(eq(encryptedKeys.agentId, TEST_AGENT_ID));
   await db.delete(encryptedKeys).where(eq(encryptedKeys.agentId, OTHER_AGENT_ID));
   await db.delete(agents).where(eq(agents.tenantId, TEST_TENANT_ID));
+  await db.delete(userTenants).where(eq(userTenants.tenantId, TEST_TENANT_ID));
+  if (testUserId) await db.delete(users).where(eq(users.id, testUserId));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT_ID));
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
-  it("generates a scoped JWT with tenant API key auth", async () => {
+  it("generates a scoped JWT with an owner session", async () => {
     const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
-      headers: tenantHeaders(testApiKey),
+      headers: await adminSessionHeaders(),
       body: JSON.stringify({}),
     });
 
@@ -110,11 +158,25 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
   it("returns 404 for non-existent agent", async () => {
     const res = await fetch(`${BASE_URL}/agents/nonexistent-agent/token`, {
       method: "POST",
-      headers: tenantHeaders(testApiKey),
+      headers: await adminSessionHeaders(),
       body: JSON.stringify({}),
     });
 
     expect(res.status).toBe(404);
+  });
+
+  it("rejects request with a tenant API key (no longer sufficient)", async () => {
+    // Token minting now requires an owner session-jwt; a bare tenant API key is
+    // authenticated but lacks the owner/admin session, so the route rejects it.
+    const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
+      method: "POST",
+      headers: tenantHeaders(testApiKey),
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(403);
+    const json = (await res.json()) as any;
+    expect(json.error).toContain("owner or admin session");
   });
 
   it("rejects request with invalid API key", async () => {
@@ -137,13 +199,13 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
 
     expect(res.status).toBe(403);
     const json = (await res.json()) as any;
-    expect(json.error).toContain("cannot generate");
+    expect(json.error).toContain("owner or admin session");
   });
 
   it("accepts custom expiresIn", async () => {
     const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
-      headers: tenantHeaders(testApiKey),
+      headers: await adminSessionHeaders(),
       body: JSON.stringify({ expiresIn: "7d" }),
     });
 
@@ -155,7 +217,7 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
   it("rejects excessive custom expiresIn values", async () => {
     const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
-      headers: tenantHeaders(testApiKey),
+      headers: await adminSessionHeaders(),
       body: JSON.stringify({ expiresIn: "100y" }),
     });
 
@@ -170,10 +232,10 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
   let _otherAgentToken: string;
 
   beforeAll(async () => {
-    // Generate tokens via the API
+    // Generate tokens via the API (requires an owner session now).
     const res1 = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
-      headers: tenantHeaders(testApiKey),
+      headers: await adminSessionHeaders(),
       body: JSON.stringify({}),
     });
     const json1 = (await res1.json()) as any;
@@ -181,7 +243,7 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
 
     const res2 = await fetch(`${BASE_URL}/agents/${OTHER_AGENT_ID}/token`, {
       method: "POST",
-      headers: tenantHeaders(testApiKey),
+      headers: await adminSessionHeaders(),
       body: JSON.stringify({}),
     });
     const json2 = (await res2.json()) as any;
@@ -270,22 +332,20 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
       .where(and(eq(agents.id, IMPORT_AGENT_ID), eq(agents.tenantId, TEST_TENANT_ID)));
   });
 
-  it("imports an EVM private key and returns derived address", async () => {
-    // Generate a test private key (deterministic for testing)
-    const testPrivateKey = `0x${"ab".repeat(32)}`;
-
+  // Private key import is a break-glass operation gated behind
+  // STEWARD_ALLOW_PRIVATE_KEY_IMPORT + STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT.
+  // The verify server runs with these unset (the secure default), so every
+  // import request is rejected at the disabled gate (403) regardless of caller.
+  it("is blocked by default even for an owner session", async () => {
     const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
       method: "POST",
-      headers: tenantHeaders(testApiKey),
-      body: JSON.stringify({ privateKey: testPrivateKey, chain: "evm" }),
+      headers: await adminSessionHeaders(),
+      body: JSON.stringify({ privateKey: `0x${"ab".repeat(32)}`, chain: "evm" }),
     });
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(403);
     const json = (await res.json()) as any;
-    expect(json.ok).toBe(true);
-    expect(json.data.agentId).toBe(IMPORT_AGENT_ID);
-    expect(json.data.walletAddress).toMatch(/^0x[0-9a-fA-F]{40}$/);
-    expect(json.data.chain).toBe("evm");
+    expect(json.ok).toBe(false);
   });
 
   it("rejects import from agent-scoped token", async () => {
@@ -301,33 +361,6 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
     });
 
     expect(res.status).toBe(403);
-    const json = (await res.json()) as any;
-    expect(json.error).toContain("tenant-level");
-  });
-
-  it("rejects missing privateKey", async () => {
-    const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
-      method: "POST",
-      headers: tenantHeaders(testApiKey),
-      body: JSON.stringify({ chain: "evm" }),
-    });
-
-    expect(res.status).toBe(400);
-  });
-
-  it("rejects invalid chain type", async () => {
-    const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
-      method: "POST",
-      headers: tenantHeaders(testApiKey),
-      body: JSON.stringify({
-        privateKey: `0x${"ab".repeat(32)}`,
-        chain: "bitcoin",
-      }),
-    });
-
-    expect(res.status).toBe(400);
-    const json = (await res.json()) as any;
-    expect(json.error).toContain("chain must be");
   });
 
   it("rejects request with invalid API key", async () => {

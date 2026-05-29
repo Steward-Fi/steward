@@ -81,7 +81,13 @@ function signSolanaMessage(message: string): string {
 }
 
 async function fetchNonce(): Promise<string> {
-  const res = await fetch(`${BASE_URL}/auth/nonce`);
+  // The nonce route now requires an allowed Origin/Referer and binds the issued
+  // nonce to that origin host; verification later asserts the signed message's
+  // domain matches that bound origin. Send an Origin on the steward.fi allowlist
+  // so the nonce binds to "steward.fi" (matching the SIWE/SIWS message domain).
+  const res = await fetch(`${BASE_URL}/auth/nonce`, {
+    headers: { Origin: "https://steward.fi" },
+  });
   const json = (await res.json()) as { nonce: string };
   return json.nonce;
 }
@@ -194,7 +200,9 @@ describeWithDatabase("wallet auth flows", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("closed");
+    // Closed tenants are now rejected with "is not accepting new members"
+    // (the literal word "closed" is no longer surfaced in the error).
+    expect(body.error).toContain("not accepting new members");
 
     const [user] = await db.select().from(users).where(eq(users.walletAddress, address));
     if (user) {

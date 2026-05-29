@@ -21,6 +21,7 @@ let platformKey: string;
 // We'll create test users directly in the DB for testing
 const TEST_USER_EMAIL = "cross-tenant-test@example.com";
 let testUserId: string;
+let coOwnerUserId: string | undefined;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -97,7 +98,13 @@ beforeAll(async () => {
     })
     .onConflictDoNothing();
 
-  // NO_CONFIG_TENANT intentionally has no config row (defaults to open)
+  // NO_CONFIG_TENANT is given an explicit "open" join config. The join route no
+  // longer treats a missing config row as open (hardened: undefined joinMode is
+  // rejected), so self-join requires an explicit open config.
+  await db
+    .insert(tenantConfigs)
+    .values({ tenantId: NO_CONFIG_TENANT, joinMode: "open" })
+    .onConflictDoNothing();
 
   // Create test user
   const [user] = await db
@@ -118,6 +125,22 @@ beforeAll(async () => {
     .insert(userTenants)
     .values({ userId: testUserId, tenantId: OPEN_TENANT, role: "member" })
     .onConflictDoNothing();
+
+  // Personal tenant membership is required for the user's personal session to
+  // verify (verifySessionToken checks for a userTenants row matching the
+  // token's tenantId). The personal session is what /user/me/* routes require.
+  await db
+    .insert(tenants)
+    .values({
+      id: `personal-${testUserId}`,
+      name: "Personal Tenant",
+      apiKeyHash: generateApiKey().hash,
+    })
+    .onConflictDoNothing();
+  await db
+    .insert(userTenants)
+    .values({ userId: testUserId, tenantId: `personal-${testUserId}`, role: "owner" })
+    .onConflictDoNothing();
 });
 
 afterAll(async () => {
@@ -126,14 +149,20 @@ afterAll(async () => {
   }
   const db = getDb();
   // Clean up in reverse order of dependencies
+  if (coOwnerUserId) {
+    await db.delete(userTenants).where(eq(userTenants.userId, coOwnerUserId));
+    await db.delete(users).where(eq(users.id, coOwnerUserId));
+  }
   await db.delete(userTenants).where(eq(userTenants.userId, testUserId));
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, OPEN_TENANT));
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, INVITE_TENANT));
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, CLOSED_TENANT));
+  await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, NO_CONFIG_TENANT));
   await db.delete(tenants).where(eq(tenants.id, OPEN_TENANT));
   await db.delete(tenants).where(eq(tenants.id, INVITE_TENANT));
   await db.delete(tenants).where(eq(tenants.id, CLOSED_TENANT));
   await db.delete(tenants).where(eq(tenants.id, NO_CONFIG_TENANT));
+  await db.delete(tenants).where(eq(tenants.id, `personal-${testUserId}`));
   await db.delete(users).where(eq(users.id, testUserId));
 });
 
@@ -141,12 +170,16 @@ afterAll(async () => {
 
 async function getTestUserToken(tenantId?: string): Promise<string> {
   const { createSessionToken } = await import("../routes/auth");
-  return createSessionToken("0x0000000000000000000000000000000000000000", tenantId ?? OPEN_TENANT, {
-    userId: testUserId,
-    email: TEST_USER_EMAIL,
-    mfaVerifiedAt: Date.now(),
-    mfaMethod: "totp",
-  });
+  return createSessionToken(
+    "0x0000000000000000000000000000000000000000",
+    tenantId ?? `personal-${testUserId}`,
+    {
+      userId: testUserId,
+      email: TEST_USER_EMAIL,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
+  );
 }
 
 // ─── Tests: User Tenant APIs ──────────────────────────────────────────────
@@ -177,7 +210,11 @@ describeWithDatabase("Cross-Tenant Identity", () => {
   });
 
   describe("POST /user/me/tenants", () => {
-    it("creates a tenant and adds the user as owner", async () => {
+    // User-driven tenant creation is gated behind ALLOW_USER_TENANT_CREATION on
+    // the server. The verify server runs with the flag unset (the secure
+    // default), so the route rejects with 403 before any create/validation
+    // logic. These tests assert that disabled-by-default boundary.
+    it("rejects tenant creation when the feature is disabled (secure default)", async () => {
       const token = await getTestUserToken();
       const tenantId = `test-ct-created-${Date.now()}`;
 
@@ -187,28 +224,21 @@ describeWithDatabase("Cross-Tenant Identity", () => {
         body: JSON.stringify({ name: "Created Tenant", slug: tenantId }),
       });
 
-      expect(res.status).toBe(201);
-      const body = (await res.json()) as {
-        ok: boolean;
-        data: { tenantId: string; role: string; apiKey: string };
-      };
-      expect(body.ok).toBe(true);
-      expect(body.data.tenantId).toBe(tenantId);
-      expect(body.data.role).toBe("owner");
-      expect(body.data.apiKey.startsWith("stw_")).toBe(true);
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { ok: boolean; error: string };
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("disabled");
 
+      // No tenant/membership should have been created.
       const db = getDb();
-      const [membership] = await db
+      const memberships = await db
         .select({ role: userTenants.role })
         .from(userTenants)
         .where(eq(userTenants.tenantId, tenantId));
-      expect(membership?.role).toBe("owner");
-
-      await db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
-      await db.delete(tenants).where(eq(tenants.id, tenantId));
+      expect(memberships).toHaveLength(0);
     });
 
-    it("rejects reserved personal wallet tenant slugs", async () => {
+    it("rejects creation attempts with a personal session (disabled gate fires first)", async () => {
       const token = await getTestUserToken();
 
       const res = await fetch(`${BASE_URL}/user/me/tenants`, {
@@ -217,10 +247,9 @@ describeWithDatabase("Cross-Tenant Identity", () => {
         body: JSON.stringify({ name: "Reserved Tenant", slug: `personal-${testUserId}` }),
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(403);
       const body = (await res.json()) as { ok: boolean; error: string };
       expect(body.ok).toBe(false);
-      expect(body.error).toContain("reserved");
     });
   });
 
@@ -341,17 +370,21 @@ describeWithDatabase("Cross-Tenant Identity", () => {
 
   describe("DELETE /user/me/tenants/:tenantId/leave", () => {
     it("allows leaving a non-personal tenant", async () => {
-      const token = await getTestUserToken();
+      const personalToken = await getTestUserToken();
 
-      // First ensure we joined NO_CONFIG_TENANT
+      // First ensure we joined NO_CONFIG_TENANT (join is allowed from the
+      // personal session).
       await fetch(`${BASE_URL}/user/me/tenants/${NO_CONFIG_TENANT}/join`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${personalToken}` },
       });
 
+      // Leaving requires a session scoped to the target tenant (the route
+      // enforces sessionTenantMatches), so mint a NO_CONFIG_TENANT-scoped token.
+      const scopedToken = await getTestUserToken(NO_CONFIG_TENANT);
       const res = await fetch(`${BASE_URL}/user/me/tenants/${NO_CONFIG_TENANT}/leave`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${scopedToken}` },
       });
 
       expect(res.status).toBe(200);
@@ -428,6 +461,20 @@ describeWithDatabase("Cross-Tenant Identity", () => {
     });
 
     it("DELETE /platform/tenants/:id/members/:userId removes member", async () => {
+      // The PATCH test promoted testUserId to "owner" of INVITE_TENANT. The
+      // route refuses to remove the sole owner (409), so seed a second owner
+      // first to keep that safeguard intact while still exercising removal.
+      const db = getDb();
+      const [coOwner] = await db
+        .insert(users)
+        .values({ email: `ct-coowner-${Date.now()}@example.com`, emailVerified: true })
+        .returning();
+      coOwnerUserId = coOwner.id;
+      await db
+        .insert(userTenants)
+        .values({ userId: coOwnerUserId, tenantId: INVITE_TENANT, role: "owner" })
+        .onConflictDoNothing();
+
       const res = await fetch(
         `${BASE_URL}/platform/tenants/${INVITE_TENANT}/members/${testUserId}`,
         {
