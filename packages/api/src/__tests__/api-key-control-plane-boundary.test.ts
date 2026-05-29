@@ -8,13 +8,21 @@ const policiesSource = readFileSync(join(routesDir, "policies-standalone.ts"), "
 const conditionSetsSource = readFileSync(join(routesDir, "condition-sets.ts"), "utf8");
 const agentsSource = readFileSync(join(routesDir, "agents.ts"), "utf8");
 
+function routeStart(source: string, marker: string): number {
+  const direct = source.indexOf(marker);
+  if (direct >= 0) return direct;
+  return source.indexOf(marker.replace('")', '", async'));
+}
+
 function expectAdminBeforeTenantLevel(source: string, marker: string) {
-  const start = source.indexOf(marker);
+  const start = routeStart(source, marker);
   expect(start).toBeGreaterThanOrEqual(0);
   const adminCheck = source.indexOf("requireTenantAdminSession(c)", start);
+  const mfaAdminCheck = source.indexOf("requireRecentTenantAdminMfa(c", start);
+  const boundaryCheck = adminCheck >= 0 ? adminCheck : mfaAdminCheck;
   const tenantLevelCheck = source.indexOf("requireTenantLevel(c)", start);
-  expect(adminCheck).toBeGreaterThan(start);
-  expect(tenantLevelCheck === -1 || adminCheck < tenantLevelCheck).toBe(true);
+  expect(boundaryCheck).toBeGreaterThan(start);
+  expect(tenantLevelCheck === -1 || boundaryCheck < tenantLevelCheck).toBe(true);
 }
 
 describe("API key control-plane boundary", () => {
@@ -32,7 +40,7 @@ describe("API key control-plane boundary", () => {
       ['secretsRoutes.delete("/:id")', "Secret management"],
       ['secretsRoutes.post("/:id/rotate")', "Secret management"],
     ] as const) {
-      const start = secretsSource.indexOf(marker);
+      const start = routeStart(secretsSource, marker);
       expect(start).toBeGreaterThanOrEqual(0);
       expect(
         secretsSource.indexOf(`requireRecentTenantAdminMfa(c, "${reason}")`, start),

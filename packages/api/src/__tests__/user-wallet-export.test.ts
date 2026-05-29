@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { getDb, tenants, users, userTenants } from "@stwd/db";
+import { eq } from "drizzle-orm";
 
 const previousDatabaseUrl = process.env.DATABASE_URL;
 process.env.DATABASE_URL ||= "postgres://unused:unused@localhost:5432/unused";
@@ -9,7 +11,9 @@ mock.module("../services/webhook-dispatch", () => ({
   dispatchWebhook: dispatchWebhookMock,
 }));
 
-const USER_ID = "0x0000000000000000000000000000000000000001";
+const USER_ID = crypto.randomUUID();
+const USER_ADDRESS = `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`;
+const PERSONAL_TENANT_ID = `personal-${USER_ID}`;
 
 let createSessionToken: Awaited<typeof import("../routes/auth")>["createSessionToken"];
 let userRoutes: Awaited<typeof import("../routes/user")>["userRoutes"];
@@ -20,6 +24,9 @@ beforeAll(async () => {
   process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT = "true";
   ({ createSessionToken } = await import("../routes/auth"));
   ({ userRoutes } = await import("../routes/user"));
+  await getDb().insert(tenants).values({ id: PERSONAL_TENANT_ID, name: "User Wallet Export Tenant", apiKeyHash: `hash-user-wallet-export-${USER_ID}` }).onConflictDoNothing();
+  await getDb().insert(users).values({ id: USER_ID, walletAddress: USER_ADDRESS, walletChain: "ethereum" }).onConflictDoNothing();
+  await getDb().insert(userTenants).values({ userId: USER_ID, tenantId: PERSONAL_TENANT_ID, role: "owner" }).onConflictDoNothing();
 });
 
 beforeEach(() => {
@@ -32,6 +39,9 @@ afterAll(() => {
   } else {
     process.env.DATABASE_URL = previousDatabaseUrl;
   }
+  void getDb().delete(userTenants).where(eq(userTenants.userId, USER_ID)).catch(() => {});
+  void getDb().delete(users).where(eq(users.id, USER_ID)).catch(() => {});
+  void getDb().delete(tenants).where(eq(tenants.id, PERSONAL_TENANT_ID)).catch(() => {});
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT;
   delete process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT;
@@ -39,7 +49,7 @@ afterAll(() => {
 
 describe("user wallet private key export hardening", () => {
   it("requires a recent MFA step-up before wallet transaction signing reaches vault setup", async () => {
-    const token = await createSessionToken(USER_ID, "tenant");
+    const token = await createSessionToken(USER_ADDRESS, PERSONAL_TENANT_ID, { userId: USER_ID });
 
     const res = await userRoutes.request("/me/wallet/sign", {
       method: "POST",
@@ -58,7 +68,7 @@ describe("user wallet private key export hardening", () => {
   });
 
   it("requires a recent MFA step-up even when break-glass export flags are enabled", async () => {
-    const token = await createSessionToken(USER_ID, "tenant");
+    const token = await createSessionToken(USER_ADDRESS, PERSONAL_TENANT_ID, { userId: USER_ID });
 
     const res = await userRoutes.request("/me/wallet/export", {
       method: "POST",

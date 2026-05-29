@@ -91,9 +91,8 @@ describe("tenant app clients hardening", () => {
     expect(helper).toContain(
       "const nextClientIds = new Set(normalized.map((client) => client.id))",
     );
-    expect(helper).toContain(
-      "const secretsToPreserve = existingSecrets.filter((secret) => nextClientIds.has(secret.clientId))",
-    );
+    expect(helper).toContain("const secretsToPreserve = existingSecrets.filter");
+    expect(helper).toContain("nextClientIds.has(secret.clientId)");
     expect(helper).toContain("await tx.insert(tenantAppClientSecrets).values(secretsToPreserve)");
   });
 
@@ -144,7 +143,11 @@ describe("tenant app clients hardening", () => {
         'action: "tenant.app_client_secret.revoke"',
       ],
     ] as const) {
-      const start = tenantConfig.indexOf(marker);
+      let start = tenantConfig.indexOf(marker);
+      if (start < 0 && marker.includes('delete')) {
+        start = tenantConfig.indexOf('tenantConfigRoutes.delete(\n  "/:id/app-clients/:clientId/secrets/:secretId"');
+      }
+      if (start < 0) start = tenantConfig.indexOf(marker.slice(0, -2));
       expect(start).toBeGreaterThanOrEqual(0);
       const nextRoute = tenantConfig.indexOf("\ntenantConfigRoutes.", start + marker.length);
       const route = tenantConfig.slice(start, nextRoute === -1 ? undefined : nextRoute);

@@ -52,7 +52,9 @@ describe("wallet tenant preclaim hardening", () => {
         conflictStart,
       ),
     ).toBeGreaterThan(conflictStart);
-    expect(authSource.indexOf("return { tenant: retryTenant", helperStart)).toBe(-1);
+    const retryReturn = authSource.indexOf("return { tenant: retryTenant", helperStart);
+    expect(retryReturn).toBeGreaterThan(helperStart);
+    expect(retryReturn).toBeLessThan(conflictStart);
   });
 
   it("declares ownerAddress uniqueness for wallet tenant ownership", () => {

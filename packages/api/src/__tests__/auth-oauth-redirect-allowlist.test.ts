@@ -25,6 +25,7 @@ import { authRoutes, clearOAuthTokenKeyStoreForTests } from "../routes/auth";
  */
 
 const TENANT_ID = "test-oauth-allowlist";
+const PKCE_QUERY = "&response_type=code&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256";
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
@@ -94,7 +95,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     });
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://evil.example/callback")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://evil.example/callback")}${PKCE_QUERY}`,
     );
 
     expect(res.status).toBe(400);
@@ -114,7 +115,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = "https://global.example.test/callback";
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://global.example.test/callback")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://global.example.test/callback")}${PKCE_QUERY}`,
     );
 
     expect(res.status).toBe(400);
@@ -133,7 +134,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     });
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}${PKCE_QUERY}`,
     );
 
     expect(res.status).toBe(400);
@@ -152,7 +153,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     });
 
     const authorizeRes = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/")}${PKCE_QUERY}`,
     );
 
     expect(authorizeRes.status).toBe(302);
