@@ -1401,6 +1401,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           to: signRequest.to,
           value: signRequest.value,
           ...signerAuthAuditMetadata(signerAuthorization.auth),
+          venue: signRequest.venue,
+          walletAddress: signRequest.walletAddress,
           policyResults: evaluation.results,
         },
       });

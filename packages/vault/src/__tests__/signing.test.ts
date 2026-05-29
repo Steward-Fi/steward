@@ -9,6 +9,11 @@ import {
   generateSolanaKeypair,
   restoreSolanaKeypair,
 } from "../solana";
+import {
+  assertEvmWalletAddressMatches,
+  missingSigningKeyError,
+  resolveSignVenueSelector,
+} from "../vault";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
@@ -270,6 +275,42 @@ describe("EIP-712 Typed Data Signing", () => {
       signature,
     });
     expect(valid).toBe(true);
+  });
+});
+
+// ─── Vault Sign Venue Selector ────────────────────────────────────────────
+
+describe("Vault signTransaction venue selector", () => {
+  it("sign with no venue resolves NULL-venue key", () => {
+    expect(resolveSignVenueSelector({})).toBeNull();
+  });
+
+  it("sign with venue=hyperliquid resolves venue-scoped key", () => {
+    expect(resolveSignVenueSelector({ venue: "hyperliquid" })).toBe("hyperliquid");
+  });
+
+  it("sign with venue but no matching key throws clear error", () => {
+    expect(() => {
+      throw missingSigningKeyError("sol-waifu", "evm", "hyperliquid");
+    }).toThrow(
+      "No signing key found for agent sol-waifu on chain family evm with venue hyperliquid",
+    );
+  });
+
+  it("sign with walletAddress matching derived address succeeds", () => {
+    const privateKey = generatePrivateKey();
+    const account = privateKeyToAccount(privateKey);
+
+    expect(() => assertEvmWalletAddressMatches(privateKey, account.address)).not.toThrow();
+  });
+
+  it("sign with walletAddress NOT matching derived throws mismatch error", () => {
+    const privateKey = generatePrivateKey();
+    const wrongAddress = privateKeyToAccount(generatePrivateKey()).address;
+
+    expect(() => assertEvmWalletAddressMatches(privateKey, wrongAddress)).toThrow(
+      /Wallet address mismatch: resolved 0x[0-9a-fA-F]{40} but request specified 0x[0-9a-fA-F]{40}/,
+    );
   });
 });
 

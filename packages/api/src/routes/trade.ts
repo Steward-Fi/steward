@@ -27,11 +27,12 @@ export const tradeRoutes = new Hono<{ Variables: AppVariables }>();
 const createSessionSchema = z.object({
   agentId: z.string().min(1).optional(),
   venue: z.literal("hyperliquid"),
-  dailyCap: z.number().positive().max(1_000).default(300),
-  perOrderCap: z.number().positive().max(500).default(100),
-  leverageCap: z.number().positive().max(10).default(5),
+  walletAddress: z.string().min(1).optional(),
+  dailyCap: z.number().positive().max(50_000).default(300),
+  perOrderCap: z.number().positive().max(10_000).default(100),
+  leverageCap: z.number().positive().max(50).default(5),
   allowedAssets: z
-    .array(z.enum(["BTC", "ETH", "BNB", "SOL"]))
+    .array(z.enum(["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP", "NEAR", "HYPE", "ZEC", "XMR"]))
     .min(1)
     .default(["BTC", "ETH", "BNB"]),
   ttlSeconds: z.number().int().positive().max(86_400).default(3_600),
@@ -441,7 +442,7 @@ tradeRoutes.post("/sessions", async (c) => {
 
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  const walletAddress = await resolveHyperliquidWallet(agentId, agent);
+  const walletAddress = parsed.data.walletAddress ?? (await resolveHyperliquidWallet(agentId, agent));
   if (!walletAddress) {
     return c.json<ApiResponse>(
       {

@@ -2,11 +2,37 @@ import { concatBytes, type Hex, keccak256, parseSignature, toBytes } from "viem"
 import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 
-export const hyperliquidAssetSchema = z.enum(["BTC", "ETH", "BNB", "SOL"]);
+export const hyperliquidAssetSchema = z.enum([
+  "BTC",
+  "ETH",
+  "BNB",
+  "SOL",
+  "AVAX",
+  "ARB",
+  "OP",
+  "NEAR",
+  "HYPE",
+  "ZEC",
+  "XMR",
+]);
 export type HyperliquidAsset = z.infer<typeof hyperliquidAssetSchema>;
-// HL perp universe indices. Verified live 2026-05-24:
-// 0=BTC, 1=ETH, 5=SOL, 7=BNB. Source: POST api.hyperliquid.xyz/info {"type":"meta"}.universe
-const ASSET_INDEX: Record<HyperliquidAsset, number> = { BTC: 0, ETH: 1, SOL: 5, BNB: 7 };
+// HL perp universe indices. Verified live 2026-05-27:
+// 0=BTC, 1=ETH, 5=SOL, 6=AVAX, 7=BNB, 9=OP, 11=ARB,
+// 74=NEAR, 159=HYPE, 214=ZEC, 224=XMR.
+// Source: POST api.hyperliquid.xyz/info {"type":"meta"}.universe
+const ASSET_INDEX: Record<HyperliquidAsset, number> = {
+  BTC: 0,
+  ETH: 1,
+  SOL: 5,
+  AVAX: 6,
+  BNB: 7,
+  OP: 9,
+  ARB: 11,
+  NEAR: 74,
+  HYPE: 159,
+  ZEC: 214,
+  XMR: 224,
+};
 const DEFAULT_BASE_URL = "https://api.hyperliquid.xyz";
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
 
@@ -23,7 +49,7 @@ export const hyperliquidOrderSchema = z.object({
     .object({ limit: z.object({ tif: z.enum(["Alo", "Ioc", "Gtc"]) }).optional() })
     .optional(),
   reduceOnly: z.boolean().default(false),
-  leverage: z.number().positive().max(2).optional(),
+  leverage: z.number().positive().max(50).optional(),
   nonce: z.number().int().positive().optional(),
 });
 export type HyperliquidOrder = z.input<typeof hyperliquidOrderSchema>;
@@ -144,6 +170,52 @@ function dec(v: unknown, fallback?: string) {
     .toFixed(8)
     .replace(/\.0+$/, "")
     .replace(/(\.\d*?)0+$/, "$1");
+}
+function hasExplicitLimitPx(order: HyperliquidOrder): boolean {
+  return order.limitPx !== undefined || order.limitPrice !== undefined;
+}
+function bestBookPrice(levels: unknown, side: "bid" | "ask"): number {
+  const index = side === "bid" ? 0 : 1;
+  const level = (levels as unknown[])?.[index] as unknown[] | undefined;
+  const px = (level?.[0] as { px?: unknown } | undefined)?.px;
+  const n = Number(px);
+  if (!Number.isFinite(n) || n <= 0) throw new Error(`missing Hyperliquid best ${side}`);
+  return n;
+}
+function roundMarketablePx(px: number, isBuy: boolean): string {
+  const sigFigs = 5;
+  const scale = 10 ** (Math.floor(Math.log10(px)) - sigFigs + 1);
+  const rounded = (isBuy ? Math.ceil(px / scale) : Math.floor(px / scale)) * scale;
+  return dec(rounded);
+}
+export async function getMarketableLimitPx(
+  coin: HyperliquidAsset,
+  isBuy: boolean,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<string> {
+  const transport = options.transport ?? { fetch };
+  const r = await transport.fetch(`${options.baseUrl ?? DEFAULT_BASE_URL}/info`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "l2Book", coin }),
+  });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
+  const levels = (j as { levels?: unknown })?.levels;
+  const px = isBuy ? bestBookPrice(levels, "ask") * 1.005 : bestBookPrice(levels, "bid") * 0.995;
+  return roundMarketablePx(px, isBuy);
+}
+async function withMarketableLimitPx(
+  order: HyperliquidOrder,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<HyperliquidOrder> {
+  if (hasExplicitLimitPx(order)) return order;
+  const p = hyperliquidOrderSchema.parse(order);
+  const coin = p.coin ?? p.asset;
+  if (!coin) throw new Error("coin is required");
+  const isBuy = p.isBuy ?? (p.side ? p.side === "buy" : undefined);
+  if (isBuy === undefined) throw new Error("side is required");
+  return { ...order, limitPx: await getMarketableLimitPx(coin, isBuy, options) };
 }
 function normalized(order: HyperliquidOrder) {
   const p = hyperliquidOrderSchema.parse(order);
@@ -310,15 +382,17 @@ async function signAction(
     expiresAfter: opts.expiresAfter,
   });
 }
-export const signOrder = (
+export const signOrder = async (
   walletPrivateKey: Hex,
   order: HyperliquidOrder,
-  options: SignOptions = {},
-) =>
-  signAction(walletPrivateKey, toExchangeAction(order), {
+  options: SignOptions & { transport?: HyperliquidTransport; baseUrl?: string } = {},
+) => {
+  const resolved = await withMarketableLimitPx(order, options);
+  return signAction(walletPrivateKey, toExchangeAction(resolved), {
     ...options,
     nonce: options.nonce ?? order.nonce,
   });
+};
 async function postExchange(signed: SignedOrder, transport: HyperliquidTransport, baseUrl: string) {
   const r = await transport.fetch(
     `${baseUrl}/exchange`,
@@ -394,7 +468,11 @@ export class HyperliquidAdapter {
   }
   async signOrder(order: HyperliquidOrder): Promise<SignedOrder> {
     const nonce = order.nonce ?? nextNonce();
-    const action = toExchangeAction(order);
+    const resolved = await withMarketableLimitPx(order, {
+      transport: this.transport,
+      baseUrl: this.baseUrl,
+    });
+    const action = toExchangeAction(resolved);
     const td = createL1TypedData(
       action,
       nonce,

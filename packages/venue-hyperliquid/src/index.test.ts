@@ -4,6 +4,7 @@ import {
   actionHash,
   cancelOrder,
   createL1TypedData,
+  getMarketableLimitPx,
   getOpenOrders,
   HyperliquidAdapter,
   type HyperliquidTransport,
@@ -62,6 +63,63 @@ describe("Hyperliquid L1 signing", () => {
     expect(signed.signature.r).toMatch(/^0x[0-9a-f]{64}$/);
     expect(signed.signature.s).toMatch(/^0x[0-9a-f]{64}$/);
     expect([27, 28]).toContain(signed.signature.v);
+  });
+
+  test("uses explicit limit price without fetching the book", async () => {
+    const signed = await signOrder(
+      PRIVATE_KEY,
+      { coin: "BTC", side: "buy", size: 0.02, limitPx: "30000" },
+      {
+        nonce: NONCE,
+        isMainnet: false,
+        transport: {
+          async fetch() {
+            throw new Error("unexpected fetch");
+          },
+        },
+      },
+    );
+    expect(signed.action).toMatchObject({
+      orders: [{ p: "30000" }],
+    });
+  });
+
+  test("auto-computes marketable IOC price from best ask for buys", async () => {
+    const signed = await signOrder(
+      PRIVATE_KEY,
+      { coin: "BTC", side: "buy", size: 0.02 },
+      {
+        nonce: NONCE,
+        isMainnet: false,
+        transport: {
+          async fetch(_input, init) {
+            expect(JSON.parse(String(init?.body))).toEqual({ type: "l2Book", coin: "BTC" });
+            return new Response(
+              JSON.stringify({ levels: [[{ px: "29900", sz: "1" }], [{ px: "30000", sz: "1" }]] }),
+              { status: 200 },
+            );
+          },
+        },
+      },
+    );
+    expect(signed.action).toMatchObject({
+      orders: [{ b: true, p: "30150" }],
+    });
+  });
+
+  test("auto-computes marketable IOC price from best bid for sells", async () => {
+    const px = await getMarketableLimitPx("ETH", false, {
+      transport: {
+        async fetch(_input, init) {
+          expect(JSON.parse(String(init?.body))).toEqual({ type: "l2Book", coin: "ETH" });
+          return new Response(
+            JSON.stringify({ levels: [[{ px: "2500", sz: "1" }], [{ px: "2510", sz: "1" }]] }),
+            { status: 200 },
+          );
+        },
+      },
+    });
+    expect(px).toBe("2487.5");
   });
 
   test("adapter signs with vault-provided EIP-712 and submits HL payload", async () => {

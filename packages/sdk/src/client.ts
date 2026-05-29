@@ -227,6 +227,19 @@ export interface SignRawHashResult {
   walletAddress: string;
 }
 
+export type HyperliquidAsset =
+  | "BTC"
+  | "ETH"
+  | "BNB"
+  | "SOL"
+  | "AVAX"
+  | "ARB"
+  | "OP"
+  | "NEAR"
+  | "HYPE"
+  | "ZEC"
+  | "XMR";
+
 export interface CreateTradeSessionInput {
   agentId?: string;
   venue: "hyperliquid";
@@ -234,7 +247,7 @@ export interface CreateTradeSessionInput {
   dailyCap?: number;
   perOrderCap?: number;
   leverageCap?: number;
-  allowedAssets?: Array<"BTC" | "ETH">;
+  allowedAssets?: HyperliquidAsset[];
   ttlSeconds?: number;
 }
 
@@ -260,7 +273,7 @@ export interface TradeSessionState {
   remainingCapUsd: number;
   perOrderCapUsd: number;
   leverageCap: number;
-  allowedAssets: Array<"BTC" | "ETH">;
+  allowedAssets: HyperliquidAsset[];
   createdAt: string;
   expiresAt: string;
   revokedAt?: string | null;
@@ -322,7 +335,7 @@ function isSensitiveMutatingRequest(path: string, method: string): boolean {
 
 export interface HyperliquidSubmitOrderInput {
   sessionId: string;
-  asset: "BTC" | "ETH";
+  asset: HyperliquidAsset;
   side: "buy" | "sell";
   size: number;
   leverage: number;
