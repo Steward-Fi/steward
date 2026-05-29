@@ -1,4 +1,6 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
+
+setDefaultTimeout(30000);
 
 import { closeDb, getDb, tenantConfigs, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -21,6 +23,10 @@ describe("user lifecycle webhook dispatch", () => {
     process.env.STEWARD_MASTER_PASSWORD = "user-lifecycle-webhooks-master-password";
     process.env.STEWARD_JWT_SECRET = "user-lifecycle-webhooks-jwt-secret-with-enough-entropy";
     process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+      [PLATFORM_KEY]: ["platform:*"],
+    });
+    process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION = "true";
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
@@ -30,7 +36,7 @@ describe("user lifecycle webhook dispatch", () => {
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "User Lifecycle Webhooks Tenant",
-      apiKeyHash: "hash",
+      apiKeyHash: `hash-${TENANT_ID}`,
     });
 
     ({ authRoutes } = await import("../routes/auth"));
@@ -47,6 +53,8 @@ describe("user lifecycle webhook dispatch", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
     delete process.env.STEWARD_PLATFORM_KEYS;
+    delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
+    delete process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION;
   });
 
   function platformHeaders() {

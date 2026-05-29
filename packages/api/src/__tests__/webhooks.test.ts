@@ -3,8 +3,9 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 // Skip all DB-dependent tests when DATABASE_URL is not configured
 const SKIP = !process.env.DATABASE_URL;
 
+import { randomUUID } from "node:crypto";
 import { generateApiKey } from "@stwd/auth";
-import { getDb, tenants, webhookConfigs } from "@stwd/db";
+import { getDb, tenants, users, userTenants, webhookConfigs } from "@stwd/db";
 import { eq } from "drizzle-orm";
 import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "../services/webhook-events";
 
@@ -13,7 +14,10 @@ const BASE_URL = `http://localhost:${TEST_PORT}`;
 const TEST_TENANT = "test-webhooks-tenant";
 
 let validApiKey: string;
+let sessionToken: string;
 let createdWebhookId: string;
+const testUserId = randomUUID();
+const TEST_USER_EMAIL = `webhooks-admin-${Date.now()}@example.test`;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -31,6 +35,27 @@ beforeAll(async () => {
       apiKeyHash: apiKeyPair.hash,
     })
     .onConflictDoNothing();
+
+  await db
+    .insert(users)
+    .values({ id: testUserId, email: TEST_USER_EMAIL, emailVerified: true })
+    .onConflictDoNothing();
+  await db
+    .insert(userTenants)
+    .values({ userId: testUserId, tenantId: TEST_TENANT, role: "owner" })
+    .onConflictDoNothing();
+
+  const { createSessionToken } = await import("../routes/auth");
+  sessionToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000000",
+    TEST_TENANT,
+    {
+      userId: testUserId,
+      email: TEST_USER_EMAIL,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
+  );
 });
 
 afterAll(async () => {
@@ -38,13 +63,15 @@ afterAll(async () => {
   const db = getDb();
   // Clean up webhooks first (FK constraint)
   await db.delete(webhookConfigs).where(eq(webhookConfigs.tenantId, TEST_TENANT));
+  await db.delete(userTenants).where(eq(userTenants.userId, testUserId));
+  await db.delete(users).where(eq(users.id, testUserId));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT));
 });
 
 function authHeaders() {
   return {
     "X-Steward-Tenant": TEST_TENANT,
-    "X-Steward-Key": validApiKey,
+    Authorization: `Bearer ${sessionToken}`,
     "Content-Type": "application/json",
   };
 }

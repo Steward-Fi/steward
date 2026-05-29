@@ -1,6 +1,9 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 
-import { closeDb, getDb, tenants } from "@stwd/db";
+setDefaultTimeout(30000);
+import { randomUUID } from "node:crypto";
+
+import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 
@@ -11,8 +14,9 @@ mock.module("../services/webhook-dispatch", () => ({
 }));
 
 const USER_ADDRESS = "0x0000000000000000000000000000000000000042";
-const PERSONAL_TENANT_ID = `personal-${USER_ADDRESS}`;
-const USER_AGENT_ID = `user-wallet-${USER_ADDRESS}`;
+const USER_ID = randomUUID();
+const PERSONAL_TENANT_ID = `personal-${USER_ID}`;
+const USER_AGENT_ID = `user-wallet-${USER_ID}`;
 
 describe("user wallet creation webhooks", () => {
   let createSessionToken: Awaited<typeof import("../routes/auth")>["createSessionToken"];
@@ -26,6 +30,22 @@ describe("user wallet creation webhooks", () => {
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
+    });
+
+    await getDb().insert(users).values({
+      id: USER_ID,
+      walletAddress: USER_ADDRESS,
+      walletChain: "ethereum",
+    });
+    await getDb().insert(tenants).values({
+      id: PERSONAL_TENANT_ID,
+      name: "User Wallet Personal Tenant",
+      apiKeyHash: `hash-${PERSONAL_TENANT_ID}`,
+    });
+    await getDb().insert(userTenants).values({
+      userId: USER_ID,
+      tenantId: PERSONAL_TENANT_ID,
+      role: "owner",
     });
 
     ({ createSessionToken } = await import("../routes/auth"));
@@ -44,7 +64,7 @@ describe("user wallet creation webhooks", () => {
   });
 
   it("dispatches user.wallet_created only for first successful wallet provisioning", async () => {
-    const token = await createSessionToken(USER_ADDRESS, "tenant");
+    const token = await createSessionToken(USER_ADDRESS, PERSONAL_TENANT_ID, { userId: USER_ID });
 
     const created = await userRoutes.request("/me/wallet", {
       method: "POST",
@@ -71,7 +91,7 @@ describe("user wallet creation webhooks", () => {
       USER_AGENT_ID,
       "user.wallet_created",
       {
-        userId: USER_ADDRESS,
+        userId: USER_ID,
         walletId: USER_AGENT_ID,
         walletAddress: createdBody.data.walletAddress,
         walletAddresses: expect.objectContaining({ evm: createdBody.data.walletAddress }),

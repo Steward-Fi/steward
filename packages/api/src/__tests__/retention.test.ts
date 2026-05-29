@@ -7,6 +7,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { randomUUID } from "node:crypto";
 import { getDb } from "@stwd/db";
 import { sql } from "drizzle-orm";
 
@@ -15,20 +16,33 @@ const SKIP = !process.env.DATABASE_URL;
 const SUFFIX = `${Date.now()}`;
 const TENANT = `retention-test-${SUFFIX}`;
 const AGENT = `retention-agent-${SUFFIX}`;
+const USER_ID = randomUUID();
 
 async function cleanup(): Promise<void> {
   const db = getDb();
   await db.execute(sql`DELETE FROM proxy_audit_log WHERE tenant_id = ${TENANT}`);
   await db.execute(sql`DELETE FROM refresh_tokens WHERE tenant_id = ${TENANT}`);
   await db.execute(sql`DELETE FROM transactions WHERE agent_id = ${AGENT}`);
+  await db.execute(sql`DELETE FROM agents WHERE id = ${AGENT}`);
   await db.execute(sql`DELETE FROM audit_events WHERE tenant_id = ${TENANT}`);
   await db.execute(sql`DELETE FROM auth_kv_store WHERE namespace = ${`retention-test-${SUFFIX}`}`);
+  await db.execute(sql`DELETE FROM tenants WHERE id = ${TENANT}`);
+  await db.execute(sql`DELETE FROM users WHERE id = ${USER_ID}`);
 }
 
 beforeAll(async () => {
   if (SKIP) return;
   process.env.STEWARD_RETENTION_DISABLED = "true"; // scheduler off; we call runRetentionSweep directly
   await cleanup();
+  await getDb().execute(sql`
+    INSERT INTO users (id, email) VALUES (${USER_ID}, ${`retention-${SUFFIX}@example.test`})
+    ON CONFLICT (id) DO NOTHING
+  `);
+  await getDb().execute(sql`
+    INSERT INTO tenants (id, name, api_key_hash)
+    VALUES (${TENANT}, 'retention-test', ${`test-hash-${TENANT}`})
+    ON CONFLICT (id) DO NOTHING
+  `);
 });
 
 afterAll(async () => {
@@ -74,13 +88,13 @@ describe.skipIf(SKIP)("retention sweep", () => {
     // expired 30 days ago — past the 7-day grace.
     await db.execute(sql`
       INSERT INTO refresh_tokens (id, user_id, tenant_id, token_hash, expires_at, created_at)
-      VALUES (${`tok-old-${SUFFIX}`}, ${`u-${SUFFIX}`}, ${TENANT}, 'h1',
+      VALUES (${`tok-old-${SUFFIX}`}, ${USER_ID}, ${TENANT}, 'h1',
               now() - interval '30 days', now() - interval '60 days')
     `);
     // Still valid (1 day out).
     await db.execute(sql`
       INSERT INTO refresh_tokens (id, user_id, tenant_id, token_hash, expires_at, created_at)
-      VALUES (${`tok-new-${SUFFIX}`}, ${`u-${SUFFIX}`}, ${TENANT}, 'h2',
+      VALUES (${`tok-new-${SUFFIX}`}, ${USER_ID}, ${TENANT}, 'h2',
               now() + interval '1 day', now())
     `);
 
@@ -100,7 +114,7 @@ describe.skipIf(SKIP)("retention sweep", () => {
 
     // We need a real agent FK; create a minimal tenant + agent.
     await db.execute(sql`
-      INSERT INTO tenants (id, name, api_key_hash) VALUES (${TENANT}, 'retention-test', 'test-hash')
+      INSERT INTO tenants (id, name, api_key_hash) VALUES (${TENANT}, 'retention-test', ${`test-hash-${TENANT}`})
       ON CONFLICT (id) DO NOTHING
     `);
     await db.execute(sql`
