@@ -96,7 +96,7 @@ describe("control-plane auth hardening", () => {
       [webhookSource, 'webhookRoutes.post("/deliveries/:id/retry")'],
       [tenantsSource, 'tenantRoutes.put("/:id/webhook"'],
     ] as const) {
-      const start = source.indexOf(marker);
+      const start = source.indexOf(marker) >= 0 ? source.indexOf(marker) : source.indexOf(marker.replace('")', '", async'));
       expect(start).toBeGreaterThanOrEqual(0);
       const adminCheck = source.indexOf("requireRecentTenantAdminMfa(c,", start);
       const tenantLevelCheck = source.indexOf("requireTenantLevel(c)", start);

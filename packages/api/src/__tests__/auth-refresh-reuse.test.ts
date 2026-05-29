@@ -22,11 +22,11 @@ describe("refresh token reuse detection", () => {
     expect(rotationBody).toContain("const [refreshCandidate]");
     expect(rotationBody).toContain("refresh_token_${tokenHash}");
     expect(rotationBody).toContain("pg_advisory_xact_lock");
-    expect(rotationBody).toContain("user_session_${refreshCandidate.userId}");
-    const userLock = rotationBody.indexOf("user_session_${refreshCandidate.userId}");
+    expect(rotationBody).toContain("lockUserSession(tx, refreshCandidate.userId)");
+    const userLock = rotationBody.indexOf("lockUserSession(tx, refreshCandidate.userId)");
     const validDelete = rotationBody.indexOf(".delete(refreshTokens)", userLock);
     expect(userLock).toBeLessThan(validDelete);
-    expect(rotationBody.indexOf("revocationStore.getUserRevokedBefore")).toBeGreaterThan(
+    expect(rotationBody.indexOf("revocationStore.getUserRevokedBefore")).toBeLessThan(
       rotationBody.indexOf(".insert(refreshTokens)"),
     );
   });

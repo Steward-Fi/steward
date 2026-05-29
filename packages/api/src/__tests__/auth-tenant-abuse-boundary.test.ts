@@ -26,7 +26,7 @@ describe("tenant auth abuse boundaries", () => {
     const end = authSource.indexOf("function getOAuthAuthorizeUrl", start);
     const source = authSource.slice(start, end);
 
-    const tenantResolved = source.indexOf("const resolvedTenantId = tenantResult.tenantId");
+    const tenantResolved = source.indexOf("resolvedTenantId = tenantResult.tenantId");
     const policyCheck = source.indexOf("validateEmailAbusePolicy", tenantResolved);
     const tenantLink = source.indexOf("await ensureUserTenantLink", tenantResolved);
     const sessionResponse = source.indexOf("buildAuthOrMfaResponse", tenantResolved);

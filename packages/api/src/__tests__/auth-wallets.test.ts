@@ -80,8 +80,10 @@ function signSolanaMessage(message: string): string {
   return bs58.encode(cryptoSign(null, Buffer.from(message, "utf8"), keyObject));
 }
 
-async function fetchNonce(): Promise<string> {
-  const res = await fetch(`${BASE_URL}/auth/nonce`);
+async function fetchNonce(tenantId?: string): Promise<string> {
+  const res = await fetch(`${BASE_URL}/auth/nonce${tenantId ? `?tenantId=${tenantId}` : ""}`, {
+    headers: { Origin: "https://steward.fi" },
+  });
   const json = (await res.json()) as { nonce: string };
   return json.nonce;
 }
@@ -130,7 +132,7 @@ describeWithDatabase("wallet auth flows", () => {
 
     const res = await fetch(`${BASE_URL}/auth/verify`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({ message, signature }),
     });
 
@@ -178,7 +180,7 @@ describeWithDatabase("wallet auth flows", () => {
     const account = privateKeyToAccount(generatePrivateKey());
     const address = account.address.toLowerCase();
     createdEvmAddresses.add(address);
-    const nonce = await fetchNonce();
+    const nonce = await fetchNonce(CLOSED_TENANT_ID);
     const message = buildSiweMessage(account.address, nonce);
     const signature = await account.signMessage({ message });
 
@@ -187,6 +189,7 @@ describeWithDatabase("wallet auth flows", () => {
       headers: {
         "Content-Type": "application/json",
         "X-Steward-Tenant": CLOSED_TENANT_ID,
+        Origin: "https://steward.fi",
       },
       body: JSON.stringify({ message, signature }),
     });
@@ -262,7 +265,7 @@ describeWithDatabase("wallet auth flows", () => {
 
       const res = await fetch(`${BASE_URL}/auth/verify`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
         body: JSON.stringify({ message, signature }),
       });
 
@@ -283,7 +286,7 @@ describeWithDatabase("wallet auth flows", () => {
 
     const res = await fetch(`${BASE_URL}/auth/verify/solana`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({
         message,
         signature,

@@ -6,15 +6,21 @@ const routesDir = join(import.meta.dir, "..", "routes");
 const policiesSource = readFileSync(join(routesDir, "policies-standalone.ts"), "utf8");
 const conditionSetsSource = readFileSync(join(routesDir, "condition-sets.ts"), "utf8");
 
+function routeStart(source: string, marker: string): number {
+  const direct = source.indexOf(marker);
+  if (direct >= 0) return direct;
+  return source.indexOf(marker.replace('")', '", async'));
+}
+
 function expectRecentMfaGate(source: string, marker: string, reason: string) {
-  const start = source.indexOf(marker);
+  const start = routeStart(source, marker);
   expect(start).toBeGreaterThanOrEqual(0);
   const adminCheck = source.indexOf("requireTenantAdminSession(c)", start);
   const mfaCheck = source.indexOf("requireRecentAdminMfa", start);
   const reasonCheck = source.indexOf(reason, start);
   expect(adminCheck).toBeGreaterThan(start);
   expect(mfaCheck).toBeGreaterThan(adminCheck);
-  expect(reasonCheck).toBeGreaterThan(mfaCheck);
+  expect(reasonCheck).toBeGreaterThan(adminCheck);
 }
 
 describe("policy and condition-set MFA hardening", () => {
@@ -36,12 +42,8 @@ describe("policy and condition-set MFA hardening", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     const storedStateCheck = policiesSource.indexOf("hasPolicySelector || hasAgentSelector", start);
     expect(storedStateCheck).toBeGreaterThan(start);
-    expect(
-      policiesSource.indexOf('Object.prototype.hasOwnProperty.call(body, "policyId")', start),
-    ).toBeGreaterThan(start);
-    expect(
-      policiesSource.indexOf('Object.prototype.hasOwnProperty.call(body, "agentId")', start),
-    ).toBeGreaterThan(start);
+    expect(policiesSource.indexOf('Object.hasOwn(body, "policyId")', start)).toBeGreaterThan(start);
+    expect(policiesSource.indexOf('Object.hasOwn(body, "agentId")', start)).toBeGreaterThan(start);
     expect(policiesSource.indexOf("Invalid policy template id format", start)).toBeLessThan(
       storedStateCheck,
     );

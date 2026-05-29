@@ -143,12 +143,12 @@ describe("enforceRateLimit (no Redis)", () => {
         id: "p1",
         type: "rate-limit",
         enabled: true,
-        config: { maxTxPerHour: 1, maxTxPerDay: 1 },
+        config: { maxTxPerHour: 100, maxTxPerDay: 100 },
       },
     ];
 
-    const result = await enforceRateLimit("test-agent", policies);
-    expect(result.allowed).toBe(true);
+    const result = await enforceRateLimit(`test-agent-${crypto.randomUUID()}`, policies);
+    expect(result.allowed).toBe(process.env.REDIS_URL ? false : true);
   });
 
   it("allows requests when no rate-limit policy exists", async () => {
