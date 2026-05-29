@@ -187,7 +187,7 @@ jobs:
           exit 1
 
       - name: Integration tests (API)
-        run: bun test --isolate packages/api
+        run: bun test --isolate --timeout=30000 packages/api
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
           PORT: "3299"

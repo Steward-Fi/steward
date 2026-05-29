@@ -238,7 +238,11 @@ jobs:
           exit 1
 
       - name: Integration tests (API)
-        run: bun test --isolate packages/api
+        # --timeout=30000: the per-file PGLite beforeEach re-runs all migrations,
+        # which can exceed bun's 5s default under the concurrent --isolate load on
+        # CI runners. These are not real failures (each file passes in isolation);
+        # the higher per-test timeout absorbs the migration latency.
+        run: bun test --isolate --timeout=30000 packages/api
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
           PORT: "3299"
