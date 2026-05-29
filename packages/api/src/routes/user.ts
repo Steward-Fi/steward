@@ -3484,7 +3484,7 @@ user.get("/me/tenants/:tenantId/users", async (c) => {
   if (q) {
     const like = `%${q.replace(/[%_]/g, "\\$&")}%`;
     whereConditions.push(
-      or(ilike(users.email, like), ilike(users.name, like), ilike(users.id, like))!,
+      or(ilike(users.email, like), ilike(users.name, like), ilike(sql`${users.id}::text`, like))!,
     );
   }
 
