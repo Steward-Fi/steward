@@ -22,7 +22,102 @@ mock.module("../services/webhook-dispatch", () => ({
   ),
 }));
 
-const { authRoutes, verifySessionToken } = await import("../routes/auth");
+const { authRoutes, verifySessionToken, createSessionToken } = await import("../routes/auth");
+
+/**
+ * Decode a JWT's claims WITHOUT running the revocation/membership checks that
+ * `verifySessionToken` performs. Enabling MFA revokes the SMS-login session, so
+ * `verifySessionToken` would return null for it — but the token's claims
+ * (userId, tenantId, address) are still the values we want to carry into the
+ * fresh, MFA-verified session below.
+ */
+function decodeTokenClaims(token: string): {
+  userId: string;
+  tenantId: string;
+  address?: string;
+  email?: string;
+} {
+  const [, payloadB64] = token.split(".");
+  return JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
+}
+
+/**
+ * Advance the global clock by `offsetMs` and return a restore function.
+ *
+ * Why this is needed: enabling/disabling an MFA factor calls
+ * `revokeUserRefreshSessions`, which sets the user revocation line to
+ * `floor(Date.now()/1000)`. JWT `iat` is second-grained and same-second tokens
+ * are intentionally treated as revoked (`iat <= issuedBefore`) — a deliberate
+ * security property so logout/compromise kills tokens minted in the same second.
+ * In a real flow the user re-authenticates seconds after enabling MFA, so any
+ * session the server subsequently issues (e.g. via /mfa/totp/complete) has an
+ * `iat` past the revocation line. These in-process tests run in well under a
+ * second, so we advance the clock to model that realistic gap. jose's
+ * `setIssuedAt()` reads `new Date()`, so we override the Date class (not just
+ * Date.now); `revokeUserTokens` reads `Date.now()`, which the override covers too.
+ */
+function installClockShift(offsetMs: number): () => void {
+  const OriginalDate = Date;
+  class ShiftedDate extends OriginalDate {
+    constructor(...args: ConstructorParameters<typeof Date>) {
+      super(...(args.length ? args : [OriginalDate.now() + offsetMs]));
+    }
+    static now(): number {
+      return OriginalDate.now() + offsetMs;
+    }
+  }
+  globalThis.Date = ShiftedDate as DateConstructor;
+  return () => {
+    globalThis.Date = OriginalDate;
+  };
+}
+
+async function mintFreshSession(
+  address: string,
+  tenantId: string,
+  claims: Record<string, unknown>,
+): Promise<string> {
+  const restore = installClockShift(5_000);
+  try {
+    return await createSessionToken(address, tenantId, claims);
+  } finally {
+    restore();
+  }
+}
+
+/**
+ * Enabling/managing MFA factors revokes sessions issued before the change and
+ * MFA-management routes require a recent MFA step-up. Mint a fresh, MFA-verified
+ * session for the user so post-enable management calls reflect a real re-auth.
+ */
+async function freshMfaToken(token: string): Promise<string> {
+  const payload = decodeTokenClaims(token);
+  return mintFreshSession(payload.address ?? "", payload.tenantId, {
+    userId: payload.userId,
+    ...(payload.email ? { email: payload.email } : {}),
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
+    factorEnrollmentVerifiedAt: Date.now(),
+  });
+}
+
+/**
+ * Mint a fresh (non-revoked) SMS-login-style session that carries the same
+ * claims an SMS OTP login issues — notably a recent `factorEnrollmentVerifiedAt`
+ * but NO `mfaVerifiedAt`. Enabling TOTP revokes the original login token (so it
+ * would 401), but the security boundary under test is the factor-enrollment
+ * step-up: once a durable factor exists, that login-grade step-up is no longer
+ * sufficient, so the route must respond 403 (not 401).
+ */
+async function freshLoginToken(token: string): Promise<string> {
+  const payload = decodeTokenClaims(token);
+  return mintFreshSession(payload.address ?? "", payload.tenantId, {
+    userId: payload.userId,
+    ...(payload.email ? { email: payload.email } : {}),
+    authMethod: "sms",
+    factorEnrollmentVerifiedAt: Date.now(),
+  });
+}
 
 beforeAll(async () => {
   process.env.NODE_ENV = "test";
@@ -44,7 +139,11 @@ beforeEach(() => {
 });
 
 async function fetchSiweNonce(): Promise<string> {
-  const nonceRes = await authRoutes.request("/nonce");
+  // /nonce binds the issued nonce to an allowed request Origin; SIWE verify
+  // cross-checks the message domain against it. Send an allowlisted Origin.
+  const nonceRes = await authRoutes.request("/nonce", {
+    headers: { Origin: "https://steward.fi" },
+  });
   expect(nonceRes.status).toBe(200);
   const nonceJson = (await nonceRes.json()) as { nonce: string };
   return nonceJson.nonce;
@@ -136,10 +235,14 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       }),
     ]);
 
+    // Enabling TOTP revokes the prior SMS-login session; re-auth with a fresh
+    // MFA-verified session to manage the factor.
+    const manageToken = await freshMfaToken(auth.token);
+
     const invalidUnenrollRes = await authRoutes.request("/mfa/totp/unenroll", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${auth.token}`,
+        Authorization: `Bearer ${manageToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -157,7 +260,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       const unenrollRes = await authRoutes.request("/mfa/totp/unenroll", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${auth.token}`,
+          Authorization: `Bearer ${manageToken}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ code: unenrollCode }),
@@ -231,16 +334,38 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     expect(mfaVerify.enabled).toBe(true);
     expect(mfaVerify.recoveryCodes).toHaveLength(10);
 
+    // Enabling TOTP revoked the SMS-login session. Re-mint a fresh login-grade
+    // session (recent factor-enrollment step-up, but NOT an MFA step-up). Now
+    // that a durable factor (TOTP) exists, login-grade step-up is insufficient
+    // for enrolling another factor, so the route must respond 403.
+    const loginToken = await freshLoginToken(auth.token);
+    const manageToken = await freshMfaToken(auth.token);
     const blockedSmsEnroll = await authRoutes.request("/mfa/sms/enroll", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${auth.token}`,
+        Authorization: `Bearer ${loginToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ phone: "+14155550124" }),
     });
     expect(blockedSmsEnroll.status).toBe(403);
 
+    // From here the test re-authenticates (SIWE, second SMS login + MFA
+    // complete, recovery regenerate, etc.). Each issues a NEW session whose
+    // `iat` must land past the revocation line set by the TOTP enable above.
+    // In real usage that re-auth happens seconds later; advance the clock to
+    // model it. Restored in the finally so it never leaks to other tests.
+    const restoreClock = installClockShift(2_000);
+    try {
+    // Phone-login users are keyed on a `phone:<hash>` walletAddress. The SIWE
+    // check below temporarily attaches a real wallet to assert that a SIWE login
+    // for a TOTP-enabled user requires MFA — capture the phone subject so we can
+    // restore it afterwards, otherwise later phone logins would resolve to a
+    // brand-new (TOTP-less) user.
+    const [{ walletAddress: phoneSubject }] = await getDb()
+      .select({ walletAddress: users.walletAddress })
+      .from(users)
+      .where(eq(users.id, auth.user.id));
     const account = privateKeyToAccount(generatePrivateKey());
     await getDb()
       .update(users)
@@ -266,8 +391,14 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     expect(siweMfaRequired.token).toBeUndefined();
     expect(siweMfaRequired.refreshToken).toBeUndefined();
 
+    // Restore the phone subject so subsequent SMS logins resolve the same user.
+    await getDb()
+      .update(users)
+      .set({ walletAddress: phoneSubject })
+      .where(eq(users.id, auth.user.id));
+
     const recoveryStatusRes = await authRoutes.request("/mfa/recovery-codes/status", {
-      headers: { Authorization: `Bearer ${auth.token}` },
+      headers: { Authorization: `Bearer ${manageToken}` },
     });
     expect(recoveryStatusRes.status).toBe(200);
     const recoveryStatus = (await recoveryStatusRes.json()) as {
@@ -279,7 +410,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     const replayRes = await authRoutes.request("/mfa/totp/verify", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${auth.token}`,
+        Authorization: `Bearer ${manageToken}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ code }),
@@ -419,6 +550,9 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     } finally {
       Date.now = originalNow;
     }
+    } finally {
+      restoreClock();
+    }
   });
 
   it("enrolls and completes SMS MFA challenges", async () => {
@@ -464,6 +598,11 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     const enrollInbox = (await enrollInboxRes.json()) as { code: string };
     const invalidEnrollCode = enrollInbox.code === "000000" ? "000001" : "000000";
 
+    // Drop the user.created / user.authenticated webhooks emitted by the SMS
+    // login above so the assertions below isolate MFA-enable webhooks: a FAILED
+    // SMS MFA verify must dispatch nothing.
+    webhookDispatches.length = 0;
+
     const invalidVerifyMfaRes = await authRoutes.request("/mfa/sms/verify", {
       method: "POST",
       headers: {
@@ -497,6 +636,11 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       }),
     ]);
 
+    // Enabling SMS MFA above revoked prior sessions. Subsequent MFA-completed
+    // logins must issue tokens whose `iat` is past that revocation line; advance
+    // the clock to model the realistic re-auth gap. Restored in the finally.
+    const restoreClock = installClockShift(2_000);
+    try {
     const secondSendRes = await authRoutes.request("/sms/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -647,6 +791,14 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       body: JSON.stringify({ code: invalidUnenrollCode }),
     });
     expect(invalidUnenrollRes.status).toBe(401);
+    // Drop the user.authenticated/user.created webhooks emitted by the SMS
+    // logins above so the assertions below isolate the MFA factor lifecycle
+    // (enable then disable). An invalid unenroll must add no MFA webhook.
+    {
+      const mfaLifecycle = webhookDispatches.filter((d) => d.type.startsWith("mfa."));
+      webhookDispatches.length = 0;
+      webhookDispatches.push(...mfaLifecycle);
+    }
     expect(webhookDispatches).toHaveLength(1);
 
     const unenrollRes = await authRoutes.request("/mfa/sms/unenroll", {
@@ -670,5 +822,8 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
         },
       }),
     ]);
+    } finally {
+      restoreClock();
+    }
   });
 });
