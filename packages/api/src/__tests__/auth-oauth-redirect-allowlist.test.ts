@@ -11,29 +11,33 @@ import {
 
 setDefaultTimeout(30000);
 
-import { getDb, tenantConfigs, tenants } from "@stwd/db";
-import { eq } from "drizzle-orm";
-import { authRoutes, clearOAuthTokenKeyStoreForTests } from "../routes/auth";
+process.env.NODE_ENV = "test";
+process.env.STEWARD_PGLITE_MEMORY = "true";
+process.env.STEWARD_MASTER_PASSWORD =
+  process.env.STEWARD_MASTER_PASSWORD || "oauth-allowlist-master-password";
+process.env.STEWARD_JWT_SECRET =
+  process.env.STEWARD_JWT_SECRET || "oauth-allowlist-jwt-secret-with-enough-bytes";
+process.env.DATABASE_URL = process.env.DATABASE_URL || "postgres://test:test@localhost:5432/test";
 
-/**
- * NOTE on test isolation:
- *   Uses the ambient `DATABASE_URL` from the `Integration Tests (Postgres)`
- *   CI job rather than swapping pglite into the global handle. Closing a
- *   pglite handle in `afterAll` previously poisoned every subsequent test
- *   in `bun test packages/api` with `error: PGlite is closed`. We use a
- *   unique tenant prefix and clean up the rows in `afterAll` instead.
- */
+import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { eq } from "drizzle-orm";
+
+const { authRoutes, clearOAuthTokenKeyStoreForTests } = await import("../routes/auth");
 
 const TENANT_ID = "test-oauth-allowlist";
-const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
-const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
+// PKCE is mandatory for response_type=code; a syntactically valid S256
+// challenge lets requests reach redirect_uri allowlist validation.
+const CODE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+const PKCE_QS = `&code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256`;
 
-describeWithDatabase("OAuth redirect_uri allowlist", () => {
+describe("OAuth redirect_uri allowlist", () => {
   beforeAll(async () => {
-    process.env.STEWARD_MASTER_PASSWORD =
-      process.env.STEWARD_MASTER_PASSWORD || "oauth-allowlist-master-password";
-    process.env.STEWARD_JWT_SECRET =
-      process.env.STEWARD_JWT_SECRET || "oauth-allowlist-jwt-secret-with-enough-bytes";
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => {
+      await client.close();
+    });
+
     process.env.APP_URL = "https://api.example.test";
     process.env.GOOGLE_CLIENT_ID = "google-client";
     process.env.GOOGLE_CLIENT_SECRET = "google-secret";
@@ -41,8 +45,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     delete process.env.STEWARD_OAUTH_REDIRECT_ALLOWLIST;
     clearOAuthTokenKeyStoreForTests();
 
-    const db = getDb();
-    await db
+    await getDb()
       .insert(tenants)
       .values({
         id: TENANT_ID,
@@ -50,7 +53,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
         apiKeyHash: "hash",
       })
       .onConflictDoNothing();
-    await db
+    await getDb()
       .insert(tenantConfigs)
       .values({
         tenantId: TENANT_ID,
@@ -68,20 +71,13 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
   });
 
   afterAll(async () => {
-    const db = getDb();
-    await db
-      .delete(tenantConfigs)
-      .where(eq(tenantConfigs.tenantId, TENANT_ID))
-      .catch(() => {});
-    await db
-      .delete(tenants)
-      .where(eq(tenants.id, TENANT_ID))
-      .catch(() => {});
+    await closeDb();
     delete process.env.APP_URL;
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
     delete process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS;
     delete process.env.STEWARD_OAUTH_REDIRECT_ALLOWLIST;
+    delete process.env.STEWARD_PGLITE_MEMORY;
   });
 
   it("rejects /authorize when redirect_uri origin is outside the tenant allowlist", async () => {
@@ -94,7 +90,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     });
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://evil.example/callback")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://evil.example/callback")}${PKCE_QS}`,
     );
 
     expect(res.status).toBe(400);
@@ -114,7 +110,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = "https://global.example.test/callback";
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://global.example.test/callback")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://global.example.test/callback")}${PKCE_QS}`,
     );
 
     expect(res.status).toBe(400);
@@ -133,7 +129,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     });
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}${PKCE_QS}`,
     );
 
     expect(res.status).toBe(400);
@@ -152,7 +148,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     });
 
     const authorizeRes = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/")}${PKCE_QS}`,
     );
 
     expect(authorizeRes.status).toBe(302);

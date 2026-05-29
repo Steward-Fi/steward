@@ -33,6 +33,7 @@ describe("control-plane auth hardening", () => {
       'tenantConfigRoutes.put("/:id/oidc-providers"',
       'tenantConfigRoutes.get("/:id/auth-abuse-config"',
       'tenantConfigRoutes.put("/:id/auth-abuse-config"',
+      'tenantConfigRoutes.get("/:id/security-checklist"',
       'tenantConfigRoutes.get("/:id/test-account"',
       'tenantConfigRoutes.post("/:id/test-account"',
       'tenantConfigRoutes.delete("/:id/test-account"',
@@ -89,12 +90,15 @@ describe("control-plane auth hardening", () => {
 
   it("does not allow tenant API keys or stale admin sessions to manage persistent webhooks", () => {
     for (const [source, marker] of [
-      [webhookSource, 'webhookRoutes.post("/")'],
-      [webhookSource, 'webhookRoutes.put("/:id")'],
-      [webhookSource, 'webhookRoutes.delete("/:id")'],
-      [webhookSource, 'webhookRoutes.get("/:id/deliveries")'],
-      [webhookSource, 'webhookRoutes.post("/deliveries/:id/retry")'],
-      [tenantsSource, 'tenantRoutes.put("/:id/webhook"'],
+      [webhookSource, 'webhookRoutes.post("/",'],
+      [webhookSource, 'webhookRoutes.put("/:id",'],
+      [webhookSource, 'webhookRoutes.delete("/:id",'],
+      [webhookSource, 'webhookRoutes.post("/:id/test",'],
+      [webhookSource, 'webhookRoutes.get("/:id/deliveries",'],
+      [webhookSource, 'webhookRoutes.get("/:id/deliveries/export",'],
+      [webhookSource, 'webhookRoutes.post("/deliveries/:id/replay",'],
+      [webhookSource, 'webhookRoutes.post("/deliveries/:id/retry",'],
+      [tenantsSource, 'tenantRoutes.put("/:id/webhook",'],
     ] as const) {
       const start = source.indexOf(marker);
       expect(start).toBeGreaterThanOrEqual(0);

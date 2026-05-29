@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { agents, closeDb, getDb, refreshTokens, tenants } from "@stwd/db";
+import { agents, closeDb, getDb, refreshTokens, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 
@@ -18,6 +18,8 @@ describe("platform tenant creation", () => {
         "platform:read",
         "platform:write",
         "platform:tenant:create",
+        "platform:tenant:delete",
+        "platform:tenant-policy:write",
         "platform:agent:create",
       ],
     });
@@ -116,7 +118,7 @@ describe("platform tenant creation", () => {
       .values({
         id: `${TENANT_ID}-policies`,
         name: "Platform Tenant Policies",
-        apiKeyHash: "hash",
+        apiKeyHash: `hash-${TENANT_ID}-policies`,
       });
 
     const putResponse = await platformRoutes.request(`/tenants/${TENANT_ID}-policies/policies`, {
@@ -142,7 +144,7 @@ describe("platform tenant creation", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Platform Tenant Delete",
-      apiKeyHash: "hash",
+      apiKeyHash: `hash-${tenantId}`,
     });
     await getDb()
       .insert(agents)
@@ -152,11 +154,16 @@ describe("platform tenant creation", () => {
         name: "Delete Agent",
         walletAddress: "0x0000000000000000000000000000000000000001",
       });
+    const refreshUserId = "00000000-0000-0000-0000-000000000001";
+    await getDb()
+      .insert(users)
+      .values({ id: refreshUserId, email: `${tenantId}@example.test` })
+      .onConflictDoNothing();
     await getDb()
       .insert(refreshTokens)
       .values({
         id: `${tenantId}-refresh`,
-        userId: "00000000-0000-0000-0000-000000000001",
+        userId: refreshUserId,
         tenantId,
         tokenHash: "stale-refresh-hash",
         expiresAt: new Date(Date.now() + 60_000),
@@ -181,7 +188,7 @@ describe("platform tenant creation", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Platform Tenant Batch",
-      apiKeyHash: "hash",
+      apiKeyHash: `hash-${tenantId}`,
     });
 
     const response = await platformRoutes.request(`/tenants/${tenantId}/agents/batch`, {

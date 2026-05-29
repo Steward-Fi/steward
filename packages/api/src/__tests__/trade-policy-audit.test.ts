@@ -40,8 +40,7 @@ describe("trade policy audit", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Trade Wallet Test Tenant",
-      apiKeyHash: "test-hash",
-      ownerAddress: "0x0000000000000000000000000000000000000000",
+      apiKeyHash: `test-hash-${tenantId}`,
     });
     await getDb().insert(agents).values({
       id: agentId,
@@ -63,12 +62,18 @@ describe("trade policy audit", () => {
         tenantId: string;
         agentScope: null;
         authType: string;
+        tenantRole: string;
+        userId: string;
+        sessionMfaVerifiedAt: number;
       };
     }>();
     app.use("*", async (c, next) => {
       c.set("tenantId", tenantId);
       c.set("agentScope", null);
-      c.set("authType", "api-key");
+      c.set("authType", "session-jwt");
+      c.set("tenantRole", "owner");
+      c.set("userId", `${tenantId}-owner`);
+      c.set("sessionMfaVerifiedAt", Date.now());
       await next();
     });
     app.route("/v1/trade", tradeRoutes);
@@ -105,8 +110,7 @@ describe("trade policy audit", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Trade Policy Test Tenant",
-      apiKeyHash: "test-hash",
-      ownerAddress: "0x0000000000000000000000000000000000000000",
+      apiKeyHash: `test-hash-${tenantId}`,
     });
     await getDb().insert(agents).values({
       id: agentId,
@@ -188,8 +192,7 @@ describe("trade policy audit", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Trade Notional Test Tenant",
-      apiKeyHash: "test-hash",
-      ownerAddress: "0x0000000000000000000000000000000000000000",
+      apiKeyHash: `test-hash-${tenantId}`,
     });
     await getDb().insert(agents).values({
       id: agentId,
@@ -266,8 +269,7 @@ describe("trade policy audit", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Trade Price Test Tenant",
-      apiKeyHash: "test-hash",
-      ownerAddress: "0x0000000000000000000000000000000000000000",
+      apiKeyHash: `test-hash-${tenantId}`,
     });
     await getDb().insert(agents).values({
       id: agentId,
@@ -332,7 +334,7 @@ describe("trade policy audit", () => {
       .select()
       .from(tradeSessions)
       .where(eq(tradeSessions.id, sessionId));
-    expect(session?.dailySpendUsd).toBe("0");
+    expect(Number(session?.dailySpendUsd)).toBe(0);
   });
 
   it("requires tenant-level auth for unscoped trade session management", async () => {
@@ -342,8 +344,7 @@ describe("trade policy audit", () => {
     await getDb().insert(tenants).values({
       id: tenantId,
       name: "Trade Member Test Tenant",
-      apiKeyHash: "test-hash",
-      ownerAddress: "0x0000000000000000000000000000000000000000",
+      apiKeyHash: `test-hash-${tenantId}`,
     });
     await getDb().insert(agents).values({
       id: agentId,

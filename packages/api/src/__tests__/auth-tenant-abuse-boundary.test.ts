@@ -22,11 +22,11 @@ describe("tenant auth abuse boundaries", () => {
   });
 
   it("checks OAuth email policy against the resolved tenant before tenant linking or session minting", () => {
-    const start = authSource.indexOf("async function provisionOAuthUser");
-    const end = authSource.indexOf("function getOAuthAuthorizeUrl", start);
+    const start = authSource.indexOf("async function completeEmailAuth");
+    const end = authSource.indexOf("function resolveSamlMappedRole", start);
     const source = authSource.slice(start, end);
 
-    const tenantResolved = source.indexOf("const resolvedTenantId = tenantResult.tenantId");
+    const tenantResolved = source.indexOf("resolvedTenantId = tenantResult.tenantId");
     const policyCheck = source.indexOf("validateEmailAbusePolicy", tenantResolved);
     const tenantLink = source.indexOf("await ensureUserTenantLink", tenantResolved);
     const sessionResponse = source.indexOf("buildAuthOrMfaResponse", tenantResolved);

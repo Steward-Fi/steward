@@ -91,9 +91,8 @@ describe("tenant app clients hardening", () => {
     expect(helper).toContain(
       "const nextClientIds = new Set(normalized.map((client) => client.id))",
     );
-    expect(helper).toContain(
-      "const secretsToPreserve = existingSecrets.filter((secret) => nextClientIds.has(secret.clientId))",
-    );
+    expect(helper).toContain("const secretsToPreserve = existingSecrets.filter((secret) =>");
+    expect(helper).toContain("nextClientIds.has(secret.clientId)");
     expect(helper).toContain("await tx.insert(tenantAppClientSecrets).values(secretsToPreserve)");
   });
 
@@ -140,7 +139,7 @@ describe("tenant app clients hardening", () => {
         'action: "tenant.app_client_secret.rotate"',
       ],
       [
-        'tenantConfigRoutes.delete("/:id/app-clients/:clientId/secrets/:secretId"',
+        '"/:id/app-clients/:clientId/secrets/:secretId"',
         'action: "tenant.app_client_secret.revoke"',
       ],
     ] as const) {

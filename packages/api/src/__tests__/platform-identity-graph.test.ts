@@ -22,6 +22,7 @@ describe("platform global identity graph routes", () => {
       [PLATFORM_KEY]: [
         "platform:read",
         "platform:write",
+        "platform:user:read",
         "platform:user:write",
         "platform:user-lifecycle:write",
         "platform:user:delete",

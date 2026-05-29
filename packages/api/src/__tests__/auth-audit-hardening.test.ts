@@ -36,8 +36,12 @@ describe("auth and audit hardening", () => {
     const routeStart = authSource.indexOf('auth.delete("/sessions"');
     expect(routeStart).toBeGreaterThanOrEqual(0);
     expect(
-      authSource.indexOf("revocationStore.revokeUserTokens(payload.userId)", routeStart),
+      authSource.indexOf("revokeUserRefreshSessions(payload.userId)", routeStart),
     ).toBeGreaterThan(routeStart);
+    // revokeUserRefreshSessions revokes all minted access tokens for the user.
+    expect(authSource.indexOf("revocationStore.revokeUserTokens(userId)")).toBeGreaterThanOrEqual(
+      0,
+    );
     expect(
       authSource.indexOf("revocationStore.revokeToken(payload.jti, payload.exp)", routeStart),
     ).toBeGreaterThan(routeStart);
@@ -47,7 +51,7 @@ describe("auth and audit hardening", () => {
     const reusedBranch = authSource.indexOf('rotatedRefresh.status === "reused"');
     expect(reusedBranch).toBeGreaterThanOrEqual(0);
     expect(
-      authSource.indexOf("revocationStore.revokeUserTokens(rotatedRefresh.userId)", reusedBranch),
+      authSource.indexOf("revokeUserRefreshSessions(rotatedRefresh.userId)", reusedBranch),
     ).toBeGreaterThan(reusedBranch);
     expect(authSource.indexOf("auth.refresh.reuse_detected", reusedBranch)).toBeGreaterThan(
       reusedBranch,
@@ -62,14 +66,17 @@ describe("auth and audit hardening", () => {
     expect(authSource.indexOf("const [refreshCandidate]", rotationStart)).toBeGreaterThan(
       rotationStart,
     );
-    expect(authSource).toContain("user_session_${refreshCandidate.userId}");
-    expect(authSource.indexOf("refreshStartedAt", routeStart)).toBeGreaterThan(routeStart);
+    // Rotation fences concurrent revocation via a per-user session advisory lock.
+    expect(authSource.indexOf("lockUserSession(tx, refreshCandidate.userId)", rotationStart)).toBeGreaterThan(
+      rotationStart,
+    );
     expect(
       authSource.indexOf("revocationStore.getUserRevokedBefore(record.userId)", rotationStart),
     ).toBeGreaterThan(rotationStart);
-    expect(authSource.indexOf(".insert(refreshTokens)", rotationStart)).toBeLessThan(
+    // Revocation must be checked BEFORE minting/inserting the rotated refresh token.
+    expect(
       authSource.indexOf("revocationStore.getUserRevokedBefore(record.userId)", rotationStart),
-    );
+    ).toBeLessThan(authSource.indexOf(".insert(refreshTokens)", rotationStart));
     expect(
       authSource.indexOf("Session was revoked. Please sign in again.", routeStart),
     ).toBeGreaterThan(routeStart);
@@ -99,7 +106,10 @@ describe("auth and audit hardening", () => {
       expect(authSource).toContain(action);
     }
     expect(authSource.indexOf('action: "auth.sessions.revoke_all.authorized"')).toBeLessThan(
-      authSource.indexOf(".delete(refreshTokens)", authSource.indexOf('auth.delete("/sessions"')),
+      authSource.indexOf(
+        "revokeUserRefreshSessions(payload.userId)",
+        authSource.indexOf('auth.delete("/sessions"'),
+      ),
     );
   });
 
@@ -127,8 +137,10 @@ describe("auth and audit hardening", () => {
     expect(auditRouteSource).toContain('role !== "owner" && role !== "admin"');
     expect(auditRouteSource).toContain("sessionMfaVerifiedAt");
     expect(auditRouteSource).toContain("Audit routes require recent MFA verification");
-    expect(auditServiceSource).toContain("seq = ${requestedFromSeq - 1}");
-    expect(auditServiceSource).toContain("seq BETWEEN ${requestedFromSeq} AND ${toSeq}");
+    // fromSeq is clamped to the chain genesis (effectiveFromSeq) before being used in queries.
+    expect(auditServiceSource).toContain("Math.max(requestedFromSeq, genesisSeq)");
+    expect(auditServiceSource).toContain("seq = ${effectiveFromSeq - 1}");
+    expect(auditServiceSource).toContain("seq BETWEEN ${effectiveFromSeq} AND ${toSeq}");
     expect(auditServiceSource).not.toContain("const fromSeq = 1");
   });
 
@@ -235,10 +247,11 @@ describe("auth and audit hardening", () => {
       const routeStart = authSource.indexOf(route);
       expect(routeStart).toBeGreaterThanOrEqual(0);
       const routeSource = authSource.slice(routeStart, authSource.indexOf("\n});", routeStart));
+      // Step-up re-auth must run before all user sessions are revoked.
       expect(
         routeSource.indexOf("await requireRecentFactorEnrollmentStepUp(c, session)"),
-      ).toBeLessThan(routeSource.indexOf(".delete(refreshTokens)"));
-      expect(routeSource).toContain("revocationStore.revokeUserTokens(session.payload.userId)");
+      ).toBeLessThan(routeSource.indexOf("revokeUserRefreshSessions(session.payload.userId)"));
+      expect(routeSource).toContain("revokeUserRefreshSessions(session.payload.userId)");
       expect(routeSource).toContain("revokedAccessTokensIssuedBefore");
     }
   });

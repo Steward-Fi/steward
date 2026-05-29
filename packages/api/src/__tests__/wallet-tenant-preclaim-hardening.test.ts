@@ -52,7 +52,24 @@ describe("wallet tenant preclaim hardening", () => {
         conflictStart,
       ),
     ).toBeGreaterThan(conflictStart);
-    expect(authSource.indexOf("return { tenant: retryTenant", helperStart)).toBe(-1);
+    // The id-conflict branch must look up the conflicting tenant by id and then throw,
+    // so a caller never receives a tenant whose ownerAddress does not match.
+    const conflictLookup = authSource.indexOf(
+      "eq(tenants.id, opts.tenantId)",
+      conflictStart,
+    );
+    expect(conflictLookup).toBeGreaterThan(conflictStart);
+    // Any post-conflict retry that returns an existing tenant must be scoped by
+    // ownerAddress (never by id alone) before the id-conflict throw.
+    const retryReturn = authSource.indexOf("return { tenant: retryTenant", helperStart);
+    if (retryReturn !== -1) {
+      expect(retryReturn).toBeLessThan(conflictStart);
+      const retryLookupStart = authSource.lastIndexOf("const [retryTenant]", retryReturn);
+      expect(retryLookupStart).toBeGreaterThan(helperStart);
+      expect(
+        authSource.indexOf("eq(tenants.ownerAddress, opts.ownerAddress)", retryLookupStart),
+      ).toBeGreaterThan(retryLookupStart);
+    }
   });
 
   it("declares ownerAddress uniqueness for wallet tenant ownership", () => {

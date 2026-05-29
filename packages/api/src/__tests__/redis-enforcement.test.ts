@@ -12,6 +12,7 @@ import {
   enforceRateLimit,
   extractRateLimitPolicy,
   extractSpendLimitPolicy,
+  formatRateLimitHeaders,
   recordVaultSpend,
 } from "../middleware/redis-enforcement";
 
@@ -155,6 +156,31 @@ describe("enforceRateLimit (no Redis)", () => {
     const policies: PolicyRule[] = [];
     const result = await enforceRateLimit("test-agent", policies);
     expect(result.allowed).toBe(true);
+  });
+});
+
+describe("formatRateLimitHeaders", () => {
+  it("emits standard and legacy rate-limit headers", () => {
+    const headers = formatRateLimitHeaders({
+      limit: 10,
+      remaining: 2,
+      resetMs: 12_001,
+      retryAfterMs: 12_001,
+    });
+
+    expect(headers["RateLimit-Limit"]).toBe("10");
+    expect(headers["RateLimit-Remaining"]).toBe("2");
+    expect(headers["RateLimit-Reset"]).toBe("13");
+    expect(headers["Retry-After"]).toBe("13");
+    expect(headers["X-RateLimit-Limit"]).toBe("10");
+    expect(headers["X-RateLimit-Remaining"]).toBe("2");
+    expect(headers["X-RateLimit-Reset"]).toBe("13");
+  });
+
+  it("does not emit Retry-After for allowed responses", () => {
+    const headers = formatRateLimitHeaders({ limit: 5, remaining: 4, resetMs: 1_000 });
+    expect(headers["Retry-After"]).toBeUndefined();
+    expect(headers["RateLimit-Remaining"]).toBe("4");
   });
 });
 

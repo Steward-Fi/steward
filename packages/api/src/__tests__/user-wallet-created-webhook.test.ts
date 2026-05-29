@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { closeDb, getDb, tenants } from "@stwd/db";
+import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 
@@ -11,12 +11,13 @@ mock.module("../services/webhook-dispatch", () => ({
 }));
 
 const USER_ADDRESS = "0x0000000000000000000000000000000000000042";
-const PERSONAL_TENANT_ID = `personal-${USER_ADDRESS}`;
-const USER_AGENT_ID = `user-wallet-${USER_ADDRESS}`;
 
 describe("user wallet creation webhooks", () => {
   let createSessionToken: Awaited<typeof import("../routes/auth")>["createSessionToken"];
   let userRoutes: Awaited<typeof import("../routes/user")>["userRoutes"];
+  let userId = "";
+  let personalTenantId = "";
+  let userAgentId = "";
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -27,6 +28,23 @@ describe("user wallet creation webhooks", () => {
     setPGLiteOverride(db, async () => {
       await client.close();
     });
+
+    const [userRow] = await getDb()
+      .insert(users)
+      .values({ email: "wallet-created@example.test", emailVerified: true })
+      .returning({ id: users.id });
+    userId = userRow.id;
+    personalTenantId = `personal-${userId}`;
+    userAgentId = `user-wallet-${userId}`;
+
+    // verifySessionToken requires a userTenants row matching the token tenantId.
+    await getDb()
+      .insert(tenants)
+      .values({ id: personalTenantId, name: "Wallet Created Personal", apiKeyHash: `${personalTenantId}-hash` })
+      .onConflictDoNothing();
+    await getDb()
+      .insert(userTenants)
+      .values({ userId, tenantId: personalTenantId, role: "owner" });
 
     ({ createSessionToken } = await import("../routes/auth"));
     ({ userRoutes } = await import("../routes/user"));
@@ -44,7 +62,12 @@ describe("user wallet creation webhooks", () => {
   });
 
   it("dispatches user.wallet_created only for first successful wallet provisioning", async () => {
-    const token = await createSessionToken(USER_ADDRESS, "tenant");
+    const token = await createSessionToken(USER_ADDRESS, personalTenantId, {
+      userId,
+      tenantId: personalTenantId,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    });
 
     const created = await userRoutes.request("/me/wallet", {
       method: "POST",
@@ -57,22 +80,22 @@ describe("user wallet creation webhooks", () => {
 
     expect(created.status).toBe(201);
     expect(createdBody.ok).toBe(true);
-    expect(createdBody.data.agentId).toBe(USER_AGENT_ID);
+    expect(createdBody.data.agentId).toBe(userAgentId);
 
     const [personalTenant] = await getDb()
       .select({ id: tenants.id })
       .from(tenants)
-      .where(eq(tenants.id, PERSONAL_TENANT_ID));
-    expect(personalTenant?.id).toBe(PERSONAL_TENANT_ID);
+      .where(eq(tenants.id, personalTenantId));
+    expect(personalTenant?.id).toBe(personalTenantId);
 
     expect(dispatchWebhookMock).toHaveBeenCalledTimes(1);
     expect(dispatchWebhookMock).toHaveBeenCalledWith(
-      PERSONAL_TENANT_ID,
-      USER_AGENT_ID,
+      personalTenantId,
+      userAgentId,
       "user.wallet_created",
       {
-        userId: USER_ADDRESS,
-        walletId: USER_AGENT_ID,
+        userId,
+        walletId: userAgentId,
         walletAddress: createdBody.data.walletAddress,
         walletAddresses: expect.objectContaining({ evm: createdBody.data.walletAddress }),
       },

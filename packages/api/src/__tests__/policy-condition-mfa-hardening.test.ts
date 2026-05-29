@@ -10,22 +10,20 @@ function expectRecentMfaGate(source: string, marker: string, reason: string) {
   const start = source.indexOf(marker);
   expect(start).toBeGreaterThanOrEqual(0);
   const adminCheck = source.indexOf("requireTenantAdminSession(c)", start);
-  const mfaCheck = source.indexOf("requireRecentAdminMfa", start);
-  const reasonCheck = source.indexOf(reason, start);
+  const mfaCheck = source.indexOf(`requireRecentAdminMfa(c, "${reason}")`, start);
   expect(adminCheck).toBeGreaterThan(start);
   expect(mfaCheck).toBeGreaterThan(adminCheck);
-  expect(reasonCheck).toBeGreaterThan(mfaCheck);
 }
 
 describe("policy and condition-set MFA hardening", () => {
   it("requires recent MFA for policy template reads and mutations", () => {
     for (const [marker, reason] of [
-      ['policiesStandaloneRoutes.get("/")', "Policy template access"],
-      ['policiesStandaloneRoutes.post("/")', "Policy template creation"],
-      ['policiesStandaloneRoutes.get("/:id")', "Policy template access"],
-      ['policiesStandaloneRoutes.put("/:id")', "Policy template updates"],
-      ['policiesStandaloneRoutes.delete("/:id")', "Policy template deletion"],
-      ['policiesStandaloneRoutes.post("/:id/assign")', "Policy template assignment"],
+      ['policiesStandaloneRoutes.get("/",', "Policy template access"],
+      ['policiesStandaloneRoutes.post("/",', "Policy template creation"],
+      ['policiesStandaloneRoutes.get("/:id",', "Policy template access"],
+      ['policiesStandaloneRoutes.put("/:id",', "Policy template updates"],
+      ['policiesStandaloneRoutes.delete("/:id",', "Policy template deletion"],
+      ['policiesStandaloneRoutes.post("/:id/assign",', "Policy template assignment"],
     ] as const) {
       expectRecentMfaGate(policiesSource, marker, reason);
     }
@@ -37,10 +35,10 @@ describe("policy and condition-set MFA hardening", () => {
     const storedStateCheck = policiesSource.indexOf("hasPolicySelector || hasAgentSelector", start);
     expect(storedStateCheck).toBeGreaterThan(start);
     expect(
-      policiesSource.indexOf('Object.prototype.hasOwnProperty.call(body, "policyId")', start),
+      policiesSource.indexOf('Object.hasOwn(body, "policyId")', start),
     ).toBeGreaterThan(start);
     expect(
-      policiesSource.indexOf('Object.prototype.hasOwnProperty.call(body, "agentId")', start),
+      policiesSource.indexOf('Object.hasOwn(body, "agentId")', start),
     ).toBeGreaterThan(start);
     expect(policiesSource.indexOf("Invalid policy template id format", start)).toBeLessThan(
       storedStateCheck,
@@ -83,15 +81,15 @@ describe("policy and condition-set MFA hardening", () => {
 
   it("requires recent MFA for condition-set reads and mutations", () => {
     for (const [marker, reason] of [
-      ['conditionSetRoutes.get("/")', "Condition set access"],
-      ['conditionSetRoutes.post("/")', "Condition set creation"],
-      ['conditionSetRoutes.get("/:id")', "Condition set access"],
-      ['conditionSetRoutes.patch("/:id")', "Condition set updates"],
-      ['conditionSetRoutes.delete("/:id")', "Condition set deletion"],
-      ['conditionSetRoutes.get("/:id/items")', "Condition set item access"],
-      ['conditionSetRoutes.post("/:id/items")', "Condition set item updates"],
-      ['conditionSetRoutes.put("/:id/items")', "Condition set item replacement"],
-      ['conditionSetRoutes.delete("/:id/items/:itemId")', "Condition set item deletion"],
+      ['conditionSetRoutes.get("/",', "Condition set access"],
+      ['conditionSetRoutes.post("/",', "Condition set creation"],
+      ['conditionSetRoutes.get("/:id",', "Condition set access"],
+      ['conditionSetRoutes.patch("/:id",', "Condition set updates"],
+      ['conditionSetRoutes.delete("/:id",', "Condition set deletion"],
+      ['conditionSetRoutes.get("/:id/items",', "Condition set item access"],
+      ['conditionSetRoutes.post("/:id/items",', "Condition set item updates"],
+      ['conditionSetRoutes.put("/:id/items",', "Condition set item replacement"],
+      ['conditionSetRoutes.delete("/:id/items/:itemId",', "Condition set item deletion"],
     ] as const) {
       expectRecentMfaGate(conditionSetsSource, marker, reason);
     }

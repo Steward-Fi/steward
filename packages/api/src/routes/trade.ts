@@ -442,7 +442,10 @@ tradeRoutes.post("/sessions", async (c) => {
 
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  const walletAddress = parsed.data.walletAddress ?? (await resolveHyperliquidWallet(agentId, agent));
+  // Bind the session to the agent's own resolved venue wallet. Caller-supplied
+  // walletAddress is intentionally ignored — honoring it would let an owner bind
+  // a trade session to an arbitrary wallet (funds-routing spoof).
+  const walletAddress = await resolveHyperliquidWallet(agentId, agent);
   if (!walletAddress) {
     return c.json<ApiResponse>(
       {

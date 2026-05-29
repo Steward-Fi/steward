@@ -39,7 +39,7 @@ async function createTenantWithAbuseConfig(
     .values({
       id: tenantId,
       name: tenantId,
-      apiKeyHash: "test-hash",
+      apiKeyHash: `test-hash-${tenantId}`,
       ownerAddress: `0x${(tenantOwnerCounter++).toString(16).padStart(40, "0")}`,
     })
     .onConflictDoNothing();

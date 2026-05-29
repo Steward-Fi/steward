@@ -72,8 +72,8 @@ describe("generic intents API", () => {
     await getDb()
       .insert(tenants)
       .values([
-        { id: TENANT_ID, name: "Intents Tenant", apiKeyHash: "hash" },
-        { id: OTHER_TENANT_ID, name: "Other Intents Tenant", apiKeyHash: "hash" },
+        { id: TENANT_ID, name: "Intents Tenant", apiKeyHash: `hash-${TENANT_ID}` },
+        { id: OTHER_TENANT_ID, name: "Other Intents Tenant", apiKeyHash: `hash-${OTHER_TENANT_ID}` },
       ]);
     await getDb().insert(agents).values({
       id: AGENT_ID,
@@ -1043,6 +1043,24 @@ describe("generic intents API", () => {
     }) as typeof fetch;
 
     try {
+      await getDb()
+        .insert(policies)
+        .values({
+          id: "intent-success-allowlist",
+          agentId: SUCCESS_AGENT_ID,
+          type: "approved-addresses",
+          enabled: true,
+          config: {
+            mode: "whitelist",
+            addresses: [
+              "0x0000000000000000000000000000000000000001",
+              "0x0000000000000000000000000000000000000002",
+              "0x0000000000000000000000000000000000000003",
+            ],
+          },
+        })
+        .onConflictDoNothing();
+
       const transferIntent = await apiApp.request("/intents", {
         method: "POST",
         headers: { "content-type": "application/json" },

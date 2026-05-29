@@ -14,7 +14,8 @@ describe("ERC-8004 audit ordering", () => {
       expect(start).toBeGreaterThanOrEqual(0);
       const adminCheck = routeSource.indexOf("requireTenantAdminSession(c)", start);
       const mfaCheck = routeSource.indexOf("requireRecentAdminMfa", start);
-      const reasonCheck = routeSource.indexOf(reason, start);
+      // The reason label is passed into the MFA step-up call, so look for it at/after mfaCheck.
+      const reasonCheck = routeSource.indexOf(reason, mfaCheck);
       expect(adminCheck).toBeGreaterThan(start);
       expect(mfaCheck).toBeGreaterThan(adminCheck);
       expect(reasonCheck).toBeGreaterThan(mfaCheck);
@@ -72,18 +73,19 @@ describe("ERC-8004 audit ordering", () => {
     expect(routeSource.indexOf("signed feedback proof", feedbackStart)).toBeLessThan(
       routeSource.indexOf("feedbackSchema.safeParse", feedbackStart),
     );
-    expect(
-      routeSource.indexOf("fromAddress must be an EVM address", feedbackStart),
-    ).toBeGreaterThan(feedbackStart);
-    expect(routeSource.indexOf("taskId: z.string().trim().min(1)", feedbackStart)).toBeGreaterThan(
-      0,
-    );
+    // feedbackSchema (with the fromAddress EVM validation) is declared at module scope.
+    expect(routeSource.indexOf("fromAddress must be an EVM address")).toBeGreaterThanOrEqual(0);
+    // feedbackSchema requires a non-empty taskId (the replay-protection key) at module scope.
+    expect(routeSource.indexOf("taskId: z.string().trim().min(1)")).toBeGreaterThanOrEqual(0);
     expect(routeSource.indexOf("feedbackReplayKey", feedbackStart)).toBeLessThan(
       routeSource.indexOf("INSERT INTO reputation_cache", feedbackStart),
     );
-    expect(routeSource.indexOf("Feedback has already been recorded", feedbackStart)).toBeLessThan(
+    // The duplicate-feedback detection short-circuits (returns true) before the aggregate
+    // INSERT runs, so replays never reach the reputation mutation.
+    expect(routeSource.indexOf("if (getRows(duplicateFeedback).length > 0) return true", feedbackStart)).toBeLessThan(
       routeSource.indexOf("INSERT INTO reputation_cache", feedbackStart),
     );
+    expect(routeSource).toContain("Feedback has already been recorded");
   });
 
   it("uses transaction-scoped feedback replay locks instead of session advisory locks", () => {

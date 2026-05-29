@@ -18,7 +18,9 @@ describe("platform tenant email config routes", () => {
       [PLATFORM_KEY]: [
         "platform:read",
         "platform:write",
+        "platform:tenant-email-config:read",
         "platform:tenant-email-config:write",
+        "platform:tenant-oidc:read",
         "platform:tenant-oidc:write",
       ],
     });

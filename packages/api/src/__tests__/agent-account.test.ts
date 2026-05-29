@@ -159,7 +159,11 @@ describe("agent account API", () => {
     });
     expect(body.data.capabilities).toContain("sign_transaction");
     expect(body.data.capabilities).toContain("solana_transaction");
-    expect(body.data.sponsorship).toEqual({ enabled: false, provider: null });
+    expect(body.data.sponsorship).toEqual({
+      enabled: false,
+      provider: null,
+      circuitBreakerEnabled: false,
+    });
   });
 
   it("rejects invalid account portfolio query parameters before provider calls", async () => {

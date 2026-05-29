@@ -21,6 +21,19 @@ describe("user lifecycle webhook dispatch", () => {
     process.env.STEWARD_MASTER_PASSWORD = "user-lifecycle-webhooks-master-password";
     process.env.STEWARD_JWT_SECRET = "user-lifecycle-webhooks-jwt-secret-with-enough-entropy";
     process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+      [PLATFORM_KEY]: [
+        "platform:read",
+        "platform:write",
+        "platform:user:write",
+        "platform:user-lifecycle:write",
+        "platform:identity-migration",
+        "platform:identity-migration:force",
+        "platform:tenant-member:write",
+        "platform:tenant-user:write",
+      ],
+    });
+    process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION = "true";
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
@@ -47,6 +60,8 @@ describe("user lifecycle webhook dispatch", () => {
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
     delete process.env.STEWARD_PLATFORM_KEYS;
+    delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
+    delete process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION;
   });
 
   function platformHeaders() {
