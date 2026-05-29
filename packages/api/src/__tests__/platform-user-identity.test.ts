@@ -38,12 +38,13 @@ beforeAll(async () => {
   await db.insert(tenants).values({
     id: TENANT_ID,
     name: "Platform Identity Test",
-    apiKeyHash: "test-hash",
+    // apiKeyHash is unique-indexed; the two tenants need distinct hashes.
+    apiKeyHash: `test-hash-${TENANT_ID}`,
   });
   await db.insert(tenants).values({
     id: OTHER_TENANT_ID,
     name: "Platform Identity Other Tenant",
-    apiKeyHash: "test-hash",
+    apiKeyHash: `test-hash-${OTHER_TENANT_ID}`,
   });
   const [user] = await db
     .insert(users)
@@ -79,10 +80,16 @@ beforeAll(async () => {
 afterAll(async () => {
   if (SKIP) return;
   const db = getDb();
-  await db.delete(accounts).where(eq(accounts.userId, userId));
+  // Guard: if beforeAll failed before assigning userId, skip the uuid-typed
+  // deletes (an empty string is not a valid uuid and throws).
+  if (userId) {
+    await db.delete(accounts).where(eq(accounts.userId, userId));
+  }
   await db.delete(userTenants).where(eq(userTenants.tenantId, TENANT_ID));
   await db.delete(userTenants).where(eq(userTenants.tenantId, OTHER_TENANT_ID));
-  await db.delete(users).where(eq(users.id, userId));
+  if (userId) {
+    await db.delete(users).where(eq(users.id, userId));
+  }
   await db.delete(tenants).where(eq(tenants.id, TENANT_ID));
   await db.delete(tenants).where(eq(tenants.id, OTHER_TENANT_ID));
 });

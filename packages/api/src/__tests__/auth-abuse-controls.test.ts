@@ -39,7 +39,10 @@ async function createTenantWithAbuseConfig(
     .values({
       id: tenantId,
       name: tenantId,
-      apiKeyHash: "test-hash",
+      // apiKeyHash has a unique index. A shared constant made the second tenant
+      // insert silently no-op under onConflictDoNothing, which then tripped the
+      // tenant_configs -> tenants FK. Derive a unique hash per tenant.
+      apiKeyHash: `test-hash-${tenantId}`,
       ownerAddress: `0x${(tenantOwnerCounter++).toString(16).padStart(40, "0")}`,
     })
     .onConflictDoNothing();

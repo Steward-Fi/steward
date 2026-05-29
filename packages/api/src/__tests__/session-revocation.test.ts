@@ -66,8 +66,8 @@ describe("API access-token revocation", () => {
       .values({
         id: tenantId,
         name: "Refresh Test Tenant",
-        apiKeyHash: "test-hash",
-        ownerAddress: "0x0000000000000000000000000000000000000000",
+        apiKeyHash: `test-hash-${tenantId}`,
+        ownerAddress: `0x${tenantId.replace(/[^a-f0-9]/gi, "").padEnd(40, "0").slice(0, 40)}`,
       })
       .onConflictDoNothing();
     await db.insert(users).values({ id: userId, email: `${userId}@example.com` });
@@ -141,7 +141,7 @@ describe("API access-token revocation", () => {
       .values({
         id: tenantId,
         name: "Identity Test Tenant",
-        apiKeyHash: "test-hash",
+        apiKeyHash: `test-hash-${tenantId}`,
         ownerAddress: walletAddress,
       })
       .onConflictDoNothing();
@@ -220,7 +220,7 @@ describe("API access-token revocation", () => {
       .values({
         id: tenantId,
         name: "Deactivated Test Tenant",
-        apiKeyHash: "test-hash",
+        apiKeyHash: `test-hash-${tenantId}`,
         ownerAddress: walletAddress,
       })
       .onConflictDoNothing();
