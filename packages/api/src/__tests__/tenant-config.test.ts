@@ -35,12 +35,15 @@ beforeAll(async () => {
       apiKeyHash: apiKeyPair.hash,
     })
     .onConflictDoNothing();
+  // apiKeyHash is unique-indexed. Reusing apiKeyPair.hash made this second
+  // tenant insert silently no-op under onConflictDoNothing, which then tripped
+  // the agents -> tenants FK below. Give the other tenant its own key hash.
   await db
     .insert(tenants)
     .values({
       id: OTHER_TENANT_ID,
       name: "Other Config Test Tenant",
-      apiKeyHash: apiKeyPair.hash,
+      apiKeyHash: generateApiKey().hash,
     })
     .onConflictDoNothing();
   await db

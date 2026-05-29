@@ -51,13 +51,15 @@ describe("agent route audit ordering", () => {
 
     const signerPatchStart = routeSource.indexOf('agentRoutes.patch("/:agentId/signers/:signerId"');
     expect(signerPatchStart).toBeGreaterThanOrEqual(0);
-    expect(routeSource.indexOf("Signer permission updates", signerPatchStart)).toBeGreaterThan(
+    // The signer PATCH handler consolidates all privileged-field changes
+    // (signerType, address, chainFamily, permissions, metadata, status) behind
+    // a single recent-MFA gate labelled "Signer updates", set via the
+    // privilegedSignerUpdate flag. This is the credential-takeover fix from the
+    // PR #79 audit-gap sweep: previously type/address/chainFamily were ungated.
+    expect(routeSource.indexOf("privilegedSignerUpdate", signerPatchStart)).toBeGreaterThan(
       signerPatchStart,
     );
-    expect(routeSource.indexOf("Signer status updates", signerPatchStart)).toBeGreaterThan(
-      signerPatchStart,
-    );
-    expect(routeSource.indexOf("Signer metadata updates", signerPatchStart)).toBeGreaterThan(
+    expect(routeSource.indexOf("Signer updates", signerPatchStart)).toBeGreaterThan(
       signerPatchStart,
     );
     expect(
