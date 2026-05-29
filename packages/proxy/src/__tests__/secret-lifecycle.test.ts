@@ -16,7 +16,16 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-secret-lifecycle-jwt-secret-with-enough-bytes";
-  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com,api.deleted.example.com";
+  process.env.STEWARD_PROXY_ALLOWED_HOSTS =
+    "api.example.com,api.deleted.example.com,api.openai.com";
+  // The vault's createRoute allowlist (configuredSecretRouteHosts) reads a
+  // separate env var and ships with a default allowlist that does not include
+  // the synthetic *.example.com hosts these tests register routes against.
+  process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com,api.deleted.example.com";
+  // These lifecycle tests exercise route matching across the whole path, so they
+  // register broad "/*" path routes. The vault now gates broad routes behind an
+  // explicit opt-in (validateSecretRouteConfig), so enable it for this suite.
+  process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES = "true";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -33,6 +42,8 @@ afterAll(async () => {
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+  delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
+  delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
 });
 
 function buildApp() {
@@ -45,7 +56,10 @@ function buildApp() {
 async function ensureTenant(tenantId: string) {
   await getDb()
     .insert(tenants)
-    .values({ id: tenantId, name: tenantId, apiKeyHash: "hash" })
+    // apiKeyHash has a unique index, so each tenant needs a distinct value. A
+    // shared constant made the second/third tenant insert silently no-op under
+    // onConflictDoNothing, which then tripped the agents -> tenants FK.
+    .values({ id: tenantId, name: tenantId, apiKeyHash: `hash-${tenantId}` })
     .onConflictDoNothing();
 }
 

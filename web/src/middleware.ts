@@ -6,7 +6,10 @@ const SECURITY_HEADERS = [
   ["X-Content-Type-Options", "nosniff"],
   ["Referrer-Policy", "strict-origin-when-cross-origin"],
   ["Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"],
-  ["Permissions-Policy", "camera=(), microphone=(), geolocation=(), browsing-topics=(), payment=()"],
+  [
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), browsing-topics=(), payment=()",
+  ],
 ] as const;
 
 function makeNonce(): string {
@@ -56,7 +59,8 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     {
-      source: "/((?!api|_next/static|_next/image|favicon.ico|icon-192.png|icon-512.png|apple-touch-icon.png|site.webmanifest).*)",
+      source:
+        "/((?!api|_next/static|_next/image|favicon.ico|icon-192.png|icon-512.png|apple-touch-icon.png|site.webmanifest).*)",
       missing: [
         { type: "header", key: "next-router-prefetch" },
         { type: "header", key: "purpose", value: "prefetch" },

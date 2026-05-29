@@ -442,7 +442,8 @@ tradeRoutes.post("/sessions", async (c) => {
 
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  const walletAddress = parsed.data.walletAddress ?? (await resolveHyperliquidWallet(agentId, agent));
+  const walletAddress =
+    parsed.data.walletAddress ?? (await resolveHyperliquidWallet(agentId, agent));
   if (!walletAddress) {
     return c.json<ApiResponse>(
       {

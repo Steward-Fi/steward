@@ -101,11 +101,11 @@ import {
   authenticators,
   getDb,
   refreshTokens,
-  tenantSamlAssertionReplays,
-  tenantSamlAuthnRequests,
   type TenantEmailConfig,
   tenantAppClients,
   tenantConfigs,
+  tenantSamlAssertionReplays,
+  tenantSamlAuthnRequests,
   tenantSamlSsoConfigs,
   tenantSsoDomains,
   tenants,
@@ -2818,10 +2818,7 @@ async function provisionSamlUser(opts: {
       if (existingEmailUser) {
         user = existingEmailUser;
       } else {
-        const [created] = await db
-          .insert(users)
-          .values({ email, emailVerified: true })
-          .returning();
+        const [created] = await db.insert(users).values({ email, emailVerified: true }).returning();
         user = created;
         createdUser = true;
       }
@@ -3180,12 +3177,14 @@ async function recordSamlAssertionReplay(
   assertionId: string,
   responseId: string | undefined,
 ): Promise<void> {
-  await getDb().insert(tenantSamlAssertionReplays).values({
-    tenantId,
-    assertionId,
-    responseId,
-    expiresAt: new Date(Date.now() + 10 * 60_000),
-  });
+  await getDb()
+    .insert(tenantSamlAssertionReplays)
+    .values({
+      tenantId,
+      assertionId,
+      responseId,
+      expiresAt: new Date(Date.now() + 10 * 60_000),
+    });
 }
 
 /**
@@ -3247,16 +3246,18 @@ auth.get("/saml/:tenantId/login", async (c) => {
     spEntityId: config.spEntityId,
     acsUrl: config.acsUrl,
   });
-  await getDb().insert(tenantSamlAuthnRequests).values({
-    tenantId,
-    requestId: built.requestId,
-    relayState,
-    redirectUri,
-    appClientId: clientId,
-    codeChallenge,
-    codeChallengeMethod: "S256",
-    expiresAt: new Date(Date.now() + 5 * 60_000),
-  });
+  await getDb()
+    .insert(tenantSamlAuthnRequests)
+    .values({
+      tenantId,
+      requestId: built.requestId,
+      relayState,
+      redirectUri,
+      appClientId: clientId,
+      codeChallenge,
+      codeChallengeMethod: "S256",
+      expiresAt: new Date(Date.now() + 5 * 60_000),
+    });
 
   if (appState) {
     await getChallengeStore().set(`saml-app-state:${relayState}`, appState);
@@ -3290,7 +3291,10 @@ auth.post("/saml/:tenantId/acs", async (c) => {
   const samlResponse = typeof body?.SAMLResponse === "string" ? body.SAMLResponse : "";
   const relayState = typeof body?.RelayState === "string" ? body.RelayState : "";
   if (!samlResponse || !relayState) {
-    return c.json<ApiResponse>({ ok: false, error: "SAMLResponse and RelayState are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "SAMLResponse and RelayState are required" },
+      400,
+    );
   }
 
   let request: Awaited<ReturnType<typeof consumeSamlAuthnRequest>>;
