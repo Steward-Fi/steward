@@ -220,6 +220,8 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
+          STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
+          ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
@@ -243,6 +245,8 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
+          STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
+          ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
