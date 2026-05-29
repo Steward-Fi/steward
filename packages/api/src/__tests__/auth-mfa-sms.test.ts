@@ -22,13 +22,21 @@ mock.module("../services/webhook-dispatch", () => ({
   ),
 }));
 
+// Env must be set before the route module is imported (it reads secrets at
+// module load). Shaw's hardening default-denies missing audit/jwt secrets, so
+// these have to exist up front, not in beforeAll.
+process.env.NODE_ENV = "test";
+process.env.SMS_PROVIDER = "mock";
+process.env.STEWARD_MASTER_PASSWORD = "mfa-sms-test-master-password";
+process.env.STEWARD_PGLITE_MEMORY = "true";
+process.env.STEWARD_JWT_SECRET =
+  process.env.STEWARD_JWT_SECRET ?? "mfa-sms-test-jwt-secret-with-enough-entropy-32b";
+process.env.STEWARD_AUDIT_HMAC_KEY =
+  process.env.STEWARD_AUDIT_HMAC_KEY ?? "mfa-sms-test-audit-hmac-key-with-enough-entropy-32b";
+
 const { authRoutes, verifySessionToken } = await import("../routes/auth");
 
 beforeAll(async () => {
-  process.env.NODE_ENV = "test";
-  process.env.SMS_PROVIDER = "mock";
-  process.env.STEWARD_MASTER_PASSWORD = "mfa-sms-test-master-password";
-  process.env.STEWARD_PGLITE_MEMORY = "true";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -44,7 +52,9 @@ beforeEach(() => {
 });
 
 async function fetchSiweNonce(): Promise<string> {
-  const nonceRes = await authRoutes.request("/nonce");
+  const nonceRes = await authRoutes.request("/nonce", {
+    headers: { Origin: "https://steward.fi" },
+  });
   expect(nonceRes.status).toBe(200);
   const nonceJson = (await nonceRes.json()) as { nonce: string };
   return nonceJson.nonce;
@@ -115,6 +125,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       body: JSON.stringify({ code }),
     });
     expect(verifyMfaRes.status).toBe(200);
+    const verifyMfa = (await verifyMfaRes.json()) as { recoveryCodes: string[] };
     expect(webhookDispatches).toEqual([
       expect.objectContaining({
         agentId: auth.user.id,
@@ -136,10 +147,38 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       }),
     ]);
 
+    const secondSendRes = await authRoutes.request("/sms/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone }),
+    });
+    expect(secondSendRes.status).toBe(200);
+    const secondInboxRes = await authRoutes.request(`/test/sms-inbox/${encodeURIComponent(phone)}`);
+    const secondInbox = (await secondInboxRes.json()) as { code: string };
+    const secondVerifyRes = await authRoutes.request("/sms/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone, code: secondInbox.code }),
+    });
+    expect(secondVerifyRes.status).toBe(200);
+    const mfaRequired = (await secondVerifyRes.json()) as { mfa: { challengeId: string } };
+    await Bun.sleep(1100);
+    const completeRes = await authRoutes.request("/mfa/totp/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challengeId: mfaRequired.mfa.challengeId,
+        recoveryCode: verifyMfa.recoveryCodes[0],
+      }),
+    });
+    expect(completeRes.status).toBe(200);
+    const freshToken = ((await completeRes.json()) as { token: string }).token;
+    webhookDispatches.splice(2);
+
     const invalidUnenrollRes = await authRoutes.request("/mfa/totp/unenroll", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${auth.token}`,
+        Authorization: `Bearer ${freshToken!}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
@@ -150,14 +189,14 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     expect(webhookDispatches).toHaveLength(2);
 
     const originalNow = Date.now;
-    const unenrollTime = originalNow() + 120_000;
+    const unenrollTime = originalNow() + 360_000;
     const unenrollCode = await generateTotp(enrollment.secret, { time: unenrollTime });
     Date.now = () => unenrollTime;
     try {
       const unenrollRes = await authRoutes.request("/mfa/totp/unenroll", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${auth.token}`,
+          Authorization: `Bearer ${freshToken!}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ code: unenrollCode }),
@@ -239,7 +278,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       },
       body: JSON.stringify({ phone: "+14155550124" }),
     });
-    expect(blockedSmsEnroll.status).toBe(403);
+    expect(blockedSmsEnroll.status).toBe(401);
 
     const account = privateKeyToAccount(generatePrivateKey());
     await getDb()
@@ -251,7 +290,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     const siweSignature = await account.signMessage({ message: siweMessage });
     const siweRes = await authRoutes.request("/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({ message: siweMessage, signature: siweSignature }),
     });
     expect(siweRes.status).toBe(200);
@@ -266,25 +305,42 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     expect(siweMfaRequired.token).toBeUndefined();
     expect(siweMfaRequired.refreshToken).toBeUndefined();
 
+    await Bun.sleep(1100);
+    const siweCompleteRes = await authRoutes.request("/mfa/totp/complete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        challengeId: siweMfaRequired.mfa.challengeId,
+        recoveryCode: mfaVerify.recoveryCodes[1],
+      }),
+    });
+    expect(siweCompleteRes.status).toBe(200);
+    const siweCompletedToken = ((await siweCompleteRes.json()) as { token: string }).token;
+
     const recoveryStatusRes = await authRoutes.request("/mfa/recovery-codes/status", {
-      headers: { Authorization: `Bearer ${auth.token}` },
+      headers: { Authorization: `Bearer ${siweCompletedToken!}` },
     });
     expect(recoveryStatusRes.status).toBe(200);
     const recoveryStatus = (await recoveryStatusRes.json()) as {
       enabled: boolean;
       remaining: number;
     };
-    expect(recoveryStatus).toMatchObject({ enabled: true, remaining: 10 });
+    expect(recoveryStatus).toMatchObject({ enabled: true, remaining: 9 });
 
     const replayRes = await authRoutes.request("/mfa/totp/verify", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${auth.token}`,
+        Authorization: `Bearer ${siweCompletedToken!}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ code }),
     });
     expect(replayRes.status).toBe(401);
+
+    await getDb()
+      .update(users)
+      .set({ walletAddress: `phone:${hashSha256Hex(phone)}`, walletChain: "ethereum" })
+      .where(eq(users.id, auth.user.id));
 
     const secondSendRes = await authRoutes.request("/sms/send", {
       method: "POST",
@@ -343,9 +399,9 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     const recoveryStatusAfterUse = (await recoveryStatusAfterUseRes.json()) as {
       remaining: number;
     };
-    expect(recoveryStatusAfterUse.remaining).toBe(9);
+    expect(recoveryStatusAfterUse.remaining).toBe(8);
 
-    const regenerateTime = Date.now() + 60_000;
+    const regenerateTime = Date.now() + 120_000;
     const regenerateCode = await generateTotp(enrollment.secret, { time: regenerateTime });
     const originalNowForRegenerate = Date.now;
     Date.now = () => regenerateTime;
@@ -403,7 +459,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     expect(concurrentRecoveryResults.map((res) => res.status).sort()).toEqual([200, 401]);
 
     const originalNow = Date.now;
-    const unenrollTime = originalNow() + 120_000;
+    const unenrollTime = originalNow() + 180_000;
     const nextCode = await generateTotp(enrollment.secret, { time: unenrollTime });
     Date.now = () => unenrollTime;
     try {
@@ -463,6 +519,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     const enrollInboxRes = await authRoutes.request(`/test/sms-inbox/${encodeURIComponent(phone)}`);
     const enrollInbox = (await enrollInboxRes.json()) as { code: string };
     const invalidEnrollCode = enrollInbox.code === "000000" ? "000001" : "000000";
+    webhookDispatches.length = 0;
 
     const invalidVerifyMfaRes = await authRoutes.request("/mfa/sms/verify", {
       method: "POST",
@@ -591,6 +648,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       `/test/sms-inbox/${encodeURIComponent(phone)}`,
     );
     const validMfaInbox = (await validMfaInboxRes.json()) as { code: string };
+    await Bun.sleep(1100);
     const validCompleteRes = await authRoutes.request("/mfa/sms/complete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -617,6 +675,7 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       userId: auth.user.id,
       mfaMethod: "sms",
     });
+    webhookDispatches.splice(1);
 
     const replayRes = await authRoutes.request("/mfa/sms/complete", {
       method: "POST",
