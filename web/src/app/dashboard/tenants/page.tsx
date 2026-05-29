@@ -19,15 +19,6 @@ interface CreatedTenant {
   apiKey: string;
 }
 
-/**
- * FIXME (flag to Sol): the dashboard invokes `POST /user/me/tenants` to
- * create a tenant and `POST /user/me/tenants/switch` to switch, but neither
- * endpoint exists in `packages/api`. The actual create-tenant route lives at
- * `POST /platform/tenants` and there is no switch endpoint at all — switching
- * is a client-side concept today (localStorage only). Until the backend
- * catches up, keep these as direct `fetch` calls so the SDK only exposes
- * routes that actually exist.
- */
 async function createTenantViaApi(
   token: string,
   name: string,
