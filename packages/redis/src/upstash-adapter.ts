@@ -29,6 +29,13 @@ export interface IoredisLike {
   // Strings
   set(key: string, value: string): Promise<string | null>;
   set(key: string, value: string, mode: "PX", ttlMs: number): Promise<string | null>;
+  set(
+    key: string,
+    value: string,
+    mode: "PX",
+    ttlMs: number,
+    condition: "NX",
+  ): Promise<string | null>;
   get(key: string): Promise<string | null>;
   del(...keys: string[]): Promise<number>;
   setex(key: string, ttlSeconds: number, value: string): Promise<string>;
@@ -56,6 +63,9 @@ export interface IoredisLike {
     count: "COUNT",
     countValue: number,
   ): Promise<[string, string[]]>;
+
+  // Scripting
+  eval(script: string, numKeys: number, ...args: (string | number)[]): Promise<unknown>;
 
   // Pipeline / transaction
   multi(): IoredisPipelineLike;
@@ -157,9 +167,17 @@ class UpstashPipeline implements IoredisPipelineLike {
 export function createUpstashIoredisAdapter(upstash: UpstashRedis): IoredisLike {
   return {
     // Strings
-    async set(key: string, value: string, mode?: "PX", ttlMs?: number): Promise<string | null> {
+    async set(
+      key: string,
+      value: string,
+      mode?: "PX",
+      ttlMs?: number,
+      condition?: "NX",
+    ): Promise<string | null> {
       if (mode === "PX" && typeof ttlMs === "number") {
-        return upstash.set(key, value, { px: ttlMs });
+        return condition === "NX"
+          ? upstash.set(key, value, { px: ttlMs, nx: true })
+          : upstash.set(key, value, { px: ttlMs });
       }
       return upstash.set(key, value);
     },
@@ -263,6 +281,15 @@ export function createUpstashIoredisAdapter(upstash: UpstashRedis): IoredisLike 
     ): Promise<[string, string[]]> {
       const [next, keys] = await upstash.scan(cursor, { match: pattern, count: countValue });
       return [String(next), keys];
+    },
+
+    // Scripting — Upstash runs EVAL server-side, preserving the atomicity the
+    // rate-limiter/spend-tracker scripts rely on. ioredis takes positional
+    // (numKeys, ...keysThenArgs); Upstash takes (script, keys[], args[]).
+    async eval(script: string, numKeys: number, ...args: (string | number)[]): Promise<unknown> {
+      const keys = args.slice(0, numKeys).map(String);
+      const argv = args.slice(numKeys).map(String);
+      return upstash.eval(script, keys, argv);
     },
 
     // Pipeline / transaction

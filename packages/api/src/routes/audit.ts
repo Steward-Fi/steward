@@ -7,7 +7,7 @@
 
 import { proxyAuditLog } from "@stwd/db";
 import { and, count, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { verifyAuditChain } from "../services/audit";
 import {
   type ApiResponse,
@@ -15,23 +15,116 @@ import {
   agents,
   approvalQueue,
   db,
-  requireTenantLevel,
   transactions,
 } from "../services/context";
 
 export const auditRoutes = new Hono<{ Variables: AppVariables }>();
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const MAX_AUDIT_PAGE = 5_000;
+const MAX_AUDIT_OFFSET = 1_000_000;
+const MAX_AUDIT_VERIFY_RANGE = 10_000;
+const MAX_AUDIT_EXPORT_RANGE_MS = 31 * 24 * 60 * 60 * 1000;
+const AUDIT_READ_MFA_MAX_AGE_MS = 5 * 60_000;
 
-function parsePage(raw: string | undefined): number {
-  const n = parseInt(raw || "1", 10);
-  return Number.isFinite(n) && n > 0 ? n : 1;
+function hasRecentSessionMfa(
+  c: Context<{ Variables: AppVariables }>,
+  maxAgeMs = AUDIT_READ_MFA_MAX_AGE_MS,
+) {
+  const verifiedAt = c.get("sessionMfaVerifiedAt");
+  return (
+    typeof verifiedAt === "number" &&
+    Number.isFinite(verifiedAt) &&
+    Date.now() - verifiedAt <= maxAgeMs
+  );
 }
 
-function parseLimit(raw: string | undefined): number {
-  const n = parseInt(raw || "50", 10);
-  if (!Number.isFinite(n) || n < 1) return 50;
-  return Math.min(n, 200);
+auditRoutes.use("*", async (c, next) => {
+  const role = c.get("tenantRole");
+  if (c.get("authType") !== "session-jwt" || (role !== "owner" && role !== "admin")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Audit routes require owner or admin session" },
+      403,
+    );
+  }
+  if (!hasRecentSessionMfa(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Audit routes require recent MFA verification" },
+      403,
+    );
+  }
+  return next();
+});
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+type ParsedParam<T> = { ok: true; value: T } | { ok: false; error: string };
+
+function parsePositiveIntegerParam(
+  raw: string | undefined,
+  name: string,
+  defaultValue: number,
+  maxValue: number,
+): ParsedParam<number> {
+  if (raw === undefined || raw === "") return { ok: true, value: defaultValue };
+  if (!/^\d+$/.test(raw)) {
+    return { ok: false, error: `${name} must be a positive integer` };
+  }
+  const n = Number(raw);
+  if (!Number.isSafeInteger(n) || n < 1 || n > maxValue) {
+    return { ok: false, error: `${name} must be between 1 and ${maxValue}` };
+  }
+  return { ok: true, value: n };
+}
+
+function parseDateParam(raw: string | undefined, name: string): ParsedParam<Date | undefined> {
+  if (!raw) return { ok: true, value: undefined };
+  const date = new Date(raw);
+  if (!Number.isFinite(date.getTime())) {
+    return { ok: false, error: `${name} must be a valid date` };
+  }
+  return { ok: true, value: date };
+}
+
+function parsePagination(
+  rawPage: string | undefined,
+  rawLimit: string | undefined,
+): ParsedParam<{ page: number; limit: number; offset: number }> {
+  const page = parsePositiveIntegerParam(rawPage, "page", 1, MAX_AUDIT_PAGE);
+  if (!page.ok) return page;
+  const limit = parsePositiveIntegerParam(rawLimit, "limit", 50, 200);
+  if (!limit.ok) return limit;
+  const offset = (page.value - 1) * limit.value;
+  if (offset > MAX_AUDIT_OFFSET) {
+    return { ok: false, error: `offset must not exceed ${MAX_AUDIT_OFFSET}` };
+  }
+  return { ok: true, value: { page: page.value, limit: limit.value, offset } };
+}
+
+function parseAuditDateRange(
+  rawDateFrom: string | undefined,
+  rawDateTo: string | undefined,
+): ParsedParam<{ dateFrom: Date | undefined; dateTo: Date | undefined }> {
+  const dateFrom = parseDateParam(rawDateFrom, "dateFrom");
+  if (!dateFrom.ok) return dateFrom;
+  const dateTo = parseDateParam(rawDateTo, "dateTo");
+  if (!dateTo.ok) return dateTo;
+  if (dateFrom.value && dateTo.value && dateFrom.value > dateTo.value) {
+    return { ok: false, error: "dateFrom must be before dateTo" };
+  }
+  return { ok: true, value: { dateFrom: dateFrom.value, dateTo: dateTo.value } };
+}
+
+function validateAuditExportRange(
+  dateFrom: Date | undefined,
+  dateTo: Date | undefined,
+): string | null {
+  if (!dateFrom || !dateTo) {
+    return "audit export requires dateFrom and dateTo";
+  }
+  if (dateTo.getTime() - dateFrom.getTime() > MAX_AUDIT_EXPORT_RANGE_MS) {
+    return "audit export range must not exceed 31 days";
+  }
+  return null;
 }
 
 /** Resolve the set of agentIds belonging to the authenticated tenant. */
@@ -44,15 +137,16 @@ async function tenantAgentIds(tenantId: string): Promise<string[]> {
 
 auditRoutes.get("/log", async (c) => {
   const tenantId = c.get("tenantId");
-  const page = parsePage(c.req.query("page"));
-  const limit = parseLimit(c.req.query("limit"));
-  const offset = (page - 1) * limit;
+  const pagination = parsePagination(c.req.query("page"), c.req.query("limit"));
+  if (!pagination.ok) return c.json<ApiResponse>({ ok: false, error: pagination.error }, 400);
+  const { page, limit, offset } = pagination.value;
 
   const filterAgentId = c.req.query("agentId");
   const filterAction = c.req.query("action"); // sign, approve, reject, proxy
   const filterStatus = c.req.query("status");
-  const dateFrom = c.req.query("dateFrom");
-  const dateTo = c.req.query("dateTo");
+  const dateRange = parseAuditDateRange(c.req.query("dateFrom"), c.req.query("dateTo"));
+  if (!dateRange.ok) return c.json<ApiResponse>({ ok: false, error: dateRange.error }, 400);
+  const { dateFrom, dateTo } = dateRange.value;
 
   // Get all agent IDs for this tenant (for tenant isolation)
   const agentIds = await tenantAgentIds(tenantId);
@@ -101,6 +195,7 @@ auditRoutes.get("/log", async (c) => {
 
   const wantTx = !filterAction || ["sign", "approve", "reject"].includes(filterAction);
   const wantProxy = !filterAction || filterAction === "proxy";
+  const combinedFetchLimit = wantTx && wantProxy ? offset + limit : limit;
 
   // ── Transactions + approval_queue ────────────────────────────────────────
 
@@ -111,10 +206,10 @@ auditRoutes.get("/log", async (c) => {
       txConditions.push(eq(transactions.status, filterStatus as any));
     }
     if (dateFrom) {
-      txConditions.push(gte(transactions.createdAt, new Date(dateFrom)));
+      txConditions.push(gte(transactions.createdAt, dateFrom));
     }
     if (dateTo) {
-      txConditions.push(lte(transactions.createdAt, new Date(dateTo)));
+      txConditions.push(lte(transactions.createdAt, dateTo));
     }
 
     const txWhere = and(...txConditions);
@@ -144,7 +239,7 @@ auditRoutes.get("/log", async (c) => {
       .leftJoin(approvalQueue, eq(approvalQueue.txId, transactions.id))
       .where(txWhere)
       .orderBy(desc(transactions.createdAt))
-      .limit(wantProxy ? 1000 : limit) // over-fetch if merging with proxy
+      .limit(wantProxy ? combinedFetchLimit : limit)
       .offset(wantProxy ? 0 : offset);
 
     for (const row of txRows) {
@@ -192,10 +287,10 @@ auditRoutes.get("/log", async (c) => {
       proxyConditions.push(eq(proxyAuditLog.agentId, filterAgentId));
     }
     if (dateFrom) {
-      proxyConditions.push(gte(proxyAuditLog.createdAt, new Date(dateFrom)));
+      proxyConditions.push(gte(proxyAuditLog.createdAt, dateFrom));
     }
     if (dateTo) {
-      proxyConditions.push(lte(proxyAuditLog.createdAt, new Date(dateTo)));
+      proxyConditions.push(lte(proxyAuditLog.createdAt, dateTo));
     }
 
     const proxyWhere = and(...proxyConditions);
@@ -207,7 +302,7 @@ auditRoutes.get("/log", async (c) => {
       .from(proxyAuditLog)
       .where(proxyWhere)
       .orderBy(desc(proxyAuditLog.createdAt))
-      .limit(wantTx ? 1000 : limit)
+      .limit(wantTx ? combinedFetchLimit : limit)
       .offset(wantTx ? 0 : offset);
 
     for (const row of proxyRows) {
@@ -274,6 +369,12 @@ auditRoutes.get("/summary", async (c) => {
       since = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
       break;
     case "all":
+      if (process.env.STEWARD_ALLOW_UNBOUNDED_AUDIT_SUMMARY !== "true") {
+        return c.json<ApiResponse>(
+          { ok: false, error: "range=all requires STEWARD_ALLOW_UNBOUNDED_AUDIT_SUMMARY=true" },
+          400,
+        );
+      }
       since = null;
       break;
     default:
@@ -391,8 +492,11 @@ auditRoutes.get("/export", async (c) => {
   const filterAgentId = c.req.query("agentId");
   const filterAction = c.req.query("action");
   const filterStatus = c.req.query("status");
-  const dateFrom = c.req.query("dateFrom");
-  const dateTo = c.req.query("dateTo");
+  const dateRange = parseAuditDateRange(c.req.query("dateFrom"), c.req.query("dateTo"));
+  if (!dateRange.ok) return c.json<ApiResponse>({ ok: false, error: dateRange.error }, 400);
+  const { dateFrom, dateTo } = dateRange.value;
+  const exportRangeError = validateAuditExportRange(dateFrom, dateTo);
+  if (exportRangeError) return c.json<ApiResponse>({ ok: false, error: exportRangeError }, 400);
 
   const agentIds = await tenantAgentIds(tenantId);
 
@@ -417,19 +521,33 @@ auditRoutes.get("/export", async (c) => {
   if (wantTx && relevantAgentIds.length > 0) {
     const txConditions = [inArray(transactions.agentId, relevantAgentIds)];
     if (filterStatus) txConditions.push(eq(transactions.status, filterStatus as any));
-    if (dateFrom) txConditions.push(gte(transactions.createdAt, new Date(dateFrom)));
-    if (dateTo) txConditions.push(lte(transactions.createdAt, new Date(dateTo)));
+    if (dateFrom) txConditions.push(gte(transactions.createdAt, dateFrom));
+    if (dateTo) txConditions.push(lte(transactions.createdAt, dateTo));
 
     const txRows = await db
-      .select()
+      .select({
+        id: transactions.id,
+        agentId: transactions.agentId,
+        status: transactions.status,
+        toAddress: transactions.toAddress,
+        value: transactions.value,
+        chainId: transactions.chainId,
+        txHash: transactions.txHash,
+        createdAt: transactions.createdAt,
+        aqStatus: approvalQueue.status,
+        aqResolvedAt: approvalQueue.resolvedAt,
+        aqResolvedBy: approvalQueue.resolvedBy,
+      })
       .from(transactions)
+      .leftJoin(approvalQueue, eq(approvalQueue.txId, transactions.id))
       .where(and(...txConditions))
       .orderBy(desc(transactions.createdAt))
       .limit(10000);
 
     for (const row of txRows) {
       let action = "sign";
-      if (row.status === "rejected") action = "reject";
+      if (row.aqStatus === "approved") action = "approve";
+      else if (row.aqStatus === "rejected" || row.status === "rejected") action = "reject";
       if (filterAction && action !== filterAction) continue;
 
       rows.push(
@@ -441,7 +559,15 @@ auditRoutes.get("/export", async (c) => {
           row.status,
           row.toAddress,
           row.value,
-          `chainId=${row.chainId}${row.txHash ? ` txHash=${row.txHash}` : ""}`,
+          [
+            `chainId=${row.chainId}`,
+            row.txHash ? `txHash=${row.txHash}` : "",
+            row.aqStatus ? `approvalStatus=${row.aqStatus}` : "",
+            row.aqResolvedBy ? `resolvedBy=${row.aqResolvedBy}` : "",
+            row.aqResolvedAt ? `resolvedAt=${(row.aqResolvedAt as Date).toISOString()}` : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
         ]),
       );
     }
@@ -450,8 +576,8 @@ auditRoutes.get("/export", async (c) => {
   if (wantProxy) {
     const proxyConditions: ReturnType<typeof eq>[] = [eq(proxyAuditLog.tenantId, tenantId)];
     if (filterAgentId) proxyConditions.push(eq(proxyAuditLog.agentId, filterAgentId));
-    if (dateFrom) proxyConditions.push(gte(proxyAuditLog.createdAt, new Date(dateFrom)));
-    if (dateTo) proxyConditions.push(lte(proxyAuditLog.createdAt, new Date(dateTo)));
+    if (dateFrom) proxyConditions.push(gte(proxyAuditLog.createdAt, dateFrom));
+    if (dateTo) proxyConditions.push(lte(proxyAuditLog.createdAt, dateTo));
 
     const proxyRows = await db
       .select()
@@ -488,9 +614,9 @@ auditRoutes.get("/export", async (c) => {
 // platform-level access should query directly.
 auditRoutes.get("/events", async (c) => {
   const tenantId = c.get("tenantId");
-  const page = parsePage(c.req.query("page"));
-  const limit = parseLimit(c.req.query("limit"));
-  const offset = (page - 1) * limit;
+  const pagination = parsePagination(c.req.query("page"), c.req.query("limit"));
+  if (!pagination.ok) return c.json<ApiResponse>({ ok: false, error: pagination.error }, 400);
+  const { page, limit, offset } = pagination.value;
   const action = c.req.query("action");
 
   const rows = (await db.execute(
@@ -537,26 +663,60 @@ auditRoutes.get("/events", async (c) => {
 // (b) somebody with DB write access has tampered with historical rows.
 // Tenant-level auth required — agent tokens cannot verify.
 auditRoutes.post("/verify", async (c) => {
-  if (!requireTenantLevel(c)) {
+  const tenantId = c.get("tenantId");
+  const parsedFromSeq = parsePositiveIntegerParam(
+    c.req.query("fromSeq"),
+    "fromSeq",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!parsedFromSeq.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedFromSeq.error }, 400);
+  }
+  const fromSeq = parsedFromSeq.value;
+  const toSeqRaw = c.req.query("toSeq");
+  const parsedToSeq = toSeqRaw
+    ? parsePositiveIntegerParam(toSeqRaw, "toSeq", fromSeq, Number.MAX_SAFE_INTEGER)
+    : ({ ok: true, value: undefined } as const);
+  if (!parsedToSeq.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedToSeq.error }, 400);
+  }
+  const requestedToSeq = parsedToSeq.value;
+  const toSeq = requestedToSeq ?? fromSeq + MAX_AUDIT_VERIFY_RANGE - 1;
+  if (toSeq !== undefined && toSeq < fromSeq) {
+    return c.json<ApiResponse>({ ok: false, error: "toSeq must be greater than fromSeq" }, 400);
+  }
+  if (toSeq - fromSeq + 1 > MAX_AUDIT_VERIFY_RANGE) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Audit verification requires tenant-level authentication" },
-      403,
+      { ok: false, error: `audit verify range must not exceed ${MAX_AUDIT_VERIFY_RANGE}` },
+      400,
     );
   }
-  const tenantId = c.get("tenantId");
-  const fromSeqRaw = c.req.query("fromSeq");
-  const toSeqRaw = c.req.query("toSeq");
-  const fromSeq = fromSeqRaw ? Math.max(1, parseInt(fromSeqRaw, 10)) : 1;
-  const toSeq = toSeqRaw ? parseInt(toSeqRaw, 10) : undefined;
 
   const result = await verifyAuditChain(tenantId, { fromSeq, toSeq });
-  return c.json<ApiResponse>({ ok: true, data: result });
+  const verifiedToSeq = result.valid
+    ? fromSeq + result.count - 1
+    : Math.max(fromSeq - 1, result.brokenAt - 1);
+  return c.json<ApiResponse>({
+    ok: true,
+    data: {
+      ...result,
+      anchored: fromSeq === 1,
+      verifiedFromSeq: fromSeq,
+      verifiedToSeq,
+      warning:
+        fromSeq === 1
+          ? undefined
+          : "Partial verification is anchored to the stored predecessor hash and is not proof that earlier audit rows are intact.",
+    },
+  });
 });
 
 function csvRow(fields: string[]): string {
   return fields
     .map((f) => {
-      const s = String(f ?? "");
+      const raw = String(f ?? "");
+      const s = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
       if (s.includes(",") || s.includes('"') || s.includes("\n")) {
         return `"${s.replace(/"/g, '""')}"`;
       }

@@ -22,15 +22,29 @@ export interface RegistrationResult {
   chainId: number;
   registryAddress: string;
   agentCardUri: string;
+  /**
+   * True only when the registration was confirmed against a real, configured
+   * on-chain registry. Callers MUST NOT treat the result as authoritative when
+   * this is false.
+   */
+  verified: boolean;
 }
 
-/** Aggregated reputation for a registered agent. */
+/**
+ * Aggregated reputation for a registered agent.
+ *
+ * `verified` is true only when the score was read from a real, configured
+ * on-chain reputation registry. When false, the numeric `score*` fields are
+ * absent (undefined) — they must never be presented as authoritative on-chain
+ * data and must not be displayed as a real "score of 0".
+ */
 export interface ReputationScore {
   agentId: string;
-  scoreOnchain: number;
-  scoreInternal: number;
-  scoreCombined: number;
-  feedbackCount: number;
+  verified: boolean;
+  scoreOnchain?: number;
+  scoreInternal?: number;
+  scoreCombined?: number;
+  feedbackCount?: number;
   lastUpdated: string;
 }
 

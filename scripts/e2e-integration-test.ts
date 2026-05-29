@@ -22,6 +22,7 @@ import path from "node:path";
 
 const STEWARD_URL = process.env.STEWARD_URL || "http://88.99.66.168:3200";
 const PROXY_URL = process.env.PROXY_URL || STEWARD_URL.replace(":3200", ":8080");
+const SKIP_PROXY_E2E = process.env.SKIP_PROXY_E2E === "1" || process.env.SKIP_PROXY_E2E === "true";
 const TEST_PREFIX = `e2e-${Date.now()}`;
 const TENANT_ID = `${TEST_PREFIX}-tenant`;
 const TENANT_KEY = `${TEST_PREFIX}-key-${crypto.randomUUID().slice(0, 8)}`;
@@ -72,6 +73,13 @@ function resolveStoredPlatformKey(): string {
     return "";
   }
 }
+
+const PLATFORM_KEY = firstNonEmpty(
+  process.env.PLATFORM_KEY,
+  process.env.STEWARD_PLATFORM_KEY,
+  firstPlatformKeyFromList(process.env.STEWARD_PLATFORM_KEYS),
+  resolveStoredPlatformKey(),
+);
 
 // ─── Test harness ────────────────────────────────────────────────────────────
 
@@ -159,11 +167,22 @@ async function testCloudProvisioning() {
 
   // 1b. Create test tenant
   try {
-    const { status, data } = await api("POST", "/tenants", {
-      id: TENANT_ID,
-      name: "E2E Integration Test",
-      apiKeyHash: TENANT_KEY,
-    });
+    if (!PLATFORM_KEY) {
+      fail("Create test tenant", "STEWARD_PLATFORM_KEY or PLATFORM_KEY is required");
+      return false;
+    }
+    const { status, data } = await api(
+      "POST",
+      "/tenants",
+      {
+        id: TENANT_ID,
+        name: "E2E Integration Test",
+        apiKeyHash: TENANT_KEY,
+      },
+      {
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+    );
     if (status === 200 && data.ok) {
       pass("Create test tenant");
     } else {
@@ -509,6 +528,7 @@ async function testSecretManagement() {
       "/secrets/routes",
       {
         secretId,
+        agentId: AGENT_ID,
         hostPattern: "api.openai.com",
         pathPattern: "/*",
         method: "*",
@@ -592,6 +612,7 @@ async function testSecretManagement() {
         "/secrets/routes",
         {
           secretId,
+          agentId: AGENT_ID,
           hostPattern: "api.openai.com",
           pathPattern: "/*",
           method: "*",
@@ -621,6 +642,13 @@ async function testProxyOperations() {
   console.log("\n╔══════════════════════════════════════════════╗");
   console.log("║  4. Proxy Operations                         ║");
   console.log("╚══════════════════════════════════════════════╝\n");
+
+  if (SKIP_PROXY_E2E) {
+    skip("Proxy health check", "SKIP_PROXY_E2E set");
+    skip("Proxy request through gateway", "SKIP_PROXY_E2E set");
+    skip("Proxy audit log verification", "SKIP_PROXY_E2E set");
+    return;
+  }
 
   // 4a. Proxy health check
   try {
@@ -854,16 +882,10 @@ async function testCleanup() {
   }
 
   // 6e. Delete test tenant (via platform API if available, otherwise note it)
-  const platformKey = firstNonEmpty(
-    process.env.PLATFORM_KEY,
-    process.env.STEWARD_PLATFORM_KEY,
-    firstPlatformKeyFromList(process.env.STEWARD_PLATFORM_KEYS),
-    resolveStoredPlatformKey(),
-  );
-  if (platformKey) {
+  if (PLATFORM_KEY) {
     try {
       const { status, data } = await api("DELETE", `/platform/tenants/${TENANT_ID}`, undefined, {
-        "X-Steward-Platform-Key": platformKey,
+        "X-Steward-Platform-Key": PLATFORM_KEY,
       });
       if (status === 200 && data.ok) {
         pass("Delete test tenant (via platform API)");

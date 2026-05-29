@@ -1,4 +1,4 @@
-import type { StewardAuthResult } from "@stwd/sdk";
+import type { StewardAuthResult, StewardMfaRequiredResult } from "@stwd/sdk";
 import React, { useEffect, useMemo, useState } from "react";
 
 export type WalletChains = "evm" | "solana" | "both";
@@ -24,7 +24,10 @@ export interface WalletLoginProps {
   /** Which chain family(ies) to render. Defaults to "both". */
   chains?: WalletChains;
   /** Fires after a successful SIWE / SIWS exchange. */
-  onSuccess?: (result: StewardAuthResult, kind: "evm" | "solana") => void;
+  onSuccess?: (
+    result: StewardAuthResult | StewardMfaRequiredResult,
+    kind: "evm" | "solana",
+  ) => void;
   /** Fires on any wallet, signing, or server error. */
   onError?: (error: Error, kind: "evm" | "solana") => void;
   /** Extra className appended to the root element. */
@@ -87,7 +90,7 @@ function useDynamicPanel(
  * @example
  * <WalletLogin
  *   chains="both"
- *   onSuccess={(res, kind) => console.log("signed in via", kind, res.token)}
+ *   onSuccess={(res, kind) => console.log("signed in via", kind)}
  * />
  */
 export function WalletLogin({

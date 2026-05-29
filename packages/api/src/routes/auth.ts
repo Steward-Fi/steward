@@ -43,59 +43,140 @@
 // If any of these fail at runtime on Workers, fall back to tweetnacl for
 // ed25519 verify (lightweight, edge-compatible).
 import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
-import type { AuthenticatorTransportFuture } from "@stwd/auth";
+import { lookup as dnsLookup } from "node:dns";
+import { request as httpsRequest } from "node:https";
+import { isIP } from "node:net";
 import {
+  ACCESS_TOKEN_EXPIRY,
+  ACCESS_TOKEN_EXPIRY_SECONDS,
   assertTokenNotRevoked,
   buildBackend,
+  buildOtpauthUri,
   ChallengeStore,
   EmailAuth,
+  evaluateSiwePolicy,
+  type FarcasterLoginPayload,
   generateApiKey,
+  generateRecoveryCodes,
+  generateTotpSecret,
+  getEnabledProviders,
+  getIdentityJwtIssuer,
   getProviderConfig,
   hashSha256Hex,
+  InMemoryRecoveryCodeStore,
   isBuiltInProvider,
+  isDevSecretAllowed,
+  isValidE164,
   MockEmailInbox,
   MockEmailProvider,
+  MockSmsInbox,
+  MockSmsProvider,
   OAuthClient,
   PasskeyAuth,
+  PhoneAuth,
+  type RecoveryCodeStore,
   ResendProvider,
   revocationStore,
+  type SmsProvider,
+  type StoreBackend,
+  type StoredRecoveryCode,
   signAccessToken,
+  signIdentityJwtPayload,
+  type TelegramLoginPayload,
   TokenStore,
+  TwilioSmsProvider,
   uint8ArrayToBase64url,
+  unusedRecoveryCodeCount,
+  verifyFarcasterLogin,
+  verifyOidcJwt,
+  verifyRecoveryCode,
+  verifyTelegramLogin,
   verifyToken,
+  verifyTotp,
 } from "@stwd/auth";
 import {
   accounts,
   authenticators,
   getDb,
   refreshTokens,
+  tenantAppClients,
   type TenantEmailConfig,
   tenantConfigs,
+  tenantSamlSsoConfigs,
+  tenantSsoDomains,
   tenants,
   users,
   userTenants,
 } from "@stwd/db";
-import type { ApiResponse } from "@stwd/shared";
+import type {
+  ApiResponse,
+  SsoDiscoveryResult,
+  TenantOidcProviderConfig,
+  TenantSamlSsoConfig,
+  TenantTestAccountConfig,
+} from "@stwd/shared";
+import type { TenantAuthAbuseConfig } from "@stwd/shared";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
-import { and, eq, gte, lt } from "drizzle-orm";
+import { and, eq, gte, lt, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { generateNonce, SiweMessage } from "siwe";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
-import { trackAuditEvent } from "../services/audit";
+import { writeAuditEvent } from "../services/audit";
+import { lockUserSession } from "../services/session-lock";
+import {
+  publicAuthAbuseConfig,
+  validateEmailAbusePolicy,
+  validatePhoneAbusePolicy,
+  validateWalletAbusePolicy,
+  verifyCaptchaToken,
+} from "../services/auth-abuse";
 import { verifyEip1271 } from "../services/eip1271";
+import { buildSamlServiceProviderUrls } from "../services/saml-sso-config";
+import { testAccountOtpMatches } from "../services/test-account-credentials";
+import { dispatchWebhook } from "../services/webhook-dispatch";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
 
+function isValidTenantId(value: unknown): value is string {
+  return typeof value === "string" && /^[a-zA-Z0-9_\-.:]{1,64}$/.test(value);
+}
+
+function isReservedTenantId(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    normalized === "personal" ||
+    normalized.startsWith("personal-") ||
+    normalized.startsWith("eth:") ||
+    normalized.startsWith("t-") ||
+    normalized.startsWith("solana:")
+  );
+}
+
+function normalizeEmailDomain(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const email = value.trim().toLowerCase();
+  const at = email.lastIndexOf("@");
+  if (at <= 0 || at >= email.length - 1) return null;
+  const domain = email.slice(at + 1);
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(domain)) {
+    return null;
+  }
+  return domain;
+}
+
 // ─── IP-based auth rate limiting ─────────────────────────────────────────────
 
 /**
- * Check a per-IP rate limit for auth endpoints, backed by the Redis sliding
- * window. When Redis is unavailable the request is allowed — the existing
- * Bun-side global rate limiter (in index.ts) and the upstream platform
- * (Cloudflare, ALB, etc.) are still in front of this. We deliberately do not
+ * Check a client rate limit for auth endpoints, backed by the Redis sliding
+ * window. In production, Redis must be available for endpoint-specific auth
+ * throttles unless STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL=true is explicitly
+ * configured. Forwarded IP headers
+ * are used only when STEWARD_TRUST_PROXY_HEADERS=true; otherwise a single
+ * global bucket is safer than letting clients pick arbitrary rate-limit keys.
+ * We deliberately do not
  * keep an in-memory fallback Map: it is incorrect across multiple instances
  * and impossible on Cloudflare Workers (no shared state across isolates).
  *
@@ -104,19 +185,39 @@ const _DEFAULT_TENANT_ID = process.env.STEWARD_DEFAULT_TENANT_ID || "default";
  * @param windowMs - Window length in milliseconds
  * @param max      - Maximum allowed requests in the window
  */
+function authRateLimitSubject(c: Context): string {
+  if (process.env.STEWARD_TRUST_PROXY_HEADERS !== "true") return "global";
+  return (
+    c.req.header("cf-connecting-ip")?.trim() ||
+    c.req.header("x-real-ip")?.trim() ||
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    "global"
+  );
+}
+
+function allowAuthRateLimitSoftFail(): boolean {
+  return (
+    process.env.NODE_ENV !== "production" ||
+    process.env.STEWARD_ALLOW_AUTH_RATE_LIMIT_SOFT_FAIL === "true"
+  );
+}
+
 async function checkAuthRateLimit(
   c: Context,
   endpoint: string,
   windowMs: number,
   max: number,
+  subjectOverride?: string,
 ): Promise<{ allowed: boolean; retryAfterSecs?: number }> {
-  const ip =
-    c.req.header("x-forwarded-for")?.split(",")[0].trim() ?? c.req.header("x-real-ip") ?? "unknown";
-  const key = `ratelimit:auth:${endpoint}:${ip}:${windowMs}`;
+  const subject = subjectOverride ?? authRateLimitSubject(c);
+  const key = `ratelimit:auth:${endpoint}:${subject}:${windowMs}`;
 
   try {
     const redisMw = await import("../middleware/redis.js");
-    if (!redisMw.isRedisAvailable()) return { allowed: true };
+    if (!redisMw.isRedisAvailable()) {
+      if (allowAuthRateLimitSoftFail()) return { allowed: true };
+      return { allowed: false, retryAfterSecs: 60 };
+    }
 
     const { checkRateLimit } = await import("@stwd/redis");
     const result = await checkRateLimit(key, windowMs, max);
@@ -128,17 +229,228 @@ async function checkAuthRateLimit(
     }
     return { allowed: true };
   } catch {
-    // Treat Redis errors as soft-fail (allow the request) so a transient
-    // Redis outage doesn't lock users out of authentication.
-    return { allowed: true };
+    if (allowAuthRateLimitSoftFail()) return { allowed: true };
+    return { allowed: false, retryAfterSecs: 60 };
   }
 }
 
-// ─── JWT helpers ──────────────────────────────────────────────────────────────
+const SMS_VERIFY_MAX_FAILED_ATTEMPTS = 5;
+const SMS_VERIFY_FAILED_ATTEMPT_TTL_MS = 10 * 60 * 1000;
+const TOTP_VERIFY_MAX_FAILED_ATTEMPTS = 5;
+const TOTP_VERIFY_FAILED_ATTEMPT_TTL_MS = 10 * 60 * 1000;
+const FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS = 5 * 60 * 1000;
 
-/** Access token lifetime: 24 hours */
-const ACCESS_TOKEN_EXPIRY = "24h";
-const ACCESS_TOKEN_EXPIRY_SECONDS = 86400;
+function smsVerifyAttemptKey(phone: string, purpose: string): string {
+  return `sms-verify-attempts:${hashSha256Hex(`${purpose}:${phone}`)}`;
+}
+
+async function getSmsVerifyFailedAttempts(phone: string, purpose: string): Promise<number> {
+  const raw = await getMfaBackend().get(smsVerifyAttemptKey(phone, purpose));
+  if (!raw) return 0;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+async function recordSmsVerifyFailure(phone: string, purpose: string): Promise<void> {
+  const next = (await getSmsVerifyFailedAttempts(phone, purpose)) + 1;
+  await getMfaBackend().set(
+    smsVerifyAttemptKey(phone, purpose),
+    String(next),
+    SMS_VERIFY_FAILED_ATTEMPT_TTL_MS,
+  );
+}
+
+async function clearSmsVerifyFailures(phone: string, purpose: string): Promise<void> {
+  await getMfaBackend().delete(smsVerifyAttemptKey(phone, purpose));
+}
+
+function totpVerifyAttemptKey(scope: string): string {
+  return `totp-verify-attempts:${hashSha256Hex(scope)}`;
+}
+
+async function getTotpVerifyFailedAttempts(scope: string): Promise<number> {
+  const raw = await getMfaBackend().get(totpVerifyAttemptKey(scope));
+  if (!raw) return 0;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+
+async function recordTotpVerifyFailure(scope: string): Promise<number> {
+  const next = (await getTotpVerifyFailedAttempts(scope)) + 1;
+  await getMfaBackend().set(
+    totpVerifyAttemptKey(scope),
+    String(next),
+    TOTP_VERIFY_FAILED_ATTEMPT_TTL_MS,
+  );
+  return next;
+}
+
+async function clearTotpVerifyFailures(scope: string): Promise<void> {
+  await getMfaBackend().delete(totpVerifyAttemptKey(scope));
+}
+
+async function getTenantAuthAbuseConfig(tenantId: string) {
+  const [row] = await getDb()
+    .select({ authAbuseConfig: tenantConfigs.authAbuseConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+  return row?.authAbuseConfig ?? {};
+}
+
+async function getTenantAppClientLoginMethods(
+  tenantId: string,
+  clientId: string | undefined,
+): Promise<TenantAuthAbuseConfig["loginMethods"] | undefined> {
+  const normalizedClientId = normalizePublicClientId(clientId);
+  if (!normalizedClientId) return undefined;
+  const [row] = await getDb()
+    .select({ loginMethods: tenantAppClients.loginMethods })
+    .from(tenantAppClients)
+    .where(
+      and(
+        eq(tenantAppClients.tenantId, tenantId),
+        eq(tenantAppClients.id, normalizedClientId),
+        eq(tenantAppClients.enabled, true),
+      ),
+    );
+  return (row?.loginMethods as TenantAuthAbuseConfig["loginMethods"] | undefined) ?? undefined;
+}
+
+type LoginMethodName =
+  | "passkey"
+  | "email"
+  | "sms"
+  | "whatsapp"
+  | "totp"
+  | "siwe"
+  | "siws"
+  | "telegram"
+  | "farcaster"
+  | "oauth"
+  | "oidc";
+
+function loginMethodProviderKey(providerId: string | undefined): string {
+  return providerId?.trim().toLowerCase() ?? "";
+}
+
+async function requireTenantLoginMethodAllowed(
+  c: Context,
+  tenantId: string | undefined,
+  method: LoginMethodName,
+  providerId?: string,
+  clientId?: string,
+): Promise<Response | null> {
+  if (!tenantId) return null;
+  const loginMethods =
+    (await getTenantAppClientLoginMethods(tenantId, clientId)) ??
+    (await getTenantAuthAbuseConfig(tenantId)).loginMethods;
+  if (!loginMethods) return null;
+  if (method !== "oauth" && method !== "oidc" && loginMethods[method] === false) {
+    return c.json<ApiResponse>(
+      { ok: false, error: `${method} login is disabled for this tenant` },
+      403,
+    );
+  }
+  const normalizedProviderId = loginMethodProviderKey(providerId);
+  if (method === "oauth" && loginMethods.oauth?.[normalizedProviderId] === false) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "OAuth login is disabled for this tenant" },
+      403,
+    );
+  }
+  if (method === "oidc" && loginMethods.oidc?.[normalizedProviderId] === false) {
+    return c.json<ApiResponse>({ ok: false, error: "OIDC login is disabled for this tenant" }, 403);
+  }
+  return null;
+}
+
+async function isSsoRequiredForEmailDomain(tenantId: string, email: string): Promise<boolean> {
+  const domain = normalizeEmailDomain(email);
+  if (!domain) return false;
+  const [row] = await getDb()
+    .select({ ssoRequired: tenantSsoDomains.ssoRequired })
+    .from(tenantSsoDomains)
+    .where(
+      and(
+        eq(tenantSsoDomains.tenantId, tenantId),
+        eq(tenantSsoDomains.domain, domain),
+        eq(tenantSsoDomains.status, "verified"),
+      ),
+    )
+    .limit(1);
+  return row?.ssoRequired === true;
+}
+
+async function requireNonSsoEmailLoginAllowed(
+  c: Context,
+  tenantId: string,
+  email: string,
+  methodLabel: string,
+): Promise<Response | null> {
+  if (!(await isSsoRequiredForEmailDomain(tenantId, email))) return null;
+  return c.json<ApiResponse>(
+    { ok: false, error: `${methodLabel} login is disabled because this email domain requires SSO` },
+    403,
+  );
+}
+
+async function isVerifiedSsoEmailDomainForTenant(tenantId: string, email: string): Promise<boolean> {
+  const domain = normalizeEmailDomain(email);
+  if (!domain) return false;
+  const [row] = await getDb()
+    .select({ tenantId: tenantSsoDomains.tenantId })
+    .from(tenantSsoDomains)
+    .where(
+      and(
+        eq(tenantSsoDomains.tenantId, tenantId),
+        eq(tenantSsoDomains.domain, domain),
+        eq(tenantSsoDomains.status, "verified"),
+      ),
+    )
+    .limit(1);
+  return Boolean(row);
+}
+
+async function tenantExists(tenantId: string): Promise<boolean> {
+  const [row] = await getDb()
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  return Boolean(row);
+}
+
+async function validateExplicitAuthTenantHint(
+  tenantId: string,
+  explicitHint: boolean,
+): Promise<string | null> {
+  if (!explicitHint) return null;
+  if (!(await tenantExists(tenantId))) return `Tenant '${tenantId}' not found`;
+  return null;
+}
+
+function trustedRemoteIp(c: Context): string | undefined {
+  if (process.env.STEWARD_TRUST_PROXY_HEADERS !== "true") return undefined;
+  return (
+    c.req.header("cf-connecting-ip")?.trim() ||
+    c.req.header("x-real-ip")?.trim() ||
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    undefined
+  );
+}
+
+function authTenantHint(c: Context, bodyTenantId?: string): string {
+  return c.req.header("X-Steward-Tenant")?.trim() || bodyTenantId?.trim() || _DEFAULT_TENANT_ID;
+}
+
+function smsLoginPurpose(tenantId: string): string {
+  return `login:${tenantId}`;
+}
+
+function whatsappLoginPurpose(tenantId: string): string {
+  return `whatsapp-login:${tenantId}`;
+}
+
+// ─── JWT helpers ──────────────────────────────────────────────────────────────
 
 /** Refresh token lifetime: 30 days */
 const REFRESH_TOKEN_EXPIRY_DAYS = 30;
@@ -147,8 +459,89 @@ export async function createSessionToken(
   address: string,
   tenantId: string,
   extra?: Record<string, unknown>,
+  expiresIn: string = ACCESS_TOKEN_EXPIRY,
 ): Promise<string> {
-  return signAccessToken({ address, tenantId, ...extra }, ACCESS_TOKEN_EXPIRY);
+  return signAccessToken({ address, tenantId, ...extra }, expiresIn);
+}
+
+async function isActiveTenantMember(userId: string, tenantId: string): Promise<boolean> {
+  const [row] = await getDb()
+    .select({ userId: users.id })
+    .from(users)
+    .innerJoin(
+      userTenants,
+      and(eq(userTenants.userId, users.id), eq(userTenants.tenantId, tenantId)),
+    )
+    .where(and(eq(users.id, userId), sql`${users.deactivatedAt} is null`));
+  return Boolean(row);
+}
+
+async function buildIdentityClaims(
+  userId: string,
+  tenantId: string,
+): Promise<{
+  sub: string;
+  userId: string;
+  tenantId: string;
+  email: string | null;
+  emailVerified: boolean | null;
+  name: string | null;
+  image: string | null;
+  walletAddress: string | null;
+  walletChain: string | null;
+  customMetadata: Record<string, unknown>;
+}> {
+  const db = getDb();
+  const [user] = await db.select().from(users).where(eq(users.id, userId));
+  if (!user) throw new Error("User not found");
+
+  const [tenantMembership] = await db
+    .select({ customMetadata: userTenants.customMetadata })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+  if (!tenantMembership) {
+    throw new Error("Not a member of this tenant");
+  }
+
+  return {
+    sub: user.id,
+    userId: user.id,
+    tenantId,
+    email: user.email,
+    emailVerified: user.emailVerified,
+    name: user.name,
+    image: user.image,
+    walletAddress: user.walletAddress,
+    walletChain: user.walletChain,
+    customMetadata: tenantMembership.customMetadata ?? {},
+  };
+}
+
+function tenantIdentityJwtIssuer(tenantId: string): string {
+  return `${getIdentityJwtIssuer()}/tenants/${encodeURIComponent(tenantId)}`;
+}
+
+async function createIdentityToken(
+  claims: Awaited<ReturnType<typeof buildIdentityClaims>>,
+): Promise<string> {
+  return signIdentityJwtPayload(
+    {
+      typ: "identity",
+      sub: claims.sub,
+      address: claims.walletAddress ?? "",
+      userId: claims.userId,
+      tenantId: claims.tenantId,
+      email: claims.email ?? undefined,
+      emailVerified: claims.emailVerified ?? undefined,
+      name: claims.name ?? undefined,
+      image: claims.image ?? undefined,
+      walletAddress: claims.walletAddress ?? undefined,
+      walletChain: claims.walletChain ?? undefined,
+      customMetadata: claims.customMetadata,
+    },
+    ACCESS_TOKEN_EXPIRY,
+    tenantIdentityJwtIssuer(claims.tenantId),
+  );
 }
 
 // ─── Refresh token helpers ────────────────────────────────────────────────────
@@ -161,39 +554,182 @@ function hashToken(raw: string): string {
  * Generate a random refresh token, persist its hash in DB, return the raw value.
  * The raw token is sent to the client; only the hash is stored server-side.
  */
-async function createRefreshToken(userId: string, tenantId: string): Promise<string> {
+async function createRefreshToken(
+  userId: string,
+  tenantId: string,
+  sessionClaims?: Record<string, unknown>,
+): Promise<string> {
   const db = getDb();
   const raw = randomBytes(40).toString("hex");
   const id = randomBytes(16).toString("hex");
+  const tokenHash = hashToken(raw);
   const expiresAt = new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000);
-  await db
-    .insert(refreshTokens)
-    .values({ id, userId, tenantId, tokenHash: hashToken(raw), expiresAt });
+  await db.insert(refreshTokens).values({ id, userId, tenantId, tokenHash, expiresAt });
+  if (sessionClaims && Object.keys(sessionClaims).length > 0) {
+    await writeMfaJson(
+      `refresh:claims:${tokenHash}`,
+      sessionClaims,
+      REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+    );
+  }
   return raw;
 }
 
-/**
- * Atomically consume a raw refresh token.
- * Deletes and returns the row in one statement so concurrent refresh attempts
- * cannot both validate the same one-time token and mint parallel successors.
- */
-async function consumeRefreshToken(raw: string): Promise<typeof refreshTokens.$inferSelect | null> {
+type RefreshRotationResult =
+  | {
+      status: "valid";
+      record: typeof refreshTokens.$inferSelect;
+      newAccessToken: string;
+      newRefreshToken: string;
+    }
+  | { status: "reused"; userId: string; tenantId: string }
+  | { status: "invalid" }
+  | { status: "deactivated"; userId: string; tenantId: string }
+  | { status: "not_member"; userId: string; tenantId: string }
+  | { status: "revoked"; userId: string; tenantId: string };
+
+function refreshTokenIssuedAtSeconds(record: typeof refreshTokens.$inferSelect): number {
+  return Math.floor(new Date(record.createdAt).getTime() / 1000);
+}
+
+async function revokeUserRefreshSessions(userId: string) {
+  return getDb().transaction(async (tx) => {
+    await lockUserSession(tx, userId);
+    const revoked = await tx
+      .delete(refreshTokens)
+      .where(eq(refreshTokens.userId, userId))
+      .returning();
+    const issuedBefore = await revocationStore.revokeUserTokens(userId);
+    return { revoked, issuedBefore };
+  });
+}
+
+async function rotateRefreshTokenForUserSession(raw: string): Promise<RefreshRotationResult> {
   const db = getDb();
   const now = new Date();
-  const [record] = await db
-    .delete(refreshTokens)
-    .where(and(eq(refreshTokens.tokenHash, hashToken(raw)), gte(refreshTokens.expiresAt, now)))
-    .returning();
+  const tokenHash = hashToken(raw);
+  return db.transaction(async (tx): Promise<RefreshRotationResult> => {
+    const [refreshCandidate] = await tx
+      .select({ userId: refreshTokens.userId })
+      .from(refreshTokens)
+      .where(and(eq(refreshTokens.tokenHash, tokenHash), gte(refreshTokens.expiresAt, now)));
 
-  // Best-effort cleanup for expired rows so they do not linger forever.
-  if (!record) {
-    await db
+    if (!refreshCandidate) {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${`refresh_token_${tokenHash}`}, 0))`,
+      );
+      const used = await readMfaJson<{ userId?: string; tenantId?: string }>(
+        `refresh:used:${tokenHash}`,
+      );
+      if (used?.userId && used?.tenantId) {
+        await tx
+          .delete(refreshTokens)
+          .where(
+            and(eq(refreshTokens.userId, used.userId), eq(refreshTokens.tenantId, used.tenantId)),
+          );
+        return { status: "reused", userId: used.userId, tenantId: used.tenantId };
+      }
+      await tx
+        .delete(refreshTokens)
+        .where(and(eq(refreshTokens.tokenHash, tokenHash), lt(refreshTokens.expiresAt, now)));
+      return { status: "invalid" };
+    }
+
+    await lockUserSession(tx, refreshCandidate.userId);
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`refresh_token_${tokenHash}`}, 0))`,
+    );
+    const [record] = await tx
       .delete(refreshTokens)
-      .where(and(eq(refreshTokens.tokenHash, hashToken(raw)), lt(refreshTokens.expiresAt, now)));
-    return null;
-  }
+      .where(
+        and(
+          eq(refreshTokens.tokenHash, tokenHash),
+          eq(refreshTokens.userId, refreshCandidate.userId),
+          gte(refreshTokens.expiresAt, now),
+        ),
+      )
+      .returning();
 
-  return record;
+    if (!record) {
+      const used = await readMfaJson<{ userId?: string; tenantId?: string }>(
+        `refresh:used:${tokenHash}`,
+      );
+      if (used?.userId && used?.tenantId) {
+        await tx
+          .delete(refreshTokens)
+          .where(
+            and(eq(refreshTokens.userId, used.userId), eq(refreshTokens.tenantId, used.tenantId)),
+          );
+        return { status: "reused", userId: used.userId, tenantId: used.tenantId };
+      }
+      await tx
+        .delete(refreshTokens)
+        .where(and(eq(refreshTokens.tokenHash, tokenHash), lt(refreshTokens.expiresAt, now)));
+      return { status: "invalid" };
+    }
+
+    await writeMfaJson(
+      `refresh:used:${tokenHash}`,
+      { userId: record.userId, tenantId: record.tenantId },
+      REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+    );
+
+    const [user] = await tx.select().from(users).where(eq(users.id, record.userId));
+    if (user?.deactivatedAt) {
+      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, record.userId));
+      return { status: "deactivated", userId: record.userId, tenantId: record.tenantId };
+    }
+
+    const [membership] = await tx
+      .select({ id: userTenants.id })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, record.userId), eq(userTenants.tenantId, record.tenantId)));
+    if (!membership) {
+      await tx
+        .delete(refreshTokens)
+        .where(
+          and(eq(refreshTokens.userId, record.userId), eq(refreshTokens.tenantId, record.tenantId)),
+        );
+      return { status: "not_member", userId: record.userId, tenantId: record.tenantId };
+    }
+
+    const revokedBefore = await revocationStore.getUserRevokedBefore(record.userId);
+    if (revokedBefore !== null && revokedBefore >= refreshTokenIssuedAtSeconds(record)) {
+      await tx.delete(refreshTokens).where(eq(refreshTokens.userId, record.userId));
+      return { status: "revoked", userId: record.userId, tenantId: record.tenantId };
+    }
+
+    const walletAddress = user?.walletAddress ?? "";
+    const email = user?.email ?? undefined;
+    const sessionClaims =
+      (await readMfaJson<Record<string, unknown>>(`refresh:claims:${record.tokenHash}`)) ?? {};
+    await getMfaBackend().delete(`refresh:claims:${record.tokenHash}`);
+
+    const newAccessToken = await createSessionToken(walletAddress, record.tenantId, {
+      userId: record.userId,
+      ...(email ? { email } : {}),
+      ...sessionClaims,
+    });
+
+    const newRefreshToken = randomBytes(40).toString("hex");
+    const newRefreshTokenHash = hashToken(newRefreshToken);
+    await tx.insert(refreshTokens).values({
+      id: randomBytes(16).toString("hex"),
+      userId: record.userId,
+      tenantId: record.tenantId,
+      tokenHash: newRefreshTokenHash,
+      expiresAt: new Date(Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000),
+    });
+    if (Object.keys(sessionClaims).length > 0) {
+      await writeMfaJson(
+        `refresh:claims:${newRefreshTokenHash}`,
+        sessionClaims,
+        REFRESH_TOKEN_EXPIRY_DAYS * 86400 * 1000,
+      );
+    }
+
+    return { status: "valid", record, newAccessToken, newRefreshToken };
+  });
 }
 
 /** Build the standard dual-token auth response. */
@@ -216,6 +752,13 @@ export async function verifySessionToken(token: string): Promise<{
   tenantId: string;
   userId?: string;
   email?: string;
+  jti?: string;
+  exp?: number;
+  iat?: number;
+  authMethod?: string;
+  factorEnrollmentVerifiedAt?: number;
+  mfaVerifiedAt?: number;
+  mfaMethod?: string;
 } | null> {
   try {
     const payload = (await verifyToken(token)) as {
@@ -223,11 +766,33 @@ export async function verifySessionToken(token: string): Promise<{
       tenantId: string;
       userId?: string;
       email?: string;
+      typ?: string;
       jti?: string;
       exp?: number;
       iat?: number;
+      authMethod?: string;
+      factorEnrollmentVerifiedAt?: number;
+      mfaVerifiedAt?: number;
+      mfaMethod?: string;
     };
+    if (payload.typ === "identity") return null;
     await assertTokenNotRevoked(payload);
+    if (payload.userId) {
+      const [user] = await getDb()
+        .select({ deactivatedAt: users.deactivatedAt })
+        .from(users)
+        .where(eq(users.id, payload.userId));
+      if (!user || user.deactivatedAt) return null;
+      if (payload.tenantId) {
+        const [membership] = await getDb()
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(
+            and(eq(userTenants.userId, payload.userId), eq(userTenants.tenantId, payload.tenantId)),
+          );
+        if (!membership) return null;
+      }
+    }
     return payload;
   } catch {
     return null;
@@ -248,6 +813,12 @@ export async function verifySessionToken(token: string): Promise<{
 const SIWE_NONCE_TTL_MS = 5 * 60 * 1000;
 let _nonceBackend: import("@stwd/auth").StoreBackend | null = null;
 
+type SiweNonceRecord = {
+  allowedDomains: string[];
+  originHost?: string;
+  tenantId?: string;
+};
+
 function getNonceBackend(): import("@stwd/auth").StoreBackend {
   if (_nonceBackend) return _nonceBackend;
   // Lazily fall back to a fresh in-memory backend if initAuthStores() hasn't
@@ -259,25 +830,67 @@ function getNonceBackend(): import("@stwd/auth").StoreBackend {
   return _nonceBackend;
 }
 
-async function setSiweNonce(nonce: string): Promise<void> {
-  await getNonceBackend().set(nonce, "1", SIWE_NONCE_TTL_MS);
+function originHostFromRequest(c: Context): string | undefined {
+  const origin = c.req.header("origin") ?? c.req.header("referer");
+  if (!origin) return undefined;
+  try {
+    return new URL(origin).host.toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+function requiredOriginHostFromRequest(c: Context): string | null {
+  const originHost = originHostFromRequest(c);
+  if (!originHost) return null;
+  return getAllowedSiweDomains(c).includes(originHost) ? originHost : null;
+}
+
+async function setSiweNonce(nonce: string, record: SiweNonceRecord): Promise<void> {
+  await getNonceBackend().set(nonce, JSON.stringify(record), SIWE_NONCE_TTL_MS);
 }
 
 /**
- * Atomically consume a SIWE nonce. Returns true if the nonce was present and
- * unexpired (and is now deleted), false otherwise.
+ * Atomically consume a SIWE nonce record if the nonce was present and unexpired
+ * (and is now deleted).
  *
- * The check-then-delete is not strictly atomic across instances — Upstash and
- * Postgres do both, but with a small window. For SIWE this is acceptable: the
- * surrounding signature check is the actual authentication, and a leaked nonce
- * is useless without the corresponding wallet signature.
+ * Store backends implement consume atomically where supported, so parallel
+ * requests cannot reuse the same signed nonce.
  */
-async function consumeSiweNonce(nonce: string): Promise<boolean> {
-  const backend = getNonceBackend();
-  const value = await backend.get(nonce);
-  if (!value) return false;
-  await backend.delete(nonce);
-  return true;
+async function consumeSiweNonce(nonce: string): Promise<SiweNonceRecord | null> {
+  const raw = await getNonceBackend().consume(nonce);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as SiweNonceRecord;
+    return {
+      allowedDomains: Array.isArray(parsed.allowedDomains) ? parsed.allowedDomains : [],
+      originHost: typeof parsed.originHost === "string" ? parsed.originHost : undefined,
+      tenantId: typeof parsed.tenantId === "string" ? parsed.tenantId : undefined,
+    };
+  } catch {
+    return { allowedDomains: [] };
+  }
+}
+
+function validateConsumedSiweNonce(
+  record: SiweNonceRecord | null,
+  input: { domain: string; tenantId?: string },
+): string | null {
+  if (!record) return "Invalid or expired nonce";
+  const domain = input.domain.toLowerCase();
+  if (record.allowedDomains.length > 0 && !record.allowedDomains.includes(domain)) {
+    return "Nonce was not issued for this SIWE domain";
+  }
+  if (!record.originHost) {
+    return "Nonce was not bound to an origin";
+  }
+  if (record.originHost !== domain) {
+    return "Nonce origin does not match signed domain";
+  }
+  if (record.tenantId && record.tenantId !== input.tenantId) {
+    return "Nonce tenant does not match verification tenant";
+  }
+  return null;
 }
 
 // ─── PasskeyAuth singleton ────────────────────────────────────────────────────
@@ -287,6 +900,8 @@ async function consumeSiweNonce(nonce: string): Promise<boolean> {
 let _challengeStore: ChallengeStore | null = null;
 let _tokenStore: TokenStore | null = null;
 let _oauthCodeStore: ChallengeStore | null = null;
+let _mfaBackend: StoreBackend | null = null;
+let _phoneAuth: PhoneAuth | null = null;
 
 /**
  * One-time OAuth nonce-exchange codes (response_type=code) live for 60s —
@@ -311,20 +926,23 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
     { backend: challengeBackend, source: challengeSource },
     { backend: tokenBackend, source: tokenSource },
     { backend: nonceBackend, source: nonceSource },
+    { backend: mfaBackend, source: mfaSource },
   ] = await Promise.all([
     buildBackend("challenge", redisClient, usePostgres),
     buildBackend("token", redisClient, usePostgres),
     buildBackend("siwe-nonce", redisClient, usePostgres),
+    buildBackend("mfa", redisClient, usePostgres),
   ]);
 
   console.log(
     `[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}, ` +
-      `siwe-nonce store: ${nonceSource}`,
+      `siwe-nonce store: ${nonceSource}, mfa store: ${mfaSource}`,
   );
 
   _challengeStore = new ChallengeStore({ backend: challengeBackend });
   _tokenStore = new TokenStore({ backend: tokenBackend });
   _nonceBackend = nonceBackend;
+  _mfaBackend = mfaBackend;
   // Reuse the challenge backend (Redis when available) for OAuth nonce codes
   // so they survive worker restarts and round-robin between isolates. The
   // 60s TTL is enforced at write time by ChallengeStore.
@@ -335,6 +953,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
 
   // Reset singletons so they pick up the new stores on next use
   _passkeyAuth = null;
+  _phoneAuth = null;
   _passkeyAuthByOrigin.clear();
   _emailAuthByTenant.clear();
 }
@@ -349,9 +968,46 @@ function getOAuthCodeStore(): ChallengeStore {
   return _oauthCodeStore;
 }
 
+const OAUTH_CODE_REDEEM_LOCK_TTL_MS = 10 * 1000;
+
+async function lockOAuthCodeRedemption(code: string): Promise<boolean> {
+  return getOAuthCodeStore().setIfNotExists(
+    `oauth-code-lock:${code}`,
+    "1",
+    OAUTH_CODE_REDEEM_LOCK_TTL_MS,
+  );
+}
+
+async function releaseOAuthCodeRedemptionLock(code: string): Promise<void> {
+  getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
+}
+
+function isUnsafeUnboundOAuthProviderCodeExchangeAllowed(): boolean {
+  return process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE === "true";
+}
+
+function isValidPkceCodeVerifier(value: string): boolean {
+  return /^[A-Za-z0-9._~-]{43,128}$/.test(value);
+}
+
+async function pkceChallengeForVerifier(verifier: string, method: string): Promise<string | null> {
+  if (method === "plain") return verifier;
+  if (method !== "S256") return null;
+  const bytes = new TextEncoder().encode(verifier);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return uint8ArrayToBase64url(new Uint8Array(digest));
+}
+
 function getTokenStore(): TokenStore {
   _tokenStore ??= new TokenStore();
   return _tokenStore;
+}
+
+function getMfaBackend(): StoreBackend {
+  if (_mfaBackend) return _mfaBackend;
+  const { MemoryBackend } = require("@stwd/auth") as typeof import("@stwd/auth");
+  _mfaBackend = new MemoryBackend();
+  return _mfaBackend;
 }
 
 let _passkeyAuth: PasskeyAuth | null = null;
@@ -474,8 +1130,10 @@ function getEmailKeyStore(): KeyStore {
 
   const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
   if (!masterPassword) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("STEWARD_MASTER_PASSWORD is required");
+    if (!isDevSecretAllowed()) {
+      throw new Error(
+        "STEWARD_MASTER_PASSWORD is required. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
+      );
     }
     _emailKeyStore = new KeyStore("dev-secret");
     return _emailKeyStore;
@@ -490,8 +1148,10 @@ function getOAuthKeyStore(): KeyStore {
 
   const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
   if (!masterPassword) {
-    if (process.env.NODE_ENV === "production") {
-      throw new Error("STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens");
+    if (!isDevSecretAllowed()) {
+      throw new Error(
+        "STEWARD_MASTER_PASSWORD is required to encrypt OAuth provider tokens. For local development only, set STEWARD_ALLOW_DEV_SECRETS=true to use the insecure dev key.",
+      );
     }
     _oauthKeyStore = new KeyStore("dev-secret");
     return _oauthKeyStore;
@@ -567,6 +1227,41 @@ function isMockEmailEnabled(): boolean {
     );
   }
   return process.env.EMAIL_PROVIDER === "mock" && process.env.NODE_ENV !== "production";
+}
+
+function authTestInboxEnabled(): boolean {
+  return process.env.NODE_ENV === "test";
+}
+
+function isEnabledTestAccount(
+  value: TenantTestAccountConfig | undefined,
+): value is Required<Pick<TenantTestAccountConfig, "enabled" | "email" | "phone">> &
+  TenantTestAccountConfig {
+  const testAccount = value as (TenantTestAccountConfig & { otpHash?: string }) | undefined;
+  return (
+    testAccount?.enabled === true &&
+    typeof testAccount.email === "string" &&
+    typeof testAccount.phone === "string" &&
+    ((typeof testAccount.otpHash === "string" && testAccount.otpHash.length > 0) ||
+      (typeof testAccount.otp === "string" && testAccount.otp.length > 0))
+  );
+}
+
+function testCredentialMatches(actual: string | undefined, expected: string | undefined): boolean {
+  if (!actual || !expected) return false;
+  return (
+    hashSha256Hex(actual.trim().toLowerCase()) === hashSha256Hex(expected.trim().toLowerCase())
+  );
+}
+
+function invalidTestAccountCredentials() {
+  return { ok: false, error: "Invalid test account credentials" } satisfies ApiResponse;
+}
+
+function emailMagicLinkVerifySubject(token: string, email: string, tenantId: string): string {
+  return hashSha256Hex(
+    [tenantId.trim().toLowerCase(), email.trim().toLowerCase(), token.trim()].join(":"),
+  );
 }
 
 function buildGlobalEmailAuth(overrides?: { baseUrl?: string; callbackPath?: string }): EmailAuth {
@@ -716,6 +1411,9 @@ export function _seedOAuthExchangeCodeForTests(
     refreshToken: string;
     redirectUri: string;
     tenantId: string | null;
+    providerName?: string;
+    codeChallenge?: string;
+    codeChallengeMethod?: string;
     expiresAt?: number;
     expiresIn?: number;
   },
@@ -725,6 +1423,9 @@ export function _seedOAuthExchangeCodeForTests(
     refreshToken: payload.refreshToken,
     redirectUri: payload.redirectUri,
     tenantId: payload.tenantId,
+    ...(payload.providerName ? { providerName: payload.providerName } : {}),
+    ...(payload.codeChallenge ? { codeChallenge: payload.codeChallenge } : {}),
+    ...(payload.codeChallengeMethod ? { codeChallengeMethod: payload.codeChallengeMethod } : {}),
     expiresAt: payload.expiresAt ?? Date.now() + OAUTH_CODE_TTL_MS,
     expiresIn: payload.expiresIn ?? ACCESS_TOKEN_EXPIRY_SECONDS,
   };
@@ -756,7 +1457,7 @@ function getVault(): Vault {
  * Returns null if the resolved tenant doesn't exist in the DB (caller should 404).
  */
 type TenantResolutionOk = { ok: true; tenantId: string; isPersonal: boolean };
-type TenantResolutionErr = { ok: false; status: 403 | 404; error: string };
+type TenantResolutionErr = { ok: false; status: 400 | 403 | 404; error: string };
 type TenantResolutionResult = TenantResolutionOk | TenantResolutionErr;
 
 /**
@@ -767,10 +1468,9 @@ type TenantResolutionResult = TenantResolutionOk | TenantResolutionErr;
  * When an explicit tenantId is requested:
  *   1. Verify the tenant exists in the `tenants` table (404 if not)
  *   2. Check if user already has a user_tenants link (always allowed if so)
- *   3. Look up join_mode from tenant_configs (default 'open')
+ *   3. Look up join_mode from tenant_configs
  *   4. If join_mode is 'open', auto-link is allowed
- *   5. If join_mode is 'invite', 403 (must be pre-invited)
- *   6. If join_mode is 'closed', 403 always
+ *   5. If join_mode is missing, 'invite', or 'closed', 403
  */
 async function resolveAndValidateTenant(
   c: Context,
@@ -782,6 +1482,12 @@ async function resolveAndValidateTenant(
 
   if (!requested) {
     return { ok: true, tenantId: `personal-${userId}`, isPersonal: true };
+  }
+  if (!isValidTenantId(requested)) {
+    return { ok: false, status: 400, error: "Invalid tenant id format" };
+  }
+  if (isReservedTenantId(requested) && requested !== `personal-${userId}`) {
+    return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
   }
 
   const db = getDb();
@@ -811,10 +1517,18 @@ async function resolveAndValidateTenant(
     .from(tenantConfigs)
     .where(eq(tenantConfigs.tenantId, requested));
 
-  const joinMode = config?.joinMode ?? "open"; // default open if no config row
+  const joinMode = config?.joinMode;
 
   if (joinMode === "open") {
     return { ok: true, tenantId: requested, isPersonal: false };
+  }
+
+  if (!joinMode) {
+    return {
+      ok: false,
+      status: 403,
+      error: `Tenant '${requested}' is not configured for self-join`,
+    };
   }
 
   if (joinMode === "invite") {
@@ -835,39 +1549,221 @@ async function resolveAndValidateTenant(
 
 // ─── User / tenant provisioning helpers ──────────────────────────────────────
 
-async function findOrCreateUser(email: string): Promise<typeof users.$inferSelect> {
+type UserProvisionResult = {
+  user: typeof users.$inferSelect;
+  isNew: boolean;
+};
+
+async function findOrCreateUserWithStatus(email: string): Promise<UserProvisionResult> {
   const db = getDb();
   const [existing] = await db.select().from(users).where(eq(users.email, email));
-  if (existing) return existing;
+  if (existing) return { user: existing, isNew: false };
   const [newUser] = await db.insert(users).values({ email, emailVerified: false }).returning();
-  return newUser;
+  return { user: newUser, isNew: true };
 }
 
-async function findOrCreateWalletUser(
+async function findUserByEmail(email: string): Promise<typeof users.$inferSelect | null> {
+  const [existing] = await getDb().select().from(users).where(eq(users.email, email));
+  return existing ?? null;
+}
+
+async function resolveEmailTenantBeforeMutation(
+  c: Context,
+  requestedTenantId: string | undefined,
+  existingUserId: string | null,
+): Promise<TenantResolutionResult | null> {
+  if (!requestedTenantId) return null;
+  if (existingUserId) return resolveAndValidateTenant(c, existingUserId, requestedTenantId);
+  if (!isValidTenantId(requestedTenantId)) {
+    return { ok: false, status: 400, error: "Invalid tenant id format" };
+  }
+  if (isReservedTenantId(requestedTenantId)) {
+    return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
+  }
+
+  const db = getDb();
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, requestedTenantId));
+  if (!tenant) {
+    return { ok: false, status: 404, error: `Tenant '${requestedTenantId}' not found` };
+  }
+  const [config] = await db
+    .select({ joinMode: tenantConfigs.joinMode })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, requestedTenantId));
+  if (config?.joinMode === "open") {
+    return { ok: true, tenantId: requestedTenantId, isPersonal: false };
+  }
+  return {
+    ok: false,
+    status: 403,
+    error:
+      config?.joinMode === "closed"
+        ? `Tenant '${requestedTenantId}' is not accepting new members`
+        : config?.joinMode === "invite"
+          ? `Tenant '${requestedTenantId}' requires an invitation to join`
+          : `Tenant '${requestedTenantId}' is not configured for self-join`,
+  };
+}
+
+async function findOrCreateWalletUserWithStatus(
   walletAddress: string,
   walletChain: "ethereum" | "solana",
-): Promise<typeof users.$inferSelect> {
+): Promise<UserProvisionResult> {
   const db = getDb();
-  const [existing] = await db.select().from(users).where(eq(users.walletAddress, walletAddress));
-  if (existing) {
-    if (existing.walletChain !== walletChain) {
-      await db.update(users).set({ walletChain }).where(eq(users.id, existing.id));
-      const [updated] = await db.select().from(users).where(eq(users.id, existing.id));
-      return updated ?? { ...existing, walletChain };
-    }
-    return existing;
+  const [existing] = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.walletAddress, walletAddress), eq(users.walletChain, walletChain)));
+  if (existing) return { user: existing, isNew: false };
+
+  try {
+    const [created] = await db
+      .insert(users)
+      .values({
+        walletAddress,
+        walletChain,
+        email: null,
+        emailVerified: false,
+      })
+      .returning();
+    return { user: created, isNew: true };
+  } catch (error) {
+    const [concurrent] = await db
+      .select()
+      .from(users)
+      .where(and(eq(users.walletAddress, walletAddress), eq(users.walletChain, walletChain)));
+    if (concurrent) return { user: concurrent, isNew: false };
+    throw error;
   }
+}
+
+async function findOrCreatePhoneUserWithStatus(phone: string): Promise<UserProvisionResult> {
+  const phoneSubject = `phone:${hashSha256Hex(phone)}`;
+  const db = getDb();
+  const [existing] = await db.select().from(users).where(eq(users.walletAddress, phoneSubject));
+  if (existing) return { user: existing, isNew: false };
 
   const [created] = await db
     .insert(users)
     .values({
-      walletAddress,
-      walletChain,
       email: null,
       emailVerified: false,
+      walletAddress: phoneSubject,
+      walletChain: "ethereum",
     })
     .returning();
-  return created;
+  return { user: created, isNew: true };
+}
+
+async function findOrCreateExternalAccountUserWithStatus(input: {
+  provider: string;
+  providerAccountId: string;
+  name?: string;
+  image?: string;
+}): Promise<UserProvisionResult> {
+  const db = getDb();
+  const [existingAccount] = await db
+    .select({ user: users })
+    .from(accounts)
+    .innerJoin(users, eq(accounts.userId, users.id))
+    .where(
+      and(
+        eq(accounts.provider, input.provider),
+        eq(accounts.providerAccountId, input.providerAccountId),
+      ),
+    );
+  if (existingAccount) return { user: existingAccount.user, isNew: false };
+
+  try {
+    return await db.transaction(async (tx) => {
+      const [raceWinner] = await tx
+        .select({ user: users })
+        .from(accounts)
+        .innerJoin(users, eq(accounts.userId, users.id))
+        .where(
+          and(
+            eq(accounts.provider, input.provider),
+            eq(accounts.providerAccountId, input.providerAccountId),
+          ),
+        );
+      if (raceWinner) return { user: raceWinner.user, isNew: false };
+
+      const [created] = await tx
+        .insert(users)
+        .values({
+          email: null,
+          emailVerified: false,
+          name: input.name,
+          image: input.image,
+        })
+        .returning();
+      await tx.insert(accounts).values({
+        userId: created.id,
+        provider: input.provider,
+        providerAccountId: input.providerAccountId,
+      });
+      return { user: created, isNew: true };
+    });
+  } catch (error) {
+    const [winner] = await db
+      .select({ user: users })
+      .from(accounts)
+      .innerJoin(users, eq(accounts.userId, users.id))
+      .where(
+        and(
+          eq(accounts.provider, input.provider),
+          eq(accounts.providerAccountId, input.providerAccountId),
+        ),
+      );
+    if (winner) return { user: winner.user, isNew: false };
+    throw error;
+  }
+}
+
+function dispatchUserCreated(
+  tenantId: string,
+  userId: string,
+  source: string,
+  extra: Record<string, unknown> = {},
+): void {
+  dispatchWebhook(tenantId, userId, "user.created", {
+    userId,
+    source,
+    ...extra,
+  });
+}
+
+function dispatchUserAuthenticated(tenantId: string, userId: string, authMethod?: string): void {
+  dispatchWebhook(tenantId, userId, "user.authenticated", {
+    userId,
+    ...(authMethod ? { authMethod } : {}),
+  });
+}
+
+async function writeAuthLoginAudit(
+  c: Context,
+  tenantId: string,
+  userId: string,
+  claims: Record<string, unknown> | undefined,
+  metadata: Record<string, unknown> = {},
+): Promise<void> {
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "auth.login",
+    resourceType: "session",
+    metadata: {
+      method: typeof claims?.authMethod === "string" ? claims.authMethod : "unknown",
+      ...metadata,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.req.header("x-request-id") ?? null,
+  });
 }
 
 type WalletTenantResult = {
@@ -906,22 +1802,46 @@ async function findOrCreateWalletTenant(opts: {
     return { tenant: newTenant, isNewTenant: true, rawApiKey: apiKeyPair.key };
   }
 
-  const [retryTenant] = await db.select().from(tenants).where(eq(tenants.id, opts.tenantId));
-  if (!retryTenant) {
-    throw new Error("Failed to create tenant");
+  const [retryTenant] = await db
+    .select()
+    .from(tenants)
+    .where(eq(tenants.ownerAddress, opts.ownerAddress));
+  if (retryTenant) {
+    return { tenant: retryTenant, isNewTenant: false };
   }
 
-  return { tenant: retryTenant, isNewTenant: false };
+  const [conflictingTenant] = await db.select().from(tenants).where(eq(tenants.id, opts.tenantId));
+  if (conflictingTenant) {
+    throw new Error("Wallet tenant id is already reserved for a different owner");
+  }
+
+  throw new Error("Failed to create tenant");
 }
 
-function getAllowedSiweDomains(): string[] | null {
+function ethereumWalletTenantId(address: string): string {
+  return `eth:${address.toLowerCase()}`;
+}
+
+function getAllowedSiweDomains(c?: Context): string[] {
   const raw = process.env.SIWE_ALLOWED_DOMAINS?.trim();
-  if (!raw) return null;
-  const domains = raw
-    .split(",")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  return domains.length > 0 ? domains : null;
+  if (raw) {
+    const domains = raw
+      .split(",")
+      .map((entry) => entry.trim().toLowerCase())
+      .filter(Boolean);
+    if (domains.length > 0) return domains;
+  }
+
+  const appUrl = process.env.APP_URL?.trim() || "https://steward.fi";
+  try {
+    return [new URL(appUrl).host.toLowerCase()];
+  } catch {
+    if (process.env.NODE_ENV !== "production") {
+      const host = c?.req.header("host")?.trim().toLowerCase();
+      if (host) return [host];
+    }
+    return [];
+  }
 }
 
 type ParsedSiwsMessage = {
@@ -1096,21 +2016,796 @@ async function safeJsonParse<T>(c: Context): Promise<T | null> {
   }
 }
 
-type CompletedEmailAuthResult =
+async function requireSession(c: Context): Promise<
   | {
       ok: true;
       token: string;
-      refreshToken: string;
-      user: { id: string; email: string; walletAddress?: string | null };
+      payload: {
+        address: string;
+        tenantId: string;
+        userId: string;
+        email?: string;
+        iat?: number;
+        authMethod?: string;
+        factorEnrollmentVerifiedAt?: number;
+        mfaVerifiedAt?: number;
+        mfaMethod?: string;
+      };
     }
-  | { ok: false; status: 403 | 404; error: string };
+  | { ok: false; response: Response }
+> {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "Authorization header required" }, 401),
+    };
+  }
+
+  const token = authHeader.slice(7);
+  const payload = await verifySessionToken(token);
+  if (!payload) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "Invalid or expired token" }, 401),
+    };
+  }
+  if (!payload.userId) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "Token does not contain userId" }, 400),
+    };
+  }
+
+  return { ok: true, token, payload: { ...payload, userId: payload.userId } };
+}
+
+async function hasAnyDurableFactor(userId: string): Promise<boolean> {
+  if (await hasTotpEnabled(userId)) return true;
+  if (await getSmsMfa(userId)) return true;
+
+  const [passkey] = await getDb()
+    .select({ id: authenticators.id })
+    .from(authenticators)
+    .where(eq(authenticators.userId, userId))
+    .limit(1);
+  return Boolean(passkey);
+}
+
+function sessionHasRecentFactorEnrollmentStepUp(
+  session: Extract<Awaited<ReturnType<typeof requireSession>>, { ok: true }>,
+  existingDurableFactor: boolean,
+): boolean {
+  const now = Date.now();
+  if (
+    typeof session.payload.mfaVerifiedAt === "number" &&
+    now - session.payload.mfaVerifiedAt <= FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS
+  ) {
+    return true;
+  }
+  if (existingDurableFactor && session.payload.authMethod !== "passkey") {
+    return false;
+  }
+  if (
+    typeof session.payload.factorEnrollmentVerifiedAt === "number" &&
+    now - session.payload.factorEnrollmentVerifiedAt <= FACTOR_ENROLLMENT_STEP_UP_MAX_AGE_MS
+  ) {
+    return true;
+  }
+  return false;
+}
+
+async function requireRecentFactorEnrollmentStepUp(
+  c: Context,
+  session: Extract<Awaited<ReturnType<typeof requireSession>>, { ok: true }>,
+): Promise<Response | null> {
+  const existingDurableFactor = await hasAnyDurableFactor(session.payload.userId);
+  if (sessionHasRecentFactorEnrollmentStepUp(session, existingDurableFactor)) return null;
+  return c.json<ApiResponse>(
+    { ok: false, error: "Recent sign-in, MFA, or passkey re-authentication is required" },
+    403,
+  );
+}
+
+export function getPhoneAuth(): PhoneAuth {
+  if (_phoneAuth) return _phoneAuth;
+
+  let provider: SmsProvider | undefined;
+  if (process.env.SMS_PROVIDER === "mock" && process.env.NODE_ENV !== "production") {
+    provider = new MockSmsProvider();
+  } else if (
+    process.env.TWILIO_ACCOUNT_SID &&
+    process.env.TWILIO_AUTH_TOKEN &&
+    process.env.TWILIO_FROM
+  ) {
+    provider = new TwilioSmsProvider({
+      accountSid: process.env.TWILIO_ACCOUNT_SID,
+      authToken: process.env.TWILIO_AUTH_TOKEN,
+      from: process.env.TWILIO_FROM,
+    });
+  } else if (process.env.NODE_ENV === "production") {
+    throw new Error("SMS provider not configured");
+  }
+
+  _phoneAuth = new PhoneAuth({
+    provider,
+    tokenStore: new TokenStore({ backend: getMfaBackend() }),
+  });
+  return _phoneAuth;
+}
+
+function isWhatsAppOtpEnabled(): boolean {
+  return process.env.WHATSAPP_OTP_ENABLED === "true";
+}
+
+function isFarcasterLoginEnabled(): boolean {
+  return process.env.FARCASTER_LOGIN_ENABLED === "true";
+}
+
+const TELEGRAM_LOGIN_MAX_AGE_SEC = 24 * 60 * 60;
+const TELEGRAM_LOGIN_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+
+type TelegramLoginChallengeRecord = {
+  tenantId?: string;
+  originHost?: string;
+  issuedAt: number;
+};
+
+async function requiredTelegramOriginHostFromRequest(
+  c: Context,
+  tenantId?: string,
+): Promise<string | null> {
+  const originHost = originHostFromRequest(c);
+  if (!originHost) return null;
+
+  if (!tenantId) {
+    return getAllowedSiweDomains(c).includes(originHost) ? originHost : null;
+  }
+
+  const [row] = await getDb()
+    .select({ allowedOrigins: tenantConfigs.allowedOrigins })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  for (const allowedOrigin of row?.allowedOrigins ?? []) {
+    if (allowedOrigin.trim() === "*") continue;
+    try {
+      if (new URL(allowedOrigin).host.toLowerCase() === originHost) return originHost;
+    } catch {}
+  }
+
+  return null;
+}
+
+function telegramLoginChallengeKey(challengeId: string): string {
+  return `telegram-login-challenge:${hashSha256Hex(challengeId)}`;
+}
+
+async function createTelegramLoginChallenge(
+  record: Omit<TelegramLoginChallengeRecord, "issuedAt">,
+): Promise<{ challengeId: string; expiresAt: number }> {
+  const challengeId = uint8ArrayToBase64url(randomBytes(32));
+  const expiresAt = Date.now() + TELEGRAM_LOGIN_CHALLENGE_TTL_MS;
+  await getNonceBackend().set(
+    telegramLoginChallengeKey(challengeId),
+    JSON.stringify({ ...record, issuedAt: Date.now() }),
+    TELEGRAM_LOGIN_CHALLENGE_TTL_MS,
+  );
+  return { challengeId, expiresAt };
+}
+
+async function consumeTelegramLoginChallenge(
+  challengeId: string,
+): Promise<TelegramLoginChallengeRecord | null> {
+  const raw = await getNonceBackend().consume(telegramLoginChallengeKey(challengeId));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as TelegramLoginChallengeRecord;
+    return {
+      tenantId: typeof parsed.tenantId === "string" ? parsed.tenantId : undefined,
+      originHost: typeof parsed.originHost === "string" ? parsed.originHost : undefined,
+      issuedAt: typeof parsed.issuedAt === "number" ? parsed.issuedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function validateConsumedTelegramLoginChallenge(
+  record: TelegramLoginChallengeRecord | null,
+  input: { tenantId?: string; originHost?: string },
+): string | null {
+  if (!record) return "Invalid or expired Telegram login challenge";
+  if (record.tenantId !== input.tenantId) {
+    return "Telegram login challenge tenant does not match verification tenant";
+  }
+  if (!record.originHost) {
+    return "Telegram login challenge was not bound to an origin";
+  }
+  if (record.originHost !== input.originHost) {
+    return "Telegram login challenge origin does not match verification origin";
+  }
+  return null;
+}
+
+async function consumeTelegramLoginHashOnce(hash: string, authDate: number): Promise<boolean> {
+  const expiresAtMs = (authDate + TELEGRAM_LOGIN_MAX_AGE_SEC) * 1000;
+  const ttlMs = Math.max(1_000, expiresAtMs - Date.now());
+  return getMfaBackend().setIfNotExists(
+    `telegram-login:${hashSha256Hex(hash.toLowerCase())}`,
+    "1",
+    ttlMs,
+  );
+}
+
+const TOTP_PENDING_TTL_MS = 10 * 60 * 1000;
+const TOTP_ENABLED_TTL_MS = 10 * 365 * 24 * 60 * 60 * 1000;
+const MFA_AUTH_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const MFA_TOTP_STEP_CLAIM_TTL_MS = 10 * 60 * 1000;
+const TOTP_STEP_SEC = 30;
+
+type StoredTotp = {
+  secret: string;
+  enabledAt: string;
+  lastAcceptedStep: number | null;
+};
+
+type StoredSmsMfa = {
+  phone: string;
+  enabledAt: string;
+};
+
+function mfaKey(
+  kind: "totp:pending" | "totp:enabled" | "sms:pending" | "sms:enabled" | "recovery",
+  userId: string,
+): string {
+  return `${kind}:${userId}`;
+}
+
+function recoveryCodeConsumeKey(codeId: string): string {
+  return `recovery:code:${codeId}`;
+}
+
+function totpStepClaimKey(userId: string, step: number): string {
+  return `totp:step:${userId}:${step}`;
+}
+
+function smsMfaEnrollPurpose(userId: string): string {
+  return `mfa:sms:enroll:${userId}`;
+}
+
+function smsMfaManagePurpose(userId: string): string {
+  return `mfa:sms:manage:${userId}`;
+}
+
+function smsMfaChallengePurpose(challengeId: string): string {
+  return `mfa:sms:challenge:${challengeId}`;
+}
+
+function encryptMfaJson(value: unknown): string {
+  return JSON.stringify(getOAuthKeyStore().encrypt(JSON.stringify(value)));
+}
+
+function decryptMfaJson<T>(value: string): T {
+  const encrypted = JSON.parse(value) as {
+    ciphertext: string;
+    iv: string;
+    tag: string;
+    salt: string;
+  };
+  return JSON.parse(getOAuthKeyStore().decrypt(encrypted)) as T;
+}
+
+async function readMfaJson<T>(key: string): Promise<T | null> {
+  const raw = await getMfaBackend().get(key);
+  if (!raw) return null;
+  try {
+    return decryptMfaJson<T>(raw);
+  } catch {
+    await getMfaBackend().delete(key);
+    return null;
+  }
+}
+
+async function writeMfaJson(
+  key: string,
+  value: unknown,
+  ttlMs = TOTP_ENABLED_TTL_MS,
+): Promise<void> {
+  await getMfaBackend().set(key, encryptMfaJson(value), ttlMs);
+}
+
+function totpStepForDrift(drift: number): number {
+  return Math.floor(Date.now() / 1000 / TOTP_STEP_SEC) + drift;
+}
+
+async function verifyStoredTotp(
+  userId: string,
+  code: string,
+): Promise<{ valid: boolean; stored?: StoredTotp; acceptedStep?: number }> {
+  const stored = await readMfaJson<StoredTotp>(mfaKey("totp:enabled", userId));
+  if (!stored) return { valid: false };
+
+  const result = await verifyTotp(stored.secret, code, {
+    stepSec: TOTP_STEP_SEC,
+  });
+  if (!result.valid || typeof result.drift !== "number") return { valid: false };
+
+  const acceptedStep = totpStepForDrift(result.drift);
+  if (stored.lastAcceptedStep !== null && acceptedStep <= stored.lastAcceptedStep) {
+    return { valid: false };
+  }
+  const claimed = await getMfaBackend().setIfNotExists(
+    totpStepClaimKey(userId, acceptedStep),
+    "claimed",
+    MFA_TOTP_STEP_CLAIM_TTL_MS,
+  );
+  if (!claimed) return { valid: false };
+  return { valid: true, stored, acceptedStep };
+}
+
+class MfaRecoveryCodeStore implements RecoveryCodeStore {
+  async replaceForUser(
+    userId: string,
+    codes: Array<{ hash: string; salt: string }>,
+  ): Promise<void> {
+    const issuedAt = Date.now();
+    const rows = codes.map((code, idx) => ({
+      id: `${userId}:${issuedAt}:${idx}`,
+      hash: code.hash,
+      salt: code.salt,
+      usedAt: null,
+    }));
+    await writeMfaJson(mfaKey("recovery", userId), rows);
+    await Promise.all(
+      rows.map((row) =>
+        getMfaBackend().set(recoveryCodeConsumeKey(row.id), "unused", TOTP_ENABLED_TTL_MS),
+      ),
+    );
+  }
+
+  async listForUser(userId: string): Promise<StoredRecoveryCode[]> {
+    const rows = await readMfaJson<
+      Array<Omit<StoredRecoveryCode, "usedAt"> & { usedAt: string | null }>
+    >(mfaKey("recovery", userId));
+    return (rows ?? []).map((row) => ({
+      ...row,
+      usedAt: row.usedAt ? new Date(row.usedAt) : null,
+    }));
+  }
+
+  async markUsed(id: string, usedAt: Date): Promise<boolean> {
+    const consumed = await getMfaBackend().consume(recoveryCodeConsumeKey(id));
+    if (!consumed) return false;
+
+    const userId = id.split(":")[0];
+    if (!userId) return false;
+    const rows =
+      (await readMfaJson<Array<Omit<StoredRecoveryCode, "usedAt"> & { usedAt: string | null }>>(
+        mfaKey("recovery", userId),
+      )) ?? [];
+    const next = rows.map((row) =>
+      row.id === id ? { ...row, usedAt: usedAt.toISOString() } : row,
+    );
+    await writeMfaJson(mfaKey("recovery", userId), next);
+    return true;
+  }
+}
+
+const recoveryCodeStore: RecoveryCodeStore =
+  process.env.NODE_ENV === "test" ? new InMemoryRecoveryCodeStore() : new MfaRecoveryCodeStore();
+
+type PendingMfaAuth = {
+  mfaType: "totp" | "sms";
+  userId: string;
+  tenantId: string;
+  address: string;
+  claims?: Record<string, unknown>;
+  user: Record<string, unknown>;
+  expiresAt: number;
+};
+
+async function hasTotpEnabled(userId: string): Promise<boolean> {
+  return Boolean(await readMfaJson<StoredTotp>(mfaKey("totp:enabled", userId)));
+}
+
+async function getSmsMfa(userId: string): Promise<StoredSmsMfa | null> {
+  return readMfaJson<StoredSmsMfa>(mfaKey("sms:enabled", userId));
+}
+
+async function createMfaAuthChallenge(payload: Omit<PendingMfaAuth, "expiresAt">): Promise<{
+  challengeId: string;
+  expiresAt: number;
+}> {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const challengeId = uint8ArrayToBase64url(bytes);
+  const expiresAt = Date.now() + MFA_AUTH_CHALLENGE_TTL_MS;
+  await writeMfaJson(
+    `auth:challenge:${challengeId}`,
+    { ...payload, expiresAt },
+    MFA_AUTH_CHALLENGE_TTL_MS,
+  );
+  return { challengeId, expiresAt };
+}
+
+async function buildAuthOrMfaResponse(
+  userId: string,
+  tenantId: string,
+  address: string,
+  claims: Record<string, unknown>,
+  user: Record<string, unknown>,
+  c?: Context,
+): Promise<Record<string, unknown>> {
+  const sessionClaims = {
+    ...claims,
+    factorEnrollmentVerifiedAt: Date.now(),
+  };
+  const [activeUser] = await getDb()
+    .select({ deactivatedAt: users.deactivatedAt })
+    .from(users)
+    .where(eq(users.id, userId));
+  if (activeUser?.deactivatedAt) {
+    return { ok: false, status: 403, error: "User is deactivated" };
+  }
+
+  if (await hasTotpEnabled(userId)) {
+    const challenge = await createMfaAuthChallenge({
+      mfaType: "totp",
+      userId,
+      tenantId,
+      address,
+      claims: sessionClaims,
+      user,
+    });
+    return {
+      ok: true,
+      mfaRequired: true,
+      mfa: {
+        type: "totp",
+        challengeId: challenge.challengeId,
+        expiresAt: new Date(challenge.expiresAt).toISOString(),
+      },
+      user,
+    };
+  }
+
+  const smsMfa = await getSmsMfa(userId);
+  if (smsMfa) {
+    const challenge = await createMfaAuthChallenge({
+      mfaType: "sms",
+      userId,
+      tenantId,
+      address,
+      claims: sessionClaims,
+      user,
+    });
+    const { expiresAt } = await getPhoneAuth().sendOtp(
+      smsMfa.phone,
+      smsMfaChallengePurpose(challenge.challengeId),
+    );
+    return {
+      ok: true,
+      mfaRequired: true,
+      mfa: {
+        type: "sms",
+        challengeId: challenge.challengeId,
+        expiresAt: expiresAt.toISOString(),
+      },
+      user,
+    };
+  }
+
+  if (c) {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "auth.login",
+      resourceType: "session",
+      metadata: {
+        method: typeof claims.authMethod === "string" ? claims.authMethod : "unknown",
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+  }
+  const token = await createSessionToken(address, tenantId, sessionClaims);
+  const refreshToken = await createRefreshToken(userId, tenantId, sessionClaims);
+  dispatchUserAuthenticated(
+    tenantId,
+    userId,
+    typeof claims.authMethod === "string" ? claims.authMethod : undefined,
+  );
+  return buildAuthResponse(token, refreshToken, user);
+}
+
+function authExchangeJson(c: Context, response: Record<string, unknown>) {
+  if (response.ok === false && typeof response.error === "string") {
+    const status =
+      typeof response.status === "number" && response.status >= 400 && response.status < 600
+        ? response.status
+        : 400;
+    return c.json<ApiResponse>({ ok: false, error: response.error }, status as 400 | 403 | 500);
+  }
+  return c.json(response);
+}
+
+async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProviderConfig[]> {
+  const db = getDb();
+  const [row] = await db
+    .select({ oidcProviders: tenantConfigs.oidcProviders })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+  return row?.oidcProviders ?? [];
+}
+
+function selectOidcProvider(
+  providers: TenantOidcProviderConfig[],
+  providerId?: string,
+): TenantOidcProviderConfig | null {
+  const enabled = providers.filter((provider) => provider.enabled !== false);
+  if (providerId) return enabled.find((provider) => provider.id === providerId) ?? null;
+  return enabled.length === 1 ? enabled[0] : null;
+}
+
+async function validateOidcJitTenant(tenantId: string): Promise<
+  | {
+      ok: true;
+    }
+  | { ok: false; status: 403 | 404; error: string }
+> {
+  if (!isValidTenantId(tenantId)) {
+    return { ok: false, status: 403, error: "Invalid tenant id format" };
+  }
+  if (isReservedTenantId(tenantId)) {
+    return { ok: false, status: 403, error: "Personal tenants cannot be self-joined" };
+  }
+  const db = getDb();
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) return { ok: false, status: 404, error: `Tenant '${tenantId}' not found` };
+
+  const [config] = await db
+    .select({ joinMode: tenantConfigs.joinMode })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+  if (config?.joinMode === "open") return { ok: true };
+  if (!config?.joinMode) {
+    return {
+      ok: false,
+      status: 403,
+      error: `Tenant '${tenantId}' is not configured for self-join`,
+    };
+  }
+  if (config.joinMode === "invite") {
+    return {
+      ok: false,
+      status: 403,
+      error: `Tenant '${tenantId}' requires an invitation to join`,
+    };
+  }
+  return {
+    ok: false,
+    status: 403,
+    error: `Tenant '${tenantId}' is not accepting new members`,
+  };
+}
+
+async function provisionOidcUser(opts: {
+  c: Context;
+  tenantId: string;
+  provider: TenantOidcProviderConfig;
+  subject: string;
+  email?: string;
+  emailVerified?: boolean;
+  name?: string;
+  picture?: string;
+  tenantRole?: string;
+}): Promise<
+  | {
+      ok: true;
+      userId: string;
+      response: Record<string, unknown>;
+    }
+  | { ok: false; status?: 400 | 403 | 404 | 409 | 500; error: string }
+> {
+  const { c, tenantId, provider, subject, email, emailVerified, name, picture, tenantRole } = opts;
+  const db = getDb();
+  const providerAccountId = hashSha256Hex(
+    `${tenantId}:${provider.id}:${provider.issuer}:${subject}`,
+  );
+  const providerName = "oidc";
+
+  try {
+    if (emailVerified === true && email) {
+      const authAbuseConfig = await getTenantAuthAbuseConfig(tenantId);
+      const emailPolicyError = validateEmailAbusePolicy(email, authAbuseConfig);
+      if (emailPolicyError) {
+        return { ok: false, status: 400, error: emailPolicyError };
+      }
+    }
+
+    const [existingAccount] = await db
+      .select({ userId: accounts.userId })
+      .from(accounts)
+      .where(
+        and(eq(accounts.provider, providerName), eq(accounts.providerAccountId, providerAccountId)),
+      );
+
+    let user: typeof users.$inferSelect;
+    let createdUser = false;
+    if (existingAccount) {
+      const [existingUser] = await db
+        .select()
+        .from(users)
+        .where(eq(users.id, existingAccount.userId));
+      if (!existingUser) return { ok: false, status: 500, error: "OIDC account user missing" };
+      user = existingUser;
+    } else {
+      if (provider.allowJitProvisioning === false) {
+        return {
+          ok: false,
+          status: 403,
+          error: "OIDC JIT provisioning is disabled",
+        };
+      }
+      const jitTenant = await validateOidcJitTenant(tenantId);
+      if (!jitTenant.ok) return jitTenant;
+      const [created] = await db
+        .insert(users)
+        .values({
+          email: null,
+          emailVerified: false,
+          name,
+          image: picture,
+        })
+        .returning();
+      user = created;
+      await db
+        .insert(accounts)
+        .values({ userId: user.id, provider: providerName, providerAccountId });
+      createdUser = true;
+    }
+
+    const updates: Partial<typeof users.$inferInsert> = {};
+    if (!user.name && name) updates.name = name;
+    if (!user.image && picture) updates.image = picture;
+    if (Object.keys(updates).length > 0) {
+      await db.update(users).set(updates).where(eq(users.id, user.id));
+      user = { ...user, ...updates };
+    }
+
+    const tenantResult = await resolveAndValidateTenant(c, user.id, tenantId);
+    if (!tenantResult.ok) {
+      return {
+        ok: false,
+        status: tenantResult.status,
+        error: tenantResult.error,
+      };
+    }
+    await ensureUserTenantLink(user.id, tenantResult.tenantId, tenantRole ?? "member");
+
+    let walletAddress = user.walletAddress;
+    const syntheticEmail = `oidc.${provider.id}.${providerAccountId}@id.steward.internal`;
+    try {
+      const wallet = await provisionWalletForUser(user.id, syntheticEmail);
+      walletAddress = wallet.walletAddress;
+    } catch (err) {
+      console.error(`[OidcAuth:${provider.id}] Wallet provision failed:`, err);
+      return { ok: false, status: 500, error: "Wallet provisioning failed" };
+    }
+    const verifiedEmail = emailVerified === true ? email : undefined;
+    if (createdUser) {
+      dispatchUserCreated(tenantResult.tenantId, user.id, "auth.oidc", {
+        provider: provider.id,
+        hasEmail: Boolean(verifiedEmail),
+      });
+    }
+    const claims: Record<string, unknown> = {
+      userId: user.id,
+      oidcProviderId: provider.id,
+      oidcSubject: subject,
+      emailVerified: emailVerified === true,
+      authMethod: "oidc",
+    };
+    if (verifiedEmail) claims.email = verifiedEmail;
+
+    await writeAuditEvent({
+      tenantId: tenantResult.tenantId,
+      actorType: "user",
+      actorId: user.id,
+      action: "auth.oidc.login",
+      resourceType: "user",
+      metadata: {
+        providerId: provider.id,
+        issuer: provider.issuer,
+        oidcSubject: subject,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+
+    return {
+      ok: true,
+      userId: user.id,
+      response: await buildAuthOrMfaResponse(
+        user.id,
+        tenantResult.tenantId,
+        walletAddress ?? "",
+        claims,
+        {
+          id: user.id,
+          email: verifiedEmail ?? syntheticEmail,
+          emailVerified: emailVerified === true,
+          walletAddress,
+          oidcProviderId: provider.id,
+        },
+      ),
+    };
+  } catch (err) {
+    console.error(`[OidcAuth:${provider.id}] provisionOidcUser failed:`, err);
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Internal server error",
+    };
+  }
+}
+
+type CompletedEmailAuthResult =
+  | {
+      ok: true;
+      response: Record<string, unknown>;
+    }
+  | { ok: false; status: 400 | 403 | 404; error: string };
 
 async function completeEmailAuth(
   c: Context,
   email: string,
   tenantId?: string,
+  opts: { allowTenantJoin?: boolean } = {},
 ): Promise<CompletedEmailAuthResult> {
-  const user = await findOrCreateUser(email);
+  const hintedTenantId = c.req.header("X-Steward-Tenant") || tenantId || _DEFAULT_TENANT_ID;
+  const hintedAuthAbuseConfig = await getTenantAuthAbuseConfig(hintedTenantId);
+  const hintedEmailPolicyError = validateEmailAbusePolicy(email, hintedAuthAbuseConfig);
+  if (hintedEmailPolicyError) {
+    return { ok: false, status: 403, error: hintedEmailPolicyError };
+  }
+
+  const requestedTenantId = c.req.header("X-Steward-Tenant")?.trim() || tenantId?.trim() || undefined;
+  const existingUser = await findUserByEmail(email);
+  const preResolvedTenant =
+    opts.allowTenantJoin && tenantId
+      ? null
+      : await resolveEmailTenantBeforeMutation(c, requestedTenantId, existingUser?.id ?? null);
+  if (preResolvedTenant && !preResolvedTenant.ok) {
+    return {
+      ok: false,
+      status: preResolvedTenant.status,
+      error: preResolvedTenant.error,
+    };
+  }
+  if (preResolvedTenant?.ok) {
+    const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+      c,
+      preResolvedTenant.tenantId,
+      email,
+      "Email",
+    );
+    if (ssoRequiredResponse) {
+      return {
+        ok: false,
+        status: 403,
+        error: "Email login is disabled because this email domain requires SSO",
+      };
+    }
+  }
+
+  const { user, isNew } = await findOrCreateUserWithStatus(email);
   const db = getDb();
   await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
 
@@ -1123,25 +2818,73 @@ async function completeEmailAuth(
     console.error("[EmailAuth] Wallet provision failed:", err);
   }
 
-  // Resolve requesting tenant and link user
-  const tenantResult = await resolveAndValidateTenant(c, user.id, tenantId);
-  if (!tenantResult.ok) {
-    return { ok: false, status: tenantResult.status, error: tenantResult.error };
+  // Resolve requesting tenant and link user.
+  let resolvedTenantId: string;
+  if (opts.allowTenantJoin && tenantId) {
+    if (!isValidTenantId(tenantId)) {
+      return { ok: false, status: 400, error: "Invalid tenant id format" };
+    }
+    if (!(await tenantExists(tenantId))) {
+      return { ok: false, status: 404, error: `Tenant '${tenantId}' not found` };
+    }
+    resolvedTenantId = tenantId;
+  } else {
+    const tenantResult = preResolvedTenant ?? (await resolveAndValidateTenant(c, user.id, tenantId));
+    if (!tenantResult.ok) {
+      return {
+        ok: false,
+        status: tenantResult.status,
+        error: tenantResult.error,
+      };
+    }
+    resolvedTenantId = tenantResult.tenantId;
   }
-  const { tenantId: resolvedTenantId } = tenantResult;
-  await ensureUserTenantLink(user.id, resolvedTenantId);
-
-  const token = await createSessionToken(walletAddress ?? "", resolvedTenantId, {
-    userId: user.id,
+  const authAbuseConfig = await getTenantAuthAbuseConfig(resolvedTenantId);
+  const emailPolicyError = validateEmailAbusePolicy(email, authAbuseConfig);
+  if (emailPolicyError) {
+    return { ok: false, status: 403, error: emailPolicyError };
+  }
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    resolvedTenantId,
     email,
-  });
-  const refreshToken = await createRefreshToken(user.id, resolvedTenantId);
+    "Email",
+  );
+  if (ssoRequiredResponse) {
+    return {
+      ok: false,
+      status: 403,
+      error: "Email login is disabled because this email domain requires SSO",
+    };
+  }
+  await ensureUserTenantLink(user.id, resolvedTenantId);
+  if (isNew) {
+    dispatchUserCreated(resolvedTenantId, user.id, "auth.email", { hasEmail: true });
+  }
+
+  const response = await buildAuthOrMfaResponse(
+    user.id,
+    resolvedTenantId,
+    walletAddress ?? "",
+    {
+      userId: user.id,
+      email,
+      authMethod: "email",
+    },
+    { id: user.id, email, walletAddress },
+    c,
+  );
+  if (response.ok === false) {
+    return {
+      ok: false,
+      status: typeof response.status === "number" ? (response.status as 400 | 403 | 404) : 403,
+      error: typeof response.error === "string" ? response.error : "Authentication failed",
+    };
+  }
 
   return {
     ok: true,
-    token,
-    refreshToken,
-    user: { id: user.id, email, walletAddress },
+    response,
   };
 }
 
@@ -1158,6 +2901,14 @@ function buildEmailAuthRedirectUrl(params?: Record<string, string | undefined>):
     if (value) redirectUrl.searchParams.set(key, value);
   }
   return redirectUrl.toString();
+}
+
+function setRedirectFragment(url: URL, params: Record<string, string | undefined>): void {
+  const fragment = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value) fragment.set(key, value);
+  }
+  url.hash = fragment.toString();
 }
 
 function redirectEmailAuthFailure(c: Context, reason: string): Response {
@@ -1177,6 +2928,127 @@ const auth = new Hono();
 // ── Discovery ─────────────────────────────────────────────────────────────────
 
 /**
+ * POST /sso/discover
+ * Public discovery endpoint for Privy-style dashboard/team SSO routing.
+ * Returns a tenant only after the email domain has been verified by a tenant
+ * admin, so unverified drafts cannot hijack login.
+ */
+auth.post("/sso/discover", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  const domain = normalizeEmailDomain(body && typeof body === "object" ? (body as { email?: unknown }).email : null);
+  if (!domain) {
+    return c.json<ApiResponse>({ ok: false, error: "Valid email is required" }, 400);
+  }
+
+  const rows = await getDb()
+    .select({
+      tenantId: tenantSsoDomains.tenantId,
+      domain: tenantSsoDomains.domain,
+      ssoRequired: tenantSsoDomains.ssoRequired,
+    })
+    .from(tenantSsoDomains)
+    .where(and(eq(tenantSsoDomains.domain, domain), eq(tenantSsoDomains.status, "verified")))
+    .limit(2);
+
+  const data: SsoDiscoveryResult =
+    rows.length === 1
+      ? { domain, tenantId: rows[0].tenantId, ssoRequired: rows[0].ssoRequired, available: true }
+      : { domain, tenantId: null, ssoRequired: false, available: false };
+  return c.json<ApiResponse<SsoDiscoveryResult>>({ ok: true, data });
+});
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function samlMetadataXml(config: TenantSamlSsoConfig): string {
+  const entityId = escapeXml(config.spEntityId);
+  const acsUrl = escapeXml(config.acsUrl);
+  const nameIdFormat = escapeXml(
+    config.nameIdFormat ?? "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+  );
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="${entityId}">
+  <SPSSODescriptor AuthnRequestsSigned="false" WantAssertionsSigned="true" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <NameIDFormat>${nameIdFormat}</NameIDFormat>
+    <AssertionConsumerService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="${acsUrl}" index="0" isDefault="true"/>
+  </SPSSODescriptor>
+</EntityDescriptor>`;
+}
+
+async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoConfig | null> {
+  const [row] = await getDb()
+    .select()
+    .from(tenantSamlSsoConfigs)
+    .where(
+      and(
+        eq(tenantSamlSsoConfigs.tenantId, tenantId),
+        eq(tenantSamlSsoConfigs.enabled, true),
+        eq(tenantSamlSsoConfigs.status, "active"),
+      ),
+    );
+  if (!row) return null;
+  const urls = buildSamlServiceProviderUrls(tenantId);
+  if (row.spEntityId !== urls.spEntityId || row.acsUrl !== urls.acsUrl) return null;
+  return {
+    tenantId: row.tenantId,
+    enabled: row.enabled,
+    status: row.status as TenantSamlSsoConfig["status"],
+    idpEntityId: row.idpEntityId,
+    idpSsoUrl: row.idpSsoUrl,
+    idpCertPems: row.idpCertPems,
+    spEntityId: row.spEntityId,
+    acsUrl: row.acsUrl,
+    nameIdFormat: row.nameIdFormat ?? undefined,
+    emailAttribute: row.emailAttribute,
+    groupsAttribute: row.groupsAttribute ?? undefined,
+    allowJitProvisioning: row.allowJitProvisioning,
+    jitDefaultRole: "viewer",
+    lastTestedAt: row.lastTestedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+/**
+ * GET /saml/:tenantId/metadata
+ * Public SAML SP metadata for dashboard/team SSO IdP setup.
+ */
+auth.get("/saml/:tenantId/metadata", async (c) => {
+  const tenantId = c.req.param("tenantId") as string;
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id" }, 400);
+  }
+  const config = await getActiveSamlSsoConfig(tenantId);
+  if (!config) return c.json<ApiResponse>({ ok: false, error: "SAML SSO is not configured" }, 404);
+  return c.text(samlMetadataXml(config), 200, { "Content-Type": "application/samlmetadata+xml" });
+});
+
+/**
+ * POST /saml/:tenantId/acs
+ * Placeholder ACS endpoint. Login remains disabled until SAML signature,
+ * audience, recipient, expiry, domain, and replay fixtures are enforced.
+ */
+auth.post("/saml/:tenantId/acs", async (c) => {
+  const tenantId = c.req.param("tenantId") as string;
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id" }, 400);
+  }
+  return c.json<ApiResponse>(
+    {
+      ok: false,
+      error: "SAML ACS is not enabled until signed assertion validation and replay protection are configured",
+    },
+    501,
+  );
+});
+
+/**
  * GET /providers
  * Public endpoint. Returns which authentication methods are enabled on this
  * server so a client SDK (e.g. @stwd/sdk) can render the right sign-in UI.
@@ -1191,16 +3063,20 @@ const auth = new Hono();
  * to advertise OAuth as disabled even though the underlying authorize
  * endpoints had working credentials.
  */
-auth.get("/providers", (c) => {
-  const oauthClientIds: Record<string, string | undefined> = {
-    google: process.env.GOOGLE_CLIENT_ID || process.env.STEWARD_OAUTH_GOOGLE_CLIENT_ID,
-    discord: process.env.DISCORD_CLIENT_ID || process.env.STEWARD_OAUTH_DISCORD_CLIENT_ID,
-    github: process.env.GITHUB_CLIENT_ID || process.env.STEWARD_OAUTH_GITHUB_CLIENT_ID,
-    twitter: process.env.TWITTER_CLIENT_ID || process.env.STEWARD_OAUTH_TWITTER_CLIENT_ID,
-  };
-  const oauth = Object.entries(oauthClientIds)
-    .filter(([, value]) => typeof value === "string" && value.trim().length > 0)
-    .map(([name]) => name);
+auth.get("/providers", async (c) => {
+  const oauth = getEnabledProviders();
+  const tenantId = c.req.query("tenantId")?.trim() || c.req.header("X-Steward-Tenant")?.trim();
+  const authAbuseConfig = tenantId ? await getTenantAuthAbuseConfig(tenantId) : {};
+  const loginMethods = authAbuseConfig.loginMethods ?? {};
+  const methodEnabled = (method: keyof NonNullable<typeof authAbuseConfig.loginMethods>) =>
+    loginMethods[method] !== false;
+  const enabledOauth = oauth.filter((provider) => loginMethods.oauth?.[provider] !== false);
+  const oidc = tenantId
+    ? (await getTenantOidcProviders(tenantId))
+        .filter((provider) => provider.enabled !== false)
+        .filter((provider) => loginMethods.oidc?.[loginMethodProviderKey(provider.id)] !== false)
+        .map((provider) => provider.id)
+    : [];
 
   // Returns the providers payload at the top level, NOT wrapped in { ok, data }.
   // The @stwd/sdk authRequest helper returns the full parsed body as `res.data`,
@@ -1213,16 +3089,764 @@ auth.get("/providers", (c) => {
   // were checking for it keep working.
   return c.json({
     ok: true,
-    passkey: true,
-    email: true,
-    siwe: true,
-    siws: true,
-    google: oauth.includes("google"),
-    discord: oauth.includes("discord"),
-    github: oauth.includes("github"),
-    twitter: oauth.includes("twitter"),
-    oauth,
+    passkey: methodEnabled("passkey"),
+    email: methodEnabled("email"),
+    sms: methodEnabled("sms"),
+    whatsapp: methodEnabled("whatsapp") && isWhatsAppOtpEnabled(),
+    totp: methodEnabled("totp"),
+    siwe: methodEnabled("siwe"),
+    siws: methodEnabled("siws"),
+    google: enabledOauth.includes("google"),
+    discord: enabledOauth.includes("discord"),
+    github: enabledOauth.includes("github"),
+    twitter: enabledOauth.includes("twitter"),
+    telegram: methodEnabled("telegram") && Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim()),
+    farcaster: methodEnabled("farcaster") && isFarcasterLoginEnabled(),
+    linkedin: enabledOauth.includes("linkedin"),
+    spotify: enabledOauth.includes("spotify"),
+    twitch: enabledOauth.includes("twitch"),
+    instagram: enabledOauth.includes("instagram"),
+    line: enabledOauth.includes("line"),
+    oauth: enabledOauth,
+    jwt: oidc.length > 0,
+    oidc,
+    captcha: publicAuthAbuseConfig(authAbuseConfig).captcha,
   });
+});
+
+auth.post("/telegram/challenge", async (c) => {
+  const rl = await checkAuthRateLimit(c, "telegram-challenge", 60_000, 30);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many Telegram login attempts. Try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ tenantId?: unknown }>(c);
+  if (body === null) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  if (!botToken) {
+    return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
+  }
+
+  const requestedTenantId =
+    typeof body?.tenantId === "string" && body.tenantId.trim()
+      ? body.tenantId.trim()
+      : c.req.header("X-Steward-Tenant")?.trim() || undefined;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, requestedTenantId, "telegram");
+  if (methodResponse) return methodResponse;
+  const originHost = await requiredTelegramOriginHostFromRequest(c, requestedTenantId);
+  if (!originHost) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Telegram login challenges require an allowed Origin or Referer" },
+      400,
+    );
+  }
+  const challenge = await createTelegramLoginChallenge({
+    tenantId: requestedTenantId,
+    originHost,
+  });
+  return c.json({
+    challengeId: challenge.challengeId,
+    expiresAt: new Date(challenge.expiresAt).toISOString(),
+  });
+});
+
+auth.post("/telegram/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "telegram-verify", 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many Telegram login attempts. Try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<
+    TelegramLoginPayload & { tenantId?: unknown; challengeId?: unknown }
+  >(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+
+  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  if (!botToken) {
+    return c.json<ApiResponse>({ ok: false, error: "Telegram login is not configured" }, 503);
+  }
+
+  const { tenantId: requestedBodyTenantId, challengeId, ...telegramPayload } = body;
+  if (typeof challengeId !== "string" || !challengeId.trim()) {
+    return c.json<ApiResponse>({ ok: false, error: "challengeId is required" }, 400);
+  }
+  const bodyTenantId =
+    typeof requestedBodyTenantId === "string" && requestedBodyTenantId.trim()
+      ? requestedBodyTenantId.trim()
+      : undefined;
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim() || undefined;
+  if (bodyTenantId && headerTenantId && bodyTenantId !== headerTenantId) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "tenantId and X-Steward-Tenant must match" },
+      400,
+    );
+  }
+  const requestedTenantId = bodyTenantId || headerTenantId;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, requestedTenantId, "telegram");
+  if (methodResponse) return methodResponse;
+  const challengeError = validateConsumedTelegramLoginChallenge(
+    await consumeTelegramLoginChallenge(challengeId.trim()),
+    {
+      tenantId: requestedTenantId,
+      originHost: originHostFromRequest(c),
+    },
+  );
+  if (challengeError) {
+    return c.json<ApiResponse>({ ok: false, error: challengeError }, 401);
+  }
+
+  let telegramUser: ReturnType<typeof verifyTelegramLogin>;
+  try {
+    telegramUser = verifyTelegramLogin(telegramPayload, botToken, {
+      maxAgeSec: TELEGRAM_LOGIN_MAX_AGE_SEC,
+    });
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid Telegram login" },
+      401,
+    );
+  }
+
+  const displayName =
+    [telegramUser.firstName, telegramUser.lastName].filter(Boolean).join(" ").trim() ||
+    telegramUser.username ||
+    `telegram:${telegramUser.id}`;
+  const [existingTelegramAccount] = await getDb()
+    .select({ userId: accounts.userId })
+    .from(accounts)
+    .where(and(eq(accounts.provider, "telegram"), eq(accounts.providerAccountId, telegramUser.id)));
+  if (!existingTelegramAccount && requestedTenantId) {
+    const jitTenant = await validateOidcJitTenant(requestedTenantId);
+    if (!jitTenant.ok) {
+      return c.json<ApiResponse>({ ok: false, error: jitTenant.error }, jitTenant.status);
+    }
+  }
+  const telegramHash =
+    typeof telegramPayload.hash === "string" ? telegramPayload.hash : String(telegramPayload.hash);
+  if (!(await consumeTelegramLoginHashOnce(telegramHash, telegramUser.authDate))) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Telegram login payload was already used" },
+      401,
+    );
+  }
+  const { user, isNew } = await findOrCreateExternalAccountUserWithStatus({
+    provider: "telegram",
+    providerAccountId: telegramUser.id,
+    name: displayName,
+    image: telegramUser.photoUrl,
+  });
+
+  try {
+    const updates: Partial<typeof users.$inferInsert> = {};
+    if (!user.name && displayName) updates.name = displayName;
+    if (!user.image && telegramUser.photoUrl) updates.image = telegramUser.photoUrl;
+    if (Object.keys(updates).length > 0) {
+      await getDb().update(users).set(updates).where(eq(users.id, user.id));
+    }
+
+    let walletAddress = user.walletAddress;
+    try {
+      const wallet = await provisionWalletForUser(user.id, `telegram:${telegramUser.id}`);
+      walletAddress = wallet.walletAddress;
+    } catch (err) {
+      console.error("[TelegramAuth] Wallet provision failed:", err);
+    }
+
+    const tenantResult = await resolveAndValidateTenant(c, user.id, requestedTenantId);
+    if (!tenantResult.ok) {
+      return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+    }
+    const resolvedMethodResponse = await requireTenantLoginMethodAllowed(
+      c,
+      tenantResult.tenantId,
+      "telegram",
+    );
+    if (resolvedMethodResponse) return resolvedMethodResponse;
+    await ensureUserTenantLink(user.id, tenantResult.tenantId);
+    if (isNew) {
+      dispatchUserCreated(tenantResult.tenantId, user.id, "auth.telegram", {
+        provider: "telegram",
+        hasEmail: false,
+      });
+    }
+
+    const response = await buildAuthOrMfaResponse(
+      user.id,
+      tenantResult.tenantId,
+      walletAddress ?? "",
+      {
+        userId: user.id,
+        authMethod: "telegram",
+        telegramId: telegramUser.id,
+      },
+      {
+        id: user.id,
+        email: null,
+        name: displayName,
+        image: telegramUser.photoUrl,
+        walletAddress,
+        telegramId: telegramUser.id,
+        telegramUsername: telegramUser.username,
+      },
+      c,
+    );
+    return authExchangeJson(c, response);
+  } catch (error) {
+    console.error("[TelegramAuth] verify failed:", error);
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Telegram login failed" },
+      500,
+    );
+  }
+});
+
+auth.post("/farcaster/verify", async (c) => {
+  if (!isFarcasterLoginEnabled()) {
+    return c.json<ApiResponse>({ ok: false, error: "Farcaster login is not configured" }, 503);
+  }
+
+  const rl = await checkAuthRateLimit(c, "farcaster-verify", 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many Farcaster login attempts. Try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<FarcasterLoginPayload & { tenantId?: unknown }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+
+  const { tenantId: requestedBodyTenantId, ...farcasterPayload } = body;
+  let farcasterUser: Awaited<ReturnType<typeof verifyFarcasterLogin>>;
+  try {
+    farcasterUser = await verifyFarcasterLogin(farcasterPayload, {
+      expectedDomain: getAllowedSiweDomains(c),
+      maxMessageAgeMs: 10 * 60 * 1000,
+    });
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid Farcaster login" },
+      401,
+    );
+  }
+
+  const bodyTenantId =
+    typeof requestedBodyTenantId === "string" && requestedBodyTenantId.trim()
+      ? requestedBodyTenantId.trim()
+      : undefined;
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim() || undefined;
+  if (bodyTenantId && headerTenantId && bodyTenantId !== headerTenantId) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "tenantId and X-Steward-Tenant must match" },
+      400,
+    );
+  }
+  const requestedTenantId = bodyTenantId || headerTenantId;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, requestedTenantId, "farcaster");
+  if (methodResponse) return methodResponse;
+  const nonceError = validateConsumedSiweNonce(
+    await consumeSiweNonce(farcasterUser.message.nonce),
+    {
+      domain: farcasterUser.message.domain,
+      tenantId: requestedTenantId,
+    },
+  );
+  if (nonceError) {
+    return c.json<ApiResponse>({ ok: false, error: nonceError }, 401);
+  }
+
+  const displayName = `farcaster:${farcasterUser.custodyAddress}`;
+  const providerAccountId = `address:${farcasterUser.custodyAddress.toLowerCase()}`;
+
+  const [existingFarcasterAccount] = await getDb()
+    .select({ userId: accounts.userId })
+    .from(accounts)
+    .where(
+      and(eq(accounts.provider, "farcaster"), eq(accounts.providerAccountId, providerAccountId)),
+    );
+  if (!existingFarcasterAccount && requestedTenantId) {
+    const jitTenant = await validateOidcJitTenant(requestedTenantId);
+    if (!jitTenant.ok) {
+      return c.json<ApiResponse>({ ok: false, error: jitTenant.error }, jitTenant.status);
+    }
+  }
+
+  const { user, isNew } = await findOrCreateExternalAccountUserWithStatus({
+    provider: "farcaster",
+    providerAccountId,
+    name: displayName,
+  });
+
+  try {
+    const updates: Partial<typeof users.$inferInsert> = {};
+    if (!user.name && displayName) updates.name = displayName;
+    if (!user.walletAddress) {
+      updates.walletAddress = farcasterUser.custodyAddress;
+      updates.walletChain = "ethereum";
+    }
+    if (Object.keys(updates).length > 0) {
+      await getDb().update(users).set(updates).where(eq(users.id, user.id));
+    }
+
+    let walletAddress = user.walletAddress ?? farcasterUser.custodyAddress;
+    try {
+      const wallet = await provisionWalletForUser(user.id, `farcaster:${providerAccountId}`);
+      walletAddress = wallet.walletAddress;
+    } catch (err) {
+      console.error("[FarcasterAuth] Wallet provision failed:", err);
+    }
+
+    const tenantResult = await resolveAndValidateTenant(c, user.id, requestedTenantId);
+    if (!tenantResult.ok) {
+      return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+    }
+    const resolvedMethodResponse = await requireTenantLoginMethodAllowed(
+      c,
+      tenantResult.tenantId,
+      "farcaster",
+    );
+    if (resolvedMethodResponse) return resolvedMethodResponse;
+    await ensureUserTenantLink(user.id, tenantResult.tenantId);
+    if (isNew) {
+      dispatchUserCreated(tenantResult.tenantId, user.id, "auth.farcaster", {
+        provider: "farcaster",
+        custodyAddress: farcasterUser.custodyAddress,
+        authoritativeCustody: false,
+      });
+    }
+
+    const response = await buildAuthOrMfaResponse(
+      user.id,
+      tenantResult.tenantId,
+      walletAddress ?? "",
+      {
+        userId: user.id,
+        authMethod: "farcaster",
+        custodyAddress: farcasterUser.custodyAddress,
+      },
+      {
+        id: user.id,
+        email: null,
+        name: displayName,
+        walletAddress,
+        custodyAddress: farcasterUser.custodyAddress,
+      },
+      c,
+    );
+    return authExchangeJson(c, response);
+  } catch (error) {
+    console.error("[FarcasterAuth] verify failed:", error);
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Farcaster login failed" },
+      500,
+    );
+  }
+});
+
+/**
+ * POST /jwt/login (direct OIDC id_token login)
+ *
+ * Accepts an id_token the client already obtained from the IdP and exchanges it
+ * for a Steward session. By design this flow is NOT nonce-bound: there is no
+ * server-issued nonce echoed back in the id_token, so the only replay bound is
+ * the id_token's own `exp`. A captured id_token can be re-submitted until it
+ * expires. Signature, issuer, audience, and azp (OIDC §3.1.3.7) are still fully
+ * verified in verifyOidcJwt, so substitution/forgery is prevented — only replay
+ * within the token lifetime is possible. Prefer the nonce-bound authorization-
+ * code flow (/oidc/:provider/authorize → /oidc/:provider/callback), which binds
+ * a one-time server nonce into the id_token and eliminates the replay window.
+ */
+auth.post("/jwt/login", async (c) => {
+  const rl = await checkAuthRateLimit(c, "jwt", 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many JWT login attempts. Try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{
+    tenantId?: unknown;
+    providerId?: unknown;
+    token?: unknown;
+  }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  if (
+    typeof body.tenantId !== "string" ||
+    body.tenantId.trim() === "" ||
+    typeof body.token !== "string" ||
+    body.token.trim() === ""
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "tenantId and token are required" }, 400);
+  }
+
+  const tenantId = body.tenantId.trim();
+  const headerTenant = c.req.header("X-Steward-Tenant")?.trim();
+  if (headerTenant && headerTenant !== tenantId) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "tenantId does not match X-Steward-Tenant" },
+      400,
+    );
+  }
+
+  const providerId =
+    typeof body.providerId === "string" && body.providerId.trim() !== ""
+      ? body.providerId.trim()
+      : undefined;
+  const provider = selectOidcProvider(await getTenantOidcProviders(tenantId), providerId);
+  if (!provider) {
+    return c.json<ApiResponse>({ ok: false, error: "OIDC provider not found or disabled" }, 404);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "oidc", provider.id);
+  if (methodResponse) return methodResponse;
+
+  try {
+    const verified = await verifyOidcJwt(tenantId, provider, body.token.trim());
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: null,
+      action: "auth.oidc.login.authorized",
+      resourceType: "session",
+      metadata: {
+        providerId: provider.id,
+        issuer: provider.issuer,
+        oidcSubject: verified.subject,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    if (!verified.email || verified.emailVerified !== true) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Enterprise OIDC SSO requires a verified email claim" },
+        403,
+      );
+    }
+    if (!(await isVerifiedSsoEmailDomainForTenant(tenantId, verified.email))) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Enterprise OIDC SSO email domain is not verified for this tenant" },
+        403,
+      );
+    }
+    const result = await provisionOidcUser({
+      c,
+      tenantId,
+      provider,
+      subject: verified.subject,
+      email: verified.email,
+      emailVerified: verified.emailVerified,
+      name: verified.name,
+      picture: verified.picture,
+    });
+    if (!result.ok) {
+      return c.json<ApiResponse>({ ok: false, error: result.error }, result.status ?? 500);
+    }
+    return authExchangeJson(c, result.response);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "OIDC token verification failed",
+      },
+      401,
+    );
+  }
+});
+
+/**
+ * GET /oidc/:provider/authorize
+ *
+ * Enterprise OIDC authorization-code SSO. This mirrors the built-in OAuth
+ * nonce-exchange flow: Steward owns the provider callback, validates the
+ * ID token, then redirects the app with a one-time code that must be redeemed
+ * through /auth/oauth/exchange.
+ */
+auth.get("/oidc/:provider/authorize", async (c) => {
+  const providerId = c.req.param("provider");
+  const rl = await checkAuthRateLimit(c, `oidc-authorize:${providerId}`, 60_000, 30);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many OIDC authorization requests. Please try again later." },
+      429,
+    );
+  }
+
+  const tenantId = c.req.query("tenant_id")?.trim() || c.req.query("tenantId")?.trim() || "";
+  const redirectUri = c.req.query("redirect_uri")?.trim() || c.req.query("redirectUri")?.trim();
+  const appState = c.req.query("state")?.trim() || undefined;
+  const rawClientId = c.req.query("app_client_id") ?? c.req.query("appClientId");
+  const clientId = rawClientId ? normalizePublicClientId(rawClientId) : undefined;
+  const responseType = c.req.query("response_type")?.trim() || "code";
+  const codeChallenge = c.req.query("code_challenge")?.trim() || undefined;
+  const codeChallengeMethod = c.req.query("code_challenge_method")?.trim() || "S256";
+
+  if (!tenantId) return c.json<ApiResponse>({ ok: false, error: "tenant_id is required" }, 400);
+  if (!redirectUri) {
+    return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
+  }
+  if (rawClientId && !clientId) {
+    return c.json<ApiResponse>({ ok: false, error: "app_client_id is invalid" }, 400);
+  }
+  if (responseType !== "code") {
+    return c.json<ApiResponse>({ ok: false, error: "response_type must be 'code'" }, 400);
+  }
+  if (!codeChallenge) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "code_challenge is required for response_type=code" },
+      400,
+    );
+  }
+  if (codeChallengeMethod !== "S256") {
+    return c.json<ApiResponse>({ ok: false, error: "code_challenge_method must be 'S256'" }, 400);
+  }
+
+  const provider = selectOidcProvider(await getTenantOidcProviders(tenantId), providerId);
+  if (!provider) {
+    return c.json<ApiResponse>({ ok: false, error: "OIDC provider not found or disabled" }, 404);
+  }
+  if (!provider.clientId || !provider.authorizationUrl || !provider.tokenUrl) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "OIDC provider is not configured for authorization-code login" },
+      400,
+    );
+  }
+
+  const methodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    tenantId,
+    "oidc",
+    provider.id,
+    clientId,
+  );
+  if (methodResponse) return methodResponse;
+
+  try {
+    await assertAllowedOAuthRedirectUri(redirectUri, tenantId, clientId);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      400,
+    );
+  }
+
+  const state = randomBase64Url(24);
+  const nonce = randomBase64Url(24);
+  const codeVerifier = randomBase64Url(48);
+  const providerCodeChallenge = await pkceChallengeForVerifier(codeVerifier, "S256");
+  if (!providerCodeChallenge) {
+    return c.json<ApiResponse>({ ok: false, error: "Failed to generate PKCE challenge" }, 500);
+  }
+
+  const callbackUrl = buildOidcCallbackUrl(c, provider.id);
+  const scopes = provider.scopes?.length ? provider.scopes : ["openid", "email", "profile"];
+  const authUrl = new URL(provider.authorizationUrl);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("client_id", provider.clientId);
+  authUrl.searchParams.set("redirect_uri", callbackUrl);
+  authUrl.searchParams.set("scope", Array.from(new Set(["openid", ...scopes])).join(" "));
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("nonce", nonce);
+  authUrl.searchParams.set("code_challenge", providerCodeChallenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
+
+  await getChallengeStore().set(
+    `oidc:${state}`,
+    JSON.stringify({
+      providerId: provider.id,
+      tenantId,
+      clientId,
+      redirectUri,
+      appState,
+      codeChallenge,
+      codeChallengeMethod,
+      nonce,
+      codeVerifier,
+    }),
+  );
+
+  return c.redirect(authUrl.toString(), 302);
+});
+
+auth.get("/oidc/:provider/callback", async (c) => {
+  const providerId = c.req.param("provider");
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  const errorParam = c.req.query("error");
+
+  if (errorParam) {
+    return c.json<ApiResponse>({ ok: false, error: `OIDC error: ${errorParam}` }, 400);
+  }
+  if (!code || !state) {
+    return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
+  }
+
+  const rawPayload = await getChallengeStore().consume(`oidc:${state}`);
+  if (!rawPayload) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OIDC state" }, 401);
+  }
+
+  let stateData: {
+    providerId: string;
+    tenantId: string;
+    clientId?: string;
+    redirectUri: string;
+    appState?: string;
+    codeChallenge?: string;
+    codeChallengeMethod?: string;
+    nonce: string;
+    codeVerifier: string;
+  };
+  try {
+    stateData = JSON.parse(rawPayload) as typeof stateData;
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Malformed OIDC state payload" }, 400);
+  }
+  if (stateData.providerId !== providerId) {
+    return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
+  }
+
+  const provider = selectOidcProvider(await getTenantOidcProviders(stateData.tenantId), providerId);
+  if (!provider?.clientId || !provider.tokenUrl) {
+    return c.json<ApiResponse>({ ok: false, error: "OIDC provider not found or disabled" }, 404);
+  }
+
+  const methodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    stateData.tenantId,
+    "oidc",
+    provider.id,
+    stateData.clientId,
+  );
+  if (methodResponse) return methodResponse;
+
+  let redirectUrl: URL;
+  try {
+    redirectUrl = await assertAllowedOAuthRedirectUri(
+      stateData.redirectUri,
+      stateData.tenantId,
+      stateData.clientId,
+    );
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      400,
+    );
+  }
+
+  let idToken: string;
+  try {
+    idToken = await exchangeOidcAuthorizationCode({
+      provider,
+      code,
+      redirectUri: buildOidcCallbackUrl(c, provider.id),
+      codeVerifier: stateData.codeVerifier,
+    });
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "OIDC token exchange failed" },
+      502,
+    );
+  }
+
+  try {
+    const verified = await verifyOidcJwt(stateData.tenantId, provider, idToken);
+    if (verified.claims.nonce !== stateData.nonce) {
+      return c.json<ApiResponse>({ ok: false, error: "OIDC nonce mismatch" }, 401);
+    }
+    if (!verified.email || verified.emailVerified !== true) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Enterprise OIDC SSO requires a verified email claim" },
+        403,
+      );
+    }
+    if (!(await isVerifiedSsoEmailDomainForTenant(stateData.tenantId, verified.email))) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Enterprise OIDC SSO email domain is not verified for this tenant" },
+        403,
+      );
+    }
+    await writeAuditEvent({
+      tenantId: stateData.tenantId,
+      actorType: "user",
+      actorId: null,
+      action: "auth.oidc.login.authorized",
+      resourceType: "session",
+      metadata: {
+        providerId: provider.id,
+        issuer: provider.issuer,
+        oidcSubject: verified.subject,
+        flow: "authorization_code",
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    const result = await provisionOidcUser({
+      c,
+      tenantId: stateData.tenantId,
+      provider,
+      subject: verified.subject,
+      email: verified.email,
+      emailVerified: verified.emailVerified,
+      name: verified.name,
+      picture: verified.picture,
+      tenantRole: "viewer",
+    });
+    if (!result.ok) {
+      redirectUrl.searchParams.set("error", result.error);
+      return c.redirect(redirectUrl.toString(), 302);
+    }
+    if (result.response.ok === false) {
+      redirectUrl.searchParams.set("error", String(result.response.error || "auth_failed"));
+      return c.redirect(redirectUrl.toString(), 302);
+    }
+    if (result.response.mfaRequired) {
+      redirectUrl.searchParams.set("error", "mfa_required");
+      return c.redirect(redirectUrl.toString(), 302);
+    }
+
+    const exchangeCode = randomBase64Url(32);
+    const issuedAt = Date.now();
+    const expiresAt = issuedAt + OAUTH_CODE_TTL_MS;
+    await getOAuthCodeStore().set(
+      `oauth-code:${exchangeCode}`,
+      JSON.stringify({
+        providerName: `oidc:${provider.id}`,
+        token: result.response.token,
+        refreshToken: result.response.refreshToken,
+        redirectUri: stateData.redirectUri,
+        tenantId: stateData.tenantId,
+        codeChallenge: stateData.codeChallenge,
+        codeChallengeMethod: stateData.codeChallengeMethod ?? "S256",
+        expiresAt,
+        expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+      }),
+    );
+    setRedirectFragment(redirectUrl, { code: exchangeCode, state: stateData.appState });
+    return c.redirect(redirectUrl.toString(), 302);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "OIDC token verification failed",
+      },
+      401,
+    );
+  }
 });
 
 /**
@@ -1233,7 +3857,7 @@ auth.get("/providers", (c) => {
  * — returns 404 in any other configuration so it cannot leak in prod.
  */
 auth.get("/test/inbox/:email", (c) => {
-  if (!isMockEmailEnabled()) {
+  if (!isMockEmailEnabled() || !authTestInboxEnabled()) {
     return c.json<ApiResponse>({ ok: false, error: "Not found" }, 404);
   }
   const email = decodeURIComponent(c.req.param("email"));
@@ -1252,6 +3876,510 @@ auth.get("/test/inbox/:email", (c) => {
   });
 });
 
+auth.get("/test/sms-inbox/:phone", (c) => {
+  if (
+    process.env.SMS_PROVIDER !== "mock" ||
+    process.env.NODE_ENV === "production" ||
+    !authTestInboxEnabled()
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "Not found" }, 404);
+  }
+  const phone = decodeURIComponent(c.req.param("phone"));
+  const msg = MockSmsInbox.last(phone);
+  if (!msg) {
+    return c.json<ApiResponse>({ ok: false, error: "No message" }, 404);
+  }
+  return c.json({
+    ok: true,
+    to: msg.to,
+    body: msg.body,
+    code: msg.code,
+    sentAt: msg.sentAt.toISOString(),
+  });
+});
+
+/**
+ * POST /test/token
+ *
+ * Exchanges a tenant's explicitly enabled test-account credentials for a
+ * normal short-lived session token. This mirrors Privy-style app-review and
+ * automation credentials without exposing mock inboxes or bypassing tenant
+ * membership for arbitrary users.
+ */
+auth.post("/test/token", async (c) => {
+  // ⚠️ SECURITY WARNING — STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN ⚠️
+  // This endpoint mints a real, fully-privileged session token for a tenant's
+  // test-account credentials. It is hard-disabled in production by default.
+  // Setting STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN=true in a production
+  // environment is DANGEROUS: anyone who learns the (often static) test-account
+  // email/phone/OTP can obtain a valid session. Only enable it for short,
+  // supervised app-review / automation windows and disable it immediately
+  // afterward. Never leave it enabled on an internet-reachable prod deploy.
+  if (
+    process.env.NODE_ENV === "production" &&
+    process.env.STEWARD_ENABLE_PROD_TEST_ACCOUNT_TOKEN !== "true"
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Test account token exchange is disabled" },
+      404,
+    );
+  }
+
+  const rl = await checkAuthRateLimit(c, "test-account-token", 10_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many test account attempts. Try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{
+    tenantId?: string;
+    email?: string;
+    phone?: string;
+    otp?: string;
+  }>(c);
+  const tenantId = c.req.header("X-Steward-Tenant")?.trim() || body?.tenantId?.trim();
+  if (!tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "tenantId is required" }, 400);
+  }
+
+  const [row] = await getDb()
+    .select({ testAccount: tenantConfigs.testAccount })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+  const testAccount = row?.testAccount;
+  if (!isEnabledTestAccount(testAccount)) {
+    return c.json<ApiResponse>(invalidTestAccountCredentials(), 401);
+  }
+
+  const emailMatches = testCredentialMatches(body?.email, testAccount.email);
+  const phoneMatches = testCredentialMatches(body?.phone, testAccount.phone);
+  if (!emailMatches && !phoneMatches) {
+    return c.json<ApiResponse>(invalidTestAccountCredentials(), 401);
+  }
+
+  const credentialSubject = hashSha256Hex(
+    [
+      tenantId.toLowerCase(),
+      emailMatches ? `email:${testAccount.email.trim().toLowerCase()}` : "",
+      phoneMatches ? `phone:${testAccount.phone.trim()}` : "",
+    ].join(":"),
+  );
+  const credentialRl = await checkAuthRateLimit(
+    c,
+    "test-account-token-credential",
+    10 * 60_000,
+    5,
+    credentialSubject,
+  );
+  if (!credentialRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many test account attempts. Try again later." },
+      429,
+    );
+  }
+
+  if (!testAccountOtpMatches(body?.otp, testAccount)) {
+    return c.json<ApiResponse>(invalidTestAccountCredentials(), 401);
+  }
+
+  if (emailMatches) {
+    const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "email");
+    if (methodResponse) return methodResponse;
+    const authResult = await completeEmailAuth(c, testAccount.email, tenantId, {
+      allowTenantJoin: true,
+    });
+    if (!authResult.ok) {
+      return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
+    }
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId:
+        typeof authResult.response.user === "object" &&
+        authResult.response.user !== null &&
+        "id" in authResult.response.user
+          ? String(authResult.response.user.id)
+          : null,
+      action: "auth.test_account.login",
+      resourceType: "session",
+      metadata: { method: "email" },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: null,
+    });
+    return authExchangeJson(c, authResult.response);
+  }
+
+  const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "sms");
+  if (methodResponse) return methodResponse;
+  const { user, isNew } = await findOrCreatePhoneUserWithStatus(testAccount.phone);
+  await ensurePersonalTenant(user.id, `Phone ${testAccount.phone.slice(-4)}`);
+  await ensureUserTenantLink(user.id, tenantId, "member");
+  if (isNew) {
+    dispatchUserCreated(tenantId, user.id, "auth.test_account", {
+      hasPhone: true,
+    });
+  }
+
+  const response = await buildAuthOrMfaResponse(
+    user.id,
+    tenantId,
+    user.walletAddress ?? "",
+    {
+      userId: user.id,
+      phoneHash: hashSha256Hex(testAccount.phone),
+      authMethod: "test_account",
+    },
+    {
+      id: user.id,
+      email: "",
+      walletAddress: user.walletAddress,
+    },
+  );
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: user.id,
+    action: "auth.test_account.login",
+    resourceType: "session",
+    metadata: { method: "phone" },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: null,
+  });
+  return authExchangeJson(c, response);
+});
+
+// ── SMS OTP ─────────────────────────────────────────────────────────────────
+
+auth.post("/sms/send", async (c) => {
+  const rl = await checkAuthRateLimit(c, "sms-send", 60_000, 3);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{ phone: string; tenantId?: string; captchaToken?: string }>(c);
+  if (!isValidE164(body?.phone)) {
+    return c.json<ApiResponse>({ ok: false, error: "phone must be E.164" }, 400);
+  }
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const bodyTenantId = body.tenantId?.trim();
+  const resolvedTenantId = authTenantHint(c, body.tenantId);
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    resolvedTenantId,
+    Boolean(headerTenantId || bodyTenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "sms");
+  if (methodResponse) return methodResponse;
+  const authAbuseConfig = await getTenantAuthAbuseConfig(resolvedTenantId);
+  const phonePolicyError = validatePhoneAbusePolicy(body.phone, authAbuseConfig);
+  if (phonePolicyError) {
+    return c.json<ApiResponse>({ ok: false, error: phonePolicyError }, 400);
+  }
+  const captcha = await verifyCaptchaToken(
+    authAbuseConfig,
+    "sms_otp",
+    body.captchaToken,
+    trustedRemoteIp(c),
+  );
+  if (!captcha.ok) {
+    return c.json<ApiResponse>(
+      { ok: false, error: captcha.error },
+      captcha.status as 400 | 502 | 503,
+    );
+  }
+  const phoneRl = await checkAuthRateLimit(c, "sms-send-destination", 10 * 60_000, 5, body.phone);
+  if (!phoneRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+
+  let expiresAt: Date;
+  try {
+    ({ expiresAt } = await getPhoneAuth().sendOtp(body.phone, smsLoginPurpose(resolvedTenantId)));
+  } catch (err) {
+    if (err instanceof Error && err.message === "SMS provider not configured") {
+      return c.json<ApiResponse>({ ok: false, error: "SMS provider not configured" }, 503);
+    }
+    throw err;
+  }
+  return c.json({ ok: true, expiresAt: expiresAt.toISOString() });
+});
+
+auth.post("/sms/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "sms-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{
+    phone: string;
+    code: string;
+    tenantId?: string;
+  }>(c);
+  if (!isValidE164(body?.phone) || typeof body?.code !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "phone and code are required" }, 400);
+  }
+
+  const otpTenantId = authTenantHint(c, body.tenantId);
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    otpTenantId,
+    Boolean(c.req.header("X-Steward-Tenant") || body.tenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(c, otpTenantId, "sms");
+  if (methodResponse) return methodResponse;
+  const otpPurpose = smsLoginPurpose(otpTenantId);
+
+  if (
+    (await getSmsVerifyFailedAttempts(body.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Too many invalid codes. Request a new code and try again later.",
+      },
+      429,
+    );
+  }
+
+  const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  if (!result.valid) {
+    await recordSmsVerifyFailure(body.phone, otpPurpose);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
+  }
+  await clearSmsVerifyFailures(body.phone, otpPurpose);
+
+  const { user, isNew } = await findOrCreatePhoneUserWithStatus(body.phone);
+  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const authAbuseConfig = await getTenantAuthAbuseConfig(tenantResult.tenantId);
+  const phonePolicyError = validatePhoneAbusePolicy(body.phone, authAbuseConfig);
+  if (phonePolicyError) {
+    return c.json<ApiResponse>({ ok: false, error: phonePolicyError }, 400);
+  }
+  await ensurePersonalTenant(user.id, `Phone ${body.phone.slice(-4)}`);
+  await ensureUserTenantLink(
+    user.id,
+    tenantResult.tenantId,
+    tenantResult.isPersonal ? "owner" : "member",
+  );
+  if (isNew) {
+    dispatchUserCreated(tenantResult.tenantId, user.id, "auth.sms", {
+      hasPhone: true,
+    });
+  }
+
+  return authExchangeJson(
+    c,
+    await buildAuthOrMfaResponse(
+      user.id,
+      tenantResult.tenantId,
+      user.walletAddress ?? "",
+      {
+        userId: user.id,
+        phoneHash: hashSha256Hex(body.phone),
+        authMethod: "sms",
+      },
+      {
+        id: user.id,
+        email: "",
+        walletAddress: user.walletAddress,
+      },
+      c,
+    ),
+  );
+});
+
+auth.post("/whatsapp/send", async (c) => {
+  if (!isWhatsAppOtpEnabled()) {
+    return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP is not configured" }, 503);
+  }
+
+  const rl = await checkAuthRateLimit(c, "whatsapp-send", 60_000, 3);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{ phone: string; tenantId?: string; captchaToken?: string }>(c);
+  if (!isValidE164(body?.phone)) {
+    return c.json<ApiResponse>({ ok: false, error: "phone must be E.164" }, 400);
+  }
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const bodyTenantId = body.tenantId?.trim();
+  const resolvedTenantId = authTenantHint(c, body.tenantId);
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    resolvedTenantId,
+    Boolean(headerTenantId || bodyTenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "whatsapp");
+  if (methodResponse) return methodResponse;
+  const authAbuseConfig = await getTenantAuthAbuseConfig(resolvedTenantId);
+  const phonePolicyError = validatePhoneAbusePolicy(body.phone, authAbuseConfig);
+  if (phonePolicyError) {
+    return c.json<ApiResponse>({ ok: false, error: phonePolicyError }, 400);
+  }
+  const captcha = await verifyCaptchaToken(
+    authAbuseConfig,
+    "sms_otp",
+    body.captchaToken,
+    trustedRemoteIp(c),
+  );
+  if (!captcha.ok) {
+    return c.json<ApiResponse>(
+      { ok: false, error: captcha.error },
+      captcha.status as 400 | 502 | 503,
+    );
+  }
+  const phoneRl = await checkAuthRateLimit(
+    c,
+    "whatsapp-send-destination",
+    10 * 60_000,
+    5,
+    body.phone,
+  );
+  if (!phoneRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+
+  let expiresAt: Date;
+  try {
+    ({ expiresAt } = await getPhoneAuth().sendOtp(
+      body.phone,
+      whatsappLoginPurpose(resolvedTenantId),
+    ));
+  } catch (err) {
+    if (err instanceof Error && err.message === "SMS provider not configured") {
+      return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP provider not configured" }, 503);
+    }
+    throw err;
+  }
+  return c.json({ ok: true, expiresAt: expiresAt.toISOString() });
+});
+
+auth.post("/whatsapp/verify", async (c) => {
+  if (!isWhatsAppOtpEnabled()) {
+    return c.json<ApiResponse>({ ok: false, error: "WhatsApp OTP is not configured" }, 503);
+  }
+
+  const rl = await checkAuthRateLimit(c, "whatsapp-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{
+    phone: string;
+    code: string;
+    tenantId?: string;
+  }>(c);
+  if (!isValidE164(body?.phone) || typeof body?.code !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "phone and code are required" }, 400);
+  }
+
+  const otpTenantId = authTenantHint(c, body.tenantId);
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    otpTenantId,
+    Boolean(c.req.header("X-Steward-Tenant") || body.tenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(c, otpTenantId, "whatsapp");
+  if (methodResponse) return methodResponse;
+  const otpPurpose = whatsappLoginPurpose(otpTenantId);
+
+  if (
+    (await getSmsVerifyFailedAttempts(body.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Too many invalid codes. Request a new code and try again later.",
+      },
+      429,
+    );
+  }
+
+  const result = await getPhoneAuth().verifyOtp(body.phone, body.code, otpPurpose);
+  if (!result.valid) {
+    await recordSmsVerifyFailure(body.phone, otpPurpose);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
+  }
+  await clearSmsVerifyFailures(body.phone, otpPurpose);
+
+  const { user, isNew } = await findOrCreatePhoneUserWithStatus(body.phone);
+  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const authAbuseConfig = await getTenantAuthAbuseConfig(tenantResult.tenantId);
+  const phonePolicyError = validatePhoneAbusePolicy(body.phone, authAbuseConfig);
+  if (phonePolicyError) {
+    return c.json<ApiResponse>({ ok: false, error: phonePolicyError }, 400);
+  }
+  await ensurePersonalTenant(user.id, `Phone ${body.phone.slice(-4)}`);
+  await ensureUserTenantLink(
+    user.id,
+    tenantResult.tenantId,
+    tenantResult.isPersonal ? "owner" : "member",
+  );
+  if (isNew) {
+    dispatchUserCreated(tenantResult.tenantId, user.id, "auth.whatsapp", {
+      hasPhone: true,
+      channel: "whatsapp",
+    });
+  }
+
+  return authExchangeJson(
+    c,
+    await buildAuthOrMfaResponse(
+      user.id,
+      tenantResult.tenantId,
+      user.walletAddress ?? "",
+      {
+        userId: user.id,
+        phoneHash: hashSha256Hex(body.phone),
+        authMethod: "whatsapp",
+      },
+      {
+        id: user.id,
+        email: "",
+        walletAddress: user.walletAddress,
+      },
+      c,
+    ),
+  );
+});
+
 // ── SIWE ──────────────────────────────────────────────────────────────────────
 
 /**
@@ -1259,8 +4387,29 @@ auth.get("/test/inbox/:email", (c) => {
  * Returns a fresh one-time nonce for SIWE message construction.
  */
 auth.get("/nonce", async (c) => {
+  const rl = await checkAuthRateLimit(c, "siwe-nonce", 60_000, 30);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many nonce requests. Please try again later." },
+      429,
+    );
+  }
   const nonce = generateNonce();
-  await setSiweNonce(nonce);
+  const tenantId = c.req.header("X-Steward-Tenant")?.trim() || c.req.query("tenantId")?.trim();
+  const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "siwe");
+  if (methodResponse) return methodResponse;
+  const originHost = requiredOriginHostFromRequest(c);
+  if (!originHost) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "SIWE nonce requests require an allowed Origin or Referer" },
+      400,
+    );
+  }
+  await setSiweNonce(nonce, {
+    allowedDomains: getAllowedSiweDomains(c),
+    originHost,
+    tenantId: tenantId || undefined,
+  });
   return c.json({ nonce });
 });
 
@@ -1274,7 +4423,13 @@ auth.get("/nonce", async (c) => {
  * to that tenant and the JWT reflects the requested tenant instead.
  */
 auth.post("/verify", async (c) => {
-  const db = getDb();
+  const rl = await checkAuthRateLimit(c, "siwe-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
   const body = await safeJsonParse<{ message: string; signature: string }>(c);
   if (!body?.message || !body?.signature) {
     return c.json<ApiResponse>({ ok: false, error: "message and signature are required" }, 400);
@@ -1322,14 +4477,44 @@ auth.post("/verify", async (c) => {
     }
   }
 
-  const allowedDomains = getAllowedSiweDomains();
-  if (allowedDomains && !allowedDomains.includes(siweMessage.domain)) {
+  const allowedDomains = getAllowedSiweDomains(c);
+  if (!allowedDomains.includes(siweMessage.domain.toLowerCase())) {
     return c.json<ApiResponse>({ ok: false, error: "SIWE domain not allowed" }, 401);
   }
+  if (!siweMessage.issuedAt) {
+    return c.json<ApiResponse>({ ok: false, error: "SIWE issuedAt is required" }, 401);
+  }
+  const siwePolicyError = evaluateSiwePolicy(
+    {
+      domain: siweMessage.domain.toLowerCase(),
+      address: siweMessage.address,
+      statement: siweMessage.statement,
+      uri: siweMessage.uri,
+      version: siweMessage.version,
+      chainId: siweMessage.chainId,
+      nonce: siweMessage.nonce,
+      issuedAt: siweMessage.issuedAt ?? "",
+      expirationTime: siweMessage.expirationTime,
+      notBefore: siweMessage.notBefore,
+    },
+    { allowedDomains },
+  );
+  if (siwePolicyError) {
+    return c.json<ApiResponse>(
+      { ok: false, error: `SIWE policy violation: ${siwePolicyError}` },
+      401,
+    );
+  }
 
-  const nonceOk = await consumeSiweNonce(siweMessage.nonce);
-  if (!nonceOk) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
+  const requestedTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const methodResponse = await requireTenantLoginMethodAllowed(c, requestedTenantId, "siwe");
+  if (methodResponse) return methodResponse;
+  const nonceError = validateConsumedSiweNonce(await consumeSiweNonce(siweMessage.nonce), {
+    domain: siweMessage.domain,
+    tenantId: requestedTenantId,
+  });
+  if (nonceError) {
+    return c.json<ApiResponse>({ ok: false, error: nonceError }, 401);
   }
 
   // Enforce SIWE temporal constraints before any signature verification path.
@@ -1402,38 +4587,66 @@ auth.post("/verify", async (c) => {
   try {
     tenantResult = await findOrCreateWalletTenant({
       ownerAddress: address,
-      tenantId: `t-${address.slice(2, 10)}`,
+      tenantId: ethereumWalletTenantId(address),
       tenantName: `${address.slice(0, 6)}...${address.slice(-4)}`,
     });
   } catch {
     return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
   }
 
-  const requestedTenantId = c.req.header("X-Steward-Tenant");
+  const { user, isNew: isNewUser } = await findOrCreateWalletUserWithStatus(address, "ethereum");
   let effectiveTenantId = tenantResult.tenant.id;
   if (requestedTenantId && requestedTenantId !== tenantResult.tenant.id) {
-    const [requestedTenant] = await db
-      .select()
-      .from(tenants)
-      .where(eq(tenants.id, requestedTenantId));
-    if (requestedTenant) {
-      effectiveTenantId = requestedTenantId;
+    const tenantResolution = await resolveAndValidateTenant(c, user.id, requestedTenantId);
+    if (!tenantResolution.ok) {
+      return c.json<ApiResponse>(
+        { ok: false, error: tenantResolution.error },
+        tenantResolution.status,
+      );
     }
+    effectiveTenantId = tenantResolution.tenantId;
+  }
+  const effectiveMethodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    effectiveTenantId,
+    "siwe",
+  );
+  if (effectiveMethodResponse) return effectiveMethodResponse;
+
+  const authAbuseConfig = await getTenantAuthAbuseConfig(effectiveTenantId);
+  const walletPolicyError = validateWalletAbusePolicy(address, "ethereum", authAbuseConfig);
+  if (walletPolicyError) {
+    return c.json<ApiResponse>({ ok: false, error: walletPolicyError }, 403);
   }
 
-  const user = await findOrCreateWalletUser(address, "ethereum");
   await ensureUserTenantLink(
     user.id,
     effectiveTenantId,
     effectiveTenantId === tenantResult.tenant.id ? "owner" : "member",
   );
+  if (isNewUser) {
+    dispatchUserCreated(effectiveTenantId, user.id, "auth.siwe", {
+      walletChain: "ethereum",
+    });
+  }
 
-  const token = await createSessionToken(address, effectiveTenantId, {
-    userId: user.id,
-  });
-  const refreshToken = await createRefreshToken(user.id, effectiveTenantId);
+  const responseData = await buildAuthOrMfaResponse(
+    user.id,
+    effectiveTenantId,
+    address,
+    {
+      userId: user.id,
+      authMethod: "siwe",
+    },
+    {
+      id: user.id,
+      address,
+      walletAddress: address,
+      walletChain: "ethereum",
+    },
+  );
 
-  trackAuditEvent({
+  await writeAuditEvent({
     tenantId: effectiveTenantId,
     actorType: "user",
     actorId: user.id,
@@ -1445,27 +4658,31 @@ auth.post("/verify", async (c) => {
     requestId: c.get("requestId") ?? null,
   });
 
-  const responseData: Record<string, unknown> = {
-    ok: true,
-    token,
-    refreshToken,
-    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
-    userId: user.id,
-    address,
-    walletChain: "ethereum",
-    tenant: { id: tenantResult.tenant.id, name: tenantResult.tenant.name },
-  };
+  responseData.userId = user.id;
+  responseData.address = address;
+  responseData.walletChain = "ethereum";
+  responseData.tenant = { id: tenantResult.tenant.id, name: tenantResult.tenant.name };
 
-  if (tenantResult.isNewTenant && tenantResult.rawApiKey) {
+  if (!responseData.mfaRequired && tenantResult.isNewTenant && tenantResult.rawApiKey) {
     (responseData.tenant as Record<string, unknown>).apiKey = tenantResult.rawApiKey;
   }
 
-  return c.json(responseData);
+  return authExchangeJson(c, responseData);
 });
 
 auth.post("/verify/solana", async (c) => {
-  const db = getDb();
-  const body = await safeJsonParse<{ message: string; signature: string; publicKey: string }>(c);
+  const rl = await checkAuthRateLimit(c, "siws-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+  const body = await safeJsonParse<{
+    message: string;
+    signature: string;
+    publicKey: string;
+  }>(c);
   if (!body?.message || !body?.signature || !body?.publicKey) {
     return c.json<ApiResponse>(
       { ok: false, error: "message, signature, and publicKey are required" },
@@ -1485,8 +4702,8 @@ auth.post("/verify/solana", async (c) => {
     );
   }
 
-  const allowedDomains = getAllowedSiweDomains();
-  if (allowedDomains && !allowedDomains.includes(parsed.domain)) {
+  const allowedDomains = getAllowedSiweDomains(c);
+  if (!allowedDomains.includes(parsed.domain.toLowerCase())) {
     return c.json<ApiResponse>({ ok: false, error: "SIWS domain not allowed" }, 401);
   }
 
@@ -1500,14 +4717,23 @@ auth.post("/verify/solana", async (c) => {
 
   if (!isAllowedSiwsChainId(parsed.chainId)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "SIWS chainId must be one of: solana, mainnet, devnet" },
+      {
+        ok: false,
+        error: "SIWS chainId must be one of: solana, mainnet, devnet",
+      },
       401,
     );
   }
 
-  const nonceOk = await consumeSiweNonce(parsed.nonce);
-  if (!nonceOk) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
+  const requestedTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const methodResponse = await requireTenantLoginMethodAllowed(c, requestedTenantId, "siws");
+  if (methodResponse) return methodResponse;
+  const nonceError = validateConsumedSiweNonce(await consumeSiweNonce(parsed.nonce), {
+    domain: parsed.domain,
+    tenantId: requestedTenantId,
+  });
+  if (nonceError) {
+    return c.json<ApiResponse>({ ok: false, error: nonceError }, 401);
   }
 
   if (!verifySolanaMessageSignature(body.message, body.signature, body.publicKey)) {
@@ -1525,47 +4751,74 @@ auth.post("/verify/solana", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
   }
 
-  const requestedTenantId = c.req.header("X-Steward-Tenant");
+  const { user, isNew: isNewUser } = await findOrCreateWalletUserWithStatus(
+    body.publicKey,
+    "solana",
+  );
   let effectiveTenantId = tenantResult.tenant.id;
   if (requestedTenantId && requestedTenantId !== tenantResult.tenant.id) {
-    const [requestedTenant] = await db
-      .select()
-      .from(tenants)
-      .where(eq(tenants.id, requestedTenantId));
-    if (requestedTenant) {
-      effectiveTenantId = requestedTenantId;
+    const tenantResolution = await resolveAndValidateTenant(c, user.id, requestedTenantId);
+    if (!tenantResolution.ok) {
+      return c.json<ApiResponse>(
+        { ok: false, error: tenantResolution.error },
+        tenantResolution.status,
+      );
     }
+    effectiveTenantId = tenantResolution.tenantId;
+  }
+  const effectiveMethodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    effectiveTenantId,
+    "siws",
+  );
+  if (effectiveMethodResponse) return effectiveMethodResponse;
+
+  const authAbuseConfig = await getTenantAuthAbuseConfig(effectiveTenantId);
+  const walletPolicyError = validateWalletAbusePolicy(body.publicKey, "solana", authAbuseConfig);
+  if (walletPolicyError) {
+    return c.json<ApiResponse>({ ok: false, error: walletPolicyError }, 403);
   }
 
-  const user = await findOrCreateWalletUser(body.publicKey, "solana");
   await ensureUserTenantLink(
     user.id,
     effectiveTenantId,
     effectiveTenantId === tenantResult.tenant.id ? "owner" : "member",
   );
+  if (isNewUser) {
+    dispatchUserCreated(effectiveTenantId, user.id, "auth.siws", {
+      walletChain: "solana",
+    });
+  }
 
-  const token = await createSessionToken(body.publicKey, effectiveTenantId, {
-    userId: user.id,
-  });
-  const refreshToken = await createRefreshToken(user.id, effectiveTenantId);
+  const responseData = await buildAuthOrMfaResponse(
+    user.id,
+    effectiveTenantId,
+    body.publicKey,
+    {
+      userId: user.id,
+      authMethod: "siws",
+    },
+    {
+      id: user.id,
+      address: body.publicKey,
+      publicKey: body.publicKey,
+      walletAddress: body.publicKey,
+      walletChain: "solana",
+    },
+    c,
+  );
 
-  const responseData: Record<string, unknown> = {
-    ok: true,
-    token,
-    refreshToken,
-    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
-    userId: user.id,
-    address: body.publicKey,
-    publicKey: body.publicKey,
-    walletChain: "solana",
-    tenant: { id: tenantResult.tenant.id, name: tenantResult.tenant.name },
-  };
+  responseData.userId = user.id;
+  responseData.address = body.publicKey;
+  responseData.publicKey = body.publicKey;
+  responseData.walletChain = "solana";
+  responseData.tenant = { id: tenantResult.tenant.id, name: tenantResult.tenant.name };
 
-  if (tenantResult.isNewTenant && tenantResult.rawApiKey) {
+  if (!responseData.mfaRequired && tenantResult.isNewTenant && tenantResult.rawApiKey) {
     (responseData.tenant as Record<string, unknown>).apiKey = tenantResult.rawApiKey;
   }
 
-  return c.json(responseData);
+  return authExchangeJson(c, responseData);
 });
 
 /**
@@ -1589,12 +4842,821 @@ auth.get("/session", async (c) => {
   });
 });
 
+auth.get("/identity-token", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  try {
+    const claims = await buildIdentityClaims(session.payload.userId, session.payload.tenantId);
+    const token = await createIdentityToken(claims);
+    return c.json({
+      ok: true,
+      token,
+      expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+      claims,
+      user: {
+        id: claims.userId,
+        email: claims.email,
+        emailVerified: claims.emailVerified,
+        name: claims.name,
+        image: claims.image,
+        walletAddress: claims.walletAddress,
+        walletChain: claims.walletChain,
+        customMetadata: claims.customMetadata,
+      },
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Identity token generation failed";
+    const status = message === "Not a member of this tenant" ? 403 : 404;
+    return c.json<ApiResponse>({ ok: false, error: message }, status);
+  }
+});
+
+// ── TOTP MFA ─────────────────────────────────────────────────────────────────
+
+auth.get("/mfa/totp/status", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const enabled = Boolean(
+    await readMfaJson<StoredTotp>(mfaKey("totp:enabled", session.payload.userId)),
+  );
+  const pending = Boolean(
+    await readMfaJson<{ secret: string }>(mfaKey("totp:pending", session.payload.userId)),
+  );
+  return c.json({ ok: true, enabled, pending });
+});
+
+auth.post("/mfa/totp/enroll", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const existing = await readMfaJson<StoredTotp>(mfaKey("totp:enabled", session.payload.userId));
+  if (existing) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "TOTP is already enabled; unenroll it before enrolling a new secret",
+      },
+      409,
+    );
+  }
+  const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
+  if (stepUpResponse) return stepUpResponse;
+
+  const secret = generateTotpSecret();
+  const accountName =
+    session.payload.email || session.payload.address || `user:${session.payload.userId}`;
+  const issuer = process.env.TOTP_ISSUER || "Steward";
+
+  await writeMfaJson(
+    mfaKey("totp:pending", session.payload.userId),
+    { secret, createdAt: new Date().toISOString() },
+    TOTP_PENDING_TTL_MS,
+  );
+
+  return c.json({
+    ok: true,
+    secret,
+    otpauthUri: buildOtpauthUri({ issuer, accountName, secret }),
+    expiresAt: new Date(Date.now() + TOTP_PENDING_TTL_MS).toISOString(),
+  });
+});
+
+auth.post("/mfa/totp/verify", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-totp-verify", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ code: string }>(c);
+  if (typeof body?.code !== "string" || !/^\d{6}$/.test(body.code)) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const pending = await readMfaJson<{ secret: string }>(
+    mfaKey("totp:pending", session.payload.userId),
+  );
+  if (pending) {
+    const existing = await readMfaJson<StoredTotp>(mfaKey("totp:enabled", session.payload.userId));
+    if (existing) {
+      await getMfaBackend().delete(mfaKey("totp:pending", session.payload.userId));
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "TOTP is already enabled; replacement requires unenrollment first",
+        },
+        409,
+      );
+    }
+    const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
+    if (stepUpResponse) return stepUpResponse;
+
+    const result = await verifyTotp(pending.secret, body.code, {
+      stepSec: TOTP_STEP_SEC,
+    });
+    if (!result.valid || typeof result.drift !== "number") {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+    }
+
+    const stored: StoredTotp = {
+      secret: pending.secret,
+      enabledAt: new Date().toISOString(),
+      lastAcceptedStep: totpStepForDrift(result.drift),
+    };
+    await writeAuditEvent({
+      tenantId: session.payload.tenantId,
+      actorType: "user",
+      actorId: session.payload.userId,
+      action: "mfa.enable.authorized",
+      resourceType: "user",
+      resourceId: session.payload.userId,
+      metadata: { factor: "totp" },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    await writeMfaJson(mfaKey("totp:enabled", session.payload.userId), stored);
+    await getMfaBackend().delete(mfaKey("totp:pending", session.payload.userId));
+    const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore, session.payload.userId);
+    const { issuedBefore } = await revokeUserRefreshSessions(session.payload.userId);
+    await writeAuditEvent({
+      tenantId: session.payload.tenantId,
+      actorType: "user",
+      actorId: session.payload.userId,
+      action: "mfa.enabled",
+      resourceType: "user",
+      resourceId: session.payload.userId,
+      metadata: {
+        factor: "totp",
+        recoveryCodesIssued: recoveryCodes.length,
+        revokedRefreshTokens: true,
+        revokedAccessTokensIssuedBefore: issuedBefore,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    dispatchWebhook(session.payload.tenantId, session.payload.userId, "mfa.enabled", {
+      userId: session.payload.userId,
+      factor: "totp",
+      recoveryCodesIssued: recoveryCodes.length,
+    });
+    dispatchWebhook(session.payload.tenantId, session.payload.userId, "wallet.recovery_setup", {
+      userId: session.payload.userId,
+      source: "totp_enable",
+      recoveryCodesIssued: recoveryCodes.length,
+    });
+
+    return c.json({ ok: true, enabled: true, recoveryCodes });
+  }
+
+  const verified = await verifyStoredTotp(session.payload.userId, body.code);
+  if (!verified.valid || !verified.stored || typeof verified.acceptedStep !== "number") {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+  }
+  await writeMfaJson(mfaKey("totp:enabled", session.payload.userId), {
+    ...verified.stored,
+    lastAcceptedStep: verified.acceptedStep,
+  });
+
+  return c.json({ ok: true, verified: true });
+});
+
+auth.post("/mfa/totp/complete", async (c) => {
+  const rl = await checkAuthRateLimit(c, "mfa-totp-complete", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{
+    challengeId: string;
+    code?: string;
+    recoveryCode?: string;
+  }>(c);
+  if (!body?.challengeId || typeof body.challengeId !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "challengeId is required" }, 400);
+  }
+  const hasTotpCode = typeof body.code === "string" && body.code.length > 0;
+  const hasRecoveryCode = typeof body.recoveryCode === "string" && body.recoveryCode.length > 0;
+  if (hasTotpCode === hasRecoveryCode) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Provide exactly one of code or recoveryCode" },
+      400,
+    );
+  }
+  if (hasTotpCode && !/^\d{6}$/.test(body.code ?? "")) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const challengeKey = `auth:challenge:${body.challengeId}`;
+  const rawChallenge = await getMfaBackend().get(challengeKey);
+  const challenge = rawChallenge ? decryptMfaJson<PendingMfaAuth>(rawChallenge) : null;
+  if (!challenge || challenge.mfaType !== "totp" || Date.now() > challenge.expiresAt) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+  }
+  const attemptScope = `login:${challenge.userId}:${body.challengeId}`;
+  if ((await getTotpVerifyFailedAttempts(attemptScope)) >= TOTP_VERIFY_MAX_FAILED_ATTEMPTS) {
+    await getMfaBackend().delete(challengeKey);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many invalid codes. Start a new MFA challenge." },
+      429,
+    );
+  }
+
+  let method: "totp" | "recovery_code" = "totp";
+  if (hasRecoveryCode) {
+    const verified = await verifyRecoveryCode(
+      recoveryCodeStore,
+      challenge.userId,
+      body.recoveryCode ?? "",
+    );
+    if (!verified.valid) {
+      const failures = await recordTotpVerifyFailure(attemptScope);
+      if (failures >= TOTP_VERIFY_MAX_FAILED_ATTEMPTS) await getMfaBackend().delete(challengeKey);
+      return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+    }
+    method = "recovery_code";
+  } else {
+    const verified = await verifyStoredTotp(challenge.userId, body.code ?? "");
+    if (!verified.valid || !verified.stored || typeof verified.acceptedStep !== "number") {
+      const failures = await recordTotpVerifyFailure(attemptScope);
+      if (failures >= TOTP_VERIFY_MAX_FAILED_ATTEMPTS) await getMfaBackend().delete(challengeKey);
+      return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+    }
+    if ((await getMfaBackend().consume(challengeKey)) === null) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+    }
+    await writeMfaJson(mfaKey("totp:enabled", challenge.userId), {
+      ...verified.stored,
+      lastAcceptedStep: verified.acceptedStep,
+    });
+  }
+  if (hasRecoveryCode && (await getMfaBackend().consume(challengeKey)) === null) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+  }
+  await clearTotpVerifyFailures(attemptScope);
+
+  const mfaClaims = {
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: method,
+    factorEnrollmentVerifiedAt: Date.now(),
+  };
+  if (!(await isActiveTenantMember(challenge.userId, challenge.tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
+  }
+  await writeAuthLoginAudit(c, challenge.tenantId, challenge.userId, challenge.claims, {
+    mfaMethod: method,
+  });
+  const token = await createSessionToken(challenge.address, challenge.tenantId, {
+    ...(challenge.claims ?? {}),
+    userId: challenge.userId,
+    ...mfaClaims,
+  });
+  const refreshToken = await createRefreshToken(challenge.userId, challenge.tenantId, mfaClaims);
+  dispatchUserAuthenticated(
+    challenge.tenantId,
+    challenge.userId,
+    typeof challenge.claims?.authMethod === "string" ? challenge.claims.authMethod : undefined,
+  );
+  return c.json(buildAuthResponse(token, refreshToken, challenge.user));
+});
+
+auth.get("/mfa/recovery-codes/status", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const enabled = await hasTotpEnabled(session.payload.userId);
+  const remaining = enabled
+    ? await unusedRecoveryCodeCount(recoveryCodeStore, session.payload.userId)
+    : 0;
+  return c.json({ ok: true, enabled, remaining });
+});
+
+auth.post("/mfa/recovery-codes/regenerate", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-recovery-regenerate", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ code: string }>(c);
+  if (typeof body?.code !== "string" || !/^\d{6}$/.test(body.code)) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const attemptScope = `manage:${session.payload.userId}:recovery-regenerate`;
+  if ((await getTotpVerifyFailedAttempts(attemptScope)) >= TOTP_VERIFY_MAX_FAILED_ATTEMPTS) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many invalid codes. Please try again later." },
+      429,
+    );
+  }
+  const verified = await verifyStoredTotp(session.payload.userId, body.code);
+  if (!verified.valid || !verified.stored || typeof verified.acceptedStep !== "number") {
+    await recordTotpVerifyFailure(attemptScope);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+  }
+  await clearTotpVerifyFailures(attemptScope);
+
+  await writeAuditEvent({
+    tenantId: session.payload.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: "mfa.recovery_codes.regenerate.authorized",
+    resourceType: "user",
+    resourceId: session.payload.userId,
+    metadata: {},
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  await writeMfaJson(mfaKey("totp:enabled", session.payload.userId), {
+    ...verified.stored,
+    lastAcceptedStep: verified.acceptedStep,
+  });
+  const recoveryCodes = await generateRecoveryCodes(recoveryCodeStore, session.payload.userId);
+  await writeAuditEvent({
+    tenantId: session.payload.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: "mfa.recovery_codes.regenerate",
+    resourceType: "user",
+    resourceId: session.payload.userId,
+    metadata: { recoveryCodesIssued: recoveryCodes.length },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  dispatchWebhook(session.payload.tenantId, session.payload.userId, "wallet.recovery_setup", {
+    userId: session.payload.userId,
+    source: "recovery_code_regenerate",
+    recoveryCodesIssued: recoveryCodes.length,
+  });
+
+  return c.json({ ok: true, recoveryCodes });
+});
+
+// ── SMS MFA ──────────────────────────────────────────────────────────────────
+
+function maskedPhone(phone: string): string {
+  return phone.length <= 4 ? "****" : `***${phone.slice(-4)}`;
+}
+
+auth.get("/mfa/sms/status", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const enabled = await getSmsMfa(session.payload.userId);
+  const pending = await readMfaJson<{ phone: string }>(
+    mfaKey("sms:pending", session.payload.userId),
+  );
+  return c.json({
+    ok: true,
+    enabled: Boolean(enabled),
+    pending: Boolean(pending),
+    phone: enabled ? maskedPhone(enabled.phone) : pending ? maskedPhone(pending.phone) : undefined,
+  });
+});
+
+auth.post("/mfa/sms/enroll", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-sms-enroll", 60_000, 3);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ phone: string }>(c);
+  if (!isValidE164(body?.phone)) {
+    return c.json<ApiResponse>({ ok: false, error: "phone must be E.164" }, 400);
+  }
+
+  const existing = await getSmsMfa(session.payload.userId);
+  if (existing) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "SMS MFA is already enabled; unenroll it before enrolling a new phone",
+      },
+      409,
+    );
+  }
+  const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
+  if (stepUpResponse) return stepUpResponse;
+
+  let expiresAt: Date;
+  try {
+    ({ expiresAt } = await getPhoneAuth().sendOtp(
+      body.phone,
+      smsMfaEnrollPurpose(session.payload.userId),
+    ));
+  } catch (err) {
+    if (err instanceof Error && err.message === "SMS provider not configured") {
+      return c.json<ApiResponse>({ ok: false, error: "SMS provider not configured" }, 503);
+    }
+    throw err;
+  }
+
+  await writeMfaJson(
+    mfaKey("sms:pending", session.payload.userId),
+    {
+      phone: body.phone,
+      purpose: smsMfaEnrollPurpose(session.payload.userId),
+      createdAt: new Date().toISOString(),
+    },
+    TOTP_PENDING_TTL_MS,
+  );
+  return c.json({
+    ok: true,
+    phone: maskedPhone(body.phone),
+    expiresAt: expiresAt.toISOString(),
+  });
+});
+
+auth.post("/mfa/sms/verify", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-sms-verify", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ code: string }>(c);
+  if (typeof body?.code !== "string" || !/^\d{6}$/.test(body.code)) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const pending = await readMfaJson<{ phone: string; purpose?: string }>(
+    mfaKey("sms:pending", session.payload.userId),
+  );
+  if (!pending) {
+    return c.json<ApiResponse>({ ok: false, error: "No pending SMS MFA enrollment" }, 404);
+  }
+  const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
+  if (stepUpResponse) return stepUpResponse;
+
+  const pendingPurpose = pending.purpose ?? smsMfaEnrollPurpose(session.payload.userId);
+  const failures = await getSmsVerifyFailedAttempts(pending.phone, pendingPurpose);
+  if (failures >= SMS_VERIFY_MAX_FAILED_ATTEMPTS) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
+      429,
+    );
+  }
+
+  const verified = await getPhoneAuth().verifyOtp(pending.phone, body.code, pendingPurpose);
+  if (!verified.valid) {
+    await recordSmsVerifyFailure(pending.phone, pendingPurpose);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
+  }
+  await clearSmsVerifyFailures(pending.phone, pendingPurpose);
+
+  await writeAuditEvent({
+    tenantId: session.payload.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: "mfa.enable.authorized",
+    resourceType: "user",
+    resourceId: session.payload.userId,
+    metadata: { factor: "sms", phoneHash: hashSha256Hex(pending.phone) },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  await writeMfaJson(mfaKey("sms:enabled", session.payload.userId), {
+    phone: pending.phone,
+    enabledAt: new Date().toISOString(),
+  });
+  await getMfaBackend().delete(mfaKey("sms:pending", session.payload.userId));
+  const { issuedBefore } = await revokeUserRefreshSessions(session.payload.userId);
+  await writeAuditEvent({
+    tenantId: session.payload.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: "mfa.enabled",
+    resourceType: "user",
+    resourceId: session.payload.userId,
+    metadata: {
+      factor: "sms",
+      phoneHash: hashSha256Hex(pending.phone),
+      revokedRefreshTokens: true,
+      revokedAccessTokensIssuedBefore: issuedBefore,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  dispatchWebhook(session.payload.tenantId, session.payload.userId, "mfa.enabled", {
+    userId: session.payload.userId,
+    factor: "sms",
+    phoneHash: hashSha256Hex(pending.phone),
+  });
+
+  return c.json({ ok: true, enabled: true, phone: maskedPhone(pending.phone) });
+});
+
+auth.post("/mfa/sms/send", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-sms-send", 60_000, 3);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const smsMfa = await getSmsMfa(session.payload.userId);
+  if (!smsMfa) {
+    return c.json<ApiResponse>({ ok: false, error: "SMS MFA is not enabled" }, 404);
+  }
+
+  let expiresAt: Date;
+  try {
+    ({ expiresAt } = await getPhoneAuth().sendOtp(
+      smsMfa.phone,
+      smsMfaManagePurpose(session.payload.userId),
+    ));
+  } catch (err) {
+    if (err instanceof Error && err.message === "SMS provider not configured") {
+      return c.json<ApiResponse>({ ok: false, error: "SMS provider not configured" }, 503);
+    }
+    throw err;
+  }
+
+  return c.json({
+    ok: true,
+    phone: maskedPhone(smsMfa.phone),
+    expiresAt: expiresAt.toISOString(),
+  });
+});
+
+auth.post("/mfa/sms/complete", async (c) => {
+  const rl = await checkAuthRateLimit(c, "mfa-sms-complete", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ challengeId: string; code: string }>(c);
+  if (!body?.challengeId || typeof body.challengeId !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "challengeId is required" }, 400);
+  }
+  if (typeof body.code !== "string" || !/^\d{6}$/.test(body.code)) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const challengeKey = `auth:challenge:${body.challengeId}`;
+  const rawChallenge = await getMfaBackend().get(challengeKey);
+  const challenge = rawChallenge ? decryptMfaJson<PendingMfaAuth>(rawChallenge) : null;
+  if (!challenge || challenge.mfaType !== "sms" || Date.now() > challenge.expiresAt) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+  }
+
+  const smsMfa = await getSmsMfa(challenge.userId);
+  if (!smsMfa) {
+    return c.json<ApiResponse>({ ok: false, error: "SMS MFA is not enabled" }, 401);
+  }
+
+  const otpPurpose = smsMfaChallengePurpose(body.challengeId);
+  if (
+    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Too many invalid codes. Request a new code and try again later.",
+      },
+      429,
+    );
+  }
+
+  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  if (!verified.valid) {
+    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
+  }
+  if ((await getMfaBackend().consume(challengeKey)) === null) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired MFA challenge" }, 401);
+  }
+  await clearSmsVerifyFailures(smsMfa.phone, otpPurpose);
+
+  const mfaClaims = {
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "sms",
+    factorEnrollmentVerifiedAt: Date.now(),
+  };
+  if (!(await isActiveTenantMember(challenge.userId, challenge.tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
+  }
+  await writeAuthLoginAudit(c, challenge.tenantId, challenge.userId, challenge.claims, {
+    mfaMethod: "sms",
+  });
+  const token = await createSessionToken(challenge.address, challenge.tenantId, {
+    ...(challenge.claims ?? {}),
+    userId: challenge.userId,
+    ...mfaClaims,
+  });
+  const refreshToken = await createRefreshToken(challenge.userId, challenge.tenantId, mfaClaims);
+  dispatchUserAuthenticated(
+    challenge.tenantId,
+    challenge.userId,
+    typeof challenge.claims?.authMethod === "string" ? challenge.claims.authMethod : undefined,
+  );
+  return c.json(buildAuthResponse(token, refreshToken, challenge.user));
+});
+
+auth.post("/mfa/sms/unenroll", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-sms-unenroll", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ code: string }>(c);
+  if (typeof body?.code !== "string" || !/^\d{6}$/.test(body.code)) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const smsMfa = await getSmsMfa(session.payload.userId);
+  if (!smsMfa) {
+    return c.json<ApiResponse>({ ok: false, error: "SMS MFA is not enabled" }, 404);
+  }
+  const otpPurpose = smsMfaManagePurpose(session.payload.userId);
+  if (
+    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
+  ) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Too many invalid codes. Request a new code and try again later.",
+      },
+      429,
+    );
+  }
+  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  if (!verified.valid) {
+    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
+  }
+  await clearSmsVerifyFailures(smsMfa.phone, otpPurpose);
+
+  await writeAuditEvent({
+    tenantId: session.payload.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: "mfa.disable.authorized",
+    resourceType: "user",
+    resourceId: session.payload.userId,
+    metadata: { factor: "sms", phoneHash: hashSha256Hex(smsMfa.phone) },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  await getMfaBackend().delete(mfaKey("sms:enabled", session.payload.userId));
+  const { issuedBefore } = await revokeUserRefreshSessions(session.payload.userId);
+  await writeAuditEvent({
+    tenantId: session.payload.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: "mfa.disabled",
+    resourceType: "user",
+    resourceId: session.payload.userId,
+    metadata: {
+      factor: "sms",
+      phoneHash: hashSha256Hex(smsMfa.phone),
+      revokedRefreshTokens: true,
+      revokedAccessTokensIssuedBefore: issuedBefore,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  dispatchWebhook(session.payload.tenantId, session.payload.userId, "mfa.disabled", {
+    userId: session.payload.userId,
+    factor: "sms",
+    phoneHash: hashSha256Hex(smsMfa.phone),
+  });
+  return c.json<ApiResponse>({ ok: true });
+});
+
+auth.post("/mfa/totp/unenroll", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-totp-unenroll", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ code: string }>(c);
+  if (typeof body?.code !== "string" || !/^\d{6}$/.test(body.code)) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const attemptScope = `manage:${session.payload.userId}:totp-unenroll`;
+  if ((await getTotpVerifyFailedAttempts(attemptScope)) >= TOTP_VERIFY_MAX_FAILED_ATTEMPTS) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many invalid codes. Please try again later." },
+      429,
+    );
+  }
+  const verified = await verifyStoredTotp(session.payload.userId, body.code);
+  if (!verified.valid) {
+    await recordTotpVerifyFailure(attemptScope);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+  }
+  await clearTotpVerifyFailures(attemptScope);
+
+  await writeAuditEvent({
+    tenantId: session.payload.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: "mfa.disable.authorized",
+    resourceType: "user",
+    resourceId: session.payload.userId,
+    metadata: { factor: "totp" },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  await getMfaBackend().delete(mfaKey("totp:enabled", session.payload.userId));
+  await getMfaBackend().delete(mfaKey("recovery", session.payload.userId));
+  const { issuedBefore } = await revokeUserRefreshSessions(session.payload.userId);
+  await writeAuditEvent({
+    tenantId: session.payload.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: "mfa.disabled",
+    resourceType: "user",
+    resourceId: session.payload.userId,
+    metadata: {
+      factor: "totp",
+      revokedRefreshTokens: true,
+      revokedAccessTokensIssuedBefore: issuedBefore,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  dispatchWebhook(session.payload.tenantId, session.payload.userId, "mfa.disabled", {
+    userId: session.payload.userId,
+    factor: "totp",
+  });
+  return c.json<ApiResponse>({ ok: true });
+});
+
 /**
  * POST /logout
- * Revokes the presented access token's JTI until its natural expiry. Refresh
- * token revocation is handled by /refresh/revoke and /refresh/revoke-all.
+ * Revokes the presented access token's JTI until its natural expiry. If a
+ * refresh token is supplied, it is revoked too so logout cannot be bypassed by
+ * silently rotating the same session back in.
  */
 auth.post("/logout", async (c) => {
+  const body = await safeJsonParse<{ refreshToken?: string }>(c);
   const authHeader = c.req.header("Authorization");
   let auditCtx: { tenantId?: string; userId?: string; jti?: string } = {};
   if (authHeader?.startsWith("Bearer ")) {
@@ -1606,6 +5668,19 @@ auth.post("/logout", async (c) => {
         tenantId?: string;
       };
       if (typeof payload.jti === "string" && typeof payload.exp === "number") {
+        if (payload.tenantId) {
+          await writeAuditEvent({
+            tenantId: payload.tenantId,
+            actorType: "user",
+            actorId: payload.userId ?? null,
+            action: "auth.logout.authorized",
+            resourceType: "session",
+            resourceId: payload.jti,
+            ipAddress: c.req.header("x-forwarded-for") ?? null,
+            userAgent: c.req.header("user-agent") ?? null,
+            requestId: c.get("requestId") ?? null,
+          });
+        }
         await revocationStore.revokeToken(payload.jti, payload.exp);
         auditCtx = {
           tenantId: payload.tenantId,
@@ -1617,8 +5692,21 @@ auth.post("/logout", async (c) => {
       // Logout remains idempotent: invalid/expired tokens are already unusable.
     }
   }
+  if (body?.refreshToken) {
+    const [revokedRefresh] = await getDb()
+      .delete(refreshTokens)
+      .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)))
+      .returning();
+    if (!auditCtx.tenantId && revokedRefresh) {
+      auditCtx = {
+        tenantId: revokedRefresh.tenantId,
+        userId: revokedRefresh.userId,
+        jti: auditCtx.jti,
+      };
+    }
+  }
   if (auditCtx.tenantId) {
-    trackAuditEvent({
+    await writeAuditEvent({
       tenantId: auditCtx.tenantId,
       actorType: "user",
       actorId: auditCtx.userId ?? null,
@@ -1652,26 +5740,60 @@ auth.post("/refresh", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "refreshToken is required" }, 400);
   }
 
-  const record = await consumeRefreshToken(body.refreshToken);
-  if (!record) {
+  const rotatedRefresh = await rotateRefreshTokenForUserSession(body.refreshToken);
+  if (rotatedRefresh.status === "reused") {
+    const { issuedBefore: revokedBefore } = await revokeUserRefreshSessions(rotatedRefresh.userId);
+    await writeAuditEvent({
+      tenantId: rotatedRefresh.tenantId,
+      actorType: "user",
+      actorId: rotatedRefresh.userId,
+      action: "auth.refresh.reuse_detected",
+      resourceType: "session",
+      metadata: { revokedRefreshTokens: true, revokedAccessTokensIssuedBefore: revokedBefore },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+    return c.json<ApiResponse>(
+      { ok: false, error: "Refresh token reuse detected. Please sign in again." },
+      401,
+    );
+  }
+  if (rotatedRefresh.status === "invalid") {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired refresh token" }, 401);
   }
+  if (rotatedRefresh.status === "deactivated") {
+    return c.json<ApiResponse>({ ok: false, error: "User is deactivated" }, 403);
+  }
+  if (rotatedRefresh.status === "not_member") {
+    return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 403);
+  }
+  if (rotatedRefresh.status === "revoked") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Session was revoked. Please sign in again." },
+      401,
+    );
+  }
 
+  const { record, newAccessToken, newRefreshToken } = rotatedRefresh;
   const db = getDb();
-
-  // Fetch user for token claims
-  const [user] = await db.select().from(users).where(eq(users.id, record.userId));
-  const walletAddress = user?.walletAddress ?? "";
-  const email = user?.email ?? undefined;
-
-  // Issue new access token (24h)
-  const newAccessToken = await createSessionToken(walletAddress, record.tenantId, {
-    userId: record.userId,
-    ...(email ? { email } : {}),
-  });
-
-  // Issue new refresh token (rotation)
-  const newRefreshToken = await createRefreshToken(record.userId, record.tenantId);
+  try {
+    await writeAuditEvent({
+      tenantId: record.tenantId,
+      actorType: "user",
+      actorId: record.userId,
+      action: "auth.refresh",
+      resourceType: "session",
+      metadata: { rotated: true },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+  } catch (err) {
+    await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, hashToken(newRefreshToken)));
+    throw err;
+  }
+  dispatchUserAuthenticated(record.tenantId, record.userId, "refresh");
 
   return c.json({
     ok: true,
@@ -1693,7 +5815,41 @@ auth.post("/revoke", async (c) => {
   }
 
   const db = getDb();
-  await db.delete(refreshTokens).where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
+  const [existing] = await db
+    .select()
+    .from(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)));
+  if (existing) {
+    await writeAuditEvent({
+      tenantId: existing.tenantId,
+      actorType: "user",
+      actorId: existing.userId,
+      action: "auth.refresh_token.revoke.authorized",
+      resourceType: "session",
+      metadata: { tokenId: existing.id },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+  }
+  const [revoked] = await db
+    .delete(refreshTokens)
+    .where(eq(refreshTokens.tokenHash, hashToken(body.refreshToken)))
+    .returning();
+
+  if (revoked) {
+    await writeAuditEvent({
+      tenantId: revoked.tenantId,
+      actorType: "user",
+      actorId: revoked.userId,
+      action: "auth.refresh_token.revoke",
+      resourceType: "session",
+      metadata: { tokenId: revoked.id },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+  }
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -1718,8 +5874,36 @@ auth.delete("/sessions", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Token does not contain userId" }, 400);
   }
 
-  const db = getDb();
-  await db.delete(refreshTokens).where(eq(refreshTokens.userId, payload.userId));
+  await writeAuditEvent({
+    tenantId: payload.tenantId,
+    actorType: "user",
+    actorId: payload.userId,
+    action: "auth.sessions.revoke_all.authorized",
+    resourceType: "session",
+    resourceId: payload.jti ?? null,
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  const { revoked, issuedBefore } = await revokeUserRefreshSessions(payload.userId);
+  if (payload.jti && payload.exp) {
+    await revocationStore.revokeToken(payload.jti, payload.exp);
+  }
+
+  await writeAuditEvent({
+    tenantId: payload.tenantId,
+    actorType: "user",
+    actorId: payload.userId,
+    action: "auth.sessions.revoke_all",
+    resourceType: "session",
+    metadata: {
+      revokedRefreshTokenCount: revoked.length,
+      revokedUserTokensIssuedBefore: issuedBefore,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
 
   return c.json<ApiResponse>({ ok: true });
 });
@@ -1732,6 +5916,15 @@ auth.delete("/sessions", async (c) => {
  * Finds or creates user, returns WebAuthn registration options.
  */
 auth.post("/passkey/register/options", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+  const sessionMethodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    session.payload.tenantId,
+    "passkey",
+  );
+  if (sessionMethodResponse) return sessionMethodResponse;
+
   const body = await safeJsonParse<{
     email: string;
     authenticatorAttachment?: "platform" | "cross-platform";
@@ -1741,13 +5934,33 @@ auth.post("/passkey/register/options", async (c) => {
   }
 
   const email = body.email.toLowerCase().trim();
-  const user = await findOrCreateUser(email);
-
   const db = getDb();
+  const [user] = await db.select().from(users).where(eq(users.id, session.payload.userId));
+  if (!user || user.email?.toLowerCase().trim() !== email) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Passkey registration requires an authenticated matching email session",
+      },
+      403,
+    );
+  }
+  if (!user.emailVerified) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Email must be verified before registering a passkey",
+      },
+      403,
+    );
+  }
+
   const existingCreds = await db
     .select({ credentialId: authenticators.credentialId })
     .from(authenticators)
     .where(eq(authenticators.userId, user.id));
+  const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
+  if (stepUpResponse) return stepUpResponse;
 
   const attachment =
     body.authenticatorAttachment === "platform" || body.authenticatorAttachment === "cross-platform"
@@ -1771,6 +5984,9 @@ auth.post("/passkey/register/options", async (c) => {
  * Verifies registration, stores credential, provisions wallet, returns JWT.
  */
 auth.post("/passkey/register/verify", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
   const rl = await checkAuthRateLimit(c, "passkey-verify", 60_000, 10);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
@@ -1788,19 +6004,29 @@ auth.post("/passkey/register/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "email and response are required" }, 400);
   }
 
-  const email = body.email.toLowerCase().trim();
   const db = getDb();
 
-  const [user] = await db.select().from(users).where(eq(users.email, email));
-  if (!user) {
+  const [user] = await db.select().from(users).where(eq(users.id, session.payload.userId));
+  const email = body.email.toLowerCase().trim();
+  if (!user || user.email?.toLowerCase().trim() !== email || !user.emailVerified) {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "User not found — call /passkey/register/options first",
+        error: "Passkey registration requires an authenticated verified email session",
       },
-      404,
+      403,
     );
   }
+  const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
+  if (stepUpResponse) return stepUpResponse;
+
+  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const { tenantId } = tenantResult;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "passkey");
+  if (methodResponse) return methodResponse;
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyRegistration"]>>;
   try {
@@ -1838,8 +6064,6 @@ auth.post("/passkey/register/verify", async (c) => {
     })
     .onConflictDoNothing();
 
-  await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
-
   // Provision the user's personal wallet (idempotent)
   let walletAddress = user.walletAddress;
   try {
@@ -1849,26 +6073,27 @@ auth.post("/passkey/register/verify", async (c) => {
     console.error("[PasskeyAuth] Wallet provision failed on register:", err);
   }
 
-  // Resolve which tenant this auth is for and link the user
-  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
-  if (!tenantResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
-  }
-  const { tenantId } = tenantResult;
+  // Link the user only after tenant authorization has been validated.
   await ensureUserTenantLink(user.id, tenantId);
 
-  const token = await createSessionToken(walletAddress ?? "", tenantId, {
-    userId: user.id,
-    email,
-  });
-  const registerRefreshToken = await createRefreshToken(user.id, tenantId);
-
-  return c.json(
-    buildAuthResponse(token, registerRefreshToken, {
-      id: user.id,
-      email,
-      walletAddress,
-    }),
+  return authExchangeJson(
+    c,
+    await buildAuthOrMfaResponse(
+      user.id,
+      tenantId,
+      walletAddress ?? "",
+      {
+        userId: user.id,
+        email,
+        authMethod: "passkey",
+      },
+      {
+        id: user.id,
+        email,
+        walletAddress,
+      },
+      c,
+    ),
   );
 });
 
@@ -1880,49 +6105,37 @@ auth.post("/passkey/register/verify", async (c) => {
  * Returns WebAuthn authentication options with allowed credentials.
  */
 auth.post("/passkey/login/options", async (c) => {
-  const body = await safeJsonParse<{ email: string }>(c);
+  const rl = await checkAuthRateLimit(c, "passkey-options", 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ email: string; tenantId?: string }>(c);
   if (!body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
   }
+  const optionTenantId = authTenantHint(c, body.tenantId);
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    optionTenantId,
+    Boolean(c.req.header("X-Steward-Tenant") || body.tenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(c, optionTenantId, "passkey");
+  if (methodResponse) return methodResponse;
 
   const email = body.email.toLowerCase().trim();
-  const db = getDb();
 
-  const [user] = await db.select().from(users).where(eq(users.email, email));
-  if (!user) {
-    return c.json<ApiResponse>({ ok: false, error: "No account found for this email" }, 404);
-  }
+  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(email);
+  const challengeId = options.challenge;
+  await getChallengeStore().set(`passkey-login:${email}:${challengeId}`, options.challenge);
 
-  // Select transports alongside credentialId. WebAuthn browsers use the
-  // transports hint to know that a credential lives on the local platform
-  // authenticator (e.g. Touch ID, Windows Hello). Without it the browser
-  // conservatively shows the cross-device QR picker even for credentials
-  // that were registered on this device, which is a major UX regression.
-  const creds = await db
-    .select({
-      credentialId: authenticators.credentialId,
-      transports: authenticators.transports,
-    })
-    .from(authenticators)
-    .where(eq(authenticators.userId, user.id));
-
-  if (creds.length === 0) {
-    return c.json<ApiResponse>({ ok: false, error: "No passkeys registered for this email" }, 404);
-  }
-
-  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
-    email,
-    {
-      allowCredentials: creds.map((cred) => ({
-        id: cred.credentialId,
-        ...(cred.transports && cred.transports.length > 0
-          ? { transports: cred.transports as AuthenticatorTransportFuture[] }
-          : {}),
-      })),
-    },
-  );
-
-  return c.json(options);
+  return c.json({ ...options, allowCredentials: [], challengeId });
 });
 
 /**
@@ -1941,6 +6154,7 @@ auth.post("/passkey/login/verify", async (c) => {
   }
   const body = await safeJsonParse<{
     email: string;
+    challengeId?: string;
     response: { id: string; [key: string]: unknown };
     tenantId?: string;
   }>(c);
@@ -1948,13 +6162,16 @@ auth.post("/passkey/login/verify", async (c) => {
   if (!body?.email || !body?.response) {
     return c.json<ApiResponse>({ ok: false, error: "email and response are required" }, 400);
   }
+  if (!body.challengeId || typeof body.challengeId !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "challengeId is required" }, 400);
+  }
 
   const email = body.email.toLowerCase().trim();
   const db = getDb();
 
   const [user] = await db.select().from(users).where(eq(users.email, email));
   if (!user) {
-    return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
   const [cred] = await db
@@ -1965,31 +6182,46 @@ auth.post("/passkey/login/verify", async (c) => {
     );
 
   if (!cred) {
-    return c.json<ApiResponse>({ ok: false, error: "Credential not found" }, 404);
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
   try {
+    const expectedChallenge = await getChallengeStore().consume(
+      `passkey-login:${email}:${body.challengeId}`,
+    );
+    if (!expectedChallenge) {
+      return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
+    }
     verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
       body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
-      undefined,
+      expectedChallenge,
       cred.credentialPublicKey,
       cred.counter,
-      email,
     );
   } catch (err) {
+    console.warn("[PasskeyAuth] Authentication failed:", err);
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: err instanceof Error ? err.message : "Authentication failed",
+        error: "Passkey authentication failed",
       },
       400,
     );
   }
 
   if (!verification.verified) {
-    return c.json<ApiResponse>({ ok: false, error: "Authentication verification failed" }, 401);
+    return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
+
+  // Resolve the requesting tenant before mutating counters or provisioning wallets.
+  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const { tenantId } = tenantResult;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "passkey");
+  if (methodResponse) return methodResponse;
 
   // Update counter to prevent replay attacks
   await db
@@ -2011,26 +6243,26 @@ auth.post("/passkey/login/verify", async (c) => {
     await ensurePersonalTenant(user.id, email);
   }
 
-  // Resolve the requesting tenant and auto-link if user isn't already a member
-  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
-  if (!tenantResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
-  }
-  const { tenantId } = tenantResult;
   await ensureUserTenantLink(user.id, tenantId);
 
-  const token = await createSessionToken(walletAddress ?? "", tenantId, {
-    userId: user.id,
-    email,
-  });
-  const loginRefreshToken = await createRefreshToken(user.id, tenantId);
-
-  return c.json(
-    buildAuthResponse(token, loginRefreshToken, {
-      id: user.id,
-      email,
-      walletAddress,
-    }),
+  return authExchangeJson(
+    c,
+    await buildAuthOrMfaResponse(
+      user.id,
+      tenantId,
+      walletAddress ?? "",
+      {
+        userId: user.id,
+        email,
+        authMethod: "passkey",
+      },
+      {
+        id: user.id,
+        email,
+        walletAddress,
+      },
+      c,
+    ),
   );
 });
 
@@ -2049,15 +6281,59 @@ auth.post("/email/send", async (c) => {
       429,
     );
   }
-  const body = await safeJsonParse<{ email: string; tenantId?: string }>(c);
+  const body = await safeJsonParse<{ email: string; tenantId?: string; captchaToken?: string }>(c);
   if (!body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
   }
 
   const email = body.email.toLowerCase().trim();
-  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const bodyTenantId = body.tenantId?.trim();
+  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    resolvedTenantId,
+    Boolean(headerTenantId || bodyTenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
+  if (methodResponse) return methodResponse;
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    resolvedTenantId,
+    email,
+    "Email",
+  );
+  if (ssoRequiredResponse) return ssoRequiredResponse;
+  const authAbuseConfig = await getTenantAuthAbuseConfig(resolvedTenantId);
+  const emailPolicyError = validateEmailAbusePolicy(email, authAbuseConfig);
+  if (emailPolicyError) {
+    return c.json<ApiResponse>({ ok: false, error: emailPolicyError }, 400);
+  }
+  const captcha = await verifyCaptchaToken(
+    authAbuseConfig,
+    "email_otp",
+    body.captchaToken,
+    trustedRemoteIp(c),
+  );
+  if (!captcha.ok) {
+    return c.json<ApiResponse>(
+      { ok: false, error: captcha.error },
+      captcha.status as 400 | 502 | 503,
+    );
+  }
+  const emailRl = await checkAuthRateLimit(c, "email-send-destination", 10 * 60_000, 5, email);
+  if (!emailRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
-  const { expiresAt } = await emailAuth.sendMagicLink(email);
+  const { expiresAt } = await emailAuth.sendMagicLink(email, {
+    tenantId: resolvedTenantId,
+  });
 
   return c.json<ApiResponse<{ expiresAt: string }>>({
     ok: true,
@@ -2072,6 +6348,11 @@ auth.post("/email/send", async (c) => {
  * but redirects to the dashboard login page instead of returning JSON.
  */
 auth.get("/callback/email", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-callback", 60_000, 10);
+  if (!rl.allowed) {
+    return redirectEmailAuthFailure(c, "rate_limited");
+  }
+
   const token = c.req.query("token");
   const emailParam = c.req.query("email");
   const tenantId = c.req.query("tenantId");
@@ -2081,10 +6362,30 @@ auth.get("/callback/email", async (c) => {
   }
 
   const email = emailParam.toLowerCase().trim();
+  const resolvedTenantId = tenantId || _DEFAULT_TENANT_ID;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
+  if (methodResponse) return redirectEmailAuthFailure(c, "method_disabled");
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    resolvedTenantId,
+    email,
+    "Email",
+  );
+  if (ssoRequiredResponse) return redirectEmailAuthFailure(c, "sso_required");
+  const tokenRl = await checkAuthRateLimit(
+    c,
+    "email-callback-token",
+    10 * 60_000,
+    5,
+    emailMagicLinkVerifySubject(token, email, resolvedTenantId),
+  );
+  if (!tokenRl.allowed) {
+    return redirectEmailAuthFailure(c, "rate_limited");
+  }
 
   let result: Awaited<ReturnType<EmailAuth["verifyMagicLink"]>>;
   try {
-    const emailAuth = await getEmailAuthForTenant(tenantId || _DEFAULT_TENANT_ID);
+    const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
     result = await emailAuth.verifyMagicLink(token);
   } catch {
     return redirectEmailAuthFailure(c, "invalid_link");
@@ -2092,6 +6393,9 @@ auth.get("/callback/email", async (c) => {
 
   if (!result.valid) {
     return redirectEmailAuthFailure(c, "invalid_link");
+  }
+  if (result.tenantId && result.tenantId !== resolvedTenantId) {
+    return redirectEmailAuthFailure(c, "tenant_mismatch");
   }
 
   if (result.email.toLowerCase().trim() !== email) {
@@ -2104,13 +6408,30 @@ auth.get("/callback/email", async (c) => {
     return redirectEmailAuthFailure(c, reason);
   }
 
-  return c.redirect(
-    buildEmailAuthRedirectUrl({
-      token: authResult.token,
-      refreshToken: authResult.refreshToken,
+  if (authResult.response.mfaRequired) {
+    return redirectEmailAuthFailure(c, "mfa_required");
+  }
+
+  const emailRedirectUrl = buildEmailAuthRedirectUrl();
+  const nonceBytes = new Uint8Array(32);
+  crypto.getRandomValues(nonceBytes);
+  const exchangeCode = uint8ArrayToBase64url(nonceBytes);
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + OAUTH_CODE_TTL_MS;
+  await getOAuthCodeStore().set(
+    `oauth-code:${exchangeCode}`,
+    JSON.stringify({
+      token: authResult.response.token,
+      refreshToken: authResult.response.refreshToken,
+      redirectUri: emailRedirectUrl,
+      tenantId: tenantId ?? null,
+      expiresAt,
+      expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
     }),
-    302,
   );
+  const redirectUrl = new URL(emailRedirectUrl);
+  setRedirectFragment(redirectUrl, { code: exchangeCode, auth: "email", tenantId });
+  return c.redirect(redirectUrl.toString(), 302);
 });
 
 /**
@@ -2120,6 +6441,14 @@ auth.get("/callback/email", async (c) => {
  * Verifies the magic link token, provisions user + wallet, links to tenant, returns JWT.
  */
 auth.post("/email/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many verification attempts. Try again later." },
+      429,
+    );
+  }
+
   const body = await safeJsonParse<{
     token: string;
     email: string;
@@ -2131,11 +6460,36 @@ auth.post("/email/verify", async (c) => {
 
   const email = body.email.toLowerCase().trim();
   const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
+  if (methodResponse) return methodResponse;
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    resolvedTenantId,
+    email,
+    "Email",
+  );
+  if (ssoRequiredResponse) return ssoRequiredResponse;
+  const tokenRl = await checkAuthRateLimit(
+    c,
+    "email-verify-token",
+    10 * 60_000,
+    5,
+    emailMagicLinkVerifySubject(body.token, email, resolvedTenantId),
+  );
+  if (!tokenRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many verification attempts. Try again later." },
+      429,
+    );
+  }
   const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
   const result = await emailAuth.verifyMagicLink(body.token);
 
   if (!result.valid || result.email.toLowerCase().trim() !== email) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
+  }
+  if (result.tenantId && result.tenantId !== resolvedTenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Magic link tenant mismatch" }, 401);
   }
 
   const authResult = await completeEmailAuth(c, email, body.tenantId);
@@ -2143,7 +6497,7 @@ auth.post("/email/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: authResult.error }, authResult.status);
   }
 
-  return c.json(buildAuthResponse(authResult.token, authResult.refreshToken, authResult.user));
+  return authExchangeJson(c, authResult.response);
 });
 
 // ── OAuth authorization-code flow ─────────────────────────────────────────────
@@ -2160,6 +6514,75 @@ auth.get("/oauth/:provider/authorize", async (c) => {
   if (!isBuiltInProvider(providerName)) {
     return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
   }
+  const rl = await checkAuthRateLimit(c, `oauth-authorize:${providerName}`, 60_000, 30);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many OAuth authorization requests. Please try again later." },
+      429,
+    );
+  }
+
+  const redirectUri = c.req.query("redirect_uri");
+  const appState = c.req.query("state")?.trim() || undefined;
+  // Accept both `tenant_id` (snake_case, canonical) and `tenantId` (camelCase)
+  // so integrators sending either shape land on the right tenant. Whitespace
+  // is trimmed defensively for the same reason we trim headers elsewhere.
+  const tenantId = c.req.query("tenant_id")?.trim() || c.req.query("tenantId")?.trim() || undefined;
+  const rawClientId = c.req.query("client_id") ?? c.req.query("clientId");
+  const clientId = rawClientId ? normalizePublicClientId(rawClientId) : undefined;
+  if (rawClientId && !clientId) {
+    return c.json<ApiResponse>({ ok: false, error: "client_id is invalid" }, 400);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    tenantId,
+    "oauth",
+    providerName,
+    clientId,
+  );
+  if (methodResponse) return methodResponse;
+
+  // Default to the nonce-exchange flow so access and refresh tokens stay out
+  // of browser history, server access logs, Referer headers, and copied URLs.
+  // Token-in-query redirects are an explicitly unsafe compatibility mode.
+  const responseType = c.req.query("response_type")?.trim() || "code";
+  const codeChallenge = c.req.query("code_challenge")?.trim() || undefined;
+  const codeChallengeMethod = c.req.query("code_challenge_method")?.trim() || "S256";
+
+  if (!redirectUri) {
+    return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
+  }
+
+  if (responseType !== undefined && responseType !== "code" && responseType !== "token") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "response_type must be 'code' or 'token'" },
+      400,
+    );
+  }
+  if (responseType === "token") {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "response_type=token is disabled because it exposes tokens in URLs; use response_type=code",
+      },
+      400,
+    );
+  }
+  if (responseType === "code") {
+    if (!codeChallenge) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "code_challenge is required for response_type=code",
+        },
+        400,
+      );
+    }
+    if (codeChallengeMethod !== "S256") {
+      return c.json<ApiResponse>({ ok: false, error: "code_challenge_method must be 'S256'" }, 400);
+    }
+  }
 
   let oauthClient: OAuthClient;
   try {
@@ -2174,37 +6597,14 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     );
   }
 
-  const redirectUri = c.req.query("redirect_uri");
-  // Accept both `tenant_id` (snake_case, canonical) and `tenantId` (camelCase)
-  // so integrators sending either shape land on the right tenant. Whitespace
-  // is trimmed defensively for the same reason we trim headers elsewhere.
-  const tenantId = c.req.query("tenant_id")?.trim() || c.req.query("tenantId")?.trim() || undefined;
-
-  // `response_type=code` opts the caller into the nonce-exchange flow. Instead
-  // of leaking `?token=...&refreshToken=...` in the redirect URL (which gets
-  // captured by browser history, server access logs, Referer headers from any
-  // resource the landing page loads, and the user clipboard), the callback
-  // issues a one-time `?code=<nonce>` that the caller's backend exchanges for
-  // the real tokens server-side via POST /oauth/exchange. Legacy callers that
-  // omit response_type still get the token-in-query redirect for one release.
-  const responseType = c.req.query("response_type")?.trim() || undefined;
-
-  if (!redirectUri) {
-    return c.json<ApiResponse>({ ok: false, error: "redirect_uri is required" }, 400);
-  }
-
   try {
-    await assertAllowedOAuthRedirectUri(redirectUri, tenantId);
+    await assertAllowedOAuthRedirectUri(redirectUri, tenantId, clientId);
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
-      400,
-    );
-  }
-
-  if (responseType !== undefined && responseType !== "code" && responseType !== "token") {
-    return c.json<ApiResponse>(
-      { ok: false, error: "response_type must be 'code' or 'token'" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Invalid redirect_uri",
+      },
       400,
     );
   }
@@ -2223,11 +6623,15 @@ auth.get("/oauth/:provider/authorize", async (c) => {
   const statePayload = JSON.stringify({
     provider: providerName,
     tenantId,
+    clientId,
     redirectUri,
     responseType,
+    appState,
+    codeChallenge,
+    codeChallengeMethod,
     ...(codeVerifier ? { codeVerifier } : {}),
   });
-  getChallengeStore().set(`oauth:${state}`, statePayload);
+  await getChallengeStore().set(`oauth:${state}`, statePayload);
 
   return c.redirect(authUrl, 302);
 });
@@ -2272,8 +6676,12 @@ auth.get("/oauth/:provider/callback", async (c) => {
   let stateData: {
     provider: string;
     tenantId?: string;
+    clientId?: string;
     redirectUri: string;
     responseType?: string;
+    appState?: string;
+    codeChallenge?: string;
+    codeChallengeMethod?: string;
     codeVerifier?: string;
   };
   try {
@@ -2285,13 +6693,28 @@ auth.get("/oauth/:provider/callback", async (c) => {
   if (stateData.provider !== providerName) {
     return c.json<ApiResponse>({ ok: false, error: "Provider mismatch in state" }, 400);
   }
+  const methodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    stateData.tenantId,
+    "oauth",
+    providerName,
+    stateData.clientId,
+  );
+  if (methodResponse) return methodResponse;
 
   let redirectUrl: URL;
   try {
-    redirectUrl = await assertAllowedOAuthRedirectUri(stateData.redirectUri, stateData.tenantId);
+    redirectUrl = await assertAllowedOAuthRedirectUri(
+      stateData.redirectUri,
+      stateData.tenantId,
+      stateData.clientId,
+    );
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Invalid redirect_uri" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Invalid redirect_uri",
+      },
       400,
     );
   }
@@ -2351,8 +6774,9 @@ auth.get("/oauth/:provider/callback", async (c) => {
     }
     providerUser = {
       ...providerUser,
-      email: `${providerName}.${providerUser.id}@id.steward.internal`,
-    };
+      email: oauthSyntheticEmail(providerName, providerUser.id),
+      syntheticEmailGenerated: true,
+    } as OAuthUserInfoWithEmailSource;
   }
 
   // Create/find user + provision wallet + link tenant
@@ -2365,41 +6789,43 @@ auth.get("/oauth/:provider/callback", async (c) => {
   });
 
   if (!result.ok) {
-    return c.json<ApiResponse>({ ok: false, error: result.error }, 500);
+    return c.json<ApiResponse>({ ok: false, error: result.error }, result.status ?? 500);
   }
 
-  // Branch: nonce-exchange (`response_type=code`) vs legacy token-in-query.
-  //
+  if (result.response.ok === false) {
+    redirectUrl.searchParams.set("error", String(result.response.error || "auth_failed"));
+    return c.redirect(redirectUrl.toString(), 302);
+  }
+
+  if (result.response.mfaRequired) {
+    redirectUrl.searchParams.set("error", "mfa_required");
+    return c.redirect(redirectUrl.toString(), 302);
+  }
+
   // Nonce-exchange path: issue a one-time, short-lived (60s) code that the
   // caller's backend trades for the real tokens via POST /oauth/exchange.
   // This keeps the tokens off the address bar / browser history / Referer /
   // upstream access logs / any window the user copy-pastes. The pair
   // {redirectUri, tenantId} is bound to the code so a stolen code cannot be
   // redeemed against a different redirect_uri or pivoted to another tenant.
-  if (stateData.responseType === "code") {
-    const nonceBytes = new Uint8Array(32);
-    crypto.getRandomValues(nonceBytes);
-    const code = uint8ArrayToBase64url(nonceBytes);
-    const issuedAt = Date.now();
-    const expiresAt = issuedAt + OAUTH_CODE_TTL_MS;
-    const codePayload = JSON.stringify({
-      token: result.token,
-      refreshToken: result.refreshToken,
-      redirectUri: stateData.redirectUri,
-      tenantId: stateData.tenantId ?? null,
-      expiresAt,
-      expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
-    });
-    getOAuthCodeStore().set(`oauth-code:${code}`, codePayload);
-    redirectUrl.searchParams.set("code", code);
-    return c.redirect(redirectUrl.toString(), 302);
-  }
-
-  // Legacy: redirect with tokens directly in the query string. Kept for one
-  // release cycle so existing integrators don't break. Mark for removal in a
-  // follow-up once all callers have moved to `response_type=code`.
-  redirectUrl.searchParams.set("token", result.token);
-  redirectUrl.searchParams.set("refreshToken", result.refreshToken);
+  const nonceBytes = new Uint8Array(32);
+  crypto.getRandomValues(nonceBytes);
+  const exchangeCode = uint8ArrayToBase64url(nonceBytes);
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + OAUTH_CODE_TTL_MS;
+  const codePayload = JSON.stringify({
+    providerName,
+    token: result.response.token,
+    refreshToken: result.response.refreshToken,
+    redirectUri: stateData.redirectUri,
+    tenantId: stateData.tenantId ?? null,
+    codeChallenge: stateData.codeChallenge,
+    codeChallengeMethod: stateData.codeChallengeMethod ?? "S256",
+    expiresAt,
+    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+  });
+  await getOAuthCodeStore().set(`oauth-code:${exchangeCode}`, codePayload);
+  setRedirectFragment(redirectUrl, { code: exchangeCode, state: stateData.appState });
   return c.redirect(redirectUrl.toString(), 302);
 });
 
@@ -2421,17 +6847,28 @@ auth.get("/oauth/:provider/callback", async (c) => {
  *   401 code_redirect_mismatch — `redirect_uri` does not match
  *   401 code_tenant_mismatch   — `tenant_id` does not match
  *
- * The code is consumed (deleted) on the FIRST lookup, before any validation,
- * so a redirect_uri / tenant mismatch still burns the nonce. This prevents an
- * attacker who guesses or steals a code from probing for the bound redirect.
+ * Invalid redemption attempts do not burn the code. A short lock serializes
+ * valid redemption so the code remains single-use without letting a bad PKCE
+ * verifier kill the user's login.
  */
 auth.post("/oauth/exchange", async (c) => {
+  const rl = await checkAuthRateLimit(c, "oauth-exchange", 60_000, 30);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many OAuth exchange attempts. Try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
   const body = await safeJsonParse<{
     code?: unknown;
     redirect_uri?: unknown;
     redirectUri?: unknown;
     tenant_id?: unknown;
     tenantId?: unknown;
+    code_verifier?: unknown;
+    codeVerifier?: unknown;
   }>(c);
 
   const code = typeof body?.code === "string" ? body.code.trim() : "";
@@ -2448,26 +6885,38 @@ auth.post("/oauth/exchange", async (c) => {
         ? body.tenantId.trim()
         : "";
   const tenantId = rawTenantId.length > 0 ? rawTenantId : null;
+  const codeVerifier =
+    typeof body?.code_verifier === "string"
+      ? body.code_verifier.trim()
+      : typeof body?.codeVerifier === "string"
+        ? body.codeVerifier.trim()
+        : "";
 
   if (!code || !redirectUri) {
     return c.json<ApiResponse>({ ok: false, error: "code and redirect_uri are required" }, 400);
   }
 
-  // One-shot consume — even on mismatch, the code is burned so an attacker
-  // cannot retry with corrected parameters.
-  const raw = await getOAuthCodeStore().consume(`oauth-code:${code}`);
+  const codeKey = `oauth-code:${code}`;
+  const raw = await getOAuthCodeStore().get(codeKey);
   if (!raw) {
     return c.json<ApiResponse & { code: string }>(
-      { ok: false, error: "Invalid or already-used code", code: "code_invalid" },
+      {
+        ok: false,
+        error: "Invalid or already-used code",
+        code: "code_invalid",
+      },
       401,
     );
   }
 
   let payload: {
+    providerName?: string;
     token: string;
     refreshToken: string;
     redirectUri: string;
     tenantId: string | null;
+    codeChallenge?: string;
+    codeChallengeMethod?: string;
     expiresAt: number;
     expiresIn: number;
   };
@@ -2485,6 +6934,33 @@ auth.post("/oauth/exchange", async (c) => {
       { ok: false, error: "Code expired", code: "code_expired" },
       401,
     );
+  }
+
+  if (payload.codeChallenge) {
+    if (!codeVerifier || !isValidPkceCodeVerifier(codeVerifier)) {
+      return c.json<ApiResponse & { code: string }>(
+        {
+          ok: false,
+          error: "Invalid code verifier",
+          code: "code_verifier_invalid",
+        },
+        401,
+      );
+    }
+    const computedChallenge = await pkceChallengeForVerifier(
+      codeVerifier,
+      payload.codeChallengeMethod ?? "S256",
+    );
+    if (!computedChallenge || computedChallenge !== payload.codeChallenge) {
+      return c.json<ApiResponse & { code: string }>(
+        {
+          ok: false,
+          error: "Code verifier mismatch",
+          code: "code_verifier_mismatch",
+        },
+        401,
+      );
+    }
   }
 
   if (payload.redirectUri !== redirectUri) {
@@ -2508,6 +6984,50 @@ auth.post("/oauth/exchange", async (c) => {
       401,
     );
   }
+  const methodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    payload.tenantId ?? undefined,
+    "oauth",
+    payload.providerName,
+  );
+  if (methodResponse) return methodResponse;
+
+  if (!(await lockOAuthCodeRedemption(code))) {
+    return c.json<ApiResponse & { code: string }>(
+      {
+        ok: false,
+        error: "OAuth code is already being redeemed",
+        code: "code_in_use",
+      },
+      409,
+    );
+  }
+
+  try {
+    const consumed = await getOAuthCodeStore().consume(codeKey);
+    if (!consumed) {
+      return c.json<ApiResponse & { code: string }>(
+        {
+          ok: false,
+          error: "Invalid or already-used code",
+          code: "code_invalid",
+        },
+        401,
+      );
+    }
+    if (consumed !== raw) {
+      return c.json<ApiResponse & { code: string }>(
+        {
+          ok: false,
+          error: "OAuth code changed during redemption",
+          code: "code_invalid",
+        },
+        401,
+      );
+    }
+  } finally {
+    await releaseOAuthCodeRedemptionLock(code);
+  }
 
   return c.json({
     ok: true,
@@ -2530,6 +7050,14 @@ auth.post("/oauth/:provider/token", async (c) => {
   if (!isBuiltInProvider(providerName)) {
     return c.json<ApiResponse>({ ok: false, error: `Unknown provider: ${providerName}` }, 400);
   }
+  const rl = await checkAuthRateLimit(c, `oauth-token:${providerName}`, 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many OAuth token attempts. Try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
 
   const body = await safeJsonParse<{
     code: string;
@@ -2542,14 +7070,113 @@ auth.post("/oauth/:provider/token", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "code and redirectUri are required" }, 400);
   }
 
-  const requestedTenantId =
-    body.tenantId?.trim() || c.req.header("X-Steward-Tenant")?.trim() || undefined;
+  const bodyTenantId = body.tenantId?.trim() || undefined;
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim() || undefined;
+  if (bodyTenantId && headerTenantId && bodyTenantId !== headerTenantId) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "tenantId and X-Steward-Tenant must match" },
+      400,
+    );
+  }
+  const requestedTenantId = bodyTenantId || headerTenantId;
+  const methodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    requestedTenantId,
+    "oauth",
+    providerName,
+  );
+  if (methodResponse) return methodResponse;
   try {
     await assertAllowedOAuthRedirectUri(body.redirectUri, requestedTenantId);
   } catch (err) {
     return c.json<ApiResponse>(
-      { ok: false, error: err instanceof Error ? err.message : "Invalid redirectUri" },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : "Invalid redirectUri",
+      },
       400,
+    );
+  }
+
+  const boundCodeKey = `oauth-code:${body.code}`;
+  const boundCode = await getOAuthCodeStore().get(boundCodeKey);
+  if (boundCode) {
+    let payload: {
+      providerName?: string;
+      token: string;
+      refreshToken: string;
+      redirectUri: string;
+      tenantId: string | null;
+      codeChallenge?: string;
+      codeChallengeMethod?: string;
+      expiresAt: number;
+      expiresIn: number;
+    };
+    try {
+      payload = JSON.parse(boundCode);
+    } catch {
+      return c.json<ApiResponse>({ ok: false, error: "Malformed OAuth code payload" }, 401);
+    }
+    if (Date.now() > payload.expiresAt) {
+      return c.json<ApiResponse>({ ok: false, error: "OAuth code expired" }, 401);
+    }
+    if (payload.redirectUri !== body.redirectUri) {
+      return c.json<ApiResponse>({ ok: false, error: "OAuth code redirectUri mismatch" }, 401);
+    }
+    if ((payload.tenantId ?? null) !== (requestedTenantId ?? null)) {
+      return c.json<ApiResponse>({ ok: false, error: "OAuth code tenant mismatch" }, 401);
+    }
+    if (payload.providerName && payload.providerName !== providerName) {
+      return c.json<ApiResponse>({ ok: false, error: "OAuth code provider mismatch" }, 401);
+    }
+    const payloadMethodResponse = await requireTenantLoginMethodAllowed(
+      c,
+      payload.tenantId ?? undefined,
+      "oauth",
+      payload.providerName ?? providerName,
+    );
+    if (payloadMethodResponse) return payloadMethodResponse;
+    if (payload.codeChallenge) {
+      const verifier = body.codeVerifier?.trim() ?? "";
+      if (!verifier || !isValidPkceCodeVerifier(verifier)) {
+        return c.json<ApiResponse>({ ok: false, error: "Invalid code verifier" }, 401);
+      }
+      const computedChallenge = await pkceChallengeForVerifier(
+        verifier,
+        payload.codeChallengeMethod ?? "S256",
+      );
+      if (!computedChallenge || computedChallenge !== payload.codeChallenge) {
+        return c.json<ApiResponse>({ ok: false, error: "Code verifier mismatch" }, 401);
+      }
+    }
+    if (!(await lockOAuthCodeRedemption(body.code))) {
+      return c.json<ApiResponse>({ ok: false, error: "OAuth code is already being redeemed" }, 409);
+    }
+    try {
+      const consumed = await getOAuthCodeStore().consume(boundCodeKey);
+      if (!consumed || consumed !== boundCode) {
+        return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used code" }, 401);
+      }
+    } finally {
+      await releaseOAuthCodeRedemptionLock(body.code);
+    }
+    return c.json({
+      ok: true,
+      token: payload.token,
+      refreshToken: payload.refreshToken,
+      expiresIn: payload.expiresIn,
+      expiresAt: payload.expiresAt,
+    });
+  }
+
+  if (!isUnsafeUnboundOAuthProviderCodeExchangeAllowed()) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Unbound OAuth provider code exchange is disabled; use /auth/oauth/:provider/authorize and /auth/oauth/exchange",
+      },
+      401,
     );
   }
 
@@ -2603,8 +7230,9 @@ auth.post("/oauth/:provider/token", async (c) => {
     }
     providerUser = {
       ...providerUser,
-      email: `${providerName}.${providerUser.id}@id.steward.internal`,
-    };
+      email: oauthSyntheticEmail(providerName, providerUser.id),
+      syntheticEmailGenerated: true,
+    } as OAuthUserInfoWithEmailSource;
   }
 
   const result = await provisionOAuthUser({
@@ -2612,45 +7240,144 @@ auth.post("/oauth/:provider/token", async (c) => {
     providerName,
     providerUser,
     tokenResponse,
-    tenantId: body.tenantId,
+    tenantId: requestedTenantId,
   });
 
   if (!result.ok) {
-    return c.json<ApiResponse>({ ok: false, error: result.error }, 500);
+    return c.json<ApiResponse>({ ok: false, error: result.error }, result.status ?? 500);
   }
 
-  return c.json(
-    buildAuthResponse(result.token, result.refreshToken, result.user as Record<string, unknown>),
-  );
+  return authExchangeJson(c, result.response);
 });
 
 // ─── OAuth helper: provision user + account + tenant link ─────────────────────
 
 type OAuthUserInfo = Awaited<ReturnType<OAuthClient["getUserInfo"]>>;
 type OAuthTokenResponse = Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
+type OAuthUserInfoWithEmailSource = OAuthUserInfo & { syntheticEmailGenerated?: boolean };
+
+function oauthSyntheticEmail(providerName: string, providerUserId: string): string {
+  return `${providerName}.${providerUserId}@id.steward.internal`;
+}
 
 async function provisionOAuthUser(opts: {
   c: Context;
   providerName: string;
-  providerUser: OAuthUserInfo;
+  providerUser: OAuthUserInfoWithEmailSource;
   tokenResponse: OAuthTokenResponse;
   tenantId?: string;
 }): Promise<
   | {
       ok: true;
-      token: string;
-      refreshToken: string;
-      user: { id: string; email: string; walletAddress?: string | null };
+      response: Record<string, unknown>;
     }
-  | { ok: false; error: string }
+  | { ok: false; status?: 400 | 403 | 404 | 409 | 500; error: string }
 > {
   const { c, providerName, providerUser, tokenResponse, tenantId } = opts;
   const db = getDb();
   const email = providerUser.email.toLowerCase().trim();
+  const isInternalSyntheticEmail = email.endsWith("@id.steward.internal");
 
   try {
-    // 1. Find or create global user record
-    const user = await findOrCreateUser(email);
+    if (isInternalSyntheticEmail && providerUser.syntheticEmailGenerated !== true) {
+      return {
+        ok: false,
+        status: 403,
+        error: "Provider email uses a reserved internal domain",
+      };
+    }
+    if (!providerUser.syntheticEmailGenerated && providerUser.verified_email !== true) {
+      return {
+        ok: false,
+        status: 403,
+        error: "Provider email must be verified before OAuth sign-in is allowed",
+      };
+    }
+
+    const requestedTenantId = c.req.header("X-Steward-Tenant")?.trim() || tenantId?.trim();
+    const [existingUser] = await db.select().from(users).where(eq(users.email, email));
+    let resolvedTenantId: string | undefined;
+
+    if (existingUser) {
+      const tenantResult = await resolveAndValidateTenant(c, existingUser.id, tenantId);
+      if (!tenantResult.ok) {
+        return {
+          ok: false as const,
+          status: tenantResult.status,
+          error: tenantResult.error,
+        };
+      }
+      resolvedTenantId = tenantResult.tenantId;
+    } else if (requestedTenantId) {
+      const tenantResult = await validateOidcJitTenant(requestedTenantId);
+      if (!tenantResult.ok) {
+        return {
+          ok: false as const,
+          status: tenantResult.status,
+          error: tenantResult.error,
+        };
+      }
+      resolvedTenantId = requestedTenantId;
+    }
+
+    if (resolvedTenantId) {
+      const authAbuseConfig = await getTenantAuthAbuseConfig(resolvedTenantId);
+      const emailPolicyError = validateEmailAbusePolicy(email, authAbuseConfig);
+      if (emailPolicyError) {
+        return {
+          ok: false as const,
+          status: 400,
+          error: emailPolicyError,
+        };
+      }
+      if (
+        !providerUser.syntheticEmailGenerated &&
+        (await isSsoRequiredForEmailDomain(resolvedTenantId, email))
+      ) {
+        return {
+          ok: false as const,
+          status: 403,
+          error: "OAuth login is disabled because this email domain requires SSO",
+        };
+      }
+    }
+
+    // 1. Find or create global user record after tenant/policy checks that can
+    // be evaluated without a new personal tenant.
+    const { user, isNew } = existingUser
+      ? { user: existingUser, isNew: false }
+      : await findOrCreateUserWithStatus(email);
+
+    if (!resolvedTenantId) {
+      const tenantResult = await resolveAndValidateTenant(c, user.id, tenantId);
+      if (!tenantResult.ok) {
+        return {
+          ok: false as const,
+          status: tenantResult.status,
+          error: tenantResult.error,
+        };
+      }
+      resolvedTenantId = tenantResult.tenantId;
+      const authAbuseConfig = await getTenantAuthAbuseConfig(resolvedTenantId);
+      const emailPolicyError = validateEmailAbusePolicy(email, authAbuseConfig);
+      if (emailPolicyError) {
+        return {
+          ok: false as const,
+          status: 400,
+          error: emailPolicyError,
+        };
+      }
+      if (
+        !providerUser.syntheticEmailGenerated &&
+        (await isSsoRequiredForEmailDomain(resolvedTenantId, email))
+      ) {
+        return {
+          ok: false as const,
+          status: 403,
+          error: "OAuth login is disabled because this email domain requires SSO",
+        };
+      }
+    }
 
     // Update name/image if we have richer data from the provider and the user doesn't have it yet
     const updates: Partial<typeof users.$inferInsert> = {};
@@ -2670,7 +7397,7 @@ async function provisionOAuthUser(opts: {
       tokenResponse.access_token,
       tokenResponse.refresh_token ?? null,
     );
-    await db
+    const [insertedAccount] = await db
       .insert(accounts)
       .values({
         userId: user.id,
@@ -2681,16 +7408,42 @@ async function provisionOAuthUser(opts: {
           ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
           : null,
       })
-      .onConflictDoUpdate({
+      .onConflictDoNothing({
         target: [accounts.provider, accounts.providerAccountId],
-        set: {
-          userId: user.id,
+      })
+      .returning({ id: accounts.id });
+    if (!insertedAccount) {
+      const [currentAccount] = await db
+        .select({ id: accounts.id, userId: accounts.userId })
+        .from(accounts)
+        .where(
+          and(eq(accounts.provider, providerName), eq(accounts.providerAccountId, providerUser.id)),
+        );
+      if (!currentAccount || currentAccount.userId !== user.id) {
+        return {
+          ok: false as const,
+          status: 403,
+          error: "OAuth account is already linked to another user",
+        };
+      }
+      const [updatedAccount] = await db
+        .update(accounts)
+        .set({
           ...encryptedProviderTokens,
           expiresAt: tokenResponse.expires_in
             ? Math.floor(Date.now() / 1000) + tokenResponse.expires_in
             : null,
-        },
-      });
+        })
+        .where(and(eq(accounts.id, currentAccount.id), eq(accounts.userId, user.id)))
+        .returning({ id: accounts.id });
+      if (!updatedAccount) {
+        return {
+          ok: false as const,
+          status: 403,
+          error: "OAuth account ownership changed during sign-in",
+        };
+      }
+    }
 
     // 3. Provision personal wallet (idempotent)
     let walletAddress = user.walletAddress;
@@ -2701,26 +7454,29 @@ async function provisionOAuthUser(opts: {
       console.error(`[OAuthAuth:${providerName}] Wallet provision failed:`, err);
     }
 
-    // 4. Resolve requesting tenant and link user
-    const tenantResult = await resolveAndValidateTenant(c, user.id, tenantId);
-    if (!tenantResult.ok) {
-      return { ok: false as const, error: tenantResult.error };
-    }
-    const resolvedTenantId = tenantResult.tenantId;
+    // 4. Link user to the already-authorized requesting tenant.
     await ensureUserTenantLink(user.id, resolvedTenantId);
-
-    // 5. Mint JWT + refresh token
-    const token = await createSessionToken(walletAddress ?? "", resolvedTenantId, {
-      userId: user.id,
-      email,
-    });
-    const oauthRefreshToken = await createRefreshToken(user.id, resolvedTenantId);
+    if (isNew) {
+      dispatchUserCreated(resolvedTenantId, user.id, "auth.oauth", {
+        provider: providerName,
+        hasEmail: true,
+      });
+    }
 
     return {
       ok: true,
-      token,
-      refreshToken: oauthRefreshToken,
-      user: { id: user.id, email, walletAddress },
+      response: await buildAuthOrMfaResponse(
+        user.id,
+        resolvedTenantId,
+        walletAddress ?? "",
+        {
+          userId: user.id,
+          email,
+          authMethod: "oauth",
+        },
+        { id: user.id, email, walletAddress },
+        c,
+      ),
     };
   } catch (err) {
     console.error(`[OAuthAuth:${providerName}] provisionOAuthUser failed:`, err);
@@ -2739,7 +7495,235 @@ function buildOAuthCallbackUrl(c: Context, providerName: string): string {
   const appUrl = process.env.APP_URL
     ? process.env.APP_URL.replace(/\/$/, "")
     : `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
-  return `${appUrl}/auth/oauth/${providerName}/callback`;
+  return `${appUrl}/auth/oauth/${encodeURIComponent(providerName)}/callback`;
+}
+
+function buildOidcCallbackUrl(c: Context, providerId: string): string {
+  const appUrl = process.env.APP_URL
+    ? process.env.APP_URL.replace(/\/$/, "")
+    : `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
+  return `${appUrl}/auth/oidc/${encodeURIComponent(providerId)}/callback`;
+}
+
+function randomBase64Url(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return uint8ArrayToBase64url(bytes);
+}
+
+const OIDC_TOKEN_EXCHANGE_TIMEOUT_MS = 10_000;
+const OIDC_TOKEN_EXCHANGE_MAX_BYTES = 64 * 1024;
+
+function isPrivateOidcIpv4(address: string): boolean {
+  const parts = address.split(".").map((part) => Number(part));
+  if (
+    parts.length !== 4 ||
+    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  ) {
+    return false;
+  }
+  const [a, b] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 192 && b === 0) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    a >= 224
+  );
+}
+
+function isPrivateOidcIpv6(address: string): boolean {
+  const normalized = address.toLowerCase();
+  const ipv4Mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (ipv4Mapped) return isPrivateOidcIpv4(ipv4Mapped[1]);
+  const hexIpv4Mapped = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hexIpv4Mapped) {
+    const high = Number.parseInt(hexIpv4Mapped[1], 16);
+    const low = Number.parseInt(hexIpv4Mapped[2], 16);
+    if (Number.isFinite(high) && Number.isFinite(low) && high <= 0xffff && low <= 0xffff) {
+      return isPrivateOidcIpv4(
+        `${(high >> 8) & 255}.${high & 255}.${(low >> 8) & 255}.${low & 255}`,
+      );
+    }
+  }
+  return (
+    normalized === "::" ||
+    normalized === "::1" ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd") ||
+    normalized.startsWith("fe80:") ||
+    normalized.startsWith("ff") ||
+    normalized.startsWith("2001:db8:")
+  );
+}
+
+function assertPublicOidcAddress(address: string, family: number): void {
+  if (
+    (family === 4 && isPrivateOidcIpv4(address)) ||
+    (family === 6 && isPrivateOidcIpv6(address))
+  ) {
+    throw new Error("OIDC token endpoint must resolve to a public address");
+  }
+}
+
+function assertPublicOidcTokenUrl(url: URL): void {
+  const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  const literalVersion = isIP(hostname);
+  if (
+    url.protocol !== "https:" ||
+    hostname === "localhost" ||
+    hostname.endsWith(".localhost") ||
+    hostname.endsWith(".local") ||
+    hostname.endsWith(".internal") ||
+    (literalVersion === 4 && isPrivateOidcIpv4(hostname)) ||
+    (literalVersion === 6 && isPrivateOidcIpv6(hostname))
+  ) {
+    throw new Error("OIDC token endpoint must be a public https URL");
+  }
+}
+
+async function postPublicOidcTokenEndpoint(
+  tokenUrl: string,
+  body: URLSearchParams,
+): Promise<{ ok: boolean; status: number; text: string }> {
+  const url = new URL(tokenUrl);
+  assertPublicOidcTokenUrl(url);
+  const bodyText = body.toString();
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let bytes = 0;
+    let responseText = "";
+    const finish = <T>(fn: (value: T) => void, value: T) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      fn(value);
+    };
+    const request = httpsRequest(
+      url,
+      {
+        method: "POST",
+        timeout: OIDC_TOKEN_EXCHANGE_TIMEOUT_MS,
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Length": new TextEncoder().encode(bodyText).length.toString(),
+        },
+        lookup(hostname, options, callback) {
+          dnsLookup(
+            hostname,
+            { all: false, family: options.family, verbatim: true },
+            (error, address, family) => {
+              if (error) {
+                callback(error, address, family);
+                return;
+              }
+              try {
+                assertPublicOidcAddress(address, family);
+                callback(null, address, family);
+              } catch (privateAddressError) {
+                callback(privateAddressError as NodeJS.ErrnoException, address, family);
+              }
+            },
+          );
+        },
+      },
+      (response) => {
+        if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400) {
+          finish(reject, new Error("OIDC token endpoint redirects are not allowed"));
+          response.resume();
+          return;
+        }
+        response.setEncoding("utf8");
+        response.on("data", (chunk: string) => {
+          bytes += new TextEncoder().encode(chunk).length;
+          if (bytes > OIDC_TOKEN_EXCHANGE_MAX_BYTES) {
+            finish(reject, new Error("OIDC token endpoint response is too large"));
+            request.destroy();
+            return;
+          }
+          responseText += chunk;
+        });
+        response.on("end", () => {
+          finish(resolve, {
+            ok: Boolean(response.statusCode && response.statusCode >= 200 && response.statusCode < 300),
+            status: response.statusCode ?? 0,
+            text: responseText,
+          });
+        });
+      },
+    );
+    request.on("error", (error) => finish(reject, error));
+    request.setTimeout(OIDC_TOKEN_EXCHANGE_TIMEOUT_MS, () => {
+      finish(reject, new Error("OIDC token endpoint request timed out"));
+      request.destroy();
+    });
+    const deadline = setTimeout(() => {
+      finish(reject, new Error("OIDC token endpoint request timed out"));
+      request.destroy();
+    }, OIDC_TOKEN_EXCHANGE_TIMEOUT_MS);
+    request.write(bodyText);
+    request.end();
+  });
+}
+
+async function exchangeOidcAuthorizationCode(opts: {
+  provider: TenantOidcProviderConfig;
+  code: string;
+  redirectUri: string;
+  codeVerifier: string;
+}): Promise<string> {
+  const { provider, code, redirectUri, codeVerifier } = opts;
+  if (!provider.clientId || !provider.tokenUrl) {
+    throw new Error("OIDC provider is not configured for authorization-code login");
+  }
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    code,
+    redirect_uri: redirectUri,
+    client_id: provider.clientId,
+    code_verifier: codeVerifier,
+  });
+  if (provider.clientSecretEnv) {
+    const secret = process.env[provider.clientSecretEnv];
+    if (!secret) throw new Error(`OIDC client secret env ${provider.clientSecretEnv} is not set`);
+    body.set("client_secret", secret);
+  }
+
+  const response = await postPublicOidcTokenEndpoint(provider.tokenUrl, body);
+  const text = response.text;
+  let payload: unknown;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error("OIDC token endpoint returned invalid JSON");
+  }
+  if (!response.ok) {
+    const error =
+      payload &&
+      typeof payload === "object" &&
+      "error" in payload &&
+      typeof payload.error === "string"
+        ? payload.error
+        : "OIDC token endpoint rejected authorization code";
+    throw new Error(error);
+  }
+  if (
+    !payload ||
+    typeof payload !== "object" ||
+    !("id_token" in payload) ||
+    typeof payload.id_token !== "string" ||
+    payload.id_token.trim() === ""
+  ) {
+    throw new Error("OIDC token endpoint did not return an id_token");
+  }
+  return payload.id_token.trim();
 }
 
 const OAUTH_REDIRECT_ALLOWLIST_ENV_KEYS = [
@@ -2773,8 +7757,14 @@ function parseOAuthRedirectUri(redirectUri: string): URL {
     throw new Error("redirect_uri must be a valid absolute URL");
   }
 
-  if (redirectUrl.protocol !== "https:" && redirectUrl.protocol !== "http:") {
-    throw new Error("redirect_uri must use http or https");
+  if (redirectUrl.protocol === "http:") {
+    const host = redirectUrl.hostname.toLowerCase();
+    const isLoopback = host === "localhost" || host === "127.0.0.1" || host === "::1";
+    if (!isLoopback) {
+      throw new Error("redirect_uri must use https except for loopback development origins");
+    }
+  } else if (redirectUrl.protocol !== "https:") {
+    throw new Error("redirect_uri must use https");
   }
 
   if (redirectUrl.username || redirectUrl.password) {
@@ -2800,7 +7790,12 @@ function isOAuthRedirectEntryMatch(redirectUrl: URL, allowedEntry: string): bool
     allowedUrl.pathname === "/" && !allowedUrl.search && !allowedUrl.hash && !allowedUrl.username;
 
   if (isOriginOnly) {
-    return allowedUrl.origin === redirectUrl.origin;
+    return (
+      allowedUrl.origin === redirectUrl.origin &&
+      redirectUrl.pathname === "/" &&
+      !redirectUrl.search &&
+      !redirectUrl.hash
+    );
   }
 
   return (
@@ -2810,32 +7805,92 @@ function isOAuthRedirectEntryMatch(redirectUrl: URL, allowedEntry: string): bool
   );
 }
 
-async function getAllowedOAuthRedirectEntries(tenantId?: string): Promise<string[]> {
-  const entries = new Set(parseOAuthRedirectAllowlistEnv());
-  const resolvedTenantId = tenantId?.trim() || _DEFAULT_TENANT_ID;
+function normalizePublicClientId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const id = value.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{2,63}$/.test(id) ? id : undefined;
+}
+
+async function getAllowedOAuthRedirectEntries(
+  tenantId?: string,
+  clientId?: string,
+): Promise<string[]> {
+  const explicitTenantId = tenantId?.trim() || undefined;
+  const resolvedTenantId = explicitTenantId || _DEFAULT_TENANT_ID;
+  const entries = new Set<string>();
+
+  const normalizedClientId = normalizePublicClientId(clientId);
+  const appClientRows = await getDb()
+    .select({
+      id: tenantAppClients.id,
+      allowedRedirectUrls: tenantAppClients.allowedRedirectUrls,
+      allowedOrigins: tenantAppClients.allowedOrigins,
+    })
+    .from(tenantAppClients)
+    .where(and(eq(tenantAppClients.tenantId, resolvedTenantId), eq(tenantAppClients.enabled, true)));
+
+  if (normalizedClientId) {
+    const client = appClientRows.find((candidate) => candidate.id === normalizedClientId);
+    if (client) {
+      const redirects = client.allowedRedirectUrls?.length
+        ? client.allowedRedirectUrls
+        : (client.allowedOrigins ?? []);
+      for (const entry of redirects) {
+        const trimmed = entry.trim();
+        if (trimmed && trimmed !== "*") entries.add(trimmed);
+      }
+    }
+    return [...entries];
+  }
 
   const [row] = await getDb()
-    .select({ allowedOrigins: tenantConfigs.allowedOrigins })
+    .select({
+      allowedOrigins: tenantConfigs.allowedOrigins,
+      allowedRedirectUrls: tenantConfigs.allowedRedirectUrls,
+    })
     .from(tenantConfigs)
     .where(eq(tenantConfigs.tenantId, resolvedTenantId));
 
-  for (const origin of row?.allowedOrigins ?? []) {
-    const trimmed = origin.trim();
+  const tenantRedirects = row?.allowedRedirectUrls?.length
+    ? row.allowedRedirectUrls
+    : (row?.allowedOrigins ?? []);
+  for (const entry of tenantRedirects) {
+    const trimmed = entry.trim();
     if (trimmed && trimmed !== "*") {
       entries.add(trimmed);
+    }
+  }
+
+  for (const client of appClientRows) {
+    const redirects = client.allowedRedirectUrls?.length
+      ? client.allowedRedirectUrls
+      : (client.allowedOrigins ?? []);
+    for (const entry of redirects) {
+      const trimmed = entry.trim();
+      if (trimmed && trimmed !== "*") entries.add(trimmed);
+    }
+  }
+
+  if (!explicitTenantId) {
+    for (const entry of parseOAuthRedirectAllowlistEnv()) {
+      entries.add(entry);
     }
   }
 
   return [...entries];
 }
 
-async function assertAllowedOAuthRedirectUri(redirectUri: string, tenantId?: string): Promise<URL> {
+export async function assertAllowedOAuthRedirectUri(
+  redirectUri: string,
+  tenantId?: string,
+  clientId?: string,
+): Promise<URL> {
   const redirectUrl = parseOAuthRedirectUri(redirectUri);
-  const allowlist = await getAllowedOAuthRedirectEntries(tenantId);
+  const allowlist = await getAllowedOAuthRedirectEntries(tenantId, clientId);
 
   if (allowlist.length === 0) {
     throw new Error(
-      "OAuth redirect_uri allowlist is not configured for this tenant. Configure tenant allowedOrigins or STEWARD_OAUTH_ALLOWED_REDIRECTS.",
+      "OAuth redirect_uri allowlist is not configured for this tenant. Configure tenant allowedRedirectUrls or STEWARD_OAUTH_ALLOWED_REDIRECTS.",
     );
   }
 

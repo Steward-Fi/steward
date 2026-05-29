@@ -83,7 +83,9 @@ jobs:
       - name: Export image tag
         id: image-tag
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          # Use the $GITHUB_REF env var rather than inlining ${{ github.ref }}
+          # into the script (avoids GHA expression-injection into the shell).
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             TAG="${GITHUB_REF#refs/tags/v}"
           else
             TAG="${GITHUB_REF#refs/heads/}"

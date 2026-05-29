@@ -6,6 +6,7 @@ const SKIP = !process.env.DATABASE_URL;
 import { generateApiKey } from "@stwd/auth";
 import { getDb, tenants, webhookConfigs } from "@stwd/db";
 import { eq } from "drizzle-orm";
+import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "../services/webhook-events";
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
 const BASE_URL = `http://localhost:${TEST_PORT}`;
@@ -88,6 +89,27 @@ describe.skipIf(SKIP)("Webhook Configuration API", () => {
       expect(body.ok).toBe(false);
     });
 
+    for (const url of [
+      "http://example.com/hook",
+      "https://localhost/hook",
+      "https://127.0.0.1/hook",
+      "https://10.0.0.1/hook",
+      "https://169.254.169.254/latest/meta-data",
+      "https://[::1]/hook",
+    ]) {
+      it(`rejects SSRF-prone webhook URL ${url}`, async () => {
+        const res = await fetch(`${BASE_URL}/webhooks`, {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ url }),
+        });
+
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.ok).toBe(false);
+      });
+    }
+
     it("rejects invalid event types", async () => {
       const res = await fetch(`${BASE_URL}/webhooks`, {
         method: "POST",
@@ -112,7 +134,7 @@ describe.skipIf(SKIP)("Webhook Configuration API", () => {
 
       expect(res.status).toBe(201);
       const body = await res.json();
-      expect(body.data.events.length).toBe(6);
+      expect(body.data.events).toEqual([...CONFIGURED_WEBHOOK_EVENT_TYPES]);
     });
   });
 
@@ -147,6 +169,40 @@ describe.skipIf(SKIP)("Webhook Configuration API", () => {
       expect(body.ok).toBe(true);
       expect(body.data.enabled).toBe(false);
       expect(body.data.description).toBe("Updated description");
+      expect(body.data.secret).toBeUndefined();
+    });
+
+    it("rejects update to SSRF-prone webhook URL", async () => {
+      const res = await fetch(`${BASE_URL}/webhooks/${createdWebhookId}`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ url: "https://169.254.169.254/latest/meta-data" }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+    });
+
+    it("rejects invalid retry settings on update", async () => {
+      for (const body of [
+        { maxRetries: -1 },
+        { maxRetries: 11 },
+        { maxRetries: 1.5 },
+        { retryBackoffMs: 999 },
+        { retryBackoffMs: 3600001 },
+        { retryBackoffMs: 1000.5 },
+      ]) {
+        const res = await fetch(`${BASE_URL}/webhooks/${createdWebhookId}`, {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify(body),
+        });
+
+        expect(res.status).toBe(400);
+        const responseBody = await res.json();
+        expect(responseBody.ok).toBe(false);
+      }
     });
 
     it("returns 404 for non-existent webhook", async () => {
@@ -170,6 +226,25 @@ describe.skipIf(SKIP)("Webhook Configuration API", () => {
       const body = await res.json();
       expect(body.ok).toBe(true);
       expect(body.data).toEqual([]);
+    });
+
+    it("rejects invalid pagination parameters", async () => {
+      for (const query of [
+        "limit=0",
+        "limit=-1",
+        "limit=201",
+        "limit=abc",
+        "offset=-1",
+        "offset=abc",
+      ]) {
+        const res = await fetch(`${BASE_URL}/webhooks/${createdWebhookId}/deliveries?${query}`, {
+          headers: authHeaders(),
+        });
+
+        expect(res.status).toBe(400);
+        const body = await res.json();
+        expect(body.ok).toBe(false);
+      }
     });
   });
 

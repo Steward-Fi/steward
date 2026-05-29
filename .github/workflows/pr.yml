@@ -4,6 +4,11 @@ on:
   pull_request:
     branches: [develop, main]
 
+# Least-privilege default for all jobs. No job in this workflow needs write
+# access; PRs only lint/test. Escalate per-job if that ever changes.
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Lint + Typecheck + PR Metadata
@@ -63,8 +68,13 @@ jobs:
           exit "$status"
 
       - name: Check PR title
+        # PR title is attacker-controlled. Pass it through env (never inline into
+        # the script) so a title like `$(cmd)` or `"; cmd; "` can't execute on the
+        # runner — see GHA script-injection guidance.
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          TITLE="${{ github.event.pull_request.title }}"
+          TITLE="$PR_TITLE"
           PATTERN="^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?: .+"
           if ! echo "$TITLE" | grep -qE "$PATTERN"; then
             echo "::error::PR title must match conventional commits format"

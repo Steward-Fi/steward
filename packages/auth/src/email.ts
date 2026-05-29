@@ -77,6 +77,25 @@ function buildMagicLink(
   return url.toString();
 }
 
+type MagicLinkPayload = {
+  email: string;
+  tenantId?: string;
+};
+
+function encodeMagicLinkPayload(payload: MagicLinkPayload): string {
+  return JSON.stringify(payload);
+}
+
+function decodeMagicLinkPayload(value: string): MagicLinkPayload {
+  try {
+    const parsed = JSON.parse(value) as MagicLinkPayload;
+    if (typeof parsed.email === "string") return parsed;
+  } catch {
+    // Backward-compatible legacy tokens stored the email as the raw value.
+  }
+  return { email: value };
+}
+
 // ---------------------------------------------------------------------------
 // EmailAuth
 // ---------------------------------------------------------------------------
@@ -113,13 +132,19 @@ export class EmailAuth {
    * Generate a magic link token, persist its hash, and send the email.
    * Returns the token hash (for verification lookup) and the expiry date.
    */
-  async sendMagicLink(email: string): Promise<{ tokenHash: string; expiresAt: Date }> {
+  async sendMagicLink(
+    email: string,
+    context: { tenantId?: string } = {},
+  ): Promise<{ tokenHash: string; expiresAt: Date }> {
     const token = generateToken();
     const tokenHash = hashToken(token);
     const expiresAt = new Date(Date.now() + this.tokenTtlMs);
 
-    // Persist hash → email with TTL
-    this.tokenStore.store(tokenHash, email, this.tokenTtlMs);
+    this.tokenStore.store(
+      tokenHash,
+      encodeMagicLinkPayload({ email, tenantId: context.tenantId }),
+      this.tokenTtlMs,
+    );
 
     // Build and send the email
     const magicLink = buildMagicLink(this.baseUrl, this.callbackPath, token, email);
@@ -142,18 +167,18 @@ export class EmailAuth {
    * Verify a raw token received from the callback URL.
    * One-time use: deletes the token after successful verification.
    */
-  async verifyMagicLink(token: string): Promise<{ email: string; valid: boolean }> {
+  async verifyMagicLink(
+    token: string,
+  ): Promise<{ email: string; tenantId?: string; valid: boolean }> {
     const tokenHash = hashToken(token);
-    const email = await this.tokenStore.verify(tokenHash);
+    const stored = await this.tokenStore.consume(tokenHash);
 
-    if (!email) {
+    if (!stored) {
       return { email: "", valid: false };
     }
 
-    // Consume the token (one-time use)
-    this.tokenStore.delete(tokenHash);
-
-    return { email, valid: true };
+    const payload = decodeMagicLinkPayload(stored);
+    return { email: payload.email, tenantId: payload.tenantId, valid: true };
   }
 
   /**

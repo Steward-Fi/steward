@@ -1,8 +1,9 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -15,18 +16,28 @@ import { tenants } from "./schema";
 
 // ─── Users ──────────────────────────────────────────────────────────────────
 // Central identity record, decoupled from any tenant.
-export const users = pgTable("users", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  email: varchar("email", { length: 255 }).unique(),
-  emailVerified: boolean("email_verified").default(false),
-  name: varchar("name", { length: 255 }),
-  image: text("image"),
-  walletAddress: varchar("wallet_address", { length: 128 }),
-  walletChain: varchar("wallet_chain", { length: 16 }).default("ethereum"),
-  stewardWalletId: varchar("steward_wallet_id", { length: 64 }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-});
+export const users = pgTable(
+  "users",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    email: varchar("email", { length: 255 }).unique(),
+    emailVerified: boolean("email_verified").default(false),
+    name: varchar("name", { length: 255 }),
+    image: text("image"),
+    walletAddress: varchar("wallet_address", { length: 128 }),
+    walletChain: varchar("wallet_chain", { length: 16 }).default("ethereum"),
+    stewardWalletId: varchar("steward_wallet_id", { length: 64 }),
+    customMetadata: jsonb("custom_metadata").$type<Record<string, unknown>>().notNull().default({}),
+    deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    walletIdentityUniqueIdx: uniqueIndex("users_wallet_identity_unique_idx")
+      .on(table.walletChain, table.walletAddress)
+      .where(sql`${table.walletAddress} is not null`),
+  }),
+);
 
 // ─── Authenticators (WebAuthn / passkeys) ────────────────────────────────────
 export const authenticators = pgTable(
@@ -105,13 +116,18 @@ export const refreshTokens = pgTable(
   "refresh_tokens",
   {
     id: text("id").primaryKey(),
-    userId: text("user_id").notNull(),
-    tenantId: text("tenant_id").notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
     tokenHash: text("token_hash").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    tokenHashUnique: uniqueIndex("refresh_tokens_token_hash_unique_idx").on(table.tokenHash),
     tokenHashIdx: index("refresh_tokens_token_hash_idx").on(table.tokenHash),
     userIdIdx: index("refresh_tokens_user_id_idx").on(table.userId),
   }),
@@ -130,6 +146,7 @@ export const userTenants = pgTable(
       .notNull()
       .references(() => tenants.id, { onDelete: "cascade" }),
     role: varchar("role", { length: 32 }).notNull().default("member"),
+    customMetadata: jsonb("custom_metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({

@@ -1,8 +1,8 @@
 import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import { createPrivateKey, sign as cryptoSign } from "node:crypto";
-import { getDb, refreshTokens, tenants, users, userTenants } from "@stwd/db";
+import { getDb, refreshTokens, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
 import bs58 from "bs58";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 const SKIP = !process.env.DATABASE_URL;
@@ -15,6 +15,7 @@ const SOLANA_TEST_KEYPAIR = {
   x: "DtNuOw6T7fPESIGzt_Qp6V0Q5d2a1-mUks5zrxPIoeE",
   publicKey: "zshVFXnC99G1ijob5dm9xS1hhSsgzC5PbDaLzSXPdct",
 };
+const CLOSED_TENANT_ID = "test-wallet-auth-closed";
 const createdEvmAddresses = new Set<string>();
 
 type VerifyResponse = {
@@ -89,7 +90,7 @@ async function cleanupCreatedRows(): Promise<void> {
   const db = getDb();
 
   for (const address of createdEvmAddresses) {
-    const tenantId = `t-${address.slice(2, 10)}`;
+    const tenantId = `eth:${address}`;
     await db.delete(refreshTokens).where(eq(refreshTokens.tenantId, tenantId));
     await db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
     await db.delete(tenants).where(eq(tenants.id, tenantId));
@@ -104,6 +105,10 @@ async function cleanupCreatedRows(): Promise<void> {
     .where(eq(userTenants.tenantId, `solana:${SOLANA_TEST_KEYPAIR.publicKey}`));
   await db.delete(tenants).where(eq(tenants.id, `solana:${SOLANA_TEST_KEYPAIR.publicKey}`));
   await db.delete(users).where(eq(users.walletAddress, SOLANA_TEST_KEYPAIR.publicKey));
+
+  await db.delete(userTenants).where(eq(userTenants.tenantId, CLOSED_TENANT_ID));
+  await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, CLOSED_TENANT_ID));
+  await db.delete(tenants).where(eq(tenants.id, CLOSED_TENANT_ID));
 }
 
 describeWithDatabase("wallet auth flows", () => {
@@ -150,6 +155,55 @@ describeWithDatabase("wallet auth flows", () => {
     const payload = decodeJwtPayload(json.token);
     expect(payload.address).toBe(account.address.toLowerCase());
     expect(payload.userId).toBe(user?.id);
+  });
+
+  it("rejects SIWE self-join into a closed tenant requested by header", async () => {
+    const db = getDb();
+    await db
+      .insert(tenants)
+      .values({
+        id: CLOSED_TENANT_ID,
+        name: "Closed Wallet Auth Tenant",
+        apiKeyHash: "hash",
+      })
+      .onConflictDoNothing();
+    await db
+      .insert(tenantConfigs)
+      .values({ tenantId: CLOSED_TENANT_ID, joinMode: "closed" })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { joinMode: "closed", updatedAt: new Date() },
+      });
+
+    const account = privateKeyToAccount(generatePrivateKey());
+    const address = account.address.toLowerCase();
+    createdEvmAddresses.add(address);
+    const nonce = await fetchNonce();
+    const message = buildSiweMessage(account.address, nonce);
+    const signature = await account.signMessage({ message });
+
+    const res = await fetch(`${BASE_URL}/auth/verify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Tenant": CLOSED_TENANT_ID,
+      },
+      body: JSON.stringify({ message, signature }),
+    });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("closed");
+
+    const [user] = await db.select().from(users).where(eq(users.walletAddress, address));
+    if (user) {
+      const links = await db
+        .select()
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, CLOSED_TENANT_ID)));
+      expect(links).toHaveLength(0);
+    }
   });
 
   it("rejects SIWS messages whose signed domain is not on the allowlist", async () => {

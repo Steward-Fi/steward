@@ -151,6 +151,18 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
     const json = (await res.json()) as any;
     expect(json.data.expiresIn).toBe("7d");
   });
+
+  it("rejects excessive custom expiresIn values", async () => {
+    const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
+      method: "POST",
+      headers: tenantHeaders(testApiKey),
+      body: JSON.stringify({ expiresIn: "100y" }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as any;
+    expect(json.error).toContain("up to 30d");
+  });
 });
 
 describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {

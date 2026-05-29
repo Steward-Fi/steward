@@ -54,11 +54,29 @@ describe("trade-order evaluators", () => {
     });
   });
 
+  it("daily-spend-cap fails closed when order notional is missing or invalid", () => {
+    for (const estimatedOrderUsd of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      expect(dailySpendCapEvaluator(session, { ...order, estimatedOrderUsd })).toEqual({
+        allow: false,
+        reason: "daily-spend-cap: estimated order USD is required when a daily cap is configured",
+      });
+    }
+  });
+
   it("per-order-cap blocks orders above the session per-order cap and defaults to $50", () => {
     expect(perOrderCapEvaluator({}, { ...order, estimatedOrderUsd: 51 })).toEqual({
       allow: false,
       reason: "per-order-cap: order $51 exceeds cap $50",
     });
+  });
+
+  it("per-order-cap fails closed when order notional is missing or invalid", () => {
+    for (const estimatedOrderUsd of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+      expect(perOrderCapEvaluator(session, { ...order, estimatedOrderUsd })).toEqual({
+        allow: false,
+        reason: "per-order-cap: estimated order USD is required when a per-order cap is configured",
+      });
+    }
   });
 
   it("compose returns the first failure for an ETH buy 3x at $200", () => {

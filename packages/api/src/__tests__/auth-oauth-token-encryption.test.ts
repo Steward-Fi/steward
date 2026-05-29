@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { accounts, closeDb, tenantConfigs, tenants } from "@stwd/db";
+import { accounts, closeDb, tenantConfigs, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import {
@@ -28,6 +28,7 @@ describe("OAuth provider token encryption", () => {
     process.env.APP_URL = "https://api.example.test";
     process.env.GOOGLE_CLIENT_ID = "google-client";
     process.env.GOOGLE_CLIENT_SECRET = "google-secret";
+    process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE = "true";
     clearOAuthTokenKeyStoreForTests();
   });
 
@@ -36,12 +37,12 @@ describe("OAuth provider token encryption", () => {
     globalThis.fetch = originalFetch;
     clearOAuthTokenKeyStoreForTests();
     await closeDb().catch(() => {});
-    delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.JWT_SECRET;
     delete process.env.APP_URL;
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
+    delete process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE;
   });
 
   it("encrypts OAuth tokens and rejects the wrong master password with a clear error", () => {
@@ -91,6 +92,8 @@ describe("OAuth provider token encryption", () => {
     await db.insert(tenantConfigs).values({
       tenantId: "oauth-test-tenant",
       allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/callback"],
+      joinMode: "open",
     });
 
     mock.restore();
@@ -150,5 +153,129 @@ describe("OAuth provider token encryption", () => {
         salt: account.accessTokenSalt,
       }),
     ).toBe("provider-access-token");
+  });
+
+  it("rejects OAuth sign-in when the provider email is unverified", async () => {
+    const db = await setupDb();
+    await db.insert(tenants).values({
+      id: "oauth-unverified-tenant",
+      name: "OAuth Unverified Tenant",
+      apiKeyHash: "hash",
+    });
+    await db.insert(tenantConfigs).values({
+      tenantId: "oauth-unverified-tenant",
+      allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/callback"],
+      joinMode: "open",
+    });
+
+    mock.restore();
+    globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return new Response(
+          JSON.stringify({
+            access_token: "provider-access-token",
+            expires_in: 3600,
+            token_type: "Bearer",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url === "https://www.googleapis.com/oauth2/v3/userinfo") {
+        return new Response(
+          JSON.stringify({
+            id: "google-user-unverified",
+            email: "victim@example.com",
+            name: "Unverified OAuth User",
+            verified_email: false,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(`unexpected fetch: ${url}`, { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const res = await authRoutes.request("/oauth/google/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: "auth-code",
+        redirectUri: "https://app.example.test/callback",
+        tenantId: "oauth-unverified-tenant",
+      }),
+    });
+
+    const body = (await res.json()) as { ok: boolean; error?: string };
+    expect(res.status).toBe(403);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Provider email must be verified");
+  });
+
+  it("rejects provider-supplied emails in the reserved synthetic identity domain", async () => {
+    const db = await setupDb();
+    await db.insert(tenants).values({
+      id: "oauth-internal-email-tenant",
+      name: "OAuth Internal Email Tenant",
+      apiKeyHash: "hash",
+    });
+    await db.insert(tenantConfigs).values({
+      tenantId: "oauth-internal-email-tenant",
+      allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/callback"],
+      joinMode: "open",
+    });
+    const [victim] = await db
+      .insert(users)
+      .values({ email: "twitter.12345@id.steward.internal" })
+      .returning({ id: users.id });
+
+    mock.restore();
+    globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return new Response(
+          JSON.stringify({
+            access_token: "provider-access-token",
+            expires_in: 3600,
+            token_type: "Bearer",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url === "https://www.googleapis.com/oauth2/v3/userinfo") {
+        return new Response(
+          JSON.stringify({
+            id: "attacker-google-account",
+            email: "twitter.12345@id.steward.internal",
+            name: "Internal Collision",
+            verified_email: false,
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(`unexpected fetch: ${url}`, { status: 500 });
+    }) as unknown as typeof fetch;
+
+    const res = await authRoutes.request("/oauth/google/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: "auth-code",
+        redirectUri: "https://app.example.test/callback",
+        tenantId: "oauth-internal-email-tenant",
+      }),
+    });
+
+    const body = (await res.json()) as { ok: boolean; error?: string };
+    expect(res.status).toBe(403);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("reserved internal domain");
+
+    const linkedAccounts = await db
+      .select()
+      .from(accounts)
+      .where(eq(accounts.userId, victim.id));
+    expect(linkedAccounts).toHaveLength(0);
   });
 });

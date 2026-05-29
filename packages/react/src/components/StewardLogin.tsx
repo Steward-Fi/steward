@@ -1,12 +1,14 @@
-import type { StewardAuthResult } from "@stwd/sdk";
+import type { StewardAuthResult, StewardMfaRequiredResult } from "@stwd/sdk";
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
   DiscordIcon,
   EmailIcon,
   EthereumIcon,
+  FarcasterIcon,
   GitHubIcon,
   GoogleIcon,
   PasskeyIcon,
+  TelegramIcon,
   XIcon,
 } from "../icons/index.js";
 import {
@@ -19,12 +21,20 @@ import type { StewardLoginProps } from "../types.js";
 import type { WalletLoginPanelProps } from "./WalletLogin.js";
 
 type LoginStep = "idle" | "loading" | "email-sent" | "passkey-fallback-pending" | "error";
+type SmsStep = "idle" | "sent";
+type PhoneOtpChannel = "sms" | "whatsapp";
 type LoadingButton =
   | "passkey"
   | "email"
+  | "sms"
+  | "sms-verify"
+  | "whatsapp"
+  | "whatsapp-verify"
   | "google"
   | "discord"
   | "github"
+  | "telegram"
+  | "farcaster"
   | "twitter"
   | "siwe"
   | "wallet-evm"
@@ -75,7 +85,11 @@ export function composeWalletSuccess(
   onSuccess?: StewardLoginProps["onSuccess"],
 ): NonNullable<WalletLoginPanelProps["onSuccess"]> {
   return (result, _kind) => {
-    onSuccess?.({ token: result.token, user: result.user });
+    if ("token" in result) {
+      onSuccess?.({ token: result.token, user: result.user });
+    } else {
+      onSuccess?.(result);
+    }
   };
 }
 
@@ -140,7 +154,7 @@ function useDynamicWalletPanel(
  *     showWallets
  *     showGoogle
  *     showDiscord
- *     onSuccess={({ token }) => console.log("signed in:", token)}
+ *     onSuccess={() => console.log("signed in")}
  *   />
  * </StewardProvider>
  */
@@ -149,12 +163,18 @@ export function StewardLogin({
   onError,
   showPasskey = true,
   showEmail = true,
+  showSms = true,
+  showWhatsApp = true,
   showSIWE = false,
   showWallets = false,
   showGoogle = true,
   showDiscord = true,
   showGithub = true,
   showTwitter = true,
+  showTelegram = true,
+  getTelegramLoginPayload,
+  showFarcaster = true,
+  getFarcasterLoginPayload,
   variant = "card",
   logo,
   title,
@@ -165,6 +185,10 @@ export function StewardLogin({
   const ctx = useContext(StewardAuthContext);
 
   const [email, setEmail] = useState("");
+  const [phone, setPhone] = useState("");
+  const [smsCode, setSmsCode] = useState("");
+  const [smsStep, setSmsStep] = useState<SmsStep>("idle");
+  const [phoneOtpChannel, setPhoneOtpChannel] = useState<PhoneOtpChannel | null>(null);
   const [step, setStep] = useState<LoginStep>("idle");
   const [loadingBtn, setLoadingBtn] = useState<LoadingButton>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -220,7 +244,7 @@ export function StewardLogin({
   // Wallet panel callbacks. Defined before any early return so hook order
   // stays stable across the missing-context branch.
   const handleWalletSuccess = useCallback(
-    (result: StewardAuthResult, kind: "evm" | "solana") => {
+    (result: StewardAuthResult | StewardMfaRequiredResult, kind: "evm" | "solana") => {
       setLoadingBtn(null);
       setStep("idle");
       setErrorMsg(null);
@@ -229,7 +253,9 @@ export function StewardLogin({
       // double-invoke. The wallet sign helpers already wrote the session
       // into the auth context, so the effect would otherwise see the new
       // authenticated state on its next render and fire again.
-      didFireSuccess.current = true;
+      if (!("mfaRequired" in result && result.mfaRequired)) {
+        didFireSuccess.current = true;
+      }
       composeWalletSuccess(onSuccess)(result, kind);
     },
     [onSuccess],
@@ -279,7 +305,22 @@ export function StewardLogin({
   const discordEnabled = showDiscord && (providers?.discord ?? false);
   const githubEnabled = showGithub && (providers?.github ?? false);
   const twitterEnabled = showTwitter && (providers?.twitter ?? false);
-  const hasOAuth = googleEnabled || discordEnabled || githubEnabled || twitterEnabled;
+  const telegramEnabled =
+    showTelegram && providers?.telegram === true && typeof getTelegramLoginPayload === "function";
+  const farcasterEnabled =
+    showFarcaster &&
+    providers?.farcaster === true &&
+    typeof getFarcasterLoginPayload === "function";
+  const hasOAuth =
+    googleEnabled ||
+    discordEnabled ||
+    githubEnabled ||
+    twitterEnabled ||
+    telegramEnabled ||
+    farcasterEnabled;
+  const smsEnabled = showSms && providers?.sms === true;
+  const whatsappEnabled = showWhatsApp && providers?.whatsapp === true;
+  const hasPhoneOtp = smsEnabled || whatsappEnabled;
   // Wallet UI requires both: backend confirms support AND a panel loader is
   // registered (i.e. consumer imported `@stwd/react/wallet`). Without
   // a registered panel, rendering would show a permanently-disabled
@@ -361,6 +402,70 @@ export function StewardLogin({
     }
   };
 
+  const handleSmsSend = async () => {
+    const trimmedPhone = phone.trim();
+    if (!trimmedPhone) {
+      setErrorMsg("enter your phone number");
+      setStep("error");
+      return;
+    }
+    setStep("loading");
+    setLoadingBtn("sms");
+    setErrorMsg(null);
+    try {
+      await ctx.sendSmsOtp(trimmedPhone);
+      setPhoneOtpChannel("sms");
+      setSmsStep("sent");
+      setStep("idle");
+      setLoadingBtn(null);
+    } catch (err) {
+      handleError(err);
+    }
+  };
+
+  const handleSmsVerify = async () => {
+    const trimmedPhone = phone.trim();
+    const trimmedCode = smsCode.trim();
+    if (!trimmedPhone || !trimmedCode) {
+      setErrorMsg("enter your phone number and code");
+      setStep("error");
+      return;
+    }
+    setStep("loading");
+    setLoadingBtn(phoneOtpChannel === "whatsapp" ? "whatsapp-verify" : "sms-verify");
+    setErrorMsg(null);
+    try {
+      const result =
+        phoneOtpChannel === "whatsapp"
+          ? await ctx.verifyWhatsAppOtp(trimmedPhone, trimmedCode)
+          : await ctx.verifySmsOtp(trimmedPhone, trimmedCode);
+      onSuccess?.(result);
+    } catch (err) {
+      handleError(err);
+    }
+  };
+
+  const handleWhatsAppSend = async () => {
+    const trimmedPhone = phone.trim();
+    if (!trimmedPhone) {
+      setErrorMsg("enter your phone number");
+      setStep("error");
+      return;
+    }
+    setStep("loading");
+    setLoadingBtn("whatsapp");
+    setErrorMsg(null);
+    try {
+      await ctx.sendWhatsAppOtp(trimmedPhone);
+      setPhoneOtpChannel("whatsapp");
+      setSmsStep("sent");
+      setStep("idle");
+      setLoadingBtn(null);
+    } catch (err) {
+      handleError(err);
+    }
+  };
+
   const handleOAuth = async (provider: "google" | "discord" | "github" | "twitter") => {
     setStep("loading");
     setLoadingBtn(provider);
@@ -370,6 +475,40 @@ export function StewardLogin({
         throw new Error("OAuth unavailable. update @stwd/sdk");
       }
       const result = await ctx.signInWithOAuth(provider, tenantId ? { tenantId } : undefined);
+      onSuccess?.(result);
+    } catch (err) {
+      handleError(err);
+    }
+  };
+
+  const handleTelegram = async () => {
+    if (typeof getTelegramLoginPayload !== "function") {
+      handleError(new Error("Telegram login payload callback is not configured"));
+      return;
+    }
+    setStep("loading");
+    setLoadingBtn("telegram");
+    setErrorMsg(null);
+    try {
+      const payload = await getTelegramLoginPayload();
+      const result = await ctx.signInWithTelegram(payload, tenantId ? { tenantId } : undefined);
+      onSuccess?.(result);
+    } catch (err) {
+      handleError(err);
+    }
+  };
+
+  const handleFarcaster = async () => {
+    if (typeof getFarcasterLoginPayload !== "function") {
+      handleError(new Error("Farcaster login payload callback is not configured"));
+      return;
+    }
+    setStep("loading");
+    setLoadingBtn("farcaster");
+    setErrorMsg(null);
+    try {
+      const payload = await getFarcasterLoginPayload();
+      const result = await ctx.signInWithFarcaster(payload, tenantId ? { tenantId } : undefined);
       onSuccess?.(result);
     } catch (err) {
       handleError(err);
@@ -400,6 +539,7 @@ export function StewardLogin({
           onClick={() => {
             setStep("idle");
             setLoadingBtn(null);
+            setPhoneOtpChannel(null);
           }}
           type="button"
         >
@@ -450,6 +590,44 @@ export function StewardLogin({
         </div>
       )}
 
+      {hasPhoneOtp && (
+        <div className="stwd-login__fields">
+          <input
+            className="stwd-login__input"
+            type="tel"
+            placeholder="+14155550123"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                if (smsStep === "sent") void handleSmsVerify();
+                else if (smsEnabled) void handleSmsSend();
+                else void handleWhatsAppSend();
+              }
+            }}
+            disabled={isLoading}
+            autoComplete="tel"
+            aria-label="phone"
+          />
+          {smsStep === "sent" && (
+            <input
+              className="stwd-login__input"
+              type="text"
+              placeholder="000000"
+              value={smsCode}
+              onChange={(e) => setSmsCode(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void handleSmsVerify();
+              }}
+              disabled={isLoading}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              aria-label="sms code"
+            />
+          )}
+        </div>
+      )}
+
       {/* Primary auth buttons */}
       <div className="stwd-login__actions">
         {showPasskey && (
@@ -481,6 +659,42 @@ export function StewardLogin({
               <EmailIcon size={18} />
             )}
             <span>email me a link</span>
+          </button>
+        )}
+
+        {smsEnabled && (
+          <button
+            className="stwd-login__btn stwd-login__btn--sms"
+            onClick={() => void (smsStep === "sent" ? handleSmsVerify() : handleSmsSend())}
+            disabled={isLoading}
+            type="button"
+          >
+            {loadingBtn === "sms" || loadingBtn === "sms-verify" ? (
+              <span className="stwd-login__spinner" />
+            ) : (
+              <span className="stwd-login__btn-icon">#</span>
+            )}
+            <span>{smsStep === "sent" ? "verify sms code" : "text me a code"}</span>
+          </button>
+        )}
+
+        {whatsappEnabled && (
+          <button
+            className="stwd-login__btn stwd-login__btn--whatsapp"
+            onClick={() => void (smsStep === "sent" ? handleSmsVerify() : handleWhatsAppSend())}
+            disabled={isLoading}
+            type="button"
+          >
+            {loadingBtn === "whatsapp" || loadingBtn === "whatsapp-verify" ? (
+              <span className="stwd-login__spinner" />
+            ) : (
+              <span className="stwd-login__btn-icon">WA</span>
+            )}
+            <span>
+              {smsStep === "sent" && phoneOtpChannel === "whatsapp"
+                ? "verify WhatsApp code"
+                : "WhatsApp code"}
+            </span>
           </button>
         )}
       </div>
@@ -533,7 +747,7 @@ export function StewardLogin({
       )}
 
       {/* Divider */}
-      {hasOAuth && (showPasskey || showEmail || hasWallet) && (
+      {hasOAuth && (showPasskey || showEmail || hasPhoneOtp || hasWallet) && (
         <div className="stwd-login__divider">
           <span>or</span>
         </div>
@@ -544,8 +758,14 @@ export function StewardLogin({
       {hasOAuth && (
         <div
           className={
-            [googleEnabled, discordEnabled, githubEnabled, twitterEnabled].filter(Boolean).length >=
-            3
+            [
+              googleEnabled,
+              discordEnabled,
+              githubEnabled,
+              twitterEnabled,
+              telegramEnabled,
+              farcasterEnabled,
+            ].filter(Boolean).length >= 3
               ? "stwd-login__oauth stwd-login__oauth--grid"
               : "stwd-login__oauth"
           }
@@ -611,6 +831,38 @@ export function StewardLogin({
                 <XIcon size={16} />
               )}
               <span>X</span>
+            </button>
+          )}
+
+          {telegramEnabled && (
+            <button
+              className="stwd-login__btn stwd-login__btn--telegram"
+              onClick={() => void handleTelegram()}
+              disabled={isLoading}
+              type="button"
+            >
+              {loadingBtn === "telegram" ? (
+                <span className="stwd-login__spinner" />
+              ) : (
+                <TelegramIcon size={18} />
+              )}
+              <span>Telegram</span>
+            </button>
+          )}
+
+          {farcasterEnabled && (
+            <button
+              className="stwd-login__btn stwd-login__btn--farcaster"
+              onClick={() => void handleFarcaster()}
+              disabled={isLoading}
+              type="button"
+            >
+              {loadingBtn === "farcaster" ? (
+                <span className="stwd-login__spinner" />
+              ) : (
+                <FarcasterIcon size={18} />
+              )}
+              <span>Farcaster</span>
             </button>
           )}
         </div>

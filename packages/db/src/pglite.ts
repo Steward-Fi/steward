@@ -102,7 +102,7 @@ async function runPGLiteMigrations(client: PGlite): Promise<void> {
       }
     }
 
-    await client.exec(`INSERT INTO __steward_migrations (tag) VALUES ('${tag}')`);
+    await client.query("INSERT INTO __steward_migrations (tag) VALUES ($1)", [tag]);
     console.log(`[pglite] Applied migration: ${file}`);
   }
 }

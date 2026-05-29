@@ -13,12 +13,45 @@
 import { getRedis } from "./client.js";
 
 export type SpendPeriod = "day" | "week" | "month";
+type SpendLimitMap = Partial<Record<SpendPeriod, number>>;
+
+export interface SpendLimitSnapshot {
+  allowed: boolean;
+  spent: number;
+  reserved: number;
+  effectiveSpent: number;
+  remaining: number;
+}
+
+export interface SpendReservation {
+  reservedUsd: number;
+  periods: SpendPeriod[];
+  buckets: Array<{ period: SpendPeriod; dateKey: string; key: string }>;
+}
 
 const TTL_SECONDS: Record<SpendPeriod, number> = {
   day: 172800, // 2 days
   week: 691200, // 8 days
   month: 2764800, // 32 days
 };
+
+// ARGV: reserveUnits, limitUnits, tenantId, ttlSeconds
+// Returns {ok, settled, reservedAfter}. Increments `reserved` only when the
+// effective spend stays within the limit — atomic so concurrent reserves
+// cannot collectively exceed the cap.
+const RESERVE_SPEND_LUA = `
+local reserve = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+local settled = tonumber(redis.call('HGET', KEYS[1], 'total') or '0')
+local reserved = tonumber(redis.call('HGET', KEYS[1], 'reserved') or '0')
+if (settled + reserved + reserve) > limit then
+  return {0, settled, reserved}
+end
+local after = redis.call('HINCRBY', KEYS[1], 'reserved', reserve)
+redis.call('HSET', KEYS[1], 'tenantId', ARGV[3])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
+return {1, settled, after}
+`;
 
 /**
  * Get the date key for a given period.
@@ -35,11 +68,8 @@ function getDateKey(period: SpendPeriod, date: Date = new Date()): string {
     case "day":
       return `${y}-${m}-${d}`;
     case "week": {
-      // ISO week number
-      const jan1 = new Date(Date.UTC(y, 0, 1));
-      const dayOfYear = Math.floor((date.getTime() - jan1.getTime()) / 86400000) + 1;
-      const weekNum = Math.ceil((dayOfYear + jan1.getUTCDay()) / 7);
-      return `${y}-W${String(weekNum).padStart(2, "0")}`;
+      const { isoYear, isoWeek: weekNum } = isoWeek(date);
+      return `${isoYear}-W${String(weekNum).padStart(2, "0")}`;
     }
     case "month":
       return `${y}-${m}`;
@@ -48,6 +78,54 @@ function getDateKey(period: SpendPeriod, date: Date = new Date()): string {
 
 function spendKey(agentId: string, period: SpendPeriod, dateKey: string): string {
   return `spend:${agentId}:${period}:${dateKey}`;
+}
+
+/**
+ * ISO-8601 week number + ISO week-year (Thursday-based). Days near a year
+ * boundary may belong to the previous/next ISO week-year, so we return both.
+ */
+export function isoWeek(date: Date): { isoYear: number; isoWeek: number } {
+  // Shift to the Thursday of the current ISO week (Mon=0..Sun=6).
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNum = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - dayNum + 3);
+  const isoYear = d.getUTCFullYear();
+  const firstThursday = new Date(Date.UTC(isoYear, 0, 4));
+  const firstThursdayDayNum = (firstThursday.getUTCDay() + 6) % 7;
+  firstThursday.setUTCDate(firstThursday.getUTCDate() - firstThursdayDayNum + 3);
+  const week = 1 + Math.round((d.getTime() - firstThursday.getTime()) / (7 * 86400000));
+  return { isoYear, isoWeek: week };
+}
+
+function toSpendUnits(costUsd: number): number {
+  // A sign/parse error upstream must not silently floor to a free spend.
+  if (!Number.isFinite(costUsd) || costUsd < 0) {
+    throw new Error(`invalid spend amount: ${costUsd}`);
+  }
+  if (costUsd === 0) return 0;
+  return Math.ceil(costUsd * 10000); // store as 0.01 cent precision, rounded up for enforcement
+}
+
+function fromSpendUnits(units: number): number {
+  return units / 10000;
+}
+
+async function rollbackReservedSpend(
+  tenantId: string,
+  reserveUnits: number,
+  buckets: SpendReservation["buckets"],
+): Promise<void> {
+  if (reserveUnits <= 0 || buckets.length === 0) return;
+  const redis = getRedis();
+  const pipeline = redis.multi();
+
+  for (const { period, key } of buckets) {
+    pipeline.hincrby(key, "reserved", -reserveUnits);
+    pipeline.hset(key, "tenantId", tenantId);
+    pipeline.expire(key, TTL_SECONDS[period]);
+  }
+
+  await pipeline.exec();
 }
 
 /**
@@ -67,10 +145,10 @@ export async function recordSpend(
   costUsd: number,
   host: string,
 ): Promise<void> {
-  if (costUsd <= 0) return;
+  const costCents = toSpendUnits(costUsd); // throws on negative/NaN; 0 → no-op below
+  if (costCents <= 0) return;
 
   const redis = getRedis();
-  const costCents = Math.round(costUsd * 10000); // store as 0.01 cent precision (hundredths of cent)
   const now = new Date();
 
   const pipeline = redis.multi();
@@ -93,6 +171,117 @@ export async function recordSpend(
 }
 
 /**
+ * Reserve in-flight spend before a request leaves the proxy.
+ *
+ * The reservation is kept separate from settled spend but checkSpendLimit counts
+ * both fields. Each period is incremented first and rolled back if the effective
+ * spend crosses that period's configured limit.
+ */
+export async function reserveSpend(
+  agentId: string,
+  tenantId: string,
+  reserveUsd: number,
+  limits: SpendLimitMap,
+): Promise<SpendReservation> {
+  const reserveUnits = toSpendUnits(reserveUsd);
+  if (reserveUnits <= 0) return { reservedUsd: 0, periods: [], buckets: [] };
+
+  const redis = getRedis();
+  const now = new Date();
+  const periods = (["day", "week", "month"] as SpendPeriod[]).filter(
+    (period) => limits[period] !== undefined,
+  );
+  const reservedPeriods: SpendPeriod[] = [];
+  const reservedBuckets: SpendReservation["buckets"] = [];
+
+  for (const period of periods) {
+    const limit = limits[period];
+    if (limit === undefined) continue;
+    const dateKey = getDateKey(period, now);
+    const key = spendKey(agentId, period, dateKey);
+    const limitUnits = toSpendUnits(limit);
+
+    // Atomic per-bucket gate: read total+reserved, only bump `reserved` if the
+    // result stays within the limit. A separate hincrby + hget would let
+    // concurrent requests race past the cap (TOCTOU).
+    const res = (await redis.eval(
+      RESERVE_SPEND_LUA,
+      1,
+      key,
+      String(reserveUnits),
+      String(limitUnits),
+      tenantId,
+      String(TTL_SECONDS[period]),
+    )) as [number, number, number];
+    const [ok, settled] = res;
+
+    if (ok === 1) {
+      reservedPeriods.push(period);
+      reservedBuckets.push({ period, dateKey, key });
+      continue;
+    }
+
+    if (reservedBuckets.length > 0) {
+      await rollbackReservedSpend(tenantId, reserveUnits, reservedBuckets);
+    }
+    throw new Error(
+      `${period} spend reservation would exceed limit: requested $${reserveUsd.toFixed(4)} with $${fromSpendUnits(Math.max(0, limitUnits - settled)).toFixed(4)} available`,
+    );
+  }
+
+  return {
+    reservedUsd: fromSpendUnits(reserveUnits),
+    periods: reservedPeriods,
+    buckets: reservedBuckets,
+  };
+}
+
+/**
+ * Settle an earlier reservation after the upstream response is known.
+ *
+ * If actual spend cannot be calculated, callers should pass the reserved amount
+ * to avoid turning parsing failures into free budget bypasses.
+ */
+export async function settleReservedSpend(
+  agentId: string,
+  tenantId: string,
+  reservedUsd: number,
+  actualUsd: number,
+  host: string,
+  periods: SpendPeriod[],
+  buckets?: SpendReservation["buckets"],
+): Promise<void> {
+  const reservedUnits = toSpendUnits(reservedUsd);
+  const actualUnits = Math.max(0, toSpendUnits(actualUsd));
+  const settlementBuckets =
+    buckets && buckets.length > 0
+      ? buckets
+      : periods.map((period) => {
+          const dateKey = getDateKey(period);
+          return { period, dateKey, key: spendKey(agentId, period, dateKey) };
+        });
+  if (reservedUnits <= 0 || settlementBuckets.length === 0) {
+    if (actualUnits > 0) await recordSpend(agentId, tenantId, actualUsd, host);
+    return;
+  }
+
+  const redis = getRedis();
+  const pipeline = redis.multi();
+
+  for (const { period, key } of settlementBuckets) {
+    pipeline.hincrby(key, "reserved", -reservedUnits);
+    if (actualUnits > 0) {
+      pipeline.hincrby(key, "total", actualUnits);
+      pipeline.hincrby(key, `host:${host}`, actualUnits);
+    }
+    pipeline.hset(key, "tenantId", tenantId);
+    pipeline.expire(key, TTL_SECONDS[period]);
+  }
+
+  await pipeline.exec();
+}
+
+/**
  * Get total spend for an agent in a given period.
  *
  * @returns Spend in USD
@@ -105,11 +294,15 @@ export async function getSpend(agentId: string, period: SpendPeriod, date?: Date
   const totalCents = await redis.hget(key, "total");
   if (!totalCents) return 0;
 
-  return Number(totalCents) / 10000; // convert back to USD
+  return fromSpendUnits(Number(totalCents)); // convert back to USD
 }
 
 /**
  * Check if an agent is within their spend limit.
+ *
+ * ADVISORY ONLY: this is a status read with no pending amount, so `allowed`
+ * means "budget not yet fully consumed". The real enforcement is the atomic
+ * gate in reserveSpend — never admit a request on this alone.
  *
  * @returns Whether the agent can spend more, how much they've spent, and remaining budget
  */
@@ -117,13 +310,24 @@ export async function checkSpendLimit(
   agentId: string,
   limitUsd: number,
   period: SpendPeriod,
-): Promise<{ allowed: boolean; spent: number; remaining: number }> {
-  const spent = await getSpend(agentId, period);
-  const remaining = Math.max(0, limitUsd - spent);
+): Promise<SpendLimitSnapshot> {
+  const redis = getRedis();
+  const dateKey = getDateKey(period);
+  const key = spendKey(agentId, period, dateKey);
+  const [totalRaw, reservedRaw] = await Promise.all([
+    redis.hget(key, "total"),
+    redis.hget(key, "reserved"),
+  ]);
+  const spent = fromSpendUnits(Number(totalRaw ?? "0"));
+  const reserved = fromSpendUnits(Number(reservedRaw ?? "0"));
+  const effectiveSpent = spent + reserved;
+  const remaining = Math.max(0, limitUsd - effectiveSpent);
 
   return {
-    allowed: spent < limitUsd,
+    allowed: effectiveSpent < limitUsd,
     spent,
+    reserved,
+    effectiveSpent,
     remaining,
   };
 }

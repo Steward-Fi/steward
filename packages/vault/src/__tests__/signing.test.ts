@@ -1,9 +1,14 @@
 import { describe, expect, it } from "bun:test";
+import { PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { keccak256, recoverAddress, recoverMessageAddress, toHex, verifyTypedData } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 import { KeyStore } from "../keystore";
-import { generateSolanaKeypair, restoreSolanaKeypair } from "../solana";
+import {
+  assertSolanaTransferTransactionMatches,
+  generateSolanaKeypair,
+  restoreSolanaKeypair,
+} from "../solana";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
@@ -415,6 +420,43 @@ describe("Solana Keypair", () => {
     const kp2 = generateSolanaKeypair();
     expect(kp1.publicKey).not.toBe(kp2.publicKey);
     expect(kp1.secretKey).not.toBe(kp2.secretKey);
+  });
+
+  it("rejects serialized transfer envelopes that do not match policy fields", () => {
+    const from = new PublicKey(generateSolanaKeypair().publicKey);
+    const allowedRecipient = new PublicKey(generateSolanaKeypair().publicKey);
+    const attackerRecipient = new PublicKey(generateSolanaKeypair().publicKey);
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: from,
+        toPubkey: attackerRecipient,
+        lamports: 10_000,
+      }),
+    );
+
+    expect(() =>
+      assertSolanaTransferTransactionMatches(tx, {
+        from,
+        to: allowedRecipient.toBase58(),
+        lamports: 1n,
+      }),
+    ).toThrow(/recipient does not match/);
+
+    expect(() =>
+      assertSolanaTransferTransactionMatches(tx, {
+        from,
+        to: attackerRecipient.toBase58(),
+        lamports: 1n,
+      }),
+    ).toThrow(/amount does not match/);
+
+    expect(() =>
+      assertSolanaTransferTransactionMatches(tx, {
+        from,
+        to: attackerRecipient.toBase58(),
+        lamports: 10_000n,
+      }),
+    ).not.toThrow();
   });
 });
 

@@ -7,13 +7,27 @@
  */
 
 import {
+  ACCESS_TOKEN_EXPIRY,
   assertTokenNotRevoked,
   signAccessToken,
   signAgentToken,
   validateApiKey,
   verifyToken,
 } from "@stwd/auth";
-import { getDb, policies, tenants, toPolicyRule, transactions, userTenants } from "@stwd/db";
+import {
+  conditionSetItems,
+  conditionSets,
+  getDb,
+  inArray,
+  policies,
+  tenantAppClientSecrets,
+  tenantAppClients,
+  tenants,
+  toPolicyRule,
+  transactions,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
   type AgentIdentity,
@@ -45,18 +59,19 @@ export const isWorkersRuntime =
 /**
  * User access token TTL. Refresh tokens (30d) handle long-lived sessions.
  */
-export const JWT_EXPIRY = "24h";
+export const JWT_EXPIRY = ACCESS_TOKEN_EXPIRY;
 export const AGENT_SCOPE = "agent";
 export const PROXY_SCOPE = "api:proxy";
 
 export function normalizeAgentTokenScopes(scopes?: string[]): string[] {
-  const normalized = new Set([AGENT_SCOPE]);
+  if (!scopes || scopes.length === 0) return [AGENT_SCOPE];
+  const normalized = new Set<string>();
   for (const scope of scopes ?? []) {
     if (typeof scope === "string" && scope.trim()) {
       normalized.add(scope.trim());
     }
   }
-  return [...normalized];
+  return normalized.size > 0 ? [...normalized] : [AGENT_SCOPE];
 }
 
 export function parseAgentTokenScopes(value: unknown): string[] | null {
@@ -73,10 +88,14 @@ export function parseAgentTokenScopes(value: unknown): string[] | null {
   if (!requested || !requested.every((scope) => typeof scope === "string")) return null;
 
   const scopes = normalizeAgentTokenScopes(requested.map((scope) => scope.trim()).filter(Boolean));
-
-  // Agent tokens always include the legacy/base agent scope. The only opt-in
-  // privilege exposed by token minting endpoints today is proxy gateway access.
   return scopes.every((scope) => scope === AGENT_SCOPE || scope === PROXY_SCOPE) ? scopes : null;
+}
+
+export function hasAgentTokenScope(
+  scopes: readonly string[] | undefined,
+  required = AGENT_SCOPE,
+): boolean {
+  return Boolean(scopes?.includes(required));
 }
 
 export async function createSessionToken(address: string, tenantId: string): Promise<string> {
@@ -104,10 +123,30 @@ export async function verifySessionToken(token: string) {
       agentId?: string;
       scope?: string;
       scopes?: string[];
+      typ?: string;
       userId?: string;
       email?: string;
+      mfaVerifiedAt?: number;
+      mfaMethod?: string;
     };
+    if (payload.typ === "identity") return null;
     await assertTokenNotRevoked(payload);
+    if (payload.userId) {
+      const [user] = await getDb()
+        .select({ deactivatedAt: users.deactivatedAt })
+        .from(users)
+        .where(eq(users.id, payload.userId));
+      if (!user || user.deactivatedAt) return null;
+      if (payload.tenantId) {
+        const [membership] = await getDb()
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(
+            and(eq(userTenants.userId, payload.userId), eq(userTenants.tenantId, payload.tenantId)),
+          );
+        if (!membership) return null;
+      }
+    }
     return payload;
   } catch {
     return null;
@@ -223,10 +262,16 @@ function requireEnv(name: string): string {
   return value;
 }
 
-export const DATABASE_URL = requireEnv("DATABASE_URL");
+const isPGLiteRuntime =
+  process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+
+export const DATABASE_URL =
+  process.env.DATABASE_URL?.trim() || (isPGLiteRuntime ? "" : requireEnv("DATABASE_URL"));
 export const MASTER_PASSWORD = requireEnv("STEWARD_MASTER_PASSWORD");
 
-process.env.DATABASE_URL = DATABASE_URL;
+if (process.env.DATABASE_URL) {
+  process.env.DATABASE_URL = DATABASE_URL;
+}
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 
@@ -272,19 +317,53 @@ export type AppVariables = {
   tenantId: string;
   userId?: string;
   tenantRole?: string;
+  sessionMfaVerifiedAt?: number;
+  sessionMfaMethod?: string;
   agentScope?: string;
-  authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt";
+  agentScopes?: string[];
+  authType?: "api-key" | "app-secret" | "session-jwt" | "agent-token" | "dashboard-jwt";
+  requestSignatureVerified?: boolean;
+  requestId?: string;
+  platformKeyHash?: string;
+  platformScopes?: string[];
 };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
 
-export function getTenantPayload(tenant: Tenant): Tenant & TenantConfig {
+export function getTenantPayload(tenant: Tenant): Omit<Tenant, "apiKeyHash"> & TenantConfig {
   const config = tenantConfigs.get(tenant.id);
+  const { apiKeyHash: _apiKeyHash, ...safeTenant } = tenant;
   return {
-    ...tenant,
+    ...safeTenant,
     name: config?.name || tenant.name,
     webhookUrl: config?.webhookUrl,
     defaultPolicies: config?.defaultPolicies,
+  };
+}
+
+function parseAppId(value: string | undefined | null): { tenantId: string; clientId: string } | null {
+  if (!value) return null;
+  const index = value.lastIndexOf("/");
+  if (index <= 0 || index >= value.length - 1) return null;
+  const tenantId = value.slice(0, index);
+  const clientId = value.slice(index + 1);
+  if (!isValidTenantId(tenantId) || !/^[a-z0-9][a-z0-9_-]{2,63}$/.test(clientId)) return null;
+  return { tenantId, clientId };
+}
+
+function parseBasicAuth(value: string | undefined | null): { username: string; password: string } | null {
+  if (!value?.startsWith("Basic ")) return null;
+  let decoded = "";
+  try {
+    decoded = atob(value.slice(6));
+  } catch {
+    return null;
+  }
+  const separator = decoded.indexOf(":");
+  if (separator <= 0) return null;
+  return {
+    username: decoded.slice(0, separator),
+    password: decoded.slice(separator + 1),
   };
 }
 
@@ -313,6 +392,73 @@ export async function getPolicySet(tenantId: string, agentId: string): Promise<P
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
   return tenantConfigs.get(tenantId)?.defaultPolicies || [];
+}
+
+export async function loadConditionSetsForPolicies(
+  tenantId: string,
+  policySet: PolicyRule[],
+): Promise<Record<string, string[]>> {
+  const ids = getConditionSetIdsFromPolicies(policySet);
+
+  if (ids.length === 0) return {};
+
+  const existingSets = await db
+    .select({ id: conditionSets.id })
+    .from(conditionSets)
+    .where(and(eq(conditionSets.tenantId, tenantId), inArray(conditionSets.id, ids)));
+  const existingIds = existingSets.map((row) => row.id);
+
+  if (existingIds.length === 0) return {};
+
+  const rows = await db
+    .select({
+      conditionSetId: conditionSetItems.conditionSetId,
+      value: conditionSetItems.value,
+    })
+    .from(conditionSetItems)
+    .where(
+      and(
+        eq(conditionSetItems.tenantId, tenantId),
+        inArray(conditionSetItems.conditionSetId, existingIds),
+      ),
+    );
+
+  const loaded: Record<string, string[]> = {};
+  for (const id of existingIds) loaded[id] = [];
+  for (const row of rows) loaded[row.conditionSetId].push(row.value);
+  return loaded;
+}
+
+export function getConditionSetIdsFromPolicies(policySet: PolicyRule[]): string[] {
+  return Array.from(
+    new Set(
+      policySet
+        .filter((policy) => policy.type === "condition-set")
+        .map((policy) => policy.config.conditionSetId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+}
+
+export async function getConditionSetReferenceValidationError(
+  tenantId: string,
+  policySet: PolicyRule[],
+): Promise<string | null> {
+  const ids = getConditionSetIdsFromPolicies(policySet);
+  if (ids.length === 0) return null;
+
+  const existingRows = await db
+    .select({ id: conditionSets.id })
+    .from(conditionSets)
+    .where(and(eq(conditionSets.tenantId, tenantId), inArray(conditionSets.id, ids)));
+  const existingIds = new Set(existingRows.map((row) => row.id));
+  const missingIds = ids.filter((id) => !existingIds.has(id));
+
+  if (missingIds.length > 0) {
+    return `condition-set.conditionSetId not found for tenant: ${missingIds.join(", ")}`;
+  }
+
+  return null;
 }
 
 export async function getTransactionStats(agentId: string) {
@@ -372,6 +518,10 @@ export async function tenantAuth(
     const token = authHeader.slice(7);
     const payload = await verifySessionToken(token);
     if (payload?.tenantId) {
+      const headerTenant = c.req.header("X-Steward-Tenant");
+      if (headerTenant && headerTenant !== payload.tenantId) {
+        return c.json<ApiResponse>({ ok: false, error: "Tenant header does not match token" }, 403);
+      }
       const jwtTenant = await findTenant(payload.tenantId);
       if (jwtTenant) {
         if (options?.requireTenantMatch && payload.tenantId !== options.requireTenantMatch) {
@@ -379,7 +529,12 @@ export async function tenantAuth(
         }
 
         const isAgentToken = payload.scope === "agent" && typeof payload.agentId === "string";
-        if (!isAgentToken) {
+        if (isAgentToken) {
+          const agent = await ensureAgentForTenant(payload.tenantId, payload.agentId as string);
+          if (!agent) {
+            return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 403);
+          }
+        } else {
           if (!payload.userId) {
             return c.json<ApiResponse>(
               { ok: false, error: "User session token is missing userId" },
@@ -407,8 +562,15 @@ export async function tenantAuth(
         if (payload.userId) c.set("userId", payload.userId);
         if (isAgentToken) {
           c.set("agentScope", payload.agentId);
+          c.set("agentScopes", normalizeAgentTokenScopes(payload.scopes));
           c.set("authType", "agent-token");
         } else {
+          if (typeof payload.mfaVerifiedAt === "number") {
+            c.set("sessionMfaVerifiedAt", payload.mfaVerifiedAt);
+          }
+          if (typeof payload.mfaMethod === "string") {
+            c.set("sessionMfaMethod", payload.mfaMethod);
+          }
           c.set("authType", "session-jwt");
         }
         return next();
@@ -417,9 +579,74 @@ export async function tenantAuth(
   }
 
   const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
+  const appId = c.req.header("X-Steward-App-Id");
+  const basic = parseBasicAuth(authHeader);
+  if (appId || basic) {
+    if (!appId || !basic) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "App secret auth requires Basic auth and X-Steward-App-Id" },
+        401,
+      );
+    }
+    if (basic.username !== appId) {
+      return c.json<ApiResponse>({ ok: false, error: "App id mismatch" }, 403);
+    }
+    const parsedAppId = parseAppId(appId);
+    if (!parsedAppId) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid app id" }, 400);
+    }
+    if (options?.requireTenantMatch && parsedAppId.tenantId !== options.requireTenantMatch) {
+      return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+    }
+    const appTenant = await findTenant(parsedAppId.tenantId);
+    if (!appTenant) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+    const now = new Date();
+    const rows = await getDb()
+      .select({
+        secretHash: tenantAppClientSecrets.secretHash,
+        status: tenantAppClientSecrets.status,
+        expiresAt: tenantAppClientSecrets.expiresAt,
+        revokedAt: tenantAppClientSecrets.revokedAt,
+        clientEnabled: tenantAppClients.enabled,
+      })
+      .from(tenantAppClientSecrets)
+      .innerJoin(
+        tenantAppClients,
+        and(
+          eq(tenantAppClients.tenantId, tenantAppClientSecrets.tenantId),
+          eq(tenantAppClients.id, tenantAppClientSecrets.clientId),
+        ),
+      )
+      .where(
+        and(
+          eq(tenantAppClientSecrets.tenantId, parsedAppId.tenantId),
+          eq(tenantAppClientSecrets.clientId, parsedAppId.clientId),
+          inArray(tenantAppClientSecrets.status, ["active", "retiring"]),
+          eq(tenantAppClients.enabled, true),
+        ),
+      );
+
+    const match = rows.some((row) => {
+      if (!row.clientEnabled || row.revokedAt) return false;
+      if (row.expiresAt && row.expiresAt <= now) return false;
+      return validateApiKey(basic.password, row.secretHash);
+    });
+    if (!match) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+
+    c.set("tenantId", parsedAppId.tenantId);
+    c.set("tenant", appTenant);
+    c.set(
+      "tenantConfig",
+      tenantConfigs.get(parsedAppId.tenantId) || { id: appTenant.id, name: appTenant.name },
+    );
+    c.set("authType", "app-secret");
+    await next();
+    return;
+  }
+
   const tenant = await findTenant(tenantId);
 
-  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
 
   if (options?.requireTenantMatch && tenantId !== options.requireTenantMatch) {
     return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
@@ -427,13 +654,8 @@ export async function tenantAuth(
 
   const apiKey = c.req.header("X-Steward-Key") || "";
 
-  if (tenant.apiKeyHash) {
-    if (!validateApiKey(apiKey, tenant.apiKeyHash)) {
-      return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
-    }
-  } else {
-    if (!apiKey) return c.json<ApiResponse>({ ok: false, error: "API key required" }, 401);
-    return c.json<ApiResponse>({ ok: false, error: "Tenant not configured for API key auth" }, 403);
+  if (!tenant.apiKeyHash || !validateApiKey(apiKey, tenant.apiKeyHash)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
   }
 
   c.set("tenantId", tenantId);
@@ -471,8 +693,10 @@ export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next:
 
 export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boolean {
   const agentScope = c.get("agentScope");
-  if (!agentScope) return true;
-  return agentScope === c.req.param("agentId");
+  if (agentScope) {
+    return agentScope === c.req.param("agentId") && hasAgentTokenScope(c.get("agentScopes"));
+  }
+  return requireTenantLevel(c);
 }
 
 export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boolean {
@@ -505,6 +729,10 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
   if (!payload?.tenantId) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
   }
+  const headerTenant = c.req.header("X-Steward-Tenant");
+  if (headerTenant && headerTenant !== payload.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant header does not match token" }, 403);
+  }
 
   if (payload.scope === "agent" || payload.agentId) {
     return c.json<ApiResponse>(
@@ -525,6 +753,11 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
   }
 
+  const membership = await findUserTenantMembership(payload.userId, payload.tenantId);
+  if (!membership) {
+    return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 403);
+  }
+
   c.set("tenantId", payload.tenantId);
   c.set("tenant", tenant);
   c.set(
@@ -532,19 +765,31 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
     tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name },
   );
   c.set("authType", "dashboard-jwt");
+  c.set("tenantRole", membership.role);
   if (payload.userId) c.set("userId", payload.userId);
+  if (typeof payload.mfaVerifiedAt === "number") {
+    c.set("sessionMfaVerifiedAt", payload.mfaVerifiedAt);
+  }
+  if (typeof payload.mfaMethod === "string") {
+    c.set("sessionMfaMethod", payload.mfaMethod);
+  }
 
   return next();
 }
 
 // Re-export drizzle schemas used in route modules
 export {
+  agentKeyQuorums,
+  agentSigners,
   agents,
   agentWallets,
   approvalQueue,
   autoApprovalRules,
+  conditionSetItems,
+  conditionSets,
   encryptedChainKeys,
   encryptedKeys,
+  intents,
   policies,
   tenants,
   toPolicyRule,

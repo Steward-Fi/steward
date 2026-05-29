@@ -1,11 +1,19 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # Steward — Development Override
 #
+# ⚠️  DEV-ONLY — NEVER RUN ON A PUBLIC HOST. ⚠️
+# This file ships throwaway default secrets (STEWARD_MASTER_PASSWORD,
+# STEWARD_SESSION_SECRET, platform/tenant keys) purely for local convenience.
+# Published ports are bound to 127.0.0.1 so the dev stack is not reachable from
+# the network, but the defaults here are not safe for any shared or internet-
+# facing machine. Use docker-compose.yml (which requires real secrets) for
+# production.
+#
 # Layered on top of docker-compose.yml for local development:
 #   - Live source mounts (hot reload via bun --hot)
 #   - PGLite in-process DB (no Postgres container needed)
 #   - Redis removed (in-memory fallback)
-#   - Debug ports exposed
+#   - Debug ports exposed (loopback only)
 #   - Verbose logging
 #
 # Usage:
@@ -48,10 +56,11 @@ services:
       # Persist PGLite data across restarts
       - pglite-data:/app/.pglite
     ports:
+      # Bound to loopback only — dev stack must not be exposed to the network.
       # API
-      - "3200:3200"
+      - "127.0.0.1:3200:3200"
       # Node/Bun inspector (attach with chrome://inspect or VS Code)
-      - "9229:9229"
+      - "127.0.0.1:9229:9229"
     healthcheck:
       # Relaxed for dev: /health only (PGLite doesn't do full /ready checks)
       test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3200/health');process.exit(r.ok?0:1)"]
@@ -78,12 +87,15 @@ services:
       - ./packages:/app/packages
       - pglite-data:/app/.pglite
     ports:
-      - "8080:8080"
+      # Bound to loopback only — dev stack must not be exposed to the network.
+      - "127.0.0.1:8080:8080"
     depends_on:
       steward-api:
         condition: service_healthy
 
-  # Disable Postgres and Redis in dev
+  # Disable Postgres and Redis in dev (API uses in-process PGLite + in-memory stores).
+  # NOTE: the throwaway STEWARD_MASTER_PASSWORD default above is intentional for local
+  # dev only and is never reached in the production compose, which requires real secrets.
   postgres:
     profiles: ["disabled"]
 

@@ -110,6 +110,36 @@ export function XIcon({ size = 20, className }: IconProps) {
   );
 }
 
+export function TelegramIcon({ size = 20, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M21.94 4.16a1.53 1.53 0 0 0-1.58-.25L3.05 10.58c-1.18.46-1.16 2.16.03 2.58l4.38 1.53 1.7 5.31c.33 1.03 1.65 1.32 2.38.53l2.46-2.66 4.43 3.24c.9.66 2.18.14 2.37-.96l2.2-14.44c.1-.63-.25-1.24-.86-1.55ZM9.03 13.9l8.54-5.34-6.97 6.81-.27 3.19-1.3-4.66Z" />
+    </svg>
+  );
+}
+
+export function FarcasterIcon({ size = 20, className }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M6 3h12v18h-2.4v-5.4h-.02c-.27-3.03-1.78-4.56-3.58-4.56s-3.31 1.53-3.58 4.56H8.4V21H6V3Zm2.4 2.4v6.12c.84-1.61 2.17-2.52 3.6-2.52s2.76.91 3.6 2.52V5.4H8.4Z" />
+    </svg>
+  );
+}
+
 export function EthereumIcon({ size = 20, className }: IconProps) {
   return (
     <svg

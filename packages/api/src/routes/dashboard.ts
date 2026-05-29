@@ -15,7 +15,7 @@ import {
   ensureAgentForTenant,
   getPolicySet,
   getTransactionStats,
-  requireAgentAccess,
+  requireTenantLevel,
   toTxRecord,
   transactions,
   vault,
@@ -23,14 +23,29 @@ import {
 
 export const dashboardRoutes = new Hono<{ Variables: AppVariables }>();
 
+function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
+  const verifiedAt = c.get("sessionMfaVerifiedAt");
+  return (
+    typeof verifiedAt === "number" &&
+    Number.isFinite(verifiedAt) &&
+    Date.now() - verifiedAt <= maxAgeMs
+  );
+}
+
 // ─── GET /dashboard/:agentId — aggregated agent dashboard ─────────────────────
 
 dashboardRoutes.get("/:agentId", async (c) => {
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
 
-  if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+  }
+  if (!hasRecentSessionMfa(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Dashboard data requires recent MFA verification" },
+      403,
+    );
   }
 
   // Get agent identity

@@ -50,15 +50,21 @@ jobs:
       # Resolve the image tag based on trigger type
       - name: Resolve image tag
         id: resolve
+        # image_tag is a caller-supplied input; pass it via env (never inline
+        # into the script) to avoid shell expression-injection.
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
-          TAG="${{ inputs.image_tag }}"
+          TAG="$IMAGE_TAG"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Image tag resolved: ${TAG}"
 
       - name: Resolve dry-run flag
         id: flags
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          echo "dry_run=${{ inputs.dry_run }}" >> "$GITHUB_OUTPUT"
+          echo "dry_run=${DRY_RUN}" >> "$GITHUB_OUTPUT"
 
       # Create GitHub deployment (shows in repo's Deployments tab)
       - name: Create GitHub deployment
@@ -75,9 +81,13 @@ jobs:
         id: deploy
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          # Step outputs derive from the caller-supplied image_tag input, so they
+          # are still tainted — pass via env instead of inlining into the script.
+          RESOLVED_TAG: ${{ steps.resolve.outputs.tag }}
+          DRY_RUN: ${{ steps.flags.outputs.dry_run }}
         run: |
-          ARGS="${{ steps.resolve.outputs.tag }}"
-          if [[ "${{ steps.flags.outputs.dry_run }}" == "true" ]]; then
+          ARGS="$RESOLVED_TAG"
+          if [[ "$DRY_RUN" == "true" ]]; then
             ARGS="${ARGS} --dry-run"
           fi
           chmod +x scripts/railway-deploy.sh

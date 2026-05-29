@@ -44,6 +44,14 @@ function readPositiveInt(envName: string): number | undefined {
   return n;
 }
 
+function rowsFromExecute<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  if (result && typeof result === "object" && Array.isArray((result as { rows?: unknown }).rows)) {
+    return (result as { rows: T[] }).rows;
+  }
+  return [];
+}
+
 async function deleteRows(query: ReturnType<typeof sql>): Promise<number> {
   const db = getDb();
   const res = (await db.execute(query)) as unknown;
@@ -98,20 +106,76 @@ async function sweepFailedTransactions(): Promise<SweepResult> {
 async function sweepAuditEvents(): Promise<SweepResult | null> {
   const override = readPositiveInt("STEWARD_RETENTION_AUDIT_EVENTS_DAYS");
   if (override === undefined) {
-    // Default: never delete audit events.
+    // Default: audit events are immutable — never deleted.
     return null;
   }
+  // Sub-floor retention is a hard error, not a warning: silently keeping less
+  // than the SOC2 floor would erode the compliance guarantee unnoticed.
   if (override < DEFAULT_AUDIT_EVENTS_DAYS) {
-    console.warn(
+    throw new Error(
       `[retention] STEWARD_RETENTION_AUDIT_EVENTS_DAYS=${override} is below the ` +
-        `${DEFAULT_AUDIT_EVENTS_DAYS}-day SOC2 floor; retaining audit events for less ` +
-        `than one year may violate SOC2 CC2 / CC7 requirements.`,
+        `${DEFAULT_AUDIT_EVENTS_DAYS}-day SOC2 floor; refusing to delete audit events. ` +
+        "Set the retention >= 365 days (and STEWARD_RETENTION_AUDIT_ARCHIVE_CONFIRMED=true) to proceed.",
     );
   }
-  const deleted = await deleteRows(sql`
-    DELETE FROM audit_events
-    WHERE created_at < now() - make_interval(days => ${override})
-  `);
+  // Audit rows are part of a tamper-evident chain: a plain DELETE of the prefix
+  // would orphan the survivors from ZERO_HASH and make verification impossible.
+  // Require an explicit operator attestation that rows were archived first.
+  if (process.env.STEWARD_RETENTION_AUDIT_ARCHIVE_CONFIRMED !== "true") {
+    throw new Error(
+      "[retention] Deleting audit_events requires archiving first. Set " +
+        "STEWARD_RETENTION_AUDIT_ARCHIVE_CONFIRMED=true only after the chain prefix " +
+        "has been exported to durable storage; the sweep will then advance the " +
+        "verified floor anchor so post-sweep verification still succeeds.",
+    );
+  }
+
+  const db = getDb();
+  let deleted = 0;
+  // Per tenant: archive+drop the eligible prefix and advance the floor anchor
+  // (floor_seq + floor_hmac = the newest surviving-prefix row) so verifyAuditChain
+  // restarts the chain from the anchor instead of the public ZERO_HASH.
+  await db.transaction(async (tx) => {
+    const tenantRows = rowsFromExecute<{ tenant_id: string }>(
+      await tx.execute(sql`
+        SELECT DISTINCT tenant_id FROM audit_events
+        WHERE created_at < now() - make_interval(days => ${override})
+      `),
+    );
+    for (const { tenant_id } of tenantRows) {
+      // New floor = highest seq among rows being dropped for this tenant.
+      const anchorRows = rowsFromExecute<{ seq: number | string; hmac: unknown }>(
+        await tx.execute(sql`
+          SELECT seq, hmac FROM audit_events
+          WHERE tenant_id = ${tenant_id}
+            AND created_at < now() - make_interval(days => ${override})
+          ORDER BY seq DESC LIMIT 1
+        `),
+      );
+      const anchor = anchorRows[0];
+      if (!anchor) continue;
+      const floorSeq = Number(anchor.seq);
+      const floorHmac = anchor.hmac as Uint8Array;
+
+      const removed = await deleteRows(sql`
+        DELETE FROM audit_events
+        WHERE tenant_id = ${tenant_id}
+          AND created_at < now() - make_interval(days => ${override})
+      `);
+      deleted += removed;
+
+      // Persist the new verified floor. The head row already exists from append;
+      // if not (legacy data) we still record the floor so verify can anchor.
+      await tx.execute(sql`
+        INSERT INTO audit_chain_heads (tenant_id, expected_seq, expected_count, head_hmac, floor_seq, floor_hmac, updated_at)
+        VALUES (${tenant_id}, ${floorSeq}, 0, ${floorHmac}, ${floorSeq}, ${floorHmac}, now())
+        ON CONFLICT (tenant_id) DO UPDATE
+          SET floor_seq = ${floorSeq},
+              floor_hmac = ${floorHmac},
+              updated_at = now()
+      `);
+    }
+  });
   return { table: "audit_events", deleted };
 }
 

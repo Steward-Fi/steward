@@ -8,7 +8,7 @@ description: "Configure webhook endpoints to receive real-time notifications for
 Steward delivers real-time event notifications to your configured webhook endpoints. Every transaction state change, policy violation, and spend threshold crossing fires a signed HTTP POST to your URL.
 
 **Base path:** `/webhooks`  
-**Auth:** Tenant-level (`X-Steward-Key`)
+**Auth:** Tenant owner/admin session with recent MFA verification
 
 ---
 
@@ -135,7 +135,9 @@ curl -X DELETE https://api.steward.fi/webhooks/wh_550e8400-... \
 GET /webhooks/:id/deliveries?limit=50&offset=0
 ```
 
-Returns recent delivery attempts with status, response code, and error details:
+Returns recent delivery attempts with redacted status metadata. Payloads,
+webhook URLs, secrets, and raw error text are intentionally omitted from this
+list response.
 
 ```json
 {
@@ -143,20 +145,25 @@ Returns recent delivery attempts with status, response code, and error details:
   "data": [
     {
       "id": "del_...",
-      "webhookId": "wh_...",
-      "event": "tx.signed",
+      "eventType": "tx.signed",
       "status": "delivered",
       "attempts": 1,
-      "responseStatus": 200,
-      "createdAt": "2026-03-27T12:34:56Z"
+      "maxAttempts": 6,
+      "nextRetryAt": null,
+      "hasError": false,
+      "createdAt": "2026-03-27T12:34:56Z",
+      "deliveredAt": "2026-03-27T12:34:57Z"
     },
     {
       "id": "del_...",
-      "event": "tx.pending",
+      "eventType": "tx.pending",
       "status": "failed",
       "attempts": 5,
-      "lastError": "Connection refused",
-      "nextRetryAt": null
+      "maxAttempts": 6,
+      "nextRetryAt": "2026-03-27T12:35:56Z",
+      "hasError": true,
+      "createdAt": "2026-03-27T12:34:56Z",
+      "deliveredAt": null
     }
   ]
 }
@@ -168,7 +175,8 @@ Returns recent delivery attempts with status, response code, and error details:
 POST /webhooks/deliveries/:id/retry
 ```
 
-Resets the delivery to `pending` with 0 attempts and schedules an immediate re-delivery.
+Queues an eligible failed delivery for immediate retry without resetting its
+attempt count or bypassing the configured retry budget.
 
 ---
 

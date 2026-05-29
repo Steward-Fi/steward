@@ -1,11 +1,19 @@
 "use client";
 
+import { useAuth as useStewardAuth } from "@stwd/react";
 import { motion } from "framer-motion";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { CodeBlock } from "@/components/code-block";
 import { CopyButton } from "@/components/copy-button";
-import { API_URL } from "@/lib/api";
+import {
+  API_URL,
+  type GasSponsorshipMode,
+  type GasSponsorshipProvider,
+  getTenantGasSponsorshipConfig,
+  type TenantGasSponsorshipConfig,
+  updateTenantGasSponsorshipConfig,
+} from "@/lib/api";
 
 const CHAIN_NAMES: Record<number, string> = {
   1: "Ethereum",
@@ -15,27 +23,1168 @@ const CHAIN_NAMES: Record<number, string> = {
   56: "BNB Chain",
 };
 
+type OidcProviderForm = {
+  id: string;
+  enabled: boolean;
+  issuer: string;
+  audience: string;
+  jwksUri: string;
+  clientId: string;
+  clientSecretEnv: string;
+  authorizationUrl: string;
+  tokenUrl: string;
+  scopes: string;
+  allowedAlgs: "RS256" | "ES256";
+  allowJitProvisioning: boolean;
+};
+
+type TestAccount = {
+  enabled?: boolean;
+  email?: string;
+  phone?: string;
+  otp?: string;
+  updatedAt?: string;
+};
+
+type AuthAbuseForm = {
+  loginPasskey: boolean;
+  loginEmail: boolean;
+  loginSms: boolean;
+  loginWhatsapp: boolean;
+  loginTotp: boolean;
+  loginSiwe: boolean;
+  loginSiws: boolean;
+  loginTelegram: boolean;
+  loginFarcaster: boolean;
+  oauthGoogle: boolean;
+  oauthDiscord: boolean;
+  oauthGithub: boolean;
+  oauthTwitter: boolean;
+  captchaEnabled: boolean;
+  captchaProvider: "turnstile" | "hcaptcha";
+  captchaSiteKey: string;
+  captchaSecretKeyEnv: string;
+  captchaEmailOtp: boolean;
+  captchaSmsOtp: boolean;
+  blockDisposable: boolean;
+  blockPlusAliases: boolean;
+  allowedEmails: string;
+  blockedEmails: string;
+  allowedDomains: string;
+  blockedDomains: string;
+  allowedWallets: string;
+  blockedWallets: string;
+  blockVoip: boolean;
+  allowedCountryCodes: string;
+  blockedCountryCodes: string;
+};
+
+type GasSponsorshipForm = {
+  enabled: boolean;
+  provider: GasSponsorshipProvider | "";
+  mode: GasSponsorshipMode | "";
+  allowedChainIds: string;
+  maxPerTxUsd: string;
+  allowClientSponsorship: boolean;
+  requireSimulation: boolean;
+  circuitBreakerEnabled: boolean;
+};
+
+type ThemeForm = {
+  primaryColor: string;
+  accentColor: string;
+  backgroundColor: string;
+  surfaceColor: string;
+  textColor: string;
+  mutedColor: string;
+  successColor: string;
+  errorColor: string;
+  warningColor: string;
+  borderRadius: string;
+  fontFamily: string;
+  colorScheme: "light" | "dark" | "system";
+};
+
+type ThemeConfigInput = Partial<Omit<ThemeForm, "borderRadius">> & {
+  borderRadius?: number | string;
+};
+
+type AppClientEnvironment = "development" | "preview" | "staging" | "production";
+
+type AppClientForm = {
+  id: string;
+  name: string;
+  environment: AppClientEnvironment;
+  enabled: boolean;
+  allowedOrigins: string;
+  allowedRedirectUrls: string;
+};
+
+type RotatedAppClientSecret = {
+  appId: string;
+  appSecret: string;
+  secretPrefix: string;
+};
+
+type TenantSsoDomain = {
+  id: string;
+  tenantId: string;
+  domain: string;
+  verificationToken: string;
+  status: "pending" | "verified";
+  ssoRequired: boolean;
+  verifiedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SamlServiceProvider = {
+  spEntityId: string;
+  acsUrl: string;
+  metadataUrl: string;
+};
+
+type SamlSsoConfig = {
+  tenantId: string;
+  enabled: boolean;
+  status: "pending" | "active" | "error";
+  idpEntityId: string;
+  idpSsoUrl: string;
+  idpCertPems: string[];
+  spEntityId: string;
+  acsUrl: string;
+  nameIdFormat?: string;
+  emailAttribute: string;
+  groupsAttribute?: string;
+  allowJitProvisioning: boolean;
+  jitDefaultRole: "viewer";
+  lastTestedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type SamlSsoForm = {
+  enabled: boolean;
+  idpEntityId: string;
+  idpSsoUrl: string;
+  idpCertPems: string;
+  emailAttribute: string;
+  groupsAttribute: string;
+  allowJitProvisioning: boolean;
+};
+
+type AccessAllowlistEntryType = "email" | "email_domain" | "wallet" | "phone";
+
+type AccessAllowlistEntry = {
+  id: string;
+  tenantId: string;
+  type: AccessAllowlistEntryType;
+  value: string;
+  acceptedAt: string | null;
+};
+
+const ACCESS_ALLOWLIST_TYPES: Array<{
+  value: AccessAllowlistEntryType;
+  label: string;
+  placeholder: string;
+}> = [
+  { value: "email", label: "Email", placeholder: "alice@example.com" },
+  { value: "email_domain", label: "Email Domain", placeholder: "example.com" },
+  { value: "wallet", label: "Wallet", placeholder: "0x... or solana:..." },
+  { value: "phone", label: "Phone", placeholder: "+14155550100" },
+];
+
+const GAS_SPONSORSHIP_PROVIDERS: Array<{ value: GasSponsorshipProvider; label: string }> = [
+  { value: "custom_evm_paymaster", label: "Custom EVM Paymaster" },
+  { value: "custom_bundler", label: "Custom Bundler" },
+  { value: "solana_fee_payer", label: "Solana Fee Payer" },
+  { value: "mock", label: "Mock" },
+];
+
+const GAS_SPONSORSHIP_MODES: Array<{ value: GasSponsorshipMode; label: string }> = [
+  { value: "erc4337", label: "ERC-4337" },
+  { value: "eip7702", label: "EIP-7702" },
+  { value: "solana_fee_payer", label: "Solana Fee Payer" },
+];
+
+const THEME_COLOR_FIELDS: Array<{ key: keyof ThemeForm; label: string }> = [
+  { key: "primaryColor", label: "Primary" },
+  { key: "accentColor", label: "Accent" },
+  { key: "backgroundColor", label: "Background" },
+  { key: "surfaceColor", label: "Surface" },
+  { key: "textColor", label: "Text" },
+  { key: "mutedColor", label: "Muted" },
+  { key: "successColor", label: "Success" },
+  { key: "errorColor", label: "Error" },
+  { key: "warningColor", label: "Warning" },
+];
+
+const APP_CLIENT_ENVIRONMENTS: Array<{ value: AppClientEnvironment; label: string }> = [
+  { value: "development", label: "Development" },
+  { value: "preview", label: "Preview" },
+  { value: "staging", label: "Staging" },
+  { value: "production", label: "Production" },
+];
+
+const emptyOidcProvider = (): OidcProviderForm => ({
+  id: "",
+  enabled: true,
+  issuer: "",
+  audience: "",
+  jwksUri: "",
+  clientId: "",
+  clientSecretEnv: "",
+  authorizationUrl: "",
+  tokenUrl: "",
+  scopes: "openid\nemail\nprofile",
+  allowedAlgs: "RS256",
+  allowJitProvisioning: true,
+});
+
+const emptySamlSsoForm = (): SamlSsoForm => ({
+  enabled: false,
+  idpEntityId: "",
+  idpSsoUrl: "",
+  idpCertPems: "",
+  emailAttribute: "email",
+  groupsAttribute: "",
+  allowJitProvisioning: false,
+});
+
+function samlFormFromConfig(config: SamlSsoConfig | null): SamlSsoForm {
+  if (!config) return emptySamlSsoForm();
+  return {
+    enabled: config.enabled,
+    idpEntityId: config.idpEntityId,
+    idpSsoUrl: config.idpSsoUrl,
+    idpCertPems: config.idpCertPems.join("\n\n"),
+    emailAttribute: config.emailAttribute,
+    groupsAttribute: config.groupsAttribute ?? "",
+    allowJitProvisioning: config.allowJitProvisioning,
+  };
+}
+
+const emptyAuthAbuseForm = (): AuthAbuseForm => ({
+  loginPasskey: true,
+  loginEmail: true,
+  loginSms: true,
+  loginWhatsapp: true,
+  loginTotp: true,
+  loginSiwe: true,
+  loginSiws: true,
+  loginTelegram: true,
+  loginFarcaster: true,
+  oauthGoogle: true,
+  oauthDiscord: true,
+  oauthGithub: true,
+  oauthTwitter: true,
+  captchaEnabled: false,
+  captchaProvider: "turnstile",
+  captchaSiteKey: "",
+  captchaSecretKeyEnv: "",
+  captchaEmailOtp: true,
+  captchaSmsOtp: true,
+  blockDisposable: false,
+  blockPlusAliases: false,
+  allowedEmails: "",
+  blockedEmails: "",
+  allowedDomains: "",
+  blockedDomains: "",
+  allowedWallets: "",
+  blockedWallets: "",
+  blockVoip: false,
+  allowedCountryCodes: "",
+  blockedCountryCodes: "",
+});
+
+const defaultThemeForm = (): ThemeForm => ({
+  primaryColor: "#D4A054",
+  accentColor: "#A78BFA",
+  backgroundColor: "#0F0F0F",
+  surfaceColor: "#1A1A2E",
+  textColor: "#FAFAFA",
+  mutedColor: "#6B7280",
+  successColor: "#10B981",
+  errorColor: "#EF4444",
+  warningColor: "#F59E0B",
+  borderRadius: "8",
+  fontFamily: "Inter, system-ui, sans-serif",
+  colorScheme: "dark",
+});
+
+const emptyGasSponsorshipForm = (): GasSponsorshipForm => ({
+  enabled: false,
+  provider: "",
+  mode: "",
+  allowedChainIds: "",
+  maxPerTxUsd: "",
+  allowClientSponsorship: false,
+  requireSimulation: true,
+  circuitBreakerEnabled: false,
+});
+
+const emptyAppClient = (): AppClientForm => ({
+  id: "",
+  name: "",
+  environment: "development",
+  enabled: true,
+  allowedOrigins: "",
+  allowedRedirectUrls: "",
+});
+
+function listToLines(value: string[] | undefined): string {
+  return (value ?? []).join("\n");
+}
+
+function linesToList(value: string): string[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function linesToNumberList(value: string): number[] {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => Number(item))
+    .filter((item) => Number.isSafeInteger(item) && item > 0);
+}
+
+function appClientFormFromConfig(client: any): AppClientForm {
+  const environment = APP_CLIENT_ENVIRONMENTS.some((item) => item.value === client?.environment)
+    ? client.environment
+    : "development";
+  return {
+    id: typeof client?.id === "string" ? client.id : "",
+    name: typeof client?.name === "string" ? client.name : "",
+    environment,
+    enabled: client?.enabled !== false,
+    allowedOrigins: listToLines(client?.allowedOrigins),
+    allowedRedirectUrls: listToLines(client?.allowedRedirectUrls),
+  };
+}
+
+function appClientPayloadFromForm(client: AppClientForm) {
+  return {
+    id: client.id.trim(),
+    name: client.name.trim(),
+    environment: client.environment,
+    enabled: client.enabled,
+    allowedOrigins: linesToList(client.allowedOrigins),
+    allowedRedirectUrls: linesToList(client.allowedRedirectUrls),
+  };
+}
+
+function themeFormFromConfig(theme: ThemeConfigInput | undefined): ThemeForm {
+  const fallback = defaultThemeForm();
+  return {
+    ...fallback,
+    ...Object.fromEntries(
+      Object.entries(theme ?? {}).filter(([, value]) => value !== undefined && value !== null),
+    ),
+    borderRadius:
+      typeof theme?.borderRadius === "number" ? String(theme.borderRadius) : fallback.borderRadius,
+  } as ThemeForm;
+}
+
+function themePayloadFromForm(theme: ThemeForm) {
+  return {
+    primaryColor: theme.primaryColor.trim(),
+    accentColor: theme.accentColor.trim(),
+    backgroundColor: theme.backgroundColor.trim(),
+    surfaceColor: theme.surfaceColor.trim(),
+    textColor: theme.textColor.trim(),
+    mutedColor: theme.mutedColor.trim(),
+    successColor: theme.successColor.trim(),
+    errorColor: theme.errorColor.trim(),
+    warningColor: theme.warningColor.trim(),
+    borderRadius: Number(theme.borderRadius),
+    fontFamily: theme.fontFamily.trim(),
+    colorScheme: theme.colorScheme,
+  };
+}
+
+function accessAllowlistTypeLabel(type: AccessAllowlistEntryType): string {
+  return ACCESS_ALLOWLIST_TYPES.find((item) => item.value === type)?.label ?? type;
+}
+
+function authAbuseFormFromConfig(config: any): AuthAbuseForm {
+  const captchaRequiredFor = new Set<string>(config?.captcha?.requiredFor ?? []);
+  const loginMethods = config?.loginMethods ?? {};
+  const oauth = loginMethods.oauth ?? {};
+  return {
+    loginPasskey: loginMethods.passkey !== false,
+    loginEmail: loginMethods.email !== false,
+    loginSms: loginMethods.sms !== false,
+    loginWhatsapp: loginMethods.whatsapp !== false,
+    loginTotp: loginMethods.totp !== false,
+    loginSiwe: loginMethods.siwe !== false,
+    loginSiws: loginMethods.siws !== false,
+    loginTelegram: loginMethods.telegram !== false,
+    loginFarcaster: loginMethods.farcaster !== false,
+    oauthGoogle: oauth.google !== false,
+    oauthDiscord: oauth.discord !== false,
+    oauthGithub: oauth.github !== false,
+    oauthTwitter: oauth.twitter !== false,
+    captchaEnabled: config?.captcha?.enabled === true,
+    captchaProvider: config?.captcha?.provider === "hcaptcha" ? "hcaptcha" : "turnstile",
+    captchaSiteKey: config?.captcha?.siteKey ?? "",
+    captchaSecretKeyEnv: config?.captcha?.secretKeyEnv ?? "",
+    captchaEmailOtp: captchaRequiredFor.size === 0 ? true : captchaRequiredFor.has("email_otp"),
+    captchaSmsOtp: captchaRequiredFor.size === 0 ? true : captchaRequiredFor.has("sms_otp"),
+    blockDisposable: config?.email?.blockDisposable === true,
+    blockPlusAliases: config?.email?.blockPlusAliases === true,
+    allowedEmails: listToLines(config?.email?.allowedEmails),
+    blockedEmails: listToLines(config?.email?.blockedEmails),
+    allowedDomains: listToLines(config?.email?.allowedDomains),
+    blockedDomains: listToLines(config?.email?.blockedDomains),
+    allowedWallets: listToLines(config?.wallet?.allowedWallets),
+    blockedWallets: listToLines(config?.wallet?.blockedWallets),
+    blockVoip: config?.phone?.blockVoip === true,
+    allowedCountryCodes: listToLines(config?.phone?.allowedCountryCodes),
+    blockedCountryCodes: listToLines(config?.phone?.blockedCountryCodes),
+  };
+}
+
+function authAbusePayloadFromForm(form: AuthAbuseForm) {
+  const requiredFor = [
+    ...(form.captchaEmailOtp ? ["email_otp"] : []),
+    ...(form.captchaSmsOtp ? ["sms_otp"] : []),
+  ];
+  return {
+    loginMethods: {
+      passkey: form.loginPasskey,
+      email: form.loginEmail,
+      sms: form.loginSms,
+      whatsapp: form.loginWhatsapp,
+      totp: form.loginTotp,
+      siwe: form.loginSiwe,
+      siws: form.loginSiws,
+      telegram: form.loginTelegram,
+      farcaster: form.loginFarcaster,
+      oauth: {
+        google: form.oauthGoogle,
+        discord: form.oauthDiscord,
+        github: form.oauthGithub,
+        twitter: form.oauthTwitter,
+      },
+    },
+    captcha: {
+      enabled: form.captchaEnabled,
+      provider: form.captchaProvider,
+      siteKey: form.captchaSiteKey.trim() || undefined,
+      secretKeyEnv: form.captchaSecretKeyEnv.trim() || undefined,
+      requiredFor,
+    },
+    email: {
+      blockDisposable: form.blockDisposable,
+      blockPlusAliases: form.blockPlusAliases,
+      allowedEmails: linesToList(form.allowedEmails),
+      blockedEmails: linesToList(form.blockedEmails),
+      allowedDomains: linesToList(form.allowedDomains),
+      blockedDomains: linesToList(form.blockedDomains),
+    },
+    wallet: {
+      allowedWallets: linesToList(form.allowedWallets),
+      blockedWallets: linesToList(form.blockedWallets),
+    },
+    phone: {
+      blockVoip: form.blockVoip,
+      allowedCountryCodes: linesToList(form.allowedCountryCodes),
+      blockedCountryCodes: linesToList(form.blockedCountryCodes),
+    },
+  };
+}
+
+function gasSponsorshipFormFromConfig(config: TenantGasSponsorshipConfig): GasSponsorshipForm {
+  return {
+    enabled: config.enabled === true,
+    provider: config.provider ?? "",
+    mode: config.mode ?? "",
+    allowedChainIds: listToLines((config.allowedChainIds ?? []).map((chainId) => String(chainId))),
+    maxPerTxUsd: config.maxPerTxUsd === undefined ? "" : String(config.maxPerTxUsd),
+    allowClientSponsorship: config.allowClientSponsorship === true,
+    requireSimulation: config.requireSimulation !== false,
+    circuitBreakerEnabled: config.circuitBreakerEnabled === true,
+  };
+}
+
+function gasSponsorshipPayloadFromForm(form: GasSponsorshipForm): TenantGasSponsorshipConfig {
+  const maxPerTxUsd = form.maxPerTxUsd.trim() === "" ? undefined : Number(form.maxPerTxUsd);
+  return {
+    enabled: form.enabled,
+    provider: form.provider || undefined,
+    mode: form.mode || undefined,
+    allowedChainIds: linesToNumberList(form.allowedChainIds),
+    maxPerTxUsd:
+      maxPerTxUsd !== undefined && Number.isFinite(maxPerTxUsd) ? maxPerTxUsd : undefined,
+    allowClientSponsorship: form.allowClientSponsorship,
+    requireSimulation: form.requireSimulation,
+    circuitBreakerEnabled: form.circuitBreakerEnabled,
+  };
+}
+
+function gasSponsorshipProviderLabel(provider: GasSponsorshipProvider | ""): string {
+  if (!provider) return "No Provider";
+  return (
+    GAS_SPONSORSHIP_PROVIDERS.find((providerOption) => providerOption.value === provider)?.label ??
+    provider
+  );
+}
+
 export default function SettingsPage() {
+  const stewardAuth = useStewardAuth();
   const { address, tenant } = useAuth();
+  const authToken = stewardAuth.getToken();
   const chainId = 8453; // Base mainnet
   const [webhookUrl, setWebhookUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showKey, setShowKey] = useState(false);
+  const [oidcProviders, setOidcProviders] = useState<OidcProviderForm[]>([]);
+  const [oidcLoading, setOidcLoading] = useState(false);
+  const [oidcSaving, setOidcSaving] = useState(false);
+  const [oidcSaved, setOidcSaved] = useState(false);
+  const [oidcError, setOidcError] = useState<string | null>(null);
+  const [testAccount, setTestAccount] = useState<TestAccount>({ enabled: false });
+  const [testAccountLoading, setTestAccountLoading] = useState(false);
+  const [testAccountSaving, setTestAccountSaving] = useState(false);
+  const [testAccountError, setTestAccountError] = useState<string | null>(null);
+  const [authAbuse, setAuthAbuse] = useState<AuthAbuseForm>(emptyAuthAbuseForm);
+  const [authAbuseLoading, setAuthAbuseLoading] = useState(false);
+  const [authAbuseSaving, setAuthAbuseSaving] = useState(false);
+  const [authAbuseSaved, setAuthAbuseSaved] = useState(false);
+  const [authAbuseError, setAuthAbuseError] = useState<string | null>(null);
+  const [gasSponsorship, setGasSponsorship] = useState<GasSponsorshipForm>(emptyGasSponsorshipForm);
+  const [gasSponsorshipLoading, setGasSponsorshipLoading] = useState(false);
+  const [gasSponsorshipSaving, setGasSponsorshipSaving] = useState(false);
+  const [gasSponsorshipSaved, setGasSponsorshipSaved] = useState(false);
+  const [gasSponsorshipError, setGasSponsorshipError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<ThemeForm>(defaultThemeForm);
+  const [themeSaving, setThemeSaving] = useState(false);
+  const [themeSaved, setThemeSaved] = useState(false);
+  const [themeError, setThemeError] = useState<string | null>(null);
+  const [allowedOrigins, setAllowedOrigins] = useState("");
+  const [originsLoading, setOriginsLoading] = useState(false);
+  const [originsSaving, setOriginsSaving] = useState(false);
+  const [originsSaved, setOriginsSaved] = useState(false);
+  const [originsError, setOriginsError] = useState<string | null>(null);
+  const [allowedRedirectUrls, setAllowedRedirectUrls] = useState("");
+  const [redirectUrlsSaving, setRedirectUrlsSaving] = useState(false);
+  const [redirectUrlsSaved, setRedirectUrlsSaved] = useState(false);
+  const [redirectUrlsError, setRedirectUrlsError] = useState<string | null>(null);
+  const [appClients, setAppClients] = useState<AppClientForm[]>([]);
+  const [appClientsSaving, setAppClientsSaving] = useState(false);
+  const [appClientsSaved, setAppClientsSaved] = useState(false);
+  const [appClientsError, setAppClientsError] = useState<string | null>(null);
+  const [appClientSecrets, setAppClientSecrets] = useState<Record<string, RotatedAppClientSecret>>(
+    {},
+  );
+  const [appClientSecretRotating, setAppClientSecretRotating] = useState<string | null>(null);
+  const [ssoDomains, setSsoDomains] = useState<TenantSsoDomain[]>([]);
+  const [ssoDomainValue, setSsoDomainValue] = useState("");
+  const [ssoDomainRequired, setSsoDomainRequired] = useState(true);
+  const [ssoDomainsLoading, setSsoDomainsLoading] = useState(false);
+  const [ssoDomainsSaving, setSsoDomainsSaving] = useState(false);
+  const [ssoDomainsSaved, setSsoDomainsSaved] = useState(false);
+  const [ssoDomainsError, setSsoDomainsError] = useState<string | null>(null);
+  const [ssoDomainVerifying, setSsoDomainVerifying] = useState<string | null>(null);
+  const [samlSso, setSamlSso] = useState<SamlSsoForm>(emptySamlSsoForm);
+  const [samlServiceProvider, setSamlServiceProvider] = useState<SamlServiceProvider | null>(null);
+  const [samlSsoLoading, setSamlSsoLoading] = useState(false);
+  const [samlSsoSaving, setSamlSsoSaving] = useState(false);
+  const [samlSsoSaved, setSamlSsoSaved] = useState(false);
+  const [samlSsoError, setSamlSsoError] = useState<string | null>(null);
+  const [accessAllowlist, setAccessAllowlist] = useState<AccessAllowlistEntry[]>([]);
+  const [accessAllowlistType, setAccessAllowlistType] = useState<AccessAllowlistEntryType>("email");
+  const [accessAllowlistValue, setAccessAllowlistValue] = useState("");
+  const [accessAllowlistLoading, setAccessAllowlistLoading] = useState(false);
+  const [accessAllowlistSaving, setAccessAllowlistSaving] = useState(false);
+  const [accessAllowlistSaved, setAccessAllowlistSaved] = useState(false);
+  const [accessAllowlistError, setAccessAllowlistError] = useState<string | null>(null);
 
   const TENANT_ID = tenant?.tenantId || "";
   const API_KEY = tenant?.apiKey || "";
+
+  useEffect(() => {
+    if (!TENANT_ID || !authToken) return;
+
+    let cancelled = false;
+    setOriginsLoading(true);
+    setOriginsError(null);
+    fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/config`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || "Failed to load app origins");
+        if (!cancelled) {
+          setAllowedOrigins(listToLines(data.data.allowedOrigins ?? []));
+          setAllowedRedirectUrls(listToLines(data.data.allowedRedirectUrls ?? []));
+          setAppClients((data.data.appClients ?? []).map(appClientFormFromConfig));
+          setTheme(themeFormFromConfig(data.data.theme));
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setOriginsError(e instanceof Error ? e.message : "Failed to load app origins");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setOriginsLoading(false);
+      });
+
+    setAccessAllowlistLoading(true);
+    setAccessAllowlistError(null);
+    fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/access-allowlist`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || "Failed to load access allowlist");
+        }
+        if (!cancelled) setAccessAllowlist(data.data.entries ?? []);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setAccessAllowlist([]);
+          setAccessAllowlistError(
+            e instanceof Error ? e.message : "Failed to load access allowlist",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAccessAllowlistLoading(false);
+      });
+
+    setSsoDomainsLoading(true);
+    setSsoDomainsError(null);
+    fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/sso-domains`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || "Failed to load SSO domains");
+        if (!cancelled) setSsoDomains(data.data.domains ?? []);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setSsoDomains([]);
+          setSsoDomainsError(e instanceof Error ? e.message : "Failed to load SSO domains");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSsoDomainsLoading(false);
+      });
+
+    setSamlSsoLoading(true);
+    setSamlSsoError(null);
+    fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/saml-sso`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || "Failed to load SAML SSO");
+        if (!cancelled) {
+          setSamlSso(samlFormFromConfig(data.data.config ?? null));
+          setSamlServiceProvider(data.data.serviceProvider ?? null);
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setSamlSso(emptySamlSsoForm());
+          setSamlSsoError(e instanceof Error ? e.message : "Failed to load SAML SSO");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSamlSsoLoading(false);
+      });
+
+    setAuthAbuseLoading(true);
+    setAuthAbuseError(null);
+    fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/auth-abuse-config`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || "Failed to load login controls");
+        if (!cancelled) {
+          setAuthAbuse(authAbuseFormFromConfig(data.data.authAbuseConfig ?? {}));
+        }
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setAuthAbuseError(e instanceof Error ? e.message : "Failed to load login controls");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAuthAbuseLoading(false);
+      });
+
+    setGasSponsorshipLoading(true);
+    setGasSponsorshipError(null);
+    getTenantGasSponsorshipConfig(TENANT_ID, authToken)
+      .then((config) => {
+        if (!cancelled) setGasSponsorship(gasSponsorshipFormFromConfig(config));
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setGasSponsorship(emptyGasSponsorshipForm());
+          setGasSponsorshipError(
+            e instanceof Error ? e.message : "Failed to load gas sponsorship config",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setGasSponsorshipLoading(false);
+      });
+
+    setTestAccountLoading(true);
+    setTestAccountError(null);
+    fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/test-account`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || "Failed to load test account");
+        if (!cancelled) setTestAccount(data.data.testAccount ?? { enabled: false });
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setTestAccount({ enabled: false });
+          setTestAccountError(e instanceof Error ? e.message : "Failed to load test account");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setTestAccountLoading(false);
+      });
+
+    setOidcLoading(true);
+    setOidcError(null);
+    fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/oidc-providers`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    })
+      .then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || "Failed to load providers");
+        if (cancelled) return;
+        setOidcProviders(
+          (data.data.providers ?? []).map(
+            (provider: {
+              id: string;
+              enabled?: boolean;
+              issuer: string;
+              audience?: string[];
+              jwksUri: string;
+              clientId?: string;
+              clientSecretEnv?: string;
+              authorizationUrl?: string;
+              tokenUrl?: string;
+              scopes?: string[];
+              allowedAlgs?: Array<"RS256" | "ES256">;
+              allowJitProvisioning?: boolean;
+            }) => ({
+              id: provider.id,
+              enabled: provider.enabled !== false,
+              issuer: provider.issuer,
+              audience: (provider.audience ?? []).join(", "),
+              jwksUri: provider.jwksUri,
+              clientId: provider.clientId ?? "",
+              clientSecretEnv: provider.clientSecretEnv ?? "",
+              authorizationUrl: provider.authorizationUrl ?? "",
+              tokenUrl: provider.tokenUrl ?? "",
+              scopes: listToLines(provider.scopes ?? ["openid", "email", "profile"]),
+              allowedAlgs: provider.allowedAlgs?.[0] ?? "RS256",
+              allowJitProvisioning: provider.allowJitProvisioning !== false,
+            }),
+          ),
+        );
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setOidcError(e instanceof Error ? e.message : "Failed to load providers");
+      })
+      .finally(() => {
+        if (!cancelled) setOidcLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [TENANT_ID, authToken]);
+
+  function updateAuthAbuse(patch: Partial<AuthAbuseForm>) {
+    setAuthAbuse((current) => ({ ...current, ...patch }));
+  }
+
+  function updateGasSponsorship(patch: Partial<GasSponsorshipForm>) {
+    setGasSponsorship((current) => ({ ...current, ...patch }));
+  }
+
+  async function saveGasSponsorship(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setGasSponsorshipError("Sign in again to save gas sponsorship");
+      return;
+    }
+    const payload = gasSponsorshipPayloadFromForm(gasSponsorship);
+    if (gasSponsorship.enabled) {
+      if (!payload.provider || !payload.mode) {
+        setGasSponsorshipError("Choose a provider and mode before enabling sponsorship");
+        return;
+      }
+      if ((payload.allowedChainIds ?? []).length === 0) {
+        setGasSponsorshipError("Add at least one allowed chain ID before enabling sponsorship");
+        return;
+      }
+      if (payload.maxPerTxUsd === undefined) {
+        setGasSponsorshipError("Set a max USD per transaction before enabling sponsorship");
+        return;
+      }
+    }
+
+    setGasSponsorshipSaving(true);
+    setGasSponsorshipSaved(false);
+    setGasSponsorshipError(null);
+    try {
+      const config = await updateTenantGasSponsorshipConfig(TENANT_ID, authToken, payload);
+      setGasSponsorship(gasSponsorshipFormFromConfig(config));
+      setGasSponsorshipSaved(true);
+      setTimeout(() => setGasSponsorshipSaved(false), 2000);
+    } catch (e: unknown) {
+      setGasSponsorshipError(
+        e instanceof Error ? e.message : "Failed to save gas sponsorship config",
+      );
+    } finally {
+      setGasSponsorshipSaving(false);
+    }
+  }
+
+  async function saveAuthAbuseControls(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setAuthAbuseError("Sign in again to save login controls");
+      return;
+    }
+    setAuthAbuseSaving(true);
+    setAuthAbuseSaved(false);
+    setAuthAbuseError(null);
+    try {
+      const res = await fetch(
+        `${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/auth-abuse-config`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ authAbuseConfig: authAbusePayloadFromForm(authAbuse) }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save login controls");
+      setAuthAbuse(authAbuseFormFromConfig(data.data.authAbuseConfig ?? {}));
+      setAuthAbuseSaved(true);
+      setTimeout(() => setAuthAbuseSaved(false), 2000);
+    } catch (e: unknown) {
+      setAuthAbuseError(e instanceof Error ? e.message : "Failed to save login controls");
+    } finally {
+      setAuthAbuseSaving(false);
+    }
+  }
+
+  async function addAccessAllowlistEntry(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setAccessAllowlistError("Sign in again to update the access allowlist");
+      return;
+    }
+    const value = accessAllowlistValue.trim();
+    if (!value) {
+      setAccessAllowlistError("Enter an email, domain, wallet, or phone number");
+      return;
+    }
+
+    setAccessAllowlistSaving(true);
+    setAccessAllowlistSaved(false);
+    setAccessAllowlistError(null);
+    try {
+      const res = await fetch(
+        `${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/access-allowlist`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ type: accessAllowlistType, value }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Failed to add access allowlist entry");
+      }
+      setAccessAllowlist(data.data.entries ?? []);
+      setAccessAllowlistValue("");
+      setAccessAllowlistSaved(true);
+      setTimeout(() => setAccessAllowlistSaved(false), 2000);
+    } catch (e: unknown) {
+      setAccessAllowlistError(
+        e instanceof Error ? e.message : "Failed to add access allowlist entry",
+      );
+    } finally {
+      setAccessAllowlistSaving(false);
+    }
+  }
+
+  async function removeAccessAllowlistEntry(entry: AccessAllowlistEntry) {
+    if (!TENANT_ID || !authToken) {
+      setAccessAllowlistError("Sign in again to update the access allowlist");
+      return;
+    }
+
+    setAccessAllowlistSaving(true);
+    setAccessAllowlistSaved(false);
+    setAccessAllowlistError(null);
+    try {
+      const res = await fetch(
+        `${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/access-allowlist`,
+        {
+          method: "DELETE",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ id: entry.id }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Failed to remove access allowlist entry");
+      }
+      setAccessAllowlist(data.data.entries ?? []);
+      setAccessAllowlistSaved(true);
+      setTimeout(() => setAccessAllowlistSaved(false), 2000);
+    } catch (e: unknown) {
+      setAccessAllowlistError(
+        e instanceof Error ? e.message : "Failed to remove access allowlist entry",
+      );
+    } finally {
+      setAccessAllowlistSaving(false);
+    }
+  }
+
+  async function addSsoDomain(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setSsoDomainsError("Sign in again to update SSO domains");
+      return;
+    }
+    const domain = ssoDomainValue.trim().toLowerCase();
+    if (!domain) {
+      setSsoDomainsError("Enter a domain to verify for SSO");
+      return;
+    }
+
+    setSsoDomainsSaving(true);
+    setSsoDomainsSaved(false);
+    setSsoDomainsError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/sso-domains`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ domain, ssoRequired: ssoDomainRequired }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to add SSO domain");
+      const nextDomain = data.data.domain as TenantSsoDomain;
+      setSsoDomains((current) => [
+        nextDomain,
+        ...current.filter((item) => item.domain !== nextDomain.domain),
+      ]);
+      setSsoDomainValue("");
+      setSsoDomainsSaved(true);
+      setTimeout(() => setSsoDomainsSaved(false), 2000);
+    } catch (e: unknown) {
+      setSsoDomainsError(e instanceof Error ? e.message : "Failed to add SSO domain");
+    } finally {
+      setSsoDomainsSaving(false);
+    }
+  }
+
+  async function verifySsoDomain(domain: string) {
+    if (!TENANT_ID || !authToken) {
+      setSsoDomainsError("Sign in again to verify SSO domains");
+      return;
+    }
+
+    setSsoDomainVerifying(domain);
+    setSsoDomainsSaved(false);
+    setSsoDomainsError(null);
+    try {
+      const res = await fetch(
+        `${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/sso-domains/${encodeURIComponent(
+          domain,
+        )}/verify`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${authToken}` },
+        },
+      );
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to verify SSO domain");
+      const nextDomain = data.data.domain as TenantSsoDomain;
+      setSsoDomains((current) =>
+        current.map((item) => (item.domain === nextDomain.domain ? nextDomain : item)),
+      );
+      setSsoDomainsSaved(true);
+      setTimeout(() => setSsoDomainsSaved(false), 2000);
+    } catch (e: unknown) {
+      setSsoDomainsError(e instanceof Error ? e.message : "Failed to verify SSO domain");
+    } finally {
+      setSsoDomainVerifying(null);
+    }
+  }
+
+  async function deleteSsoDomain(domain: string) {
+    if (!TENANT_ID || !authToken) {
+      setSsoDomainsError("Sign in again to update SSO domains");
+      return;
+    }
+
+    setSsoDomainsSaving(true);
+    setSsoDomainsSaved(false);
+    setSsoDomainsError(null);
+    try {
+      const res = await fetch(
+        `${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/sso-domains/${encodeURIComponent(
+          domain,
+        )}`,
+        {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${authToken}` },
+        },
+      );
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to delete SSO domain");
+      setSsoDomains((current) => current.filter((item) => item.domain !== domain));
+      setSsoDomainsSaved(true);
+      setTimeout(() => setSsoDomainsSaved(false), 2000);
+    } catch (e: unknown) {
+      setSsoDomainsError(e instanceof Error ? e.message : "Failed to delete SSO domain");
+    } finally {
+      setSsoDomainsSaving(false);
+    }
+  }
+
+  function updateSamlSso(patch: Partial<SamlSsoForm>) {
+    setSamlSso((current) => ({ ...current, ...patch }));
+  }
+
+  async function saveSamlSso(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setSamlSsoError("Sign in again to save SAML SSO");
+      return;
+    }
+
+    setSamlSsoSaving(true);
+    setSamlSsoSaved(false);
+    setSamlSsoError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/saml-sso`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          enabled: samlSso.enabled,
+          idpEntityId: samlSso.idpEntityId.trim(),
+          idpSsoUrl: samlSso.idpSsoUrl.trim(),
+          idpCertPems: samlSso.idpCertPems
+            .split(/(?=-----BEGIN CERTIFICATE-----)/g)
+            .map((cert) => cert.trim())
+            .filter(Boolean),
+          emailAttribute: samlSso.emailAttribute.trim() || "email",
+          groupsAttribute: samlSso.groupsAttribute.trim() || undefined,
+          allowJitProvisioning: samlSso.allowJitProvisioning,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save SAML SSO");
+      setSamlSso(samlFormFromConfig(data.data.config ?? null));
+      setSamlSsoSaved(true);
+      setTimeout(() => setSamlSsoSaved(false), 2000);
+    } catch (e: unknown) {
+      setSamlSsoError(e instanceof Error ? e.message : "Failed to save SAML SSO");
+    } finally {
+      setSamlSsoSaving(false);
+    }
+  }
+
+  async function rotateTestAccount() {
+    if (!TENANT_ID || !authToken) {
+      setTestAccountError("Sign in again to manage test credentials");
+      return;
+    }
+    setTestAccountSaving(true);
+    setTestAccountError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/test-account`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to rotate test account");
+      setTestAccount(data.data.testAccount ?? { enabled: false });
+    } catch (e: unknown) {
+      setTestAccountError(e instanceof Error ? e.message : "Failed to rotate test account");
+    } finally {
+      setTestAccountSaving(false);
+    }
+  }
+
+  async function disableTestAccount() {
+    if (!TENANT_ID || !authToken) {
+      setTestAccountError("Sign in again to manage test credentials");
+      return;
+    }
+    setTestAccountSaving(true);
+    setTestAccountError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/test-account`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${authToken}` },
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to disable test account");
+      setTestAccount(data.data.testAccount ?? { enabled: false });
+    } catch (e: unknown) {
+      setTestAccountError(e instanceof Error ? e.message : "Failed to disable test account");
+    } finally {
+      setTestAccountSaving(false);
+    }
+  }
 
   async function saveWebhook(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     try {
-      const res = await fetch(`${API_URL}/tenants/${TENANT_ID}/webhook`, {
+      if (!authToken) throw new Error("Sign in again to save settings");
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/webhook`, {
         method: "PUT",
         headers: {
+          Authorization: `Bearer ${authToken}`,
           "Content-Type": "application/json",
-          "X-Steward-Tenant": TENANT_ID,
-          "X-Steward-Key": API_KEY,
         },
         body: JSON.stringify({ webhookUrl: webhookUrl || undefined }),
       });
@@ -48,6 +1197,277 @@ export default function SettingsPage() {
       alert(e instanceof Error ? e.message : "Failed to save");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function saveAllowedOrigins(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setOriginsError("Sign in again to save app origins");
+      return;
+    }
+    setOriginsSaving(true);
+    setOriginsSaved(false);
+    setOriginsError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/config`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ allowedOrigins: linesToList(allowedOrigins) }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save app origins");
+      setAllowedOrigins(listToLines(data.data.allowedOrigins ?? []));
+      setOriginsSaved(true);
+      setTimeout(() => setOriginsSaved(false), 2000);
+    } catch (e: unknown) {
+      setOriginsError(e instanceof Error ? e.message : "Failed to save app origins");
+    } finally {
+      setOriginsSaving(false);
+    }
+  }
+
+  async function saveAllowedRedirectUrls(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setRedirectUrlsError("Sign in again to save redirect URLs");
+      return;
+    }
+    setRedirectUrlsSaving(true);
+    setRedirectUrlsSaved(false);
+    setRedirectUrlsError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/config`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ allowedRedirectUrls: linesToList(allowedRedirectUrls) }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save redirect URLs");
+      setAllowedRedirectUrls(listToLines(data.data.allowedRedirectUrls ?? []));
+      setRedirectUrlsSaved(true);
+      setTimeout(() => setRedirectUrlsSaved(false), 2000);
+    } catch (e: unknown) {
+      setRedirectUrlsError(e instanceof Error ? e.message : "Failed to save redirect URLs");
+    } finally {
+      setRedirectUrlsSaving(false);
+    }
+  }
+
+  function addAppClient() {
+    setAppClients((clients) => [...clients, emptyAppClient()]);
+  }
+
+  function updateAppClient(index: number, patch: Partial<AppClientForm>) {
+    setAppClients((clients) =>
+      clients.map((client, clientIndex) =>
+        clientIndex === index ? { ...client, ...patch } : client,
+      ),
+    );
+  }
+
+  function removeAppClient(index: number) {
+    setAppClients((clients) => clients.filter((_, clientIndex) => clientIndex !== index));
+  }
+
+  async function rotateAppClientSecret(clientId: string) {
+    if (!TENANT_ID || !authToken) {
+      setAppClientsError("Sign in again to rotate app secrets");
+      return;
+    }
+    const normalizedClientId = clientId.trim().toLowerCase();
+    if (!normalizedClientId) {
+      setAppClientsError("Save a client ID before rotating its secret");
+      return;
+    }
+    setAppClientSecretRotating(normalizedClientId);
+    setAppClientsError(null);
+    try {
+      const res = await fetch(
+        `${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/app-clients/${encodeURIComponent(
+          normalizedClientId,
+        )}/secrets`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+        },
+      );
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to rotate app secret");
+      setAppClientSecrets((current) => ({
+        ...current,
+        [normalizedClientId]: {
+          appId: data.data.appId,
+          appSecret: data.data.appSecret,
+          secretPrefix: data.data.secret.secretPrefix,
+        },
+      }));
+    } catch (e: unknown) {
+      setAppClientsError(e instanceof Error ? e.message : "Failed to rotate app secret");
+    } finally {
+      setAppClientSecretRotating(null);
+    }
+  }
+
+  async function saveAppClients(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setAppClientsError("Sign in again to save app clients");
+      return;
+    }
+    setAppClientsSaving(true);
+    setAppClientsSaved(false);
+    setAppClientsError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/config`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ appClients: appClients.map(appClientPayloadFromForm) }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save app clients");
+      setAppClients((data.data.appClients ?? []).map(appClientFormFromConfig));
+      setAppClientsSaved(true);
+      setTimeout(() => setAppClientsSaved(false), 2000);
+    } catch (e: unknown) {
+      setAppClientsError(e instanceof Error ? e.message : "Failed to save app clients");
+    } finally {
+      setAppClientsSaving(false);
+    }
+  }
+
+  function updateTheme(patch: Partial<ThemeForm>) {
+    setTheme((current) => ({ ...current, ...patch }));
+  }
+
+  async function saveTheme(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setThemeError("Sign in again to save appearance");
+      return;
+    }
+    setThemeSaving(true);
+    setThemeSaved(false);
+    setThemeError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/config`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ theme: themePayloadFromForm(theme) }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save appearance");
+      setTheme(themeFormFromConfig(data.data.theme));
+      setThemeSaved(true);
+      setTimeout(() => setThemeSaved(false), 2000);
+    } catch (e: unknown) {
+      setThemeError(e instanceof Error ? e.message : "Failed to save appearance");
+    } finally {
+      setThemeSaving(false);
+    }
+  }
+
+  function updateOidcProvider(index: number, patch: Partial<OidcProviderForm>) {
+    setOidcProviders((providers) =>
+      providers.map((provider, providerIndex) =>
+        providerIndex === index ? { ...provider, ...patch } : provider,
+      ),
+    );
+  }
+
+  async function saveOidcProviders(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setOidcError("Sign in again to save providers");
+      return;
+    }
+
+    setOidcSaving(true);
+    setOidcSaved(false);
+    setOidcError(null);
+    try {
+      const providers = oidcProviders.map((provider) => ({
+        id: provider.id.trim(),
+        enabled: provider.enabled,
+        issuer: provider.issuer.trim(),
+        audience: provider.audience
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean),
+        jwksUri: provider.jwksUri.trim(),
+        clientId: provider.clientId.trim() || undefined,
+        clientSecretEnv: provider.clientSecretEnv.trim() || undefined,
+        authorizationUrl: provider.authorizationUrl.trim() || undefined,
+        tokenUrl: provider.tokenUrl.trim() || undefined,
+        scopes: linesToList(provider.scopes),
+        allowedAlgs: [provider.allowedAlgs],
+        allowJitProvisioning: provider.allowJitProvisioning,
+      }));
+      const res = await fetch(
+        `${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/oidc-providers`,
+        {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${authToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ providers }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save providers");
+      setOidcProviders(
+        (data.data.providers ?? []).map(
+          (provider: {
+            id: string;
+            enabled?: boolean;
+            issuer: string;
+            audience?: string[];
+            jwksUri: string;
+            clientId?: string;
+            clientSecretEnv?: string;
+            authorizationUrl?: string;
+            tokenUrl?: string;
+            scopes?: string[];
+            allowedAlgs?: Array<"RS256" | "ES256">;
+            allowJitProvisioning?: boolean;
+          }) => ({
+            id: provider.id,
+            enabled: provider.enabled !== false,
+            issuer: provider.issuer,
+            audience: (provider.audience ?? []).join(", "),
+            jwksUri: provider.jwksUri,
+            clientId: provider.clientId ?? "",
+            clientSecretEnv: provider.clientSecretEnv ?? "",
+            authorizationUrl: provider.authorizationUrl ?? "",
+            tokenUrl: provider.tokenUrl ?? "",
+            scopes: listToLines(provider.scopes ?? ["openid", "email", "profile"]),
+            allowedAlgs: provider.allowedAlgs?.[0] ?? "RS256",
+            allowJitProvisioning: provider.allowJitProvisioning !== false,
+          }),
+        ),
+      );
+      setOidcSaved(true);
+      setTimeout(() => setOidcSaved(false), 2000);
+    } catch (e: unknown) {
+      setOidcError(e instanceof Error ? e.message : "Failed to save providers");
+    } finally {
+      setOidcSaving(false);
     }
   }
 
@@ -160,6 +1580,994 @@ const policies = await steward.getPolicies("my-agent")`;
         </div>
       </div>
 
+      {/* Appearance */}
+      <form onSubmit={saveTheme} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              Appearance
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Configure tenant theme tokens used by embedded Steward components.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={themeSaving || originsLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {themeSaving ? "Saving..." : "Save Appearance"}
+          </button>
+        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_360px] gap-px bg-border max-w-6xl">
+          <div className="bg-bg p-5 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle">
+              {THEME_COLOR_FIELDS.map((field) => (
+                <label key={field.key} className="bg-bg p-4 space-y-1.5 block">
+                  <span className="text-xs text-text-tertiary block">{field.label}</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      aria-label={`${field.label} color picker`}
+                      type="color"
+                      value={String(theme[field.key])}
+                      onChange={(event) => updateTheme({ [field.key]: event.target.value })}
+                      className="h-9 w-10 border border-border bg-bg"
+                    />
+                    <input
+                      aria-label={`${field.label} color`}
+                      value={String(theme[field.key])}
+                      onChange={(event) => updateTheme({ [field.key]: event.target.value })}
+                      className="min-w-0 flex-1 bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                    />
+                  </div>
+                </label>
+              ))}
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle">
+              <label className="bg-bg p-4 space-y-1.5 block">
+                <span className="text-xs text-text-tertiary block">Color Scheme</span>
+                <select
+                  value={theme.colorScheme}
+                  onChange={(event) =>
+                    updateTheme({ colorScheme: event.target.value as ThemeForm["colorScheme"] })
+                  }
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                >
+                  <option value="dark">Dark</option>
+                  <option value="light">Light</option>
+                  <option value="system">System</option>
+                </select>
+              </label>
+              <label className="bg-bg p-4 space-y-1.5 block">
+                <span className="text-xs text-text-tertiary block">Border Radius</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="32"
+                  value={theme.borderRadius}
+                  onChange={(event) => updateTheme({ borderRadius: event.target.value })}
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                />
+              </label>
+              <label className="bg-bg p-4 space-y-1.5 block">
+                <span className="text-xs text-text-tertiary block">Font Family</span>
+                <input
+                  value={theme.fontFamily}
+                  onChange={(event) => updateTheme({ fontFamily: event.target.value })}
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                />
+              </label>
+            </div>
+          </div>
+          <div
+            className="p-5 space-y-4"
+            style={{
+              backgroundColor: theme.backgroundColor,
+              color: theme.textColor,
+              fontFamily: theme.fontFamily,
+            }}
+            data-testid="appearance-preview"
+          >
+            <div className="text-xs uppercase tracking-wider" style={{ color: theme.mutedColor }}>
+              Preview
+            </div>
+            <div
+              className="border p-4 space-y-3"
+              style={{
+                backgroundColor: theme.surfaceColor,
+                borderColor: theme.mutedColor,
+                borderRadius: `${Number(theme.borderRadius) || 0}px`,
+              }}
+            >
+              <div className="text-sm font-medium">Sign in to Steward</div>
+              <div className="text-xs" style={{ color: theme.mutedColor }}>
+                Continue with your wallet or email.
+              </div>
+              <button
+                type="button"
+                className="w-full px-3 py-2 text-sm font-medium"
+                style={{
+                  backgroundColor: theme.primaryColor,
+                  color: theme.backgroundColor,
+                  borderRadius: `${Math.max((Number(theme.borderRadius) || 0) - 2, 0)}px`,
+                }}
+              >
+                Continue
+              </button>
+              <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                <div style={{ color: theme.successColor }}>Ready</div>
+                <div style={{ color: theme.warningColor }}>Review</div>
+                <div style={{ color: theme.errorColor }}>Blocked</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {themeSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {themeError && <span className="text-xs text-red-400">{themeError}</span>}
+        </div>
+      </form>
+
+      {/* App Clients */}
+      <form onSubmit={saveAppClients} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              App Clients
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Group redirect URLs and browser origins by development, preview, and production
+              client environments.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={addAppClient}
+              className="px-4 py-2 text-sm border border-border text-text-secondary hover:border-accent hover:text-text transition-colors font-medium"
+            >
+              Add Client
+            </button>
+            <button
+              type="submit"
+              disabled={appClientsSaving || originsLoading || !TENANT_ID}
+              className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+            >
+              {appClientsSaving ? "Saving..." : "Save Clients"}
+            </button>
+          </div>
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          {appClients.length === 0 ? (
+            <div className="bg-bg p-5">
+              <p className="text-sm text-text-tertiary">
+                No app clients configured. Add one to separate local, preview, and production
+                integration settings.
+              </p>
+            </div>
+          ) : (
+            appClients.map((client, index) => (
+              <div
+                key={`${client.id || "new-client"}-${index}`}
+                className="bg-bg p-5 space-y-4"
+                data-testid="app-client-row"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs text-text-secondary uppercase tracking-wider">
+                      {client.name.trim() || client.id.trim() || `Client ${index + 1}`}
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-1">
+                      {client.environment} {client.enabled ? "enabled" : "disabled"}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeAppClient(index)}
+                    className="text-xs text-text-tertiary hover:text-red-400 transition-colors"
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-px bg-border-subtle">
+                  <label className="bg-bg p-4 space-y-1.5 block">
+                    <span className="text-xs text-text-tertiary block">Client ID</span>
+                    <input
+                      value={client.id}
+                      onChange={(event) => updateAppClient(index, { id: event.target.value })}
+                      placeholder="web-prod"
+                      className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                    />
+                  </label>
+                  <label className="bg-bg p-4 space-y-1.5 block">
+                    <span className="text-xs text-text-tertiary block">Name</span>
+                    <input
+                      value={client.name}
+                      onChange={(event) => updateAppClient(index, { name: event.target.value })}
+                      placeholder="Production Web"
+                      className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                    />
+                  </label>
+                  <label className="bg-bg p-4 space-y-1.5 block">
+                    <span className="text-xs text-text-tertiary block">Environment</span>
+                    <select
+                      value={client.environment}
+                      onChange={(event) =>
+                        updateAppClient(index, {
+                          environment: event.target.value as AppClientEnvironment,
+                        })
+                      }
+                      className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                    >
+                      {APP_CLIENT_ENVIRONMENTS.map((environment) => (
+                        <option key={environment.value} value={environment.value}>
+                          {environment.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="bg-bg p-4 flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={client.enabled}
+                      onChange={(event) =>
+                        updateAppClient(index, { enabled: event.target.checked })
+                      }
+                      className="h-4 w-4 accent-accent"
+                    />
+                    <span className="text-xs text-text-tertiary">Enabled</span>
+                  </label>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-border-subtle">
+                  <label className="bg-bg p-4 space-y-1.5 block">
+                    <span className="text-xs text-text-tertiary block">Allowed Origins</span>
+                    <textarea
+                      value={client.allowedOrigins}
+                      onChange={(event) =>
+                        updateAppClient(index, { allowedOrigins: event.target.value })
+                      }
+                      rows={4}
+                      placeholder={
+                        "https://app.example.com\nhttps://preview.example.com\nhttp://localhost:3000"
+                      }
+                      className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+                    />
+                  </label>
+                  <label className="bg-bg p-4 space-y-1.5 block">
+                    <span className="text-xs text-text-tertiary block">Redirect URLs</span>
+                    <textarea
+                      value={client.allowedRedirectUrls}
+                      onChange={(event) =>
+                        updateAppClient(index, { allowedRedirectUrls: event.target.value })
+                      }
+                      rows={4}
+                      placeholder={
+                        "https://app.example.com/auth/callback\nhttps://preview.example.com/auth/callback"
+                      }
+                      className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+                    />
+                  </label>
+                </div>
+                <div className="border border-border-subtle bg-bg-elevated p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs text-text-secondary uppercase tracking-wider">
+                        Backend App Secret
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-1 font-mono">
+                        {TENANT_ID && client.id.trim()
+                          ? `${TENANT_ID}/${client.id.trim().toLowerCase()}`
+                          : "Save a client ID to create an app secret"}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => rotateAppClientSecret(client.id)}
+                      disabled={appClientSecretRotating === client.id.trim().toLowerCase()}
+                      className="px-3 py-2 text-xs border border-border text-text-secondary hover:border-accent hover:text-text transition-colors disabled:opacity-40"
+                    >
+                      {appClientSecretRotating === client.id.trim().toLowerCase()
+                        ? "Rotating..."
+                        : "Rotate Secret"}
+                    </button>
+                  </div>
+                  {appClientSecrets[client.id.trim().toLowerCase()] && (
+                    <div className="border border-amber-400/20 bg-amber-400/5 p-3 text-xs">
+                      <div className="text-amber-300">Copy this app secret now.</div>
+                      <div className="mt-2 font-mono text-text-secondary break-all">
+                        App ID: {appClientSecrets[client.id.trim().toLowerCase()].appId}
+                      </div>
+                      <div className="mt-1 font-mono text-text-secondary break-all">
+                        Secret: {appClientSecrets[client.id.trim().toLowerCase()].appSecret}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {appClientsSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {appClientsError && <span className="text-xs text-red-400">{appClientsError}</span>}
+        </div>
+      </form>
+
+      {/* SSO Domains */}
+      <form onSubmit={addSsoDomain} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              SSO Domains
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Verify email domains for tenant SSO discovery and enforce SSO before passwordless or
+              built-in OAuth login.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={ssoDomainsSaving || ssoDomainsLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {ssoDomainsSaving ? "Saving..." : "Add Domain"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5">
+            <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_220px] gap-4">
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Domain</span>
+                <input
+                  value={ssoDomainValue}
+                  onChange={(event) => setSsoDomainValue(event.target.value)}
+                  placeholder="example.com"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+              <label className="flex items-end gap-2 text-sm text-text-secondary pb-2">
+                <input
+                  type="checkbox"
+                  checked={ssoDomainRequired}
+                  onChange={(event) => setSsoDomainRequired(event.target.checked)}
+                  className="h-4 w-4 accent-accent"
+                />
+                Require SSO
+              </label>
+            </div>
+          </div>
+          <div className="bg-bg overflow-x-auto">
+            <table className="w-full min-w-[820px] text-sm">
+              <thead className="border-b border-border-subtle">
+                <tr className="text-left text-xs text-text-tertiary">
+                  <th className="font-medium px-5 py-3">Domain</th>
+                  <th className="font-medium px-5 py-3">Status</th>
+                  <th className="font-medium px-5 py-3">Policy</th>
+                  <th className="font-medium px-5 py-3">DNS TXT</th>
+                  <th className="font-medium px-5 py-3 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border-subtle">
+                {ssoDomains.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-5 py-5 text-sm text-text-tertiary">
+                      {ssoDomainsLoading ? "Loading SSO domains..." : "No SSO domains configured"}
+                    </td>
+                  </tr>
+                ) : (
+                  ssoDomains.map((domain) => (
+                    <tr key={domain.id} className="text-text-secondary align-top">
+                      <td className="px-5 py-3 font-mono break-all">{domain.domain}</td>
+                      <td className="px-5 py-3 whitespace-nowrap">
+                        <span
+                          className={
+                            domain.status === "verified" ? "text-emerald-400" : "text-amber-300"
+                          }
+                        >
+                          {domain.status === "verified" ? "Verified" : "Pending"}
+                        </span>
+                      </td>
+                      <td className="px-5 py-3 whitespace-nowrap text-xs text-text-tertiary">
+                        {domain.ssoRequired ? "SSO required" : "SSO optional"}
+                      </td>
+                      <td className="px-5 py-3">
+                        <div className="space-y-1 font-mono text-xs">
+                          <div className="break-all">_steward-sso.{domain.domain}</div>
+                          <div className="break-all text-text-tertiary">
+                            {domain.verificationToken}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-5 py-3 text-right">
+                        <div className="flex justify-end gap-3">
+                          {domain.status !== "verified" && (
+                            <button
+                              type="button"
+                              onClick={() => verifySsoDomain(domain.domain)}
+                              disabled={ssoDomainVerifying === domain.domain}
+                              className="text-xs text-text-tertiary hover:text-emerald-400 transition-colors disabled:opacity-40"
+                            >
+                              {ssoDomainVerifying === domain.domain ? "Verifying..." : "Verify"}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => deleteSsoDomain(domain.domain)}
+                            disabled={ssoDomainsSaving || ssoDomainsLoading || !TENANT_ID}
+                            className="text-xs text-text-tertiary hover:text-red-400 transition-colors disabled:opacity-40"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {ssoDomainsSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {ssoDomainsError && <span className="text-xs text-red-400">{ssoDomainsError}</span>}
+        </div>
+      </form>
+
+      {/* SAML SSO */}
+      <form onSubmit={saveSamlSso} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              SAML SSO
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Configure the tenant IdP for dashboard SSO. Verified domains still control email
+              routing.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={samlSsoSaving || samlSsoLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {samlSsoSaving ? "Saving..." : "Save SAML"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5 grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle">
+            {[
+              ["Entity ID", samlServiceProvider?.spEntityId ?? ""],
+              ["ACS URL", samlServiceProvider?.acsUrl ?? ""],
+              ["Metadata URL", samlServiceProvider?.metadataUrl ?? ""],
+            ].map(([label, value]) => (
+              <div key={label} className="bg-bg p-4 min-w-0">
+                <div className="text-xs text-text-tertiary mb-2">{label}</div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-xs text-text-secondary break-all">{value}</span>
+                  {value && <CopyButton text={value} />}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="bg-bg p-5 space-y-4">
+            <label className="flex items-center gap-2 text-sm text-text-secondary">
+              <input
+                type="checkbox"
+                checked={samlSso.enabled}
+                onChange={(event) => updateSamlSso({ enabled: event.target.checked })}
+                className="h-4 w-4 accent-accent"
+              />
+              Enable SAML SSO
+            </label>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">IdP Entity ID</span>
+                <input
+                  value={samlSso.idpEntityId}
+                  onChange={(event) => updateSamlSso({ idpEntityId: event.target.value })}
+                  placeholder="https://idp.example.com/saml"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">IdP SSO URL</span>
+                <input
+                  type="url"
+                  value={samlSso.idpSsoUrl}
+                  onChange={(event) => updateSamlSso({ idpSsoUrl: event.target.value })}
+                  placeholder="https://idp.example.com/sso"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Email Attribute</span>
+                <input
+                  value={samlSso.emailAttribute}
+                  onChange={(event) => updateSamlSso({ emailAttribute: event.target.value })}
+                  placeholder="email"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Groups Attribute</span>
+                <input
+                  value={samlSso.groupsAttribute}
+                  onChange={(event) => updateSamlSso({ groupsAttribute: event.target.value })}
+                  placeholder="groups"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+            </div>
+            <label className="space-y-1.5 block">
+              <span className="text-xs text-text-tertiary block">IdP Certificate PEMs</span>
+              <textarea
+                value={samlSso.idpCertPems}
+                onChange={(event) => updateSamlSso({ idpCertPems: event.target.value })}
+                rows={7}
+                placeholder={"-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"}
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+              />
+            </label>
+            <label className="flex items-center gap-2 text-sm text-text-secondary">
+              <input
+                type="checkbox"
+                checked={samlSso.allowJitProvisioning}
+                onChange={(event) =>
+                  updateSamlSso({ allowJitProvisioning: event.target.checked })
+                }
+                className="h-4 w-4 accent-accent"
+              />
+              Auto-create SSO users as Viewer
+            </label>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {samlSsoSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {samlSsoError && <span className="text-xs text-red-400">{samlSsoError}</span>}
+        </div>
+      </form>
+
+      {/* App Origins */}
+      <form onSubmit={saveAllowedOrigins} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              App Origins
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Used for browser CORS, passkey relying-party selection, and wallet sign-in domains.
+              Use exact origins only.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={originsSaving || originsLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {originsSaving ? "Saving..." : "Save Origins"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-4xl">
+          <div className="bg-bg p-5 space-y-3">
+            <label className="space-y-1.5 block">
+              <span className="text-xs text-text-tertiary block">Allowed Origins</span>
+              <textarea
+                value={allowedOrigins}
+                onChange={(event) => setAllowedOrigins(event.target.value)}
+                rows={5}
+                placeholder={
+                  "https://app.example.com\nhttps://dashboard.example.com\nhttp://localhost:3000"
+                }
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+              />
+            </label>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle">
+              {[
+                ["CORS", "Browser requests from these origins can call tenant-scoped APIs."],
+                ["Wallet Login", "SIWE and SIWS signed domains are checked against this list."],
+                [
+                  "Passkeys",
+                  "Subdomains can share a relying-party ID with a configured apex origin.",
+                ],
+              ].map(([label, copy]) => (
+                <div key={label} className="bg-bg p-4">
+                  <div className="text-xs text-text-secondary uppercase tracking-wider">
+                    {label}
+                  </div>
+                  <div className="text-xs text-text-tertiary mt-1">{copy}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {originsSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {originsError && <span className="text-xs text-red-400">{originsError}</span>}
+        </div>
+      </form>
+
+      {/* Redirect URLs */}
+      <form onSubmit={saveAllowedRedirectUrls} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              Redirect URLs
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Exact OAuth and email callback URLs. Existing tenants fall back to app origins only
+              when this list is empty.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={redirectUrlsSaving || originsLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {redirectUrlsSaving ? "Saving..." : "Save Redirects"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-4xl">
+          <div className="bg-bg p-5 space-y-3">
+            <label className="space-y-1.5 block">
+              <span className="text-xs text-text-tertiary block">Allowed Redirect URLs</span>
+              <textarea
+                value={allowedRedirectUrls}
+                onChange={(event) => setAllowedRedirectUrls(event.target.value)}
+                rows={5}
+                placeholder={
+                  "https://app.example.com/auth/callback\nhttps://app.example.com/login\nhttp://localhost:3000/auth/callback"
+                }
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+              />
+            </label>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {redirectUrlsSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {redirectUrlsError && <span className="text-xs text-red-400">{redirectUrlsError}</span>}
+        </div>
+      </form>
+
+      {/* App Access Allowlist */}
+      <form onSubmit={addAccessAllowlistEntry} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              App Access Allowlist
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Restrict who can authenticate by exact email, email domain, wallet address, or E.164
+              phone number.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={accessAllowlistSaving || accessAllowlistLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {accessAllowlistSaving ? "Saving..." : "Add Entry"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5">
+            <div className="grid grid-cols-1 md:grid-cols-[180px_minmax(0,1fr)] gap-4">
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Type</span>
+                <select
+                  value={accessAllowlistType}
+                  onChange={(event) =>
+                    setAccessAllowlistType(event.target.value as AccessAllowlistEntryType)
+                  }
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                >
+                  {ACCESS_ALLOWLIST_TYPES.map((type) => (
+                    <option key={type.value} value={type.value}>
+                      {type.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Value</span>
+                <input
+                  value={accessAllowlistValue}
+                  onChange={(event) => setAccessAllowlistValue(event.target.value)}
+                  placeholder={
+                    ACCESS_ALLOWLIST_TYPES.find((type) => type.value === accessAllowlistType)
+                      ?.placeholder
+                  }
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+            </div>
+          </div>
+          <div className="bg-bg overflow-x-auto">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead className="border-b border-border-subtle">
+                <tr className="text-left text-xs text-text-tertiary">
+                  <th className="font-medium px-5 py-3">Type</th>
+                  <th className="font-medium px-5 py-3">Value</th>
+                  <th className="font-medium px-5 py-3">Status</th>
+                  <th className="font-medium px-5 py-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border-subtle">
+                {accessAllowlist.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-5 py-5 text-sm text-text-tertiary">
+                      {accessAllowlistLoading
+                        ? "Loading entries..."
+                        : "No access allowlist entries configured"}
+                    </td>
+                  </tr>
+                ) : (
+                  accessAllowlist.map((entry) => (
+                    <tr key={entry.id} className="text-text-secondary">
+                      <td className="px-5 py-3 whitespace-nowrap">
+                        {accessAllowlistTypeLabel(entry.type)}
+                      </td>
+                      <td className="px-5 py-3 font-mono break-all">{entry.value}</td>
+                      <td className="px-5 py-3 whitespace-nowrap text-xs text-text-tertiary">
+                        {entry.acceptedAt ? "Accepted" : "Active"}
+                      </td>
+                      <td className="px-5 py-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => removeAccessAllowlistEntry(entry)}
+                          disabled={accessAllowlistSaving || accessAllowlistLoading || !TENANT_ID}
+                          className="text-xs text-text-tertiary hover:text-red-400 transition-colors disabled:opacity-40"
+                        >
+                          Remove
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {accessAllowlistSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {accessAllowlistError && (
+            <span className="text-xs text-red-400">{accessAllowlistError}</span>
+          )}
+        </div>
+      </form>
+
+      {/* Gas Sponsorship */}
+      <form onSubmit={saveGasSponsorship} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              Gas Sponsorship
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Configure tenant-level paymaster or fee-payer sponsorship. Updates may require a
+              recent tenant-admin MFA challenge.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={gasSponsorshipSaving || gasSponsorshipLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {gasSponsorshipSaving ? "Saving..." : "Save Sponsorship"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5 space-y-4">
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={gasSponsorship.enabled}
+                  onChange={(event) => updateGasSponsorship({ enabled: event.target.checked })}
+                  className="accent-accent"
+                />
+                Enabled
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={gasSponsorship.circuitBreakerEnabled}
+                  onChange={(event) =>
+                    updateGasSponsorship({ circuitBreakerEnabled: event.target.checked })
+                  }
+                  className="accent-accent"
+                />
+                Circuit breaker
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={gasSponsorship.allowClientSponsorship}
+                  onChange={(event) =>
+                    updateGasSponsorship({ allowClientSponsorship: event.target.checked })
+                  }
+                  className="accent-accent"
+                />
+                Client requests
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={gasSponsorship.requireSimulation}
+                  onChange={(event) =>
+                    updateGasSponsorship({ requireSimulation: event.target.checked })
+                  }
+                  className="accent-accent"
+                />
+                Require simulation
+              </label>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Provider</span>
+                <select
+                  value={gasSponsorship.provider}
+                  onChange={(event) =>
+                    updateGasSponsorship({
+                      provider: event.target.value as GasSponsorshipProvider | "",
+                    })
+                  }
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                >
+                  <option value="">Select provider</option>
+                  {GAS_SPONSORSHIP_PROVIDERS.map((provider) => (
+                    <option key={provider.value} value={provider.value}>
+                      {provider.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Mode</span>
+                <select
+                  value={gasSponsorship.mode}
+                  onChange={(event) =>
+                    updateGasSponsorship({ mode: event.target.value as GasSponsorshipMode | "" })
+                  }
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                >
+                  <option value="">Select mode</option>
+                  {GAS_SPONSORSHIP_MODES.map((mode) => (
+                    <option key={mode.value} value={mode.value}>
+                      {mode.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Max USD Per Tx</span>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={gasSponsorship.maxPerTxUsd}
+                  onChange={(event) => updateGasSponsorship({ maxPerTxUsd: event.target.value })}
+                  placeholder="1.00"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+            </div>
+            <label className="space-y-1.5 block">
+              <span className="text-xs text-text-tertiary block">Allowed Chain IDs</span>
+              <textarea
+                value={gasSponsorship.allowedChainIds}
+                onChange={(event) => updateGasSponsorship({ allowedChainIds: event.target.value })}
+                rows={4}
+                placeholder={"8453\n137\n42161"}
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+              />
+            </label>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle">
+              {[
+                [
+                  gasSponsorship.enabled ? "Enabled" : "Disabled",
+                  gasSponsorship.enabled
+                    ? "Sponsored requests can be accepted on configured chains."
+                    : "Client requests for sponsorship will remain blocked.",
+                ],
+                [
+                  gasSponsorshipProviderLabel(gasSponsorship.provider),
+                  "Provider adapter selection for reservation and settlement.",
+                ],
+                [
+                  gasSponsorship.circuitBreakerEnabled ? "Breaker On" : "Breaker Off",
+                  gasSponsorship.circuitBreakerEnabled
+                    ? "Sponsorship is paused even if enabled."
+                    : "Circuit breaker is not pausing sponsorship.",
+                ],
+                [
+                  gasSponsorship.allowClientSponsorship ? "Client Opt-In" : "Server Only",
+                  gasSponsorship.allowClientSponsorship
+                    ? "Wallet actions may request sponsorship with sponsor=true."
+                    : "Client-requested sponsor=true actions remain blocked.",
+                ],
+              ].map(([label, copy]) => (
+                <div key={label} className="bg-bg p-4">
+                  <div className="text-xs text-text-secondary uppercase tracking-wider">
+                    {label}
+                  </div>
+                  <div className="text-xs text-text-tertiary mt-1">{copy}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {gasSponsorshipSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {gasSponsorshipError && (
+            <span className="text-xs text-red-400">{gasSponsorshipError}</span>
+          )}
+        </div>
+      </form>
+
       {/* Webhook */}
       <form onSubmit={saveWebhook} className="space-y-4">
         <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
@@ -196,6 +2604,446 @@ const policies = await steward.getPolicies("my-agent")`;
               Saved
             </motion.span>
           )}
+        </div>
+      </form>
+
+      {/* Login Controls */}
+      <form onSubmit={saveAuthAbuseControls} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+            Login Controls
+          </h2>
+          <button
+            type="submit"
+            disabled={authAbuseSaving || authAbuseLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {authAbuseSaving ? "Saving..." : "Save Controls"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5 space-y-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {[
+                ["Passkey", "loginPasskey"],
+                ["Email", "loginEmail"],
+                ["SMS", "loginSms"],
+                ["WhatsApp", "loginWhatsapp"],
+                ["TOTP", "loginTotp"],
+                ["SIWE", "loginSiwe"],
+                ["SIWS", "loginSiws"],
+                ["Telegram", "loginTelegram"],
+                ["Farcaster", "loginFarcaster"],
+                ["Google", "oauthGoogle"],
+                ["Discord", "oauthDiscord"],
+                ["GitHub", "oauthGithub"],
+                ["Twitter/X", "oauthTwitter"],
+              ].map(([label, key]) => (
+                <label key={key} className="flex items-center gap-2 text-sm text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={authAbuse[key as keyof AuthAbuseForm] as boolean}
+                    onChange={(event) =>
+                      updateAuthAbuse({ [key]: event.target.checked } as Partial<AuthAbuseForm>)
+                    }
+                    className="accent-accent"
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="bg-bg p-5 space-y-4">
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={authAbuse.captchaEnabled}
+                  onChange={(event) => updateAuthAbuse({ captchaEnabled: event.target.checked })}
+                  className="accent-accent"
+                />
+                CAPTCHA
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Provider</span>
+                <select
+                  value={authAbuse.captchaProvider}
+                  onChange={(event) =>
+                    updateAuthAbuse({
+                      captchaProvider: event.target.value as "turnstile" | "hcaptcha",
+                    })
+                  }
+                  className="bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                >
+                  <option value="turnstile">Turnstile</option>
+                  <option value="hcaptcha">hCaptcha</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-secondary mt-5">
+                <input
+                  type="checkbox"
+                  checked={authAbuse.captchaEmailOtp}
+                  onChange={(event) => updateAuthAbuse({ captchaEmailOtp: event.target.checked })}
+                  className="accent-accent"
+                />
+                Email OTP
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-secondary mt-5">
+                <input
+                  type="checkbox"
+                  checked={authAbuse.captchaSmsOtp}
+                  onChange={(event) => updateAuthAbuse({ captchaSmsOtp: event.target.checked })}
+                  className="accent-accent"
+                />
+                SMS OTP
+              </label>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Site Key</span>
+                <input
+                  value={authAbuse.captchaSiteKey}
+                  onChange={(event) => updateAuthAbuse({ captchaSiteKey: event.target.value })}
+                  placeholder="0x4AAAA..."
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">Secret Env Var</span>
+                <input
+                  value={authAbuse.captchaSecretKeyEnv}
+                  onChange={(event) => updateAuthAbuse({ captchaSecretKeyEnv: event.target.value })}
+                  placeholder="TENANT_TURNSTILE_SECRET"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+            </div>
+          </div>
+          <div className="bg-bg p-5 space-y-4">
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="flex items-center gap-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={authAbuse.blockDisposable}
+                  onChange={(event) => updateAuthAbuse({ blockDisposable: event.target.checked })}
+                  className="accent-accent"
+                />
+                Disposable email block
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={authAbuse.blockPlusAliases}
+                  onChange={(event) => updateAuthAbuse({ blockPlusAliases: event.target.checked })}
+                  className="accent-accent"
+                />
+                Plus alias block
+              </label>
+              <label className="flex items-center gap-2 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={authAbuse.blockVoip}
+                  onChange={(event) => updateAuthAbuse({ blockVoip: event.target.checked })}
+                  className="accent-accent"
+                />
+                VOIP phone block
+              </label>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+              {[
+                ["Allowed Emails", "allowedEmails", "alice@example.com"],
+                ["Blocked Emails", "blockedEmails", "blocked@example.com"],
+                ["Allowed Domains", "allowedDomains", "example.com"],
+                ["Blocked Domains", "blockedDomains", "mailinator.com"],
+                ["Allowed Wallets", "allowedWallets", "0x... or solana:..."],
+                ["Blocked Wallets", "blockedWallets", "0x... or solana:..."],
+                ["Allowed Phone Codes", "allowedCountryCodes", "1"],
+                ["Blocked Phone Codes", "blockedCountryCodes", "7"],
+              ].map(([label, key, placeholder]) => (
+                <label key={key} className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">{label}</span>
+                  <textarea
+                    value={authAbuse[key as keyof AuthAbuseForm] as string}
+                    onChange={(event) =>
+                      updateAuthAbuse({ [key]: event.target.value } as Partial<AuthAbuseForm>)
+                    }
+                    rows={4}
+                    placeholder={placeholder}
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {authAbuseSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {authAbuseError && <span className="text-xs text-red-400">{authAbuseError}</span>}
+        </div>
+      </form>
+
+      {/* Test Credentials */}
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+            Test Credentials
+          </h2>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={rotateTestAccount}
+              disabled={testAccountSaving || testAccountLoading || !TENANT_ID}
+              className="px-3 py-1.5 text-xs bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+            >
+              {testAccount.enabled ? "Rotate" : "Enable"}
+            </button>
+            {testAccount.enabled && (
+              <button
+                type="button"
+                onClick={disableTestAccount}
+                disabled={testAccountSaving || testAccountLoading || !TENANT_ID}
+                className="px-3 py-1.5 text-xs border border-border text-text-secondary hover:border-red-400 hover:text-red-400 transition-colors disabled:opacity-40"
+              >
+                Disable
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="space-y-px bg-border max-w-4xl">
+          {!testAccount.enabled ? (
+            <div className="bg-bg p-5 text-sm text-text-tertiary">
+              {testAccountLoading ? "Loading credentials..." : "No test credentials enabled"}
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border">
+              <div className="bg-bg p-5 min-w-0">
+                <label className="text-xs text-text-tertiary block mb-2">Email</label>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-sm text-text-secondary truncate">
+                    {testAccount.email}
+                  </span>
+                  {testAccount.email && <CopyButton text={testAccount.email} />}
+                </div>
+              </div>
+              <div className="bg-bg p-5 min-w-0">
+                <label className="text-xs text-text-tertiary block mb-2">Phone</label>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-sm text-text-secondary truncate">
+                    {testAccount.phone}
+                  </span>
+                  {testAccount.phone && <CopyButton text={testAccount.phone} />}
+                </div>
+              </div>
+              <div className="bg-bg p-5 min-w-0">
+                <label className="text-xs text-text-tertiary block mb-2">OTP</label>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-sm text-text-secondary tracking-wider">
+                    {testAccount.otp}
+                  </span>
+                  {testAccount.otp && <CopyButton text={testAccount.otp} />}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+        {testAccountError && <span className="text-xs text-red-400">{testAccountError}</span>}
+      </div>
+
+      {/* OIDC/JWT Providers */}
+      <form onSubmit={saveOidcProviders} className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+            OIDC / JWT Login
+          </h2>
+          <button
+            type="button"
+            onClick={() => setOidcProviders((providers) => [...providers, emptyOidcProvider()])}
+            className="px-3 py-1.5 text-xs border border-border text-text-secondary hover:border-accent hover:text-text transition-colors"
+          >
+            Add Provider
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-4xl">
+          {oidcProviders.length === 0 && (
+            <div className="bg-bg p-5 text-sm text-text-tertiary">
+              {oidcLoading ? "Loading providers..." : "No OIDC providers configured"}
+            </div>
+          )}
+          {oidcProviders.map((provider, index) => (
+            <div key={`${provider.id || "provider"}-${index}`} className="bg-bg p-5 space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <label className="flex items-center gap-2 text-sm text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={provider.enabled}
+                    onChange={(e) => updateOidcProvider(index, { enabled: e.target.checked })}
+                    className="accent-accent"
+                  />
+                  Enabled
+                </label>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setOidcProviders((providers) =>
+                      providers.filter((_, providerIndex) => providerIndex !== index),
+                    )
+                  }
+                  className="text-xs text-text-tertiary hover:text-red-400 transition-colors"
+                >
+                  Remove
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">Provider ID</span>
+                  <input
+                    value={provider.id}
+                    onChange={(e) => updateOidcProvider(index, { id: e.target.value })}
+                    placeholder="auth0-prod"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">Audience</span>
+                  <input
+                    value={provider.audience}
+                    onChange={(e) => updateOidcProvider(index, { audience: e.target.value })}
+                    placeholder="steward-api, mobile-app"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">Issuer</span>
+                  <input
+                    type="url"
+                    value={provider.issuer}
+                    onChange={(e) => updateOidcProvider(index, { issuer: e.target.value })}
+                    placeholder="https://tenant.example.com"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">JWKS URL</span>
+                  <input
+                    type="url"
+                    value={provider.jwksUri}
+                    onChange={(e) => updateOidcProvider(index, { jwksUri: e.target.value })}
+                    placeholder="https://tenant.example.com/.well-known/jwks.json"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                  />
+                </label>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">Client ID</span>
+                  <input
+                    value={provider.clientId}
+                    onChange={(e) => updateOidcProvider(index, { clientId: e.target.value })}
+                    placeholder="enterprise-sso-client"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">Client Secret Env Var</span>
+                  <input
+                    value={provider.clientSecretEnv}
+                    onChange={(e) =>
+                      updateOidcProvider(index, { clientSecretEnv: e.target.value })
+                    }
+                    placeholder="ACME_SSO_CLIENT_SECRET"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">Authorization URL</span>
+                  <input
+                    type="url"
+                    value={provider.authorizationUrl}
+                    onChange={(e) =>
+                      updateOidcProvider(index, { authorizationUrl: e.target.value })
+                    }
+                    placeholder="https://tenant.example.com/oauth2/v1/authorize"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                  />
+                </label>
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">Token URL</span>
+                  <input
+                    type="url"
+                    value={provider.tokenUrl}
+                    onChange={(e) => updateOidcProvider(index, { tokenUrl: e.target.value })}
+                    placeholder="https://tenant.example.com/oauth2/v1/token"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                  />
+                </label>
+              </div>
+              <label className="space-y-1.5 block">
+                <span className="text-xs text-text-tertiary block">Scopes</span>
+                <textarea
+                  value={provider.scopes}
+                  onChange={(e) => updateOidcProvider(index, { scopes: e.target.value })}
+                  rows={3}
+                  placeholder={"openid\nemail\nprofile"}
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+                />
+              </label>
+              <div className="flex flex-wrap items-center gap-4">
+                <label className="space-y-1.5">
+                  <span className="text-xs text-text-tertiary block">Algorithm</span>
+                  <select
+                    value={provider.allowedAlgs}
+                    onChange={(e) =>
+                      updateOidcProvider(index, {
+                        allowedAlgs: e.target.value as "RS256" | "ES256",
+                      })
+                    }
+                    className="bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                  >
+                    <option value="RS256">RS256</option>
+                    <option value="ES256">ES256</option>
+                  </select>
+                </label>
+                <label className="flex items-center gap-2 text-sm text-text-secondary mt-5">
+                  <input
+                    type="checkbox"
+                    checked={provider.allowJitProvisioning}
+                    onChange={(e) =>
+                      updateOidcProvider(index, { allowJitProvisioning: e.target.checked })
+                    }
+                    className="accent-accent"
+                  />
+                  Auto-create users
+                </label>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="submit"
+            disabled={oidcSaving || oidcLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {oidcSaving ? "Saving..." : "Save Providers"}
+          </button>
+          {oidcSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {oidcError && <span className="text-xs text-red-400">{oidcError}</span>}
         </div>
       </form>
 

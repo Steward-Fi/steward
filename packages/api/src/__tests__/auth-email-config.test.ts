@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { KeyStore } from "@stwd/vault";
@@ -38,7 +39,6 @@ describe("getEmailAuthForTenant", () => {
   afterAll(async () => {
     clearEmailAuthTenantCacheForTests();
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.APP_URL;
     delete process.env.EMAIL_FROM;
@@ -179,5 +179,41 @@ describe("getEmailAuthForTenant", () => {
 
     await dbHandle.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TEST_TENANT_ID));
     invalidateEmailAuthForTenant(TEST_TENANT_ID);
+  });
+});
+
+describe("email magic-link verification hardening", () => {
+  it("preflights tenant access before mutating email identity or wallet state", () => {
+    const source = readFileSync(new URL("../routes/auth.ts", import.meta.url), "utf8");
+    const completeStart = source.indexOf("async function completeEmailAuth");
+    expect(completeStart).toBeGreaterThanOrEqual(0);
+    const completeEnd = source.indexOf("function getEmailAuthRedirectBaseUrl", completeStart);
+    const completeSource = source.slice(completeStart, completeEnd);
+
+    const preflight = completeSource.indexOf("resolveEmailTenantBeforeMutation");
+    expect(preflight).toBeGreaterThanOrEqual(0);
+    expect(preflight).toBeLessThan(completeSource.indexOf("findOrCreateUserWithStatus(email)"));
+    expect(preflight).toBeLessThan(completeSource.indexOf("emailVerified: true"));
+    expect(preflight).toBeLessThan(completeSource.indexOf("provisionWalletForUser"));
+  });
+
+  it("rate limits both JSON verify and browser callback before token checks", () => {
+    const source = readFileSync(new URL("../routes/auth.ts", import.meta.url), "utf8");
+    const verifyStart = source.indexOf('auth.post("/email/verify"');
+    const callbackStart = source.indexOf('auth.get("/callback/email"');
+    expect(verifyStart).toBeGreaterThanOrEqual(0);
+    expect(callbackStart).toBeGreaterThanOrEqual(0);
+    expect(source.indexOf('"email-verify"', verifyStart)).toBeLessThan(
+      source.indexOf("verifyMagicLink(body.token)", verifyStart),
+    );
+    expect(source.indexOf('"email-verify-token"', verifyStart)).toBeLessThan(
+      source.indexOf("verifyMagicLink(body.token)", verifyStart),
+    );
+    expect(source.indexOf('"email-callback"', callbackStart)).toBeLessThan(
+      source.indexOf("verifyMagicLink(token)", callbackStart),
+    );
+    expect(source.indexOf('"email-callback-token"', callbackStart)).toBeLessThan(
+      source.indexOf("verifyMagicLink(token)", callbackStart),
+    );
   });
 });

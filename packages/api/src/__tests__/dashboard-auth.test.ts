@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAccessToken, signAgentToken } from "@stwd/auth";
-import { getDb, tenants } from "@stwd/db";
+import { getDb, tenants, users, userTenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
@@ -17,6 +17,8 @@ setDefaultTimeout(30000);
  */
 
 const TENANT_ID = "test-dashboard-auth";
+const OWNER_USER_ID = crypto.randomUUID();
+const MEMBER_USER_ID = crypto.randomUUID();
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
@@ -35,10 +37,36 @@ beforeAll(async () => {
       apiKeyHash: "hash",
     })
     .onConflictDoNothing();
+  await getDb()
+    .insert(users)
+    .values([
+      { id: OWNER_USER_ID, email: `dashboard-owner-${OWNER_USER_ID}@example.test` },
+      { id: MEMBER_USER_ID, email: `dashboard-member-${MEMBER_USER_ID}@example.test` },
+    ])
+    .onConflictDoNothing();
+  await getDb()
+    .insert(userTenants)
+    .values([
+      { userId: OWNER_USER_ID, tenantId: TENANT_ID, role: "owner" },
+      { userId: MEMBER_USER_ID, tenantId: TENANT_ID, role: "member" },
+    ])
+    .onConflictDoNothing();
 });
 
 afterAll(async () => {
   if (!hasDatabaseUrl) return;
+  await getDb()
+    .delete(userTenants)
+    .where(eq(userTenants.tenantId, TENANT_ID))
+    .catch(() => {});
+  await getDb()
+    .delete(users)
+    .where(eq(users.id, OWNER_USER_ID))
+    .catch(() => {});
+  await getDb()
+    .delete(users)
+    .where(eq(users.id, MEMBER_USER_ID))
+    .catch(() => {});
   await getDb()
     .delete(tenants)
     .where(eq(tenants.id, TENANT_ID))
@@ -61,12 +89,35 @@ describeWithDatabase("dashboardAuthMiddleware", () => {
     expect(body.error).toContain("agent tokens");
   });
 
-  it("still allows user session tokens to reach the dashboard route", async () => {
+  it("rejects owner sessions without recent MFA before returning dashboard data", async () => {
     const token = await signAccessToken(
       {
         address: `0x${"1".repeat(40)}`,
         tenantId: TENANT_ID,
-        userId: "user-1",
+        userId: OWNER_USER_ID,
+      },
+      "1h",
+    );
+
+    const res = await app.request("/dashboard/nonexistent-agent", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("recent MFA");
+  });
+
+  it("allows owner sessions with recent MFA to reach the dashboard route", async () => {
+    const token = await signAccessToken(
+      {
+        address: `0x${"1".repeat(40)}`,
+        tenantId: TENANT_ID,
+        userId: OWNER_USER_ID,
+        mfaVerifiedAt: Date.now(),
       },
       "1h",
     );
@@ -81,5 +132,27 @@ describeWithDatabase("dashboardAuthMiddleware", () => {
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
     expect(body.error).toContain("Agent not found");
+  });
+
+  it("rejects member sessions before returning dashboard data", async () => {
+    const token = await signAccessToken(
+      {
+        address: `0x${"2".repeat(40)}`,
+        tenantId: TENANT_ID,
+        userId: MEMBER_USER_ID,
+      },
+      "1h",
+    );
+
+    const res = await app.request("/dashboard/nonexistent-agent", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Tenant-level auth");
   });
 });

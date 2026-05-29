@@ -83,7 +83,10 @@ async function main(): Promise<void> {
   }
 
   // 4. Webhook receiver
-  const webhookServer = createWebhookServer(config.webhookPort, config.webhookSecret);
+  const webhookServer = createWebhookServer(config.webhookPort, config.webhookSecret, {
+    expectedTenantId: config.steward.tenantId,
+    allowedAgentIds: config.agents.map((agent) => agent.agentId),
+  });
   registerDefaultHandlers(webhookServer);
 
   try {

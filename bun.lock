@@ -64,6 +64,7 @@
         "ioredis": "^5.10.1",
         "jose": "^6.2.1",
         "resend": "^6.9.4",
+        "viem": "^2.30.0",
       },
       "devDependencies": {
         "@types/node": "^24.5.2",

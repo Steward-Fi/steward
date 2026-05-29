@@ -1,7 +1,13 @@
 import type { Context, Next } from "hono";
 import { importJWK, type JWTPayload, jwtVerify } from "jose";
 import type { ApiResponse, AppVariables, Tenant } from "../services/context";
-import { DEFAULT_TENANT_ID, findTenant, tenantConfigs } from "../services/context";
+import {
+  AGENT_SCOPE,
+  DEFAULT_TENANT_ID,
+  ensureAgentForTenant,
+  findTenant,
+  tenantConfigs,
+} from "../services/context";
 
 type JwksKey = JsonWebKey & { kid?: string; alg?: string; use?: string };
 type Jwks = { keys?: JwksKey[] };
@@ -12,8 +18,9 @@ type CacheEntry = {
 };
 
 const JWKS_CACHE_MS = 5 * 60 * 1000;
-const ELIZA_CLOUD_JWKS_URL =
-  process.env.ELIZA_CLOUD_JWKS_URL || "https://milady.shad0w.xyz/.well-known/jwks.json";
+const DEFAULT_ELIZA_CLOUD_JWKS_URL = "https://milady.shad0w.xyz/.well-known/jwks.json";
+const ELIZA_CLOUD_JWKS_URL = process.env.ELIZA_CLOUD_JWKS_URL || DEFAULT_ELIZA_CLOUD_JWKS_URL;
+const TRADE_ORDER_SCOPE = "trade:order";
 
 let jwksCache: CacheEntry | null = null;
 
@@ -22,6 +29,9 @@ function invalid(c: Context, reason: string) {
 }
 
 async function loadJwks(): Promise<Map<string, Awaited<ReturnType<typeof importJWK>>>> {
+  if (process.env.NODE_ENV === "production" && !process.env.ELIZA_CLOUD_JWKS_URL) {
+    throw new Error("jwks-url-required");
+  }
   const now = Date.now();
   if (jwksCache && jwksCache.expiresAt > now) return jwksCache.keys;
 
@@ -72,6 +82,31 @@ function agentIdFromPayload(payload: JWTPayload): string | null {
   return agentId;
 }
 
+function stringClaim(payload: JWTPayload, ...names: string[]): string | null {
+  const claims = payload as Record<string, unknown>;
+  for (const name of names) {
+    const value = claims[name];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function stringArrayClaim(payload: JWTPayload, ...names: string[]): string[] {
+  const claims = payload as Record<string, unknown>;
+  for (const name of names) {
+    const value = claims[name];
+    if (Array.isArray(value)) {
+      return value.filter(
+        (item): item is string => typeof item === "string" && item.trim().length > 0,
+      );
+    }
+    if (typeof value === "string" && value.trim()) {
+      return value.split(/[,\s]+/).filter(Boolean);
+    }
+  }
+  return [];
+}
+
 async function setTenantContext(
   c: Context<{ Variables: AppVariables }>,
   tenant: Tenant,
@@ -82,6 +117,7 @@ async function setTenantContext(
   c.set("tenant", tenant);
   c.set("tenantConfig", tenantConfigs.get(tenantId) || { id: tenant.id, name: tenant.name });
   c.set("agentScope", agentId);
+  c.set("agentScopes", [AGENT_SCOPE]);
   c.set("authType", "agent-token");
 }
 
@@ -105,12 +141,35 @@ export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, n
     });
     const agentId = agentIdFromPayload(payload);
     if (!agentId) return invalid(c, "invalid agent claims");
+    const scopes = stringArrayClaim(payload, "scopes", "scope");
+    if (!scopes.includes(TRADE_ORDER_SCOPE)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Token missing required ${TRADE_ORDER_SCOPE} scope` },
+        403,
+      );
+    }
 
     const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
+    const tokenTenantId = stringClaim(payload, "tenant_id", "tenantId");
+    if (!tokenTenantId || tokenTenantId !== tenantId) {
+      return invalid(c, "invalid tenant claims");
+    }
     const tenant = await findTenant(tenantId);
     if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+    const agent = await ensureAgentForTenant(tenantId, agentId);
+    if (!agent) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Forbidden: agent is not registered for tenant" },
+        403,
+      );
+    }
+    const tokenPlatformId = stringClaim(payload, "platform_id", "platformId");
+    if (agent.platformId && tokenPlatformId !== agent.platformId) {
+      return invalid(c, "invalid platform claims");
+    }
 
     await setTenantContext(c, tenant, tenantId, agentId);
+    c.set("agentScopes", [AGENT_SCOPE, ...scopes]);
     return next();
   } catch (error) {
     const reason = error instanceof Error ? error.message : "verification failed";

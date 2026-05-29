@@ -27,6 +27,8 @@ import {
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
 import { startRetentionScheduler } from "./services/retention";
+import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
+import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -47,33 +49,55 @@ validateJwtSecretEnv();
 const requestLog = new Map<string, { count: number; resetAt: number }>();
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
+let cancelTransactionReceiptPolling: (() => void) | undefined;
+let cancelWebhookRetryScheduler: (() => void) | undefined;
 
-app.use("*", async (c, next) => {
-  if (c.req.path === "/health" || c.req.path === "/ready") return next();
+// Set after Bun.serve so runtimeGate (single-arg, runtime-agnostic signature) can
+// read the real socket address via server.requestIP(request).
+let bunServer: { requestIP?: (req: Request) => { address?: string } | null } | undefined;
+
+function runtimeGate(request: Request): Response | null {
+  const path = new URL(request.url).pathname;
+  if (path === "/health" || path === "/ready") return null;
 
   if (isShuttingDown) {
-    return c.json<ApiResponse>({ ok: false, error: "Server is shutting down" }, 503);
+    return Response.json({ ok: false, error: "Server is shutting down" } satisfies ApiResponse, {
+      status: 503,
+    });
   }
 
-  const forwardedFor = c.req.header("x-forwarded-for");
-  const ip = forwardedFor?.split(",")[0]?.trim() || c.req.header("x-real-ip") || "unknown";
+  // Derive a per-client key. Trust proxy headers only when explicitly configured;
+  // otherwise use the real socket address (Bun server.requestIP) so one client
+  // cannot exhaust everyone's budget. Never collapse all clients into one bucket
+  // unless no per-client identifier is available at all.
+  const socketIp = bunServer?.requestIP?.(request)?.address;
+  const ip =
+    process.env.STEWARD_TRUST_PROXY_HEADERS === "true"
+      ? request.headers.get("cf-connecting-ip")?.trim() ||
+        request.headers.get("x-real-ip")?.trim() ||
+        request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+        socketIp ||
+        "global"
+      : socketIp || "global";
   const now = Date.now();
   const current = requestLog.get(ip);
 
   if (!current || current.resetAt <= now) {
     requestLog.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return next();
+    return null;
   }
 
   if (current.count >= RATE_LIMIT_MAX_REQUESTS) {
-    c.header("Retry-After", Math.ceil((current.resetAt - now) / 1000).toString());
-    return c.json<ApiResponse>({ ok: false, error: "Rate limit exceeded" }, 429);
+    return Response.json({ ok: false, error: "Rate limit exceeded" } satisfies ApiResponse, {
+      status: 429,
+      headers: { "Retry-After": Math.ceil((current.resetAt - now) / 1000).toString() },
+    });
   }
 
   current.count += 1;
   requestLog.set(ip, current);
-  return next();
-});
+  return null;
+}
 
 const requestLogCleanupTimer = setInterval(() => {
   const now = Date.now();
@@ -157,6 +181,8 @@ if (shouldUsePGLite()) {
 
 if (migrationsRan) {
   cancelRetention = startRetentionScheduler();
+  cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
+  cancelWebhookRetryScheduler = startWebhookRetryScheduler();
 }
 
 // ─── Redis + auth store initialization (non-blocking) ───────────────────────
@@ -179,11 +205,12 @@ const BIND_HOST = process.env.STEWARD_BIND_HOST || "127.0.0.1";
 const serverOptions = {
   hostname: BIND_HOST,
   port: PORT,
-  fetch: (request: Request) => app.fetch(request),
+  fetch: (request: Request) => runtimeGate(request) ?? app.fetch(request),
   idleTimeout: 30,
 } as Parameters<typeof Bun.serve>[0] & { hostname?: string };
 
 const server = Bun.serve(serverOptions);
+bunServer = server as unknown as typeof bunServer;
 
 const shutdown = async (signal: string) => {
   if (isShuttingDown) return;
@@ -194,6 +221,8 @@ const shutdown = async (signal: string) => {
   clearInterval(requestLogCleanupTimer);
   if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   if (cancelRetention) cancelRetention();
+  if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
+  if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   requestLog.clear();
 
   try {

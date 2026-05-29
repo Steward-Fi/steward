@@ -63,6 +63,21 @@ const CONFIG_DEFAULTS: Pick<TraderConfig, "webhookPort" | "dryRun"> = {
   webhookPort: 4210,
   dryRun: false,
 };
+/**
+ * Whether unsigned webhooks are permitted. Local-dev escape hatch only: the flag
+ * is hard-disabled in production (mirrors the proxy's `isRedisRequired` gate), so
+ * a stray env var cannot strip signature verification on a live deployment.
+ */
+function allowUnsignedWebhooks(): boolean {
+  if (process.env.STEWARD_AGENT_TRADER_ALLOW_UNSIGNED_WEBHOOKS !== "true") return false;
+  if (process.env.NODE_ENV === "production") {
+    console.error(
+      "[agent-trader] STEWARD_AGENT_TRADER_ALLOW_UNSIGNED_WEBHOOKS is set but ignored in production; webhookSecret stays required.",
+    );
+    return false;
+  }
+  return true;
+}
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
@@ -112,6 +127,11 @@ function validate(config: TraderConfig): void {
   }
   if (!config.steward.tenantId) {
     throw new Error("Config error: steward.tenantId is required");
+  }
+  if (!config.webhookSecret && !allowUnsignedWebhooks()) {
+    throw new Error(
+      "Config error: webhookSecret is required. Set STEWARD_AGENT_TRADER_ALLOW_UNSIGNED_WEBHOOKS=true only for local development.",
+    );
   }
 
   for (const agent of config.agents) {

@@ -8,6 +8,7 @@
 //     alternative — note that switching KDFs invalidates existing encrypted
 //     records (operator decision, not a transparent migration).
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import type { KeystoreContext } from "./keystore-backend";
 
 /**
  * Encrypted keystore. Private keys are encrypted at rest using AES-256-GCM.
@@ -24,6 +25,19 @@ export interface EncryptedKey {
   salt: string; // hex
 }
 
+/**
+ * KDF domain labels for cryptographic separation between vault roots derived
+ * from the SAME master password. Without this, the secret-vault and the wallet
+ * signing-vault share an identical root key — compromising one path compromises
+ * both. Each domain mixes a distinct label into the scrypt master-key salt so
+ * the two roots are cryptographically independent.
+ *
+ * - undefined  → legacy derivation (no label). Preserves decryptability of all
+ *                data encrypted before domain separation existed.
+ * - "signing-vault" / "secret-vault" → independent roots.
+ */
+export type KeyStoreDomain = "signing-vault" | "secret-vault";
+
 export class KeyStore {
   private masterKey: Buffer;
 
@@ -34,8 +48,11 @@ export class KeyStore {
    *                        string (at least 32 hex chars). Falls back to a built-in
    *                        default for backward compatibility, but this weakens KDF
    *                        resistance to precomputed attacks.
+   * @param domain          Optional KDF domain label for cryptographic separation between
+   *                        roots derived from the same master password. Omit for the legacy
+   *                        (undifferentiated) root used before domain separation.
    */
-  constructor(masterPassword: string, masterSalt?: string) {
+  constructor(masterPassword: string, masterSalt?: string, domain?: KeyStoreDomain) {
     // Derive a 256-bit root key from master password via scrypt.
     // Each encrypt() call further derives a unique key with a random per-record salt,
     // so the master key salt does not need to be per-record, but SHOULD be unique
@@ -60,19 +77,25 @@ export class KeyStore {
       }
       salt = Buffer.from("steward-vault-v1");
     }
-    this.masterKey = scryptSync(masterPassword, salt, 32) as Buffer;
+    // Domain separation: namespace the master-key salt with a domain label so two
+    // roots from the same password are cryptographically independent. Legacy callers
+    // (domain undefined) keep the exact pre-separation derivation for backward compat.
+    const domainSalt = domain ? Buffer.from(`steward-kdf:${domain}:${salt.toString("hex")}`) : salt;
+    this.masterKey = scryptSync(masterPassword, domainSalt, 32) as Buffer;
   }
 
   /**
    * Encrypt a private key for storage
    */
-  encrypt(privateKey: string): EncryptedKey {
+  encrypt(privateKey: string, context?: KeystoreContext): EncryptedKey {
     const iv = randomBytes(16);
     const salt = randomBytes(16);
 
     // Derive a unique key for this encryption using the salt
     const derivedKey = scryptSync(this.masterKey, salt, 32) as Buffer;
     const cipher = createCipheriv("aes-256-gcm", derivedKey, iv);
+    const aad = aadForContext(context);
+    if (aad) cipher.setAAD(aad);
 
     let ciphertext = cipher.update(privateKey, "utf8", "hex");
     ciphertext += cipher.final("hex");
@@ -89,13 +112,30 @@ export class KeyStore {
   /**
    * Decrypt a private key for signing (ephemeral — caller should zero after use)
    */
-  decrypt(encrypted: EncryptedKey): string {
+  decrypt(encrypted: EncryptedKey, context?: KeystoreContext): string {
+    if (context) {
+      try {
+        return this.decryptWithContext(encrypted, context);
+      } catch (error) {
+        // Legacy ciphertexts were written before context binding existed.
+        // Keep them readable outside production so operators can migrate by
+        // re-encrypting rows. Production fallback must be an explicit break-glass
+        // setting; otherwise copied legacy ciphertext can defeat tenant/agent AAD.
+        if (!allowLegacyDecryptFallback()) throw error;
+      }
+    }
+    return this.decryptWithContext(encrypted);
+  }
+
+  private decryptWithContext(encrypted: EncryptedKey, context?: KeystoreContext): string {
     const iv = Buffer.from(encrypted.iv, "hex");
     const salt = Buffer.from(encrypted.salt, "hex");
     const tag = Buffer.from(encrypted.tag, "hex");
 
     const derivedKey = scryptSync(this.masterKey, salt, 32) as Buffer;
     const decipher = createDecipheriv("aes-256-gcm", derivedKey, iv);
+    const aad = aadForContext(context);
+    if (aad) decipher.setAAD(aad);
     decipher.setAuthTag(tag);
 
     let plaintext = decipher.update(encrypted.ciphertext, "hex", "utf8");
@@ -103,4 +143,26 @@ export class KeyStore {
 
     return plaintext;
   }
+}
+
+function aadForContext(context?: KeystoreContext): Buffer | null {
+  if (!context) return null;
+  const normalized = {
+    agentId: context.agentId ?? "",
+    chainFamily: context.chainFamily ?? "",
+    name: context.name ?? "",
+    tenantId: context.tenantId ?? "",
+    venue: context.venue ?? "",
+    version: context.version ?? "",
+  };
+  return Buffer.from(`steward-keystore-v2:${JSON.stringify(normalized)}`, "utf8");
+}
+
+function allowLegacyDecryptFallback(): boolean {
+  // The no-AAD fallback defeats tenant/agent/venue context binding (a copied
+  // ciphertext row would decrypt across contexts). It is ONLY for migrating
+  // pre-context-binding ciphertext outside production. Production NEVER takes
+  // this path, regardless of the env flag — the flag cannot enable it in prod.
+  if (process.env.NODE_ENV === "production") return false;
+  return process.env.STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK === "true";
 }

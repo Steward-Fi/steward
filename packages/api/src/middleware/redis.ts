@@ -69,6 +69,17 @@ export function isRedisAvailable(): boolean {
   return redisAvailable;
 }
 
+export function isRedisConfigured(): boolean {
+  const driver = process.env.REDIS_DRIVER?.trim().toLowerCase() || "ioredis";
+  if (driver === "upstash") {
+    return Boolean(
+      (process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL) &&
+        (process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN),
+    );
+  }
+  return Boolean(process.env.REDIS_URL);
+}
+
 /**
  * Return the active Redis client (real ioredis or upstash adapter), or null
  * if Redis is not available. Call isRedisAvailable() first to check.
@@ -110,10 +121,10 @@ export async function checkAgentRateLimit(
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
     console.error(
-      "[steward:redis] Rate limit check failed, allowing request:",
+      "[steward:redis] Rate limit check failed, denying sensitive request:",
       (err as Error).message,
     );
-    return PERMISSIVE_RATE_LIMIT;
+    return { allowed: false, remaining: 0, resetMs: 60_000 };
   }
 }
 
@@ -152,16 +163,23 @@ export async function checkAgentSpendLimit(
   limitUsd: number,
   period: SpendPeriod,
 ): Promise<{ allowed: boolean; spent: number; remaining: number }> {
-  if (!redisAvailable) return { allowed: true, spent: 0, remaining: limitUsd };
+  // Redis not available: only skip enforcement when Redis was never configured
+  // (documented dev path). If Redis IS configured (production), an unavailable
+  // backend must fail CLOSED rather than silently allow unlimited spend.
+  if (!redisAvailable) {
+    if (!isRedisConfigured()) return { allowed: true, spent: 0, remaining: limitUsd };
+    return { allowed: false, spent: 0, remaining: 0 };
+  }
 
   try {
     return await checkSpendLimit(agentId, limitUsd, period);
   } catch (err) {
+    // Configured backend threw: fail CLOSED — we cannot prove the spend is within limit.
     console.error(
-      "[steward:redis] Spend limit check failed, allowing request:",
+      "[steward:redis] Spend limit check failed, denying request (fail-closed):",
       (err as Error).message,
     );
-    return { allowed: true, spent: 0, remaining: limitUsd };
+    return { allowed: false, spent: 0, remaining: 0 };
   }
 }
 

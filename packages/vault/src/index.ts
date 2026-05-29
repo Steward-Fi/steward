@@ -27,5 +27,12 @@ export {
   provisionUserWallet,
   USER_WALLET_DEFAULT_POLICIES,
 } from "./user-wallet";
+export type { PackedUserOperation, UnpackedUserOperationFields } from "./userop";
+export {
+  ENTRY_POINT_V07,
+  getUserOperationDigest,
+  getUserOperationHash,
+  packUserOperation,
+} from "./userop";
 export type { VaultConfig } from "./vault";
 export { Vault, Vault as VaultClient } from "./vault";

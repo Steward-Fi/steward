@@ -1,9 +1,10 @@
 "use client";
 
+import { useAuth } from "@stwd/react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { CopyButton } from "@/components/copy-button";
-import { API_URL, steward } from "@/lib/api";
+import { API_URL, setAuthToken, steward } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 
 interface TenantInfo {
@@ -27,9 +28,11 @@ interface CreatedTenant {
  * catches up, keep these as direct `fetch` calls so the SDK only exposes
  * routes that actually exist.
  */
-async function createTenantViaApi(name: string, description?: string): Promise<CreatedTenant> {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("steward_session_token") || "" : "";
+async function createTenantViaApi(
+  token: string,
+  name: string,
+  description?: string,
+): Promise<CreatedTenant> {
   const res = await fetch(`${API_URL}/user/me/tenants`, {
     method: "POST",
     headers: {
@@ -43,9 +46,7 @@ async function createTenantViaApi(name: string, description?: string): Promise<C
   return json.data;
 }
 
-async function switchTenantViaApi(tenantId: string): Promise<void> {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("steward_session_token") || "" : "";
+async function switchTenantViaApi(token: string, tenantId: string): Promise<void> {
   const res = await fetch(`${API_URL}/user/me/tenants/switch`, {
     method: "POST",
     headers: {
@@ -61,6 +62,7 @@ async function switchTenantViaApi(tenantId: string): Promise<void> {
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
 export default function TenantsPage() {
+  const auth = useAuth();
   const [tenants, setTenants] = useState<TenantInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +87,8 @@ export default function TenantsPage() {
     try {
       setLoading(true);
       setError(null);
+      const token = auth.getToken();
+      if (token) setAuthToken(token);
       const list = await steward.listUserTenants();
       setTenants(list);
       // If no active tenant set but we have tenants, use first one
@@ -101,7 +105,9 @@ export default function TenantsPage() {
   async function switchTenant(tenantId: string) {
     try {
       setSwitching(tenantId);
-      await switchTenantViaApi(tenantId);
+      const token = auth.getToken();
+      if (!token) throw new Error("Authentication token is required");
+      await switchTenantViaApi(token, tenantId);
       setActiveTenantId(tenantId);
       localStorage.setItem("steward_active_tenant", tenantId);
     } catch (e: unknown) {
@@ -117,7 +123,9 @@ export default function TenantsPage() {
     setCreateError(null);
     try {
       setCreating(true);
-      const result = await createTenantViaApi(form.name, form.description || undefined);
+      const token = auth.getToken();
+      if (!token) throw new Error("Authentication token is required");
+      const result = await createTenantViaApi(token, form.name, form.description || undefined);
       setCreated(result);
       // Add to list
       setTenants((prev) => [

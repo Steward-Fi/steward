@@ -4,6 +4,11 @@ on:
   push:
     branches: [develop, main]
 
+# Least-privilege default for all jobs. CI only lints/tests; nothing needs
+# write access. Escalate per-job if that ever changes.
+permissions:
+  contents: read
+
 jobs:
   ci:
     name: Lint + Typecheck
@@ -165,6 +170,7 @@ jobs:
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run packages/api/src/index.ts > /tmp/steward-api-integration.log 2>&1 &
@@ -187,6 +193,7 @@ jobs:
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
 
       - name: Stop API test server
@@ -232,6 +239,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
         run: |
           bun run start:local > /tmp/steward-fi-e2e.log 2>&1 &
@@ -318,6 +326,7 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
+          STEWARD_AUDIT_HMAC_KEY: "ci-audit-hmac-key-must-be-at-least-32-bytes-long"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           POSTGRES_DB: "steward_test"
           POSTGRES_USER: "steward"

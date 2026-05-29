@@ -1,13 +1,21 @@
+import { randomUUID } from "node:crypto";
 import { and, eq, webhookConfigs, webhookDeliveries } from "@stwd/db";
 import type { WebhookEvent } from "@stwd/shared";
-import { WebhookDispatcher } from "@stwd/webhooks";
-import { db, tenantConfigs } from "./context";
+import {
+  decryptWebhookSecret,
+  encryptWebhookSecret,
+  isEncryptedWebhookSecret,
+  WebhookDispatcher,
+} from "@stwd/webhooks";
+import { db } from "./context";
 import {
   acceptsConfiguredWebhookEvent,
   type ConfiguredWebhookEventType,
   type DispatchableWebhookEventType,
   toConfiguredWebhookEventType,
 } from "./webhook-events";
+
+const INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000;
 
 export function dispatchWebhook(
   tenantId: string,
@@ -16,47 +24,37 @@ export function dispatchWebhook(
   data: Record<string, unknown>,
 ): void {
   const configuredType = toConfiguredWebhookEventType(type);
-  if (configuredType) {
-    const event: WebhookEvent = {
-      type: configuredType,
-      tenantId,
-      agentId,
-      data,
-      timestamp: new Date(),
-    };
-    void dispatchConfiguredWebhooks(event).catch((error) => {
-      console.error("[webhooks] Failed to dispatch configured webhooks:", error);
-    });
-  }
-
-  const tenantConfigWebhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
-  if (tenantConfigWebhookUrl) {
-    const tenantConfigEvent: WebhookEvent = {
-      type,
-      tenantId,
-      agentId,
-      data,
-      timestamp: new Date(),
-    };
-    const dispatcher = new WebhookDispatcher();
-    dispatcher.dispatch(tenantConfigEvent, tenantConfigWebhookUrl).catch((error) => {
-      console.error("[webhooks] Failed to dispatch tenant config webhook:", error);
-    });
-  }
+  const event: WebhookEvent = {
+    type: configuredType ?? type,
+    tenantId,
+    agentId,
+    data,
+    timestamp: new Date(),
+  };
+  void dispatchConfiguredWebhooks(event, configuredType).catch((error) => {
+    console.error("[webhooks] Failed to dispatch configured webhooks:", error);
+  });
 }
 
-async function dispatchConfiguredWebhooks(event: WebhookEvent): Promise<void> {
+async function dispatchConfiguredWebhooks(
+  event: WebhookEvent,
+  configuredType: ConfiguredWebhookEventType | null,
+): Promise<void> {
   const configs = await db
     .select()
     .from(webhookConfigs)
     .where(and(eq(webhookConfigs.tenantId, event.tenantId), eq(webhookConfigs.enabled, true)));
 
-  const eventType = event.type as ConfiguredWebhookEventType;
   await Promise.all(
     configs
-      .filter((config) => acceptsConfiguredWebhookEvent(config.events, eventType))
+      .filter((config) =>
+        configuredType
+          ? acceptsConfiguredWebhookEvent(config.events, configuredType)
+          : config.events.length === 0,
+      )
       .map((config) =>
         dispatchConfiguredWebhook(event, {
+          id: config.id,
           url: config.url,
           secret: config.secret,
           events: config.events,
@@ -70,6 +68,7 @@ async function dispatchConfiguredWebhooks(event: WebhookEvent): Promise<void> {
 async function dispatchConfiguredWebhook(
   event: WebhookEvent,
   config: {
+    id: string;
     url: string;
     secret: string;
     events: string[];
@@ -77,18 +76,38 @@ async function dispatchConfiguredWebhook(
     retryBackoffMs: number;
   },
 ): Promise<void> {
+  const signingSecret = decryptWebhookSecret(config.secret);
+  const encryptedSecret = isEncryptedWebhookSecret(config.secret)
+    ? config.secret
+    : encryptWebhookSecret(signingSecret);
+  if (encryptedSecret !== config.secret) {
+    await db
+      .update(webhookConfigs)
+      .set({ secret: encryptedSecret, updatedAt: new Date() })
+      .where(and(eq(webhookConfigs.id, config.id), eq(webhookConfigs.secret, config.secret)));
+  }
+  const deliveryId = randomUUID();
+  const eventWithDelivery: WebhookEvent & { deliveryId: string; webhookConfigId: string } = {
+    ...event,
+    deliveryId,
+    webhookConfigId: config.id,
+  };
   const [delivery] = await db
     .insert(webhookDeliveries)
     .values({
+      id: deliveryId,
       tenantId: event.tenantId,
+      webhookConfigId: config.id,
       agentId: event.agentId,
       eventType: event.type,
-      payload: event as unknown as Record<string, unknown>,
+      payload: eventWithDelivery as unknown as Record<string, unknown>,
       url: config.url,
-      status: "pending",
+      secret: encryptedSecret,
+      events: config.events,
+      status: "processing",
       attempts: 0,
       maxAttempts: config.maxRetries + 1,
-      nextRetryAt: new Date(),
+      nextRetryAt: new Date(Date.now() + INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS),
     })
     .returning();
 
@@ -97,19 +116,20 @@ async function dispatchConfiguredWebhook(
   }
 
   const dispatcher = new WebhookDispatcher({
-    maxRetries: config.maxRetries,
-    retryDelayMs: config.retryBackoffMs,
+    maxRetries: 0,
+    retryDelayMs: 0,
   });
-  const result = await dispatcher.dispatch(event, config);
+  const result = await dispatcher.dispatch(eventWithDelivery, { ...config, secret: signingSecret });
+  const retryable = !result.success && config.maxRetries > 0;
 
   await db
     .update(webhookDeliveries)
     .set({
-      status: result.success ? "delivered" : "failed",
+      status: result.success ? "delivered" : retryable ? "pending" : "failed",
       attempts: result.attempts,
       deliveredAt: result.deliveredAt ?? null,
       lastError: result.error ?? null,
-      nextRetryAt: null,
+      nextRetryAt: retryable ? new Date(Date.now() + config.retryBackoffMs) : null,
     })
     .where(eq(webhookDeliveries.id, delivery.id));
 }

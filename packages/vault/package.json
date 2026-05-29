@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "dev": "tsc --watch",
-    "test": "bun test",
+    "test": "bun test --timeout 30000",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit"
   },

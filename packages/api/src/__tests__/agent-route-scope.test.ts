@@ -77,6 +77,22 @@ afterAll(async () => {
 });
 
 describeWithDatabase("agent route scope enforcement", () => {
+  it("rejects agent tokens whose agent no longer exists before tenant route access", async () => {
+    const token = await signAgentToken(
+      { agentId: "test-ars-missing-agent", tenantId: TENANT_ID },
+      "1h",
+    );
+
+    const res = await app.request("/condition-sets", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Agent not found");
+  });
+
   it("blocks agent tokens from listing agents and creating new agents", async () => {
     const token = await signAgentToken({ agentId: AGENT_A, tenantId: TENANT_ID }, "1h");
 
@@ -111,6 +127,28 @@ describeWithDatabase("agent route scope enforcement", () => {
     const body = (await otherRes.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
     expect(body.error).toContain("scope does not match");
+  });
+
+  it("does not upgrade proxy-only tokens into agent metadata read tokens", async () => {
+    const token = await signAgentToken(
+      { agentId: AGENT_A, tenantId: TENANT_ID, scopes: ["api:proxy"] },
+      "1h",
+    );
+
+    const ownRecord = await app.request(`/agents/${AGENT_A}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(ownRecord.status).toBe(403);
+
+    const account = await app.request(`/agents/${AGENT_A}/account`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(account.status).toBe(403);
+
+    const policies = await app.request(`/agents/${AGENT_A}/policies`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(policies.status).toBe(403);
   });
 
   it("keeps tenant-level agent listing working", async () => {
@@ -167,23 +205,37 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(otherBody.error).toContain("scope does not match");
   });
 
-  it("only allows an agent token to write its own policies", async () => {
+  it("blocks agent tokens from writing policies, including their own", async () => {
     const token = await signAgentToken({ agentId: AGENT_A, tenantId: TENANT_ID }, "1h");
 
-    // Cross-agent policy write was the most severe path of the three
-    // (compromised agent token could grant itself auto-approval on a
-    // sibling agent and drain its wallet). Verify the gate rejects it.
+    const writeOwnRes = await app.request(`/agents/${AGENT_A}/policies`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify([
+        { type: "auto-approve-threshold", enabled: true, config: { thresholdUsd: "10000" } },
+      ]),
+    });
+    expect(writeOwnRes.status).toBe(403);
+    const writeOwnBody = (await writeOwnRes.json()) as { ok: boolean; error: string };
+    expect(writeOwnBody.ok).toBe(false);
+    expect(writeOwnBody.error).toContain("tenant-level authentication");
+
     const writeOtherRes = await app.request(`/agents/${AGENT_B}/policies`, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify([{ type: "auto-approve-threshold", config: { thresholdUsd: "10000" } }]),
+      body: JSON.stringify([
+        { type: "auto-approve-threshold", enabled: true, config: { thresholdUsd: "10000" } },
+      ]),
     });
     expect(writeOtherRes.status).toBe(403);
     const writeOtherBody = (await writeOtherRes.json()) as { ok: boolean; error: string };
     expect(writeOtherBody.ok).toBe(false);
-    expect(writeOtherBody.error).toContain("scope does not match");
+    expect(writeOtherBody.error).toContain("tenant-level authentication");
   });
 });

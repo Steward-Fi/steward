@@ -12,6 +12,18 @@ function killPid(pid: number | undefined): void {
   }
 }
 
+async function removeDirWithRetry(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      rmSync(path, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (attempt === 4) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+    }
+  }
+}
+
 export default async function globalTeardown(): Promise<void> {
   if (!existsSync(PID_FILE)) return;
   const raw = JSON.parse(readFileSync(PID_FILE, "utf8")) as {
@@ -24,7 +36,7 @@ export default async function globalTeardown(): Promise<void> {
   killPid(raw.api);
   killPid(raw.fakeOAuth);
   if (raw.dataDir && existsSync(raw.dataDir)) {
-    rmSync(raw.dataDir, { recursive: true, force: true });
+    await removeDirWithRetry(raw.dataDir);
   }
   rmSync(PID_FILE, { force: true });
 }

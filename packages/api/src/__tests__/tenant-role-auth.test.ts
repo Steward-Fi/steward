@@ -102,6 +102,19 @@ describeWithDatabase("tenantAuth membership checks and requireTenantLevel role c
     const memberBody = (await memberRes.json()) as { ok: boolean; error: string };
     expect(memberBody.ok).toBe(false);
     expect(memberBody.error).toContain("tenant-level authentication");
+
+    const ownerConfigRes = await app.request(`/tenants/${TENANT_ID}/config`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(ownerConfigRes.status).toBe(200);
+
+    const memberConfigRes = await app.request(`/tenants/${TENANT_ID}/config`, {
+      headers: { Authorization: `Bearer ${memberToken}` },
+    });
+    expect(memberConfigRes.status).toBe(403);
+    const memberConfigBody = (await memberConfigRes.json()) as { ok: boolean; error: string };
+    expect(memberConfigBody.ok).toBe(false);
+    expect(memberConfigBody.error).toContain("tenant-level authentication");
   });
 
   it("re-validates tenant membership on every request", async () => {

@@ -269,6 +269,13 @@ async function testPasskeyRegistrationOptions() {
       skip("Passkey registration options", "endpoint not deployed on this version");
       return;
     }
+    if (status === 401 || status === 403) {
+      pass(
+        "Passkey registration options",
+        `requires authenticated verified email session (${status})`,
+      );
+      return;
+    }
     if (status !== 200) {
       fail(
         "Passkey registration options",

@@ -17,26 +17,33 @@
  * Node-only APIs) belongs in `index.ts`, not here.
  */
 
+import { platformAuthMiddleware } from "@stwd/auth";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { requireAgentJwt } from "./middleware/agent-jwt";
+import { authorizationSignature } from "./middleware/authorization-signature";
 import { correlationId } from "./middleware/correlation";
+import { idempotencyMiddleware } from "./middleware/idempotency";
+import { requestExpiry } from "./middleware/request-expiry";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
 import { agentRoutes } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
 import { authRoutes } from "./routes/auth";
+import { conditionSetRoutes } from "./routes/condition-sets";
 import { dashboardRoutes } from "./routes/dashboard";
+import { identityDiscoveryRoutes } from "./routes/discovery";
 import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
+import { intentRoutes } from "./routes/intents";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { secretsRoutes } from "./routes/secrets";
 import { tenantConfigRoutes } from "./routes/tenant-config";
 import { tenantRoutes } from "./routes/tenants";
 import { tradeRoutes } from "./routes/trade";
-import { userRoutes } from "./routes/user";
+import { userRoutes, userSessionAuth } from "./routes/user";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
 import {
@@ -76,7 +83,6 @@ app.use("*", securityHeaders);
 app.use("*", tenantCors);
 app.use("*", logger());
 app.use("*", correlationId);
-
 app.use(
   "*",
   bodyLimit({
@@ -85,6 +91,8 @@ app.use(
       c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
   }),
 );
+app.use("*", requestExpiry());
+app.use("*", authorizationSignature());
 
 // ─── Auth middleware per route group ──────────────────────────────────────────
 
@@ -116,10 +124,18 @@ app.use("/webhooks", (c, next) => tenantAuth(c, next));
 app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
 app.use("/approvals", (c, next) => tenantAuth(c, next));
 app.use("/approvals/*", (c, next) => tenantAuth(c, next));
+app.use("/intents", (c, next) => tenantAuth(c, next));
+app.use("/intents/*", (c, next) => tenantAuth(c, next));
 app.use("/audit", (c, next) => tenantAuth(c, next));
 app.use("/audit/*", (c, next) => tenantAuth(c, next));
 app.use("/policies", (c, next) => tenantAuth(c, next));
 app.use("/policies/*", (c, next) => tenantAuth(c, next));
+app.use("/condition-sets", (c, next) => tenantAuth(c, next));
+app.use("/condition-sets/*", (c, next) => tenantAuth(c, next));
+app.use("/condition_sets", (c, next) => tenantAuth(c, next));
+app.use("/condition_sets/*", (c, next) => tenantAuth(c, next));
+app.use("/v1/condition_sets", (c, next) => tenantAuth(c, next));
+app.use("/v1/condition_sets/*", (c, next) => tenantAuth(c, next));
 app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/trade", (c, next) => tenantAuth(c, next));
@@ -130,6 +146,12 @@ app.use("/v1/trade", (c, next) => tenantAuth(c, next));
 app.use("/v1/trade/*", (c, next) =>
   c.req.path.endsWith("/v1/trade/hyperliquid/order") ? next() : tenantAuth(c, next),
 );
+app.use("/platform", platformAuthMiddleware());
+app.use("/platform/*", platformAuthMiddleware());
+app.use("/user", (c, next) => userSessionAuth(c as never, next));
+app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
+
+app.use("*", idempotencyMiddleware());
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
@@ -145,6 +167,7 @@ app.get("/health", (c) =>
 // ─── Route modules ────────────────────────────────────────────────────────────
 
 app.route("/auth", authRoutes);
+app.route("/", identityDiscoveryRoutes);
 app.route("/platform", platformRoutes);
 app.route("/user", userRoutes);
 app.route("/agents", agentRoutes);
@@ -157,8 +180,12 @@ app.route("/tenants", tenantRoutes);
 app.route("/dashboard", dashboardRoutes);
 app.route("/webhooks", webhookRoutes);
 app.route("/approvals", approvalRoutes);
+app.route("/intents", intentRoutes);
 app.route("/audit", auditRoutes);
 app.route("/policies", policiesStandaloneRoutes);
+app.route("/condition-sets", conditionSetRoutes);
+app.route("/condition_sets", conditionSetRoutes);
+app.route("/v1/condition_sets", conditionSetRoutes);
 app.route("/trade", tradeRoutes);
 app.route("/v1/trade", tradeRoutes);
 app.route("/agents", erc8004Routes);

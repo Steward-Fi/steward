@@ -13,7 +13,7 @@
  * so global-teardown can stop everything even if the test run crashes.
  */
 
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -46,9 +46,14 @@ async function waitForUrl(url: string, label: string, timeoutMs = 60_000): Promi
   throw new Error(`${label} did not become ready at ${url}: ${String(lastErr)}`);
 }
 
-function startProcess(cmd: string, args: string[], env: Record<string, string>): ChildProcess {
+function startProcess(
+  cmd: string,
+  args: string[],
+  env: Record<string, string>,
+  cwd = REPO_ROOT,
+): ChildProcess {
   const child = spawn(cmd, args, {
-    cwd: REPO_ROOT,
+    cwd,
     env: { ...process.env, ...env },
     stdio: "inherit",
     detached: false,
@@ -57,6 +62,22 @@ function startProcess(cmd: string, args: string[], env: Record<string, string>):
     console.error(`[e2e setup] ${cmd} ${args.join(" ")} failed:`, err);
   });
   return child;
+}
+
+function runCommand(
+  cmd: string,
+  args: string[],
+  env: Record<string, string>,
+  cwd = REPO_ROOT,
+): void {
+  const result = spawnSync(cmd, args, {
+    cwd,
+    env: { ...process.env, ...env },
+    stdio: "inherit",
+  });
+  if (result.status !== 0) {
+    throw new Error(`${cmd} ${args.join(" ")} failed with status ${result.status}`);
+  }
 }
 
 export default async function globalSetup(_config: FullConfig): Promise<void> {
@@ -107,10 +128,24 @@ export default async function globalSetup(_config: FullConfig): Promise<void> {
   const api = startProcess("bun", ["run", "packages/api/src/embedded.ts"], apiEnv);
   await waitForUrl(`${apiOrigin}/auth/providers`, "api");
 
-  const web = startProcess("bun", ["run", "start"], {
-    PORT: String(E2E_PORTS.web),
-    NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
-  });
+  runCommand(
+    "bun",
+    ["run", "build"],
+    {
+      NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
+    },
+    join(REPO_ROOT, "web"),
+  );
+
+  const web = startProcess(
+    "bun",
+    ["run", "start"],
+    {
+      PORT: String(E2E_PORTS.web),
+      NEXT_PUBLIC_STEWARD_API_URL: apiOrigin,
+    },
+    join(REPO_ROOT, "web"),
+  );
   await waitForUrl(`${webOrigin}/login`, "web", 120_000);
 
   writeFileSync(

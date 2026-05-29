@@ -16,17 +16,47 @@ function asFetchMock(impl: (...args: any[]) => Promise<Response>): typeof fetch 
 // ─── isBuiltInProvider ───────────────────────────────────────────────────────
 
 describe("isBuiltInProvider", () => {
-  it("returns true for google, discord, twitter, github", () => {
-    expect(isBuiltInProvider("google")).toBe(true);
-    expect(isBuiltInProvider("discord")).toBe(true);
-    expect(isBuiltInProvider("twitter")).toBe(true);
-    expect(isBuiltInProvider("github")).toBe(true);
+  it("returns true for supported OAuth provider ids", () => {
+    for (const provider of [
+      "google",
+      "discord",
+      "twitter",
+      "github",
+      "linkedin",
+      "spotify",
+      "twitch",
+      "instagram",
+      "line",
+    ]) {
+      expect(isBuiltInProvider(provider)).toBe(true);
+    }
   });
 
   it("returns false for unknown providers", () => {
     expect(isBuiltInProvider("facebook")).toBe(false);
-    expect(isBuiltInProvider("linkedin")).toBe(false);
     expect(isBuiltInProvider("")).toBe(false);
+  });
+
+  it("returns true for configured custom providers", () => {
+    const original = process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = JSON.stringify([
+      {
+        id: "acme",
+        clientId: "cid",
+        clientSecret: "secret",
+        authorizationUrl: "https://idp.example.com/auth",
+        tokenUrl: "https://idp.example.com/token",
+        userInfoUrl: "https://idp.example.com/userinfo",
+        scopes: ["openid"],
+      },
+    ]);
+    expect(isBuiltInProvider("custom:acme")).toBe(true);
+    expect(isBuiltInProvider("acme")).toBe(true);
+    if (original === undefined) {
+      delete process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    } else {
+      process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = original;
+    }
   });
 });
 
@@ -43,6 +73,17 @@ describe("getEnabledProviders", () => {
       TWITTER_CLIENT_SECRET: process.env.TWITTER_CLIENT_SECRET,
       GITHUB_CLIENT_ID: process.env.GITHUB_CLIENT_ID,
       GITHUB_CLIENT_SECRET: process.env.GITHUB_CLIENT_SECRET,
+      LINKEDIN_CLIENT_ID: process.env.LINKEDIN_CLIENT_ID,
+      LINKEDIN_CLIENT_SECRET: process.env.LINKEDIN_CLIENT_SECRET,
+      SPOTIFY_CLIENT_ID: process.env.SPOTIFY_CLIENT_ID,
+      SPOTIFY_CLIENT_SECRET: process.env.SPOTIFY_CLIENT_SECRET,
+      TWITCH_CLIENT_ID: process.env.TWITCH_CLIENT_ID,
+      TWITCH_CLIENT_SECRET: process.env.TWITCH_CLIENT_SECRET,
+      INSTAGRAM_CLIENT_ID: process.env.INSTAGRAM_CLIENT_ID,
+      INSTAGRAM_CLIENT_SECRET: process.env.INSTAGRAM_CLIENT_SECRET,
+      LINE_CLIENT_ID: process.env.LINE_CLIENT_ID,
+      LINE_CLIENT_SECRET: process.env.LINE_CLIENT_SECRET,
+      STEWARD_CUSTOM_OAUTH_PROVIDERS: process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS,
     };
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
@@ -52,6 +93,17 @@ describe("getEnabledProviders", () => {
     delete process.env.TWITTER_CLIENT_SECRET;
     delete process.env.GITHUB_CLIENT_ID;
     delete process.env.GITHUB_CLIENT_SECRET;
+    delete process.env.LINKEDIN_CLIENT_ID;
+    delete process.env.LINKEDIN_CLIENT_SECRET;
+    delete process.env.SPOTIFY_CLIENT_ID;
+    delete process.env.SPOTIFY_CLIENT_SECRET;
+    delete process.env.TWITCH_CLIENT_ID;
+    delete process.env.TWITCH_CLIENT_SECRET;
+    delete process.env.INSTAGRAM_CLIENT_ID;
+    delete process.env.INSTAGRAM_CLIENT_SECRET;
+    delete process.env.LINE_CLIENT_ID;
+    delete process.env.LINE_CLIENT_SECRET;
+    delete process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
     expect(getEnabledProviders()).toEqual([]);
     Object.assign(process.env, orig);
   });
@@ -143,6 +195,99 @@ describe("getProviderConfig", () => {
     delete process.env.GITHUB_CLIENT_ID;
     delete process.env.GITHUB_CLIENT_SECRET;
   });
+
+  it("returns configs for additional OAuth-style social providers", () => {
+    for (const provider of ["linkedin", "spotify", "twitch", "instagram", "line"]) {
+      const prefix = provider.toUpperCase();
+      process.env[`${prefix}_CLIENT_ID`] = `${provider}-id`;
+      process.env[`${prefix}_CLIENT_SECRET`] = `${provider}-secret`;
+      const config = getProviderConfig(provider);
+      expect(config.clientId).toBe(`${provider}-id`);
+      expect(config.authorizationUrl).toStartWith("https://");
+      expect(config.tokenUrl).toStartWith("https://");
+      expect(config.userInfoUrl).toStartWith("https://");
+      delete process.env[`${prefix}_CLIENT_ID`];
+      delete process.env[`${prefix}_CLIENT_SECRET`];
+    }
+  });
+
+  it("loads custom OAuth2 provider configs with PKCE and profile mapping", () => {
+    const original = process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = JSON.stringify([
+      {
+        id: "custom-acme",
+        clientId: "custom-id",
+        clientSecret: "custom-secret",
+        authorizationUrl: "https://idp.example.com/auth",
+        tokenUrl: "https://idp.example.com/token",
+        userInfoUrl: "https://idp.example.com/userinfo",
+        scopes: ["openid", "profile"],
+        requiresPkce: true,
+        profileMap: {
+          id: "identity.id",
+          email: "identity.email",
+          name: "profile.displayName",
+        },
+      },
+    ]);
+    const config = getProviderConfig("custom:custom-acme");
+    expect(config).toMatchObject({
+      clientId: "custom-id",
+      requiresPkce: true,
+      scopes: ["openid", "profile"],
+    });
+    expect(getEnabledProviders()).toContain("custom:custom-acme");
+    if (original === undefined) {
+      delete process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    } else {
+      process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = original;
+    }
+  });
+
+  it("rejects insecure custom OAuth2 provider URLs", () => {
+    const original = process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = JSON.stringify([
+      {
+        id: "bad",
+        clientId: "custom-id",
+        clientSecret: "custom-secret",
+        authorizationUrl: "http://idp.example.com/auth",
+        tokenUrl: "https://idp.example.com/token",
+        userInfoUrl: "https://idp.example.com/userinfo",
+        scopes: ["openid"],
+      },
+    ]);
+    expect(() => getProviderConfig("custom:bad")).toThrow("authorizationUrl must be an https URL");
+    if (original === undefined) {
+      delete process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    } else {
+      process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = original;
+    }
+  });
+
+  it("rejects insecure custom OAuth2 email fallback URLs", () => {
+    const original = process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = JSON.stringify([
+      {
+        id: "bad-email",
+        clientId: "custom-id",
+        clientSecret: "custom-secret",
+        authorizationUrl: "https://idp.example.com/auth",
+        tokenUrl: "https://idp.example.com/token",
+        userInfoUrl: "https://idp.example.com/userinfo",
+        emailUrl: "http://169.254.169.254/latest/meta-data",
+        scopes: ["openid", "email"],
+      },
+    ]);
+    expect(() => getProviderConfig("custom:bad-email")).toThrow(
+      "emailUrl must be an https URL",
+    );
+    if (original === undefined) {
+      delete process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
+    } else {
+      process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS = original;
+    }
+  });
 });
 
 // ─── OAuthClient.generateAuthUrl ─────────────────────────────────────────────
@@ -206,6 +351,51 @@ describe("OAuthClient.generateAuthUrl", () => {
     const { codeVerifier: v1 } = client.generateAuthUrl("s1", "https://app.com/cb");
     const { codeVerifier: v2 } = client.generateAuthUrl("s2", "https://app.com/cb");
     expect(v1).not.toBe(v2);
+  });
+
+  it("rejects insecure provider endpoints by default", () => {
+    expect(
+      () =>
+        new OAuthClient({
+          clientId: "c",
+          clientSecret: "s",
+          authorizationUrl: "https://example.com/auth",
+          tokenUrl: "https://example.com/token",
+          userInfoUrl: "http://127.0.0.1/userinfo",
+          scopes: [],
+        }),
+    ).toThrow("userInfoUrl must be an https URL");
+  });
+
+  it("allows insecure provider endpoints only with the explicit non-production test flag", () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousAllow = process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS;
+    process.env.NODE_ENV = "test";
+    process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS = "true";
+    try {
+      expect(
+        () =>
+          new OAuthClient({
+            clientId: "c",
+            clientSecret: "s",
+            authorizationUrl: "http://127.0.0.1/auth",
+            tokenUrl: "http://127.0.0.1/token",
+            userInfoUrl: "http://127.0.0.1/userinfo",
+            scopes: [],
+          }),
+      ).not.toThrow();
+    } finally {
+      if (previousNodeEnv === undefined) {
+        delete process.env.NODE_ENV;
+      } else {
+        process.env.NODE_ENV = previousNodeEnv;
+      }
+      if (previousAllow === undefined) {
+        delete process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS;
+      } else {
+        process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS = previousAllow;
+      }
+    }
   });
 });
 
@@ -383,6 +573,48 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
     expect(info.email).toBe("primary@example.com");
     expect(info.picture).toBe("https://github.com/images/error/octocat_happy.gif");
     expect(info.verified_email).toBe(true);
+    globalThis.fetch = originalFetch;
+  });
+
+  it("maps custom provider profile fields including nested array paths", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            identity: { id: "custom-user", email: "custom@example.com" },
+            profile: {
+              displayName: "Custom User",
+              photos: [{ url: "https://cdn.example.com/avatar.png" }],
+            },
+            flags: { verified: true },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    const client = new OAuthClient({
+      clientId: "c",
+      clientSecret: "s",
+      authorizationUrl: "https://example.com/auth",
+      tokenUrl: "https://example.com/token",
+      userInfoUrl: "https://example.com/userinfo",
+      scopes: [],
+      profileMap: {
+        id: "identity.id",
+        email: "identity.email",
+        name: "profile.displayName",
+        picture: "profile.photos.0.url",
+        emailVerified: "flags.verified",
+      },
+    });
+    const info = await client.getUserInfo("tok");
+    expect(info).toEqual({
+      id: "custom-user",
+      email: "custom@example.com",
+      name: "Custom User",
+      picture: "https://cdn.example.com/avatar.png",
+      verified_email: true,
+    });
     globalThis.fetch = originalFetch;
   });
 

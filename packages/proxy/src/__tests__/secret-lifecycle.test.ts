@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAgentToken } from "@stwd/auth";
-import { closeDb, eq, getDb, secrets, tenants } from "@stwd/db";
+import { agents, closeDb, eq, getDb, secrets, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { SecretVault } from "@stwd/vault";
 import { Hono } from "hono";
@@ -16,6 +16,7 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-secret-lifecycle-jwt-secret-with-enough-bytes";
+  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com,api.deleted.example.com";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -31,6 +32,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
 });
 
 function buildApp() {
@@ -47,15 +49,62 @@ async function ensureTenant(tenantId: string) {
     .onConflictDoNothing();
 }
 
+async function ensureAgent(tenantId: string, agentId: string) {
+  await getDb()
+    .insert(agents)
+    .values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: `0x${"1".repeat(40)}`,
+    })
+    .onConflictDoNothing();
+}
+
 describe("proxy secret lifecycle enforcement", () => {
-  it("stops matching a route once its secret has expired", async () => {
-    const tenantId = `tenant-expired-route-${crypto.randomUUID()}`;
-    const agentId = `agent-${crypto.randomUUID()}`;
+  it("does not let a sibling tenant agent use another agent's credential route", async () => {
+    const tenantId = `tenant-route-scope-${crypto.randomUUID()}`;
+    const ownerAgentId = `agent-owner-${crypto.randomUUID()}`;
+    const attackerAgentId = `agent-attacker-${crypto.randomUUID()}`;
     await ensureTenant(tenantId);
+    await ensureAgent(tenantId, ownerAgentId);
+    await ensureAgent(tenantId, attackerAgentId);
 
     const vault = new SecretVault(MASTER_PASSWORD);
     const secret = await vault.createSecret(tenantId, "openai", "sk-live");
     await vault.createRoute(tenantId, secret.id, {
+      agentId: ownerAgentId,
+      hostPattern: "api.openai.com",
+      pathPattern: "/*",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    });
+
+    const token = await signAgentToken(
+      { agentId: attackerAgentId, tenantId, scopes: ["agent", PROXY_SCOPE] },
+      "1h",
+    );
+    const res = await buildApp().request("/openai/v1/models", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("No credential route configured");
+  });
+
+  it("stops matching a route once its secret has expired", async () => {
+    const tenantId = `tenant-expired-route-${crypto.randomUUID()}`;
+    const agentId = `agent-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+
+    const vault = new SecretVault(MASTER_PASSWORD);
+    const secret = await vault.createSecret(tenantId, "openai", "sk-live");
+    await vault.createRoute(tenantId, secret.id, {
+      agentId,
       hostPattern: "api.example.com",
       pathPattern: "/*",
       injectAs: "header",
@@ -83,10 +132,12 @@ describe("proxy secret lifecycle enforcement", () => {
     const tenantId = `tenant-deleted-route-${crypto.randomUUID()}`;
     const agentId = `agent-${crypto.randomUUID()}`;
     await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
 
     const vault = new SecretVault(MASTER_PASSWORD);
     const secret = await vault.createSecret(tenantId, "anthropic", "sk-live");
     await vault.createRoute(tenantId, secret.id, {
+      agentId,
       hostPattern: "api.deleted.example.com",
       pathPattern: "/*",
       injectAs: "header",

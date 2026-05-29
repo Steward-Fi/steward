@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { matchHost, matchPath } from "../handlers/matching";
+import { compareRouteMatchSpecificity, matchHost, matchPath } from "../handlers/matching";
 
 describe("matchHost", () => {
   test("exact match", () => {
@@ -46,7 +46,9 @@ describe("matchPath", () => {
     expect(matchPath("/v1/*", "/v1/chat/completions")).toBe(true);
     expect(matchPath("/v1/*", "/v1/embeddings")).toBe(true);
     expect(matchPath("/v1/*", "/v1/")).toBe(true);
-    expect(matchPath("/v1/*", "/v1")).toBe(true);
+    expect(matchPath("/v1/*", "/v1")).toBe(false);
+    expect(matchPath("/v1/read/*", "/v1/read")).toBe(false);
+    expect(matchPath("/v1/read/*", "/v1/read/child")).toBe(true);
   });
 
   test("prefix wildcard does not match other prefixes", () => {
@@ -58,5 +60,54 @@ describe("matchPath", () => {
     expect(matchPath("/api/defi/*", "/api/defi/price")).toBe(true);
     expect(matchPath("/api/defi/*", "/api/defi/volume/24h")).toBe(true);
     expect(matchPath("/api/defi/*", "/api/nft/price")).toBe(false);
+  });
+});
+
+describe("compareRouteMatchSpecificity", () => {
+  test("prefers exact routes over broad same-priority routes", () => {
+    const broad = {
+      id: "broad",
+      hostPattern: "*.vendor.com",
+      pathPattern: "/v1/*",
+      method: "*",
+      priority: 0,
+      createdAt: new Date("2026-01-01T00:00:00Z"),
+    };
+    const exact = {
+      id: "exact",
+      hostPattern: "api.vendor.com",
+      pathPattern: "/v1/payments",
+      method: "POST",
+      priority: 0,
+      createdAt: new Date("2026-01-02T00:00:00Z"),
+    };
+
+    expect([broad, exact].sort(compareRouteMatchSpecificity).map((route) => route.id)).toEqual([
+      "exact",
+      "broad",
+    ]);
+  });
+
+  test("priority remains the operator override", () => {
+    const highPriorityBroad = {
+      id: "high-priority-broad",
+      hostPattern: "*.vendor.com",
+      pathPattern: "/v1/*",
+      method: "*",
+      priority: 10,
+    };
+    const lowPriorityExact = {
+      id: "low-priority-exact",
+      hostPattern: "api.vendor.com",
+      pathPattern: "/v1/payments",
+      method: "POST",
+      priority: 0,
+    };
+
+    expect(
+      [lowPriorityExact, highPriorityBroad]
+        .sort(compareRouteMatchSpecificity)
+        .map((route) => route.id),
+    ).toEqual(["high-priority-broad", "low-priority-exact"]);
   });
 });

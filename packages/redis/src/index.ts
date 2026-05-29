@@ -29,7 +29,11 @@ export {
   getSpend,
   getSpendByHost,
   recordSpend,
+  reserveSpend,
+  type SpendLimitSnapshot,
   type SpendPeriod,
+  type SpendReservation,
+  settleReservedSpend,
 } from "./spend-tracker.js";
 export type { IoredisPipelineLike } from "./upstash-adapter.js";
 export { createUpstashIoredisAdapter } from "./upstash-adapter.js";

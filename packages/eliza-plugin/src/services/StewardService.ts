@@ -34,6 +34,29 @@ export interface HyperliquidOrderResult {
 }
 
 /**
+ * Reject plaintext `http://` API URLs for non-localhost hosts. Talking to a
+ * remote Steward API over http would expose API keys / bearer tokens and signed
+ * transactions to network observers. The localhost default stays usable for dev.
+ */
+function assertSecureApiUrl(apiUrl: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(apiUrl);
+  } catch {
+    throw new Error(`[Steward] Invalid apiUrl: ${apiUrl}`);
+  }
+  if (parsed.protocol === "http:") {
+    const host = parsed.hostname;
+    const isLocal = host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+    if (!isLocal) {
+      throw new Error(
+        `[Steward] Insecure apiUrl "${apiUrl}": http:// is only allowed for localhost. Use https:// for remote hosts.`,
+      );
+    }
+  }
+}
+
+/**
  * Singleton service wrapping StewardClient for the ElizaOS runtime.
  *
  * Handles initialization, health checks, auto-discovery, and auto-registration.
@@ -116,6 +139,7 @@ export class StewardService extends Service {
     const env = process.env;
 
     const apiUrl = settings.apiUrl ?? env.STEWARD_API_URL ?? "http://localhost:7860";
+    assertSecureApiUrl(apiUrl);
 
     return {
       apiUrl,
@@ -124,6 +148,9 @@ export class StewardService extends Service {
       agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId ?? "default",
       tenantId: settings.tenantId ?? env.STEWARD_TENANT_ID,
       autoRegister: settings.autoRegister ?? env.STEWARD_AUTO_REGISTER !== "false",
+      // `fallbackLocal` only gates a single informational log line (see connect()):
+      // it does not itself create or expose a local signing key, so the
+      // historical default of `true` is inert and left as-is.
       fallbackLocal: settings.fallbackLocal ?? env.STEWARD_FALLBACK_LOCAL !== "false",
     };
   }

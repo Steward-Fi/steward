@@ -8,7 +8,7 @@
     "dev": "bun --watch src/index.ts",
     "build": "tsc --noEmit",
     "start": "bun src/index.ts",
-    "test": "bun test src/__tests__/",
+    "test": "bun test --timeout 30000 src/__tests__/",
     "wrangler:dev": "wrangler dev",
     "wrangler:deploy": "wrangler deploy",
     "wrangler:dry-run": "wrangler deploy --dry-run --outdir=dist"

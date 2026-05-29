@@ -1,0 +1,50 @@
+# API hardening hooks
+
+Steward supports three incremental request-hardening hooks for mutating API calls:
+
+## Idempotency-Key
+
+Clients may send `Idempotency-Key` on `POST`, `PUT`, `PATCH`, and `DELETE` requests. The API records the first completed response for the key and replays it for later identical requests.
+
+- Header format: visible ASCII, 8 to 255 characters.
+- Replay scope: HTTP method, path, query string, request body, `Authorization`, `X-Steward-Key`, and `X-Steward-Tenant`.
+- Conflict behavior: reusing a key with different request content returns `409`.
+- In-flight behavior: a concurrent duplicate returns `409` with `Retry-After: 1`.
+- Retention: bounded in-process store, default 24 hours, configurable with `STEWARD_IDEMPOTENCY_TTL_MS` and `STEWARD_IDEMPOTENCY_MAX_ENTRIES`.
+
+Responses include `Idempotency-Replayed: false` for the original completed request and `Idempotency-Replayed: true` for a replay.
+
+## Request expiry
+
+Sensitive mutating routes can validate request freshness with:
+
+- `X-Steward-Request-Expires-At`: ISO-8601 time, Unix seconds, or Unix milliseconds.
+- `X-Steward-Request-Timestamp`: ISO-8601 time, Unix seconds, or Unix milliseconds.
+
+The middleware currently validates these headers when present on sensitive mutating routes (`/vault`, `/secrets`, `/trade`, `/v1/trade`, `/approvals`) without requiring them by default. Set `STEWARD_REQUIRE_REQUEST_EXPIRY=true` to require one of the freshness headers on those routes.
+
+Defaults:
+
+- Maximum clock skew: 5 minutes (`STEWARD_REQUEST_EXPIRY_MAX_SKEW_MS`).
+- Timestamp TTL / maximum expiry horizon: 5 minutes (`STEWARD_REQUEST_TIMESTAMP_TTL_MS`).
+
+## Authorization signatures
+
+Sensitive mutating routes can be protected with an HMAC request signature:
+
+- Header: `X-Steward-Signature: v1=<hex hmac sha256>`.
+- Required freshness: signed requests must include either
+  `X-Steward-Request-Timestamp` or `X-Steward-Request-Expires-At`.
+- Covered fields: method, path + query, `X-Steward-Tenant`,
+  request timestamp, request expiry, `Idempotency-Key`, and SHA-256 body hash.
+- Sensitive route scope: `/vault`, `/secrets`, `/trade`, `/v1/trade`, and
+  `/approvals`.
+
+By default, signatures are optional and verified when present. Set
+`STEWARD_REQUIRE_AUTH_SIGNATURE=true` to require signatures on sensitive
+mutating routes. Configure one or more comma-separated secrets with
+`STEWARD_REQUEST_SIGNING_SECRETS`, or a single secret with
+`STEWARD_REQUEST_SIGNING_SECRET`.
+
+The TypeScript SDK can sign these requests automatically by passing
+`requestSigningSecret` to `StewardClient`.

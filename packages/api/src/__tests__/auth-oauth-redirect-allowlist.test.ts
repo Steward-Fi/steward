@@ -55,6 +55,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
       .values({
         tenantId: TENANT_ID,
         allowedOrigins: ["https://app.example.test"],
+        allowedRedirectUrls: ["https://app.example.test/"],
       })
       .onConflictDoNothing();
   });
@@ -89,10 +90,50 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     await db.insert(tenantConfigs).values({
       tenantId: TENANT_ID,
       allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/callback"],
     });
 
     const res = await authRoutes.request(
       `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://evil.example/callback")}`,
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("redirect_uri is not allowed");
+  });
+
+  it("does not allow global OAuth redirects to satisfy a tenant-scoped /authorize request", async () => {
+    const db = getDb();
+    await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
+    await db.insert(tenantConfigs).values({
+      tenantId: TENANT_ID,
+      allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/callback"],
+    });
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = "https://global.example.test/callback";
+
+    const res = await authRoutes.request(
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://global.example.test/callback")}`,
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("redirect_uri is not allowed");
+  });
+
+  it("rejects tenant origin-only entries for non-root OAuth redirect_uri paths", async () => {
+    const db = getDb();
+    await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
+    await db.insert(tenantConfigs).values({
+      tenantId: TENANT_ID,
+      allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/"],
+    });
+
+    const res = await authRoutes.request(
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}`,
     );
 
     expect(res.status).toBe(400);
@@ -107,10 +148,11 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     await db.insert(tenantConfigs).values({
       tenantId: TENANT_ID,
       allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/"],
     });
 
     const authorizeRes = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/")}`,
     );
 
     expect(authorizeRes.status).toBe(302);
@@ -123,6 +165,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     await db.insert(tenantConfigs).values({
       tenantId: TENANT_ID,
       allowedOrigins: ["https://other.example.test"],
+      allowedRedirectUrls: ["https://other.example.test/"],
     });
 
     const callbackRes = await authRoutes.request(
@@ -141,6 +184,7 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     await db.insert(tenantConfigs).values({
       tenantId: TENANT_ID,
       allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/callback"],
     });
 
     const res = await authRoutes.request("/oauth/google/token", {
@@ -157,5 +201,51 @@ describeWithDatabase("OAuth redirect_uri allowlist", () => {
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
     expect(body.error).toContain("redirect_uri is not allowed");
+  });
+
+  it("does not allow global OAuth redirects to satisfy a tenant-scoped /token request", async () => {
+    const db = getDb();
+    await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
+    await db.insert(tenantConfigs).values({
+      tenantId: TENANT_ID,
+      allowedOrigins: ["https://app.example.test"],
+      allowedRedirectUrls: ["https://app.example.test/callback"],
+    });
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = "https://global.example.test/callback";
+
+    const res = await authRoutes.request("/oauth/google/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code: "auth-code",
+        redirectUri: "https://global.example.test/callback",
+        tenantId: TENANT_ID,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("redirect_uri is not allowed");
+  });
+
+  it("rejects /token when body tenantId and X-Steward-Tenant disagree", async () => {
+    const res = await authRoutes.request("/oauth/google/token", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Steward-Tenant": "other-tenant",
+      },
+      body: JSON.stringify({
+        code: "auth-code",
+        redirectUri: "https://app.example.test/callback",
+        tenantId: TENANT_ID,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("must match");
   });
 });

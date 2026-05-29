@@ -28,24 +28,88 @@ export interface TenantConfig {
   defaultPolicies?: PolicyRule[];
 }
 
-export type WebhookEventType =
-  | "tx.pending"
-  | "tx.approved"
-  | "tx.denied"
-  | "tx.signed"
-  | "spend.threshold"
-  | "policy.violation"
-  // Legacy event types (kept for backwards compat)
+export const WEBHOOK_EVENT_TYPES = [
+  "tx.pending",
+  "tx.approved",
+  "tx.denied",
+  "tx.signed",
+  "spend.threshold",
+  "policy.violation",
+  "user.created",
+  "user.authenticated",
+  "user.linked_account",
+  "user.unlinked_account",
+  "user.updated_account",
+  "user.transferred_account",
+  "user.wallet_created",
+  "mfa.enabled",
+  "mfa.disabled",
+  "private_key.exported",
+  "wallet.recovery_setup",
+  "wallet.recovered",
+  "wallet.funds_deposited",
+  "wallet.funds_withdrawn",
+  "transaction.broadcasted",
+  "transaction.confirmed",
+  "transaction.execution_reverted",
+  "transaction.replaced",
+  "transaction.failed",
+  "transaction.provider_error",
+  "transaction.still_pending",
+  "user_operation.completed",
+  "user_operation.failed",
+  "intent.created",
+  "intent.authorized",
+  "intent.executed",
+  "intent.failed",
+  "intent.rejected",
+  "intent.canceled",
+  "intent.expired",
+  "wallet_action.transfer.created",
+  "wallet_action.transfer.succeeded",
+  "wallet_action.transfer.rejected",
+  "wallet_action.transfer.failed",
+  "wallet_action.swap.created",
+  "wallet_action.swap.succeeded",
+  "wallet_action.swap.rejected",
+  "wallet_action.swap.failed",
+  "wallet_action.send_calls.created",
+  "wallet_action.send_calls.succeeded",
+  "wallet_action.send_calls.rejected",
+  "wallet_action.send_calls.failed",
+  "wallet_action.earn_deposit.created",
+  "wallet_action.earn_deposit.succeeded",
+  "wallet_action.earn_deposit.rejected",
+  "wallet_action.earn_deposit.failed",
+  "wallet_action.earn_withdraw.created",
+  "wallet_action.earn_withdraw.succeeded",
+  "wallet_action.earn_withdraw.rejected",
+  "wallet_action.earn_withdraw.failed",
+  "wallet_action.earn_incentive_claim.created",
+  "wallet_action.earn_incentive_claim.succeeded",
+  "wallet_action.earn_incentive_claim.rejected",
+  "wallet_action.earn_incentive_claim.failed",
+] as const;
+
+export type WebhookCatalogEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
+
+// Legacy event types kept for backwards-compatible dispatch inputs.
+export type LegacyWebhookEventType =
   | "approval_required"
   | "tx_signed"
   | "tx_confirmed"
   | "tx_failed"
   | "tx_rejected";
 
+export type WebhookEventType = WebhookCatalogEventType | LegacyWebhookEventType;
+
 export interface WebhookEvent {
   type: WebhookEventType;
   tenantId: string;
-  agentId: string;
+  agentId?: string;
+  deliveryId?: string;
+  // Unix-seconds the canonical signature was first computed; fixed at first send and reused on retries so the signature stays stable.
+  signedAt?: number;
   data: Record<string, unknown>;
   timestamp: Date;
 }
@@ -176,6 +240,8 @@ export type PolicyType =
   | "time-window"
   | "rate-limit"
   | "allowed-chains"
+  | "condition-set"
+  | "contract-allowlist"
   | "reputation-threshold"
   | "reputation-scaling"
   | "venue-allowlist"
@@ -222,6 +288,45 @@ export interface RateLimitConfig {
 export interface AllowedChainsConfig {
   /** Array of CAIP-2 chain identifiers that are permitted. e.g. ["eip155:8453", "eip155:1"] */
   chains: string[];
+}
+
+export interface ConditionSetConfig {
+  /** Condition set id whose items are evaluated against. */
+  conditionSetId: string;
+  /** Request field to compare. Defaults to `ethereum_transaction.to`. */
+  field?:
+    | "to"
+    | "ethereum_transaction.to"
+    | "ethereum_transaction.chain_id"
+    | "ethereum_transaction.value"
+    | "ethereum_transaction.data"
+    | "solana_system_program_instruction.Transfer.to"
+    | "chain_id"
+    | "value"
+    | "data";
+  /** Privy-style operator. Defaults to `in_condition_set`. */
+  operator?: "in_condition_set" | "not_in_condition_set";
+  /** Defaults to false for address/string allowlists. */
+  caseSensitive?: boolean;
+}
+
+export interface ContractAllowlistConfig {
+  contracts: Array<{
+    address: string;
+    selectors: string[];
+    constraints?: Record<
+      string,
+      {
+        recipientAllowlist?: string[];
+        recipientBlocklist?: string[];
+        spenderAllowlist?: string[];
+        spenderBlocklist?: string[];
+        fromAllowlist?: string[];
+        fromBlocklist?: string[];
+        maxAmount?: string;
+      }
+    >;
+  }>;
 }
 
 /**
@@ -309,6 +414,8 @@ export interface SignSolanaTransactionRequest {
   transaction: string; // base64-encoded serialized transaction
   chainId?: number; // 101 = mainnet, 102 = devnet
   broadcast?: boolean; // default true
+  expectedTo?: string; // policy-evaluated recipient for serialized transfer validation
+  expectedValue?: string; // policy-evaluated lamports for serialized transfer validation
 }
 
 /**
@@ -449,6 +556,230 @@ export interface TenantTheme {
   colorScheme?: "light" | "dark" | "system";
 }
 
+export interface TenantOidcProviderConfig {
+  id: string;
+  enabled: boolean;
+  issuer: string;
+  audience: string[];
+  jwksUri: string;
+  clientId?: string;
+  clientSecretEnv?: string;
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  scopes?: string[];
+  subjectClaim?: "sub";
+  emailClaim?: string;
+  emailVerifiedClaim?: string;
+  nameClaim?: string;
+  pictureClaim?: string;
+  allowedAlgs?: Array<"RS256" | "ES256">;
+  allowJitProvisioning?: boolean;
+}
+
+export type TenantSamlSsoStatus = "pending" | "active" | "error";
+
+export interface TenantSamlSsoConfig {
+  tenantId: string;
+  enabled: boolean;
+  status: TenantSamlSsoStatus;
+  idpEntityId: string;
+  idpSsoUrl: string;
+  idpCertPems: string[];
+  spEntityId: string;
+  acsUrl: string;
+  nameIdFormat?: string;
+  emailAttribute: string;
+  groupsAttribute?: string;
+  allowJitProvisioning: boolean;
+  jitDefaultRole: "viewer";
+  lastTestedAt?: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface TenantSamlSsoUpdate {
+  enabled?: boolean;
+  idpEntityId?: string;
+  idpSsoUrl?: string;
+  idpCertPems?: string[];
+  nameIdFormat?: string;
+  emailAttribute?: string;
+  groupsAttribute?: string;
+  allowJitProvisioning?: boolean;
+}
+
+export type TenantCaptchaProvider = "turnstile" | "hcaptcha";
+export type TenantCaptchaAction = "email_otp" | "sms_otp";
+
+export interface TenantAuthAbuseConfig {
+  loginMethods?: {
+    passkey?: boolean;
+    email?: boolean;
+    sms?: boolean;
+    whatsapp?: boolean;
+    totp?: boolean;
+    siwe?: boolean;
+    siws?: boolean;
+    telegram?: boolean;
+    farcaster?: boolean;
+    oauth?: Record<string, boolean>;
+    oidc?: Record<string, boolean>;
+  };
+  captcha?: {
+    enabled?: boolean;
+    provider?: TenantCaptchaProvider;
+    siteKey?: string;
+    /**
+     * Name of the environment variable containing the provider secret.
+     * Defaults to STEWARD_TURNSTILE_SECRET_KEY or STEWARD_HCAPTCHA_SECRET_KEY.
+     */
+    secretKeyEnv?: string;
+    requiredFor?: TenantCaptchaAction[];
+  };
+  email?: {
+    blockDisposable?: boolean;
+    blockPlusAliases?: boolean;
+    allowedEmails?: string[];
+    blockedEmails?: string[];
+    allowedDomains?: string[];
+    blockedDomains?: string[];
+  };
+  wallet?: {
+    allowedWallets?: string[];
+    blockedWallets?: string[];
+  };
+  phone?: {
+    /**
+     * OSS-friendly VOIP hook: block known VOIP prefixes supplied by deployment
+     * config without depending on a proprietary carrier lookup relationship.
+     */
+    blockVoip?: boolean;
+    allowedPhoneNumbers?: string[];
+    blockedPhoneNumbers?: string[];
+    allowedCountryCodes?: string[];
+    blockedCountryCodes?: string[];
+  };
+}
+
+export type TenantAppClientEnvironment = "development" | "preview" | "staging" | "production";
+
+export interface TenantAppClient {
+  id: string;
+  name: string;
+  environment: TenantAppClientEnvironment;
+  enabled?: boolean;
+  isDefault?: boolean;
+  allowedOrigins?: string[];
+  allowedRedirectUrls?: string[];
+  loginMethods?: TenantAuthAbuseConfig["loginMethods"];
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
+}
+
+export interface TenantAppClientSecret {
+  id: string;
+  tenantId: string;
+  clientId: string;
+  appId: string;
+  secretPrefix: string;
+  status: "active" | "retiring" | "revoked";
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  expiresAt?: Date | string | null;
+  revokedAt?: Date | string | null;
+}
+
+export interface TenantAppClientSecretCreateResult {
+  secret: TenantAppClientSecret;
+  appId: string;
+  appSecret: string;
+}
+
+export interface TenantSsoDomain {
+  id: string;
+  tenantId: string;
+  domain: string;
+  verificationToken: string;
+  status: "pending" | "verified";
+  ssoRequired: boolean;
+  verifiedAt?: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface SsoDiscoveryResult {
+  domain: string;
+  tenantId: string | null;
+  ssoRequired: boolean;
+  available: boolean;
+}
+
+export interface TenantTestAccountConfig {
+  enabled?: boolean;
+  email?: string;
+  phone?: string;
+  otp?: string;
+  otpHash?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type GasSponsorshipProvider =
+  | "custom_evm_paymaster"
+  | "custom_bundler"
+  | "solana_fee_payer"
+  | "mock";
+
+export type GasSponsorshipMode = "erc4337" | "eip7702" | "solana_fee_payer";
+
+export interface TenantGasSponsorshipConfig {
+  enabled?: boolean;
+  provider?: GasSponsorshipProvider;
+  mode?: GasSponsorshipMode;
+  allowedChainIds?: number[];
+  allowedCaip2?: string[];
+  paymasterUrl?: string;
+  bundlerUrl?: string;
+  entryPoint?: string;
+  feePayerAgentId?: string;
+  maxPerTxUsd?: number;
+  maxPerWalletDayUsd?: number;
+  maxTenantDayUsd?: number;
+  maxTenantMonthUsd?: number;
+  allowClientSponsorship?: boolean;
+  requireSimulation?: boolean;
+  circuitBreakerEnabled?: boolean;
+}
+
+export interface SponsoredGasSpendEntry {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  userId?: string | null;
+  txId?: string | null;
+  chainFamily: "evm" | "solana";
+  chainId?: number | null;
+  caip2?: string | null;
+  provider: GasSponsorshipProvider | string;
+  mode: GasSponsorshipMode | string;
+  status: string;
+  reservedUsd?: string | null;
+  actualUsd?: string | null;
+  txHash?: string | null;
+  userOperationHash?: string | null;
+  signature?: string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface SponsoredGasSpendSummary {
+  currency: "USD";
+  reservedUsd: string;
+  actualUsd: string;
+  count: number;
+  entries: SponsoredGasSpendEntry[];
+}
+
 export interface TenantControlPlaneConfig {
   tenantId: string;
   displayName?: string;
@@ -458,8 +789,16 @@ export interface TenantControlPlaneConfig {
   approvalConfig: ApprovalConfig;
   featureFlags: TenantFeatureFlags;
   theme?: TenantTheme;
+  oidcProviders?: TenantOidcProviderConfig[];
+  samlSso?: TenantSamlSsoConfig;
+  authAbuseConfig?: TenantAuthAbuseConfig;
+  appClients?: TenantAppClient[];
+  testAccount?: TenantTestAccountConfig;
+  gasSponsorshipConfig?: TenantGasSponsorshipConfig;
   /** Allowed CORS origins for this tenant. Empty array = wildcard (*) in dev mode. */
   allowedOrigins?: string[];
+  /** Allowed OAuth/email redirect URLs for this tenant. */
+  allowedRedirectUrls?: string[];
   createdAt?: Date;
   updatedAt?: Date;
 }

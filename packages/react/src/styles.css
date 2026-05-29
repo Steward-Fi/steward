@@ -320,6 +320,87 @@
   margin-bottom: 0.5rem;
 }
 
+/* ─── Linked Accounts ─── */
+.stwd-linked-accounts-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.stwd-linked-account-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.stwd-linked-account-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.stwd-linked-account-group-title {
+  color: var(--stwd-muted, #6b7280);
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.stwd-linked-account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.625rem 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.stwd-linked-account-row:last-child {
+  border-bottom: none;
+}
+
+.stwd-linked-account-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.stwd-linked-account-id {
+  color: var(--stwd-text);
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.stwd-linked-account-form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.stwd-linked-account-channel {
+  width: 8rem;
+  flex: 0 0 8rem;
+}
+
+.stwd-linked-account-code {
+  width: 8rem;
+  flex: 0 0 8rem;
+}
+
+.stwd-linked-account-actions,
+.stwd-linked-wallet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 /* ─── Transaction History ─── */
 .stwd-tx-list {
   display: flex;
@@ -1005,6 +1086,8 @@
 }
 
 .stwd-login__fields {
+  display: grid;
+  gap: 0.5rem;
   margin-bottom: 1rem;
 }
 
@@ -1084,6 +1167,24 @@
 }
 .stwd-login__btn--email:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.12);
+}
+
+.stwd-login__btn--sms {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--stwd-text, #fafafa);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.stwd-login__btn--sms:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.stwd-login__btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  font-weight: 700;
 }
 
 .stwd-login__btn--google {
@@ -1660,4 +1761,121 @@
 .stwd-passkey-enroll__btn--dismiss:hover:not(:disabled) {
   border-color: var(--stwd-border-strong, rgba(0, 0, 0, 0.3));
   color: var(--stwd-text, inherit);
+}
+
+.stwd-mfa-challenge,
+.stwd-mfa-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--stwd-text, inherit);
+}
+
+.stwd-mfa-challenge__header h3,
+.stwd-mfa-settings__header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.stwd-mfa-settings__header,
+.stwd-mfa-section__title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stwd-mfa-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--stwd-border, rgba(0, 0, 0, 0.12));
+}
+
+.stwd-mfa-field,
+.stwd-mfa-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.stwd-mfa-field {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.stwd-mfa-field span,
+.stwd-mfa-section__title span {
+  font-size: 12px;
+  color: var(--stwd-text-secondary, #555);
+}
+
+.stwd-mfa-field input,
+.stwd-mfa-inline input,
+.stwd-mfa-enrollment input {
+  min-width: 0;
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--stwd-border, rgba(0, 0, 0, 0.15));
+  font: inherit;
+}
+
+.stwd-mfa-enrollment {
+  display: grid;
+  gap: 8px;
+}
+
+.stwd-mfa-enrollment code {
+  word-break: break-all;
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--stwd-surface-subtle, rgba(0, 0, 0, 0.04));
+}
+
+.stwd-mfa-primary,
+.stwd-mfa-secondary,
+.stwd-mfa-link {
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.stwd-mfa-primary,
+.stwd-mfa-secondary {
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--stwd-border, rgba(0, 0, 0, 0.15));
+}
+
+.stwd-mfa-primary {
+  background: var(--stwd-accent, #111);
+  color: var(--stwd-accent-text, #fff);
+  border-color: var(--stwd-accent, #111);
+}
+
+.stwd-mfa-secondary {
+  background: transparent;
+  color: var(--stwd-text, inherit);
+}
+
+.stwd-mfa-primary:disabled,
+.stwd-mfa-secondary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.stwd-mfa-link {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--stwd-accent, #007acc);
+}
+
+.stwd-mfa-error {
+  font-size: 12px;
+  color: var(--stwd-error, #c0392b);
 }

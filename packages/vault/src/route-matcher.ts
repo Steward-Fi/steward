@@ -22,7 +22,7 @@ export interface MatchedRoute {
 
 /**
  * Convert a simple glob pattern to a RegExp.
- * Supports `*` as a wildcard for one or more characters.
+ * Supports `*` as a wildcard.
  * E.g. `*.anthropic.com` → /^.+\.anthropic\.com$/
  *      `/v1/*` → /^\/v1\/.+$/
  */
@@ -39,7 +39,50 @@ export function globToRegex(pattern: string): RegExp {
  */
 export function matchesGlob(value: string, pattern: string): boolean {
   if (pattern === "*") return true;
+  if (pattern.endsWith("/*")) return value.startsWith(pattern.slice(0, -1));
   return globToRegex(pattern).test(value);
+}
+
+function hostSpecificity(pattern: string): number {
+  if (pattern === "*") return 0;
+  if (pattern.startsWith("*.")) return 100 + pattern.length;
+  return 1_000 + pattern.length;
+}
+
+function pathSpecificity(pattern: string | null | undefined): number {
+  const value = pattern ?? "/*";
+  if (value === "*" || value === "/*") return 0;
+  if (value.endsWith("/*")) return 100 + value.length;
+  return 1_000 + value.length;
+}
+
+function methodSpecificity(method: string | null | undefined): number {
+  return method && method !== "*" ? 1 : 0;
+}
+
+function createdAtMs(value: Date | string | null | undefined): number {
+  if (!value) return 0;
+  const time = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(time) ? time : 0;
+}
+
+function compareRouteMatchSpecificity(a: SecretRoute, b: SecretRoute): number {
+  const priorityDelta = (b.priority ?? 0) - (a.priority ?? 0);
+  if (priorityDelta !== 0) return priorityDelta;
+
+  const hostDelta = hostSpecificity(b.hostPattern) - hostSpecificity(a.hostPattern);
+  if (hostDelta !== 0) return hostDelta;
+
+  const pathDelta = pathSpecificity(b.pathPattern) - pathSpecificity(a.pathPattern);
+  if (pathDelta !== 0) return pathDelta;
+
+  const methodDelta = methodSpecificity(b.method) - methodSpecificity(a.method);
+  if (methodDelta !== 0) return methodDelta;
+
+  const createdDelta = createdAtMs(a.createdAt) - createdAtMs(b.createdAt);
+  if (createdDelta !== 0) return createdDelta;
+
+  return String(a.id ?? "").localeCompare(String(b.id ?? ""));
 }
 
 /**
@@ -47,6 +90,7 @@ export function matchesGlob(value: string, pattern: string): boolean {
  */
 export async function findMatchingRoutes(
   tenantId: string,
+  agentId: string,
   host: string,
   path: string,
   method: string,
@@ -57,7 +101,13 @@ export async function findMatchingRoutes(
   const routes = await db
     .select()
     .from(secretRoutes)
-    .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.enabled, true)));
+    .where(
+      and(
+        eq(secretRoutes.tenantId, tenantId),
+        eq(secretRoutes.agentId, agentId),
+        eq(secretRoutes.enabled, true),
+      ),
+    );
 
   const matches: MatchedRoute[] = [];
 
@@ -82,8 +132,7 @@ export async function findMatchingRoutes(
     });
   }
 
-  // Sort by priority descending (highest priority first)
-  matches.sort((a, b) => (b.route.priority ?? 0) - (a.route.priority ?? 0));
+  matches.sort((a, b) => compareRouteMatchSpecificity(a.route, b.route));
 
   return matches;
 }
@@ -94,10 +143,11 @@ export async function findMatchingRoutes(
  */
 export async function findMatchingRoute(
   tenantId: string,
+  agentId: string,
   host: string,
   path: string,
   method: string,
 ): Promise<MatchedRoute | null> {
-  const matches = await findMatchingRoutes(tenantId, host, path, method);
+  const matches = await findMatchingRoutes(tenantId, agentId, host, path, method);
   return matches[0] ?? null;
 }

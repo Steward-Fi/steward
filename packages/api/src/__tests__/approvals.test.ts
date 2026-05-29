@@ -147,18 +147,16 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
   });
 
   describe("POST /approvals/:txId/approve", () => {
-    it("approves a pending transaction", async () => {
+    it("rejects API-key approval of a pending transaction", async () => {
       const res = await fetch(`${BASE_URL}/approvals/${TEST_TX_APPROVE}/approve`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ comment: "Looks good" }),
       });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
       const body = await res.json();
-      expect(body.ok).toBe(true);
-      expect(body.data.status).toBe("approved");
-      expect(body.data.comment).toBe("Looks good");
+      expect(body.error).toContain("owner or admin user session");
     });
 
     it("rejects double-approval", async () => {
@@ -168,9 +166,9 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
         body: JSON.stringify({}),
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(403);
       const body = await res.json();
-      expect(body.error).toContain("already approved");
+      expect(body.error).toContain("owner or admin user session");
     });
   });
 
@@ -228,7 +226,7 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
   });
 
   describe("PUT /approvals/rules", () => {
-    it("creates auto-approval rules", async () => {
+    it("rejects API-key creation of auto-approval rules", async () => {
       const res = await fetch(`${BASE_URL}/approvals/rules`, {
         method: "PUT",
         headers: authHeaders(),
@@ -239,16 +237,12 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
         }),
       });
 
-      expect(res.status).toBe(201);
+      expect(res.status).toBe(403);
       const body = await res.json();
-      expect(body.ok).toBe(true);
-      expect(body.data.maxAmountWei).toBe("1000000000000000000");
-      expect(body.data.autoDenyAfterHours).toBe(24);
-      expect(body.data.escalateAboveWei).toBe("10000000000000000000");
-      expect(body.data.enabled).toBe(true);
+      expect(body.error).toContain("owner or admin user session");
     });
 
-    it("updates existing rules", async () => {
+    it("rejects API-key updates to existing rules", async () => {
       const res = await fetch(`${BASE_URL}/approvals/rules`, {
         method: "PUT",
         headers: authHeaders(),
@@ -258,13 +252,9 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
         }),
       });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
       const body = await res.json();
-      expect(body.ok).toBe(true);
-      expect(body.data.autoDenyAfterHours).toBe(48);
-      expect(body.data.enabled).toBe(false);
-      // Previous values should be preserved
-      expect(body.data.maxAmountWei).toBe("1000000000000000000");
+      expect(body.error).toContain("owner or admin user session");
     });
 
     it("rejects invalid maxAmountWei", async () => {
@@ -274,7 +264,19 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
         body: JSON.stringify({ maxAmountWei: "not-a-number" }),
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(403);
+    });
+
+    it("rejects invalid escalateAboveWei instead of persisting malformed rule state", async () => {
+      const res = await fetch(`${BASE_URL}/approvals/rules`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ escalateAboveWei: "not-a-number" }),
+      });
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toContain("owner or admin user session");
     });
   });
 });

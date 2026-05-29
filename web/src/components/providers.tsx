@@ -2,12 +2,47 @@
 
 import { StewardProvider, useAuth } from "@stwd/react";
 import { createElement, type ReactNode, useEffect, useRef, useState } from "react";
-import { setAuthToken, steward } from "@/lib/api";
+import { clearAuthToken, setAuthToken, steward } from "@/lib/api";
 
 // Pre-import @simplewebauthn/browser so it's in the client bundle.
 import "@simplewebauthn/browser";
 
 const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
+
+/**
+ * SECURITY (XSS risk — tracked hardening): this wires the Steward auth tokens
+ * (including the long-lived REFRESH token, key `steward_refresh_token`) into
+ * `window.sessionStorage`. sessionStorage is readable by any JavaScript running
+ * in this origin, so a successful XSS would be able to exfiltrate the refresh
+ * token and mint new access tokens.
+ *
+ * Mitigations in place:
+ *   1. PRIMARY: a strict Content-Security-Policy (script-src 'self' only — see
+ *      web/next.config.ts `headers()` and web/vercel.json) drastically reduces
+ *      the attack surface for injecting hostile script in the first place.
+ *   2. sessionStorage (not localStorage) scopes the token to the tab session,
+ *      so it is cleared when the tab closes rather than persisting on disk.
+ *
+ * RECOMMENDED FUTURE HARDENING: move the refresh token to a Secure, HttpOnly,
+ * SameSite=Strict cookie issued by a server route so it is unreadable from JS.
+ * That is a larger architectural change (server-side cookie issuance +
+ * CSRF protection on refresh) and is intentionally NOT done here — do it as a
+ * dedicated, fully-tested change rather than a partial swap.
+ */
+const authStorage = {
+  getItem(key: string): string | null {
+    if (typeof window === "undefined") return null;
+    return window.sessionStorage.getItem(key);
+  },
+  setItem(key: string, value: string): void {
+    if (typeof window === "undefined") return;
+    window.sessionStorage.setItem(key, value);
+  },
+  removeItem(key: string): void {
+    if (typeof window === "undefined") return;
+    window.sessionStorage.removeItem(key);
+  },
+};
 
 /**
  * Syncs the Steward auth JWT into the legacy API client once.
@@ -16,18 +51,20 @@ const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.
 function AuthTokenSync({ children }: { children: ReactNode }) {
   const auth = useAuth();
   const lastToken = useRef<string | null>(null);
+  const sessionToken = auth.session?.token ?? null;
 
   useEffect(() => {
     if (!auth.isAuthenticated) {
       lastToken.current = null;
+      clearAuthToken();
       return;
     }
-    const token = auth.getToken();
+    const token = sessionToken ?? auth.getToken();
     if (token && token !== lastToken.current) {
       lastToken.current = token;
       setAuthToken(token);
     }
-  }, [auth.isAuthenticated, auth.getToken]);
+  }, [auth.isAuthenticated, auth.getToken, auth.activeTenantId, sessionToken]);
 
   return <>{children}</>;
 }
@@ -88,7 +125,7 @@ export function Providers({ children }: { children: ReactNode }) {
     StewardProvider as any,
     {
       client: steward as any,
-      auth: { baseUrl: API_URL },
+      auth: { baseUrl: API_URL, storage: authStorage },
     },
     createElement(WalletProviderTree, null, createElement(AuthTokenSync, null, children)),
   ) as any;

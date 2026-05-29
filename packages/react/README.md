@@ -165,7 +165,7 @@ export default function Login() {
         showDiscord
         evm={{ appName: "My App" }}
         solana={{ endpoint: "https://api.mainnet-beta.solana.com" }}
-        onSuccess={({ token }) => console.log("signed in:", token)}
+        onSuccess={() => console.log("signed in")}
       />
     </StewardProvider>
   );
@@ -231,7 +231,7 @@ export function SolanaLogin() {
 <StewardProvider client={client} agentId="agent_abc" auth={{ baseUrl: "https://api.steward.fi" }}>
   <EVMWalletProvider config={wagmiConfig}>
     <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
-      <WalletLogin chains="both" onSuccess={(res, kind) => console.log(kind, res.token)} />
+      <WalletLogin chains="both" onSuccess={(res, kind) => console.log("signed in via", kind)} />
     </SolanaWalletProvider>
   </EVMWalletProvider>
 </StewardProvider>

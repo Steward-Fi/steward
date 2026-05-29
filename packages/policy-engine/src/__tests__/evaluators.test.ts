@@ -49,6 +49,243 @@ function makeAutoApproveRule(threshold: string, id = "auto-1"): PolicyRule {
   };
 }
 
+const unavailablePriceOracle = {
+  getNativeUsdPrice: async () => null,
+  getTokenUsdPrice: async () => null,
+  weiToUsd: async () => null,
+  usdToWei: async () => null,
+};
+
+function makeConditionSetRule(config: Record<string, unknown>, id = "condition-set-1"): PolicyRule {
+  return { id, type: "condition-set", enabled: true, config };
+}
+
+function makeContractAllowlistRule(
+  config: Record<string, unknown>,
+  id = "contract-allowlist-1",
+): PolicyRule {
+  return { id, type: "contract-allowlist", enabled: true, config };
+}
+
+function abiAddress(address: string): string {
+  return address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+}
+
+function abiUint(value: bigint | number | string): string {
+  return BigInt(value).toString(16).padStart(64, "0");
+}
+
+describe("Contract Allowlist Policy", () => {
+  const contract = "0x1234567890123456789012345678901234567890";
+  const otherContract = "0x9999999999999999999999999999999999999999";
+  const recipient = "0x1111111111111111111111111111111111111111";
+  const blockedRecipient = "0x2222222222222222222222222222222222222222";
+  const selector = "0xa9059cbb";
+  const rule = makeContractAllowlistRule({
+    contracts: [{ address: contract, selectors: [selector] }],
+  });
+
+  it("passes native value transfers with no calldata", async () => {
+    const result = await evaluatePolicy(rule, makeContext());
+
+    expect(result.passed).toBe(true);
+    expect(result.reason).toBe("No contract calldata");
+  });
+
+  it("passes when target contract and selector are explicitly allowed", async () => {
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: `${selector}00000000`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(true);
+  });
+
+  it("fails when selector is not allowed for the contract", async () => {
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: "0x095ea7b300000000",
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("Selector 0x095ea7b3");
+  });
+
+  it("fails when contract is not allowed", async () => {
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: otherContract,
+          data: `${selector}00000000`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("not in the contract allowlist");
+  });
+
+  it("enforces ERC20 transfer recipient and amount constraints when configured", async () => {
+    const constrainedRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [selector],
+          constraints: {
+            [selector]: {
+              recipientAllowlist: [recipient],
+              maxAmount: "100",
+            },
+          },
+        },
+      ],
+    });
+
+    const allowed = await evaluatePolicy(
+      constrainedRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: `${selector}${abiAddress(recipient)}${abiUint(100)}`,
+        },
+      }),
+    );
+    expect(allowed.passed).toBe(true);
+
+    const blockedAddress = await evaluatePolicy(
+      constrainedRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: `${selector}${abiAddress(blockedRecipient)}${abiUint(1)}`,
+        },
+      }),
+    );
+    expect(blockedAddress.passed).toBe(false);
+    expect(blockedAddress.reason).toContain("recipient");
+
+    const blockedAmount = await evaluatePolicy(
+      constrainedRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: `${selector}${abiAddress(recipient)}${abiUint(101)}`,
+        },
+      }),
+    );
+    expect(blockedAmount.passed).toBe(false);
+    expect(blockedAmount.reason).toContain("exceeds selector maxAmount");
+  });
+
+  it("enforces ERC20 approve spender constraints when configured", async () => {
+    const approveSelector = "0x095ea7b3";
+    const constrainedRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [approveSelector],
+          constraints: {
+            [approveSelector]: {
+              spenderBlocklist: [blockedRecipient],
+              maxAmount: "10",
+            },
+          },
+        },
+      ],
+    });
+
+    const blocked = await evaluatePolicy(
+      constrainedRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          data: `${approveSelector}${abiAddress(blockedRecipient)}${abiUint(1)}`,
+        },
+      }),
+    );
+    expect(blocked.passed).toBe(false);
+    expect(blocked.reason).toContain("spender");
+  });
+});
+
+describe("Condition Set Policy", () => {
+  it("passes when the selected transaction field is in the loaded condition set", async () => {
+    const rule = makeConditionSetRule({
+      conditionSetId: "approved-recipients",
+      field: "ethereum_transaction.to",
+      operator: "in_condition_set",
+    });
+
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        conditionSets: {
+          "approved-recipients": ["0x1234567890123456789012345678901234567890"],
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(true);
+  });
+
+  it("fails closed when the referenced condition set was not loaded", async () => {
+    const rule = makeConditionSetRule({ conditionSetId: "missing-set" });
+    const result = await evaluatePolicy(rule, makeContext());
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("was not loaded");
+  });
+
+  it("supports not_in_condition_set for blocklists", async () => {
+    const rule = makeConditionSetRule({
+      conditionSetId: "blocked-recipients",
+      operator: "not_in_condition_set",
+    });
+
+    const allowed = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: "0x9999999999999999999999999999999999999999",
+        },
+        conditionSets: {
+          "blocked-recipients": ["0x1234567890123456789012345678901234567890"],
+        },
+      }),
+    );
+    expect(allowed.passed).toBe(true);
+
+    const blocked = await evaluatePolicy(
+      rule,
+      makeContext({
+        conditionSets: {
+          "blocked-recipients": ["0x1234567890123456789012345678901234567890"],
+        },
+      }),
+    );
+    expect(blocked.passed).toBe(false);
+  });
+});
+
 // ─── Spending Limit Tests ─────────────────────────────────────────────────
 
 describe("Spending Limit Policy", () => {
@@ -326,6 +563,78 @@ describe("Spending Limit Policy", () => {
 
     expect(result.passed).toBe(false);
     expect(result.reason).toContain("weekly spending limit");
+  });
+
+  it("fails closed when a USD spending limit cannot be priced", async () => {
+    const rule = makeSpendingRule({ maxPerTxUsd: 1 });
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, chainId: 2147483647 },
+        priceOracle: unavailablePriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("USD spending limit cannot be evaluated");
+  });
+
+  it("fails closed when transaction or configured wei values exceed uint256 bounds", async () => {
+    const oversized = "9".repeat(79);
+
+    const oversizedRequest = await evaluatePolicy(
+      makeSpendingRule({ maxPerTx: "1000", maxPerDay: "1000", maxPerWeek: "1000" }),
+      makeContext({ request: { ...makeContext().request, value: oversized } }),
+    );
+    expect(oversizedRequest.passed).toBe(false);
+    expect(oversizedRequest.reason).toContain("uint256");
+
+    const oversizedPolicy = await evaluatePolicy(
+      makeSpendingRule({ maxPerTx: oversized, maxPerDay: "1000", maxPerWeek: "1000" }),
+      makeContext(),
+    );
+    expect(oversizedPolicy.passed).toBe(false);
+    expect(oversizedPolicy.reason).toContain("uint256");
+  });
+
+  // Regression: the daily cap is only safe when the caller reads spentToday and
+  // commits the spend inside one per-agent lock (API: withAgentSpendLock). This
+  // models that contract — a serialized read+commit window over a shared
+  // committed balance. The first spend passes and commits; the second, re-reading
+  // the now-updated balance, must be rejected. (Concurrent eval against a STALE
+  // shared read would let both pass — that is the double-spend the lock prevents.)
+  it("serializes daily cap under a per-agent lock (no double-spend)", async () => {
+    const txValue = "6000000000000000000"; // 6 ETH each → only one fits in 10 ETH/day
+    const rule = makeSpendingRule({
+      maxPerTx: txValue,
+      maxPerDay: "10000000000000000000",
+      maxPerWeek: "50000000000000000000",
+    });
+
+    let committedToday = 0n; // shared committed-balance store
+    let lock = Promise.resolve(); // serializes the read+commit window
+
+    const runLocked = (): Promise<boolean> => {
+      const result = (async () => {
+        await lock;
+        const ctx = makeContext({
+          request: { ...makeContext().request, value: txValue },
+          spentToday: committedToday, // read INSIDE the lock
+        });
+        const evalResult = await evaluatePolicy(rule, ctx);
+        if (evalResult.passed) committedToday += BigInt(txValue); // commit INSIDE the lock
+        return evalResult.passed;
+      })();
+      lock = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    };
+
+    const [first, second] = await Promise.all([runLocked(), runLocked()]);
+    expect([first, second].filter(Boolean).length).toBe(1); // exactly one succeeds
+    expect(committedToday).toBe(BigInt(txValue)); // cap not exceeded
   });
 });
 
@@ -688,6 +997,25 @@ describe("Auto-Approve Threshold Policy", () => {
     expect(result.passed).toBe(false);
   });
 
+  it("fails closed when a USD auto-approve threshold cannot be priced", async () => {
+    const rule: PolicyRule = {
+      id: "auto-usd",
+      type: "auto-approve-threshold",
+      enabled: true,
+      config: { thresholdUsd: 1 },
+    };
+    const result = await evaluatePolicy(
+      rule,
+      makeContext({
+        request: { ...makeContext().request, chainId: 2147483647 },
+        priceOracle: unavailablePriceOracle,
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("Auto-approve USD threshold cannot be evaluated");
+  });
+
   it("passes with zero-value transaction under any threshold", async () => {
     const rule = makeAutoApproveRule("1"); // 1 wei threshold
 
@@ -773,20 +1101,18 @@ describe("Allowed Chains Policy", () => {
     expect(result.reason).toContain("not a recognised chain");
   });
 
-  it("passes when chainId is 0 (absent/unset) — defers check to vault", async () => {
-    // Design decision: chainId=0 means the caller hasn't specified a chain yet.
-    // The vault will resolve it to DEFAULT_CHAIN_ID before signing, so we must not block here.
+  it("fails closed when chainId is 0 (absent/unset)", async () => {
     const rule = makeAllowedChainsRule(["eip155:1"]); // Ethereum only — would fail for Base
     const ctx = makeContext({
       request: { ...makeContext().request, chainId: 0 },
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
-    expect(result.reason).toContain("deferring chain check");
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("chainId is required");
   });
 
-  it("passes when chainId is undefined — defers check to vault", async () => {
+  it("fails closed when chainId is undefined", async () => {
     const rule = makeAllowedChainsRule(["eip155:1"]);
     // Force undefined at runtime (type cast to exercise the JS falsy guard)
     const ctx = makeContext({
@@ -797,8 +1123,8 @@ describe("Allowed Chains Policy", () => {
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
-    expect(result.reason).toContain("deferring chain check");
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("chainId is required");
   });
 
   it("fails all requests when allowed chains array is empty (nothing is permitted)", async () => {
@@ -890,10 +1216,10 @@ describe("PolicyEngine.evaluate()", () => {
     };
   }
 
-  it("no policies → auto-approved (approved=true, requiresManualApproval=false)", async () => {
+  it("no policies -> rejected closed (approved=false, requiresManualApproval=false)", async () => {
     const result = await engine.evaluate([], makeEngineCtx());
 
-    expect(result.approved).toBe(true);
+    expect(result.approved).toBe(false);
     expect(result.requiresManualApproval).toBe(false);
     expect(result.results).toHaveLength(0);
   });
@@ -971,6 +1297,23 @@ describe("PolicyEngine.evaluate()", () => {
       makeRateRule({ maxTxPerHour: 10, maxTxPerDay: 50 }),
       // Auto-approve threshold: 0.5 ETH — tx is 1 ETH, so this fails
       makeAutoApproveRule("500000000000000000"),
+    ];
+
+    const result = await engine.evaluate(policies, makeEngineCtx());
+
+    expect(result.approved).toBe(false);
+    expect(result.requiresManualApproval).toBe(true);
+  });
+
+  it("requires manual approval when any duplicate auto-approve threshold fails", async () => {
+    const policies: PolicyRule[] = [
+      makeSpendingRule({
+        maxPerTx: "10000000000000000000",
+        maxPerDay: "50000000000000000000",
+        maxPerWeek: "100000000000000000000",
+      }),
+      makeAutoApproveRule("2000000000000000000", "auto-permissive"),
+      makeAutoApproveRule("500000000000000000", "auto-strict"),
     ];
 
     const result = await engine.evaluate(policies, makeEngineCtx());

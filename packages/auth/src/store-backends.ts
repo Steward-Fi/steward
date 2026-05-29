@@ -18,7 +18,9 @@ import { getSql } from "@stwd/db";
 
 export interface StoreBackend {
   set(key: string, value: string, ttlMs: number): Promise<void>;
+  setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean>;
   get(key: string): Promise<string | null>;
+  consume(key: string): Promise<string | null>;
   delete(key: string): Promise<void>;
 }
 
@@ -52,6 +54,16 @@ export class MemoryBackend implements StoreBackend {
     this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
   }
 
+  async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
+    const existing = this.store.get(key);
+    if (existing) {
+      if (Date.now() <= existing.expiresAt) return false;
+      this.store.delete(key);
+    }
+    this.store.set(key, { value, expiresAt: Date.now() + ttlMs });
+    return true;
+  }
+
   async get(key: string): Promise<string | null> {
     const entry = this.store.get(key);
     if (!entry) return null;
@@ -59,6 +71,14 @@ export class MemoryBackend implements StoreBackend {
       this.store.delete(key);
       return null;
     }
+    return entry.value;
+  }
+
+  async consume(key: string): Promise<string | null> {
+    const entry = this.store.get(key);
+    if (!entry) return null;
+    this.store.delete(key);
+    if (Date.now() > entry.expiresAt) return null;
     return entry.value;
   }
 
@@ -90,8 +110,15 @@ export class MemoryBackend implements StoreBackend {
  * Keeping it narrow means @stwd/auth doesn't need ioredis as a direct dependency.
  */
 export interface RedisLike {
-  set(key: string, value: string, expiryMode: "PX", time: number): Promise<string | null>;
+  set(
+    key: string,
+    value: string,
+    expiryMode: "PX",
+    time: number,
+    condition?: "NX",
+  ): Promise<string | null>;
   get(key: string): Promise<string | null>;
+  getdel?(key: string): Promise<string | null>;
   del(...keys: string[]): Promise<number>;
 }
 
@@ -111,8 +138,19 @@ export class RedisBackend implements StoreBackend {
     await this.client.set(this.prefix + key, value, "PX", ttlMs);
   }
 
+  async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
+    return (await this.client.set(this.prefix + key, value, "PX", ttlMs, "NX")) === "OK";
+  }
+
   async get(key: string): Promise<string | null> {
     return this.client.get(this.prefix + key);
+  }
+
+  async consume(key: string): Promise<string | null> {
+    if (this.client.getdel) {
+      return this.client.getdel(this.prefix + key);
+    }
+    throw new Error("Redis backend does not support atomic GETDEL token consumption");
   }
 
   async delete(key: string): Promise<void> {
@@ -180,6 +218,19 @@ export class PostgresBackend implements StoreBackend {
     `;
   }
 
+  async setIfNotExists(key: string, value: string, ttlMs: number): Promise<boolean> {
+    await this.ensureTable();
+    const sql = this.getSqlClient();
+    const expiresAt = new Date(Date.now() + ttlMs);
+    const rows = await sql<Array<{ id: string }>>`
+      INSERT INTO auth_kv_store (id, namespace, value, expires_at)
+      VALUES (${key}, ${this.namespace}, ${value}, ${expiresAt})
+      ON CONFLICT (id, namespace) DO NOTHING
+      RETURNING id
+    `;
+    return rows.length > 0;
+  }
+
   async get(key: string): Promise<string | null> {
     await this.ensureTable();
     const sql = this.getSqlClient();
@@ -190,6 +241,19 @@ export class PostgresBackend implements StoreBackend {
          AND namespace = ${this.namespace}
          AND expires_at > now()
        LIMIT 1
+    `;
+    return rows[0]?.value ?? null;
+  }
+
+  async consume(key: string): Promise<string | null> {
+    await this.ensureTable();
+    const sql = this.getSqlClient();
+    const rows = await sql<Array<{ value: string }>>`
+      DELETE FROM auth_kv_store
+       WHERE id        = ${key}
+         AND namespace = ${this.namespace}
+         AND expires_at > now()
+      RETURNING value
     `;
     return rows[0]?.value ?? null;
   }

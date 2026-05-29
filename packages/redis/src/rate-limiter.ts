@@ -10,6 +10,26 @@
 
 import { getRedis } from "./client.js";
 
+// KEYS[1]=zset  ARGV: now, windowStart, maxRequests, member, ttlMs
+// Prune the window, count, and add the member only if strictly under the
+// limit (count < max → the Nth request is admitted, N+1 rejected). Done in one
+// script so concurrent requests cannot collectively pass the ceiling.
+const RATE_LIMIT_LUA = `
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, tonumber(ARGV[2]))
+local count = redis.call('ZCARD', KEYS[1])
+local allowed = 0
+if count < tonumber(ARGV[3]) then
+  redis.call('ZADD', KEYS[1], tonumber(ARGV[1]), ARGV[4])
+  allowed = 1
+  count = count + 1
+end
+redis.call('PEXPIRE', KEYS[1], tonumber(ARGV[5]))
+local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
+local oldestScore = ARGV[1]
+if oldest[2] ~= nil then oldestScore = oldest[2] end
+return {allowed, count, oldestScore}
+`;
+
 export interface RateLimitResult {
   /** Whether the request is allowed */
   allowed: boolean;
@@ -45,51 +65,38 @@ export async function checkRateLimit(
   // Unique member: timestamp + random suffix to handle sub-ms bursts
   const member = `${now}:${Math.random().toString(36).slice(2, 8)}`;
 
-  // Atomic pipeline:
-  // 1. Remove entries outside the window
-  // 2. Add the new entry
-  // 3. Count entries in the window
-  // 4. Get the oldest entry (for reset time)
-  // 5. Set TTL on the key
-  const pipeline = redis.multi();
-  pipeline.zremrangebyscore(key, 0, windowStart); // 1. prune old
-  pipeline.zadd(key, now, member); // 2. add new
-  pipeline.zcard(key); // 3. count
-  pipeline.zrange(key, 0, 0, "WITHSCORES"); // 4. oldest entry
-  pipeline.pexpire(key, windowMs + 1000); // 5. TTL = window + 1s buffer
+  const res = (await redis.eval(
+    RATE_LIMIT_LUA,
+    1,
+    key,
+    String(now),
+    String(windowStart),
+    String(maxRequests),
+    member,
+    String(windowMs + 1000), // TTL = window + 1s buffer
+  )) as [number, number, string];
+  const [allowed, count, oldestScore] = res;
 
-  const results = await pipeline.exec();
-  if (!results) {
-    throw new Error("Redis MULTI/EXEC returned null (transaction aborted)");
-  }
-
-  // results[2] = [null, count]
-  const currentCount = results[2]?.[1] as number;
-
-  // results[3] = [null, [member, score]] or [null, []]
-  const oldestEntry = results[3]?.[1] as string[];
-  const oldestTimestamp = oldestEntry.length >= 2 ? Number(oldestEntry[1]) : now;
+  const oldestTimestamp = oldestScore != null ? Number(oldestScore) : now;
   const resetMs = Math.max(0, oldestTimestamp + windowMs - now);
 
-  if (currentCount > maxRequests) {
-    // Over limit — remove the entry we just added (we were speculative)
-    await redis.zrem(key, member);
-    return {
-      allowed: false,
-      remaining: 0,
-      resetMs,
-    };
+  if (allowed !== 1) {
+    return { allowed: false, remaining: 0, resetMs };
   }
 
   return {
     allowed: true,
-    remaining: maxRequests - currentCount,
+    remaining: Math.max(0, maxRequests - count),
     resetMs,
   };
 }
 
 /**
  * Get current rate limit status without incrementing.
+ *
+ * ADVISORY ONLY: `allowed` (count < maxRequests) mirrors the atomic gate's
+ * admit condition but does not itself reserve a slot — enforcement is
+ * checkRateLimit. Use this for display, not as the gate.
  */
 export async function getRateLimitStatus(
   key: string,

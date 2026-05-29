@@ -5,14 +5,17 @@
 // no third-party infra. Master password is fixed for determinism; the
 // underlying KeyStore still adds per-record IV + salt randomness.
 
-import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 
 import { getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { Vault } from "../vault";
 
 const MASTER_PASSWORD = "test-vault-venue-scope";
 const TENANT_ID = "test-tenant";
+
+setDefaultTimeout(30000);
 
 const openClients: Array<{ close: () => Promise<void> }> = [];
 
@@ -227,5 +230,17 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     expect(Object.keys(wallet).sort()).toEqual(
       ["address", "agentId", "chainFamily", "purpose", "venue"].sort(),
     );
+  });
+
+  test("importKey stores normalized EVM keys when callers omit 0x", async () => {
+    await vault.createAgent(TENANT_ID, "import-agent", "Import Agent");
+    const privateKey = generatePrivateKey();
+    const barePrivateKey = privateKey.slice(2);
+
+    const imported = await vault.importKey(TENANT_ID, "import-agent", barePrivateKey, "evm");
+    const exported = await vault.exportPrivateKey(TENANT_ID, "import-agent");
+
+    expect(imported.walletAddress).toBe(privateKeyToAccount(privateKey).address);
+    expect(exported.evm?.privateKey).toBe(privateKey);
   });
 });

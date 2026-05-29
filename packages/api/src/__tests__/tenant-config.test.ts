@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 const SKIP = !process.env.DATABASE_URL;
 
 import { generateApiKey } from "@stwd/auth";
-import { getDb, tenantConfigs, tenants } from "@stwd/db";
+import { agents, getDb, policies, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
@@ -13,6 +13,10 @@ const TEST_PORT = 3299;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
 
 const TENANT_ID = "test-tenant-config";
+const AGENT_ID = "test-tenant-config-agent";
+const DASHBOARD_USER_ID = crypto.randomUUID();
+const OTHER_TENANT_ID = "test-tenant-config-other";
+const OTHER_AGENT_ID = "test-tenant-config-other-agent";
 let validApiKey: string;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
@@ -31,13 +35,54 @@ beforeAll(async () => {
       apiKeyHash: apiKeyPair.hash,
     })
     .onConflictDoNothing();
+  await db
+    .insert(tenants)
+    .values({
+      id: OTHER_TENANT_ID,
+      name: "Other Config Test Tenant",
+      apiKeyHash: apiKeyPair.hash,
+    })
+    .onConflictDoNothing();
+  await db
+    .insert(agents)
+    .values({
+      id: AGENT_ID,
+      tenantId: TENANT_ID,
+      name: "Config Test Agent",
+      walletAddress: `0x${"1".repeat(40)}`,
+    })
+    .onConflictDoNothing();
+  await db
+    .insert(agents)
+    .values({
+      id: OTHER_AGENT_ID,
+      tenantId: OTHER_TENANT_ID,
+      name: "Other Tenant Agent",
+      walletAddress: `0x${"2".repeat(40)}`,
+    })
+    .onConflictDoNothing();
+  await db
+    .insert(users)
+    .values({ id: DASHBOARD_USER_ID, email: `dashboard-${DASHBOARD_USER_ID}@example.test` })
+    .onConflictDoNothing();
+  await db
+    .insert(userTenants)
+    .values({ userId: DASHBOARD_USER_ID, tenantId: TENANT_ID, role: "owner" })
+    .onConflictDoNothing();
 });
 
 afterAll(async () => {
   if (SKIP) return;
   const db = getDb();
+  await db.delete(policies).where(eq(policies.agentId, AGENT_ID));
+  await db.delete(policies).where(eq(policies.agentId, OTHER_AGENT_ID));
+  await db.delete(userTenants).where(eq(userTenants.tenantId, TENANT_ID));
+  await db.delete(users).where(eq(users.id, DASHBOARD_USER_ID));
+  await db.delete(agents).where(eq(agents.id, AGENT_ID));
+  await db.delete(agents).where(eq(agents.id, OTHER_AGENT_ID));
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
   await db.delete(tenants).where(eq(tenants.id, TENANT_ID));
+  await db.delete(tenants).where(eq(tenants.id, OTHER_TENANT_ID));
 });
 
 const headers = () => ({
@@ -91,6 +136,66 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
 
       // Cleanup
       await db.delete(tenants).where(eq(tenants.id, "milady-cloud"));
+    });
+
+    it("redacts admin-only auth configuration for tenant API key callers", async () => {
+      const db = getDb();
+      await db
+        .insert(tenantConfigs)
+        .values({
+          tenantId: TENANT_ID,
+          oidcProviders: [
+            {
+              id: "admin-only",
+              issuer: "https://issuer.example.test",
+              clientId: "client-id",
+              audience: ["api://tenant"],
+              jwksUri: "https://issuer.example.test/.well-known/jwks.json",
+            },
+          ],
+          authAbuseConfig: {
+            captcha: {
+              enabled: true,
+              provider: "turnstile",
+              siteKey: "public-site-key",
+              secretKeyEnv: "STEWARD_TENANT_TURNSTILE_SECRET",
+              requiredFor: ["email_otp"],
+            },
+          },
+        })
+        .onConflictDoUpdate({
+          target: tenantConfigs.tenantId,
+          set: {
+            oidcProviders: [
+              {
+                id: "admin-only",
+                issuer: "https://issuer.example.test",
+                clientId: "client-id",
+                audience: ["api://tenant"],
+                jwksUri: "https://issuer.example.test/.well-known/jwks.json",
+              },
+            ],
+            authAbuseConfig: {
+              captcha: {
+                enabled: true,
+                provider: "turnstile",
+                siteKey: "public-site-key",
+                secretKeyEnv: "STEWARD_TENANT_TURNSTILE_SECRET",
+                requiredFor: ["email_otp"],
+              },
+            },
+          },
+        });
+
+      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        headers: headers(),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.oidcProviders).toBeUndefined();
+      expect(body.data.authAbuseConfig).toBeUndefined();
     });
   });
 
@@ -178,6 +283,52 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       });
       expect(res.status).toBe(400);
     });
+
+    it("rejects tenant API-key updates to security-sensitive config fields", async () => {
+      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: headers(),
+        body: JSON.stringify({
+          allowedOrigins: ["https://attacker.example"],
+          authAbuseConfig: {},
+        }),
+      });
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toContain("owner or admin user session");
+    });
+
+    it("rejects templates with unsupported persisted policy types", async () => {
+      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: headers(),
+        body: JSON.stringify({
+          policyTemplates: [
+            {
+              id: "bad-template",
+              name: "Bad Template",
+              description: "Unsupported policy should not be stored",
+              icon: "test",
+              policies: [
+                {
+                  id: "bad-policy",
+                  type: "unsupported-policy",
+                  enabled: true,
+                  config: {},
+                },
+              ],
+              customizableFields: [],
+            },
+          ],
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("Unsupported persisted policy type");
+    });
   });
 
   describe("GET /tenants/:id/config/templates", () => {
@@ -217,6 +368,109 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       );
       expect(res.status).toBe(404);
     });
+
+    it("rejects applying a template to an agent owned by another tenant", async () => {
+      const res = await fetch(
+        `${BASE_URL}/tenants/${TENANT_ID}/config/templates/test-template/apply`,
+        {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ agentId: OTHER_AGENT_ID }),
+        },
+      );
+
+      expect(res.status).toBe(404);
+
+      const db = getDb();
+      const otherPolicies = await db
+        .select()
+        .from(policies)
+        .where(eq(policies.agentId, OTHER_AGENT_ID));
+      expect(otherPolicies).toHaveLength(0);
+    });
+
+    it("rejects undeclared overrides without deleting existing policies", async () => {
+      const db = getDb();
+      await db.delete(policies).where(eq(policies.agentId, AGENT_ID));
+      await db.insert(policies).values({
+        id: `${AGENT_ID}-existing`,
+        agentId: AGENT_ID,
+        type: "rate-limit",
+        enabled: true,
+        config: { maxTxPerDay: 1 },
+      });
+
+      const res = await fetch(
+        `${BASE_URL}/tenants/${TENANT_ID}/config/templates/test-template/apply`,
+        {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({
+            agentId: AGENT_ID,
+            overrides: { "spending-limit.maxPerDay": "999999999999999999999999" },
+          }),
+        },
+      );
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("Override not allowed");
+
+      const existingPolicies = await db
+        .select()
+        .from(policies)
+        .where(eq(policies.agentId, AGENT_ID));
+      expect(existingPolicies).toHaveLength(1);
+      expect(existingPolicies[0]?.id).toBe(`${AGENT_ID}-existing`);
+    });
+
+    it("rejects malformed stored templates before deleting existing policies", async () => {
+      const db = getDb();
+      await db
+        .update(tenantConfigs)
+        .set({
+          policyTemplates: [
+            {
+              id: "bad-template",
+              name: "Bad Template",
+              description: "Unsupported policy from storage",
+              icon: "test",
+              policies: [
+                {
+                  id: "bad-policy",
+                  type: "unsupported-policy",
+                  enabled: true,
+                  config: {},
+                },
+              ],
+              customizableFields: [],
+            },
+          ],
+        })
+        .where(eq(tenantConfigs.tenantId, TENANT_ID));
+
+      const res = await fetch(
+        `${BASE_URL}/tenants/${TENANT_ID}/config/templates/bad-template/apply`,
+        {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify({ agentId: AGENT_ID }),
+        },
+      );
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("Unsupported persisted policy type");
+
+      const existingPolicies = await db
+        .select()
+        .from(policies)
+        .where(eq(policies.agentId, AGENT_ID));
+      expect(existingPolicies).toHaveLength(1);
+      expect(existingPolicies[0]?.id).toBe(`${AGENT_ID}-existing`);
+    });
   });
 
   describe("Auth", () => {
@@ -243,7 +497,7 @@ describe.skipIf(SKIP)("Dashboard API", () => {
     const token = await createSessionToken(
       "0x0000000000000000000000000000000000000000",
       TENANT_ID,
-      { userId: "test-dashboard-404-user" },
+      { userId: DASHBOARD_USER_ID },
     );
     const res = await fetch(`${BASE_URL}/dashboard/nonexistent-agent`, {
       headers: { Authorization: `Bearer ${token}` },

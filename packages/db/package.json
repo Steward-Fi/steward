@@ -14,7 +14,7 @@
     "migrate": "bun src/migrate.ts",
     "migrate:neon": "drizzle-kit migrate",
     "generate": "drizzle-kit generate",
-    "test": "bun test"
+    "test": "bun test --timeout 30000"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.4.2",

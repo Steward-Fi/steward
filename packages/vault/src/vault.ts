@@ -41,6 +41,7 @@ import {
 
 import { type EncryptedKey, KeyStore } from "./keystore";
 import {
+  assertSolanaTransferTransactionMatches,
   generateSolanaKeypair,
   getSolanaBalance,
   restoreSolanaKeypair,
@@ -48,11 +49,28 @@ import {
   signSolanaTransaction,
 } from "./solana";
 import { getTokenBalances as fetchTokenBalances, type TokenBalance } from "./tokens";
+import {
+  ENTRY_POINT_V07,
+  getUserOperationHash,
+  packUserOperation,
+  type UnpackedUserOperationFields,
+} from "./userop";
 
 export interface VaultConfig {
   masterPassword: string;
   rpcUrl?: string;
   chainId?: number;
+}
+
+/**
+ * Explicit, logged authorization required to call exportPrivateKey. Forces the
+ * caller to opt into a break-glass plaintext-key export rather than invoking it
+ * casually; actorId/reason are surfaced in the vault's audit log line.
+ */
+export interface ExportPrivateKeyAuthorization {
+  breakGlass: true;
+  actorId: string;
+  reason?: string;
 }
 
 const CHAINS: Record<number, Chain> = {
@@ -119,6 +137,9 @@ export class Vault {
 
   constructor(config: VaultConfig) {
     this.config = config;
+    // Signing-vault keeps the legacy (undomain) root so existing wallet ciphertext
+    // stays decryptable; the SecretVault uses a distinct domain-separated root, so
+    // the two roots are cryptographically independent despite sharing masterPassword.
     this.keyStore = new KeyStore(config.masterPassword);
   }
 
@@ -158,8 +179,18 @@ export class Vault {
     const solanaAddress = solKp.publicKey;
 
     // ── Encrypt both keys ────────────────────────────────────────────────
-    const evmEncrypted = this.keyStore.encrypt(evmPrivateKey);
-    const solEncrypted = this.keyStore.encrypt(solKp.secretKey);
+    const evmEncrypted = this.keyStore.encrypt(evmPrivateKey, {
+      tenantId,
+      agentId,
+      chainFamily: "evm",
+      venue: null,
+    });
+    const solEncrypted = this.keyStore.encrypt(solKp.secretKey, {
+      tenantId,
+      agentId,
+      chainFamily: "solana",
+      venue: null,
+    });
 
     const createdAt = new Date();
 
@@ -255,9 +286,19 @@ export class Vault {
    * List all agent identities for a tenant, including `walletAddresses`
    * for agents created with multi-wallet support.
    */
-  async listAgents(tenantId: string): Promise<AgentIdentity[]> {
+  async listAgents(
+    tenantId: string,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<AgentIdentity[]> {
     const db = getDb();
-    const rows = await db.select().from(agents).where(eq(agents.tenantId, tenantId));
+    const limit = Math.min(Math.max(Math.floor(options.limit ?? 100), 1), 200);
+    const offset = Math.min(Math.max(Math.floor(options.offset ?? 0), 0), 100_000);
+    const rows = await db
+      .select()
+      .from(agents)
+      .where(eq(agents.tenantId, tenantId))
+      .limit(limit)
+      .offset(offset);
     if (rows.length === 0) return [];
 
     const agentIds = rows.map((r) => r.id);
@@ -288,8 +329,11 @@ export class Vault {
   /**
    * List all agent identities for a tenant (alias for listAgents).
    */
-  async listAgentsByTenant(tenantId: string): Promise<AgentIdentity[]> {
-    return this.listAgents(tenantId);
+  async listAgentsByTenant(
+    tenantId: string,
+    options: { limit?: number; offset?: number } = {},
+  ): Promise<AgentIdentity[]> {
+    return this.listAgents(tenantId, options);
   }
 
   /**
@@ -378,12 +422,20 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
-        ciphertext: chainKey.ciphertext,
-        iv: chainKey.iv,
-        tag: chainKey.tag,
-        salt: chainKey.salt,
-      });
+      secretKey = this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        {
+          tenantId: request.tenantId,
+          agentId: request.agentId,
+          chainFamily: chainFamilyToUse,
+          venue: null,
+        },
+      );
     } else {
       // Fallback: legacy encrypted_keys table (EVM only)
       const [legacyKey] = await db
@@ -395,7 +447,12 @@ export class Vault {
           `No signing key found for agent ${request.agentId} on chain family ${chainFamilyToUse}`,
         );
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId: request.tenantId,
+        agentId: request.agentId,
+        chainFamily: chainFamilyToUse,
+        venue: null,
+      });
     }
 
     // Also resolve the wallet address for this chain (for Solana tx signing)
@@ -421,7 +478,9 @@ export class Vault {
 
     if (isSolana) {
       const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(chainId);
-      hash = await signSolanaTransaction(secretKey, request.to, BigInt(request.value), rpcUrl);
+      hash = await signSolanaTransaction(secretKey, request.to, BigInt(request.value), rpcUrl, {
+        broadcast: shouldBroadcast,
+      });
     } else {
       const account = privateKeyToAccount(secretKey as `0x${string}`);
       const chain = CHAINS[chainId];
@@ -478,6 +537,13 @@ export class Vault {
 
     const txId = options.txId ?? crypto.randomUUID();
     const signedAt = new Date();
+    const [existingTransaction] = await db
+      .select({ agentId: transactions.agentId })
+      .from(transactions)
+      .where(eq(transactions.id, txId));
+    if (existingTransaction && existingTransaction.agentId !== request.agentId) {
+      throw new Error("Transaction id already belongs to a different agent");
+    }
 
     await db
       .insert(transactions)
@@ -622,6 +688,8 @@ export class Vault {
 
     let walletAddress: string;
 
+    let keyToStore = privateKey;
+
     if (chainType === "solana") {
       // For Solana, the private key should be a 64-byte hex string (seed + pubkey)
       // or a 32-byte hex seed - we'll handle both
@@ -632,9 +700,15 @@ export class Vault {
       const normalizedKey = privateKey.startsWith("0x") ? privateKey : `0x${privateKey}`;
       const account = privateKeyToAccount(normalizedKey as `0x${string}`);
       walletAddress = account.address;
+      keyToStore = normalizedKey;
     }
 
-    const encryptedKey = this.keyStore.encrypt(privateKey);
+    const encryptedKey = this.keyStore.encrypt(keyToStore, {
+      tenantId,
+      agentId,
+      chainFamily: chainType,
+      venue: null,
+    });
     const now = new Date();
 
     // Check if agent already exists
@@ -763,12 +837,15 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
-        ciphertext: chainKey.ciphertext,
-        iv: chainKey.iv,
-        tag: chainKey.tag,
-        salt: chainKey.salt,
-      });
+      secretKey = this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        { tenantId, agentId, chainFamily: chainFamilyToUse, venue: null },
+      );
     } else {
       // Fallback: legacy encrypted_keys table
       const [legacyKey] = await db
@@ -778,7 +855,12 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No signing key found for agent ${agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId,
+        agentId,
+        chainFamily: chainFamilyToUse,
+        venue: null,
+      });
     }
 
     if (isSolana) {
@@ -788,6 +870,79 @@ export class Vault {
     const account = privateKeyToAccount(secretKey as `0x${string}`);
     const signature = await account.signMessage({ message });
     return signature;
+  }
+
+  /**
+   * Sign a pre-hashed 32-byte EVM digest with the agent's secp256k1 key.
+   * This is intentionally lower-level than signMessage and must remain guarded
+   * at API edges because raw signatures bypass transaction/message semantics.
+   */
+  async signRawHash(
+    tenantId: string,
+    agentId: string,
+    hash: `0x${string}`,
+  ): Promise<{ signature: string; hash: `0x${string}`; walletAddress: string }> {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+      throw new Error("hash must be a 32-byte hex string");
+    }
+
+    const db = getDb();
+    const [agentRow] = await db
+      .select({ walletAddress: agents.walletAddress })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+
+    if (!agentRow) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+    if (detectChainType(agentRow.walletAddress) !== "evm") {
+      throw new Error("Raw secp256k1 signing requires an EVM agent");
+    }
+
+    let secretKey: string;
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+          isNull(encryptedChainKeys.venue),
+        ),
+      );
+
+    if (chainKey) {
+      secretKey = this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        { tenantId, agentId, chainFamily: "evm", venue: null },
+      );
+    } else {
+      const [legacyKey] = await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, agentId));
+      if (!legacyKey) {
+        throw new Error(`No EVM signing key for agent ${agentId}`);
+      }
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId,
+        agentId,
+        chainFamily: "evm",
+        venue: null,
+      });
+    }
+
+    const account = privateKeyToAccount(secretKey as `0x${string}`);
+    return {
+      signature: await account.sign({ hash }),
+      hash,
+      walletAddress: account.address,
+    };
   }
 
   /**
@@ -844,19 +999,27 @@ export class Vault {
         ),
       );
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
-        ciphertext: chainKey.ciphertext,
-        iv: chainKey.iv,
-        tag: chainKey.tag,
-        salt: chainKey.salt,
-      });
+      secretKey = this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        { tenantId, agentId, chainFamily: "evm", venue: null },
+      );
     } else {
       const [legacyKey] = await db
         .select()
         .from(encryptedKeys)
         .where(eq(encryptedKeys.agentId, agentId));
       if (!legacyKey) throw new Error(`No EVM signing key for agent ${agentId}`);
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId,
+        agentId,
+        chainFamily: "evm",
+        venue: null,
+      });
     }
 
     const account = privateKeyToAccount(secretKey as `0x${string}`);
@@ -914,12 +1077,20 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
-        ciphertext: chainKey.ciphertext,
-        iv: chainKey.iv,
-        tag: chainKey.tag,
-        salt: chainKey.salt,
-      });
+      secretKey = this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        {
+          tenantId: request.tenantId,
+          agentId: request.agentId,
+          chainFamily: "evm",
+          venue: request.venue ?? null,
+        },
+      );
     } else {
       if (request.venue) {
         throw new Error(
@@ -934,7 +1105,12 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No signing key found for agent ${request.agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId: request.tenantId,
+        agentId: request.agentId,
+        chainFamily: "evm",
+        venue: null,
+      });
     }
 
     const account = privateKeyToAccount(secretKey as `0x${string}`);
@@ -953,6 +1129,89 @@ export class Vault {
     });
 
     return signature;
+  }
+
+  /**
+   * Sign an ERC-4337 EntryPoint v0.7 user operation hash with the agent's EVM key.
+   * The signature is EIP-191-prefixed, which matches common account implementations.
+   */
+  async signUserOperation(request: {
+    agentId: string;
+    tenantId: string;
+    userOperation: UnpackedUserOperationFields;
+    entryPoint?: `0x${string}`;
+    chainId: number;
+  }): Promise<{
+    signature: string;
+    userOperationHash: string;
+    entryPoint: string;
+    chainId: number;
+  }> {
+    const db = getDb();
+
+    const [agentRow] = await db
+      .select({ walletAddress: agents.walletAddress })
+      .from(agents)
+      .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
+
+    if (!agentRow) {
+      throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    }
+
+    if (detectChainType(agentRow.walletAddress) === "solana") {
+      throw new Error("ERC-4337 user operation signing is not supported for Solana wallets");
+    }
+
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, request.agentId),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+          isNull(encryptedChainKeys.venue),
+        ),
+      );
+
+    let secretKey: string;
+    if (chainKey) {
+      secretKey = this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        { tenantId: request.tenantId, agentId: request.agentId, chainFamily: "evm", venue: null },
+      );
+    } else {
+      const [legacyKey] = await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, request.agentId));
+      if (!legacyKey) {
+        throw new Error(`No signing key found for agent ${request.agentId}`);
+      }
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId: request.tenantId,
+        agentId: request.agentId,
+        chainFamily: "evm",
+        venue: null,
+      });
+    }
+
+    const entryPoint = request.entryPoint ?? ENTRY_POINT_V07;
+    const packed = packUserOperation(request.userOperation);
+    const userOperationHash = getUserOperationHash(packed, entryPoint, request.chainId);
+    const account = privateKeyToAccount(secretKey as `0x${string}`);
+    const signature = await account.signMessage({ message: { raw: userOperationHash } });
+
+    return {
+      signature,
+      userOperationHash,
+      entryPoint,
+      chainId: request.chainId,
+    };
   }
 
   /**
@@ -995,12 +1254,20 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
-        ciphertext: chainKey.ciphertext,
-        iv: chainKey.iv,
-        tag: chainKey.tag,
-        salt: chainKey.salt,
-      });
+      secretKey = this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        {
+          tenantId: request.tenantId,
+          agentId: request.agentId,
+          chainFamily: "solana",
+          venue: null,
+        },
+      );
     } else {
       // Legacy path: only works if the walletAddress is a Solana address
       if (detectChainType(agentRow.walletAddress) !== "solana") {
@@ -1015,7 +1282,12 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No Solana signing key found for agent ${request.agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId: request.tenantId,
+        agentId: request.agentId,
+        chainFamily: "solana",
+        venue: null,
+      });
     }
 
     const keypair = restoreSolanaKeypair(secretKey);
@@ -1027,6 +1299,16 @@ export class Vault {
     const { Transaction: SolTransaction, Connection } = await import("@solana/web3.js");
     const txBytes = Uint8Array.from(atob(request.transaction), (c) => c.charCodeAt(0));
     const tx = SolTransaction.from(txBytes);
+    if (request.expectedTo !== undefined || request.expectedValue !== undefined) {
+      if (request.expectedTo === undefined || request.expectedValue === undefined) {
+        throw new Error("Solana transaction policy envelope requires expectedTo and expectedValue");
+      }
+      assertSolanaTransferTransactionMatches(tx, {
+        from: keypair.publicKey,
+        to: request.expectedTo,
+        lamports: BigInt(request.expectedValue),
+      });
+    }
 
     // Sign the transaction
     tx.partialSign(keypair);
@@ -1072,15 +1354,28 @@ export class Vault {
   async exportPrivateKey(
     tenantId: string,
     agentId: string,
+    authorization?: ExportPrivateKeyAuthorization,
   ): Promise<{
     evm?: { privateKey: string; address: string };
     solana?: { privateKey: string; address: string };
   }> {
+    // Defense-in-depth: this returns plaintext key material, so it must never be
+    // invoked casually. Require an explicit break-glass authorization context that
+    // the (admin + MFA + audited) caller constructs, and emit a log entry every time.
+    if (!authorization?.breakGlass || !authorization.actorId?.trim()) {
+      throw new Error(
+        "exportPrivateKey requires an explicit break-glass authorization { breakGlass: true, actorId }",
+      );
+    }
+    console.warn(
+      `[Vault] BREAK-GLASS private key export: tenant=${tenantId} agent=${agentId} actor=${authorization.actorId} reason=${authorization.reason ?? "unspecified"}`,
+    );
+
     const db = getDb();
 
     // Verify agent belongs to this tenant
     const [agentRow] = await db
-      .select({ id: agents.id })
+      .select({ id: agents.id, tenantId: agents.tenantId })
       .from(agents)
       .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
 
@@ -1106,12 +1401,15 @@ export class Vault {
       );
 
     if (evmChainKey) {
-      const pk = this.keyStore.decrypt({
-        ciphertext: evmChainKey.ciphertext,
-        iv: evmChainKey.iv,
-        tag: evmChainKey.tag,
-        salt: evmChainKey.salt,
-      });
+      const pk = this.keyStore.decrypt(
+        {
+          ciphertext: evmChainKey.ciphertext,
+          iv: evmChainKey.iv,
+          tag: evmChainKey.tag,
+          salt: evmChainKey.salt,
+        },
+        { tenantId, agentId, chainFamily: "evm", venue: null },
+      );
       const [evmWallet] = await db
         .select({ address: agentWallets.address })
         .from(agentWallets)
@@ -1133,7 +1431,12 @@ export class Vault {
         .from(encryptedKeys)
         .where(eq(encryptedKeys.agentId, agentId));
       if (legacyKey) {
-        const pk = this.keyStore.decrypt(legacyKey as EncryptedKey);
+        const pk = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+          tenantId,
+          agentId,
+          chainFamily: "evm",
+          venue: null,
+        });
         result.evm = {
           privateKey: pk,
           address: privateKeyToAccount(pk as `0x${string}`).address,
@@ -1154,12 +1457,15 @@ export class Vault {
       );
 
     if (solChainKey) {
-      const pk = this.keyStore.decrypt({
-        ciphertext: solChainKey.ciphertext,
-        iv: solChainKey.iv,
-        tag: solChainKey.tag,
-        salt: solChainKey.salt,
-      });
+      const pk = this.keyStore.decrypt(
+        {
+          ciphertext: solChainKey.ciphertext,
+          iv: solChainKey.iv,
+          tag: solChainKey.tag,
+          salt: solChainKey.salt,
+        },
+        { tenantId, agentId, chainFamily: "solana", venue: null },
+      );
       const [solWallet] = await db
         .select({ address: agentWallets.address })
         .from(agentWallets)
@@ -1348,7 +1654,7 @@ export class Vault {
     // Verify the agent exists. Surfacing a clear error here beats a
     // foreign-key violation from Postgres.
     const [agentRow] = await db
-      .select({ id: agents.id })
+      .select({ id: agents.id, tenantId: agents.tenantId })
       .from(agents)
       .where(eq(agents.id, agentId));
     if (!agentRow) {
@@ -1368,7 +1674,12 @@ export class Vault {
       secret = kp.secretKey;
     }
 
-    const encrypted = this.keyStore.encrypt(secret);
+    const encrypted = this.keyStore.encrypt(secret, {
+      tenantId: agentRow.tenantId,
+      agentId,
+      chainFamily: chainType,
+      venue,
+    });
     const createdAt = new Date();
 
     await db.transaction(async (tx) => {

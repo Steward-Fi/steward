@@ -33,6 +33,10 @@ function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+function finitePositiveOrderUsd(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+}
+
 export const venueAllowlistEvaluator: TradeOrderEvaluator = (session, order) => {
   const allowed = session.allowedVenues ?? (session.venue ? [session.venue] : []);
   if (allowed.length === 0) {
@@ -80,7 +84,13 @@ export const dailySpendCapEvaluator: TradeOrderEvaluator = (session, order) => {
   const dailyCapUsd = session.dailyCapUsd;
   if (dailyCapUsd === undefined) return { allow: true };
   const spent = finiteNumber(session.dailySpendUsd, 0);
-  const estimated = finiteNumber(order.estimatedOrderUsd, 0);
+  const estimated = finitePositiveOrderUsd(order.estimatedOrderUsd);
+  if (estimated === null) {
+    return {
+      allow: false,
+      reason: "daily-spend-cap: estimated order USD is required when a daily cap is configured",
+    };
+  }
   if (spent + estimated > dailyCapUsd) {
     return {
       allow: false,
@@ -92,7 +102,13 @@ export const dailySpendCapEvaluator: TradeOrderEvaluator = (session, order) => {
 
 export const perOrderCapEvaluator: TradeOrderEvaluator = (session, order) => {
   const cap = finiteNumber(session.perOrderCapUsd, DEFAULT_PER_ORDER_CAP_USD);
-  const estimated = finiteNumber(order.estimatedOrderUsd, 0);
+  const estimated = finitePositiveOrderUsd(order.estimatedOrderUsd);
+  if (estimated === null) {
+    return {
+      allow: false,
+      reason: "per-order-cap: estimated order USD is required when a per-order cap is configured",
+    };
+  }
   if (estimated > cap) {
     return { allow: false, reason: `per-order-cap: order $${estimated} exceeds cap $${cap}` };
   }

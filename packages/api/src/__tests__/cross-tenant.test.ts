@@ -144,6 +144,8 @@ async function getTestUserToken(tenantId?: string): Promise<string> {
   return createSessionToken("0x0000000000000000000000000000000000000000", tenantId ?? OPEN_TENANT, {
     userId: testUserId,
     email: TEST_USER_EMAIL,
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
   });
 }
 
@@ -204,6 +206,21 @@ describeWithDatabase("Cross-Tenant Identity", () => {
 
       await db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
       await db.delete(tenants).where(eq(tenants.id, tenantId));
+    });
+
+    it("rejects reserved personal wallet tenant slugs", async () => {
+      const token = await getTestUserToken();
+
+      const res = await fetch(`${BASE_URL}/user/me/tenants`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Reserved Tenant", slug: `personal-${testUserId}` }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { ok: boolean; error: string };
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("reserved");
     });
   });
 

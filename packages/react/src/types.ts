@@ -10,6 +10,9 @@ import type {
   StewardTenantMembership,
   TxRecord,
   TxStatus,
+  UserAccountsResult,
+  UserAccountUnlinkResult,
+  UserLinkedAccount,
 } from "@stwd/sdk";
 
 // ─── Tenant Configuration Types ───
@@ -259,6 +262,57 @@ export interface SpendDashboardProps {
   className?: string;
 }
 
+export interface StewardLinkedAccountsProps {
+  showPrimaryLoginMethods?: boolean;
+  showLinkedAccounts?: boolean;
+  showPhoneLinking?: boolean;
+  showWalletLinking?: boolean;
+  showOAuthLinking?: boolean;
+  showSocialLinking?: boolean;
+  oauthProviders?: string[];
+  oauthRedirectUri?: string;
+  onOAuthLinkRequest?: (provider: string, challenge: {
+    state: string;
+    redirectUri: string;
+    expiresIn: number;
+  }) => Promise<{
+    code: string;
+    redirectUri?: string;
+    state?: string;
+    codeVerifier?: string;
+  } | null>;
+  ethereumWallet?: {
+    address: string;
+    signMessage: (message: string) => Promise<string>;
+  };
+  solanaWallet?: {
+    publicKey: string;
+    /**
+     * Sign the exact challenge message and return the encoded signature string
+     * expected by the Steward API.
+     */
+    signMessage: (message: string) => Promise<string>;
+  };
+  onTelegramLinkRequest?: (challengeId: string) => Promise<Record<string, unknown> | null>;
+  onFarcasterLinkRequest?: (nonce: string) => Promise<{
+    message: string;
+    signature: string;
+    custodyAddress?: string;
+    address?: string;
+    fid?: string | number;
+    username?: string;
+    displayName?: string;
+    pfpUrl?: string;
+    pfp?: string;
+  } | null>;
+  allowUnlink?: boolean;
+  className?: string;
+  onLoaded?: (result: UserAccountsResult) => void;
+  onLink?: (account: UserLinkedAccount) => void;
+  onUnlink?: (account: UserLinkedAccount, result: UserAccountUnlinkResult) => void;
+  onError?: (error: Error) => void;
+}
+
 // Re-export SDK types consumers will need
 export type {
   AgentBalance,
@@ -283,11 +337,15 @@ export type {
   StewardProviders as StewardProvidersState,
   StewardSession,
   StewardUser,
+  UserAccountsResult,
+  UserAccountUnlinkResult,
+  UserLinkedAccount,
 } from "@stwd/sdk";
 
 export interface StewardAuthConfig {
   baseUrl: string;
   storage?: import("@stwd/sdk").SessionStorage;
+  tenantId?: string;
 }
 
 export interface StewardAuthContextValue {
@@ -302,25 +360,64 @@ export interface StewardAuthContextValue {
   signOut: () => void;
   getToken: () => string | null;
   /** Sign in with a passkey (WebAuthn). Browser-only. */
-  signInWithPasskey: (email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  signInWithPasskey: (
+    email: string,
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
   /**
    * Register an additional passkey for the current email on this device /
    * relying party. Use after a successful magic-link or OAuth sign-in to
    * upgrade the user to one-tap passkey login on this domain. Browser-only.
    */
-  addPasskey: (email: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  addPasskey: (
+    email: string,
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
   /** Send a magic link email. */
-  signInWithEmail: (email: string) => Promise<import("@stwd/sdk").StewardEmailResult>;
+  signInWithEmail: (
+    email: string,
+    captchaToken?: string,
+  ) => Promise<import("@stwd/sdk").StewardEmailResult>;
+  /** Send an SMS one-time passcode. */
+  sendSmsOtp: (
+    phone: string,
+    captchaToken?: string,
+  ) => Promise<import("@stwd/sdk").StewardSmsOtpResult>;
+  /** Verify an SMS one-time passcode. */
+  verifySmsOtp: (
+    phone: string,
+    code: string,
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
+  /** Send a WhatsApp one-time passcode through the configured provider adapter. */
+  sendWhatsAppOtp: (
+    phone: string,
+    captchaToken?: string,
+  ) => Promise<import("@stwd/sdk").StewardWhatsAppOtpResult>;
+  /** Verify a WhatsApp one-time passcode. */
+  verifyWhatsAppOtp: (
+    phone: string,
+    code: string,
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
   /** Verify a magic link callback token. */
   verifyEmailCallback: (
     token: string,
     email: string,
-  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
   /** Sign in with an Ethereum wallet via SIWE. */
   signInWithSIWE: (
     address: string,
     signMessage: (msg: string) => Promise<string>,
-  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
   /**
    * Sign in with a Solana wallet via SIWS (Sign-In With Solana).
    * Optional: present only when the underlying SDK supports it. When undefined,
@@ -329,12 +426,56 @@ export interface StewardAuthContextValue {
   signInWithSolana?: (
     publicKey: string,
     signMessage: (msg: Uint8Array) => Promise<Uint8Array>,
-  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
   /** Sign in with an OAuth provider (Google, Discord, etc.) */
   signInWithOAuth: (
     provider: string,
     config?: { redirectUri?: string; tenantId?: string },
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
+  /** Verify a Telegram Login Widget payload and create a Steward session. */
+  signInWithTelegram: (
+    payload: import("@stwd/sdk").StewardTelegramLoginPayload,
+    config?: import("@stwd/sdk").StewardTelegramLoginConfig,
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
+  /** Verify a Farcaster SIWF payload and create a Steward session. */
+  signInWithFarcaster: (
+    payload: import("@stwd/sdk").StewardFarcasterLoginPayload,
+    config?: import("@stwd/sdk").StewardFarcasterLoginConfig,
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
+  getIdentityToken: () => Promise<import("@stwd/sdk").StewardIdentityTokenResult>;
+  getTotpStatus: () => Promise<import("@stwd/sdk").StewardTotpStatus>;
+  enrollTotp: () => Promise<import("@stwd/sdk").StewardTotpEnrollResult>;
+  verifyTotp: (code: string) => Promise<import("@stwd/sdk").StewardTotpVerifyResult>;
+  completeTotpMfa: (
+    challengeId: string,
+    code: string,
   ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  completeRecoveryCodeMfa: (
+    challengeId: string,
+    recoveryCode: string,
+  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  getRecoveryCodeStatus: () => Promise<import("@stwd/sdk").StewardRecoveryCodeStatus>;
+  regenerateRecoveryCodes: (
+    code: string,
+  ) => Promise<import("@stwd/sdk").StewardRecoveryCodesResult>;
+  unenrollTotp: (code: string) => Promise<{ ok: boolean }>;
+  getSmsMfaStatus: () => Promise<import("@stwd/sdk").StewardSmsMfaStatus>;
+  enrollSmsMfa: (phone: string) => Promise<import("@stwd/sdk").StewardSmsMfaEnrollResult>;
+  verifySmsMfa: (code: string) => Promise<import("@stwd/sdk").StewardSmsMfaVerifyResult>;
+  sendSmsMfaCode: () => Promise<import("@stwd/sdk").StewardSmsMfaEnrollResult>;
+  completeSmsMfa: (
+    challengeId: string,
+    code: string,
+  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  unenrollSmsMfa: (code: string) => Promise<{ ok: boolean }>;
   // ─── Multi-Tenant ───
   /** Currently active tenant ID from session */
   activeTenantId: string | null;
@@ -355,10 +496,16 @@ export interface StewardAuthContextValue {
 // ─── Auth Component Props ───
 
 export interface StewardLoginProps {
-  onSuccess?: (result: { token: string; user: import("@stwd/sdk").StewardUser }) => void;
+  onSuccess?: (
+    result:
+      | { token: string; user: import("@stwd/sdk").StewardUser }
+      | import("@stwd/sdk").StewardMfaRequiredResult,
+  ) => void;
   onError?: (error: Error) => void;
   showPasskey?: boolean;
   showEmail?: boolean;
+  showSms?: boolean;
+  showWhatsApp?: boolean;
   showSIWE?: boolean;
   /**
    * First-class wallet sign-in (SIWE / SIWS).
@@ -380,6 +527,23 @@ export interface StewardLoginProps {
   showDiscord?: boolean;
   showGithub?: boolean;
   showTwitter?: boolean;
+  /**
+   * Show Telegram login when the API reports Telegram is enabled.
+   * Provide `getTelegramLoginPayload` from Telegram's official login widget
+   * callback; the component exchanges that signed payload with Steward.
+   */
+  showTelegram?: boolean;
+  getTelegramLoginPayload?: () =>
+    | import("@stwd/sdk").StewardTelegramLoginPayload
+    | Promise<import("@stwd/sdk").StewardTelegramLoginPayload>;
+  /**
+   * Show Farcaster login when the API reports Farcaster is enabled.
+   * Provide `getFarcasterLoginPayload` from a SIWF-capable client flow.
+   */
+  showFarcaster?: boolean;
+  getFarcasterLoginPayload?: () =>
+    | import("@stwd/sdk").StewardFarcasterLoginPayload
+    | Promise<import("@stwd/sdk").StewardFarcasterLoginPayload>;
   /** "card" adds bg/border/padding wrapper; "inline" renders with no container styling */
   variant?: "card" | "inline";
   /** Custom logo element rendered at top of the login widget */
@@ -411,7 +575,11 @@ export interface StewardUserButtonProps {
 }
 
 export interface StewardEmailCallbackProps {
-  onSuccess?: (result: { token: string; user: import("@stwd/sdk").StewardUser }) => void;
+  onSuccess?: (
+    result:
+      | { token: string; user: import("@stwd/sdk").StewardUser }
+      | import("@stwd/sdk").StewardMfaRequiredResult,
+  ) => void;
   onError?: (error: Error) => void;
   redirectTo?: string;
 }
@@ -425,6 +593,20 @@ export interface StewardOAuthCallbackProps {
   onError?: (error: Error) => void;
   redirectTo?: string;
   provider?: string;
+}
+
+export interface StewardMfaChallengeProps {
+  challenge: import("@stwd/sdk").StewardMfaRequiredResult["mfa"];
+  onSuccess?: (result: import("@stwd/sdk").StewardAuthResult) => void;
+  onError?: (error: Error) => void;
+  allowRecoveryCode?: boolean;
+  className?: string;
+}
+
+export interface StewardMfaSettingsProps {
+  onRecoveryCodes?: (codes: string[]) => void;
+  onError?: (error: Error) => void;
+  className?: string;
 }
 
 // ─── Tenant Picker Props ───

@@ -176,6 +176,195 @@
       "when": 1779672300000,
       "tag": "0024_audit_events",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1779672900000,
+      "tag": "0025_user_identity_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1779673500000,
+      "tag": "0026_condition_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1779674100000,
+      "tag": "0027_secret_route_agent_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1779674700000,
+      "tag": "0028_wallet_action_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1779675300000,
+      "tag": "0029_tenant_oidc_providers",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1779680100000,
+      "tag": "0030_auth_abuse_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1779680700000,
+      "tag": "0031_user_deactivated_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1779681300000,
+      "tag": "0032_webhook_config_tenant_url_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1779681900000,
+      "tag": "0033_tenant_test_account",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1779682500000,
+      "tag": "0034_harden_tenant_join_default",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1779683100000,
+      "tag": "0035_tenant_owner_address_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1779747300000,
+      "tag": "0036_agent_signers",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1779750900000,
+      "tag": "0037_agent_key_quorums",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1779754500000,
+      "tag": "0038_intents",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1779797700000,
+      "tag": "0039_contract_allowlist_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1779798300000,
+      "tag": "0040_webhook_delivery_config_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1779798900000,
+      "tag": "0041_webhook_delivery_processing_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1779799500000,
+      "tag": "0042_user_wallet_identity_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1779800100000,
+      "tag": "0043_tenant_allowed_redirect_urls",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1779800700000,
+      "tag": "0044_tenant_gas_sponsorship_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1779801300000,
+      "tag": "0045_sponsored_gas_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1779801900000,
+      "tag": "0046_tenant_app_clients",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1779802500000,
+      "tag": "0047_tenant_app_client_secrets",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1779803100000,
+      "tag": "0048_tenant_sso_domains",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1779803700000,
+      "tag": "0049_security_invariant_constraints",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1779804300000,
+      "tag": "0050_tenant_saml_sso_configs",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1779804900000,
+      "tag": "0051_audit_integrity_constraints",
+      "breakpoints": true
     }
   ]
 }

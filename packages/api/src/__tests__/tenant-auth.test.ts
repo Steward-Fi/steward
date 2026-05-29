@@ -2,6 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { generateApiKey } from "@stwd/auth";
 import { getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
@@ -15,6 +17,7 @@ const TENANT_WITHOUT_KEY = "test-tenant-no-key";
 type ErrorBody = { error: string };
 
 let validApiKey: string;
+const contextSource = readFileSync(join(import.meta.dir, "..", "services", "context.ts"), "utf8");
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -91,7 +94,7 @@ describeWithDatabase("Tenant API Key Authentication", () => {
   });
 
   describe("Tenant without API key configured (Bug 3 fix)", () => {
-    it("rejects anonymous access — requires API key", async () => {
+    it("matches missing-tenant failures when no API key is configured and no key is sent", async () => {
       const res = await fetch(`${BASE_URL}/agents`, {
         headers: {
           "X-Steward-Tenant": TENANT_WITHOUT_KEY,
@@ -99,13 +102,12 @@ describeWithDatabase("Tenant API Key Authentication", () => {
         },
       });
 
-      // Should NOT allow through — must require auth
-      expect(res.status).toBe(401);
+      expect(res.status).toBe(403);
       const json = (await res.json()) as ErrorBody;
-      expect(json.error).toContain("API key required");
+      expect(json.error).toBe("Forbidden");
     });
 
-    it("rejects when API key provided but tenant not configured for auth", async () => {
+    it("matches missing-tenant failures when no API key is configured and a key is sent", async () => {
       const res = await fetch(`${BASE_URL}/agents`, {
         headers: {
           "X-Steward-Tenant": TENANT_WITHOUT_KEY,
@@ -113,22 +115,42 @@ describeWithDatabase("Tenant API Key Authentication", () => {
         },
       });
 
-      // Tenant has no hash, so can't validate the key
       expect(res.status).toBe(403);
       const json = (await res.json()) as ErrorBody;
-      expect(json.error).toContain("not configured");
+      expect(json.error).toBe("Forbidden");
     });
   });
 
   describe("Non-existent tenant", () => {
-    it("returns 404", async () => {
+    it("matches invalid-key failures so tenant IDs cannot be enumerated", async () => {
       const res = await fetch(`${BASE_URL}/agents`, {
         headers: {
           "X-Steward-Tenant": "nonexistent-tenant-12345",
           "X-Steward-Key": "stw_whatever",
         },
       });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(403);
+      const json = (await res.json()) as ErrorBody;
+      expect(json.error).toBe("Forbidden");
     });
+  });
+});
+
+describe("tenantAuth API-key oracle hardening", () => {
+  it("keeps missing, invalid, and disabled tenant API-key failures indistinguishable", () => {
+    const apiKeyFallbackStart = contextSource.indexOf(
+      'const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID',
+    );
+    const apiKeyFallbackEnd = contextSource.indexOf("export async function sessionAuth");
+    expect(apiKeyFallbackStart).toBeGreaterThanOrEqual(0);
+    expect(apiKeyFallbackEnd).toBeGreaterThan(apiKeyFallbackStart);
+    const apiKeyFallback = contextSource.slice(apiKeyFallbackStart, apiKeyFallbackEnd);
+
+    expect(apiKeyFallback).toContain(
+      "if (!tenant.apiKeyHash || !validateApiKey(apiKey, tenant.apiKeyHash))",
+    );
+    expect(apiKeyFallback).not.toContain('error: "Tenant not found" }, 404');
+    expect(apiKeyFallback).not.toContain("Tenant not configured for API key auth");
+    expect(apiKeyFallback).not.toContain("API key required");
   });
 });

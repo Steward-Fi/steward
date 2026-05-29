@@ -73,6 +73,179 @@ Built-in defaults are available for: `milady-cloud`, `milady-desktop`, `eliza-cl
 
 ---
 
+## App Clients And Environments
+
+Steward supports tenant-scoped app clients for grouping local, preview, staging, and production integration settings. App-client mutations require an owner/admin session with recent MFA because they change auth and browser allowlists.
+
+```json
+{
+  "appClients": [
+    {
+      "id": "web-prod",
+      "name": "Production Web",
+      "environment": "production",
+      "enabled": true,
+      "isDefault": true,
+      "allowedOrigins": ["https://app.example.com"],
+      "allowedRedirectUrls": ["https://app.example.com/auth/callback"],
+      "loginMethods": {
+        "oauth": { "google": true, "discord": false }
+      }
+    },
+    {
+      "id": "web-dev",
+      "name": "Local Dev",
+      "environment": "development",
+      "enabled": true,
+      "allowedOrigins": ["http://localhost:3000"],
+      "allowedRedirectUrls": ["http://localhost:3000/auth/callback"]
+    }
+  ]
+}
+```
+
+OAuth authorize accepts `client_id` or `clientId`. When supplied, Steward validates `redirect_uri` against that enabled app client's redirects instead of the tenant-global fallback and applies that client's OAuth login-method overrides.
+
+```bash
+GET /auth/oauth/google/authorize?tenant_id=my-platform&client_id=web-prod&redirect_uri=https%3A%2F%2Fapp.example.com%2Fauth%2Fcallback
+```
+
+Dedicated aliases:
+
+```bash
+GET /tenants/:id/app-clients
+PUT /tenants/:id/app-clients
+POST /tenants/:id/app-clients
+DELETE /tenants/:id/app-clients/:clientId
+```
+
+### App Client Secrets
+
+App clients can also have backend-only app secrets for Privy-style REST API authentication. The app ID is stable and public in the form `<tenantId>/<clientId>`. The app secret is returned only once when rotated or created.
+
+Use Basic Auth with the app ID as the username and the app secret as the password, plus `X-Steward-App-Id`:
+
+```bash
+curl https://api.steward.fi/agents \
+  -H "X-Steward-App-Id: my-platform/web-prod" \
+  -H "Authorization: Basic $(printf 'my-platform/web-prod:stw_app_...' | base64)"
+```
+
+Secret management requires an owner/admin session with recent MFA:
+
+```bash
+GET /tenants/:id/app-clients/:clientId/secrets
+POST /tenants/:id/app-clients/:clientId/secrets
+DELETE /tenants/:id/app-clients/:clientId/secrets/:secretId
+```
+
+`POST` rotates the secret, returns `appSecret` once, and marks the previous active secret as `retiring` for a short overlap window. `GET` returns metadata only: secret prefix, status, timestamps, and the public app ID.
+
+## OIDC / JWT Login Providers
+
+Tenant OIDC providers support direct JWT exchange and enterprise authorization-code SSO. The authorization-code fields are optional; when present, Steward acts as the relying party, verifies the returned ID token, and redirects the app with a short-lived exchange code instead of putting Steward tokens in the URL.
+
+```json
+{
+  "id": "acme-sso",
+  "enabled": true,
+  "issuer": "https://idp.example.com",
+  "audience": ["steward-api"],
+  "jwksUri": "https://idp.example.com/.well-known/jwks.json",
+  "clientId": "steward-dashboard",
+  "clientSecretEnv": "ACME_SSO_CLIENT_SECRET",
+  "authorizationUrl": "https://idp.example.com/oauth2/v1/authorize",
+  "tokenUrl": "https://idp.example.com/oauth2/v1/token",
+  "scopes": ["openid", "email", "profile"]
+}
+```
+
+The SP-initiated SSO route requires app-side PKCE:
+
+```bash
+GET /auth/oidc/:provider/authorize?tenant_id=my-platform&redirect_uri=https%3A%2F%2Fapp.example.com%2Fauth%2Fcallback&code_challenge=...&code_challenge_method=S256
+```
+
+The provider callback validates the OIDC state, IdP PKCE verifier, ID-token issuer/audience/algorithm/JWKS signature, and nonce. Enterprise OIDC SSO requires a verified email claim whose domain is already verified in the tenant SSO domain registry. New JIT memberships created through this auth-code path default to `viewer`. Steward then reuses `POST /auth/oauth/exchange` for the app-bound one-time code exchange.
+
+## SSO Email Domains
+
+Tenant admins can register verified email domains for dashboard/team SSO discovery. This is the domain-routing layer used before SAML/OIDC redirect flows.
+
+```bash
+GET /tenants/:id/sso-domains
+POST /tenants/:id/sso-domains
+POST /tenants/:id/sso-domains/:domain/verify
+DELETE /tenants/:id/sso-domains/:domain
+```
+
+Create a domain:
+
+```json
+{
+  "domain": "example.com",
+  "ssoRequired": true
+}
+```
+
+The response includes a `verificationToken`. Publish it as an exact TXT value at `_steward-sso.example.com`, then call verify. Once verified, public discovery can route email addresses to the tenant:
+
+```bash
+POST /auth/sso/discover
+```
+
+```json
+{
+  "email": "admin@example.com"
+}
+```
+
+## SAML Dashboard SSO
+
+Tenant admins can configure one SAML 2.0 IdP for dashboard/team SSO. The SAML configuration is separate from domain verification: verified SSO domains decide which tenant owns an email domain, while SAML metadata and ACS routes define the tenant's service-provider integration.
+
+```bash
+GET /tenants/:id/saml-sso
+PUT /tenants/:id/saml-sso
+DELETE /tenants/:id/saml-sso
+GET /auth/saml/:tenantId/metadata
+POST /auth/saml/:tenantId/acs
+```
+
+`GET /tenants/:id/saml-sso` returns the current config, if any, plus generated service-provider values:
+
+```json
+{
+  "serviceProvider": {
+    "spEntityId": "https://api.example.com/auth/saml/acme/metadata",
+    "acsUrl": "https://api.example.com/auth/saml/acme/acs",
+    "metadataUrl": "https://api.example.com/auth/saml/acme/metadata"
+  }
+}
+```
+
+`PUT /tenants/:id/saml-sso` requires an owner/admin session with recent MFA and stores parsed IdP settings:
+
+```json
+{
+  "enabled": true,
+  "idpEntityId": "https://idp.example.com/saml",
+  "idpSsoUrl": "https://idp.example.com/sso",
+  "idpCertPems": ["-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"],
+  "emailAttribute": "email",
+  "groupsAttribute": "groups",
+  "allowJitProvisioning": false
+}
+```
+
+Steward validates that the IdP SSO URL is a public `https` URL, certificate entries are PEM certificates without private key material, at most five IdP certs are configured, and JIT-created SSO memberships can only default to `viewer`. The metadata route emits unsigned SP metadata with `WantAssertionsSigned=true` and stable Entity ID/ACS URLs derived from `APP_URL`, not the request host.
+
+The ACS route is intentionally disabled until signed assertion validation, audience/recipient checks, expiry enforcement, verified-domain enforcement, and replay protection are implemented with SAML fixtures. It returns `501` instead of accepting assertions.
+
+Client IDs must match `^[a-z0-9][a-z0-9_-]{2,63}$`. Redirect URLs must be exact `https` URLs, except loopback development URLs. Origins must be exact origins; app clients cannot use wildcard origins.
+
+---
+
 ## Update Tenant Config
 
 ```bash
@@ -283,6 +456,8 @@ Full color and typography control:
 ```
 
 These map directly to the CSS custom properties in `@stwd/react`. Any fields not provided fall back to the component library defaults.
+
+Theme updates are validated before persistence: color tokens must be exact 6-digit hex values, `borderRadius` must be between `0` and `32`, `colorScheme` must be `light`, `dark`, or `system`, and `fontFamily` is restricted to common CSS font-family characters.
 
 ---
 
