@@ -25,7 +25,7 @@ afterAll(async () => {
 async function ensureTenant(tenantId: string) {
   await getDb()
     .insert(tenants)
-    .values({ id: tenantId, name: tenantId, apiKeyHash: "hash" })
+    .values({ id: tenantId, name: tenantId, apiKeyHash: `hash-${tenantId}` })
     .onConflictDoNothing();
 }
 
