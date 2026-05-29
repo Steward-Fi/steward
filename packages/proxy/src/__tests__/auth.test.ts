@@ -38,6 +38,10 @@ function app() {
 
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
+  // verifyToken now refuses to run without an explicit JWT secret (the dev
+  // fallback requires STEWARD_ALLOW_DEV_SECRETS). Set a real secret so the
+  // signed tokens here verify against the same key the middleware uses.
+  process.env.STEWARD_JWT_SECRET = "proxy-auth-test-jwt-secret-with-enough-bytes";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -46,7 +50,7 @@ beforeAll(async () => {
   await getDb().insert(tenants).values({
     id: "tenant-1",
     name: "Proxy Auth Tenant",
-    apiKeyHash: "hash",
+    apiKeyHash: "hash-proxy-auth-tenant-1",
   });
   await getDb()
     .insert(agents)
@@ -69,6 +73,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await closeDb().catch(() => {});
   delete process.env.STEWARD_PGLITE_MEMORY;
+  delete process.env.STEWARD_JWT_SECRET;
   delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
   delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
   delete process.env.STEWARD_PROXY_ALLOW_UNSIGNED_REQUESTS;
