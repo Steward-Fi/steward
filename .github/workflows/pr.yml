@@ -168,7 +168,10 @@ jobs:
   integration:
     name: Integration Tests (Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 25m: the per-test timeout was raised to 30s to absorb PGLite migration
+    # latency under the concurrent --isolate load, which lengthens worst-case
+    # wall-clock for the full 122-file run. Give the job comfortable headroom.
+    timeout-minutes: 25
     env:
       REDIS_URL: "redis://localhost:6379"
 
