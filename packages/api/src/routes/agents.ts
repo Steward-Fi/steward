@@ -1614,12 +1614,14 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
   }
 
   const updates: Partial<typeof agentSigners.$inferInsert> = {};
+  let privilegedSignerUpdate = false;
   try {
     if (body.signerType !== undefined) {
       const signerType = normalizeRequiredText(body.signerType, "signerType", 32);
       if (!AGENT_SIGNER_TYPES.has(signerType)) {
         throw new Error("signerType must be one of: owner, delegated, service, quorum_member");
       }
+      if (signerType !== existingSigner.signerType) privilegedSignerUpdate = true;
       updates.signerType = signerType;
     }
     if (body.address !== undefined) {
@@ -1631,10 +1633,15 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
       ) {
         throw new Error("address must be an EVM or Solana address");
       }
+      // Re-pointing the resolvable address of an active signer is functionally
+      // credential takeover for any flow that resolves authority through
+      // agentSigners.address, so this needs the same recent-MFA gate as a
+      // permissions/status change. Matches the key-quorum PATCH model.
+      if ((address ?? null) !== (existingSigner.address ?? null)) privilegedSignerUpdate = true;
       updates.address = address;
     }
     if (body.chainFamily !== undefined) {
-      updates.chainFamily =
+      const chainFamily =
         body.chainFamily === null
           ? null
           : body.chainFamily === "evm" || body.chainFamily === "solana"
@@ -1642,16 +1649,18 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
             : (() => {
                 throw new Error("chainFamily must be evm or solana");
               })();
+      if ((chainFamily ?? null) !== (existingSigner.chainFamily ?? null)) {
+        privilegedSignerUpdate = true;
+      }
+      updates.chainFamily = chainFamily;
     }
     if (body.label !== undefined) updates.label = normalizeOptionalText(body.label, "label", 255);
     if (body.permissions !== undefined) {
-      const mfaResponse = requireRecentAdminMfa(c, "Signer permission updates");
-      if (mfaResponse) return mfaResponse;
+      privilegedSignerUpdate = true;
       updates.permissions = normalizeSignerPermissions(body.permissions);
     }
     if (body.metadata !== undefined) {
-      const mfaResponse = requireRecentAdminMfa(c, "Signer metadata updates");
-      if (mfaResponse) return mfaResponse;
+      privilegedSignerUpdate = true;
       updates.metadata = mergeSignerMetadataPreservingReserved(
         existingSigner.metadata,
         normalizeSignerMetadata(body.metadata),
@@ -1662,10 +1671,7 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
       if (!AGENT_SIGNER_STATUSES.has(status)) {
         throw new Error("status must be one of: active, paused, revoked");
       }
-      if (status !== existingSigner.status) {
-        const mfaResponse = requireRecentAdminMfa(c, "Signer status updates");
-        if (mfaResponse) return mfaResponse;
-      }
+      if (status !== existingSigner.status) privilegedSignerUpdate = true;
       updates.status = status;
     }
   } catch (error) {
@@ -1677,6 +1683,13 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
 
   if (Object.keys(updates).length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "No signer updates provided" }, 400);
+  }
+  // Single MFA gate for any privileged field change, mirroring the key-quorum PATCH
+  // handler. Cosmetic-only updates (label) are exempt; everything that affects
+  // signer authority requires a recent step-up.
+  if (privilegedSignerUpdate) {
+    const mfaResponse = requireRecentAdminMfa(c, "Signer updates");
+    if (mfaResponse) return mfaResponse;
   }
 
   await writeAgentAudit(c, {
