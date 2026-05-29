@@ -100,7 +100,7 @@ export class PersistentQueue {
         UPDATE ${webhookDeliveries}
         SET
           "status" = 'processing',
-          "next_retry_at" = ${new Date(now.getTime() + CLAIM_VISIBILITY_TIMEOUT_MS)}
+          "next_retry_at" = ${new Date(now.getTime() + CLAIM_VISIBILITY_TIMEOUT_MS).toISOString()}
         WHERE "id" IN (
           SELECT "id"
           FROM ${webhookDeliveries}
@@ -108,7 +108,7 @@ export class PersistentQueue {
             ${webhookDeliveries.status} in ('pending', 'failed')
             OR ${webhookDeliveries.status} = 'processing'
           )
-            AND ${webhookDeliveries.nextRetryAt} <= ${now}
+            AND ${webhookDeliveries.nextRetryAt} <= ${now.toISOString()}
           ORDER BY ${webhookDeliveries.nextRetryAt} ASC
           FOR UPDATE SKIP LOCKED
           LIMIT ${this.batchSize}

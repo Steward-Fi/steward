@@ -2,7 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const routeSource = readFileSync(join(import.meta.dir, "..", "routes", "condition-sets.ts"), "utf8");
+const routeSource = readFileSync(
+  join(import.meta.dir, "..", "routes", "condition-sets.ts"),
+  "utf8",
+);
 
 describe("condition set audit rollback hardening", () => {
   it("restores condition sets and items when final audit writes fail", () => {

@@ -40,15 +40,22 @@ describe("audit and policy route hardening", () => {
     expect(verifyStart).toBeGreaterThanOrEqual(0);
     const verifyRoute = auditSource.slice(verifyStart);
     expect(verifyRoute).toContain("const requestedToSeq = parsedToSeq.value");
-    expect(verifyRoute).toContain("const toSeq = requestedToSeq ?? fromSeq + MAX_AUDIT_VERIFY_RANGE - 1");
+    expect(verifyRoute).toContain(
+      "const toSeq = requestedToSeq ?? fromSeq + MAX_AUDIT_VERIFY_RANGE - 1",
+    );
     expect(verifyRoute).toContain("toSeq - fromSeq + 1 > MAX_AUDIT_VERIFY_RANGE");
   });
 
   it("does not make deep combined audit log pages unreachable", () => {
     const logStart = auditSource.indexOf('auditRoutes.get("/log"');
     expect(logStart).toBeGreaterThanOrEqual(0);
-    const logRoute = auditSource.slice(logStart, auditSource.indexOf('auditRoutes.get("/summary"', logStart));
-    expect(logRoute).toContain("const combinedFetchLimit = wantTx && wantProxy ? offset + limit : limit");
+    const logRoute = auditSource.slice(
+      logStart,
+      auditSource.indexOf('auditRoutes.get("/summary"', logStart),
+    );
+    expect(logRoute).toContain(
+      "const combinedFetchLimit = wantTx && wantProxy ? offset + limit : limit",
+    );
     expect(logRoute).toContain(".limit(wantProxy ? combinedFetchLimit : limit)");
     expect(logRoute).toContain(".limit(wantTx ? combinedFetchLimit : limit)");
     expect(logRoute).not.toContain(".limit(wantProxy ? 1000 : limit)");
