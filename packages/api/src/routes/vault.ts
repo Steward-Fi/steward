@@ -3038,15 +3038,6 @@ vaultRoutes.get("/:agentId/pending", async (c) => {
       403,
     );
   }
-  if (!hasTenantAdminSession(c) || !hasRecentSessionMfa(c)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Unsafe message signing requires owner or admin session with recent MFA",
-      },
-      403,
-    );
-  }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
