@@ -4,7 +4,7 @@
  * Mount: app.route("/tenants", tenantRoutes)
  */
 
-import { hashApiKey } from "@stwd/auth";
+import { hashApiKey, platformAuthMiddleware } from "@stwd/auth";
 import { type Context, Hono, type Next } from "hono";
 import { trackAuditEvent } from "../services/audit";
 import {
@@ -33,7 +33,14 @@ export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
 export const requireTenantId = (c: Context<{ Variables: AppVariables }>, next: Next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") });
 
-tenantRoutes.post("/", async (c) => {
+const requirePlatformTenantCreate = (c: Context<{ Variables: AppVariables }>, next: Next) => {
+  if (!c.req.header("X-Steward-Platform-Key")) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+  }
+  return platformAuthMiddleware()(c, next);
+};
+
+tenantRoutes.post("/", requirePlatformTenantCreate, async (c) => {
   const body = await safeJsonParse<{
     id: string;
     name: string;
