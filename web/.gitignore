@@ -5,3 +5,7 @@ node_modules/
 .vercel/
 .vercel
 .env*.local
+
+# OpenNext (Cloudflare) build output
+.open-next/
+.wrangler/

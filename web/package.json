@@ -8,7 +8,10 @@
     "start": "next start --port ${PORT:-3202}",
     "e2e": "playwright test",
     "e2e:chromium": "playwright test --project=chromium",
-    "e2e:install": "playwright install chromium firefox webkit"
+    "e2e:install": "playwright install chromium firefox webkit",
+    "cf:build": "opennextjs-cloudflare build",
+    "cf:preview": "opennextjs-cloudflare preview",
+    "cf:deploy": "opennextjs-cloudflare build && wrangler deploy"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.10",
@@ -42,6 +45,8 @@
     "bs58": "^6.0.0",
     "postcss": "^8.4.0",
     "tailwindcss": "^3.4.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "@opennextjs/cloudflare": "^1.19.11",
+    "wrangler": "^4.95.0"
   }
 }
