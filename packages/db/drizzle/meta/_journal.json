@@ -183,6 +183,13 @@
       "when": 1780119600000,
       "tag": "0025_approval_queue_principals",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1780120200000,
+      "tag": "0026_agent_policies",
+      "breakpoints": true
     }
   ]
 }
