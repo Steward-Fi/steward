@@ -70,17 +70,18 @@ describe("venue helpers", () => {
 
 describe("createPriceOracle", () => {
   it("chooses the highest-liquidity priced pair and caches it", async () => {
-    const fetchMock = mock(async () =>
-      new Response(
-        JSON.stringify({
-          pairs: [
-            { priceUsd: "100", liquidity: { usd: 10 } },
-            { priceUsd: "200", liquidity: { usd: 1_000 } },
-            { priceUsd: "0", liquidity: { usd: 999_999 } },
-          ],
-        }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      ),
+    const fetchMock = mock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            pairs: [
+              { priceUsd: "100", liquidity: { usd: 10 } },
+              { priceUsd: "200", liquidity: { usd: 1_000 } },
+              { priceUsd: "0", liquidity: { usd: 999_999 } },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -92,11 +93,12 @@ describe("createPriceOracle", () => {
   });
 
   it("converts native wei and SOL lamports using chain-specific decimals", async () => {
-    const fetchMock = mock(async () =>
-      new Response(JSON.stringify({ pairs: [{ priceUsd: "50", liquidity: { usd: 100 } }] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
+    const fetchMock = mock(
+      async () =>
+        new Response(JSON.stringify({ pairs: [{ priceUsd: "50", liquidity: { usd: 100 } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -107,18 +109,21 @@ describe("createPriceOracle", () => {
   });
 
   it("returns null instead of throwing when no wrapped native token or pair is available", async () => {
-    const fetchMock = mock(async () =>
-      new Response(JSON.stringify({ pairs: [] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
+    const fetchMock = mock(
+      async () =>
+        new Response(JSON.stringify({ pairs: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     const oracle = createPriceOracle({ cacheTtlMs: 0 });
 
     await expect(oracle.getNativeUsdPrice(101)).resolves.toBeNull();
-    await expect(oracle.getTokenUsdPrice(8453, "0x0000000000000000000000000000000000000000")).resolves.toBeNull();
+    await expect(
+      oracle.getTokenUsdPrice(8453, "0x0000000000000000000000000000000000000000"),
+    ).resolves.toBeNull();
   });
 
   it("returns null for non-OK price responses", async () => {

@@ -31,7 +31,9 @@ async function readBody(req: IncomingMessage): Promise<string> {
 }
 
 async function withWebhookServer(
-  handler: (request: CapturedRequest) => { status: number; body?: string } | Promise<{ status: number; body?: string }>,
+  handler: (
+    request: CapturedRequest,
+  ) => { status: number; body?: string } | Promise<{ status: number; body?: string }>,
 ) {
   const requests: CapturedRequest[] = [];
   const server = createServer(async (req, res) => {
@@ -112,7 +114,11 @@ describe("WebhookDispatcher HMAC signing", () => {
     const server = await withWebhookServer(() => ({ status: 401, body: "bad signature" }));
 
     try {
-      const dispatcher = new WebhookDispatcher({ maxRetries: 3, retryDelayMs: 5, timeoutMs: 1_000 });
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 3,
+        retryDelayMs: 5,
+        timeoutMs: 1_000,
+      });
       const result = await dispatcher.dispatch(makeEvent(), { url: server.url, secret: SECRET });
 
       expect(result.success).toBe(false);
@@ -129,7 +135,11 @@ describe("WebhookDispatcher HMAC signing", () => {
     const server = await withWebhookServer(() => ({ status: statuses.shift() ?? 200 }));
 
     try {
-      const dispatcher = new WebhookDispatcher({ maxRetries: 3, retryDelayMs: 10, timeoutMs: 1_000 });
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 3,
+        retryDelayMs: 10,
+        timeoutMs: 1_000,
+      });
       const started = Date.now();
       const result = await dispatcher.dispatch(makeEvent(), { url: server.url, secret: SECRET });
 
