@@ -1,11 +1,11 @@
 // node:crypto under Cloudflare nodejs_compat:
-//   - createCipheriv / createDecipheriv (AES-256-GCM) — supported.
-//   - randomBytes                                      — supported.
-//   - scryptSync                                       — supported. Sync work
+//   - createCipheriv / createDecipheriv (AES-256-GCM) - supported.
+//   - randomBytes                                      - supported.
+//   - scryptSync                                       - supported. Sync work
 //     runs on the request CPU budget (~10ms by default, configurable). Default
 //     N=16384 derivation is well under budget. If a future caller raises N,
 //     consider crypto.subtle.deriveBits with PBKDF2-SHA256 as an async
-//     alternative — note that switching KDFs invalidates existing encrypted
+//     alternative - note that switching KDFs invalidates existing encrypted
 //     records (operator decision, not a transparent migration).
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 
@@ -21,7 +21,11 @@ export interface EncryptedKey {
   ciphertext: string; // hex
   iv: string; // hex
   tag: string; // hex
-  salt: string; // hex
+  salt: string; // hex for AES default, envelope metadata for KMS backends
+  backend?: string;
+  wrappedDataKey?: string; // hex
+  provider?: string;
+  keyId?: string;
 }
 
 export class KeyStore {
@@ -87,7 +91,7 @@ export class KeyStore {
   }
 
   /**
-   * Decrypt a private key for signing (ephemeral — caller should zero after use)
+   * Decrypt a private key for signing (ephemeral - caller should zero after use)
    */
   decrypt(encrypted: EncryptedKey): string {
     const iv = Buffer.from(encrypted.iv, "hex");

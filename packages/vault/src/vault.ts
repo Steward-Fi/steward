@@ -40,6 +40,7 @@ import {
 } from "viem/chains";
 
 import { type EncryptedKey, KeyStore } from "./keystore";
+import { backendFromKeyStore, type KeystoreBackend } from "./keystore-backend";
 import {
   generateSolanaKeypair,
   getSolanaBalance,
@@ -53,6 +54,7 @@ export interface VaultConfig {
   masterPassword: string;
   rpcUrl?: string;
   chainId?: number;
+  keystoreBackend?: KeystoreBackend;
 }
 
 const CHAINS: Record<number, Chain> = {
@@ -139,12 +141,13 @@ export interface SignTransactionOptions {
  * of a signing operation and never exposed to agent containers.
  */
 export class Vault {
-  private keyStore: KeyStore;
+  private keyStore: KeystoreBackend;
   private config: VaultConfig;
 
   constructor(config: VaultConfig) {
     this.config = config;
-    this.keyStore = new KeyStore(config.masterPassword);
+    this.keyStore =
+      config.keystoreBackend ?? backendFromKeyStore(new KeyStore(config.masterPassword));
   }
 
   /**
@@ -183,8 +186,8 @@ export class Vault {
     const solanaAddress = solKp.publicKey;
 
     // ── Encrypt both keys ────────────────────────────────────────────────
-    const evmEncrypted = this.keyStore.encrypt(evmPrivateKey);
-    const solEncrypted = this.keyStore.encrypt(solKp.secretKey);
+    const evmEncrypted = await this.keyStore.encrypt(evmPrivateKey);
+    const solEncrypted = await this.keyStore.encrypt(solKp.secretKey);
 
     const createdAt = new Date();
 
@@ -403,7 +406,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
+      secretKey = await this.keyStore.decrypt({
         ciphertext: chainKey.ciphertext,
         iv: chainKey.iv,
         tag: chainKey.tag,
@@ -421,7 +424,7 @@ export class Vault {
       if (!legacyKey) {
         throw missingSigningKeyError(request.agentId, chainFamilyToUse);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey);
     }
 
     // Also resolve the wallet address for this chain (for Solana tx signing)
@@ -668,7 +671,7 @@ export class Vault {
       walletAddress = account.address;
     }
 
-    const encryptedKey = this.keyStore.encrypt(privateKey);
+    const encryptedKey = await this.keyStore.encrypt(privateKey);
     const now = new Date();
 
     // Check if agent already exists
@@ -797,7 +800,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
+      secretKey = await this.keyStore.decrypt({
         ciphertext: chainKey.ciphertext,
         iv: chainKey.iv,
         tag: chainKey.tag,
@@ -812,7 +815,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No signing key found for agent ${agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey);
     }
 
     if (isSolana) {
@@ -830,7 +833,7 @@ export class Vault {
    * Returns { contractAddress, chainId, nonce, r, s, yParity, v } which the
    * caller attaches to the `authorizationList` of a type-4 transaction.
    *
-   * Per EIP-7702, signing chainId=0 designates "any chain" — useful when the
+   * Per EIP-7702, signing chainId=0 designates "any chain" - useful when the
    * delegation target is chain-agnostic. The vault accepts 0 explicitly so
    * callers can opt in; default is the chainId on the request.
    */
@@ -878,7 +881,7 @@ export class Vault {
         ),
       );
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
+      secretKey = await this.keyStore.decrypt({
         ciphertext: chainKey.ciphertext,
         iv: chainKey.iv,
         tag: chainKey.tag,
@@ -890,7 +893,7 @@ export class Vault {
         .from(encryptedKeys)
         .where(eq(encryptedKeys.agentId, agentId));
       if (!legacyKey) throw new Error(`No EVM signing key for agent ${agentId}`);
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey);
     }
 
     const account = privateKeyToAccount(secretKey as `0x${string}`);
@@ -948,7 +951,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
+      secretKey = await this.keyStore.decrypt({
         ciphertext: chainKey.ciphertext,
         iv: chainKey.iv,
         tag: chainKey.tag,
@@ -968,7 +971,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No signing key found for agent ${request.agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey);
     }
 
     const account = privateKeyToAccount(secretKey as `0x${string}`);
@@ -1029,7 +1032,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt({
+      secretKey = await this.keyStore.decrypt({
         ciphertext: chainKey.ciphertext,
         iv: chainKey.iv,
         tag: chainKey.tag,
@@ -1049,7 +1052,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No Solana signing key found for agent ${request.agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey);
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey);
     }
 
     const keypair = restoreSolanaKeypair(secretKey);
@@ -1140,7 +1143,7 @@ export class Vault {
       );
 
     if (evmChainKey) {
-      const pk = this.keyStore.decrypt({
+      const pk = await this.keyStore.decrypt({
         ciphertext: evmChainKey.ciphertext,
         iv: evmChainKey.iv,
         tag: evmChainKey.tag,
@@ -1167,7 +1170,7 @@ export class Vault {
         .from(encryptedKeys)
         .where(eq(encryptedKeys.agentId, agentId));
       if (legacyKey) {
-        const pk = this.keyStore.decrypt(legacyKey as EncryptedKey);
+        const pk = await this.keyStore.decrypt(legacyKey as EncryptedKey);
         result.evm = {
           privateKey: pk,
           address: privateKeyToAccount(pk as `0x${string}`).address,
@@ -1188,7 +1191,7 @@ export class Vault {
       );
 
     if (solChainKey) {
-      const pk = this.keyStore.decrypt({
+      const pk = await this.keyStore.decrypt({
         ciphertext: solChainKey.ciphertext,
         iv: solChainKey.iv,
         tag: solChainKey.tag,
@@ -1402,7 +1405,7 @@ export class Vault {
       secret = kp.secretKey;
     }
 
-    const encrypted = this.keyStore.encrypt(secret);
+    const encrypted = await this.keyStore.encrypt(secret);
     const createdAt = new Date();
 
     await db.transaction(async (tx) => {

@@ -21,6 +21,18 @@
     "drizzle-orm": "^0.44.5",
     "viem": "^2.30.0"
   },
+  "peerDependencies": {
+    "@aws-sdk/client-kms": "^3.700.0",
+    "graphene-pk11": "^2.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-kms": {
+      "optional": true
+    },
+    "graphene-pk11": {
+      "optional": true
+    }
+  },
   "description": "AES-256-GCM encrypted keystore and transaction signing via viem",
   "devDependencies": {
     "@types/node": "^25.5.0"
