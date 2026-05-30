@@ -16,10 +16,13 @@ import {
   db,
   ensureAgentForTenant,
   extractRpcErrorMessage,
+  formatAuthenticatedPrincipal,
+  getAuthenticatedPrincipal,
   getPolicySet,
   getTransactionStats,
   isNonEmptyString,
   isRpcError,
+  isSameAuthenticatedPrincipal,
   isValidAddress,
   isValidAgentId,
   isValidAnyAddress,
@@ -88,6 +91,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     agentId,
     chainId: resolvedChainId,
   };
+  const requester = getAuthenticatedPrincipal(c);
   const policySet = await getPolicySet(tenantId, agentId);
 
   // ── Redis rate-limit check (before policy evaluation) ──────────────────────
@@ -141,6 +145,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           txId,
           agentId,
           status: "pending",
+          requestedByType: requester.type,
+          requestedById: requester.id,
         });
       });
 
@@ -334,17 +340,46 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
   }
 
+  const approver = getAuthenticatedPrincipal(c);
+  const [approvalEntry] = await db
+    .select({
+      id: approvalQueue.id,
+      status: approvalQueue.status,
+      requestedByType: approvalQueue.requestedByType,
+      requestedById: approvalQueue.requestedById,
+    })
+    .from(approvalQueue)
+    .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
+
+  if (!approvalEntry || approvalEntry.status !== "pending") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction already processed or not found" },
+      409,
+    );
+  }
+
+  if (
+    approvalEntry.requestedByType &&
+    approvalEntry.requestedById &&
+    isSameAuthenticatedPrincipal(
+      { type: approvalEntry.requestedByType, id: approvalEntry.requestedById },
+      approver,
+    )
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "Approval requires separation of duties" }, 403);
+  }
+
   const resolvedAt = new Date();
   const claimResult = await db
     .update(approvalQueue)
-    .set({ status: "approved", resolvedAt, resolvedBy: tenantId })
-    .where(
-      and(
-        eq(approvalQueue.txId, txId),
-        eq(approvalQueue.agentId, agentId),
-        eq(approvalQueue.status, "pending"),
-      ),
-    )
+    .set({
+      status: "approved",
+      resolvedAt,
+      resolvedBy: formatAuthenticatedPrincipal(approver),
+      resolvedByType: approver.type,
+      resolvedById: approver.id,
+    })
+    .where(and(eq(approvalQueue.id, approvalEntry.id), eq(approvalQueue.status, "pending")))
     .returning();
 
   if (claimResult.length === 0) {
@@ -390,8 +425,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
     trackAuditEvent({
       tenantId,
-      actorType: "user",
-      actorId: tenantId,
+      actorType: approver.type === "agent" ? "agent" : "user",
+      actorId: approver.id,
       action: "vault.approve",
       resourceType: "transaction",
       resourceId: txId,
@@ -411,7 +446,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     // Revert the atomic claim so the approval can be retried
     await db
       .update(approvalQueue)
-      .set({ status: "pending", resolvedAt: null, resolvedBy: null })
+      .set({
+        status: "pending",
+        resolvedAt: null,
+        resolvedBy: null,
+        resolvedByType: null,
+        resolvedById: null,
+      })
       .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
 
     const requestId = c.get("requestId") || "unknown";
@@ -663,6 +704,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     value: "0",
     chainId: resolvedChainId,
   };
+  const requester = getAuthenticatedPrincipal(c);
 
   const policySet = await getPolicySet(tenantId, agentId);
 
@@ -707,6 +749,8 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
           txId,
           agentId,
           status: "pending",
+          requestedByType: requester.type,
+          requestedById: requester.id,
         });
       });
 
@@ -921,6 +965,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     value: txValue,
     chainId,
   };
+  const requester = getAuthenticatedPrincipal(c);
 
   const policySet = await getPolicySet(tenantId, agentId);
 
@@ -969,6 +1014,8 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           txId,
           agentId,
           status: "pending",
+          requestedByType: requester.type,
+          requestedById: requester.id,
         });
       });
 

@@ -266,6 +266,11 @@ export const defaultTenantReady = db
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
+export type AuthenticatedPrincipal = {
+  type: "tenant" | "user" | "agent";
+  id: string;
+};
+
 export type AppVariables = {
   tenant: Tenant;
   tenantConfig: TenantConfig;
@@ -467,6 +472,33 @@ export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next:
   );
 
   await next();
+}
+
+export function getAuthenticatedPrincipal(
+  c: Context<{ Variables: AppVariables }>,
+): AuthenticatedPrincipal {
+  const authType = c.get("authType");
+  if (authType === "agent-token") {
+    return { type: "agent", id: c.get("agentScope") || c.req.param("agentId") || "unknown" };
+  }
+
+  const userId = c.get("userId");
+  if ((authType === "session-jwt" || authType === "dashboard-jwt") && userId) {
+    return { type: "user", id: userId };
+  }
+
+  return { type: "tenant", id: c.get("tenantId") || DEFAULT_TENANT_ID };
+}
+
+export function isSameAuthenticatedPrincipal(
+  left: { type: string; id: string },
+  right: { type: string; id: string },
+): boolean {
+  return left.type === right.type && left.id === right.id;
+}
+
+export function formatAuthenticatedPrincipal(principal: AuthenticatedPrincipal): string {
+  return `${principal.type}:${principal.id}`;
 }
 
 export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boolean {
