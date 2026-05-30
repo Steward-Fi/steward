@@ -304,8 +304,12 @@ export const approvalQueue = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     status: approvalQueueStatusEnum("status").notNull().default("pending"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    requestedByType: varchar("requested_by_type", { length: 32 }),
+    requestedById: varchar("requested_by_id", { length: 255 }),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
     resolvedBy: varchar("resolved_by", { length: 255 }),
+    resolvedByType: varchar("resolved_by_type", { length: 32 }),
+    resolvedById: varchar("resolved_by_id", { length: 255 }),
   },
   (table) => ({
     txIdUniqueIdx: uniqueIndex("approval_queue_tx_id_idx").on(table.txId),

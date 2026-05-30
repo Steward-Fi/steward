@@ -5,10 +5,11 @@
  * Mount: app.route("/vault", vaultRoutes)
  */
 
+import { verifyToken } from "@stwd/auth";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
-import { trackAuditEvent } from "../services/audit";
+import { trackAuditEvent, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -16,10 +17,13 @@ import {
   db,
   ensureAgentForTenant,
   extractRpcErrorMessage,
+  formatAuthenticatedPrincipal,
+  getAuthenticatedPrincipal,
   getPolicySet,
   getTransactionStats,
   isNonEmptyString,
   isRpcError,
+  isSameAuthenticatedPrincipal,
   isValidAddress,
   isValidAgentId,
   isValidAnyAddress,
@@ -88,6 +92,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     agentId,
     chainId: resolvedChainId,
   };
+  const requester = getAuthenticatedPrincipal(c);
   const policySet = await getPolicySet(tenantId, agentId);
 
   // ── Redis rate-limit check (before policy evaluation) ──────────────────────
@@ -141,6 +146,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           txId,
           agentId,
           status: "pending",
+          requestedByType: requester.type,
+          requestedById: requester.id,
         });
       });
 
@@ -334,17 +341,46 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
   }
 
+  const approver = getAuthenticatedPrincipal(c);
+  const [approvalEntry] = await db
+    .select({
+      id: approvalQueue.id,
+      status: approvalQueue.status,
+      requestedByType: approvalQueue.requestedByType,
+      requestedById: approvalQueue.requestedById,
+    })
+    .from(approvalQueue)
+    .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
+
+  if (!approvalEntry || approvalEntry.status !== "pending") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Transaction already processed or not found" },
+      409,
+    );
+  }
+
+  if (
+    approvalEntry.requestedByType &&
+    approvalEntry.requestedById &&
+    isSameAuthenticatedPrincipal(
+      { type: approvalEntry.requestedByType, id: approvalEntry.requestedById },
+      approver,
+    )
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "Approval requires separation of duties" }, 403);
+  }
+
   const resolvedAt = new Date();
   const claimResult = await db
     .update(approvalQueue)
-    .set({ status: "approved", resolvedAt, resolvedBy: tenantId })
-    .where(
-      and(
-        eq(approvalQueue.txId, txId),
-        eq(approvalQueue.agentId, agentId),
-        eq(approvalQueue.status, "pending"),
-      ),
-    )
+    .set({
+      status: "approved",
+      resolvedAt,
+      resolvedBy: formatAuthenticatedPrincipal(approver),
+      resolvedByType: approver.type,
+      resolvedById: approver.id,
+    })
+    .where(and(eq(approvalQueue.id, approvalEntry.id), eq(approvalQueue.status, "pending")))
     .returning();
 
   if (claimResult.length === 0) {
@@ -390,8 +426,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
     trackAuditEvent({
       tenantId,
-      actorType: "user",
-      actorId: tenantId,
+      actorType: approver.type === "agent" ? "agent" : "user",
+      actorId: approver.id,
       action: "vault.approve",
       resourceType: "transaction",
       resourceId: txId,
@@ -411,7 +447,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     // Revert the atomic claim so the approval can be retried
     await db
       .update(approvalQueue)
-      .set({ status: "pending", resolvedAt: null, resolvedBy: null })
+      .set({
+        status: "pending",
+        resolvedAt: null,
+        resolvedBy: null,
+        resolvedByType: null,
+        resolvedById: null,
+      })
       .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
 
     const requestId = c.get("requestId") || "unknown";
@@ -663,6 +705,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     value: "0",
     chainId: resolvedChainId,
   };
+  const requester = getAuthenticatedPrincipal(c);
 
   const policySet = await getPolicySet(tenantId, agentId);
 
@@ -707,6 +750,8 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
           txId,
           agentId,
           status: "pending",
+          requestedByType: requester.type,
+          requestedById: requester.id,
         });
       });
 
@@ -921,6 +966,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     value: txValue,
     chainId,
   };
+  const requester = getAuthenticatedPrincipal(c);
 
   const policySet = await getPolicySet(tenantId, agentId);
 
@@ -969,6 +1015,8 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           txId,
           agentId,
           status: "pending",
+          requestedByType: requester.type,
+          requestedById: requester.id,
         });
       });
 
@@ -1277,6 +1325,53 @@ vaultRoutes.post("/:agentId/export", async (c) => {
     );
   }
 
+  const allowExport =
+    process.env.STEWARD_ALLOW_KEY_EXPORT !== undefined
+      ? process.env.STEWARD_ALLOW_KEY_EXPORT === "true"
+      : process.env.NODE_ENV !== "production";
+  if (!allowExport) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export is disabled by STEWARD_ALLOW_KEY_EXPORT" },
+      403,
+    );
+  }
+
+  const authHeader = c.req.header("Authorization");
+  let actorId = c.get("userId") ?? null;
+  let hasRecentMfa = false;
+  if (authHeader?.startsWith("Bearer ")) {
+    try {
+      const payload = await verifyToken(authHeader.slice(7));
+      actorId = typeof payload.userId === "string" ? payload.userId : actorId;
+      const verifiedAt = payload.sessionMfaVerifiedAt ?? payload.mfaVerifiedAt;
+      const verifiedAtMs =
+        typeof verifiedAt === "number"
+          ? verifiedAt < 10_000_000_000
+            ? verifiedAt * 1000
+            : verifiedAt
+          : typeof verifiedAt === "string"
+            ? Date.parse(verifiedAt)
+            : Number.NaN;
+      hasRecentMfa = Number.isFinite(verifiedAtMs) && Date.now() - verifiedAtMs <= 5 * 60 * 1000;
+    } catch {
+      hasRecentMfa = false;
+    }
+  }
+  if (!hasRecentMfa) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export requires recent MFA or passkey step-up" },
+      403,
+    );
+  }
+
+  const body = await safeJsonParse<{ reason: string }>(c);
+  if (!body || !isNonEmptyString(body.reason)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export requires a non-empty audited reason" },
+      400,
+    );
+  }
+
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -1286,6 +1381,24 @@ vaultRoutes.post("/:agentId/export", async (c) => {
   }
 
   try {
+    const requestId = c.get("requestId") || null;
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId,
+      action: "vault.key_export",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: {
+        sensitivity: "HIGH",
+        reason: body.reason.trim(),
+        authType: c.get("authType"),
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? c.req.header("cf-connecting-ip") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId,
+    });
+
     const keys = await vault.exportPrivateKey(tenantId, agentId);
 
     return c.json<
