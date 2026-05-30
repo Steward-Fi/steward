@@ -1,8 +1,9 @@
 import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import { createPrivateKey, sign as cryptoSign } from "node:crypto";
+import { generateApiKey } from "@stwd/auth";
 import { getDb, refreshTokens, tenants, users, userTenants } from "@stwd/db";
 import bs58 from "bs58";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 
 const SKIP = !process.env.DATABASE_URL;
@@ -79,8 +80,18 @@ function signSolanaMessage(message: string): string {
   return bs58.encode(cryptoSign(null, Buffer.from(message, "utf8"), keyObject));
 }
 
-async function fetchNonce(): Promise<string> {
-  const res = await fetch(`${BASE_URL}/auth/nonce`);
+async function fetchNonce(params?: {
+  domain?: string;
+  chainId?: string | number;
+  tenantId?: string;
+}): Promise<string> {
+  const url = new URL(`${BASE_URL}/auth/nonce`);
+  if (params?.domain) url.searchParams.set("domain", params.domain);
+  if (params?.chainId !== undefined) url.searchParams.set("chainId", String(params.chainId));
+
+  const res = await fetch(url, {
+    headers: params?.tenantId ? { "X-Steward-Tenant": params.tenantId } : undefined,
+  });
   const json = (await res.json()) as { nonce: string };
   return json.nonce;
 }
@@ -152,12 +163,103 @@ describeWithDatabase("wallet auth flows", () => {
     expect(payload.userId).toBe(user?.id);
   });
 
+  it("rejects SIWE tenant header pivot when the wallet is not already a member", async () => {
+    const account = privateKeyToAccount(generatePrivateKey());
+    const address = account.address.toLowerCase();
+    const targetTenantId = `test-siwe-target-${address.slice(2, 10)}`;
+    const db = getDb();
+    const apiKeyPair = generateApiKey();
+
+    await db.insert(tenants).values({
+      id: targetTenantId,
+      name: "SIWE Target Tenant",
+      apiKeyHash: apiKeyPair.hash,
+    });
+
+    try {
+      const nonce = await fetchNonce({ chainId: 1, tenantId: targetTenantId });
+      const message = buildSiweMessage(account.address, nonce);
+      const signature = await account.signMessage({ message });
+
+      const res = await fetch(`${BASE_URL}/auth/verify`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Steward-Tenant": targetTenantId,
+        },
+        body: JSON.stringify({ message, signature }),
+      });
+
+      expect(res.status).toBe(403);
+      await expect(res.json()).resolves.toMatchObject({
+        ok: false,
+        error: `Tenant '${targetTenantId}' requires an existing membership`,
+      });
+      createdEvmAddresses.add(address);
+
+      const [user] = await db.select().from(users).where(eq(users.walletAddress, address));
+      expect(user).toBeDefined();
+
+      const targetLinks = user
+        ? await db
+            .select({ id: userTenants.id })
+            .from(userTenants)
+            .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, targetTenantId)))
+        : [];
+      expect(targetLinks).toHaveLength(0);
+    } finally {
+      await db.delete(userTenants).where(eq(userTenants.tenantId, targetTenantId));
+      await db.delete(tenants).where(eq(tenants.id, targetTenantId));
+    }
+  });
+
+  it("rejects SIWE verification when the nonce domain or chain does not match", async () => {
+    const account = privateKeyToAccount(generatePrivateKey());
+
+    const chainNonce = await fetchNonce({ chainId: 1 });
+    const chainMismatchMessage = buildSiweMessage(account.address, chainNonce, 137);
+    const chainMismatchSignature = await account.signMessage({ message: chainMismatchMessage });
+
+    const chainRes = await fetch(`${BASE_URL}/auth/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: chainMismatchMessage, signature: chainMismatchSignature }),
+    });
+
+    expect(chainRes.status).toBe(401);
+    await expect(chainRes.json()).resolves.toMatchObject({
+      ok: false,
+      error: "Nonce context mismatch",
+    });
+
+    const domainNonce = await fetchNonce({ domain: "steward.fi", chainId: 1 });
+    const domainMismatchMessage = buildSiweMessage(account.address, domainNonce)
+      .replace(
+        "steward.fi wants you to sign in with your Ethereum account:",
+        "evil.com wants you to sign in with your Ethereum account:",
+      )
+      .replace("URI: https://steward.fi", "URI: https://evil.com");
+    const domainMismatchSignature = await account.signMessage({ message: domainMismatchMessage });
+
+    const domainRes = await fetch(`${BASE_URL}/auth/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: domainMismatchMessage, signature: domainMismatchSignature }),
+    });
+
+    expect(domainRes.status).toBe(401);
+    await expect(domainRes.json()).resolves.toMatchObject({
+      ok: false,
+      error: "Nonce context mismatch",
+    });
+  });
+
   it("rejects SIWS messages whose signed domain is not on the allowlist", async () => {
     const previousAllowedDomains = process.env.SIWE_ALLOWED_DOMAINS;
     process.env.SIWE_ALLOWED_DOMAINS = "steward.fi";
 
     try {
-      const nonce = await fetchNonce();
+      const nonce = await fetchNonce({ domain: "evil.com", chainId: "mainnet" });
       // Construct a signed message whose domain AND uri both claim evil.com,
       // so the URI-vs-domain consistency check passes and only the domain
       // allowlist check can reject.
@@ -202,7 +304,7 @@ describeWithDatabase("wallet auth flows", () => {
   ]) {
     it(`accepts SIWE auth signed on ${name} (chainId ${chainId})`, async () => {
       const account = privateKeyToAccount(generatePrivateKey());
-      const nonce = await fetchNonce();
+      const nonce = await fetchNonce({ chainId });
       const message = buildSiweMessage(account.address, nonce, chainId);
       const signature = await account.signMessage({ message });
 
@@ -223,7 +325,7 @@ describeWithDatabase("wallet auth flows", () => {
   }
 
   it("verifies a known-good Solana signature and provisions a solana user/tenant", async () => {
-    const nonce = await fetchNonce();
+    const nonce = await fetchNonce({ chainId: "mainnet" });
     const message = buildSiwsMessage(SOLANA_TEST_KEYPAIR.publicKey, nonce);
     const signature = signSolanaMessage(message);
 

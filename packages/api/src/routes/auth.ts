@@ -259,24 +259,87 @@ function getNonceBackend(): import("@stwd/auth").StoreBackend {
   return _nonceBackend;
 }
 
-async function setSiweNonce(nonce: string): Promise<void> {
-  await getNonceBackend().set(nonce, "1", SIWE_NONCE_TTL_MS);
+type SiweNonceContext = {
+  domain: string;
+  chainId: string;
+  tenantId?: string;
+};
+
+function normalizeNonceContextValue(value: string | number | undefined): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function serializeSiweNonceContext(context: SiweNonceContext): string {
+  return JSON.stringify({
+    domain: context.domain.toLowerCase(),
+    chainId: context.chainId,
+    ...(context.tenantId ? { tenantId: context.tenantId } : {}),
+  });
+}
+
+function parseSiweNonceContext(raw: string): SiweNonceContext | null {
+  try {
+    const parsed = JSON.parse(raw) as Partial<SiweNonceContext>;
+    const domain = normalizeNonceContextValue(parsed.domain)?.toLowerCase();
+    const chainId = normalizeNonceContextValue(parsed.chainId);
+    if (!domain || !chainId) return null;
+    return {
+      domain,
+      chainId,
+      tenantId: normalizeNonceContextValue(parsed.tenantId),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getNonceDomain(c: Context): string {
+  const queryDomain = normalizeNonceContextValue(c.req.query("domain"));
+  if (queryDomain) return queryDomain.toLowerCase();
+
+  const origin = normalizeNonceContextValue(c.req.header("Origin"));
+  if (origin) {
+    try {
+      return new URL(origin).host.toLowerCase();
+    } catch {
+      // Fall through to configured defaults below.
+    }
+  }
+
+  return getAllowedSiweDomains()?.[0]?.toLowerCase() ?? "steward.fi";
+}
+
+function getNonceChainId(c: Context): string {
+  return normalizeNonceContextValue(c.req.query("chainId")) ?? "1";
+}
+
+async function setSiweNonce(nonce: string, context: SiweNonceContext): Promise<void> {
+  await getNonceBackend().set(nonce, serializeSiweNonceContext(context), SIWE_NONCE_TTL_MS);
 }
 
 /**
- * Atomically consume a SIWE nonce. Returns true if the nonce was present and
- * unexpired (and is now deleted), false otherwise.
+ * Atomically consume a SIWE nonce. Returns the bound nonce context when the
+ * nonce was present and unexpired (and is now deleted), null otherwise.
  *
  * The check-then-delete is not strictly atomic across instances — Upstash and
  * Postgres do both, but with a small window. For SIWE this is acceptable: the
  * surrounding signature check is the actual authentication, and a leaked nonce
  * is useless without the corresponding wallet signature.
  */
-async function consumeSiweNonce(nonce: string): Promise<boolean> {
+async function consumeSiweNonce(nonce: string): Promise<SiweNonceContext | null> {
   const backend = getNonceBackend();
   const value = await backend.get(nonce);
-  if (!value) return false;
+  if (!value) return null;
   await backend.delete(nonce);
+  return parseSiweNonceContext(value);
+}
+
+function isSiweNonceContextMatch(stored: SiweNonceContext, actual: SiweNonceContext): boolean {
+  if (stored.domain !== actual.domain.toLowerCase()) return false;
+  if (stored.chainId !== actual.chainId) return false;
+  if ((stored.tenantId ?? undefined) !== (actual.tenantId ?? undefined)) return false;
   return true;
 }
 
@@ -1256,22 +1319,28 @@ auth.get("/test/inbox/:email", (c) => {
 
 /**
  * GET /nonce
- * Returns a fresh one-time nonce for SIWE message construction.
+ * Returns a fresh one-time nonce for SIWE/SIWS message construction, bound to
+ * the expected domain, chainId, and optional tenant hint.
  */
 auth.get("/nonce", async (c) => {
   const nonce = generateNonce();
-  await setSiweNonce(nonce);
+  await setSiweNonce(nonce, {
+    domain: getNonceDomain(c),
+    chainId: getNonceChainId(c),
+    tenantId: normalizeNonceContextValue(c.req.header("X-Steward-Tenant")),
+  });
   return c.json({ nonce });
 });
 
 /**
  * POST /verify
  * Body: { message: string; signature: string }
- * Verifies SIWE, auto-creates tenant (per wallet address), returns JWT.
+ * Verifies SIWE, auto-creates the wallet-owned tenant, returns JWT.
  *
  * SIWE flow is wallet-address-centric: each unique address gets its own tenant.
- * If X-Steward-Tenant is provided and the tenant exists, the user is also linked
- * to that tenant and the JWT reflects the requested tenant instead.
+ * If X-Steward-Tenant is provided, the JWT may target that tenant only when the
+ * wallet user already has an existing membership. Supplying a tenant header does
+ * not create a new membership.
  */
 auth.post("/verify", async (c) => {
   const db = getDb();
@@ -1327,9 +1396,20 @@ auth.post("/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "SIWE domain not allowed" }, 401);
   }
 
-  const nonceOk = await consumeSiweNonce(siweMessage.nonce);
-  if (!nonceOk) {
+  const nonceContext = await consumeSiweNonce(siweMessage.nonce);
+  if (!nonceContext) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
+  }
+
+  const requestedTenantId = normalizeNonceContextValue(c.req.header("X-Steward-Tenant"));
+  if (
+    !isSiweNonceContextMatch(nonceContext, {
+      domain: siweMessage.domain,
+      chainId: String(siweMessage.chainId),
+      tenantId: requestedTenantId,
+    })
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "Nonce context mismatch" }, 401);
   }
 
   // Enforce SIWE temporal constraints before any signature verification path.
@@ -1409,24 +1489,35 @@ auth.post("/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
   }
 
-  const requestedTenantId = c.req.header("X-Steward-Tenant");
+  const user = await findOrCreateWalletUser(address, "ethereum");
+  await ensureUserTenantLink(user.id, tenantResult.tenant.id, "owner");
+
   let effectiveTenantId = tenantResult.tenant.id;
   if (requestedTenantId && requestedTenantId !== tenantResult.tenant.id) {
     const [requestedTenant] = await db
-      .select()
+      .select({ id: tenants.id })
       .from(tenants)
       .where(eq(tenants.id, requestedTenantId));
-    if (requestedTenant) {
-      effectiveTenantId = requestedTenantId;
+    if (!requestedTenant) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Tenant '${requestedTenantId}' not found` },
+        404,
+      );
     }
-  }
 
-  const user = await findOrCreateWalletUser(address, "ethereum");
-  await ensureUserTenantLink(
-    user.id,
-    effectiveTenantId,
-    effectiveTenantId === tenantResult.tenant.id ? "owner" : "member",
-  );
+    const [existingMembership] = await db
+      .select({ id: userTenants.id })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, requestedTenantId)));
+    if (!existingMembership) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Tenant '${requestedTenantId}' requires an existing membership` },
+        403,
+      );
+    }
+
+    effectiveTenantId = requestedTenantId;
+  }
 
   const token = await createSessionToken(address, effectiveTenantId, {
     userId: user.id,
@@ -1505,9 +1596,20 @@ auth.post("/verify/solana", async (c) => {
     );
   }
 
-  const nonceOk = await consumeSiweNonce(parsed.nonce);
-  if (!nonceOk) {
+  const nonceContext = await consumeSiweNonce(parsed.nonce);
+  if (!nonceContext) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired nonce" }, 401);
+  }
+
+  const requestedTenantId = normalizeNonceContextValue(c.req.header("X-Steward-Tenant"));
+  if (
+    !isSiweNonceContextMatch(nonceContext, {
+      domain: parsed.domain,
+      chainId: parsed.chainId ?? "mainnet",
+      tenantId: requestedTenantId,
+    })
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "Nonce context mismatch" }, 401);
   }
 
   if (!verifySolanaMessageSignature(body.message, body.signature, body.publicKey)) {
@@ -1525,24 +1627,35 @@ auth.post("/verify/solana", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Failed to create tenant" }, 500);
   }
 
-  const requestedTenantId = c.req.header("X-Steward-Tenant");
+  const user = await findOrCreateWalletUser(body.publicKey, "solana");
+  await ensureUserTenantLink(user.id, tenantResult.tenant.id, "owner");
+
   let effectiveTenantId = tenantResult.tenant.id;
   if (requestedTenantId && requestedTenantId !== tenantResult.tenant.id) {
     const [requestedTenant] = await db
-      .select()
+      .select({ id: tenants.id })
       .from(tenants)
       .where(eq(tenants.id, requestedTenantId));
-    if (requestedTenant) {
-      effectiveTenantId = requestedTenantId;
+    if (!requestedTenant) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Tenant '${requestedTenantId}' not found` },
+        404,
+      );
     }
-  }
 
-  const user = await findOrCreateWalletUser(body.publicKey, "solana");
-  await ensureUserTenantLink(
-    user.id,
-    effectiveTenantId,
-    effectiveTenantId === tenantResult.tenant.id ? "owner" : "member",
-  );
+    const [existingMembership] = await db
+      .select({ id: userTenants.id })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, requestedTenantId)));
+    if (!existingMembership) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Tenant '${requestedTenantId}' requires an existing membership` },
+        403,
+      );
+    }
+
+    effectiveTenantId = requestedTenantId;
+  }
 
   const token = await createSessionToken(body.publicKey, effectiveTenantId, {
     userId: user.id,
