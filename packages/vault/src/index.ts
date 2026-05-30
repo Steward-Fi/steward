@@ -2,6 +2,14 @@ export type { EncryptedKey } from "./keystore";
 export { KeyStore } from "./keystore";
 export type { KeystoreBackend, KeystoreContext } from "./keystore-backend";
 export { backendFromKeyStore } from "./keystore-backend";
+export type {
+  AwsKmsClientLike,
+  AwsKmsEnvelopeOptions,
+  KmsEnvelopeOptions,
+  Pkcs11ClientLike,
+  Pkcs11KmsEnvelopeOptions,
+} from "./keystore-kms";
+export { KmsEnvelopeKeystore, resolveKmsEnvelopeOptions } from "./keystore-kms";
 export type { MatchedRoute } from "./route-matcher";
 export {
   findMatchingRoute,
