@@ -247,11 +247,16 @@ describeWithDatabase("wallet auth flows", () => {
       body: JSON.stringify({ message: domainMismatchMessage, signature: domainMismatchSignature }),
     });
 
+    // A domain claiming evil.com is rejected with 401. Depending on env config
+    // the rejection can come from the SIWE allowlist gate ("SIWE domain not
+    // allowed", which runs first when SIWE_ALLOWED_DOMAINS is set) or from the
+    // nonce-context domain binding ("Nonce context mismatch"). Both are valid
+    // rejections of an off-domain message; assert the security outcome (401 +
+    // one of the two domain-rejection errors) rather than coupling to gate order.
     expect(domainRes.status).toBe(401);
-    await expect(domainRes.json()).resolves.toMatchObject({
-      ok: false,
-      error: "Nonce context mismatch",
-    });
+    const domainBody = (await domainRes.json()) as { ok: boolean; error?: string };
+    expect(domainBody.ok).toBe(false);
+    expect(["SIWE domain not allowed", "Nonce context mismatch"]).toContain(domainBody.error);
   });
 
   it("rejects SIWS messages whose signed domain is not on the allowlist", async () => {
