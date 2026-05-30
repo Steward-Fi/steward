@@ -13,6 +13,9 @@ import {
   approvalQueue,
   autoApprovalRules,
   db,
+  formatAuthenticatedPrincipal,
+  getAuthenticatedPrincipal,
+  isSameAuthenticatedPrincipal,
   requireTenantLevel,
   safeJsonParse,
   transactions,
@@ -44,6 +47,10 @@ approvalRoutes.get("/", async (c) => {
       requestedAt: approvalQueue.requestedAt,
       resolvedAt: approvalQueue.resolvedAt,
       resolvedBy: approvalQueue.resolvedBy,
+      requestedByType: approvalQueue.requestedByType,
+      requestedById: approvalQueue.requestedById,
+      resolvedByType: approvalQueue.resolvedByType,
+      resolvedById: approvalQueue.resolvedById,
       // Transaction details
       toAddress: transactions.toAddress,
       value: transactions.value,
@@ -127,6 +134,8 @@ approvalRoutes.post("/:txId/approve", async (c) => {
       txId: approvalQueue.txId,
       agentId: approvalQueue.agentId,
       status: approvalQueue.status,
+      requestedByType: approvalQueue.requestedByType,
+      requestedById: approvalQueue.requestedById,
       tenantId: agents.tenantId,
     })
     .from(approvalQueue)
@@ -141,7 +150,15 @@ approvalRoutes.post("/:txId/approve", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: `Approval already ${entry.status}` }, 400);
   }
 
-  const resolvedBy = body?.approvedBy || "tenant-admin";
+  const approver = getAuthenticatedPrincipal(c);
+
+  if (
+    entry.requestedByType &&
+    entry.requestedById &&
+    isSameAuthenticatedPrincipal({ type: entry.requestedByType, id: entry.requestedById }, approver)
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: "Approval requires separation of duties" }, 403);
+  }
 
   // Update approval queue
   const [updated] = await db
@@ -149,7 +166,9 @@ approvalRoutes.post("/:txId/approve", async (c) => {
     .set({
       status: "approved",
       resolvedAt: new Date(),
-      resolvedBy,
+      resolvedBy: formatAuthenticatedPrincipal(approver),
+      resolvedByType: approver.type,
+      resolvedById: approver.id,
     })
     .where(eq(approvalQueue.id, entry.id))
     .returning();
@@ -208,7 +227,7 @@ approvalRoutes.post("/:txId/deny", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: `Approval already ${entry.status}` }, 400);
   }
 
-  const resolvedBy = body.deniedBy || "tenant-admin";
+  const resolver = getAuthenticatedPrincipal(c);
 
   // Update approval queue
   const [updated] = await db
@@ -216,7 +235,9 @@ approvalRoutes.post("/:txId/deny", async (c) => {
     .set({
       status: "rejected",
       resolvedAt: new Date(),
-      resolvedBy: `${resolvedBy}: ${body.reason}`,
+      resolvedBy: `${formatAuthenticatedPrincipal(resolver)}: ${body.reason}`,
+      resolvedByType: resolver.type,
+      resolvedById: resolver.id,
     })
     .where(eq(approvalQueue.id, entry.id))
     .returning();
