@@ -5,10 +5,11 @@
  * Mount: app.route("/vault", vaultRoutes)
  */
 
+import { verifyToken } from "@stwd/auth";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { enforceRateLimit, recordVaultSpend } from "../middleware/redis-enforcement";
-import { trackAuditEvent } from "../services/audit";
+import { trackAuditEvent, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
@@ -1324,6 +1325,53 @@ vaultRoutes.post("/:agentId/export", async (c) => {
     );
   }
 
+  const allowExport =
+    process.env.STEWARD_ALLOW_KEY_EXPORT !== undefined
+      ? process.env.STEWARD_ALLOW_KEY_EXPORT === "true"
+      : process.env.NODE_ENV !== "production";
+  if (!allowExport) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export is disabled by STEWARD_ALLOW_KEY_EXPORT" },
+      403,
+    );
+  }
+
+  const authHeader = c.req.header("Authorization");
+  let actorId = c.get("userId") ?? null;
+  let hasRecentMfa = false;
+  if (authHeader?.startsWith("Bearer ")) {
+    try {
+      const payload = await verifyToken(authHeader.slice(7));
+      actorId = typeof payload.userId === "string" ? payload.userId : actorId;
+      const verifiedAt = payload.sessionMfaVerifiedAt ?? payload.mfaVerifiedAt;
+      const verifiedAtMs =
+        typeof verifiedAt === "number"
+          ? verifiedAt < 10_000_000_000
+            ? verifiedAt * 1000
+            : verifiedAt
+          : typeof verifiedAt === "string"
+            ? Date.parse(verifiedAt)
+            : Number.NaN;
+      hasRecentMfa = Number.isFinite(verifiedAtMs) && Date.now() - verifiedAtMs <= 5 * 60 * 1000;
+    } catch {
+      hasRecentMfa = false;
+    }
+  }
+  if (!hasRecentMfa) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export requires recent MFA or passkey step-up" },
+      403,
+    );
+  }
+
+  const body = await safeJsonParse<{ reason: string }>(c);
+  if (!body || !isNonEmptyString(body.reason)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export requires a non-empty audited reason" },
+      400,
+    );
+  }
+
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -1333,6 +1381,24 @@ vaultRoutes.post("/:agentId/export", async (c) => {
   }
 
   try {
+    const requestId = c.get("requestId") || null;
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId,
+      action: "vault.key_export",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: {
+        sensitivity: "HIGH",
+        reason: body.reason.trim(),
+        authType: c.get("authType"),
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? c.req.header("cf-connecting-ip") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId,
+    });
+
     const keys = await vault.exportPrivateKey(tenantId, agentId);
 
     return c.json<

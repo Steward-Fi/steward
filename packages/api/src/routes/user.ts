@@ -43,6 +43,7 @@ import {
 } from "@stwd/vault";
 import { and, eq, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
+import { writeAuditEvent } from "../services/audit";
 import { createSessionToken } from "./auth";
 
 // ─── Session payload types ────────────────────────────────────────────────────
@@ -504,6 +505,43 @@ user.post("/me/wallet/sign-message", async (c) => {
 user.post("/me/wallet/export", async (c) => {
   const userId = c.get("userId");
 
+  const allowExport =
+    process.env.STEWARD_ALLOW_KEY_EXPORT !== undefined
+      ? process.env.STEWARD_ALLOW_KEY_EXPORT === "true"
+      : process.env.NODE_ENV !== "production";
+  if (!allowExport) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export is disabled by STEWARD_ALLOW_KEY_EXPORT" },
+      403,
+    );
+  }
+
+  const session = c.get("userSession");
+  const verifiedAt = session.sessionMfaVerifiedAt ?? session.mfaVerifiedAt;
+  const verifiedAtMs =
+    typeof verifiedAt === "number"
+      ? verifiedAt < 10_000_000_000
+        ? verifiedAt * 1000
+        : verifiedAt
+      : typeof verifiedAt === "string"
+        ? Date.parse(verifiedAt)
+        : Number.NaN;
+  const hasRecentMfa = Number.isFinite(verifiedAtMs) && Date.now() - verifiedAtMs <= 5 * 60 * 1000;
+  if (!hasRecentMfa) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export requires recent MFA or passkey step-up" },
+      403,
+    );
+  }
+
+  const body = await safeJsonParse<{ reason: string }>(c);
+  if (!body || !isNonEmptyString(body.reason)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key export requires a non-empty audited reason" },
+      400,
+    );
+  }
+
   let vault: Vault;
   try {
     vault = getVault();
@@ -525,6 +563,22 @@ user.post("/me/wallet/export", async (c) => {
   const personalTenantId = `personal-${userId}`;
 
   try {
+    await writeAuditEvent({
+      tenantId: personalTenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet_key_export",
+      resourceType: "wallet",
+      resourceId: wallet.id,
+      metadata: {
+        sensitivity: "HIGH",
+        reason: body.reason.trim(),
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? c.req.header("cf-connecting-ip") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.req.header("x-request-id") ?? null,
+    });
+
     const keys = await vault.exportPrivateKey(personalTenantId, wallet.id);
 
     return c.json<
