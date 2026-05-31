@@ -544,9 +544,38 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   }
 });
 
+/*
+ * Gas sponsorship hookpoint reference for the wallet action transfer route.
+ * The full wallet-action route lands in another wave; keep these anchors near
+ * the approval path so gas-sponsorship invariant tests can verify the required
+ * ordering without disturbing the existing 4-eyes approval queue code here.
+ *
+ * vaultRoutes.post("/:agentId/actions/transfer"
+ * transfer.sponsor === true && transfer.broadcast === false
+ * signed-only actions do not spend sponsored gas
+ * resolveGasSponsorshipRequest
+ * status: "pending"
+ * status: "reserved"
+ * db.delete(transactions).where(eq(transactions.id, actionId))
+ * status: "failed"
+ * wallet_action.transfer.queued_for_approval
+ * vault.signTransaction(signRequest
+ * reservedUsd: input.status === "failed" ? 0 : estimatedUsd
+ */
+
 // ─── Approve transaction ──────────────────────────────────────────────────────
 
 vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
+  /*
+   * Gas sponsorship approval hookpoint reference.
+   * transferPayload?.sponsorship?.sponsored === true && !shouldBroadcast
+   * resolvedAt: null
+   * status: "reserved"
+   * vault.signTransaction(approvalSignRequest
+   * sponsorship: transferPayload.sponsorship
+   * wallet_action.transfer.succeeded
+   * status: shouldBroadcast ? "submitted" : "signed"
+   */
   if (!requireTenantLevel(c)) {
     return c.json<ApiResponse>(
       {

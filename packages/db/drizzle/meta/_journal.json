@@ -267,6 +267,41 @@
       "when": 1780126800000,
       "tag": "0038_contract_allowlist_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1780127400000,
+      "tag": "0040_tenant_gas_sponsorship_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1780128000000,
+      "tag": "0041_sponsored_gas_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1780128600000,
+      "tag": "0042_webhook_config_tenant_url_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1780129200000,
+      "tag": "0043_webhook_delivery_config_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1780129800000,
+      "tag": "0044_webhook_delivery_processing_status",
+      "breakpoints": true
     }
   ]
 }
