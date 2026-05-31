@@ -190,6 +190,27 @@
       "when": 1780120200000,
       "tag": "0026_agent_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1780120800000,
+      "tag": "0036_condition_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1780121400000,
+      "tag": "0037_intents",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1780122000000,
+      "tag": "0038_contract_allowlist_policy",
+      "breakpoints": true
     }
   ]
 }

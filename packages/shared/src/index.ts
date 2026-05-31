@@ -28,24 +28,88 @@ export interface TenantConfig {
   defaultPolicies?: PolicyRule[];
 }
 
-export type WebhookEventType =
-  | "tx.pending"
-  | "tx.approved"
-  | "tx.denied"
-  | "tx.signed"
-  | "spend.threshold"
-  | "policy.violation"
-  // Legacy event types (kept for backwards compat)
+export const WEBHOOK_EVENT_TYPES = [
+  "tx.pending",
+  "tx.approved",
+  "tx.denied",
+  "tx.signed",
+  "spend.threshold",
+  "policy.violation",
+  "user.created",
+  "user.authenticated",
+  "user.linked_account",
+  "user.unlinked_account",
+  "user.updated_account",
+  "user.transferred_account",
+  "user.wallet_created",
+  "mfa.enabled",
+  "mfa.disabled",
+  "private_key.exported",
+  "wallet.recovery_setup",
+  "wallet.recovered",
+  "wallet.funds_deposited",
+  "wallet.funds_withdrawn",
+  "transaction.broadcasted",
+  "transaction.confirmed",
+  "transaction.execution_reverted",
+  "transaction.replaced",
+  "transaction.failed",
+  "transaction.provider_error",
+  "transaction.still_pending",
+  "user_operation.completed",
+  "user_operation.failed",
+  "intent.created",
+  "intent.authorized",
+  "intent.executed",
+  "intent.failed",
+  "intent.rejected",
+  "intent.canceled",
+  "intent.expired",
+  "wallet_action.transfer.created",
+  "wallet_action.transfer.succeeded",
+  "wallet_action.transfer.rejected",
+  "wallet_action.transfer.failed",
+  "wallet_action.swap.created",
+  "wallet_action.swap.succeeded",
+  "wallet_action.swap.rejected",
+  "wallet_action.swap.failed",
+  "wallet_action.send_calls.created",
+  "wallet_action.send_calls.succeeded",
+  "wallet_action.send_calls.rejected",
+  "wallet_action.send_calls.failed",
+  "wallet_action.earn_deposit.created",
+  "wallet_action.earn_deposit.succeeded",
+  "wallet_action.earn_deposit.rejected",
+  "wallet_action.earn_deposit.failed",
+  "wallet_action.earn_withdraw.created",
+  "wallet_action.earn_withdraw.succeeded",
+  "wallet_action.earn_withdraw.rejected",
+  "wallet_action.earn_withdraw.failed",
+  "wallet_action.earn_incentive_claim.created",
+  "wallet_action.earn_incentive_claim.succeeded",
+  "wallet_action.earn_incentive_claim.rejected",
+  "wallet_action.earn_incentive_claim.failed",
+] as const;
+
+export type WebhookCatalogEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
+
+// Legacy event types kept for backwards-compatible dispatch inputs.
+export type LegacyWebhookEventType =
   | "approval_required"
   | "tx_signed"
   | "tx_confirmed"
   | "tx_failed"
   | "tx_rejected";
 
+export type WebhookEventType = WebhookCatalogEventType | LegacyWebhookEventType;
+
 export interface WebhookEvent {
   type: WebhookEventType;
   tenantId: string;
-  agentId: string;
+  agentId?: string;
+  deliveryId?: string;
+  // Unix-seconds the canonical signature was first computed; fixed at first send and reused on retries so the signature stays stable.
+  signedAt?: number;
   data: Record<string, unknown>;
   timestamp: Date;
 }
@@ -176,6 +240,8 @@ export type PolicyType =
   | "time-window"
   | "rate-limit"
   | "allowed-chains"
+  | "condition-set"
+  | "contract-allowlist"
   | "reputation-threshold"
   | "reputation-scaling"
   | "venue-allowlist"
@@ -222,6 +288,45 @@ export interface RateLimitConfig {
 export interface AllowedChainsConfig {
   /** Array of CAIP-2 chain identifiers that are permitted. e.g. ["eip155:8453", "eip155:1"] */
   chains: string[];
+}
+
+export interface ConditionSetConfig {
+  /** Condition set id whose items are evaluated against. */
+  conditionSetId: string;
+  /** Request field to compare. Defaults to `ethereum_transaction.to`. */
+  field?:
+    | "to"
+    | "ethereum_transaction.to"
+    | "ethereum_transaction.chain_id"
+    | "ethereum_transaction.value"
+    | "ethereum_transaction.data"
+    | "solana_system_program_instruction.Transfer.to"
+    | "chain_id"
+    | "value"
+    | "data";
+  /** Privy-style operator. Defaults to `in_condition_set`. */
+  operator?: "in_condition_set" | "not_in_condition_set";
+  /** Defaults to false for address/string allowlists. */
+  caseSensitive?: boolean;
+}
+
+export interface ContractAllowlistConfig {
+  contracts: Array<{
+    address: string;
+    selectors: string[];
+    constraints?: Record<
+      string,
+      {
+        recipientAllowlist?: string[];
+        recipientBlocklist?: string[];
+        spenderAllowlist?: string[];
+        spenderBlocklist?: string[];
+        fromAllowlist?: string[];
+        fromBlocklist?: string[];
+        maxAmount?: string;
+      }
+    >;
+  }>;
 }
 
 /**

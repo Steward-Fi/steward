@@ -67,7 +67,7 @@ function getHmacKey(): Uint8Array {
   return cachedKey;
 }
 
-export type ActorType = "user" | "agent" | "platform" | "system";
+export type ActorType = "user" | "agent" | "platform" | "system" | "api-key";
 
 export interface AuditEventInput {
   tenantId: string;

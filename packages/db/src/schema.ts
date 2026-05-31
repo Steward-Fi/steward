@@ -13,6 +13,7 @@ import {
   bigserial,
   boolean,
   customType,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -77,6 +78,8 @@ export const policyTypeEnum = pgEnum("policy_type", [
   "time-window",
   "rate-limit",
   "allowed-chains",
+  "condition-set",
+  "contract-allowlist",
   "reputation-threshold",
   "reputation-scaling",
   "venue-allowlist",
@@ -216,6 +219,79 @@ export const agentWallets = pgTable(
   }),
 );
 
+export const agentSigners = pgTable(
+  "agent_signers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    signerType: varchar("signer_type", { length: 32 }).notNull(),
+    subjectType: varchar("subject_type", { length: 32 }).notNull(),
+    subjectId: varchar("subject_id", { length: 255 }).notNull(),
+    address: varchar("address", { length: 128 }),
+    chainFamily: chainFamilyEnum("chain_family"),
+    label: varchar("label", { length: 255 }),
+    permissions: text("permissions").array().notNull().default([]),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    status: varchar("status", { length: 32 }).notNull().default("active"),
+    createdBy: varchar("created_by", { length: 255 }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantAgentIdx: index("agent_signers_tenant_agent_idx").on(table.tenantId, table.agentId),
+    agentStatusIdx: index("agent_signers_agent_status_idx").on(table.agentId, table.status),
+    agentSubjectUniqueIdx: uniqueIndex("agent_signers_agent_subject_idx").on(
+      table.agentId,
+      table.subjectType,
+      table.subjectId,
+    ),
+    tenantAgentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "agent_signers_tenant_agent_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/**
+ * Threshold signing/quorum policy objects for an agent wallet/account.
+ * Member IDs reference `agent_signers.id` logically; they are kept as an
+ * ordered text array so quorum membership can be updated atomically.
+ */
+export const agentKeyQuorums = pgTable(
+  "agent_key_quorums",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 255 }).notNull(),
+    threshold: integer("threshold").notNull(),
+    memberSignerIds: text("member_signer_ids").array().notNull().default([]),
+    permissions: text("permissions").array().notNull().default([]),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    status: varchar("status", { length: 32 }).notNull().default("active"),
+    createdBy: varchar("created_by", { length: 255 }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantAgentIdx: index("agent_key_quorums_tenant_agent_idx").on(table.tenantId, table.agentId),
+    agentStatusIdx: index("agent_key_quorums_agent_status_idx").on(table.agentId, table.status),
+    tenantAgentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "agent_key_quorums_tenant_agent_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
 /**
  * Encrypted private keys for each agent+chainFamily combination.
  * Composite PK: (agentId, chainFamily).
@@ -282,6 +358,8 @@ export const transactions = pgTable(
     data: text("data"),
     chainId: integer("chain_id").notNull(),
     txHash: varchar("tx_hash", { length: 128 }),
+    actionType: varchar("action_type", { length: 64 }),
+    actionPayload: jsonb("action_payload").$type<Record<string, unknown>>(),
     policyResults: jsonb("policy_results").$type<PolicyResult[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     signedAt: timestamp("signed_at", { withTimezone: true }),
@@ -317,6 +395,66 @@ export const approvalQueue = pgTable(
   }),
 );
 
+/**
+ * First-class Privy-style intents for actions that may require authorization
+ * before execution. Transaction-backed approvals keep using transactions +
+ * approval_queue, while this table models generic wallet/policy/quorum intents.
+ */
+export const intents = pgTable(
+  "intents",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 }).references(() => agents.id, {
+      onDelete: "cascade",
+    }),
+    intentType: varchar("intent_type", { length: 64 }).notNull(),
+    status: varchar("status", { length: 32 }).notNull().default("pending"),
+    resourceType: varchar("resource_type", { length: 64 }),
+    resourceId: varchar("resource_id", { length: 255 }),
+    createdByType: varchar("created_by_type", { length: 32 }).notNull().default("api"),
+    createdById: varchar("created_by_id", { length: 255 }),
+    createdByDisplayName: varchar("created_by_display_name", { length: 255 }),
+    authorizationDetails: jsonb("authorization_details")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default([]),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    executionResult: jsonb("execution_result").$type<Record<string, unknown>>(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    authorizedBy: varchar("authorized_by", { length: 255 }),
+    canceledAt: timestamp("canceled_at", { withTimezone: true }),
+    canceledBy: varchar("canceled_by", { length: 255 }),
+    cancellationReason: text("cancellation_reason"),
+    expiredAt: timestamp("expired_at", { withTimezone: true }),
+    expiredBy: varchar("expired_by", { length: 255 }),
+    rejectedAt: timestamp("rejected_at", { withTimezone: true }),
+    rejectedBy: varchar("rejected_by", { length: 255 }),
+    rejectionReason: text("rejection_reason"),
+    executedBy: varchar("executed_by", { length: 255 }),
+    failedAt: timestamp("failed_at", { withTimezone: true }),
+    failedBy: varchar("failed_by", { length: 255 }),
+    failureReason: text("failure_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    authorizedAt: timestamp("authorized_at", { withTimezone: true }),
+    executedAt: timestamp("executed_at", { withTimezone: true }),
+  },
+  (table) => ({
+    tenantStatusIdx: index("intents_tenant_status_idx").on(table.tenantId, table.status),
+    tenantCreatedIdx: index("intents_tenant_created_idx").on(table.tenantId, table.createdAt),
+    agentIdx: index("intents_agent_idx").on(table.agentId),
+    resourceIdx: index("intents_resource_idx").on(table.resourceType, table.resourceId),
+    tenantAgentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "intents_tenant_agent_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
 // ─── Standalone policy templates ─────────────────────────────────────────────
 
 export const policyTemplates = pgTable(
@@ -336,6 +474,60 @@ export const policyTemplates = pgTable(
     tenantIdx: index("policy_templates_tenant_idx").on(table.tenantId),
   }),
 );
+
+// ─── Privy-style condition sets ──────────────────────────────────────────────
+
+export const conditionSets = pgTable(
+  "condition_sets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 255 }).notNull(),
+    description: text("description"),
+    ownerId: varchar("owner_id", { length: 255 }),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: index("condition_sets_tenant_idx").on(table.tenantId),
+    tenantNameUniqueIdx: uniqueIndex("condition_sets_tenant_name_idx").on(
+      table.tenantId,
+      table.name,
+    ),
+  }),
+);
+
+export const conditionSetItems = pgTable(
+  "condition_set_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    conditionSetId: uuid("condition_set_id")
+      .notNull()
+      .references(() => conditionSets.id, { onDelete: "cascade" }),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    value: text("value").notNull(),
+    label: varchar("label", { length: 255 }),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    ...timestamps,
+  },
+  (table) => ({
+    conditionSetIdx: index("condition_set_items_set_idx").on(table.conditionSetId),
+    tenantIdx: index("condition_set_items_tenant_idx").on(table.tenantId),
+    setValueUniqueIdx: uniqueIndex("condition_set_items_set_value_idx").on(
+      table.conditionSetId,
+      table.value,
+    ),
+  }),
+);
+
+export type ConditionSetRow = typeof conditionSets.$inferSelect;
+export type NewConditionSetRow = typeof conditionSets.$inferInsert;
+export type ConditionSetItemRow = typeof conditionSetItems.$inferSelect;
+export type NewConditionSetItemRow = typeof conditionSetItems.$inferInsert;
 
 // ─── ERC-8004 registration and discovery tables ──────────────────────────────
 
@@ -565,6 +757,9 @@ export const agentRelations = relations(agents, ({ one, many }) => ({
   policies: many(policies),
   transactions: many(transactions),
   approvalQueueEntries: many(approvalQueue),
+  intents: many(intents),
+  signers: many(agentSigners),
+  keyQuorums: many(agentKeyQuorums),
   registrations: many(agentRegistrations),
   reputationEntries: many(reputationCache),
 }));
@@ -605,9 +800,42 @@ export const approvalQueueRelations = relations(approvalQueue, ({ one }) => ({
   }),
 }));
 
+export const intentRelations = relations(intents, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [intents.tenantId],
+    references: [tenants.id],
+  }),
+  agent: one(agents, {
+    fields: [intents.agentId],
+    references: [agents.id],
+  }),
+}));
+
 export const agentWalletRelations = relations(agentWallets, ({ one }) => ({
   agent: one(agents, {
     fields: [agentWallets.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const agentSignerRelations = relations(agentSigners, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [agentSigners.tenantId],
+    references: [tenants.id],
+  }),
+  agent: one(agents, {
+    fields: [agentSigners.agentId],
+    references: [agents.id],
+  }),
+}));
+
+export const agentKeyQuorumRelations = relations(agentKeyQuorums, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [agentKeyQuorums.tenantId],
+    references: [tenants.id],
+  }),
+  agent: one(agents, {
+    fields: [agentKeyQuorums.agentId],
     references: [agents.id],
   }),
 }));
@@ -633,6 +861,12 @@ export type Transaction = typeof transactions.$inferSelect;
 export type NewTransaction = typeof transactions.$inferInsert;
 export type ApprovalQueueEntry = typeof approvalQueue.$inferSelect;
 export type NewApprovalQueueEntry = typeof approvalQueue.$inferInsert;
+export type Intent = typeof intents.$inferSelect;
+export type NewIntent = typeof intents.$inferInsert;
+export type AgentSigner = typeof agentSigners.$inferSelect;
+export type NewAgentSigner = typeof agentSigners.$inferInsert;
+export type AgentKeyQuorum = typeof agentKeyQuorums.$inferSelect;
+export type NewAgentKeyQuorum = typeof agentKeyQuorums.$inferInsert;
 export type AgentWallet = typeof agentWallets.$inferSelect;
 export type NewAgentWallet = typeof agentWallets.$inferInsert;
 export type EncryptedChainKey = typeof encryptedChainKeys.$inferSelect;
