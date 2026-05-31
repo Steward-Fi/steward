@@ -13,6 +13,8 @@ import {
   type AgentIdentity,
   type ApiResponse,
   type AppVariables,
+  agentKeyQuorums,
+  agentSigners,
   agents,
   agentWallets,
   approvalQueue,
@@ -34,6 +36,7 @@ import {
   transactions,
   vault,
 } from "../services/context";
+import { createSignerCredentialHash } from "../services/signer-credentials";
 
 export const agentRoutes = new Hono<{ Variables: AppVariables }>();
 
@@ -139,6 +142,258 @@ function validatePolicyStringArray(name: string, value: unknown): string[] | str
     return `${name} must be a non-empty string array`;
   }
   return [...new Set(value)];
+}
+
+const MAX_AGENT_SIGNER_PERMISSIONS = 32;
+const MAX_AGENT_SIGNER_METADATA_BYTES = 8_192;
+const MAX_AGENT_KEY_QUORUM_MEMBERS = 32;
+const AGENT_SIGNER_TYPES = new Set(["owner", "delegated", "service", "quorum_member"]);
+const AGENT_SIGNER_SUBJECT_TYPES = new Set(["user", "wallet", "api_key", "external"]);
+const AGENT_SIGNER_STATUSES = new Set(["active", "paused", "revoked"]);
+const AGENT_KEY_QUORUM_STATUSES = new Set(["active", "paused", "revoked"]);
+const RESERVED_SIGNER_METADATA_KEYS = new Set([
+  "credentialHash",
+  "credentialCreatedAt",
+  "credentialLastUsedAt",
+]);
+
+type AgentSignerRow = typeof agentSigners.$inferSelect;
+type AgentKeyQuorumRow = typeof agentKeyQuorums.$inferSelect;
+
+async function writeAgentAudit(
+  c: Parameters<typeof requireTenantLevel>[0],
+  event: {
+    tenantId: string;
+    action: string;
+    resourceType: string;
+    resourceId: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  await writeAuditEvent({
+    tenantId: event.tenantId,
+    actorType: "user",
+    actorId: c.get("userId") ?? c.get("authType") ?? event.tenantId,
+    action: event.action,
+    resourceType: event.resourceType,
+    resourceId: event.resourceId,
+    metadata: event.metadata,
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+}
+
+function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]): boolean {
+  const role = c.get("tenantRole");
+  return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
+}
+
+async function deleteAgentSignerRow(signerId: string): Promise<void> {
+  await db.delete(agentSigners).where(eq(agentSigners.id, signerId));
+}
+
+async function restoreAgentSigner(row: AgentSignerRow): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(agentSigners).where(eq(agentSigners.id, row.id));
+    await tx.insert(agentSigners).values(row);
+  });
+}
+
+async function deleteAgentKeyQuorumRow(quorumId: string): Promise<void> {
+  await db.delete(agentKeyQuorums).where(eq(agentKeyQuorums.id, quorumId));
+}
+
+async function restoreAgentKeyQuorum(row: AgentKeyQuorumRow): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.delete(agentKeyQuorums).where(eq(agentKeyQuorums.id, row.id));
+    await tx.insert(agentKeyQuorums).values(row);
+  });
+}
+
+function normalizeOptionalText(value: unknown, field: string, maxLength: number): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${field} must be a non-empty string`);
+  }
+  const normalized = value.trim();
+  if (normalized.length > maxLength) throw new Error(`${field} is too long`);
+  return normalized;
+}
+
+function normalizeRequiredText(value: unknown, field: string, maxLength: number): string {
+  const normalized = normalizeOptionalText(value, field, maxLength);
+  if (!normalized) throw new Error(`${field} is required`);
+  return normalized;
+}
+
+function normalizeSignerPermissions(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("permissions must be an array of strings");
+  if (value.length > MAX_AGENT_SIGNER_PERMISSIONS) {
+    throw new Error(`permissions cannot contain more than ${MAX_AGENT_SIGNER_PERMISSIONS} entries`);
+  }
+  return [
+    ...new Set(
+      value.map((permission) => {
+        if (typeof permission !== "string" || !permission.trim()) {
+          throw new Error("permissions must be non-empty strings");
+        }
+        const normalized = permission.trim();
+        if (normalized.length > 128) {
+          throw new Error("permissions entries must be 128 chars or less");
+        }
+        return normalized;
+      }),
+    ),
+  ];
+}
+
+function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
+  const verifiedAt = c.get("sessionMfaVerifiedAt");
+  return (
+    typeof verifiedAt === "number" &&
+    Number.isFinite(verifiedAt) &&
+    Date.now() - verifiedAt <= maxAgeMs
+  );
+}
+
+function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {
+  if (hasRecentSessionMfa(c)) return null;
+  return c.json<ApiResponse>(
+    { ok: false, error: `${reason} requires recent MFA verification` },
+    403,
+  );
+}
+
+function normalizeSignerMetadata(value: unknown): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("metadata must be an object");
+  }
+  if (JSON.stringify(value).length > MAX_AGENT_SIGNER_METADATA_BYTES) {
+    throw new Error(`metadata cannot exceed ${MAX_AGENT_SIGNER_METADATA_BYTES} bytes`);
+  }
+  for (const key of Object.keys(value)) {
+    if (RESERVED_SIGNER_METADATA_KEYS.has(key)) {
+      throw new Error(`metadata.${key} is reserved and cannot be set by clients`);
+    }
+  }
+  return value as Record<string, unknown>;
+}
+
+function mergeSignerMetadataPreservingReserved(
+  existing: unknown,
+  next: Record<string, unknown>,
+): Record<string, unknown> {
+  const merged = { ...next };
+  if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+    for (const key of RESERVED_SIGNER_METADATA_KEYS) {
+      const value = (existing as Record<string, unknown>)[key];
+      if (value !== undefined) merged[key] = value;
+    }
+  }
+  return merged;
+}
+
+function normalizeQuorumMemberSignerIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("memberSignerIds must be a non-empty array");
+  }
+  if (value.length > MAX_AGENT_KEY_QUORUM_MEMBERS) {
+    throw new Error(`memberSignerIds cannot contain more than ${MAX_AGENT_KEY_QUORUM_MEMBERS}`);
+  }
+  return [
+    ...new Set(
+      value.map((id) => {
+        if (typeof id !== "string" || !id.trim()) {
+          throw new Error("memberSignerIds must contain non-empty strings");
+        }
+        return id.trim();
+      }),
+    ),
+  ];
+}
+
+function normalizeQuorumThreshold(value: unknown, memberCount: number): number {
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new Error("threshold must be a positive integer");
+  }
+  const threshold = Number(value);
+  if (threshold > memberCount) throw new Error("threshold cannot exceed member count");
+  return threshold;
+}
+
+async function validateQuorumMembers(
+  tenantId: string,
+  agentId: string,
+  memberSignerIds: string[],
+): Promise<string | null> {
+  const rows = await db
+    .select({ id: agentSigners.id, status: agentSigners.status })
+    .from(agentSigners)
+    .where(and(eq(agentSigners.tenantId, tenantId), eq(agentSigners.agentId, agentId)));
+  const byId = new Map(rows.map((row) => [row.id, row.status]));
+  for (const id of memberSignerIds) {
+    const status = byId.get(id);
+    if (!status) return `memberSignerIds contains unknown signer ${id}`;
+    if (status !== "active") return `memberSignerIds contains inactive signer ${id}`;
+  }
+  return null;
+}
+
+function toAgentKeyQuorumResponse(row: typeof agentKeyQuorums.$inferSelect) {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    agentId: row.agentId,
+    name: row.name,
+    threshold: row.threshold,
+    memberSignerIds: row.memberSignerIds,
+    permissions: row.permissions,
+    metadata: row.metadata,
+    status: row.status,
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function createSignerSecret(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return `stwd_signer_${[...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function redactSignerMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const {
+    credentialHash: _credentialHash,
+    credentialCreatedAt: _credentialCreatedAt,
+    credentialLastUsedAt: _credentialLastUsedAt,
+    ...safeMetadata
+  } = metadata;
+  return safeMetadata;
+}
+
+function toAgentSignerResponse(row: typeof agentSigners.$inferSelect) {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    agentId: row.agentId,
+    signerType: row.signerType,
+    subjectType: row.subjectType,
+    subjectId: row.subjectId,
+    address: row.address,
+    chainFamily: row.chainFamily,
+    label: row.label,
+    permissions: row.permissions,
+    metadata: redactSignerMetadata(row.metadata),
+    hasCredential: typeof row.metadata.credentialHash === "string",
+    status: row.status,
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 // ─── Create agent ─────────────────────────────────────────────────────────────
@@ -536,6 +791,723 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     ok: true,
     data: { policy: after, diff },
   });
+});
+
+// ─── Agent owners and delegated signers ──────────────────────────────────────
+
+agentRoutes.get("/:agentId/signers", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer inventory requires owner or admin session" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const status = c.req.query("status");
+  if (status && !AGENT_SIGNER_STATUSES.has(status)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid signer status filter" }, 400);
+  }
+
+  const conditions = [eq(agentSigners.tenantId, tenantId), eq(agentSigners.agentId, agentId)];
+  if (status) conditions.push(eq(agentSigners.status, status));
+  const rows = await db
+    .select()
+    .from(agentSigners)
+    .where(and(...conditions))
+    .orderBy(agentSigners.createdAt);
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { signers: rows.map(toAgentSignerResponse) },
+  });
+});
+
+agentRoutes.post("/:agentId/signers", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer creation requires owner or admin session" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  if (
+    body.credentialSecret !== undefined &&
+    body.credentialSecret !== null &&
+    body.credentialSecret !== ""
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "credentialSecret is server-generated; use issueCredential=true" },
+      400,
+    );
+  }
+
+  const credentialRequested = body.issueCredential === true;
+  if (credentialRequested) {
+    const mfaResponse = requireRecentAdminMfa(c, "Signer credential issuance");
+    if (mfaResponse) return mfaResponse;
+  }
+
+  let signerType: string;
+  let subjectType: string;
+  let subjectId: string;
+  let address: string | null;
+  let chainFamily: "evm" | "solana" | null;
+  let label: string | null;
+  let permissions: string[];
+  let metadata: Record<string, unknown>;
+  let credentialSecret: string | null;
+  try {
+    signerType = normalizeRequiredText(body.signerType, "signerType", 32);
+    subjectType = normalizeRequiredText(body.subjectType, "subjectType", 32);
+    subjectId = normalizeRequiredText(body.subjectId, "subjectId", 255);
+    if (!AGENT_SIGNER_TYPES.has(signerType)) {
+      throw new Error("signerType must be one of: owner, delegated, service, quorum_member");
+    }
+    if (!AGENT_SIGNER_SUBJECT_TYPES.has(subjectType)) {
+      throw new Error("subjectType must be one of: user, wallet, api_key, external");
+    }
+    address = normalizeOptionalText(body.address, "address", 128);
+    if (
+      address &&
+      !/^0x[a-fA-F0-9]{40}$/.test(address) &&
+      !/^[1-9A-HJ-NP-Za-km-z]{32,64}$/.test(address)
+    ) {
+      throw new Error("address must be an EVM or Solana address");
+    }
+    chainFamily =
+      body.chainFamily === undefined || body.chainFamily === null
+        ? null
+        : body.chainFamily === "evm" || body.chainFamily === "solana"
+          ? body.chainFamily
+          : (() => {
+              throw new Error("chainFamily must be evm or solana");
+            })();
+    label = normalizeOptionalText(body.label, "label", 255);
+    permissions = normalizeSignerPermissions(body.permissions);
+    metadata = normalizeSignerMetadata(body.metadata);
+    credentialSecret = body.issueCredential === true ? createSignerSecret() : null;
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid signer payload" },
+      400,
+    );
+  }
+
+  const [existingSigner] = await db
+    .select({ id: agentSigners.id })
+    .from(agentSigners)
+    .where(
+      and(
+        eq(agentSigners.tenantId, tenantId),
+        eq(agentSigners.agentId, agentId),
+        eq(agentSigners.subjectType, subjectType),
+        eq(agentSigners.subjectId, subjectId),
+      ),
+    );
+  if (existingSigner) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer already exists for this agent and subject" },
+      409,
+    );
+  }
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.signer.create.authorized",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { signerType, subjectType, subjectId, permissions },
+  });
+
+  try {
+    const storedMetadata = {
+      ...metadata,
+      ...(credentialSecret
+        ? {
+            credentialHash: await createSignerCredentialHash(credentialSecret),
+            credentialCreatedAt: new Date().toISOString(),
+          }
+        : {}),
+    };
+    const [row] = await db
+      .insert(agentSigners)
+      .values({
+        tenantId,
+        agentId,
+        signerType,
+        subjectType,
+        subjectId,
+        address,
+        chainFamily,
+        label,
+        permissions,
+        metadata: storedMetadata,
+        status: "active",
+        createdBy: c.get("userId") ?? c.get("authType") ?? null,
+      })
+      .returning();
+
+    try {
+      await writeAgentAudit(c, {
+        tenantId,
+        action: "agent.signer.create",
+        resourceType: "agent_signer",
+        resourceId: row.id,
+        metadata: { agentId, signerType, subjectType, subjectId },
+      });
+    } catch (error) {
+      await deleteAgentSignerRow(row.id);
+      throw error;
+    }
+
+    return c.json<ApiResponse>(
+      {
+        ok: true,
+        data: {
+          ...toAgentSignerResponse(row),
+          ...(credentialSecret ? { credentialSecret } : {}),
+        },
+      },
+      201,
+    );
+  } catch (error) {
+    const message = sanitizeErrorMessage(error);
+    const duplicateSigner =
+      message.includes("agent_signers_agent_subject_idx") ||
+      message.toLowerCase().includes("duplicate key") ||
+      message.toLowerCase().includes("unique constraint");
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: duplicateSigner ? "Signer already exists for this agent and subject" : message,
+      },
+      duplicateSigner ? 409 : 500,
+    );
+  }
+});
+
+agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer updates require owner or admin session" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const signerId = c.req.param("signerId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const [existingSigner] = await db
+    .select()
+    .from(agentSigners)
+    .where(
+      and(
+        eq(agentSigners.id, signerId),
+        eq(agentSigners.tenantId, tenantId),
+        eq(agentSigners.agentId, agentId),
+      ),
+    );
+  if (!existingSigner) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  const updates: Partial<typeof agentSigners.$inferInsert> = {};
+  let privilegedSignerUpdate = false;
+  try {
+    if (body.signerType !== undefined) {
+      const signerType = normalizeRequiredText(body.signerType, "signerType", 32);
+      if (!AGENT_SIGNER_TYPES.has(signerType)) {
+        throw new Error("signerType must be one of: owner, delegated, service, quorum_member");
+      }
+      if (signerType !== existingSigner.signerType) privilegedSignerUpdate = true;
+      updates.signerType = signerType;
+    }
+    if (body.address !== undefined) {
+      const address = normalizeOptionalText(body.address, "address", 128);
+      if (
+        address &&
+        !/^0x[a-fA-F0-9]{40}$/.test(address) &&
+        !/^[1-9A-HJ-NP-Za-km-z]{32,64}$/.test(address)
+      ) {
+        throw new Error("address must be an EVM or Solana address");
+      }
+      // Re-pointing the resolvable address of an active signer is functionally
+      // credential takeover for any flow that resolves authority through
+      // agentSigners.address, so this needs the same recent-MFA gate as a
+      // permissions/status change. Matches the key-quorum PATCH model.
+      if ((address ?? null) !== (existingSigner.address ?? null)) privilegedSignerUpdate = true;
+      updates.address = address;
+    }
+    if (body.chainFamily !== undefined) {
+      const chainFamily =
+        body.chainFamily === null
+          ? null
+          : body.chainFamily === "evm" || body.chainFamily === "solana"
+            ? body.chainFamily
+            : (() => {
+                throw new Error("chainFamily must be evm or solana");
+              })();
+      if ((chainFamily ?? null) !== (existingSigner.chainFamily ?? null)) {
+        privilegedSignerUpdate = true;
+      }
+      updates.chainFamily = chainFamily;
+    }
+    if (body.label !== undefined) updates.label = normalizeOptionalText(body.label, "label", 255);
+    if (body.permissions !== undefined) {
+      privilegedSignerUpdate = true;
+      updates.permissions = normalizeSignerPermissions(body.permissions);
+    }
+    if (body.metadata !== undefined) {
+      privilegedSignerUpdate = true;
+      updates.metadata = mergeSignerMetadataPreservingReserved(
+        existingSigner.metadata,
+        normalizeSignerMetadata(body.metadata),
+      );
+    }
+    if (body.status !== undefined) {
+      const status = normalizeRequiredText(body.status, "status", 32);
+      if (!AGENT_SIGNER_STATUSES.has(status)) {
+        throw new Error("status must be one of: active, paused, revoked");
+      }
+      if (status !== existingSigner.status) privilegedSignerUpdate = true;
+      updates.status = status;
+    }
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid signer update" },
+      400,
+    );
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "No signer updates provided" }, 400);
+  }
+  // Single MFA gate for any privileged field change, mirroring the key-quorum PATCH
+  // handler. Cosmetic-only updates (label) are exempt; everything that affects
+  // signer authority requires a recent step-up.
+  if (privilegedSignerUpdate) {
+    const mfaResponse = requireRecentAdminMfa(c, "Signer updates");
+    if (mfaResponse) return mfaResponse;
+  }
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.signer.update.authorized",
+    resourceType: "agent_signer",
+    resourceId: signerId,
+    metadata: { agentId, fields: Object.keys(updates) },
+  });
+
+  const [row] = await db
+    .update(agentSigners)
+    .set(updates)
+    .where(
+      and(
+        eq(agentSigners.id, signerId),
+        eq(agentSigners.tenantId, tenantId),
+        eq(agentSigners.agentId, agentId),
+      ),
+    )
+    .returning();
+
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+
+  try {
+    await writeAgentAudit(c, {
+      tenantId,
+      action: "agent.signer.update",
+      resourceType: "agent_signer",
+      resourceId: row.id,
+      metadata: { agentId, status: row.status },
+    });
+  } catch (error) {
+    await restoreAgentSigner(existingSigner);
+    throw error;
+  }
+
+  return c.json<ApiResponse>({ ok: true, data: toAgentSignerResponse(row) });
+});
+
+agentRoutes.delete("/:agentId/signers/:signerId", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer revocation requires owner or admin session" },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Signer revocation");
+  if (mfaResponse) return mfaResponse;
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const signerId = c.req.param("signerId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+  const [existingSigner] = await db
+    .select()
+    .from(agentSigners)
+    .where(
+      and(
+        eq(agentSigners.id, signerId),
+        eq(agentSigners.tenantId, tenantId),
+        eq(agentSigners.agentId, agentId),
+      ),
+    );
+  if (!existingSigner) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.signer.revoke.authorized",
+    resourceType: "agent_signer",
+    resourceId: signerId,
+    metadata: { agentId },
+  });
+
+  const [row] = await db
+    .update(agentSigners)
+    .set({ status: "revoked" })
+    .where(
+      and(
+        eq(agentSigners.id, signerId),
+        eq(agentSigners.tenantId, tenantId),
+        eq(agentSigners.agentId, agentId),
+      ),
+    )
+    .returning();
+
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+
+  try {
+    await writeAgentAudit(c, {
+      tenantId,
+      action: "agent.signer.revoke",
+      resourceType: "agent_signer",
+      resourceId: row.id,
+      metadata: { agentId },
+    });
+  } catch (error) {
+    await restoreAgentSigner(existingSigner);
+    throw error;
+  }
+
+  return c.json<ApiResponse>({ ok: true, data: toAgentSignerResponse(row) });
+});
+
+// ─── Agent key quorums ───────────────────────────────────────────────────────
+
+agentRoutes.get("/:agentId/key-quorums", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key quorum inventory requires owner or admin session" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const status = c.req.query("status");
+  if (status && !AGENT_KEY_QUORUM_STATUSES.has(status)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid key quorum status filter" }, 400);
+  }
+  const conditions = [eq(agentKeyQuorums.tenantId, tenantId), eq(agentKeyQuorums.agentId, agentId)];
+  if (status) conditions.push(eq(agentKeyQuorums.status, status));
+  const rows = await db
+    .select()
+    .from(agentKeyQuorums)
+    .where(and(...conditions))
+    .orderBy(agentKeyQuorums.createdAt);
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { quorums: rows.map(toAgentKeyQuorumResponse) },
+  });
+});
+
+agentRoutes.post("/:agentId/key-quorums", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key quorum creation requires owner or admin session" },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Key quorum creation");
+  if (mfaResponse) return mfaResponse;
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+
+  let name: string;
+  let threshold: number;
+  let memberSignerIds: string[];
+  let permissions: string[];
+  let metadata: Record<string, unknown>;
+  try {
+    name = normalizeRequiredText(body.name, "name", 255);
+    memberSignerIds = normalizeQuorumMemberSignerIds(body.memberSignerIds);
+    threshold = normalizeQuorumThreshold(body.threshold, memberSignerIds.length);
+    permissions = normalizeSignerPermissions(body.permissions);
+    metadata = normalizeSignerMetadata(body.metadata);
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid key quorum payload" },
+      400,
+    );
+  }
+  const memberError = await validateQuorumMembers(tenantId, agentId, memberSignerIds);
+  if (memberError) return c.json<ApiResponse>({ ok: false, error: memberError }, 400);
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.key_quorum.create.authorized",
+    resourceType: "agent_key_quorum",
+    resourceId: agentId,
+    metadata: { agentId, name, threshold, memberSignerIds, permissions },
+  });
+
+  const [row] = await db
+    .insert(agentKeyQuorums)
+    .values({
+      tenantId,
+      agentId,
+      name,
+      threshold,
+      memberSignerIds,
+      permissions,
+      metadata,
+      status: "active",
+      createdBy: c.get("userId") ?? c.get("authType") ?? null,
+    })
+    .returning();
+
+  try {
+    await writeAgentAudit(c, {
+      tenantId,
+      action: "agent.key_quorum.create",
+      resourceType: "agent_key_quorum",
+      resourceId: row.id,
+      metadata: { agentId, threshold, memberSignerIds },
+    });
+  } catch (error) {
+    await deleteAgentKeyQuorumRow(row.id);
+    throw error;
+  }
+
+  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(row) }, 201);
+});
+
+agentRoutes.patch("/:agentId/key-quorums/:quorumId", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key quorum updates require owner or admin session" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const quorumId = c.req.param("quorumId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const [existing] = await db
+    .select()
+    .from(agentKeyQuorums)
+    .where(
+      and(
+        eq(agentKeyQuorums.id, quorumId),
+        eq(agentKeyQuorums.tenantId, tenantId),
+        eq(agentKeyQuorums.agentId, agentId),
+      ),
+    );
+  if (!existing) return c.json<ApiResponse>({ ok: false, error: "Key quorum not found" }, 404);
+
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+
+  const updates: Partial<typeof agentKeyQuorums.$inferInsert> = {};
+  let privilegedUpdate = false;
+  try {
+    if (body.name !== undefined) updates.name = normalizeRequiredText(body.name, "name", 255);
+    const nextMemberSignerIds =
+      body.memberSignerIds === undefined
+        ? existing.memberSignerIds
+        : normalizeQuorumMemberSignerIds(body.memberSignerIds);
+    if (body.memberSignerIds !== undefined) {
+      updates.memberSignerIds = nextMemberSignerIds;
+      privilegedUpdate = true;
+    }
+    if (body.threshold !== undefined) {
+      updates.threshold = normalizeQuorumThreshold(body.threshold, nextMemberSignerIds.length);
+      privilegedUpdate = true;
+    } else if (
+      body.memberSignerIds !== undefined &&
+      existing.threshold > nextMemberSignerIds.length
+    ) {
+      throw new Error("threshold cannot exceed member count");
+    }
+    if (body.permissions !== undefined) {
+      updates.permissions = normalizeSignerPermissions(body.permissions);
+      privilegedUpdate = true;
+    }
+    if (body.metadata !== undefined) updates.metadata = normalizeSignerMetadata(body.metadata);
+    if (body.status !== undefined) {
+      const status = normalizeRequiredText(body.status, "status", 32);
+      if (!AGENT_KEY_QUORUM_STATUSES.has(status)) {
+        throw new Error("status must be one of: active, paused, revoked");
+      }
+      updates.status = status;
+      if (status !== existing.status) privilegedUpdate = true;
+    }
+    if (body.memberSignerIds !== undefined) {
+      const memberError = await validateQuorumMembers(tenantId, agentId, nextMemberSignerIds);
+      if (memberError) throw new Error(memberError);
+    }
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid key quorum update" },
+      400,
+    );
+  }
+
+  if (Object.keys(updates).length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "No key quorum updates provided" }, 400);
+  }
+  if (privilegedUpdate) {
+    const mfaResponse = requireRecentAdminMfa(c, "Key quorum privilege updates");
+    if (mfaResponse) return mfaResponse;
+  }
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.key_quorum.update.authorized",
+    resourceType: "agent_key_quorum",
+    resourceId: quorumId,
+    metadata: { agentId, fields: Object.keys(updates) },
+  });
+
+  const [row] = await db
+    .update(agentKeyQuorums)
+    .set({ ...updates, updatedAt: new Date() })
+    .where(
+      and(
+        eq(agentKeyQuorums.id, quorumId),
+        eq(agentKeyQuorums.tenantId, tenantId),
+        eq(agentKeyQuorums.agentId, agentId),
+      ),
+    )
+    .returning();
+
+  try {
+    await writeAgentAudit(c, {
+      tenantId,
+      action: "agent.key_quorum.update",
+      resourceType: "agent_key_quorum",
+      resourceId: row.id,
+      metadata: { agentId, status: row.status },
+    });
+  } catch (error) {
+    await restoreAgentKeyQuorum(existing);
+    throw error;
+  }
+
+  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(row) });
+});
+
+agentRoutes.delete("/:agentId/key-quorums/:quorumId", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Key quorum revocation requires owner or admin session" },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Key quorum revocation");
+  if (mfaResponse) return mfaResponse;
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const quorumId = c.req.param("quorumId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  const [existing] = await db
+    .select()
+    .from(agentKeyQuorums)
+    .where(
+      and(
+        eq(agentKeyQuorums.id, quorumId),
+        eq(agentKeyQuorums.tenantId, tenantId),
+        eq(agentKeyQuorums.agentId, agentId),
+      ),
+    );
+  if (!existing) return c.json<ApiResponse>({ ok: false, error: "Key quorum not found" }, 404);
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.key_quorum.revoke.authorized",
+    resourceType: "agent_key_quorum",
+    resourceId: quorumId,
+    metadata: { agentId },
+  });
+
+  const [row] = await db
+    .update(agentKeyQuorums)
+    .set({ status: "revoked", updatedAt: new Date() })
+    .where(
+      and(
+        eq(agentKeyQuorums.id, quorumId),
+        eq(agentKeyQuorums.tenantId, tenantId),
+        eq(agentKeyQuorums.agentId, agentId),
+      ),
+    )
+    .returning();
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "Key quorum not found" }, 404);
+
+  try {
+    await writeAgentAudit(c, {
+      tenantId,
+      action: "agent.key_quorum.revoke",
+      resourceType: "agent_key_quorum",
+      resourceId: row.id,
+      metadata: { agentId },
+    });
+  } catch (error) {
+    await restoreAgentKeyQuorum(existing);
+    throw error;
+  }
+
+  return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(row) });
 });
 
 // ─── Get agent ────────────────────────────────────────────────────────────────

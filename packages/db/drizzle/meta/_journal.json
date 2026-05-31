@@ -190,6 +190,20 @@
       "when": 1780120200000,
       "tag": "0026_agent_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1780124400000,
+      "tag": "0033_agent_signers",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1780125000000,
+      "tag": "0034_agent_key_quorums",
+      "breakpoints": true
     }
   ]
 }
