@@ -280,6 +280,8 @@ export type AppVariables = {
   agentScope?: string;
   agentSubject?: string;
   authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt";
+  sessionMfaVerifiedAt?: number;
+  requestId?: string;
 };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
@@ -411,6 +413,12 @@ export async function tenantAuth(
         );
 
         if (payload.userId) c.set("userId", payload.userId);
+        if (typeof (payload as { mfaVerifiedAt?: unknown }).mfaVerifiedAt === "number") {
+          c.set(
+            "sessionMfaVerifiedAt",
+            (payload as unknown as { mfaVerifiedAt: number }).mfaVerifiedAt,
+          );
+        }
         if (isAgentToken) {
           c.set("agentScope", payload.agentId);
           const tokenSubject = (payload as { sub?: unknown }).sub;
@@ -476,6 +484,9 @@ export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next:
     "tenantConfig",
     tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name },
   );
+  if (typeof (payload as { mfaVerifiedAt?: unknown }).mfaVerifiedAt === "number") {
+    c.set("sessionMfaVerifiedAt", (payload as unknown as { mfaVerifiedAt: number }).mfaVerifiedAt);
+  }
 
   await next();
 }
@@ -571,6 +582,9 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
   );
   c.set("authType", "dashboard-jwt");
   if (payload.userId) c.set("userId", payload.userId);
+  if (typeof (payload as { mfaVerifiedAt?: unknown }).mfaVerifiedAt === "number") {
+    c.set("sessionMfaVerifiedAt", (payload as unknown as { mfaVerifiedAt: number }).mfaVerifiedAt);
+  }
 
   return next();
 }

@@ -190,6 +190,41 @@
       "when": 1780120200000,
       "tag": "0026_agent_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1780121000000,
+      "tag": "0040_tenant_gas_sponsorship_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1780121600000,
+      "tag": "0041_sponsored_gas_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1780122200000,
+      "tag": "0042_webhook_config_tenant_url_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1780122800000,
+      "tag": "0043_webhook_delivery_config_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1780123400000,
+      "tag": "0044_webhook_delivery_processing_status",
+      "breakpoints": true
     }
   ]
 }

@@ -5,6 +5,7 @@ import type {
   PolicyTemplate,
   SecretRoutePreset,
   TenantFeatureFlags,
+  TenantGasSponsorshipConfig,
   TenantTheme,
 } from "@stwd/shared";
 import { relations, sql } from "drizzle-orm";
@@ -13,6 +14,7 @@ import {
   bigserial,
   boolean,
   customType,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -130,6 +132,10 @@ export const tenantConfigs = pgTable("tenant_configs", {
   approvalConfig: jsonb("approval_config").$type<ApprovalConfig>().notNull().default({}),
   featureFlags: jsonb("feature_flags").$type<TenantFeatureFlags>().notNull().default({}),
   theme: jsonb("theme").$type<TenantTheme>(),
+  gasSponsorshipConfig: jsonb("gas_sponsorship_config")
+    .$type<TenantGasSponsorshipConfig>()
+    .notNull()
+    .default({}),
   /** Allowed CORS origins for this tenant. Empty = fall back to wildcard (*). */
   allowedOrigins: text("allowed_origins").array().notNull().default([]),
   /** Controls how users can join: 'open' | 'invite' | 'closed'. Default 'open' for backward compat. */
@@ -282,6 +288,8 @@ export const transactions = pgTable(
     data: text("data"),
     chainId: integer("chain_id").notNull(),
     txHash: varchar("tx_hash", { length: 128 }),
+    actionType: varchar("action_type", { length: 64 }),
+    actionPayload: jsonb("action_payload").$type<Record<string, unknown>>(),
     policyResults: jsonb("policy_results").$type<PolicyResult[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     signedAt: timestamp("signed_at", { withTimezone: true }),
@@ -289,6 +297,58 @@ export const transactions = pgTable(
   },
   (table) => ({
     agentIdIdx: index("transactions_agent_id_idx").on(table.agentId),
+  }),
+);
+
+export const sponsoredGasEvents = pgTable(
+  "sponsored_gas_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    userId: uuid("user_id"),
+    txId: varchar("tx_id", { length: 64 }).references(() => transactions.id, {
+      onDelete: "set null",
+    }),
+    chainFamily: chainFamilyEnum("chain_family").notNull().default("evm"),
+    chainId: integer("chain_id"),
+    caip2: varchar("caip2", { length: 64 }),
+    provider: varchar("provider", { length: 64 }).notNull(),
+    mode: varchar("mode", { length: 64 }).notNull(),
+    status: varchar("status", { length: 32 }).notNull().default("reserved"),
+    userOperationHash: varchar("user_operation_hash", { length: 128 }),
+    txHash: varchar("tx_hash", { length: 128 }),
+    signature: varchar("signature", { length: 128 }),
+    reservedUsd: numeric("reserved_usd", { precision: 18, scale: 6 }),
+    actualUsd: numeric("actual_usd", { precision: 18, scale: 6 }),
+    gasUnits: text("gas_units"),
+    gasToken: varchar("gas_token", { length: 64 }),
+    requestHash: varchar("request_hash", { length: 128 }),
+    error: text("error"),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantCreatedIdx: index("sponsored_gas_events_tenant_created_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+    agentCreatedIdx: index("sponsored_gas_events_agent_created_idx").on(
+      table.agentId,
+      table.createdAt,
+    ),
+    txUniqueIdx: uniqueIndex("sponsored_gas_events_tenant_tx_id_idx")
+      .on(table.tenantId, table.txId)
+      .where(sql`${table.txId} is not null`),
+    agentTenantFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "sponsored_gas_events_tenant_agent_fk",
+    }).onDelete("cascade"),
   }),
 );
 
@@ -429,6 +489,7 @@ export const webhookConfigs = pgTable(
   },
   (table) => ({
     tenantIdx: index("webhook_configs_tenant_idx").on(table.tenantId),
+    tenantUrlUnique: uniqueIndex("webhook_configs_tenant_url_idx").on(table.tenantId, table.url),
   }),
 );
 
@@ -459,6 +520,7 @@ export const autoApprovalRules = pgTable(
 
 export const webhookDeliveryStatusEnum = pgEnum("webhook_delivery_status", [
   "pending",
+  "processing",
   "delivered",
   "failed",
   "dead",
@@ -471,10 +533,15 @@ export const webhookDeliveries = pgTable(
   {
     id: uuid("id").primaryKey().defaultRandom(),
     tenantId: text("tenant_id").notNull(),
+    webhookConfigId: uuid("webhook_config_id").references(() => webhookConfigs.id, {
+      onDelete: "set null",
+    }),
     agentId: text("agent_id"),
     eventType: text("event_type").notNull(),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     url: text("url").notNull(),
+    secret: text("secret"),
+    events: jsonb("events").$type<string[]>(),
     status: webhookDeliveryStatusEnum("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     maxAttempts: integer("max_attempts").notNull().default(5),
@@ -487,6 +554,7 @@ export const webhookDeliveries = pgTable(
     statusIdx: index("webhook_deliveries_status_idx").on(table.status),
     nextRetryIdx: index("webhook_deliveries_next_retry_idx").on(table.nextRetryAt),
     tenantIdx: index("webhook_deliveries_tenant_idx").on(table.tenantId),
+    webhookConfigIdx: index("webhook_deliveries_webhook_config_idx").on(table.webhookConfigId),
   }),
 );
 
@@ -633,6 +701,8 @@ export type Transaction = typeof transactions.$inferSelect;
 export type NewTransaction = typeof transactions.$inferInsert;
 export type ApprovalQueueEntry = typeof approvalQueue.$inferSelect;
 export type NewApprovalQueueEntry = typeof approvalQueue.$inferInsert;
+export type SponsoredGasEvent = typeof sponsoredGasEvents.$inferSelect;
+export type NewSponsoredGasEvent = typeof sponsoredGasEvents.$inferInsert;
 export type AgentWallet = typeof agentWallets.$inferSelect;
 export type NewAgentWallet = typeof agentWallets.$inferInsert;
 export type EncryptedChainKey = typeof encryptedChainKeys.$inferSelect;

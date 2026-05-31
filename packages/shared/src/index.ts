@@ -35,6 +35,12 @@ export type WebhookEventType =
   | "tx.signed"
   | "spend.threshold"
   | "policy.violation"
+  | "transaction.confirmed"
+  | "transaction.execution_reverted"
+  | "transaction.provider_error"
+  | "transaction.still_pending"
+  | "user_operation.completed"
+  | "user_operation.failed"
   // Legacy event types (kept for backwards compat)
   | "approval_required"
   | "tx_signed"
@@ -463,6 +469,62 @@ export interface TenantTheme {
   colorScheme?: "light" | "dark" | "system";
 }
 
+export type GasSponsorshipProvider =
+  | "custom_evm_paymaster"
+  | "custom_bundler"
+  | "solana_fee_payer"
+  | "mock";
+
+export type GasSponsorshipMode = "erc4337" | "eip7702" | "solana_fee_payer";
+
+export interface TenantGasSponsorshipConfig {
+  enabled?: boolean;
+  provider?: GasSponsorshipProvider;
+  mode?: GasSponsorshipMode;
+  allowedChainIds?: number[];
+  allowedCaip2?: string[];
+  paymasterUrl?: string;
+  bundlerUrl?: string;
+  entryPoint?: string;
+  feePayerAgentId?: string;
+  maxPerTxUsd?: number;
+  maxPerWalletDayUsd?: number;
+  maxTenantDayUsd?: number;
+  maxTenantMonthUsd?: number;
+  allowClientSponsorship?: boolean;
+  requireSimulation?: boolean;
+  circuitBreakerEnabled?: boolean;
+}
+
+export interface SponsoredGasSpendEntry {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  userId?: string | null;
+  txId?: string | null;
+  chainFamily: "evm" | "solana";
+  chainId?: number | null;
+  caip2?: string | null;
+  provider: GasSponsorshipProvider | string;
+  mode: GasSponsorshipMode | string;
+  status: string;
+  reservedUsd?: string | null;
+  actualUsd?: string | null;
+  txHash?: string | null;
+  userOperationHash?: string | null;
+  signature?: string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface SponsoredGasSpendSummary {
+  currency: "USD";
+  reservedUsd: string;
+  actualUsd: string;
+  count: number;
+  entries: SponsoredGasSpendEntry[];
+}
+
 export interface TenantControlPlaneConfig {
   tenantId: string;
   displayName?: string;
@@ -472,6 +534,7 @@ export interface TenantControlPlaneConfig {
   approvalConfig: ApprovalConfig;
   featureFlags: TenantFeatureFlags;
   theme?: TenantTheme;
+  gasSponsorshipConfig?: TenantGasSponsorshipConfig;
   /** Allowed CORS origins for this tenant. Empty array = wildcard (*) in dev mode. */
   allowedOrigins?: string[];
   createdAt?: Date;
