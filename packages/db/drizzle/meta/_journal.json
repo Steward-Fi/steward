@@ -232,6 +232,20 @@
       "when": 1780123800000,
       "tag": "0032_user_wallet_identity_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1780124400000,
+      "tag": "0033_agent_signers",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1780125000000,
+      "tag": "0034_agent_key_quorums",
+      "breakpoints": true
     }
   ]
 }

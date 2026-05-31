@@ -13,7 +13,16 @@ import {
   validateApiKey,
   verifyToken,
 } from "@stwd/auth";
-import { getDb, policies, tenants, toPolicyRule, transactions, userTenants } from "@stwd/db";
+import {
+  agentKeyQuorums,
+  agentSigners,
+  getDb,
+  policies,
+  tenants,
+  toPolicyRule,
+  transactions,
+  userTenants,
+} from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
   type AgentIdentity,
@@ -223,10 +232,13 @@ function requireEnv(name: string): string {
   return value;
 }
 
-export const DATABASE_URL = requireEnv("DATABASE_URL");
+export const DATABASE_URL =
+  process.env.STEWARD_PGLITE_MEMORY === "true" ? "pglite://memory" : requireEnv("DATABASE_URL");
 export const MASTER_PASSWORD = requireEnv("STEWARD_MASTER_PASSWORD");
 
-process.env.DATABASE_URL = DATABASE_URL;
+if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+  process.env.DATABASE_URL = DATABASE_URL;
+}
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 
@@ -277,6 +289,7 @@ export type AppVariables = {
   tenantId: string;
   userId?: string;
   tenantRole?: string;
+  sessionMfaVerifiedAt?: number;
   agentScope?: string;
   agentSubject?: string;
   authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt";
@@ -592,7 +605,6 @@ export {
   webhookConfigs,
   webhookDeliveries,
 } from "@stwd/db";
-
 export type {
   AgentBalance,
   AgentIdentity,
@@ -606,3 +618,4 @@ export type {
   Tenant,
   TenantConfig,
 } from "@stwd/shared";
+export { agentKeyQuorums, agentSigners };
