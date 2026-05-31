@@ -33,7 +33,7 @@ export interface SubmissionLog {
 export interface WebhookLog {
   timestamp: string;
   event: string;
-  agentId: string;
+  agentId?: string;
   data: Record<string, unknown>;
 }
 

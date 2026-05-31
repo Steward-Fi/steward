@@ -302,6 +302,13 @@
       "when": 1780129800000,
       "tag": "0044_webhook_delivery_processing_status",
       "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1780130400000,
+      "tag": "0045_wallet_action_metadata",
+      "breakpoints": true
     }
   ]
 }
