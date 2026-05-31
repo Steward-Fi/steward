@@ -33,6 +33,11 @@ export interface PolicyEvaluationContext {
   leverage?: number;
   /** Sprint 4: pre-computed USD value of the action. */
   valueUsd?: number;
+  /**
+   * Privy-style condition set items keyed by conditionSetId. Callers load these
+   * from tenant-scoped storage before evaluating policies.
+   */
+  conditionSets?: Record<string, string[]>;
 }
 
 export interface EvaluationResult {
@@ -119,8 +124,7 @@ export class PolicyEngine {
     ctx: PolicyEvaluationContext & { correlationId?: string },
   ): Promise<EvaluationResult> {
     if (policies.length === 0) {
-      // No policies = everything auto-approved (dangerous but valid for testing)
-      return { approved: true, results: [], requiresManualApproval: false };
+      return { approved: false, results: [], requiresManualApproval: false };
     }
 
     const evaluatorCtx: EvaluatorContext = {
@@ -134,6 +138,7 @@ export class PolicyEngine {
       venue: ctx.venue,
       leverage: ctx.leverage,
       valueUsd: ctx.valueUsd,
+      conditionSets: ctx.conditionSets,
     };
 
     const results: PolicyResult[] = await Promise.all(
@@ -141,10 +146,11 @@ export class PolicyEngine {
     );
 
     const hardPolicies = results.filter((r) => r.type !== "auto-approve-threshold");
-    const autoApproveResult = results.find((r) => r.type === "auto-approve-threshold");
+    const autoApproveResults = results.filter((r) => r.type === "auto-approve-threshold");
 
     const allHardPass = hardPolicies.every((r) => r.passed);
-    const autoApprovePass = autoApproveResult ? autoApproveResult.passed : true;
+    const autoApprovePass =
+      autoApproveResults.length === 0 || autoApproveResults.every((r) => r.passed);
 
     let evaluationResult: EvaluationResult;
     if (allHardPass && autoApprovePass) {

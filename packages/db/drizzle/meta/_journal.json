@@ -246,6 +246,27 @@
       "when": 1780125000000,
       "tag": "0034_agent_key_quorums",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1780125600000,
+      "tag": "0036_condition_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1780126200000,
+      "tag": "0037_intents",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1780126800000,
+      "tag": "0038_contract_allowlist_policy",
+      "breakpoints": true
     }
   ]
 }
