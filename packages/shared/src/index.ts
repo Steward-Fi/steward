@@ -463,6 +463,77 @@ export interface TenantTheme {
   colorScheme?: "light" | "dark" | "system";
 }
 
+export interface TenantOidcProviderConfig {
+  id: string;
+  enabled: boolean;
+  issuer: string;
+  audience: string[];
+  jwksUri: string;
+  clientId?: string;
+  clientSecretEnv?: string;
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  scopes?: string[];
+  subjectClaim?: "sub";
+  emailClaim?: string;
+  emailVerifiedClaim?: string;
+  nameClaim?: string;
+  pictureClaim?: string;
+  allowedAlgs?: Array<"RS256" | "ES256">;
+  allowJitProvisioning?: boolean;
+}
+
+export type TenantSamlSsoStatus = "pending" | "active" | "error";
+
+export interface TenantSamlSsoConfig {
+  tenantId: string;
+  enabled: boolean;
+  status: TenantSamlSsoStatus;
+  idpEntityId: string;
+  idpSsoUrl: string;
+  idpCertPems: string[];
+  spEntityId: string;
+  acsUrl: string;
+  nameIdFormat?: string;
+  emailAttribute: string;
+  groupsAttribute?: string;
+  allowJitProvisioning: boolean;
+  jitDefaultRole: "viewer";
+  lastTestedAt?: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface TenantSamlSsoUpdate {
+  enabled?: boolean;
+  idpEntityId?: string;
+  idpSsoUrl?: string;
+  idpCertPems?: string[];
+  nameIdFormat?: string;
+  emailAttribute?: string;
+  groupsAttribute?: string;
+  allowJitProvisioning?: boolean;
+}
+
+export interface TenantSsoDomain {
+  id: string;
+  tenantId: string;
+  domain: string;
+  verificationToken: string;
+  status: "pending" | "verified";
+  ssoRequired: boolean;
+  verifiedAt?: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface SsoDiscoveryResult {
+  domain: string;
+  tenantId: string | null;
+  ssoRequired: boolean;
+  available: boolean;
+}
+
 export interface TenantControlPlaneConfig {
   tenantId: string;
   displayName?: string;

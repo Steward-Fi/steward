@@ -29,6 +29,7 @@ import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
 import { authRoutes } from "./routes/auth";
 import { dashboardRoutes } from "./routes/dashboard";
+import { identityDiscoveryRoutes } from "./routes/discovery";
 import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
@@ -146,6 +147,7 @@ app.get("/health", (c) =>
 
 // ─── Route modules ────────────────────────────────────────────────────────────
 
+app.route("/", identityDiscoveryRoutes);
 app.route("/auth", authRoutes);
 app.route("/platform", platformRoutes);
 app.route("/user", userRoutes);

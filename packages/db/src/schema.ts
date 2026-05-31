@@ -5,6 +5,7 @@ import type {
   PolicyTemplate,
   SecretRoutePreset,
   TenantFeatureFlags,
+  TenantOidcProviderConfig,
   TenantTheme,
 } from "@stwd/shared";
 import { relations, sql } from "drizzle-orm";
@@ -130,12 +131,127 @@ export const tenantConfigs = pgTable("tenant_configs", {
   approvalConfig: jsonb("approval_config").$type<ApprovalConfig>().notNull().default({}),
   featureFlags: jsonb("feature_flags").$type<TenantFeatureFlags>().notNull().default({}),
   theme: jsonb("theme").$type<TenantTheme>(),
+  oidcProviders: jsonb("oidc_providers").$type<TenantOidcProviderConfig[]>().notNull().default([]),
   /** Allowed CORS origins for this tenant. Empty = fall back to wildcard (*). */
   allowedOrigins: text("allowed_origins").array().notNull().default([]),
   /** Controls how users can join: 'open' | 'invite' | 'closed'. Default 'open' for backward compat. */
   joinMode: varchar("join_mode", { length: 16 }).notNull().default("open"),
   ...timestamps,
 });
+
+export const tenantSsoDomains = pgTable(
+  "tenant_sso_domains",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    domain: varchar("domain", { length: 255 }).notNull(),
+    verificationToken: varchar("verification_token", { length: 128 }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    ssoRequired: boolean("sso_required").notNull().default(false),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantDomainUnique: uniqueIndex("tenant_sso_domains_tenant_domain_idx").on(
+      table.tenantId,
+      table.domain,
+    ),
+    tenantCanonicalDomainUnique: uniqueIndex("tenant_sso_domains_tenant_canonical_domain_idx").on(
+      table.tenantId,
+      sql`lower(trim(trailing '.' from ${table.domain}))`,
+    ),
+    verifiedCanonicalDomainUnique: uniqueIndex("tenant_sso_domains_verified_canonical_domain_idx")
+      .on(sql`lower(trim(trailing '.' from ${table.domain}))`)
+      .where(sql`${table.status} = 'verified'`),
+    domainIdx: index("tenant_sso_domains_domain_idx").on(table.domain),
+  }),
+);
+
+export const tenantSamlSsoConfigs = pgTable(
+  "tenant_saml_sso_configs",
+  {
+    tenantId: varchar("tenant_id", { length: 64 })
+      .primaryKey()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    idpEntityId: text("idp_entity_id").notNull(),
+    idpSsoUrl: text("idp_sso_url").notNull(),
+    idpCertPems: text("idp_cert_pems").array().notNull().default([]),
+    spEntityId: text("sp_entity_id").notNull(),
+    acsUrl: text("acs_url").notNull(),
+    nameIdFormat: text("name_id_format"),
+    emailAttribute: varchar("email_attribute", { length: 128 }).notNull().default("email"),
+    groupsAttribute: varchar("groups_attribute", { length: 128 }),
+    allowJitProvisioning: boolean("allow_jit_provisioning").notNull().default(false),
+    jitDefaultRole: varchar("jit_default_role", { length: 32 }).notNull().default("viewer"),
+    lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    statusIdx: index("tenant_saml_sso_configs_status_idx").on(table.status),
+    enabledIdx: index("tenant_saml_sso_configs_enabled_idx").on(table.enabled),
+  }),
+);
+
+export type TenantSamlSsoConfigRow = typeof tenantSamlSsoConfigs.$inferSelect;
+export type TenantSamlSsoConfigInsert = typeof tenantSamlSsoConfigs.$inferInsert;
+
+export const tenantSamlAuthnRequests = pgTable(
+  "tenant_saml_authn_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    requestId: varchar("request_id", { length: 128 }).notNull(),
+    relayState: varchar("relay_state", { length: 128 }).notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    appClientId: varchar("app_client_id", { length: 64 }),
+    codeChallenge: varchar("code_challenge", { length: 128 }).notNull(),
+    codeChallengeMethod: varchar("code_challenge_method", { length: 16 }).notNull().default("S256"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: index("tenant_saml_authn_requests_tenant_idx").on(table.tenantId),
+    relayStateUnique: uniqueIndex("tenant_saml_authn_requests_relay_state_idx").on(
+      table.relayState,
+    ),
+    tenantRequestUnique: uniqueIndex("tenant_saml_authn_requests_tenant_request_idx").on(
+      table.tenantId,
+      table.requestId,
+    ),
+    expiresAtIdx: index("tenant_saml_authn_requests_expires_at_idx").on(table.expiresAt),
+  }),
+);
+
+export const tenantSamlAssertionReplays = pgTable(
+  "tenant_saml_assertion_replays",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    assertionId: varchar("assertion_id", { length: 256 }).notNull(),
+    responseId: varchar("response_id", { length: 256 }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantAssertionUnique: uniqueIndex("tenant_saml_assertion_replays_tenant_assertion_idx").on(
+      table.tenantId,
+      table.assertionId,
+    ),
+    expiresAtIdx: index("tenant_saml_assertion_replays_expires_at_idx").on(table.expiresAt),
+  }),
+);
+
+export type TenantSsoDomainRow = typeof tenantSsoDomains.$inferSelect;
+export type NewTenantSsoDomainRow = typeof tenantSsoDomains.$inferInsert;
 
 export const agents = pgTable(
   "agents",
@@ -538,9 +654,17 @@ export const tenantRelations = relations(tenants, ({ many, one }) => ({
   policyTemplates: many(policyTemplates),
   agentRegistrations: many(agentRegistrations),
   webhookConfigs: many(webhookConfigs),
+  ssoDomains: many(tenantSsoDomains),
   autoApprovalRule: one(autoApprovalRules, {
     fields: [tenants.id],
     references: [autoApprovalRules.tenantId],
+  }),
+}));
+
+export const tenantSsoDomainRelations = relations(tenantSsoDomains, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [tenantSsoDomains.tenantId],
+    references: [tenants.id],
   }),
 }));
 
