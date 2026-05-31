@@ -20,6 +20,12 @@ function routeBody(marker: string): string {
 }
 
 describe("approval route audit ordering", () => {
+  it("marks approval control-plane responses as non-cacheable", () => {
+    expect(routeSource).toContain("setNoStoreHeaders");
+    expect(routeSource).toContain('approvalRoutes.use("*"');
+    expect(routeSource).toContain("setNoStoreHeaders(c)");
+  });
+
   it("keeps approval queue reads and writes behind a human approver session", () => {
     for (const marker of [
       'approvalRoutes.get("/", async',
