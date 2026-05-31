@@ -16,11 +16,17 @@ import {
   db,
   requireTenantLevel,
   safeJsonParse,
+  setNoStoreHeaders,
   transactions,
 } from "../services/context";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const approvalRoutes = new Hono<{ Variables: AppVariables }>();
+
+approvalRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 type ApprovalStatusFilter = "pending" | "approved" | "rejected" | "all";
 
