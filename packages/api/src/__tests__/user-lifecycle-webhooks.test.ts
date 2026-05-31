@@ -1,4 +1,15 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  mock,
+  setDefaultTimeout,
+} from "bun:test";
+
+setDefaultTimeout(30000);
 
 import { closeDb, getDb, tenantConfigs, tenants, users } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -22,16 +33,7 @@ describe("user lifecycle webhook dispatch", () => {
     process.env.STEWARD_JWT_SECRET = "user-lifecycle-webhooks-jwt-secret-with-enough-entropy";
     process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
     process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
-      [PLATFORM_KEY]: [
-        "platform:read",
-        "platform:write",
-        "platform:user:write",
-        "platform:user-lifecycle:write",
-        "platform:identity-migration",
-        "platform:identity-migration:force",
-        "platform:tenant-member:write",
-        "platform:tenant-user:write",
-      ],
+      [PLATFORM_KEY]: ["platform:*"],
     });
     process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION = "true";
 
@@ -40,11 +42,13 @@ describe("user lifecycle webhook dispatch", () => {
       await client.close();
     });
 
-    await getDb().insert(tenants).values({
-      id: TENANT_ID,
-      name: "User Lifecycle Webhooks Tenant",
-      apiKeyHash: "hash",
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: TENANT_ID,
+        name: "User Lifecycle Webhooks Tenant",
+        apiKeyHash: `hash-${TENANT_ID}`,
+      });
 
     ({ authRoutes } = await import("../routes/auth"));
     ({ platformRoutes } = await import("../routes/platform"));

@@ -1,4 +1,7 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+
+setDefaultTimeout(30000);
+
 import {
   agentKeyQuorums,
   agentSigners,
@@ -1050,7 +1053,7 @@ describe("generic intents API", () => {
       await getDb()
         .insert(policies)
         .values({
-          id: "intent-success-allowlist",
+          id: "intent-success-transfer-allowlist",
           agentId: SUCCESS_AGENT_ID,
           type: "approved-addresses",
           enabled: true,
@@ -1090,7 +1093,7 @@ describe("generic intents API", () => {
       });
       expect(authorize.status).toBe(200);
 
-      const execute = await adminApp.request(`/intents/${created.data.id}/execute`, {
+      const execute = await otherAdminApp.request(`/intents/${created.data.id}/execute`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "{}",

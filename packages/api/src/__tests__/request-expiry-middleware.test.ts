@@ -24,6 +24,8 @@ function makeApp(required = false) {
   app.post("/audit/verify", (c) => c.json({ ok: true }));
   app.post("/auth/refresh", (c) => c.json({ ok: true }));
   app.post("/auth/mfa/totp/unenroll", (c) => c.json({ ok: true }));
+  app.post("/global-wallet/rpc", (c) => c.json({ ok: true }));
+  app.post("/adapters/swap/build", (c) => c.json({ ok: true }));
   app.put("/tenants/:id/config", (c) => c.json({ ok: true }));
   app.post("/platform/tenants", (c) => c.json({ ok: true }));
   app.post("/agents", (c) => c.json({ ok: true }));
@@ -95,6 +97,8 @@ describe("requestExpiry", () => {
     const auditVerify = await app.request("/audit/verify", { method: "POST" });
     const authRefresh = await app.request("/auth/refresh", { method: "POST" });
     const authMfaUnenroll = await app.request("/auth/mfa/totp/unenroll", { method: "POST" });
+    const globalWalletRpc = await app.request("/global-wallet/rpc", { method: "POST" });
+    const adapterBuild = await app.request("/adapters/swap/build", { method: "POST" });
     const tenantConfig = await app.request("/tenants/tenant-1/config", { method: "PUT" });
     const platformTenant = await app.request("/platform/tenants", { method: "POST" });
     const agent = await app.request("/agents", { method: "POST" });
@@ -113,6 +117,8 @@ describe("requestExpiry", () => {
     expect(auditVerify.status).toBe(400);
     expect(authRefresh.status).toBe(400);
     expect(authMfaUnenroll.status).toBe(400);
+    expect(globalWalletRpc.status).toBe(400);
+    expect(adapterBuild.status).toBe(400);
     expect(tenantConfig.status).toBe(400);
     expect(platformTenant.status).toBe(400);
     expect(agent.status).toBe(400);

@@ -59,6 +59,7 @@ import {
   MASTER_PASSWORD,
   requireTenantLevel,
   safeJsonParse,
+  setNoStoreHeaders,
 } from "../services/context";
 import { normalizeGasSponsorshipConfig } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
@@ -71,6 +72,12 @@ import {
 import { requireTenantId } from "./tenants";
 
 export const tenantConfigRoutes = new Hono<{ Variables: AppVariables }>();
+
+tenantConfigRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
+
 type TenantConfigRow = typeof tenantConfigsTable.$inferSelect;
 type AgentPolicyRow = typeof policies.$inferSelect;
 type TenantAppClientSecretRow = typeof tenantAppClientSecrets.$inferSelect;
@@ -1074,8 +1081,7 @@ function normalizeAllowedOrigins(value: unknown): string[] | string {
     const trimmed = entry.trim();
     if (!trimmed) return "allowedOrigins entries must be non-empty strings";
     if (trimmed === "*") {
-      origins.add(trimmed);
-      continue;
+      return "allowedOrigins entries cannot be wildcard";
     }
 
     let url: URL;
@@ -1084,8 +1090,18 @@ function normalizeAllowedOrigins(value: unknown): string[] | string {
     } catch {
       return `Invalid allowed origin: ${trimmed}`;
     }
-    if (url.protocol !== "https:" && url.protocol !== "http:") {
-      return "allowedOrigins entries must use http or https";
+    if (url.protocol === "http:") {
+      const host = url.hostname.toLowerCase();
+      const isLoopback =
+        host === "localhost" ||
+        host === "127.0.0.1" ||
+        host === "::1" ||
+        host.endsWith(".localhost");
+      if (!isLoopback) {
+        return "allowedOrigins entries must use https except for loopback development origins";
+      }
+    } else if (url.protocol !== "https:") {
+      return "allowedOrigins entries must use https";
     }
     if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
       return "allowedOrigins entries must be origins only, without credentials, paths, query strings, or fragments";
@@ -3090,6 +3106,7 @@ tenantConfigRoutes.post("/:id/app-clients/:clientId/secrets", requireTenantId, a
     throw error;
   }
 
+  setNoStoreHeaders(c);
   return c.json<ApiResponse<TenantAppClientSecretCreateResult>>(
     {
       ok: true,
@@ -3769,7 +3786,7 @@ tenantConfigRoutes.post("/:id/config/templates/:name/apply", requireTenantId, as
     await writeAuditEvent({
       tenantId,
       actorType: "user",
-      actorId: tenantId,
+      actorId: c.get("userId") ?? tenantId,
       action: "policy.template.apply",
       resourceType: "agent",
       resourceId: body.agentId,

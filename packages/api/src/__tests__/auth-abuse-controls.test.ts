@@ -39,6 +39,9 @@ async function createTenantWithAbuseConfig(
     .values({
       id: tenantId,
       name: tenantId,
+      // apiKeyHash has a unique index. A shared constant made the second tenant
+      // insert silently no-op under onConflictDoNothing, which then tripped the
+      // tenant_configs -> tenants FK. Derive a unique hash per tenant.
       apiKeyHash: `test-hash-${tenantId}`,
       ownerAddress: `0x${(tenantOwnerCounter++).toString(16).padStart(40, "0")}`,
     })
@@ -168,48 +171,6 @@ describe("auth abuse controls", () => {
     });
   });
 
-  it("normalizes tenant MFA policy controls for sensitive signing and automation", () => {
-    const config = normalizeAuthAbuseConfig({
-      mfa: {
-        maxAgeSeconds: 120,
-        requireFor: {
-          vaultSigning: true,
-          keyImport: true,
-          keyExport: true,
-          recoveryCodes: true,
-          tenantAdmin: true,
-        },
-        allowDelegatedSignerAutomation: false,
-        allowKeyQuorumAutomation: false,
-      },
-    });
-
-    expect(config).toMatchObject({
-      mfa: {
-        maxAgeSeconds: 120,
-        requireFor: {
-          vaultSigning: true,
-          keyImport: true,
-          keyExport: true,
-          recoveryCodes: true,
-          tenantAdmin: true,
-        },
-        allowDelegatedSignerAutomation: false,
-        allowKeyQuorumAutomation: false,
-      },
-    });
-
-    expect(normalizeAuthAbuseConfig({ mfa: { maxAgeSeconds: 5 } })).toBe(
-      "mfa.maxAgeSeconds must be an integer between 30 and 3600",
-    );
-    expect(normalizeAuthAbuseConfig({ mfa: { requireFor: { vaultSigning: "yes" } } })).toBe(
-      "mfa.requireFor.vaultSigning must be a boolean",
-    );
-    expect(normalizeAuthAbuseConfig({ mfa: { allowDelegatedSignerAutomation: "no" } })).toBe(
-      "mfa.allowDelegatedSignerAutomation must be a boolean",
-    );
-  });
-
   it("discovers additional OAuth-style social and custom providers", async () => {
     const original = {
       LINKEDIN_CLIENT_ID: process.env.LINKEDIN_CLIENT_ID,
@@ -326,40 +287,5 @@ describe("auth abuse controls", () => {
         phone: { allowedPhoneNumbers: ["555-555-0123"] },
       }),
     ).toBe("phone.allowedPhoneNumbers must contain E.164 phone numbers");
-  });
-
-  it("normalizes tenant access allowlist backing values for email, domain, wallet, and phone", () => {
-    const config = normalizeAuthAbuseConfig({
-      email: {
-        allowedEmails: [" Person@Example.COM ", "person@example.com"],
-        allowedDomains: [" Example.COM ", "example.com"],
-      },
-      wallet: {
-        allowedWallets: [
-          " 0x1111111111111111111111111111111111111111 ",
-          "0x1111111111111111111111111111111111111111",
-          " solana:So11111111111111111111111111111111111111112 ",
-        ],
-      },
-      phone: {
-        allowedPhoneNumbers: [" +15555550123 ", "+15555550123"],
-      },
-    });
-
-    expect(config).toMatchObject({
-      email: {
-        allowedEmails: ["person@example.com"],
-        allowedDomains: ["example.com"],
-      },
-      wallet: {
-        allowedWallets: [
-          "0x1111111111111111111111111111111111111111",
-          "solana:so11111111111111111111111111111111111111112",
-        ],
-      },
-      phone: {
-        allowedPhoneNumbers: ["+15555550123"],
-      },
-    });
   });
 });

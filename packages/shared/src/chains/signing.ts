@@ -65,7 +65,16 @@ export const SIGNING_CURVE_SUPPORT: Readonly<Record<SigningCurve, SigningCurveSu
       curve: "secp256k1",
       supported: true,
       // ECDSA over secp256k1 — used by EVM chains and most Bitcoin-lineage chains.
-      exampleChains: ["ethereum", "base", "arbitrum", "polygon", "bsc", "bitcoin", "tron", "cosmos"],
+      exampleChains: [
+        "ethereum",
+        "base",
+        "arbitrum",
+        "polygon",
+        "bsc",
+        "bitcoin",
+        "tron",
+        "cosmos",
+      ],
     },
     ed25519: {
       curve: "ed25519",

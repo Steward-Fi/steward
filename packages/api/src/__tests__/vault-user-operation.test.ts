@@ -17,6 +17,7 @@ const AGENT_ID = `userop-agent-${Date.now()}`;
 const ALLOWED = "0x1234567890123456789012345678901234567890";
 const BLOCKED = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TEST_PRIVATE_KEY = `0x${"1".repeat(64)}`;
+const TEST_WALLET_ADDRESS = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
 
 const baseUserOperation = {
   sender: ALLOWED,
@@ -49,6 +50,7 @@ describe("vault user operation signing", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "vault-user-operation-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "vault-user-operation-audit-hmac-key-with-enough-entropy";
     process.env.STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING = "true";
     process.env.STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING = "true";
     const { db, client } = await createPGLiteDb("memory://");
@@ -82,7 +84,7 @@ describe("vault user operation signing", () => {
       "evm",
     );
     app = await makeApp();
-  });
+  }, 120_000);
 
   beforeEach(() => {
     dispatchWebhookMock.mockClear();
@@ -91,6 +93,7 @@ describe("vault user operation signing", () => {
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
     delete process.env.STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING;
     delete process.env.STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING;
   });
@@ -376,6 +379,98 @@ describe("vault user operation signing", () => {
         }),
       }),
     );
+
+    dispatchWebhookMock.mockClear();
+    const fundsTxId = `${txId}-funds`;
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: fundsTxId,
+        agentId: AGENT_ID,
+        status: "broadcast",
+        toAddress: ALLOWED,
+        value: "1000000000000000000",
+        data: "0x",
+        chainId: 8453,
+        txHash: "0x4444444444444444444444444444444444444444444444444444444444444444",
+        actionPayload: { referenceId: "customer-ref-funds" },
+        policyResults: [],
+      });
+    const depositResponse = await app.request(
+      `/vault/${AGENT_ID}/transactions/${fundsTxId}/lifecycle`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "wallet.funds_deposited",
+          txHash: "0x4444444444444444444444444444444444444444444444444444444444444444",
+          amount: "1000000000000000000",
+          sender: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          blockNumber: 456,
+          confirmations: 3,
+          mnemonic:
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+          privateKey: TEST_PRIVATE_KEY,
+        }),
+      },
+    );
+    expect(depositResponse.status).toBe(200);
+    expect(dispatchWebhookMock).toHaveBeenCalledWith(
+      TENANT_ID,
+      AGENT_ID,
+      "wallet.funds_deposited",
+      expect.objectContaining({
+        wallet_id: AGENT_ID,
+        transaction_id: fundsTxId,
+        transaction_hash: "0x4444444444444444444444444444444444444444444444444444444444444444",
+        caip2: "eip155:8453",
+        asset: { type: "native-token", address: null },
+        amount: "1000000000000000000",
+        sender: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        recipient: TEST_WALLET_ADDRESS,
+        block: { number: 456 },
+        confirmations: 3,
+        reference_id: "customer-ref-funds",
+      }),
+    );
+    const depositDispatchPayloads = JSON.stringify(dispatchWebhookMock.mock.calls);
+    expect(depositDispatchPayloads).not.toContain(TEST_PRIVATE_KEY);
+    expect(depositDispatchPayloads).not.toContain("abandon abandon");
+
+    dispatchWebhookMock.mockClear();
+    const withdrawResponse = await app.request(
+      `/vault/${AGENT_ID}/transactions/${fundsTxId}/lifecycle`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "wallet.funds_withdrawn",
+          txHash: "0x4444444444444444444444444444444444444444444444444444444444444444",
+          recipient: "0xcccccccccccccccccccccccccccccccccccccccc",
+          secret: "should-not-dispatch",
+        }),
+      },
+    );
+    expect(withdrawResponse.status).toBe(200);
+    expect(dispatchWebhookMock).toHaveBeenCalledWith(
+      TENANT_ID,
+      AGENT_ID,
+      "wallet.funds_withdrawn",
+      expect.objectContaining({
+        wallet_id: AGENT_ID,
+        transaction_id: fundsTxId,
+        transaction_hash: "0x4444444444444444444444444444444444444444444444444444444444444444",
+        caip2: "eip155:8453",
+        amount: "1000000000000000000",
+        sender: TEST_WALLET_ADDRESS,
+        recipient: "0xcccccccccccccccccccccccccccccccccccccccc",
+        reference_id: "customer-ref-funds",
+      }),
+    );
+    const fundsDispatchPayloads = JSON.stringify(dispatchWebhookMock.mock.calls);
+    expect(fundsDispatchPayloads).not.toContain("should-not-dispatch");
+    expect(fundsDispatchPayloads).not.toContain(TEST_PRIVATE_KEY);
+    expect(fundsDispatchPayloads).not.toContain("abandon abandon");
 
     const badResponse = await app.request(
       `/vault/${AGENT_ID}/transactions/${replacementTxId}/lifecycle`,

@@ -19,7 +19,10 @@ describe("webhook event routing", () => {
     expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("mfa.enabled");
     expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("private_key.exported");
     expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.recovery_setup");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.recovered");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.raw_signature.created");
     expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.funds_deposited");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.funds_withdrawn");
     expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("transaction.broadcasted");
     expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("transaction.still_pending");
     expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("user_operation.completed");

@@ -5,9 +5,10 @@
  * providers can be registered through AdapterRegistry under the "push" category.
  */
 
+import { Buffer } from "node:buffer";
+import { createSign } from "node:crypto";
 import { AdapterValidationError, type BaseAdapter } from "../types.js";
 import { assertId } from "../validation.js";
-import { createSign } from "node:crypto";
 
 export type PushProvider = "expo" | "apns" | "fcm";
 export type PushPlatform = "ios" | "android";
@@ -210,7 +211,11 @@ export class ExpoPushAdapter implements PushAdapter {
         title: message.title,
         body: message.body,
         ...(message.data ? { data: message.data } : {}),
-        ...(message.sound === "none" ? { sound: null } : message.sound ? { sound: message.sound } : {}),
+        ...(message.sound === "none"
+          ? { sound: null }
+          : message.sound
+            ? { sound: message.sound }
+            : {}),
         ...(message.badge !== undefined ? { badge: message.badge } : {}),
         ...(message.collapseId ? { channelId: message.collapseId } : {}),
       }),
@@ -228,7 +233,8 @@ export class ExpoPushAdapter implements PushAdapter {
         ok: false,
         provider: this.provider,
         subscriptionId,
-        error: stringifyExpoError(payload) || `Expo push request failed with status ${response.status}`,
+        error:
+          stringifyExpoError(payload) || `Expo push request failed with status ${response.status}`,
         retryable: response.status >= 500 || response.status === 429,
         deliveredAt: this.now(),
       };
@@ -297,7 +303,8 @@ export class ApnsPushAdapter implements PushAdapter {
 
   async send(request: PushSendRequest): Promise<PushDeliveryResult> {
     const provider = assertPushProvider(request.target.provider);
-    if (provider !== "apns") throw new AdapterValidationError("ApnsPushAdapter only supports APNs push tokens");
+    if (provider !== "apns")
+      throw new AdapterValidationError("ApnsPushAdapter only supports APNs push tokens");
     const subscriptionId = assertId(request.target.id, "subscriptionId", 128);
     assertId(request.target.userId, "userId", 128);
     const token = assertPushToken(request.target.token, provider);
@@ -346,7 +353,9 @@ export class ApnsPushAdapter implements PushAdapter {
   private async jwt(): Promise<string> {
     if (this.options.jwtProvider) return this.options.jwtProvider();
     const header = base64Url(JSON.stringify({ alg: "ES256", kid: this.options.keyId }));
-    const payload = base64Url(JSON.stringify({ iss: this.options.teamId, iat: Math.floor(this.now() / 1000) }));
+    const payload = base64Url(
+      JSON.stringify({ iss: this.options.teamId, iat: Math.floor(this.now() / 1000) }),
+    );
     const signingInput = `${header}.${payload}`;
     const signer = createSign("SHA256");
     signer.update(signingInput);
@@ -386,14 +395,16 @@ export class FcmPushAdapter implements PushAdapter {
 
   async send(request: PushSendRequest): Promise<PushDeliveryResult> {
     const provider = assertPushProvider(request.target.provider);
-    if (provider !== "fcm") throw new AdapterValidationError("FcmPushAdapter only supports FCM push tokens");
+    if (provider !== "fcm")
+      throw new AdapterValidationError("FcmPushAdapter only supports FCM push tokens");
     const subscriptionId = assertId(request.target.id, "subscriptionId", 128);
     assertId(request.target.userId, "userId", 128);
     const token = assertPushToken(request.target.token, provider);
     const message = assertPushMessage(request.message);
     const accessToken = await this.accessToken();
     const response = await this.fetch(
-      this.options.endpoint ?? `https://fcm.googleapis.com/v1/projects/${this.options.projectId}/messages:send`,
+      this.options.endpoint ??
+        `https://fcm.googleapis.com/v1/projects/${this.options.projectId}/messages:send`,
       {
         method: "POST",
         headers: {
@@ -406,7 +417,9 @@ export class FcmPushAdapter implements PushAdapter {
             notification: { title: message.title, body: message.body },
             ...(message.data ? { data: message.data } : {}),
             ...(message.collapseId ? { android: { collapse_key: message.collapseId } } : {}),
-            ...(message.badge !== undefined ? { apns: { payload: { aps: { badge: message.badge } } } } : {}),
+            ...(message.badge !== undefined
+              ? { apns: { payload: { aps: { badge: message.badge } } } }
+              : {}),
           },
         }),
       },
@@ -427,7 +440,11 @@ export class FcmPushAdapter implements PushAdapter {
       provider: this.provider,
       subscriptionId,
       error: fcmErrorMessage(payload.body) ?? `FCM request failed with status ${response.status}`,
-      retryable: response.status === 429 || response.status >= 500 || code === "UNAVAILABLE" || code === "RESOURCE_EXHAUSTED",
+      retryable:
+        response.status === 429 ||
+        response.status >= 500 ||
+        code === "UNAVAILABLE" ||
+        code === "RESOURCE_EXHAUSTED",
       deliveredAt: this.now(),
     };
   }
@@ -447,14 +464,17 @@ function extractExpoTicket(payload: unknown): ExpoPushTicket | undefined {
 }
 
 function stringifyExpoError(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== "object") return typeof payload === "string" ? payload : undefined;
+  if (!payload || typeof payload !== "object")
+    return typeof payload === "string" ? payload : undefined;
   const maybeErrors = (payload as { errors?: unknown }).errors;
   if (Array.isArray(maybeErrors) && maybeErrors.length > 0) {
     const first = maybeErrors[0] as { message?: unknown; code?: unknown };
     if (typeof first.message === "string") return first.message;
     if (typeof first.code === "string") return first.code;
   }
-  const maybeMessage = (payload as { message?: unknown; error?: unknown }).message ?? (payload as { error?: unknown }).error;
+  const maybeMessage =
+    (payload as { message?: unknown; error?: unknown }).message ??
+    (payload as { error?: unknown }).error;
   return typeof maybeMessage === "string" ? maybeMessage : undefined;
 }
 
@@ -467,7 +487,9 @@ function isRetryableExpoError(errorCode: string | undefined): boolean {
   );
 }
 
-async function parseProviderPayload(response: Awaited<ReturnType<PushFetch>>): Promise<{ headers: HeadersLike; body: unknown }> {
+async function parseProviderPayload(
+  response: Awaited<ReturnType<PushFetch>>,
+): Promise<{ headers: HeadersLike; body: unknown }> {
   let body: unknown;
   try {
     body = await response.json();
@@ -490,7 +512,8 @@ function responseHeader(source: HeadersLike, name: string): string | undefined {
 }
 
 function apnsReason(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== "object") return typeof payload === "string" ? payload : undefined;
+  if (!payload || typeof payload !== "object")
+    return typeof payload === "string" ? payload : undefined;
   const reason = (payload as { reason?: unknown }).reason;
   return typeof reason === "string" ? reason : undefined;
 }
@@ -502,7 +525,8 @@ function fcmMessageName(payload: unknown): string | undefined {
 }
 
 function fcmErrorMessage(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== "object") return typeof payload === "string" ? payload : undefined;
+  if (!payload || typeof payload !== "object")
+    return typeof payload === "string" ? payload : undefined;
   const error = (payload as { error?: { message?: unknown } }).error;
   return typeof error?.message === "string" ? error.message : undefined;
 }
@@ -515,5 +539,9 @@ function fcmErrorCode(payload: unknown): string | undefined {
 
 function base64Url(value: string | Buffer): string {
   const buffer = typeof value === "string" ? Buffer.from(value) : value;
-  return buffer.toString("base64").replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
+  return (buffer as unknown as { toString(encoding: string): string })
+    .toString("base64")
+    .replace(/=/g, "")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_");
 }

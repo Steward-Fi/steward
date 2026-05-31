@@ -187,6 +187,12 @@ export class PolicyEngine {
       policies.map((policy) => evaluatePolicy(policy, evaluatorCtx)),
     );
 
+    if (policies.every((policy) => policy.enabled === false)) {
+      const evaluationResult = { approved: false, results, requiresManualApproval: false };
+      await this.emitAuditEvent(ctx, results, evaluationResult);
+      return evaluationResult;
+    }
+
     const hardPolicies = results.filter((r) => r.type !== "auto-approve-threshold");
     const autoApproveResults = results.filter((r) => r.type === "auto-approve-threshold");
 

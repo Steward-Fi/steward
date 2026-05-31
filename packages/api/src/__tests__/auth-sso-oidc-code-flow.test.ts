@@ -34,7 +34,7 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     );
     expect(authorizeRoute).toContain("`oidc:${state}`");
 
-    expect(callbackRoute).toContain("await getChallengeStore().consume(`oidc:${state}`)");
+    expect(callbackRoute).toContain("await getChallengeStore().get(stateKey)");
     expect(callbackRoute).toContain("stateData.providerId !== providerId");
     expect(callbackRoute).toContain("exchangeOidcAuthorizationCode");
     expect(callbackRoute).toContain("verifyOidcJwt(stateData.tenantId, provider, idToken)");
@@ -42,6 +42,12 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(callbackRoute).toContain("Enterprise OIDC SSO requires a verified email claim");
     expect(callbackRoute).toContain("isVerifiedSsoEmailDomainForTenant");
     expect(callbackRoute).toContain("Enterprise OIDC SSO email domain is not verified");
+    expect(callbackRoute.indexOf("await getChallengeStore().get(stateKey)")).toBeLessThan(
+      callbackRoute.indexOf("exchangeOidcAuthorizationCode"),
+    );
+    expect(callbackRoute.indexOf("await getChallengeStore().consume(stateKey)")).toBeGreaterThan(
+      callbackRoute.indexOf("isVerifiedSsoEmailDomainForTenant"),
+    );
     expect(callbackRoute).toContain("provisionOidcUser");
     expect(callbackRoute).toContain('tenantRole: "viewer"');
     expect(callbackRoute).toContain("oauth-code:${exchangeCode}");

@@ -16,6 +16,7 @@ import {
   getPolicySet,
   getTransactionStats,
   requireTenantLevel,
+  setNoStoreHeaders,
   toTxRecord,
   transactions,
   vault,
@@ -47,6 +48,7 @@ dashboardRoutes.get("/:agentId", async (c) => {
       403,
     );
   }
+  setNoStoreHeaders(c);
 
   // Get agent identity
   const agent = await ensureAgentForTenant(tenantId, agentId);

@@ -1,9 +1,6 @@
-import {
-  getIdentityJwks,
-  getIdentityJwtConfig,
-  getIdentityJwtIssuer,
-  isAsymmetricIdentityJwtConfigured,
-} from "@stwd/auth";
+import { getIdentityJwks, getIdentityJwtConfig, getIdentityJwtIssuer } from "@stwd/auth";
+import { getDb, tenants } from "@stwd/db";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 
 function requestOrigin(requestUrl: string): string {
@@ -39,9 +36,7 @@ function discoveryMetadata(requestUrl: string, tenantId?: string) {
   return {
     issuer,
     jwks_uri: jwksUri,
-    id_token_signing_alg_values_supported: isAsymmetricIdentityJwtConfigured()
-      ? ["RS256", "ES256"]
-      : ["HS256"],
+    id_token_signing_alg_values_supported: ["RS256", "ES256"],
     response_types_supported: ["id_token"],
     subject_types_supported: ["public"],
     claims_supported: [
@@ -63,6 +58,15 @@ function discoveryMetadata(requestUrl: string, tenantId?: string) {
 
 export const identityDiscoveryRoutes = new Hono();
 
+async function tenantExists(tenantId: string): Promise<boolean> {
+  const [row] = await getDb()
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId))
+    .limit(1);
+  return Boolean(row);
+}
+
 identityDiscoveryRoutes.get("/.well-known/jwks.json", async (c) => {
   c.header("Cache-Control", "public, max-age=300");
   return c.json(await getIdentityJwks());
@@ -82,6 +86,9 @@ identityDiscoveryRoutes.get("/tenants/:tenantId/.well-known/jwks.json", async (c
   if (!isValidDiscoveryTenantId(tenantId)) {
     return c.json({ ok: false, error: "Invalid tenant id" }, 400);
   }
+  if (!(await tenantExists(tenantId))) {
+    return c.json({ ok: false, error: "Tenant not found" }, 404);
+  }
   c.header("Cache-Control", "public, max-age=300");
   return c.json(await getIdentityJwks());
 });
@@ -90,6 +97,9 @@ identityDiscoveryRoutes.get("/tenants/:tenantId/.well-known/openid-configuration
   const tenantId = c.req.param("tenantId");
   if (!isValidDiscoveryTenantId(tenantId)) {
     return c.json({ ok: false, error: "Invalid tenant id" }, 400);
+  }
+  if (!(await tenantExists(tenantId))) {
+    return c.json({ ok: false, error: "Tenant not found" }, 404);
   }
   c.header("Cache-Control", "public, max-age=300");
   const config = await getIdentityJwtConfig(publicBaseUrl(c.req.url));

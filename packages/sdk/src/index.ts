@@ -171,6 +171,8 @@ export type {
   UserPushSubscriptionInput,
   UserPushSubscriptionListResult,
   UserPushSubscriptionResult,
+  UserWalletRecoveryRestoreResult,
+  UserWalletRecoverySetupResult,
   WebhookConfig,
   WebhookDelivery,
   WebhookEventType,

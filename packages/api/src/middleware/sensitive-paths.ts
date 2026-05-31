@@ -21,6 +21,7 @@
 const SENSITIVE_PATH_PREFIXES: readonly string[] = [
   "/vault",
   "/agents",
+  "/adapters",
   "/policies",
   "/secrets",
   "/trade",
@@ -29,6 +30,7 @@ const SENSITIVE_PATH_PREFIXES: readonly string[] = [
   "/intents",
   "/audit",
   "/auth",
+  "/global-wallet",
   "/user",
   "/webhooks",
   "/tenants",

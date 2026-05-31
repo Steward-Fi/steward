@@ -33,6 +33,8 @@ describe("resolveTarget", () => {
 
   test("resolves alias with no trailing path", () => {
     const result = resolveTarget("/openai");
+    // resolveTarget normalizes an empty remainder to "/", and url is built as
+    // `https://${host}${path}`, so the url carries the trailing slash too.
     expect(result).toEqual({
       url: "https://api.openai.com/",
       host: "api.openai.com",

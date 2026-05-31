@@ -6,7 +6,7 @@
  */
 
 import { proxyAuditLog } from "@stwd/db";
-import { and, count, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, inArray, lte, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { verifyAuditChain } from "../services/audit";
 import {
@@ -15,6 +15,7 @@ import {
   agents,
   approvalQueue,
   db,
+  setNoStoreHeaders,
   transactions,
 } from "../services/context";
 
@@ -52,6 +53,7 @@ auditRoutes.use("*", async (c, next) => {
       403,
     );
   }
+  setNoStoreHeaders(c);
   return next();
 });
 
@@ -125,6 +127,14 @@ function validateAuditExportRange(
     return "audit export range must not exceed 31 days";
   }
   return null;
+}
+
+function rowsFromExecute<T>(result: unknown): T[] {
+  if (Array.isArray(result)) return result as T[];
+  if (result && typeof result === "object" && Array.isArray((result as { rows?: unknown }).rows)) {
+    return (result as { rows: T[] }).rows;
+  }
+  return [];
 }
 
 /** Resolve the set of agentIds belonging to the authenticated tenant. */
@@ -617,23 +627,38 @@ auditRoutes.get("/events", async (c) => {
   const pagination = parsePagination(c.req.query("page"), c.req.query("limit"));
   if (!pagination.ok) return c.json<ApiResponse>({ ok: false, error: pagination.error }, 400);
   const { page, limit, offset } = pagination.value;
+  const dateRange = parseAuditDateRange(c.req.query("dateFrom"), c.req.query("dateTo"));
+  if (!dateRange.ok) return c.json<ApiResponse>({ ok: false, error: dateRange.error }, 400);
   const action = c.req.query("action");
+  const actorType = c.req.query("actorType");
+  const actorId = c.req.query("actorId");
+  const resourceType = c.req.query("resourceType");
+  const resourceId = c.req.query("resourceId");
+  const requestId = c.req.query("requestId");
 
-  const rows = (await db.execute(
-    action
-      ? sql`SELECT id, seq, actor_type, actor_id, action, resource_type, resource_id, metadata, ip_address, user_agent, request_id, created_at
-            FROM audit_events
-            WHERE tenant_id = ${tenantId} AND action = ${action}
-            ORDER BY seq DESC LIMIT ${limit} OFFSET ${offset}`
-      : sql`SELECT id, seq, actor_type, actor_id, action, resource_type, resource_id, metadata, ip_address, user_agent, request_id, created_at
-            FROM audit_events
-            WHERE tenant_id = ${tenantId}
-            ORDER BY seq DESC LIMIT ${limit} OFFSET ${offset}`,
-  )) as Array<Record<string, unknown>>;
+  const conditions: SQL[] = [sql`tenant_id = ${tenantId}`];
+  if (action) conditions.push(sql`action = ${action}`);
+  if (actorType) conditions.push(sql`actor_type = ${actorType}`);
+  if (actorId) conditions.push(sql`actor_id = ${actorId}`);
+  if (resourceType) conditions.push(sql`resource_type = ${resourceType}`);
+  if (resourceId) conditions.push(sql`resource_id = ${resourceId}`);
+  if (requestId) conditions.push(sql`request_id = ${requestId}`);
+  if (dateRange.value.dateFrom) conditions.push(sql`created_at >= ${dateRange.value.dateFrom}`);
+  if (dateRange.value.dateTo) conditions.push(sql`created_at <= ${dateRange.value.dateTo}`);
+  const where = sql.join(conditions, sql` AND `);
 
-  const [{ total } = { total: 0 }] = (await db.execute(
-    sql`SELECT COUNT(*)::int AS total FROM audit_events WHERE tenant_id = ${tenantId}`,
-  )) as Array<{ total: number }>;
+  const rows = rowsFromExecute<Record<string, unknown>>(
+    await db.execute(sql`
+      SELECT id, seq, actor_type, actor_id, action, resource_type, resource_id, metadata, ip_address, user_agent, request_id, created_at
+      FROM audit_events
+      WHERE ${where}
+      ORDER BY seq DESC LIMIT ${limit} OFFSET ${offset}
+    `),
+  );
+
+  const [{ total } = { total: 0 }] = rowsFromExecute<{ total: number }>(
+    await db.execute(sql`SELECT COUNT(*)::int AS total FROM audit_events WHERE ${where}`),
+  );
 
   return c.json<ApiResponse>({
     ok: true,
@@ -693,7 +718,8 @@ auditRoutes.post("/verify", async (c) => {
     );
   }
 
-  const result = await verifyAuditChain(tenantId, { fromSeq, toSeq });
+  const requireHead = c.req.query("requireHead") === "true";
+  const result = await verifyAuditChain(tenantId, { fromSeq, toSeq, requireHead });
   const verifiedToSeq = result.valid
     ? fromSeq + result.count - 1
     : Math.max(fromSeq - 1, result.brokenAt - 1);
@@ -702,6 +728,7 @@ auditRoutes.post("/verify", async (c) => {
     data: {
       ...result,
       anchored: fromSeq === 1,
+      requireHead,
       verifiedFromSeq: fromSeq,
       verifiedToSeq,
       warning:

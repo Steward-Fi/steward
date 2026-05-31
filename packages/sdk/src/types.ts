@@ -1202,6 +1202,7 @@ export const WEBHOOK_EVENT_TYPES = [
   "private_key.exported",
   "wallet.recovery_setup",
   "wallet.recovered",
+  "wallet.raw_signature.created",
   "wallet.funds_deposited",
   "wallet.funds_withdrawn",
   "transaction.broadcasted",
@@ -1303,6 +1304,46 @@ export interface ExportKeyResult {
   evm?: { privateKey: string; address: string };
   solana?: { privateKey: string; address: string };
   warning: string;
+}
+
+export interface UserWalletRecoverySetupResult {
+  wallet: {
+    agentId: string;
+    walletAddress: string;
+    recoverable: true;
+  };
+  recovery: {
+    type: "bip39";
+    mnemonic: string;
+    warning: string;
+  };
+}
+
+export interface UserWalletRecoveryRestoreResult {
+  wallet: {
+    agentId: string;
+    walletAddress: string;
+    recoverable: true;
+    restoredExisting: boolean;
+  };
+  recovery: {
+    type: "bip39";
+    restored: true;
+  };
+}
+
+export interface PregeneratedUserWalletCreateResult {
+  wallets: Array<{
+    agent: AgentIdentity;
+    claimToken: string;
+  }>;
+  warning: string;
+}
+
+export interface PregeneratedUserWalletClaimResult {
+  agentId: string;
+  walletAddress: string;
+  claimed: true;
 }
 
 /**
@@ -1613,6 +1654,31 @@ export interface AuditSummaryResponse {
   policyViolations: number;
   topAgents: Array<{ agentId: string; name: string; txCount: number }>;
   dailyActivity: Array<{ date: string; txCount: number }>;
+}
+
+export interface AuditEventEntry {
+  id: number | string;
+  seq: number;
+  actor_type: string;
+  actor_id?: string | null;
+  action: string;
+  resource_type?: string | null;
+  resource_id?: string | null;
+  metadata: Record<string, unknown>;
+  ip_address?: string | null;
+  user_agent?: string | null;
+  request_id?: string | null;
+  created_at: string;
+}
+
+export interface AuditEventsResponse {
+  data: AuditEventEntry[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
 }
 
 // ─── Tenants ────────────────────────────────────────

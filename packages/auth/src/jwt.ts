@@ -320,7 +320,7 @@ export async function signIdentityJwtPayload(
 ): Promise<string> {
   const config = await getIdentityJwtSigningConfig(issuer, audience);
   if (!config) {
-    return signJwtPayload(payload, expiresIn);
+    throw new Error("Identity JWT private key is not configured");
   }
 
   const privateKey = await importIdentityPrivateKey(config.alg);

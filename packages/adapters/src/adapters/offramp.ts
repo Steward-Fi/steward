@@ -43,6 +43,8 @@ export interface OfframpPayoutDetails {
 export interface OfframpSession {
   readonly id: string;
   readonly provider: string;
+  readonly tenantId: string;
+  readonly userId: string;
   readonly status: OfframpStatus;
   readonly cryptoAsset: string;
   readonly cryptoAmount: string;
@@ -63,7 +65,11 @@ export interface OfframpSession {
 export interface OfframpAdapter extends BaseAdapter {
   readonly category: "offramp";
   getQuote(request: OfframpQuoteRequest): Promise<OfframpQuote>;
-  createSession(quote: OfframpQuote, payout: OfframpPayoutDetails): Promise<OfframpSession>;
+  createSession(
+    quote: OfframpQuote,
+    payout: OfframpPayoutDetails,
+    owner: { tenantId: string; userId: string },
+  ): Promise<OfframpSession>;
   getSession(id: string): Promise<OfframpSession | null>;
 }
 
@@ -113,10 +119,16 @@ export class MockOfframpAdapter implements OfframpAdapter {
     };
   }
 
-  async createSession(quote: OfframpQuote, payout: OfframpPayoutDetails): Promise<OfframpSession> {
+  async createSession(
+    quote: OfframpQuote,
+    payout: OfframpPayoutDetails,
+    owner: { tenantId: string; userId: string },
+  ): Promise<OfframpSession> {
     if (!quote || typeof quote.expiresAt !== "number") {
       throw new AdapterValidationError("a valid quote is required");
     }
+    const tenantId = assertId(owner?.tenantId, "tenantId", 128);
+    const userId = assertId(owner?.userId, "userId", 128);
     if (quote.expiresAt <= this.now()) {
       throw new AdapterValidationError("quote has expired; request a fresh quote");
     }
@@ -127,6 +139,8 @@ export class MockOfframpAdapter implements OfframpAdapter {
     const session: OfframpSession = {
       id: `offramp_${crypto.randomUUID()}`,
       provider: this.provider,
+      tenantId,
+      userId,
       status: "pending",
       cryptoAsset: quote.cryptoAsset,
       cryptoAmount: quote.cryptoAmount,

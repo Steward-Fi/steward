@@ -28,6 +28,8 @@ function makeApp(required = false) {
   app.post("/audit/verify", (c) => c.json({ ok: true }));
   app.post("/auth/refresh", (c) => c.json({ ok: true }));
   app.post("/auth/mfa/totp/unenroll", (c) => c.json({ ok: true }));
+  app.post("/global-wallet/rpc", (c) => c.json({ ok: true }));
+  app.post("/adapters/swap/build", (c) => c.json({ ok: true }));
   app.put("/tenants/:id/config", (c) => c.json({ ok: true }));
   app.post("/platform/tenants", (c) => c.json({ ok: true }));
   app.post("/agents", (c) => c.json({ ok: true }));
@@ -429,6 +431,14 @@ describe("authorizationSignature", () => {
       method: "POST",
       body: BODY,
     });
+    const globalWalletRpc = await app.request("/global-wallet/rpc", {
+      method: "POST",
+      body: BODY,
+    });
+    const adapterBuild = await app.request("/adapters/swap/build", {
+      method: "POST",
+      body: BODY,
+    });
     const tenantConfig = await app.request("/tenants/tenant-1/config", {
       method: "PUT",
       body: BODY,
@@ -453,6 +463,8 @@ describe("authorizationSignature", () => {
     expect(auditVerify.status).toBe(401);
     expect(authRefresh.status).toBe(401);
     expect(authMfaUnenroll.status).toBe(401);
+    expect(globalWalletRpc.status).toBe(401);
+    expect(adapterBuild.status).toBe(401);
     expect(tenantConfig.status).toBe(401);
     expect(platformTenant.status).toBe(401);
     expect(agent.status).toBe(401);

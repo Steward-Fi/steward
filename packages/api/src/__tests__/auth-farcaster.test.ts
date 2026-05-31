@@ -8,6 +8,8 @@ process.env.NODE_ENV = "test";
 process.env.FARCASTER_LOGIN_ENABLED = "true";
 process.env.STEWARD_MASTER_PASSWORD = "farcaster-auth-master-password";
 process.env.STEWARD_JWT_SECRET = "farcaster-auth-jwt-secret-with-enough-entropy";
+process.env.STEWARD_AUDIT_HMAC_KEY =
+  process.env.STEWARD_AUDIT_HMAC_KEY ?? "farcaster-auth-audit-hmac-key-with-enough-entropy-32b";
 process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.DATABASE_URL = process.env.DATABASE_URL || "postgres://test:test@localhost:5432/test";
 
@@ -39,9 +41,7 @@ async function signedPayload(overrides: { fid?: string; nonce?: string } = {}) {
     overrides.nonce ??
     (
       (await (
-        await authRoutes.request("/nonce", {
-          headers: { Origin: "https://steward.fi" },
-        })
+        await authRoutes.request("/nonce", { headers: { Origin: "https://steward.fi" } })
       ).json()) as { nonce: string }
     ).nonce;
   const fid = overrides.fid ?? "4242";
@@ -87,7 +87,7 @@ describe("Farcaster auth", () => {
     const payload = await signedPayload();
     const first = await authRoutes.request("/farcaster/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({ ...payload, tenantId: TENANT_ID }),
     });
     expect(first.status).toBe(200);
@@ -116,7 +116,7 @@ describe("Farcaster auth", () => {
 
     const replay = await authRoutes.request("/farcaster/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({ ...payload, tenantId: TENANT_ID }),
     });
     expect(replay.status).toBe(401);
@@ -140,7 +140,7 @@ describe("Farcaster auth", () => {
 
     const second = await authRoutes.request("/farcaster/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({
         ...(await signedPayload({
           fid: "999999",
@@ -165,7 +165,7 @@ describe("Farcaster auth", () => {
     process.env.FARCASTER_LOGIN_ENABLED = "false";
     const response = await authRoutes.request("/farcaster/verify", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify(await signedPayload()),
     });
     expect(response.status).toBe(503);

@@ -59,4 +59,72 @@ test.describe("Email magic-link — mock inbox round-trip", () => {
     const body = (await inbox.json()) as { token: string };
     expect(body.token).toMatch(/^[a-f0-9]{64}$/);
   });
+
+  test("browser callback redeems, stores only in sessionStorage, scrubs URL, and redirects", async ({
+    page,
+  }) => {
+    const email = `callback-${Date.now()}@example.test`;
+    await page.request.post(`${API}/auth/email/send`, { data: { email } });
+    const { token } = (await (
+      await page.request.get(`${API}/auth/test/inbox/${encodeURIComponent(email)}`)
+    ).json()) as { token: string };
+
+    await page.goto(
+      `${WEB}/auth/callback/email?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`,
+    );
+    await page.waitForURL(/\/dashboard$/, { timeout: 30_000 });
+
+    const storageState = await page.evaluate(() => ({
+      href: window.location.href,
+      sessionToken: window.sessionStorage.getItem("steward_session_token"),
+      refreshToken: window.sessionStorage.getItem("steward_refresh_token"),
+      localToken: window.localStorage.getItem("steward_session_token"),
+      localRefreshToken: window.localStorage.getItem("steward_refresh_token"),
+    }));
+
+    expect(storageState.href).not.toContain("token=");
+    expect(storageState.href).not.toContain("email=");
+    expect(storageState.sessionToken?.split(".")).toHaveLength(3);
+    expect(storageState.refreshToken).toBeTruthy();
+    expect(storageState.localToken).toBeNull();
+    expect(storageState.localRefreshToken).toBeNull();
+  });
+
+  test("stale localStorage auth tokens are ignored by the dashboard guard", async ({ page }) => {
+    await page.goto(`${WEB}/login`);
+    await page.evaluate(() => {
+      window.localStorage.setItem("steward_session_token", "stale.local.token");
+      window.localStorage.setItem("steward_refresh_token", "stale-local-refresh");
+      window.sessionStorage.removeItem("steward_session_token");
+      window.sessionStorage.removeItem("steward_refresh_token");
+    });
+
+    await page.goto(`${WEB}/dashboard`);
+    await page.waitForURL(/\/login$/, { timeout: 30_000 });
+
+    const storageState = await page.evaluate(() => ({
+      localToken: window.localStorage.getItem("steward_session_token"),
+      sessionToken: window.sessionStorage.getItem("steward_session_token"),
+    }));
+    expect(storageState.localToken).toBe("stale.local.token");
+    expect(storageState.sessionToken).toBeNull();
+  });
+
+  test("invalid callback URL shows an error and does not create storage tokens", async ({
+    page,
+  }) => {
+    await page.goto(`${WEB}/auth/callback/email?token=not-a-real-token`);
+
+    await expect(page.getByText(/missing token or email/i)).toBeVisible();
+    const storageState = await page.evaluate(() => ({
+      sessionToken: window.sessionStorage.getItem("steward_session_token"),
+      refreshToken: window.sessionStorage.getItem("steward_refresh_token"),
+      localToken: window.localStorage.getItem("steward_session_token"),
+      localRefreshToken: window.localStorage.getItem("steward_refresh_token"),
+    }));
+    expect(storageState.sessionToken).toBeNull();
+    expect(storageState.refreshToken).toBeNull();
+    expect(storageState.localToken).toBeNull();
+    expect(storageState.localRefreshToken).toBeNull();
+  });
 });

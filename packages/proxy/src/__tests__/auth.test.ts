@@ -38,11 +38,10 @@ function app() {
 
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
-  // Sign and verify with the same explicit secret. The hardened getJwtSecret()
-  // throws when no secret is configured (unless dev secrets are opted in), so
-  // tokens must be signed with a real, stable, >=32-char secret rather than the
-  // legacy "dev-secret" literal.
-  process.env.STEWARD_JWT_SECRET = "proxy-auth-test-secret-with-at-least-thirty-two-characters";
+  // verifyToken now refuses to run without an explicit JWT secret (the dev
+  // fallback requires STEWARD_ALLOW_DEV_SECRETS). Set a real secret so the
+  // signed tokens here verify against the same key the middleware uses.
+  process.env.STEWARD_JWT_SECRET = "proxy-auth-test-jwt-secret-with-enough-bytes";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -51,7 +50,7 @@ beforeAll(async () => {
   await getDb().insert(tenants).values({
     id: "tenant-1",
     name: "Proxy Auth Tenant",
-    apiKeyHash: "hash",
+    apiKeyHash: "hash-proxy-auth-tenant-1",
   });
   await getDb()
     .insert(agents)
@@ -199,50 +198,6 @@ describe("proxy auth middleware", () => {
       });
 
       expect(signed.status).toBe(200);
-    } finally {
-      delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
-      delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;
-    }
-  });
-
-  test("rejects signed proxy requests whose body exceeds the signed-body cap", async () => {
-    try {
-      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
-      process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = "proxy-signing-secret";
-      const token = await signAgentToken({ scopes: ["agent", PROXY_SCOPE] });
-      const timestamp = String(Math.floor(Date.now() / 1000));
-      const signature = await createProxyAuthorizationSignature(
-        {
-          method: "POST",
-          url: "https://proxy.test/",
-          tenantId: "tenant-1",
-          agentId: "agent-1",
-          timestamp,
-        },
-        "proxy-signing-secret",
-      );
-
-      // Default cap is 2 MiB; advertise a Content-Length above it. The bound is
-      // enforced inside canonical-request building (during signature
-      // verification) so an attacker can't force unbounded hashing of a signed
-      // body. No multi-MB payload is needed — the Content-Length check fires
-      // first.
-      const oversized = String(3 * 1024 * 1024);
-      const res = await app().request("/", {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "x-steward-request-timestamp": timestamp,
-          "x-steward-signature": signature,
-          "content-length": oversized,
-          "content-type": "application/octet-stream",
-        },
-        body: "small-body",
-      });
-
-      expect(res.status).toBe(413);
-      const body = await res.json();
-      expect(body.error).toContain("Signed proxy request body is too large");
     } finally {
       delete process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE;
       delete process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET;

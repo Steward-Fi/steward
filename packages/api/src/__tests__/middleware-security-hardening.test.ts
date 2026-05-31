@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import app from "../app";
 
 const apiRoot = join(import.meta.dir, "..");
 const idempotencySource = readFileSync(join(apiRoot, "middleware", "idempotency.ts"), "utf8");
@@ -48,6 +49,8 @@ describe("middleware security hardening", () => {
     expect(tenantCorsSource).toContain("TENANT_ID_RE.test(tenantId)");
     expect(tenantCorsSource).toContain("MAX_CORS_CACHE_ENTRIES");
     expect(tenantCorsSource).toContain("if (!row && clientRows.length === 0) return []");
+    expect(tenantCorsSource).toContain("if (origins.includes(origin))");
+    expect(tenantCorsSource).not.toContain('origins.includes("*")');
     expect(tenantCorsSource).toContain("X-Steward-Request-Timestamp");
     expect(tenantCorsSource).toContain("X-Steward-Request-Expires-At");
     expect(contextSource).toContain("headerTenant && headerTenant !== payload.tenantId");
@@ -73,5 +76,26 @@ describe("middleware security hardening", () => {
     expect(webMiddlewareSource).toContain("Content-Security-Policy");
     expect(webMiddlewareSource).toContain("frame-ancestors 'none'");
     expect(webMiddlewareSource).toContain("object-src 'none'");
+  });
+
+  it("emits API security headers behaviorally and suppresses HSTS on localhost", async () => {
+    const response = await app.request("/health", {
+      headers: { host: "api.example.com" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
+    expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(response.headers.get("Referrer-Policy")).toBe("strict-origin-when-cross-origin");
+    expect(response.headers.get("Permissions-Policy")).toContain("geolocation=()");
+    expect(response.headers.get("Strict-Transport-Security")).toContain("includeSubDomains");
+
+    const localResponse = await app.request("/health", {
+      headers: { host: "localhost:8787" },
+    });
+    expect(localResponse.status).toBe(200);
+    expect(localResponse.headers.get("Content-Security-Policy")).toContain("default-src 'none'");
+    expect(localResponse.headers.get("Strict-Transport-Security")).toBeNull();
   });
 });

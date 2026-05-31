@@ -4,7 +4,7 @@
  * Mount: app.route("/agents", agentRoutes)
  */
 
-import { revocationStore } from "@stwd/auth";
+import { hashSha256Hex, revocationStore } from "@stwd/auth";
 import { toPersistedPolicyRule } from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
 import { and, eq, gte, sql } from "drizzle-orm";
@@ -38,6 +38,7 @@ import {
   requireTenantLevel,
   safeJsonParse,
   sanitizeErrorMessage,
+  setNoStoreHeaders,
   toPolicyRule,
   transactions,
   vault,
@@ -64,6 +65,8 @@ const AGENT_SIGNER_TYPES = new Set(["owner", "delegated", "service", "quorum_mem
 const AGENT_SIGNER_SUBJECT_TYPES = new Set(["user", "wallet", "api_key", "external"]);
 const AGENT_SIGNER_STATUSES = new Set(["active", "paused", "revoked"]);
 const AGENT_KEY_QUORUM_STATUSES = new Set(["active", "paused", "revoked"]);
+const PREGENERATED_USER_WALLET_TYPE = "pregenerated_user";
+const PREGENERATED_CLAIM_PREFIX = "pregenerated:";
 const RESERVED_SIGNER_METADATA_KEYS = new Set([
   "credentialHash",
   "credentialCreatedAt",
@@ -249,6 +252,10 @@ function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]):
 
 function generateAgentId(): string {
   return `agt_${crypto.randomUUID()}`;
+}
+
+function generatePregeneratedWalletClaimToken(): string {
+  return `stwd_claim_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
 async function deleteAgentRows(agentId: string, tenantId: string): Promise<void> {
@@ -671,6 +678,170 @@ agentRoutes.post("/", async (c) => {
   }
 });
 
+// ─── Create user-claimable pregenerated wallets ──────────────────────────────
+
+agentRoutes.post("/pregenerated", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Pregenerated wallet creation requires owner or admin session",
+      },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Pregenerated wallet creation");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.get("tenantId");
+  const body = await safeJsonParse<{
+    count?: unknown;
+    namePrefix?: unknown;
+    applyPolicies?: PolicyRule[];
+  }>(c);
+
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  const count = body.count === undefined ? 1 : Number(body.count);
+  if (!Number.isSafeInteger(count) || count < 1 || count > MAX_BATCH_AGENTS) {
+    return c.json<ApiResponse>(
+      { ok: false, error: `count must be an integer between 1 and ${MAX_BATCH_AGENTS}` },
+      400,
+    );
+  }
+
+  const namePrefix =
+    body.namePrefix === undefined || body.namePrefix === null
+      ? "Pregenerated user wallet"
+      : isNonEmptyString(body.namePrefix)
+        ? body.namePrefix.trim()
+        : null;
+  if (!namePrefix) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "namePrefix must be a non-empty string when provided" },
+      400,
+    );
+  }
+
+  if (body.applyPolicies !== undefined) {
+    if (!Array.isArray(body.applyPolicies)) {
+      return c.json<ApiResponse>({ ok: false, error: "applyPolicies must be an array" }, 400);
+    }
+    if (body.applyPolicies.length > MAX_POLICIES_PER_AGENT) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `applyPolicies cannot contain more than ${MAX_POLICIES_PER_AGENT}`,
+        },
+        400,
+      );
+    }
+    const policyValidationError = getPolicyRulesValidationError(body.applyPolicies);
+    if (policyValidationError) {
+      return c.json<ApiResponse>({ ok: false, error: policyValidationError }, 400);
+    }
+    const conditionSetValidationError = await getConditionSetReferenceValidationError(
+      tenantId,
+      body.applyPolicies,
+    );
+    if (conditionSetValidationError) {
+      return c.json<ApiResponse>({ ok: false, error: conditionSetValidationError }, 400);
+    }
+  }
+
+  const wallets: Array<{ agent: AgentIdentity; claimToken: string }> = [];
+  const persistedPolicies = body.applyPolicies?.map(toPersistedPolicyRule);
+
+  try {
+    for (let index = 0; index < count; index += 1) {
+      const agentId = generateAgentId();
+      const claimToken = generatePregeneratedWalletClaimToken();
+      const claimTokenHash = hashSha256Hex(claimToken);
+      const platformId = `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+      const name = count === 1 ? namePrefix : `${namePrefix} ${index + 1}`;
+
+      await writeAgentAudit(c, {
+        tenantId,
+        action: "agent.pregenerated_user_wallet.create.authorized",
+        resourceType: "agent",
+        resourceId: agentId,
+        metadata: { batch: count > 1, claimTokenHash },
+      });
+
+      const identity = await vault.createAgent(tenantId, agentId, name, platformId);
+
+      try {
+        await db.transaction(async (tx) => {
+          await tx
+            .update(agents)
+            .set({ walletType: PREGENERATED_USER_WALLET_TYPE, updatedAt: new Date() })
+            .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+
+          if (persistedPolicies && persistedPolicies.length > 0) {
+            await tx.insert(policies).values(
+              persistedPolicies.map((policy) => ({
+                id: crypto.randomUUID(),
+                agentId,
+                type: policy.type,
+                enabled: policy.enabled,
+                config: policy.config,
+              })),
+            );
+          }
+        });
+
+        await writeAgentAudit(c, {
+          tenantId,
+          action: "agent.pregenerated_user_wallet.create",
+          resourceType: "agent",
+          resourceId: agentId,
+          metadata: {
+            batch: count > 1,
+            appliedPolicyCount: persistedPolicies?.length ?? 0,
+            claimTokenHash,
+          },
+        });
+      } catch (error) {
+        await deleteAgentRows(agentId, tenantId);
+        throw error;
+      }
+
+      wallets.push({ agent: identity, claimToken });
+    }
+  } catch (error) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? `Failed to create pregenerated wallets: ${error.message}`
+            : "Failed to create pregenerated wallets",
+      },
+      500,
+    );
+  }
+
+  setNoStoreHeaders(c);
+  return c.json<
+    ApiResponse<{
+      wallets: Array<{ agent: AgentIdentity; claimToken: string }>;
+      warning: string;
+    }>
+  >(
+    {
+      ok: true,
+      data: {
+        wallets,
+        warning:
+          "Claim tokens are shown once. Steward stores only SHA-256 hashes and cannot recover lost claim tokens.",
+      },
+    },
+    201,
+  );
+});
+
 // ─── List agents ──────────────────────────────────────────────────────────────
 
 agentRoutes.get("/", async (c) => {
@@ -761,6 +932,9 @@ agentRoutes.post("/:agentId/token", async (c) => {
       resourceId: agentId,
       metadata: { scopes, expiresIn },
     });
+    c.header("Cache-Control", "no-store, max-age=0");
+    c.header("Pragma", "no-cache");
+    c.header("Expires", "0");
     return c.json<
       ApiResponse<{
         token: string;
@@ -1368,6 +1542,14 @@ agentRoutes.get("/:agentId/account", async (c) => {
   });
 });
 
+agentRoutes.get("/:agentId/aggregation", (c) => {
+  const query = new URL(c.req.url).search;
+  return agentRoutes.request(`/${encodeURIComponent(c.req.param("agentId"))}/account${query}`, {
+    method: "GET",
+    headers: c.req.raw.headers,
+  });
+});
+
 // ─── Agent owners and delegated signers ──────────────────────────────────────
 
 agentRoutes.get("/:agentId/signers", async (c) => {
@@ -1554,6 +1736,11 @@ agentRoutes.post("/:agentId/signers", async (c) => {
       throw error;
     }
 
+    if (credentialSecret) {
+      c.header("Cache-Control", "no-store, max-age=0");
+      c.header("Pragma", "no-cache");
+      c.header("Expires", "0");
+    }
     return c.json<ApiResponse>(
       {
         ok: true,
@@ -1614,12 +1801,14 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
   }
 
   const updates: Partial<typeof agentSigners.$inferInsert> = {};
+  let privilegedSignerUpdate = false;
   try {
     if (body.signerType !== undefined) {
       const signerType = normalizeRequiredText(body.signerType, "signerType", 32);
       if (!AGENT_SIGNER_TYPES.has(signerType)) {
         throw new Error("signerType must be one of: owner, delegated, service, quorum_member");
       }
+      if (signerType !== existingSigner.signerType) privilegedSignerUpdate = true;
       updates.signerType = signerType;
     }
     if (body.address !== undefined) {
@@ -1631,10 +1820,15 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
       ) {
         throw new Error("address must be an EVM or Solana address");
       }
+      // Re-pointing the resolvable address of an active signer is functionally
+      // credential takeover for any flow that resolves authority through
+      // agentSigners.address, so this needs the same recent-MFA gate as a
+      // permissions/status change. Matches the key-quorum PATCH model.
+      if ((address ?? null) !== (existingSigner.address ?? null)) privilegedSignerUpdate = true;
       updates.address = address;
     }
     if (body.chainFamily !== undefined) {
-      updates.chainFamily =
+      const chainFamily =
         body.chainFamily === null
           ? null
           : body.chainFamily === "evm" || body.chainFamily === "solana"
@@ -1642,16 +1836,18 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
             : (() => {
                 throw new Error("chainFamily must be evm or solana");
               })();
+      if ((chainFamily ?? null) !== (existingSigner.chainFamily ?? null)) {
+        privilegedSignerUpdate = true;
+      }
+      updates.chainFamily = chainFamily;
     }
     if (body.label !== undefined) updates.label = normalizeOptionalText(body.label, "label", 255);
     if (body.permissions !== undefined) {
-      const mfaResponse = requireRecentAdminMfa(c, "Signer permission updates");
-      if (mfaResponse) return mfaResponse;
+      privilegedSignerUpdate = true;
       updates.permissions = normalizeSignerPermissions(body.permissions);
     }
     if (body.metadata !== undefined) {
-      const mfaResponse = requireRecentAdminMfa(c, "Signer metadata updates");
-      if (mfaResponse) return mfaResponse;
+      privilegedSignerUpdate = true;
       updates.metadata = mergeSignerMetadataPreservingReserved(
         existingSigner.metadata,
         normalizeSignerMetadata(body.metadata),
@@ -1662,10 +1858,7 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
       if (!AGENT_SIGNER_STATUSES.has(status)) {
         throw new Error("status must be one of: active, paused, revoked");
       }
-      if (status !== existingSigner.status) {
-        const mfaResponse = requireRecentAdminMfa(c, "Signer status updates");
-        if (mfaResponse) return mfaResponse;
-      }
+      if (status !== existingSigner.status) privilegedSignerUpdate = true;
       updates.status = status;
     }
   } catch (error) {
@@ -1677,6 +1870,13 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
 
   if (Object.keys(updates).length === 0) {
     return c.json<ApiResponse>({ ok: false, error: "No signer updates provided" }, 400);
+  }
+  // Single MFA gate for any privileged field change, mirroring the key-quorum PATCH
+  // handler. Cosmetic-only updates (label) are exempt; everything that affects
+  // signer authority requires a recent step-up.
+  if (privilegedSignerUpdate) {
+    const mfaResponse = requireRecentAdminMfa(c, "Signer updates");
+    if (mfaResponse) return mfaResponse;
   }
 
   await writeAgentAudit(c, {

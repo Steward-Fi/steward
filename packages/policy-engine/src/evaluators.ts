@@ -7,8 +7,9 @@ import {
   type PolicyResult,
   type PolicyRule,
   type PriceOracle,
-  type RawSigningChainConditionConfig,
   type RateLimitConfig,
+  type RawSigningChainConditionConfig,
+  rawSigningChainSupport,
   type SignRequest,
   type SpendingLimitConfig,
   type TimeWindowConfig,
@@ -16,7 +17,6 @@ import {
   type TypedDataDomain,
   type TypedDataField,
   type TypedDataMessageCondition,
-  rawSigningChainSupport,
   toCaip2,
 } from "@stwd/shared";
 import { type AggregationLookup, evaluateAggregation } from "./evaluators/aggregation";

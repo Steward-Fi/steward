@@ -11,33 +11,31 @@ import {
 
 setDefaultTimeout(30000);
 
-process.env.NODE_ENV = "test";
-process.env.STEWARD_PGLITE_MEMORY = "true";
-process.env.STEWARD_MASTER_PASSWORD =
-  process.env.STEWARD_MASTER_PASSWORD || "oauth-allowlist-master-password";
-process.env.STEWARD_JWT_SECRET =
-  process.env.STEWARD_JWT_SECRET || "oauth-allowlist-jwt-secret-with-enough-bytes";
-process.env.DATABASE_URL = process.env.DATABASE_URL || "postgres://test:test@localhost:5432/test";
-
-import { closeDb, getDb, tenantConfigs, tenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { getDb, tenantAppClients, tenantConfigs, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
+import { authRoutes, clearOAuthTokenKeyStoreForTests } from "../routes/auth";
 
-const { authRoutes, clearOAuthTokenKeyStoreForTests } = await import("../routes/auth");
+/**
+ * NOTE on test isolation:
+ *   Uses the ambient `DATABASE_URL` from the `Integration Tests (Postgres)`
+ *   CI job rather than swapping pglite into the global handle. Closing a
+ *   pglite handle in `afterAll` previously poisoned every subsequent test
+ *   in `bun test packages/api` with `error: PGlite is closed`. We use a
+ *   unique tenant prefix and clean up the rows in `afterAll` instead.
+ */
 
 const TENANT_ID = "test-oauth-allowlist";
-// PKCE is mandatory for response_type=code; a syntactically valid S256
-// challenge lets requests reach redirect_uri allowlist validation.
-const CODE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
-const PKCE_QS = `&code_challenge=${CODE_CHALLENGE}&code_challenge_method=S256`;
+const PKCE_QUERY =
+  "&response_type=code&code_challenge=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&code_challenge_method=S256";
+const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
+const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
-describe("OAuth redirect_uri allowlist", () => {
+describeWithDatabase("OAuth redirect_uri allowlist", () => {
   beforeAll(async () => {
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
-
+    process.env.STEWARD_MASTER_PASSWORD =
+      process.env.STEWARD_MASTER_PASSWORD || "oauth-allowlist-master-password";
+    process.env.STEWARD_JWT_SECRET =
+      process.env.STEWARD_JWT_SECRET || "oauth-allowlist-jwt-secret-with-enough-bytes";
     process.env.APP_URL = "https://api.example.test";
     process.env.GOOGLE_CLIENT_ID = "google-client";
     process.env.GOOGLE_CLIENT_SECRET = "google-secret";
@@ -45,7 +43,8 @@ describe("OAuth redirect_uri allowlist", () => {
     delete process.env.STEWARD_OAUTH_REDIRECT_ALLOWLIST;
     clearOAuthTokenKeyStoreForTests();
 
-    await getDb()
+    const db = getDb();
+    await db
       .insert(tenants)
       .values({
         id: TENANT_ID,
@@ -53,7 +52,7 @@ describe("OAuth redirect_uri allowlist", () => {
         apiKeyHash: "hash",
       })
       .onConflictDoNothing();
-    await getDb()
+    await db
       .insert(tenantConfigs)
       .values({
         tenantId: TENANT_ID,
@@ -71,13 +70,24 @@ describe("OAuth redirect_uri allowlist", () => {
   });
 
   afterAll(async () => {
-    await closeDb();
+    const db = getDb();
+    await db
+      .delete(tenantAppClients)
+      .where(eq(tenantAppClients.tenantId, TENANT_ID))
+      .catch(() => {});
+    await db
+      .delete(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID))
+      .catch(() => {});
+    await db
+      .delete(tenants)
+      .where(eq(tenants.id, TENANT_ID))
+      .catch(() => {});
     delete process.env.APP_URL;
     delete process.env.GOOGLE_CLIENT_ID;
     delete process.env.GOOGLE_CLIENT_SECRET;
     delete process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS;
     delete process.env.STEWARD_OAUTH_REDIRECT_ALLOWLIST;
-    delete process.env.STEWARD_PGLITE_MEMORY;
   });
 
   it("rejects /authorize when redirect_uri origin is outside the tenant allowlist", async () => {
@@ -90,7 +100,7 @@ describe("OAuth redirect_uri allowlist", () => {
     });
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://evil.example/callback")}${PKCE_QS}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://evil.example/callback")}${PKCE_QUERY}`,
     );
 
     expect(res.status).toBe(400);
@@ -110,7 +120,7 @@ describe("OAuth redirect_uri allowlist", () => {
     process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = "https://global.example.test/callback";
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://global.example.test/callback")}${PKCE_QS}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://global.example.test/callback")}${PKCE_QUERY}`,
     );
 
     expect(res.status).toBe(400);
@@ -129,13 +139,61 @@ describe("OAuth redirect_uri allowlist", () => {
     });
 
     const res = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}${PKCE_QS}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/callback")}${PKCE_QUERY}`,
     );
 
     expect(res.status).toBe(400);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
     expect(body.error).toContain("redirect_uri is not allowed");
+  });
+
+  it("does not treat tenant CORS origins as OAuth redirect allowlist entries", async () => {
+    const db = getDb();
+    await db.delete(tenantAppClients).where(eq(tenantAppClients.tenantId, TENANT_ID));
+    await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
+    await db.insert(tenantConfigs).values({
+      tenantId: TENANT_ID,
+      allowedOrigins: ["https://cms.example.test"],
+      allowedRedirectUrls: [],
+    });
+
+    const res = await authRoutes.request(
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://cms.example.test/")}${PKCE_QUERY}`,
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("allowlist is not configured");
+  });
+
+  it("does not treat app client CORS origins as OAuth redirect allowlist entries", async () => {
+    const db = getDb();
+    await db.delete(tenantAppClients).where(eq(tenantAppClients.tenantId, TENANT_ID));
+    await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, TENANT_ID));
+    await db.insert(tenantConfigs).values({
+      tenantId: TENANT_ID,
+      allowedOrigins: [],
+      allowedRedirectUrls: [],
+    });
+    await db.insert(tenantAppClients).values({
+      tenantId: TENANT_ID,
+      id: "public-site",
+      name: "Public Site",
+      enabled: true,
+      allowedOrigins: ["https://cms.example.test"],
+      allowedRedirectUrls: [],
+    });
+
+    const res = await authRoutes.request(
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&client_id=public-site&redirect_uri=${encodeURIComponent("https://cms.example.test/")}${PKCE_QUERY}`,
+    );
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("allowlist is not configured");
   });
 
   it("re-validates the stored redirect_uri during /callback before redirecting tokens", async () => {
@@ -148,7 +206,7 @@ describe("OAuth redirect_uri allowlist", () => {
     });
 
     const authorizeRes = await authRoutes.request(
-      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/")}${PKCE_QS}`,
+      `/oauth/google/authorize?tenant_id=${TENANT_ID}&redirect_uri=${encodeURIComponent("https://app.example.test/")}${PKCE_QUERY}`,
     );
 
     expect(authorizeRes.status).toBe(302);

@@ -7,8 +7,19 @@
  * through the existing policy/signing path.
  */
 
-import { AdapterValidationError, type BaseAdapter, type TokenRef, type UnsignedTxIntent } from "../types.js";
-import { assertChainId, assertEvmAddress, assertId, assertSlippageBps, assertUint256 } from "../validation.js";
+import {
+  AdapterValidationError,
+  type BaseAdapter,
+  type TokenRef,
+  type UnsignedTxIntent,
+} from "../types.js";
+import {
+  assertChainId,
+  assertEvmAddress,
+  assertId,
+  assertSlippageBps,
+  assertUint256,
+} from "../validation.js";
 
 export interface BridgeQuoteRequest {
   fromChainId: number;
@@ -45,6 +56,8 @@ export interface BridgeBuildRequest {
 export interface BridgeSession {
   readonly id: string;
   readonly provider: string;
+  readonly tenantId: string;
+  readonly userId: string;
   readonly quoteId: string;
   readonly status: "created" | "pending" | "completed" | "failed";
   readonly fromChainId: number;
@@ -57,7 +70,10 @@ export interface BridgeAdapter extends BaseAdapter {
   readonly category: "bridge";
   getQuote(request: BridgeQuoteRequest): Promise<BridgeQuote>;
   buildBridge(request: BridgeBuildRequest): Promise<UnsignedTxIntent>;
-  createSession(quote: BridgeQuote): Promise<BridgeSession>;
+  createSession(
+    quote: BridgeQuote,
+    owner: { tenantId: string; userId: string },
+  ): Promise<BridgeSession>;
   getSession(id: string): Promise<BridgeSession | null>;
 }
 
@@ -136,11 +152,18 @@ export class MockBridgeAdapter implements BridgeAdapter {
     };
   }
 
-  async createSession(quote: BridgeQuote): Promise<BridgeSession> {
+  async createSession(
+    quote: BridgeQuote,
+    owner: { tenantId: string; userId: string },
+  ): Promise<BridgeSession> {
     const valid = validateQuote(quote, this.now());
+    const tenantId = assertId(owner?.tenantId, "tenantId", 128);
+    const userId = assertId(owner?.userId, "userId", 128);
     const session: BridgeSession = {
       id: `bridge_${crypto.randomUUID()}`,
       provider: this.provider,
+      tenantId,
+      userId,
       quoteId: valid.quoteId,
       status: "created",
       fromChainId: valid.fromChainId,

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 // Skip all DB-dependent tests when DATABASE_URL is not configured
 const SKIP = !process.env.DATABASE_URL;
 
+import { randomUUID } from "node:crypto";
 import { generateApiKey } from "@stwd/auth";
 import { getDb, tenants, users, userTenants, webhookConfigs } from "@stwd/db";
 import { eq } from "drizzle-orm";
@@ -11,12 +12,11 @@ import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "../services/webhook-events";
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
 const BASE_URL = `http://localhost:${TEST_PORT}`;
 const TEST_TENANT = "test-webhooks-tenant";
-const TEST_EMAIL = `${TEST_TENANT}@example.com`;
 
-// Webhook routes were hardened to require an owner/admin session JWT with recent
-// MFA. Tests authenticate with a minted session token instead of a tenant API key.
 let sessionToken: string;
 let createdWebhookId: string;
+const testUserId = randomUUID();
+const TEST_USER_EMAIL = `webhooks-admin-${Date.now()}@example.test`;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -34,23 +34,25 @@ beforeAll(async () => {
     })
     .onConflictDoNothing();
 
-  const [inserted] = await db
+  await db
     .insert(users)
-    .values({ email: TEST_EMAIL, emailVerified: true, name: "Test" })
-    .onConflictDoNothing()
-    .returning();
-  const userId =
-    inserted?.id ?? (await db.select().from(users).where(eq(users.email, TEST_EMAIL)))[0].id;
+    .values({ id: testUserId, email: TEST_USER_EMAIL, emailVerified: true })
+    .onConflictDoNothing();
   await db
     .insert(userTenants)
-    .values({ userId, tenantId: TEST_TENANT, role: "owner" })
+    .values({ userId: testUserId, tenantId: TEST_TENANT, role: "owner" })
     .onConflictDoNothing();
 
   const { createSessionToken } = await import("../routes/auth");
   sessionToken = await createSessionToken(
     "0x0000000000000000000000000000000000000000",
     TEST_TENANT,
-    { userId, email: TEST_EMAIL, mfaVerifiedAt: Date.now(), mfaMethod: "totp" },
+    {
+      userId: testUserId,
+      email: TEST_USER_EMAIL,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
   );
 });
 
@@ -59,8 +61,8 @@ afterAll(async () => {
   const db = getDb();
   // Clean up webhooks first (FK constraint)
   await db.delete(webhookConfigs).where(eq(webhookConfigs.tenantId, TEST_TENANT));
-  await db.delete(userTenants).where(eq(userTenants.tenantId, TEST_TENANT));
-  await db.delete(users).where(eq(users.email, TEST_EMAIL));
+  await db.delete(userTenants).where(eq(userTenants.userId, testUserId));
+  await db.delete(users).where(eq(users.id, testUserId));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT));
 });
 

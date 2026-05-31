@@ -17,16 +17,20 @@ skipped:
 bun run scripts/soc2-check.ts --json --skip-dependency-checks
 ```
 
+In `NODE_ENV=production`, dependency skips fail closed unless the operator sets
+`STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP=true`. `--strict` also treats any skipped
+check as a failing gate, even outside production.
+
 The report includes:
 
 - `generatedAt`, `gitRevision`, `nodeEnv`, and status counts.
 - Environment checks for master password, JWT secret, KDF salt, audit HMAC key,
   database TLS, and bind-host posture.
 - Source-backed checks for security headers, audit tamper-evidence, and
-  retention/deletion controls.
+  retention/deletion controls, including fail-closed pre-delete audit
+  authorization for destructive retention sweeps.
 - Dependency and lockfile checks unless `--skip-dependency-checks` is supplied.
 
 Use the generated JSON as supporting evidence for auditor review. It is not a
 replacement for policy documents, access reviews, vendor reviews, incident
 records, penetration tests, or a formal SOC2 report.
-

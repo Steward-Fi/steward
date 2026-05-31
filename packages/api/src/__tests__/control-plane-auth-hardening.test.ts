@@ -28,6 +28,8 @@ describe("control-plane auth hardening", () => {
 
   it("requires recent MFA before tenant admins can read or rotate sensitive login config", () => {
     expect(tenantConfigSource).toContain("function requireRecentTenantAdminMfa");
+    expect(tenantConfigSource).toContain('tenantConfigRoutes.use("*"');
+    expect(tenantConfigSource).toContain("setNoStoreHeaders(c)");
     expect(tenantConfigSource).toContain("readTenantMfaPolicy");
     expect(tenantConfigSource).toContain("tenantMfaMaxAgeMs");
     expect(tenantConfigSource).toContain("policy.requireFor?.tenantAdmin === false");
@@ -95,6 +97,26 @@ describe("control-plane auth hardening", () => {
     expect(applyRoute).not.toContain(".onConflictDoNothing()");
   });
 
+  it("keeps the final policy-template apply audit attributed to the user actor", () => {
+    const applyStart = tenantConfigSource.indexOf(
+      'tenantConfigRoutes.post("/:id/config/templates/:name/apply"',
+    );
+    expect(applyStart).toBeGreaterThanOrEqual(0);
+    const applyRoute = tenantConfigSource.slice(
+      applyStart,
+      tenantConfigSource.indexOf('tenantConfigRoutes.get("/:id/oidc-providers"', applyStart),
+    );
+    const finalAudit = applyRoute.indexOf('action: "policy.template.apply"');
+    expect(finalAudit).toBeGreaterThanOrEqual(0);
+    const finalAuditBody = applyRoute.slice(
+      applyRoute.lastIndexOf("await writeAuditEvent", finalAudit),
+      applyRoute.indexOf("metadata:", finalAudit),
+    );
+    expect(finalAuditBody).toContain('actorId: c.get("userId") ?? tenantId');
+    expect(finalAuditBody).not.toContain("actorId: tenantId");
+  });
+
+
   it("does not allow tenant API keys or stale admin sessions to manage persistent webhooks", () => {
     expect(webhookSource).toContain("function requireRecentTenantAdminMfa");
     expect(webhookSource).toContain("readTenantMfaPolicy");
@@ -112,7 +134,10 @@ describe("control-plane auth hardening", () => {
       [webhookSource, 'webhookRoutes.post("/deliveries/:id/retry",'],
       [tenantsSource, 'tenantRoutes.put("/:id/webhook",'],
     ] as const) {
-      const start = source.indexOf(marker);
+      const start =
+        source.indexOf(marker) >= 0
+          ? source.indexOf(marker)
+          : source.indexOf(marker.replace('")', '", async'));
       expect(start).toBeGreaterThanOrEqual(0);
       const adminCheck = source.indexOf("requireRecentTenantAdminMfa(c,", start);
       const tenantLevelCheck = source.indexOf("requireTenantLevel(c)", start);
@@ -135,5 +160,20 @@ describe("control-plane auth hardening", () => {
     );
     expect(getRoute).toContain("getTenantPayloadForRequest(c, tenant)");
     expect(getRoute).not.toContain("getTenantPayload(tenant)");
+  });
+
+  it("marks legacy tenant config responses as non-cacheable", () => {
+    expect(tenantsSource).toContain("setNoStoreHeaders");
+
+    for (const [marker, nextMarker] of [
+      ['tenantRoutes.get("/:id"', 'tenantRoutes.put("/:id/webhook"'],
+      ['tenantRoutes.put("/:id/webhook"', null],
+    ] as const) {
+      const start = tenantsSource.indexOf(marker);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const end = nextMarker ? tenantsSource.indexOf(nextMarker, start + marker.length) : undefined;
+      const routeBody = tenantsSource.slice(start, end);
+      expect(routeBody).toContain("setNoStoreHeaders(c)");
+    }
   });
 });

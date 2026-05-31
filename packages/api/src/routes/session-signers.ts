@@ -13,7 +13,7 @@
 import { randomUUID } from "node:crypto";
 
 import { revocationStore, signAgentToken } from "@stwd/auth";
-import { sessionSigners } from "@stwd/db";
+import { auditEvents, sessionSigners } from "@stwd/db";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
@@ -27,6 +27,7 @@ import {
   policies,
   requireTenantLevel,
   safeJsonParse,
+  setNoStoreHeaders,
 } from "../services/context";
 
 const MAX_LIFETIME_MS = 30 * 24 * 3600 * 1000;
@@ -46,14 +47,80 @@ function parseDuration(input: string): number | null {
 
 export const sessionSignerRoutes = new Hono<{ Variables: AppVariables }>();
 
+sessionSignerRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
+
+function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]): boolean {
+  const role = c.get("tenantRole");
+  return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
+}
+
+function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
+  const verifiedAt = c.get("sessionMfaVerifiedAt");
+  return (
+    typeof verifiedAt === "number" &&
+    Number.isFinite(verifiedAt) &&
+    Date.now() - verifiedAt <= maxAgeMs
+  );
+}
+
+function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {
+  if (hasRecentSessionMfa(c)) return null;
+  return c.json<ApiResponse>(
+    { ok: false, error: `${reason} requires recent MFA verification` },
+    403,
+  );
+}
+
+async function hasRevocationAudit(tenantId: string, signerId: string): Promise<boolean> {
+  const rows = await db
+    .select({ id: auditEvents.id })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.tenantId, tenantId),
+        eq(auditEvents.action, "session_signer.revoked"),
+        eq(auditEvents.resourceType, "session_signer"),
+        eq(auditEvents.resourceId, signerId),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+async function writeSessionSignerRevokedAudit(
+  c: Parameters<typeof requireTenantLevel>[0],
+  tenantId: string,
+  agentId: string,
+  signerId: string,
+  jti: string,
+): Promise<void> {
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: c.get("userId") ?? tenantId,
+    action: "session_signer.revoked",
+    resourceType: "session_signer",
+    resourceId: signerId,
+    metadata: { agentId, jti },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+}
+
 // POST /agents/:agentId/session-signers
 sessionSignerRoutes.post("/", async (c) => {
-  if (!requireTenantLevel(c)) {
+  if (!requireTenantAdminSession(c)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Session signers can only be minted with tenant-level auth" },
+      { ok: false, error: "Session signer creation requires owner or admin session" },
       403,
     );
   }
+  const mfaResponse = requireRecentAdminMfa(c, "Session signer creation");
+  if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
@@ -151,7 +218,7 @@ sessionSignerRoutes.post("/", async (c) => {
   try {
     await writeAuditEvent({
       tenantId,
-      actorType: c.get("authType") === "api-key" ? "api-key" : "user",
+      actorType: "user",
       actorId: c.get("userId") ?? tenantId,
       action: "session_signer.created",
       resourceType: "session_signer",
@@ -202,9 +269,15 @@ sessionSignerRoutes.post("/", async (c) => {
 
 // GET /agents/:agentId/session-signers
 sessionSignerRoutes.get("/", async (c) => {
-  if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Session signer access requires owner or admin session" },
+      403,
+    );
   }
+  const mfaResponse = requireRecentAdminMfa(c, "Session signer access");
+  if (mfaResponse) return mfaResponse;
+
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   if (!tenantId || !agentId) {
@@ -244,9 +317,15 @@ sessionSignerRoutes.get("/", async (c) => {
 
 // DELETE /agents/:agentId/session-signers/:id
 sessionSignerRoutes.delete("/:id", async (c) => {
-  if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Session signer revocation requires owner or admin session" },
+      403,
+    );
   }
+  const mfaResponse = requireRecentAdminMfa(c, "Session signer revocation");
+  if (mfaResponse) return mfaResponse;
+
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const signerId = c.req.param("id");
@@ -275,6 +354,24 @@ sessionSignerRoutes.delete("/:id", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Session signer not found" }, 404);
   }
   if (existing.revokedAt) {
+    if (!(await hasRevocationAudit(tenantId, signerId))) {
+      try {
+        await writeSessionSignerRevokedAudit(c, tenantId, agentId, signerId, existing.jti);
+      } catch (err) {
+        console.error(
+          `[session-signer] audit repair failed for already-revoked signer ${signerId}:`,
+          err,
+        );
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error:
+              "Session signer is revoked but audit record failed to persist; retry to record it",
+          },
+          500,
+        );
+      }
+    }
     return c.json<ApiResponse>({ ok: true, data: { alreadyRevoked: true, id: signerId } });
   }
 
@@ -286,22 +383,11 @@ sessionSignerRoutes.delete("/:id", async (c) => {
   // Revoking a delegated signing credential is a security-relevant mutation; its
   // audit record must be durable. Write it BLOCKING. We do NOT roll back on
   // failure — the credential is already revoked (the safe direction) and
-  // un-revoking would re-enable a credential the operator asked to kill. Instead
-  // we surface the failure: revocation is idempotent (the `alreadyRevoked`
-  // short-circuit above) so a retry re-attempts the audit cleanly.
+  // un-revoking would re-enable a credential the operator asked to kill. The
+  // already-revoked branch above verifies or repairs the audit record so a
+  // retry after a transient audit outage can still complete the trail.
   try {
-    await writeAuditEvent({
-      tenantId,
-      actorType: c.get("authType") === "api-key" ? "api-key" : "user",
-      actorId: c.get("userId") ?? tenantId,
-      action: "session_signer.revoked",
-      resourceType: "session_signer",
-      resourceId: signerId,
-      metadata: { agentId, jti: existing.jti },
-      ipAddress: c.req.header("x-forwarded-for") ?? null,
-      userAgent: c.req.header("user-agent") ?? null,
-      requestId: c.get("requestId") ?? null,
-    });
+    await writeSessionSignerRevokedAudit(c, tenantId, agentId, signerId, existing.jti);
   } catch (err) {
     console.error(`[session-signer] audit write failed for revocation ${signerId}:`, err);
     return c.json<ApiResponse>(

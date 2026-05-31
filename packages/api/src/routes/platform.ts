@@ -61,6 +61,7 @@ import {
   createAgentToken,
   getConditionSetReferenceValidationError,
   parseAgentTokenScopes,
+  setNoStoreHeaders,
 } from "../services/context";
 import { normalizeGasSpendQuery, querySponsoredGasSpend } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
@@ -501,14 +502,43 @@ async function safeJsonParse<T>(c: { req: { json: <X>() => Promise<X> } }): Prom
 
 const platform = new Hono<{ Variables: AppVariables }>();
 
+const PLATFORM_READ_ONLY_POST_PATHS = new Set([
+  "/users/email/address",
+  "/users/phone/number",
+  "/users/wallet/address",
+  "/users/smart-wallet/address",
+  "/users/custom-auth/id",
+  "/users/discord/username",
+  "/users/github/username",
+  "/users/farcaster/id",
+  "/users/instagram/username",
+  "/users/spotify/subject",
+  "/users/telegram/user-id",
+  "/users/telegram/username",
+  "/users/twitch/username",
+  "/users/twitter/subject",
+  "/users/twitter/username",
+]);
+
+function isPlatformReadLikeRequest(c: Context<{ Variables: AppVariables }>): boolean {
+  if (c.req.method === "GET" || c.req.method === "HEAD") return true;
+  if (c.req.method !== "POST") return false;
+  const pathname = new URL(c.req.url).pathname.replace(/^\/platform(?=\/)/, "");
+  return PLATFORM_READ_ONLY_POST_PATHS.has(pathname);
+}
+
 // All platform routes require a valid platform key
 platform.use("*", platformAuthMiddleware());
+platform.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 platform.use("*", async (c, next) => {
   if (c.req.method === "OPTIONS") {
     return next();
   }
   const scopes = c.get("platformScopes");
-  if (c.req.method === "GET" || c.req.method === "HEAD") {
+  if (isPlatformReadLikeRequest(c)) {
     if (!hasPlatformScope(scopes, "platform:read")) {
       return c.json<ApiResponse>(
         {
@@ -2160,7 +2190,14 @@ async function lookupPlatformUserIdentity(
     if (!link) return null;
   }
 
-  return serializePlatformUserIdentity(candidateUserId);
+  const identity = await serializePlatformUserIdentity(candidateUserId);
+  if (!identity) return null;
+  if (!tenantId) return identity;
+  return {
+    ...identity,
+    tenantIds: [tenantId],
+    linkedAccounts: [],
+  };
 }
 
 /**
@@ -3344,6 +3381,17 @@ platform.post("/tenants/:id/invitations", async (c) => {
     ...auditCtx(c),
   });
 
+  const previousPendingInvitations = await db
+    .select()
+    .from(tenantInvitations)
+    .where(
+      and(
+        eq(tenantInvitations.tenantId, tenantId),
+        eq(tenantInvitations.email, email),
+        eq(tenantInvitations.status, "pending"),
+      ),
+    );
+
   const invitation = await db.transaction(async (tx) => {
     const now = new Date();
     await tx
@@ -3372,15 +3420,32 @@ platform.post("/tenants/:id/invitations", async (c) => {
     return created;
   });
 
-  await writeAuditEvent({
-    tenantId,
-    actorType: "platform",
-    action: "tenant.invitation.create",
-    resourceType: "tenant_invitation",
-    resourceId: invitation.id,
-    metadata: { email, role, expiresAt: expiresAt.toISOString() },
-    ...auditCtx(c),
-  });
+  try {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "platform",
+      action: "tenant.invitation.create",
+      resourceType: "tenant_invitation",
+      resourceId: invitation.id,
+      metadata: { email, role, expiresAt: expiresAt.toISOString() },
+      ...auditCtx(c),
+    });
+  } catch (error) {
+    await db.transaction(async (tx) => {
+      await tx.delete(tenantInvitations).where(eq(tenantInvitations.id, invitation.id));
+      for (const previous of previousPendingInvitations) {
+        await tx
+          .update(tenantInvitations)
+          .set({
+            status: previous.status,
+            revokedAt: previous.revokedAt,
+            updatedAt: previous.updatedAt,
+          })
+          .where(eq(tenantInvitations.id, previous.id));
+      }
+    });
+    throw error;
+  }
 
   let emailSent = false;
   if (body.sendEmail === true) {
@@ -3393,6 +3458,7 @@ platform.post("/tenants/:id/invitations", async (c) => {
     }
   }
 
+  setNoStoreHeaders(c);
   return c.json<ApiResponse<{ invitation: typeof invitation; token: string; emailSent: boolean }>>(
     { ok: true, data: { invitation, token, emailSent } },
     201,
@@ -3418,11 +3484,7 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
 
   const db = getDb();
   const [candidate] = await db
-    .select({
-      id: tenantInvitations.id,
-      email: tenantInvitations.email,
-      role: tenantInvitations.role,
-    })
+    .select()
     .from(tenantInvitations)
     .where(
       and(
@@ -3463,6 +3525,28 @@ platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
     });
   if (!invitation) {
     return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
+  }
+
+  try {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "platform",
+      action: "tenant.invitation.revoke",
+      resourceType: "tenant_invitation",
+      resourceId: invitation.id,
+      metadata: { email: invitation.email, role: invitation.role },
+      ...auditCtx(c),
+    });
+  } catch (error) {
+    await db
+      .update(tenantInvitations)
+      .set({
+        status: candidate.status,
+        revokedAt: candidate.revokedAt,
+        updatedAt: candidate.updatedAt,
+      })
+      .where(and(eq(tenantInvitations.tenantId, tenantId), eq(tenantInvitations.id, invitationId)));
+    throw error;
   }
 
   return c.json<ApiResponse>({ ok: true });

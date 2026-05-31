@@ -80,12 +80,8 @@ function signSolanaMessage(message: string): string {
   return bs58.encode(cryptoSign(null, Buffer.from(message, "utf8"), keyObject));
 }
 
-async function fetchNonce(): Promise<string> {
-  // The nonce route now requires an allowed Origin/Referer and binds the issued
-  // nonce to that origin host; verification later asserts the signed message's
-  // domain matches that bound origin. Send an Origin on the steward.fi allowlist
-  // so the nonce binds to "steward.fi" (matching the SIWE/SIWS message domain).
-  const res = await fetch(`${BASE_URL}/auth/nonce`, {
+async function fetchNonce(tenantId?: string): Promise<string> {
+  const res = await fetch(`${BASE_URL}/auth/nonce${tenantId ? `?tenantId=${tenantId}` : ""}`, {
     headers: { Origin: "https://steward.fi" },
   });
   const json = (await res.json()) as { nonce: string };
@@ -136,7 +132,7 @@ describeWithDatabase("wallet auth flows", () => {
 
     const res = await fetch(`${BASE_URL}/auth/verify`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({ message, signature }),
     });
 
@@ -184,7 +180,7 @@ describeWithDatabase("wallet auth flows", () => {
     const account = privateKeyToAccount(generatePrivateKey());
     const address = account.address.toLowerCase();
     createdEvmAddresses.add(address);
-    const nonce = await fetchNonce();
+    const nonce = await fetchNonce(CLOSED_TENANT_ID);
     const message = buildSiweMessage(account.address, nonce);
     const signature = await account.signMessage({ message });
 
@@ -193,6 +189,7 @@ describeWithDatabase("wallet auth flows", () => {
       headers: {
         "Content-Type": "application/json",
         "X-Steward-Tenant": CLOSED_TENANT_ID,
+        Origin: "https://steward.fi",
       },
       body: JSON.stringify({ message, signature }),
     });
@@ -200,9 +197,7 @@ describeWithDatabase("wallet auth flows", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    // Closed tenants are now rejected with "is not accepting new members"
-    // (the literal word "closed" is no longer surfaced in the error).
-    expect(body.error).toContain("not accepting new members");
+    expect(body.error).toContain("closed");
 
     const [user] = await db.select().from(users).where(eq(users.walletAddress, address));
     if (user) {
@@ -270,7 +265,7 @@ describeWithDatabase("wallet auth flows", () => {
 
       const res = await fetch(`${BASE_URL}/auth/verify`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
         body: JSON.stringify({ message, signature }),
       });
 
@@ -291,7 +286,7 @@ describeWithDatabase("wallet auth flows", () => {
 
     const res = await fetch(`${BASE_URL}/auth/verify/solana`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({
         message,
         signature,

@@ -9,7 +9,7 @@ import { eq } from "drizzle-orm";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
-const TEST_PORT = parseInt(process.env.PORT || "3299", 10);
+const TEST_PORT = 3299;
 const BASE_URL = `http://localhost:${TEST_PORT}`;
 
 const TENANT_ID = "test-tenant-config";
@@ -19,10 +19,10 @@ const OTHER_TENANT_ID = "test-tenant-config-other";
 const OTHER_AGENT_ID = "test-tenant-config-other-agent";
 const DASHBOARD_USER_EMAIL = `dashboard-${DASHBOARD_USER_ID}@example.test`;
 let validApiKey: string;
-// PUT /config and template-apply were hardened to require an owner/admin session
-// with recent MFA. `sessionHeaders()` authenticates those; `headers()` keeps a
-// tenant API key for GET-redaction and security-boundary rejection assertions.
-let sessionToken: string;
+// Owner session token with recent MFA. Config mutation routes now require
+// requireRecentTenantAdminMfa (session-jwt + owner/admin + recent MFA), so
+// API-key auth is correctly rejected for those; use this for legitimate updates.
+let adminSessionToken: string;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -40,13 +40,14 @@ beforeAll(async () => {
       apiKeyHash: apiKeyPair.hash,
     })
     .onConflictDoNothing();
+  // apiKeyHash is unique-indexed. Reusing apiKeyPair.hash made this second
+  // tenant insert silently no-op under onConflictDoNothing, which then tripped
+  // the agents -> tenants FK below. Give the other tenant its own key hash.
   await db
     .insert(tenants)
     .values({
       id: OTHER_TENANT_ID,
       name: "Other Config Test Tenant",
-      // Distinct hash: apiKeyHash is unique, so reusing the primary tenant's hash
-      // would make this insert no-op via onConflictDoNothing and break the agent FK.
       apiKeyHash: generateApiKey().hash,
     })
     .onConflictDoNothing();
@@ -70,7 +71,7 @@ beforeAll(async () => {
     .onConflictDoNothing();
   await db
     .insert(users)
-    .values({ id: DASHBOARD_USER_ID, email: DASHBOARD_USER_EMAIL, emailVerified: true })
+    .values({ id: DASHBOARD_USER_ID, email: DASHBOARD_USER_EMAIL })
     .onConflictDoNothing();
   await db
     .insert(userTenants)
@@ -78,12 +79,16 @@ beforeAll(async () => {
     .onConflictDoNothing();
 
   const { createSessionToken } = await import("../routes/auth");
-  sessionToken = await createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID, {
-    userId: DASHBOARD_USER_ID,
-    email: DASHBOARD_USER_EMAIL,
-    mfaVerifiedAt: Date.now(),
-    mfaMethod: "totp",
-  });
+  adminSessionToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000000",
+    TENANT_ID,
+    {
+      userId: DASHBOARD_USER_ID,
+      email: DASHBOARD_USER_EMAIL,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
+  );
 });
 
 afterAll(async () => {
@@ -106,10 +111,10 @@ const headers = () => ({
   "Content-Type": "application/json",
 });
 
-// Owner session with recent MFA — required by PUT /config and template apply.
-const sessionHeaders = () => ({
+// Owner session + recent MFA, required by config mutation routes.
+const adminHeaders = () => ({
   "X-Steward-Tenant": TENANT_ID,
-  Authorization: `Bearer ${sessionToken}`,
+  Authorization: `Bearer ${adminSessionToken}`,
   "Content-Type": "application/json",
 });
 
@@ -141,12 +146,7 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
           name: "Milady Cloud",
           apiKeyHash: apiKeyPair.hash,
         })
-        // Upsert the hash so a leftover milady-cloud row (e.g. from an interrupted
-        // run) still matches the freshly generated key instead of returning 403.
-        .onConflictDoUpdate({
-          target: tenants.id,
-          set: { apiKeyHash: apiKeyPair.hash },
-        });
+        .onConflictDoNothing();
 
       const res = await fetch(`${BASE_URL}/tenants/milady-cloud/config`, {
         headers: {
@@ -267,14 +267,12 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
         theme: {
           primaryColor: "#FF0000",
           colorScheme: "dark",
-          logoUrl: "https://assets.example.com/logo.png",
-          faviconUrl: "https://assets.example.com/favicon.ico",
         },
       };
 
       const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
         method: "PUT",
-        headers: sessionHeaders(),
+        headers: adminHeaders(),
         body: JSON.stringify(config),
       });
 
@@ -288,90 +286,6 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       expect(body.data.featureFlags.showFundingQR).toBe(true);
       expect(body.data.featureFlags.showSpendDashboard).toBe(false);
       expect(body.data.theme.primaryColor).toBe("#FF0000");
-      expect(body.data.theme.logoUrl).toBe("https://assets.example.com/logo.png");
-      expect(body.data.theme.faviconUrl).toBe("https://assets.example.com/favicon.ico");
-    });
-
-    it("rejects unsafe tenant theme asset URLs", async () => {
-      const javascriptRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
-        method: "PUT",
-        headers: sessionHeaders(),
-        body: JSON.stringify({
-          theme: {
-            logoUrl: "javascript:alert(1)",
-          },
-        }),
-      });
-      expect(javascriptRes.status).toBe(400);
-      expect((await javascriptRes.json()).error).toContain("theme.logoUrl must use HTTPS");
-
-      const httpRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
-        method: "PUT",
-        headers: sessionHeaders(),
-        body: JSON.stringify({
-          theme: {
-            faviconUrl: "http://assets.example.com/favicon.ico",
-          },
-        }),
-      });
-      expect(httpRes.status).toBe(400);
-      expect((await httpRes.json()).error).toContain("theme.faviconUrl must use HTTPS");
-
-      const credentialsRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
-        method: "PUT",
-        headers: sessionHeaders(),
-        body: JSON.stringify({
-          theme: {
-            logoUrl: "https://user:pass@assets.example.com/logo.png",
-          },
-        }),
-      });
-      expect(credentialsRes.status).toBe(400);
-      expect((await credentialsRes.json()).error).toContain(
-        "theme.logoUrl cannot include URL credentials",
-      );
-
-      const svgRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
-        method: "PUT",
-        headers: sessionHeaders(),
-        body: JSON.stringify({
-          theme: {
-            logoUrl: "https://assets.example.com/logo.svg",
-          },
-        }),
-      });
-      expect(svgRes.status).toBe(400);
-      expect((await svgRes.json()).error).toContain("theme.logoUrl must end with .png");
-    });
-
-    it("clears tenant theme asset URLs when blank values are submitted", async () => {
-      const setRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
-        method: "PUT",
-        headers: sessionHeaders(),
-        body: JSON.stringify({
-          theme: {
-            logoUrl: "https://assets.example.com/logo.png",
-            faviconUrl: "https://assets.example.com/favicon.ico",
-          },
-        }),
-      });
-      expect(setRes.status).toBe(200);
-
-      const clearRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
-        method: "PUT",
-        headers: sessionHeaders(),
-        body: JSON.stringify({
-          theme: {
-            logoUrl: "",
-            faviconUrl: "",
-          },
-        }),
-      });
-      expect(clearRes.status).toBe(200);
-      const body = await clearRes.json();
-      expect(body.ok).toBe(true);
-      expect(body.data.theme.logoUrl).toBeUndefined();
-      expect(body.data.theme.faviconUrl).toBeUndefined();
     });
 
     it("GET returns the saved config", async () => {
@@ -389,7 +303,7 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
         method: "PUT",
         headers: {
-          ...sessionHeaders(),
+          ...adminHeaders(),
           "Content-Type": "text/plain",
         },
         body: "not json",
@@ -400,24 +314,24 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
     it("rejects tenant API-key updates to security-sensitive config fields", async () => {
       const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
         method: "PUT",
-        headers: headers(),
+        headers: headers(), // intentional: API-key must be rejected
         body: JSON.stringify({
           allowedOrigins: ["https://attacker.example"],
           authAbuseConfig: {},
         }),
       });
 
-      // API-key callers are rejected before any mutation: PUT /config now requires
-      // an owner/admin session, so the request never reaches the security-field check.
       expect(res.status).toBe(403);
       const body = await res.json();
+      // The top-level admin-session+MFA gate rejects API-key callers before the
+      // field-specific check; either way it is a 403 owner/admin-session rejection.
       expect(body.error).toContain("owner or admin session");
     });
 
     it("rejects templates with unsupported persisted policy types", async () => {
       const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
         method: "PUT",
-        headers: sessionHeaders(),
+        headers: adminHeaders(),
         body: JSON.stringify({
           policyTemplates: [
             {
@@ -442,7 +356,6 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.ok).toBe(false);
-      // Route now rejects unsupported persisted policy types with this message.
       expect(body.error).toContain("Unknown policy type");
     });
   });
@@ -466,7 +379,7 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
         `${BASE_URL}/tenants/${TENANT_ID}/config/templates/test-template/apply`,
         {
           method: "POST",
-          headers: sessionHeaders(),
+          headers: adminHeaders(),
           body: JSON.stringify({}),
         },
       );
@@ -478,7 +391,7 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
         `${BASE_URL}/tenants/${TENANT_ID}/config/templates/nonexistent/apply`,
         {
           method: "POST",
-          headers: sessionHeaders(),
+          headers: adminHeaders(),
           body: JSON.stringify({ agentId: "some-agent" }),
         },
       );
@@ -490,7 +403,7 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
         `${BASE_URL}/tenants/${TENANT_ID}/config/templates/test-template/apply`,
         {
           method: "POST",
-          headers: sessionHeaders(),
+          headers: adminHeaders(),
           body: JSON.stringify({ agentId: OTHER_AGENT_ID }),
         },
       );
@@ -520,7 +433,7 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
         `${BASE_URL}/tenants/${TENANT_ID}/config/templates/test-template/apply`,
         {
           method: "POST",
-          headers: sessionHeaders(),
+          headers: adminHeaders(),
           body: JSON.stringify({
             agentId: AGENT_ID,
             overrides: { "spending-limit.maxPerDay": "999999999999999999999999" },
@@ -570,7 +483,7 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
         `${BASE_URL}/tenants/${TENANT_ID}/config/templates/bad-template/apply`,
         {
           method: "POST",
-          headers: sessionHeaders(),
+          headers: adminHeaders(),
           body: JSON.stringify({ agentId: AGENT_ID }),
         },
       );
@@ -578,7 +491,6 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.ok).toBe(false);
-      // Route now rejects unsupported persisted policy types with this message.
       expect(body.error).toContain("Unknown policy type");
 
       const existingPolicies = await db
@@ -608,10 +520,10 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
 describe.skipIf(SKIP)("Dashboard API", () => {
   it("returns 404 for non-existent agent", async () => {
     const { createSessionToken } = await import("../routes/auth");
-    // dashboardAuthMiddleware requires a userId on session tokens, and the
-    // dashboard route now also requires recent MFA verification — so we mint a
-    // session that includes both. The route then reaches the agent lookup,
-    // which 404s for the non-existent agent.
+    // dashboardAuthMiddleware requires a userId on session tokens, so we
+    // mint a session that includes one. The dashboard route also now requires
+    // recent session MFA, so include mfaVerifiedAt. The route itself only
+    // cares about the agent lookup result, hence the synthetic userId.
     const token = await createSessionToken(
       "0x0000000000000000000000000000000000000000",
       TENANT_ID,

@@ -965,18 +965,6 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
     rules = await getPolicySet(tenantId, agentId);
   }
 
-  if (rules.length === 0) {
-    return c.json<ApiResponse>({
-      ok: true,
-      data: {
-        approved: true,
-        results: [],
-        requiresManualApproval: false,
-        note: "No rules to evaluate, request would be auto-approved",
-      },
-    });
-  }
-
   try {
     const conditionSets = await loadConditionSetsForPolicies(tenantId, rules);
     const liveStats = hasAgentSelector ? await getTransactionStats(body.agentId as string) : null;

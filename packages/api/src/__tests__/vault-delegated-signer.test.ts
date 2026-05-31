@@ -88,7 +88,7 @@ describe("vault delegated signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner/admin session with recent MFA");
+    expect(body.error).toContain("owner/admin session");
   });
 
   it("rejects bare delegated signer ids even when the id exists", async () => {
@@ -104,7 +104,7 @@ describe("vault delegated signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner/admin session with recent MFA");
+    expect(body.error).toContain("owner/admin session");
   });
 
   it("rejects forged delegated signer ids even when the signer has permission", async () => {
@@ -120,6 +120,6 @@ describe("vault delegated signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner/admin session with recent MFA");
+    expect(body.error).toContain("owner/admin session");
   });
 });

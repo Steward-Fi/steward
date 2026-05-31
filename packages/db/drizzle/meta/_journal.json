@@ -449,6 +449,13 @@
       "when": 1779819300000,
       "tag": "0065_user_push_subscriptions",
       "breakpoints": true
+    },
+    {
+      "idx": 64,
+      "version": "7",
+      "when": 1779821100000,
+      "tag": "0066_raw_signing_chain_policy_type",
+      "breakpoints": true
     }
   ]
 }

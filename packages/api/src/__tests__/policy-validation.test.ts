@@ -31,8 +31,38 @@ describe("policy rule validation", () => {
           enabled: true,
           config: { maxTxPerHour: 5, maxTxPerDay: 20 },
         },
+        {
+          id: "raw-signing",
+          type: "raw-signing-chain",
+          enabled: true,
+          config: { allowedChains: ["sui", "tron"], allowedCurves: ["ed25519", "secp256k1"] },
+        },
       ]),
     ).toBeNull();
+  });
+
+  it("rejects malformed raw-signing-chain configs", () => {
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "raw-signing",
+          type: "raw-signing-chain",
+          enabled: true,
+          config: { allowedChains: ["sui", 123] },
+        },
+      ]),
+    ).toBe("raw-signing-chain.allowedChains must be a string array");
+
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "raw-signing",
+          type: "raw-signing-chain",
+          enabled: true,
+          config: { allowedChains: ["sui"], requireSupported: "yes" },
+        },
+      ]),
+    ).toBe("raw-signing-chain.requireSupported must be a boolean");
   });
 
   it("rejects malformed condition-set references before database lookup", () => {

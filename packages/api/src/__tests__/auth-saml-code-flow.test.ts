@@ -36,8 +36,15 @@ describe("enterprise SAML authorization-code SSO hardening", () => {
     expect(providersStart).toBeGreaterThan(acsStart);
     const acsRoute = source.slice(acsStart, providersStart);
 
+    expect(acsRoute).toContain("loadSamlAuthnRequest");
     expect(acsRoute).toContain("consumeSamlAuthnRequest");
     expect(acsRoute).toContain("verifySamlAcsResponse");
+    expect(acsRoute.indexOf("loadSamlAuthnRequest")).toBeLessThan(
+      acsRoute.indexOf("verifySamlAcsResponse"),
+    );
+    expect(acsRoute.indexOf("verifySamlAcsResponse")).toBeLessThan(
+      acsRoute.indexOf("consumeSamlAuthnRequest", acsRoute.indexOf("verifySamlAcsResponse")),
+    );
     expect(acsRoute).toContain("expectedRequestId: request.requestId");
     expect(acsRoute).toContain("isVerifiedSsoEmailDomainForTenant");
     expect(acsRoute).toContain("recordSamlAssertionReplay");

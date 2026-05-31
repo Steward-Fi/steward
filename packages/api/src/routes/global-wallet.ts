@@ -13,7 +13,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
-import { safeJsonParse, verifySessionToken } from "../services/context";
+import { safeJsonParse, setNoStoreHeaders, verifySessionToken } from "../services/context";
 
 type UserSessionPayload = {
   userId: string;
@@ -40,7 +40,7 @@ type ConsentRow = typeof userWalletAppConsents.$inferSelect;
 const APP_ID_RE = /^([a-zA-Z0-9_\-.:]{1,64})\/([a-z0-9][a-z0-9_-]{2,63})$/;
 const DEFAULT_ALLOWED_SCOPES = ["eth_accounts", "personal_sign"];
 const READONLY_RPC_METHODS = new Set(["eth_accounts", "eth_chainId"]);
-const WRITE_RPC_METHODS = new Set(["personal_sign", "eth_signTypedData_v4"]);
+const WRITE_RPC_METHODS = new Set(["personal_sign", "eth_signTypedData_v4", "eth_sendTransaction"]);
 const TRANSACTION_SCAN_METHODS = new Set(["eth_sendTransaction"]);
 const CONFIRMABLE_RPC_METHODS = new Set([...WRITE_RPC_METHODS, ...TRANSACTION_SCAN_METHODS]);
 const SIGNING_RPC_METHODS = new Set([
@@ -59,6 +59,8 @@ const ALLOW_GLOBAL_WALLET_PERSONAL_SIGN =
   process.env.STEWARD_ALLOW_GLOBAL_WALLET_PERSONAL_SIGN === "true";
 const ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING =
   process.env.STEWARD_ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING === "true";
+const ALLOW_GLOBAL_WALLET_SEND_TRANSACTION =
+  process.env.STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION === "true";
 const ACTION_CONFIRMATION_TTL_MS = 5 * 60_000;
 const MAX_TRANSACTION_DATA_BYTES = 16_384;
 
@@ -648,6 +650,25 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
   }
 
   const now = new Date();
+  await writeGlobalWalletAudit(c, {
+    tenantId: parsed.tenantId,
+    action: "global_wallet.consent.approve.authorized",
+    resourceId: `${parsed.clientId}:${origin}`,
+    metadata: { clientId: parsed.clientId, origin, redirectUri, scopes },
+  });
+
+  const revokedAtApprove = await getDb()
+    .select()
+    .from(userWalletAppConsents)
+    .where(
+      and(
+        eq(userWalletAppConsents.userId, c.get("userId")),
+        eq(userWalletAppConsents.tenantId, parsed.tenantId),
+        eq(userWalletAppConsents.clientId, parsed.clientId),
+        eq(userWalletAppConsents.origin, origin!),
+        eq(userWalletAppConsents.status, "active"),
+      ),
+    );
   const [consent] = await getDb().transaction(async (tx) => {
     await tx
       .update(userWalletAppConsents)
@@ -679,12 +700,36 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
       .returning();
   });
 
-  await writeGlobalWalletAudit(c, {
-    tenantId: parsed.tenantId,
-    action: "global_wallet.consent.approved",
-    resourceId: consent.id,
-    metadata: { clientId: parsed.clientId, origin, redirectUri, scopes },
-  });
+  try {
+    await writeGlobalWalletAudit(c, {
+      tenantId: parsed.tenantId,
+      action: "global_wallet.consent.approved",
+      resourceId: consent.id,
+      metadata: { clientId: parsed.clientId, origin, redirectUri, scopes },
+    });
+  } catch (error) {
+    await getDb().transaction(async (tx) => {
+      await tx
+        .delete(userWalletAppConsents)
+        .where(
+          and(
+            eq(userWalletAppConsents.id, consent.id),
+            eq(userWalletAppConsents.userId, c.get("userId")),
+          ),
+        );
+      for (const previous of revokedAtApprove) {
+        await tx
+          .update(userWalletAppConsents)
+          .set({
+            status: "active",
+            revokedAt: null,
+            updatedAt: previous.updatedAt,
+          })
+          .where(eq(userWalletAppConsents.id, previous.id));
+      }
+    });
+    throw error;
+  }
 
   return c.json<ApiResponse>({
     ok: true,
@@ -877,6 +922,7 @@ globalWalletRoutes.post("/rpc/confirm", async (c) => {
     metadata: { clientId: parsed.clientId, origin, method, confirmationId: confirmation.id },
   });
 
+  setNoStoreHeaders(c);
   return c.json<ApiResponse>({
     ok: true,
     data: { confirmationId: confirmation.id, method, expiresAt: expiresAt.toISOString() },
@@ -993,9 +1039,13 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
       riskLevel: blocked ? "blocked" : parsedTx.valueWei === "0" ? "low" : "medium",
       warnings,
       confirmationRequired: true,
-      executionSupported: false,
+      executionSupported: ALLOW_GLOBAL_WALLET_SEND_TRANSACTION && !blocked,
       unsupportedReason:
-        "Global wallet transaction execution remains disabled until policy-backed sendTransaction approval is enabled.",
+        ALLOW_GLOBAL_WALLET_SEND_TRANSACTION && !blocked
+          ? null
+          : blocked
+            ? "Global wallet transaction execution is disabled for contract calldata until selector-aware scanning is configured."
+            : "Global wallet transaction execution is disabled. Set STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION=true only after native transfer controls are audited.",
     },
   });
 });
@@ -1021,7 +1071,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
   }
   const method = body.method.trim();
   if (
-    SIGNING_RPC_METHODS.has(method) ||
+    (SIGNING_RPC_METHODS.has(method) && method !== "eth_sendTransaction") ||
     (method.toLowerCase().includes("sign") && !WRITE_RPC_METHODS.has(method))
   ) {
     return c.json<ApiResponse>(
@@ -1029,7 +1079,11 @@ globalWalletRoutes.post("/rpc", async (c) => {
       403,
     );
   }
-  if (!READONLY_RPC_METHODS.has(method) && !WRITE_RPC_METHODS.has(method)) {
+  if (
+    !READONLY_RPC_METHODS.has(method) &&
+    !WRITE_RPC_METHODS.has(method) &&
+    !TRANSACTION_SCAN_METHODS.has(method)
+  ) {
     return c.json<ApiResponse>(
       { ok: false, error: `Unsupported global wallet RPC method: ${method}` },
       400,
@@ -1121,6 +1175,18 @@ globalWalletRoutes.post("/rpc", async (c) => {
       }),
     });
     if (confirmationError) return c.json<ApiResponse>({ ok: false, error: confirmationError }, 403);
+    await writeGlobalWalletAudit(c, {
+      tenantId: parsed.tenantId,
+      action: "global_wallet.rpc.sign.authorized",
+      resourceId: consent.id,
+      metadata: {
+        clientId: parsed.clientId,
+        origin,
+        method,
+        messageLength: parsedParams.message.length,
+        confirmationId: body.confirmation_id ?? body.confirmationId,
+      },
+    });
     let signature: string;
     try {
       signature = await getVault().signMessage(
@@ -1148,6 +1214,7 @@ globalWalletRoutes.post("/rpc", async (c) => {
         unsafeCompatibilityMode: true,
       },
     });
+    setNoStoreHeaders(c);
     return c.json<ApiResponse>({
       ok: true,
       data: { jsonrpc: body.jsonrpc ?? "2.0", id: body.id ?? null, result: signature },
@@ -1197,6 +1264,20 @@ globalWalletRoutes.post("/rpc", async (c) => {
       }),
     });
     if (confirmationError) return c.json<ApiResponse>({ ok: false, error: confirmationError }, 403);
+    await writeGlobalWalletAudit(c, {
+      tenantId: parsed.tenantId,
+      action: "global_wallet.rpc.typed_data_sign.authorized",
+      resourceId: consent.id,
+      metadata: {
+        clientId: parsed.clientId,
+        origin,
+        method,
+        primaryType: parsedParams.primaryType,
+        chainId: parsedParams.domain.chainId ?? null,
+        verifyingContract: parsedParams.domain.verifyingContract ?? null,
+        confirmationId: body.confirmation_id ?? body.confirmationId,
+      },
+    });
     let signature: string;
     try {
       signature = await getVault().signTypedData({
@@ -1230,9 +1311,119 @@ globalWalletRoutes.post("/rpc", async (c) => {
         unsafeCompatibilityMode: true,
       },
     });
+    setNoStoreHeaders(c);
     return c.json<ApiResponse>({
       ok: true,
       data: { jsonrpc: body.jsonrpc ?? "2.0", id: body.id ?? null, result: signature },
+    });
+  }
+
+  if (method === "eth_sendTransaction") {
+    if (!ALLOW_GLOBAL_WALLET_SEND_TRANSACTION) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Global wallet eth_sendTransaction is disabled. Set STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION=true only after native transfer controls are audited.",
+        },
+        403,
+      );
+    }
+    if (!hasRecentMfa(c)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Recent MFA is required for global wallet eth_sendTransaction" },
+        403,
+      );
+    }
+    const parsedTx = parseSendTransactionParams(body.params);
+    if (typeof parsedTx === "string")
+      return c.json<ApiResponse>({ ok: false, error: parsedTx }, 400);
+    if (parsedTx.from && parsedTx.from.toLowerCase() !== wallet.walletAddress.toLowerCase()) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "transaction.from does not match the consented wallet" },
+        403,
+      );
+    }
+    if (parsedTx.data && parsedTx.data !== "0x") {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Contract calldata is not enabled for global wallet eth_sendTransaction until selector-aware scanning is configured",
+        },
+        403,
+      );
+    }
+    const confirmationError = await consumeActionConfirmation({
+      confirmationId: body.confirmation_id ?? body.confirmationId,
+      consent,
+      userId: c.get("userId"),
+      tenantId: parsed.tenantId,
+      clientId: parsed.clientId,
+      origin: origin!,
+      method,
+      requestHash: globalWalletActionHash({
+        method,
+        params: body.params,
+        walletAddress: wallet.walletAddress,
+      }),
+    });
+    if (confirmationError) return c.json<ApiResponse>({ ok: false, error: confirmationError }, 403);
+    await writeGlobalWalletAudit(c, {
+      tenantId: parsed.tenantId,
+      action: "global_wallet.rpc.transaction_submit.authorized",
+      resourceId: consent.id,
+      metadata: {
+        clientId: parsed.clientId,
+        origin,
+        method,
+        to: parsedTx.to,
+        valueWei: parsedTx.valueWei,
+        chainId: parsedTx.chainId,
+        nativeOnly: true,
+        confirmationId: body.confirmation_id ?? body.confirmationId,
+      },
+    });
+    let txHash: string;
+    try {
+      txHash = await getVault().signTransaction({
+        agentId: wallet.agentId,
+        tenantId: `personal-${c.get("userId")}`,
+        to: parsedTx.to,
+        value: parsedTx.valueWei,
+        data: parsedTx.data,
+        chainId: parsedTx.chainId,
+        walletAddress: wallet.walletAddress,
+        broadcast: true,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Global wallet transaction execution failed";
+      return c.json<ApiResponse>({ ok: false, error: message }, 500);
+    }
+    await getDb()
+      .update(userWalletAppConsents)
+      .set({ lastUsedAt: new Date(), updatedAt: new Date() })
+      .where(eq(userWalletAppConsents.id, consent.id));
+    await writeGlobalWalletAudit(c, {
+      tenantId: parsed.tenantId,
+      action: "global_wallet.rpc.transaction_submitted",
+      resourceId: consent.id,
+      metadata: {
+        clientId: parsed.clientId,
+        origin,
+        method,
+        to: parsedTx.to,
+        valueWei: parsedTx.valueWei,
+        chainId: parsedTx.chainId,
+        txHash,
+        nativeOnly: true,
+      },
+    });
+    setNoStoreHeaders(c);
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { jsonrpc: body.jsonrpc ?? "2.0", id: body.id ?? null, result: txHash },
     });
   }
 

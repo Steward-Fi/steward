@@ -1,3 +1,10 @@
+export {
+  deriveEvmKey,
+  deriveSolanaKey,
+  generateMnemonic,
+  isValidMnemonic,
+  mnemonicToSeed,
+} from "./hd-wallet";
 export type { EncryptedKey } from "./keystore";
 export { KeyStore } from "./keystore";
 export type { KeystoreBackend, KeystoreContext } from "./keystore-backend";
@@ -39,11 +46,13 @@ export {
 } from "./solana-instructions";
 export type { TokenBalance, TokenDef } from "./tokens";
 export { COMMON_TOKENS, ERC20_ABI, getTokenBalances } from "./tokens";
-export type { UserWalletResult } from "./user-wallet";
+export type { UserWalletRestoreResult, UserWalletResult } from "./user-wallet";
 export {
   applyUserWalletDefaults,
   getUserWallet,
+  provisionRecoverableUserWallet,
   provisionUserWallet,
+  restoreRecoverableUserWallet,
   USER_WALLET_DEFAULT_POLICIES,
 } from "./user-wallet";
 export type { PackedUserOperation, UnpackedUserOperationFields } from "./userop";

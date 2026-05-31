@@ -194,6 +194,16 @@ function checkBindHost() {
 
 function checkBunAudit() {
   if (process.argv.includes("--skip-dependency-checks")) {
+    if (isProd() && process.env.STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP !== "true") {
+      record(
+        "bun_audit",
+        "CC7.1",
+        "fail",
+        "--skip-dependency-checks is not allowed in production unless STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP=true",
+        "operator override denied",
+      );
+      return;
+    }
     record(
       "bun_audit",
       "CC7.1",
@@ -229,6 +239,16 @@ function checkBunAudit() {
 
 function checkFrozenLockfile() {
   if (process.argv.includes("--skip-dependency-checks")) {
+    if (isProd() && process.env.STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP !== "true") {
+      record(
+        "lockfile_frozen",
+        "CC8.1",
+        "fail",
+        "--skip-dependency-checks is not allowed in production unless STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP=true",
+        "operator override denied",
+      );
+      return;
+    }
     record(
       "lockfile_frozen",
       "CC8.1",
@@ -262,7 +282,13 @@ function checkSecurityHeadersSource() {
   const path = "packages/api/src/middleware/security-headers.ts";
   const source = readSource(path);
   if (!source) {
-    return record("security_headers_source", "CC6.7", "fail", "Security headers middleware missing", path);
+    return record(
+      "security_headers_source",
+      "CC6.7",
+      "fail",
+      "Security headers middleware missing",
+      path,
+    );
   }
   const required = [
     "Strict-Transport-Security",
@@ -436,7 +462,8 @@ function main() {
 
   const failed = checks.some((c) => c.status === "fail");
   const warned = checks.some((c) => c.status === "warn");
-  process.exit(failed || (strict && warned) ? 1 : 0);
+  const skipped = checks.some((c) => c.status === "skip");
+  process.exit(failed || (strict && (warned || skipped)) ? 1 : 0);
 }
 
 main();

@@ -16,6 +16,48 @@ import {
 } from "./webhook-events";
 
 const INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000;
+const REDACTED_WEBHOOK_SECRET = "[REDACTED]";
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSensitiveWebhookPayloadKey(key: string): boolean {
+  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return (
+    normalized === "secret" ||
+    normalized.endsWith("secret") ||
+    normalized === "password" ||
+    normalized === "passphrase" ||
+    normalized === "mnemonic" ||
+    normalized === "recoveryphrase" ||
+    normalized === "seedphrase" ||
+    normalized === "privatekey" ||
+    normalized === "accesskey" ||
+    normalized === "apikey" ||
+    normalized === "accesstoken" ||
+    normalized === "refreshtoken" ||
+    normalized === "idtoken" ||
+    normalized === "sessiontoken" ||
+    normalized === "authtoken"
+  );
+}
+
+export function redactWebhookSecrets(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => redactWebhookSecrets(entry));
+  }
+  if (!isPlainObject(value) || value instanceof Date) {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [
+      key,
+      isSensitiveWebhookPayloadKey(key) ? REDACTED_WEBHOOK_SECRET : redactWebhookSecrets(entry),
+    ]),
+  );
+}
 
 export function dispatchWebhook(
   tenantId: string,
@@ -28,7 +70,7 @@ export function dispatchWebhook(
     type: configuredType ?? type,
     tenantId,
     agentId,
-    data,
+    data: redactWebhookSecrets(data) as Record<string, unknown>,
     timestamp: new Date(),
   };
   void dispatchConfiguredWebhooks(event, configuredType).catch((error) => {
@@ -92,7 +134,7 @@ export async function dispatchReplayWebhook(config: {
         : (config.originalAgentId ?? undefined),
     data:
       config.originalPayload.data && typeof config.originalPayload.data === "object"
-        ? (config.originalPayload.data as Record<string, unknown>)
+        ? (redactWebhookSecrets(config.originalPayload.data) as Record<string, unknown>)
         : {},
     timestamp: Number.isNaN(originalTimestamp.getTime())
       ? new Date(config.originalCreatedAt)
@@ -158,10 +200,16 @@ async function dispatchConfiguredWebhook(
       .where(and(eq(webhookConfigs.id, config.id), eq(webhookConfigs.secret, config.secret)));
   }
   const deliveryId = randomUUID();
-  const eventWithDelivery: WebhookEvent & { deliveryId: string; webhookConfigId: string } = {
+  const signedAt = Math.floor(Date.now() / 1000);
+  const eventWithDelivery: WebhookEvent & {
+    deliveryId: string;
+    webhookConfigId: string;
+    signedAt: number;
+  } = {
     ...event,
     deliveryId,
     webhookConfigId: config.id,
+    signedAt,
     ...(config.replayedFromDeliveryId
       ? { replayedFromDeliveryId: config.replayedFromDeliveryId }
       : {}),
@@ -210,6 +258,7 @@ async function dispatchConfiguredWebhook(
       deliveredAt: result.deliveredAt ?? null,
       lastError: result.error ?? null,
       nextRetryAt: retryable ? new Date(Date.now() + config.retryBackoffMs) : null,
+      payload: eventWithDelivery as unknown as Record<string, unknown>,
     })
     .where(eq(webhookDeliveries.id, delivery.id))
     .returning();

@@ -43,6 +43,7 @@ describe("trade policy audit", () => {
         id: tenantId,
         name: "Trade Wallet Test Tenant",
         apiKeyHash: `test-hash-${tenantId}`,
+        ownerAddress: `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -64,17 +65,13 @@ describe("trade policy audit", () => {
         tenantId: string;
         agentScope: null;
         authType: string;
-        tenantRole: string;
-        userId: string;
-        sessionMfaVerifiedAt: number;
       };
     }>();
     app.use("*", async (c, next) => {
       c.set("tenantId", tenantId);
       c.set("agentScope", null);
       c.set("authType", "session-jwt");
-      c.set("tenantRole", "owner");
-      c.set("userId", `${tenantId}-owner`);
+      c.set("tenantRole", "admin");
       c.set("sessionMfaVerifiedAt", Date.now());
       await next();
     });
@@ -115,6 +112,7 @@ describe("trade policy audit", () => {
         id: tenantId,
         name: "Trade Policy Test Tenant",
         apiKeyHash: `test-hash-${tenantId}`,
+        ownerAddress: `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -199,6 +197,7 @@ describe("trade policy audit", () => {
         id: tenantId,
         name: "Trade Notional Test Tenant",
         apiKeyHash: `test-hash-${tenantId}`,
+        ownerAddress: `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -278,6 +277,7 @@ describe("trade policy audit", () => {
         id: tenantId,
         name: "Trade Price Test Tenant",
         apiKeyHash: `test-hash-${tenantId}`,
+        ownerAddress: `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -355,6 +355,7 @@ describe("trade policy audit", () => {
         id: tenantId,
         name: "Trade Member Test Tenant",
         apiKeyHash: `test-hash-${tenantId}`,
+        ownerAddress: `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`,
       });
     await getDb().insert(agents).values({
       id: agentId,

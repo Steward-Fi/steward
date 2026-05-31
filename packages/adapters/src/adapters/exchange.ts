@@ -8,7 +8,7 @@
  * and route wiring tests.
  */
 
-import { AdapterValidationError, AdapterUnavailableError, type BaseAdapter } from "../types.js";
+import { AdapterUnavailableError, AdapterValidationError, type BaseAdapter } from "../types.js";
 import { assertId } from "../validation.js";
 
 export type ExchangeProvider = "kraken" | "coinbase" | "binance" | "mock";
@@ -48,6 +48,7 @@ export interface ExchangeEmbedAdapter extends BaseAdapter {
   createEmbedSession(request: ExchangeEmbedSessionRequest): Promise<ExchangeEmbedSession>;
   getEmbedSession(id: string): Promise<ExchangeEmbedSession | null>;
   listLinkedAccounts(userId: string): Promise<ExchangeAccountLink[]>;
+  getLinkedAccount(id: string): Promise<ExchangeAccountLink | null>;
   revokeLinkedAccount(id: string): Promise<ExchangeAccountLink>;
   /**
    * A real exchange adapter may expose order placement under strict tenant
@@ -120,6 +121,11 @@ export class MockExchangeEmbedAdapter implements ExchangeEmbedAdapter {
   async listLinkedAccounts(userId: string): Promise<ExchangeAccountLink[]> {
     const id = assertId(userId, "userId", 128);
     return [...this.links.values()].filter((link) => link.userId === id);
+  }
+
+  async getLinkedAccount(id: string): Promise<ExchangeAccountLink | null> {
+    const linkId = assertId(id, "linkId", 128);
+    return this.links.get(linkId) ?? null;
   }
 
   async revokeLinkedAccount(id: string): Promise<ExchangeAccountLink> {

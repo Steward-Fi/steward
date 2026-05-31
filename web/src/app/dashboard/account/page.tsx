@@ -1,10 +1,13 @@
 "use client";
 
+import { useAuth as useStewardAuth } from "@stwd/react";
 import type {
   GlobalWalletConsent,
+  StewardRecoveryCodeStatus,
   UserAccountSummary,
   UserAccountsResult,
   UserLinkedAccount,
+  UserWalletRecoverySetupResult,
 } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -18,6 +21,31 @@ type LoadState = {
 };
 
 type PortfolioAsset = NonNullable<UserAccountSummary["portfolio"]["native"]>;
+type RecoverySecretKind = "wallet" | "mfa";
+
+type RecoverySecret = {
+  kind: RecoverySecretKind;
+  label: string;
+  values: string[];
+  warning: string;
+};
+
+type RecoveryAuditEvent = {
+  id: number | string;
+  seq: number;
+  action: string;
+  resource_type?: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+const RECOVERY_EVENT_ACTIONS = [
+  "user.wallet.recovery_setup",
+  "mfa.recovery_codes.regenerate",
+  "mfa.enabled",
+  "mfa.disabled",
+  "auth.logout",
+] as const;
 
 const providerLabels: Record<string, string> = {
   discord: "Discord",
@@ -97,6 +125,113 @@ function formatPortfolioAssetValue(asset: PortfolioAsset): string {
   if (asset.usdValueText) return formatUsd(asset.usdValueText);
   if (asset.usdValue !== null) return formatUsd(asset.usdValue);
   return "No USD price";
+}
+
+function recoveryEventLabel(action: string): string {
+  switch (action) {
+    case "user.wallet.recovery_setup":
+      return "Wallet recovery phrase created";
+    case "mfa.recovery_codes.regenerate":
+      return "MFA recovery codes regenerated";
+    case "mfa.enabled":
+      return "MFA enabled";
+    case "mfa.disabled":
+      return "MFA disabled";
+    case "auth.logout":
+      return "Session signed out";
+    default:
+      return action;
+  }
+}
+
+function recoveryEventDetail(event: RecoveryAuditEvent): string {
+  const method = typeof event.metadata?.method === "string" ? event.metadata.method : null;
+  const factor = typeof event.metadata?.factor === "string" ? event.metadata.factor : null;
+  const issued =
+    typeof event.metadata?.recoveryCodesIssued === "number"
+      ? `${event.metadata.recoveryCodesIssued} codes issued`
+      : null;
+  return [factor, method, issued].filter(Boolean).join(" / ") || event.resource_type || "audit";
+}
+
+function NoStoreSecretDisplay({
+  secret,
+  onDismiss,
+}: {
+  secret: RecoverySecret;
+  onDismiss: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyAll() {
+    const text = secret.values.join(secret.kind === "wallet" ? " " : "\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.setAttribute("readonly", "true");
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  }
+
+  return (
+    <div
+      role="status"
+      className="border border-warning/40 bg-warning/5 p-4 space-y-4"
+      data-testid={`one-time-${secret.kind}-secret`}
+    >
+      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-display font-600 text-text">{secret.label}</div>
+          <div className="text-xs text-text-tertiary mt-1">{secret.warning}</div>
+          <div className="text-xs text-warning mt-2">
+            Shown once. Steward does not store this secret in the dashboard, browser storage, or
+            logs. Copy it to an offline password manager before dismissing.
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <button
+            type="button"
+            onClick={() => void copyAll()}
+            className="px-3 py-2 text-xs border border-border text-text-secondary hover:text-text hover:border-text-tertiary transition-colors"
+          >
+            {copied ? "Copied" : "Copy once"}
+          </button>
+          <button
+            type="button"
+            onClick={onDismiss}
+            className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-text transition-colors"
+          >
+            Dismiss
+          </button>
+        </div>
+      </div>
+      <div
+        className={
+          secret.kind === "wallet"
+            ? "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2"
+            : "grid grid-cols-1 sm:grid-cols-2 gap-2"
+        }
+      >
+        {secret.values.map((value, index) => (
+          <div
+            key={`${value}:${index}`}
+            className="font-mono text-xs text-text bg-bg border border-border-subtle px-3 py-2 break-all"
+          >
+            {secret.kind === "wallet" ? `${index + 1}. ${value}` : value}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function Stat({
@@ -179,6 +314,9 @@ function PortfolioAssetRow({ asset }: { asset: PortfolioAsset }) {
 }
 
 export default function DashboardAccountPage() {
+  const stewardAuth = useStewardAuth();
+  const getRecoveryCodeStatus = stewardAuth.getRecoveryCodeStatus;
+  const regenerateStewardRecoveryCodes = stewardAuth.regenerateRecoveryCodes;
   const [state, setState] = useState<LoadState>({
     accounts: null,
     summary: null,
@@ -188,6 +326,38 @@ export default function DashboardAccountPage() {
   const [error, setError] = useState<string | null>(null);
   const [unlinking, setUnlinking] = useState<string | null>(null);
   const [revokingConsent, setRevokingConsent] = useState<string | null>(null);
+  const [recoveryStatus, setRecoveryStatus] = useState<StewardRecoveryCodeStatus | null>(null);
+  const [recoveryEvents, setRecoveryEvents] = useState<RecoveryAuditEvent[]>([]);
+  const [recoverySecret, setRecoverySecret] = useState<RecoverySecret | null>(null);
+  const [recoveryBusy, setRecoveryBusy] = useState<string | null>(null);
+  const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [totpCode, setTotpCode] = useState("");
+  const [recoverySetupConfirmed, setRecoverySetupConfirmed] = useState(false);
+
+  const loadRecoveryControls = useCallback(
+    async (userId?: string | null) => {
+      const [status, ...events] = await Promise.allSettled([
+        getRecoveryCodeStatus(),
+        ...RECOVERY_EVENT_ACTIONS.map((action) =>
+          steward.getAuditEvents({
+            action,
+            ...(userId ? { actorId: userId } : {}),
+            limit: 5,
+          }),
+        ),
+      ]);
+
+      if (status.status === "fulfilled") setRecoveryStatus(status.value);
+      else setRecoveryStatus(null);
+
+      const merged = events
+        .flatMap((result) => (result.status === "fulfilled" ? result.value.data : []))
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, 8);
+      setRecoveryEvents(merged);
+    },
+    [getRecoveryCodeStatus],
+  );
 
   const loadAccount = useCallback(async () => {
     try {
@@ -201,18 +371,20 @@ export default function DashboardAccountPage() {
 
       if (accounts.status === "rejected") throw accounts.reason;
 
+      const nextSummary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
       setState({
         accounts: accounts.value,
-        summary: summaryResult.status === "fulfilled" ? summaryResult.value : null,
+        summary: nextSummary,
         globalWalletConsents:
           globalWalletConsents.status === "fulfilled" ? globalWalletConsents.value.consents : [],
       });
+      void loadRecoveryControls(nextSummary?.userId ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load account");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [loadRecoveryControls]);
 
   useEffect(() => {
     void loadAccount();
@@ -230,6 +402,7 @@ export default function DashboardAccountPage() {
     (account) => account.provider !== "cross_app",
   );
   const canUnlink = primaryMethods.length + unlinkableLinkedAccounts.length > 1;
+  const hasEmbeddedWallet = userWallets.length > 0 || Boolean(state.summary?.wallet);
   const activeGlobalWalletConsents = state.globalWalletConsents.filter(
     (consent) => consent.status === "active",
   );
@@ -267,6 +440,50 @@ export default function DashboardAccountPage() {
       setError(err instanceof Error ? err.message : "Failed to revoke global wallet grant");
     } finally {
       setRevokingConsent(null);
+    }
+  }
+
+  async function setupWalletRecovery() {
+    try {
+      setRecoveryBusy("wallet");
+      setRecoveryMessage(null);
+      const result: UserWalletRecoverySetupResult = await steward.setupUserWalletRecovery();
+      setRecoverySecret({
+        kind: "wallet",
+        label: "Wallet recovery phrase",
+        values: result.recovery.mnemonic.trim().split(/\s+/g),
+        warning: result.recovery.warning,
+      });
+      setRecoverySetupConfirmed(false);
+      await loadAccount();
+      await loadRecoveryControls(state.summary?.userId ?? null);
+    } catch (err) {
+      setRecoveryMessage(err instanceof Error ? err.message : "Wallet recovery setup failed");
+    } finally {
+      setRecoveryBusy(null);
+    }
+  }
+
+  async function regenerateRecoveryCodes() {
+    try {
+      setRecoveryBusy("mfa");
+      setRecoveryMessage(null);
+      const result = await regenerateStewardRecoveryCodes(totpCode.trim());
+      setRecoverySecret({
+        kind: "mfa",
+        label: "MFA recovery codes",
+        values: result.recoveryCodes,
+        warning:
+          "These recovery codes replace any previous codes and are shown once. Store them offline before leaving this page.",
+      });
+      setTotpCode("");
+      await loadRecoveryControls(state.summary?.userId ?? null);
+    } catch (err) {
+      setRecoveryMessage(
+        err instanceof Error ? err.message : "Failed to regenerate recovery codes",
+      );
+    } finally {
+      setRecoveryBusy(null);
     }
   }
 
@@ -471,6 +688,206 @@ export default function DashboardAccountPage() {
                     />
                   );
                 })}
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-5">
+          <h2 className="font-display text-lg font-600">Recovery</h2>
+          <span className="text-xs text-text-tertiary">
+            Wallet phrases and MFA codes are one-time secrets
+          </span>
+        </div>
+
+        {recoveryMessage && (
+          <div
+            role="alert"
+            className="border border-warning/30 bg-warning/5 px-4 py-3 text-sm mb-5"
+          >
+            <div className="text-warning">Recovery action did not complete</div>
+            <div className="text-text-tertiary mt-1">{recoveryMessage}</div>
+          </div>
+        )}
+
+        {recoverySecret && (
+          <div className="mb-5">
+            <NoStoreSecretDisplay
+              secret={recoverySecret}
+              onDismiss={() => setRecoverySecret(null)}
+            />
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-px bg-border mb-5">
+          <div className="bg-bg p-5 min-h-[320px]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-display text-base font-600">Wallet Recovery Setup</h3>
+                <p className="text-xs text-text-tertiary mt-1">
+                  Create a recoverable embedded wallet with a BIP-39 phrase before any user wallet
+                  exists.
+                </p>
+              </div>
+              <span
+                className={`border px-2 py-0.5 text-[11px] uppercase tracking-wider ${
+                  hasEmbeddedWallet
+                    ? "border-warning/30 text-warning"
+                    : "border-success/30 text-success"
+                }`}
+              >
+                {hasEmbeddedWallet ? "locked" : "available"}
+              </span>
+            </div>
+
+            <div className="mt-5 space-y-3 text-sm">
+              {hasEmbeddedWallet ? (
+                <div className="border border-border-subtle p-4">
+                  <div className="text-text-secondary">Existing wallet detected</div>
+                  <p className="text-xs text-text-tertiary mt-2 leading-relaxed">
+                    Existing embedded wallets cannot be assigned a new recovery phrase. Use audited
+                    key export for break-glass backup, or create recovery during initial wallet
+                    provisioning for new accounts.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <label className="flex items-start gap-3 border border-border-subtle p-4 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={recoverySetupConfirmed}
+                      onChange={(event) => setRecoverySetupConfirmed(event.currentTarget.checked)}
+                      className="mt-0.5"
+                    />
+                    <span className="text-xs text-text-secondary leading-relaxed">
+                      I understand this phrase is displayed once, is not recoverable from Steward,
+                      and should only be copied into secure offline storage.
+                    </span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void setupWalletRecovery()}
+                    disabled={!recoverySetupConfirmed || recoveryBusy !== null}
+                    className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover disabled:opacity-40 disabled:hover:bg-accent transition-colors"
+                  >
+                    {recoveryBusy === "wallet" ? "Creating..." : "Set Up Recoverable Wallet"}
+                  </button>
+                  <p className="text-xs text-text-tertiary">
+                    Requires a current session with recent MFA. If this fails, complete MFA and try
+                    again.
+                  </p>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="bg-bg p-5 min-h-[320px]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-display text-base font-600">MFA Recovery Codes</h3>
+                <p className="text-xs text-text-tertiary mt-1">
+                  Check remaining one-time codes and regenerate them after authenticator
+                  verification.
+                </p>
+              </div>
+              <span className="border border-border-subtle px-2 py-0.5 text-[11px] uppercase tracking-wider text-text-tertiary">
+                {recoveryStatus
+                  ? recoveryStatus.enabled
+                    ? `${recoveryStatus.remaining} left`
+                    : "off"
+                  : "unknown"}
+              </span>
+            </div>
+
+            <div className="mt-5 space-y-4">
+              <div className="grid grid-cols-2 gap-px bg-border">
+                <Stat
+                  label="Codes enabled"
+                  value={recoveryStatus?.enabled ? "Yes" : "No"}
+                  detail="Backs up TOTP MFA"
+                />
+                <Stat
+                  label="Remaining"
+                  value={recoveryStatus?.remaining ?? "--"}
+                  detail="Unused codes"
+                />
+              </div>
+              {recoveryStatus?.enabled ? (
+                <form
+                  className="space-y-3"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void regenerateRecoveryCodes();
+                  }}
+                >
+                  <label className="block">
+                    <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                      Authenticator Code
+                    </span>
+                    <input
+                      value={totpCode}
+                      onChange={(event) => setTotpCode(event.currentTarget.value)}
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      pattern="[0-9]*"
+                      placeholder="000000"
+                      className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                    />
+                  </label>
+                  <button
+                    type="submit"
+                    disabled={recoveryBusy !== null || !/^\d{6}$/.test(totpCode.trim())}
+                    className="px-4 py-2 text-sm border border-border text-text-secondary hover:text-text hover:border-text-tertiary disabled:opacity-40 transition-colors"
+                  >
+                    {recoveryBusy === "mfa" ? "Regenerating..." : "Regenerate Codes"}
+                  </button>
+                </form>
+              ) : (
+                <div className="border border-border-subtle p-4 text-xs text-text-tertiary leading-relaxed">
+                  Enable authenticator MFA first. Steward issues recovery codes when TOTP is enabled
+                  and replaces them when you regenerate.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-border-subtle">
+          <div className="text-xs text-text-tertiary tracking-wider uppercase py-3">
+            Recovery History
+          </div>
+          {recoveryEvents.length === 0 ? (
+            <div className="py-8 text-sm text-text-tertiary">
+              No recovery audit events are visible for this session
+            </div>
+          ) : (
+            recoveryEvents.map((event) => (
+              <div
+                key={`${event.seq}:${event.action}:${event.created_at}`}
+                className="grid grid-cols-1 md:grid-cols-[1fr_180px_160px] gap-3 py-4 border-b border-border-subtle last:border-b-0"
+              >
+                <div className="min-w-0">
+                  <div className="text-sm text-text-secondary">
+                    {recoveryEventLabel(event.action)}
+                  </div>
+                  <div className="text-xs text-text-tertiary mt-1 font-mono break-all">
+                    {event.action}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-text-tertiary uppercase tracking-wider">Detail</div>
+                  <div className="text-sm text-text-secondary mt-1">
+                    {recoveryEventDetail(event)}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-text-tertiary uppercase tracking-wider">When</div>
+                  <div className="text-sm text-text-secondary mt-1">
+                    {formatDate(event.created_at)}
+                  </div>
+                </div>
               </div>
             ))
           )}

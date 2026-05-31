@@ -41,6 +41,24 @@ export interface SweepResult {
   auditFailed?: boolean;
 }
 
+export interface RetentionSweepOptions {
+  auditWriter?: typeof writeAuditEvent;
+}
+
+interface RetentionSweepContext {
+  auditWriter: typeof writeAuditEvent;
+}
+
+class RetentionAuthorizationAuditError extends Error {
+  constructor(
+    public readonly table: string,
+    options?: { cause?: unknown },
+  ) {
+    super(`[retention] authorization audit record for ${table} failed to persist`, options);
+    this.name = "RetentionAuthorizationAuditError";
+  }
+}
+
 function readPositiveInt(envName: string): number | undefined {
   const raw = process.env[envName];
   if (raw === undefined || raw === "") return undefined;
@@ -80,8 +98,32 @@ async function deleteRows(query: ReturnType<typeof sql>): Promise<number> {
   return 0;
 }
 
-async function sweepProxyAuditLog(): Promise<SweepResult> {
+async function writeRetentionAuthorization(
+  table: string,
+  ctx: RetentionSweepContext,
+): Promise<void> {
+  const ttlDays = ttlForTable(table);
+  try {
+    await ctx.auditWriter({
+      tenantId: SYSTEM_TENANT_ID,
+      actorType: "system",
+      action: "system.retention.sweep.authorized",
+      resourceType: "table",
+      resourceId: table,
+      metadata: {
+        table,
+        ttlDays: ttlDays ?? null,
+        ageThreshold: ttlDays !== undefined ? `${ttlDays}d` : "per-row expires_at",
+      },
+    });
+  } catch (cause) {
+    throw new RetentionAuthorizationAuditError(table, { cause });
+  }
+}
+
+async function sweepProxyAuditLog(ctx: RetentionSweepContext): Promise<SweepResult> {
   const days = readPositiveInt("STEWARD_RETENTION_PROXY_AUDIT_DAYS") ?? DEFAULT_PROXY_AUDIT_DAYS;
+  await writeRetentionAuthorization("proxy_audit_log", ctx);
   const deleted = await deleteRows(sql`
     DELETE FROM proxy_audit_log
     WHERE created_at < now() - make_interval(days => ${days})
@@ -89,10 +131,11 @@ async function sweepProxyAuditLog(): Promise<SweepResult> {
   return { table: "proxy_audit_log", deleted };
 }
 
-async function sweepRefreshTokens(): Promise<SweepResult> {
+async function sweepRefreshTokens(ctx: RetentionSweepContext): Promise<SweepResult> {
   const days =
     readPositiveInt("STEWARD_RETENTION_REFRESH_TOKEN_GRACE_DAYS") ??
     DEFAULT_REFRESH_TOKEN_GRACE_DAYS;
+  await writeRetentionAuthorization("refresh_tokens", ctx);
   const deleted = await deleteRows(sql`
     DELETE FROM refresh_tokens
     WHERE expires_at < now() - make_interval(days => ${days})
@@ -100,8 +143,9 @@ async function sweepRefreshTokens(): Promise<SweepResult> {
   return { table: "refresh_tokens", deleted };
 }
 
-async function sweepFailedTransactions(): Promise<SweepResult> {
+async function sweepFailedTransactions(ctx: RetentionSweepContext): Promise<SweepResult> {
   const days = readPositiveInt("STEWARD_RETENTION_FAILED_TX_DAYS") ?? DEFAULT_FAILED_TX_DAYS;
+  await writeRetentionAuthorization("transactions", ctx);
   // Only terminal-failure states. Signed/broadcast/confirmed are kept for ledger continuity.
   const deleted = await deleteRows(sql`
     DELETE FROM transactions
@@ -111,7 +155,7 @@ async function sweepFailedTransactions(): Promise<SweepResult> {
   return { table: "transactions", deleted };
 }
 
-async function sweepAuditEvents(): Promise<SweepResult | null> {
+async function sweepAuditEvents(ctx: RetentionSweepContext): Promise<SweepResult | null> {
   const override = readPositiveInt("STEWARD_RETENTION_AUDIT_EVENTS_DAYS");
   if (override === undefined) {
     // Default: audit events are immutable — never deleted.
@@ -137,6 +181,7 @@ async function sweepAuditEvents(): Promise<SweepResult | null> {
         "verified floor anchor so post-sweep verification still succeeds.",
     );
   }
+  await writeRetentionAuthorization("audit_events", ctx);
 
   const db = getDb();
   let deleted = 0;
@@ -187,9 +232,10 @@ async function sweepAuditEvents(): Promise<SweepResult | null> {
   return { table: "audit_events", deleted };
 }
 
-async function sweepAuthKvStore(): Promise<SweepResult> {
+async function sweepAuthKvStore(ctx: RetentionSweepContext): Promise<SweepResult> {
   // auth_kv_store rows carry their own expires_at (set per-namespace TTL by the
   // auth store backend). Anything past expiry is dead weight.
+  await writeRetentionAuthorization("auth_kv_store", ctx);
   const deleted = await deleteRows(sql`
     DELETE FROM auth_kv_store
     WHERE expires_at < now()
@@ -197,7 +243,7 @@ async function sweepAuthKvStore(): Promise<SweepResult> {
   return { table: "auth_kv_store", deleted };
 }
 
-async function sweepDeactivatedUsers(): Promise<SweepResult | null> {
+async function sweepDeactivatedUsers(ctx: RetentionSweepContext): Promise<SweepResult | null> {
   const days = readPositiveInt("STEWARD_RETENTION_DEACTIVATED_USERS_DAYS");
   if (days === undefined) return null;
   if (days < MIN_DEACTIVATED_USERS_DAYS) {
@@ -213,6 +259,7 @@ async function sweepDeactivatedUsers(): Promise<SweepResult | null> {
         "export/recovery policy is documented.",
     );
   }
+  await writeRetentionAuthorization("users.deactivated", ctx);
 
   const db = getDb();
   let deleted = 0;
@@ -276,10 +323,15 @@ function ttlForTable(table: string): number | undefined {
  * per table that was considered (audit_events is omitted unless an explicit
  * override enables deletion).
  */
-export async function runRetentionSweep(): Promise<SweepResult[]> {
+export async function runRetentionSweep(
+  options: RetentionSweepOptions = {},
+): Promise<SweepResult[]> {
   const results: SweepResult[] = [];
+  const ctx: RetentionSweepContext = {
+    auditWriter: options.auditWriter ?? writeAuditEvent,
+  };
 
-  const sweepers: Array<() => Promise<SweepResult | null>> = [
+  const sweepers: Array<(context: RetentionSweepContext) => Promise<SweepResult | null>> = [
     sweepProxyAuditLog,
     sweepRefreshTokens,
     sweepFailedTransactions,
@@ -290,7 +342,7 @@ export async function runRetentionSweep(): Promise<SweepResult[]> {
 
   for (const sweeper of sweepers) {
     try {
-      const r = await sweeper();
+      const r = await sweeper(ctx);
       if (!r) continue;
       results.push(r);
       if (r.deleted > 0) {
@@ -303,7 +355,7 @@ export async function runRetentionSweep(): Promise<SweepResult[]> {
         // sweepers still run — a background sweep should not abort wholesale on
         // one audit failure.
         try {
-          await writeAuditEvent({
+          await ctx.auditWriter({
             tenantId: SYSTEM_TENANT_ID,
             actorType: "system",
             action: "system.retention.sweep",
@@ -325,7 +377,15 @@ export async function runRetentionSweep(): Promise<SweepResult[]> {
         }
       }
     } catch (err) {
-      console.error("[retention] sweep failed:", err);
+      if (err instanceof RetentionAuthorizationAuditError) {
+        results.push({ table: err.table, deleted: 0, auditFailed: true });
+        console.error(
+          `[retention] authorization audit record for sweep of ${err.table} FAILED to persist; delete skipped:`,
+          err.cause ?? err,
+        );
+      } else {
+        console.error("[retention] sweep failed:", err);
+      }
     }
   }
 

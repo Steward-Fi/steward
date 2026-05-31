@@ -1,4 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   agentWallets,
   closeDb,
@@ -33,6 +35,7 @@ describe("global wallet routes", () => {
     process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING = "true";
     process.env.STEWARD_ALLOW_GLOBAL_WALLET_PERSONAL_SIGN = "true";
     process.env.STEWARD_ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING = "true";
+    process.env.STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION = "true";
     process.env.CHAIN_ID = "8453";
 
     const { db, client } = await createPGLiteDb("memory://");
@@ -122,6 +125,7 @@ describe("global wallet routes", () => {
     delete process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING;
     delete process.env.STEWARD_ALLOW_GLOBAL_WALLET_PERSONAL_SIGN;
     delete process.env.STEWARD_ALLOW_GLOBAL_WALLET_TYPED_DATA_SIGNING;
+    delete process.env.STEWARD_ALLOW_GLOBAL_WALLET_SEND_TRANSACTION;
     delete process.env.CHAIN_ID;
   });
 
@@ -167,6 +171,27 @@ describe("global wallet routes", () => {
       { headers: { Authorization: `Bearer ${await token()}`, Origin: ORIGIN } },
     );
     expect(disabled.status).toBe(404);
+  });
+
+  it("source rolls back consent approval if final audit fails", () => {
+    const source = readFileSync(join(import.meta.dir, "..", "routes", "global-wallet.ts"), "utf8");
+    const routeStart = source.indexOf('globalWalletRoutes.post("/consent/approve"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const route = source.slice(
+      routeStart,
+      source.indexOf('globalWalletRoutes.get("/consents"', routeStart),
+    );
+    const authorized = route.indexOf('action: "global_wallet.consent.approve.authorized"');
+    const insert = route.indexOf(".insert(userWalletAppConsents)", authorized);
+    const finalAudit = route.indexOf('action: "global_wallet.consent.approved"', insert);
+    const rollbackDelete = route.indexOf(".delete(userWalletAppConsents)", finalAudit);
+    const restoreActive = route.indexOf('status: "active"', rollbackDelete);
+
+    expect(authorized).toBeGreaterThanOrEqual(0);
+    expect(insert).toBeGreaterThan(authorized);
+    expect(finalAudit).toBeGreaterThan(insert);
+    expect(rollbackDelete).toBeGreaterThan(finalAudit);
+    expect(restoreActive).toBeGreaterThan(rollbackDelete);
   });
 
   it("uses browser Origin as authoritative over explicit origin parameters", async () => {
@@ -489,6 +514,33 @@ describe("global wallet routes", () => {
     expect(reused.status).toBe(403);
   });
 
+  it("source writes global wallet RPC authorization audits before sensitive execution", () => {
+    const source = readFileSync(join(import.meta.dir, "..", "routes", "global-wallet.ts"), "utf8");
+    const rpcStart = source.indexOf('globalWalletRoutes.post("/rpc",');
+    expect(rpcStart).toBeGreaterThanOrEqual(0);
+
+    for (const [methodMarker, auditAction, executionMarker] of [
+      ['method === "personal_sign"', "global_wallet.rpc.sign.authorized", "signMessage("],
+      [
+        'method === "eth_signTypedData_v4"',
+        "global_wallet.rpc.typed_data_sign.authorized",
+        "signTypedData({",
+      ],
+      [
+        'method === "eth_sendTransaction"',
+        "global_wallet.rpc.transaction_submit.authorized",
+        "signTransaction({",
+      ],
+    ] as const) {
+      const methodStart = source.indexOf(methodMarker, rpcStart);
+      expect(methodStart).toBeGreaterThan(rpcStart);
+      const audit = source.indexOf(auditAction, methodStart);
+      const execution = source.indexOf(executionMarker, methodStart);
+      expect(audit).toBeGreaterThan(methodStart);
+      expect(audit).toBeLessThan(execution);
+    }
+  });
+
   it("requires eth_signTypedData_v4 scope and recent MFA before signing global wallet typed data", async () => {
     const typedData = {
       domain: {
@@ -632,6 +684,7 @@ describe("global wallet routes", () => {
       }),
     });
     expect(confirmation.status).toBe(200);
+    expect(confirmation.headers.get("Cache-Control")).toContain("no-store");
     const confirmationBody = (await confirmation.json()) as {
       data: { confirmationId: string; method: string };
     };
@@ -874,7 +927,7 @@ describe("global wallet routes", () => {
     }
   });
 
-  it("scans eth_sendTransaction requests without enabling global wallet execution", async () => {
+  it("scans and executes native eth_sendTransaction requests behind confirmation", async () => {
     await routes.request("/consent/approve", {
       method: "POST",
       headers: {
@@ -973,7 +1026,7 @@ describe("global wallet routes", () => {
     expect(scannedBody.data.blocked).toBe(false);
     expect(scannedBody.data.riskLevel).toBe("medium");
     expect(scannedBody.data.confirmationRequired).toBe(true);
-    expect(scannedBody.data.executionSupported).toBe(false);
+    expect(scannedBody.data.executionSupported).toBe(true);
     expect(scannedBody.data.transaction.valueWei).toBe("1");
     expect(scannedBody.data.transaction.chainId).toBe(8453);
 
@@ -1076,7 +1129,7 @@ describe("global wallet routes", () => {
       expect.objectContaining({ code: "contract_call_blocked", severity: "error" }),
     );
 
-    const execution = await routes.request("/rpc", {
+    const missingConfirmation = await routes.request("/rpc", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${await token()}`,
@@ -1091,6 +1144,72 @@ describe("global wallet routes", () => {
         ],
       }),
     });
-    expect(execution.status).toBe(403);
+    expect(missingConfirmation.status).toBe(403);
+
+    const txHash = "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue(txHash);
+    try {
+      const execution = await routes.request("/rpc", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await token()}`,
+          "Content-Type": "application/json",
+          Origin: ORIGIN,
+        },
+        body: JSON.stringify({
+          app_id: appId(),
+          method: "eth_sendTransaction",
+          params: [
+            {
+              from: walletAddress,
+              to: "0x0000000000000000000000000000000000000001",
+              value: "0x1",
+              chainId: "0x2105",
+            },
+          ],
+          confirmation_id: confirmationBody.data.confirmationId,
+        }),
+      });
+      expect(execution.status).toBe(200);
+      const executionBody = (await execution.json()) as {
+        data: { result: string; jsonrpc: string; id: null };
+      };
+      expect(executionBody.data.result).toBe(txHash);
+      expect(signSpy).toHaveBeenCalledWith({
+        agentId: `user-wallet-${userId}`,
+        tenantId: `personal-${userId}`,
+        to: "0x0000000000000000000000000000000000000001",
+        value: "1",
+        data: undefined,
+        chainId: 8453,
+        walletAddress,
+        broadcast: true,
+      });
+
+      const replay = await routes.request("/rpc", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await token()}`,
+          "Content-Type": "application/json",
+          Origin: ORIGIN,
+        },
+        body: JSON.stringify({
+          app_id: appId(),
+          method: "eth_sendTransaction",
+          params: [
+            {
+              from: walletAddress,
+              to: "0x0000000000000000000000000000000000000001",
+              value: "0x1",
+              chainId: "0x2105",
+            },
+          ],
+          confirmation_id: confirmationBody.data.confirmationId,
+        }),
+      });
+      expect(replay.status).toBe(403);
+    } finally {
+      signSpy.mockRestore();
+    }
   });
 });

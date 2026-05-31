@@ -120,6 +120,27 @@ describe("sign-solana — parser-derived policy wiring", () => {
     expect(evalCall).toBeGreaterThanOrEqual(0);
     expect(recordSpend).toBeGreaterThan(evalCall);
   });
+
+  it("requires idempotency for broadcast requests before signing", () => {
+    const route = routeSlice();
+    const idempotencyGate = route.indexOf("Broadcast Solana signing requests");
+    const signCall = route.indexOf("vault.signSolanaTransaction(");
+    expect(idempotencyGate).toBeGreaterThanOrEqual(0);
+    expect(idempotencyGate).toBeLessThan(signCall);
+  });
+
+  it("does not report broadcasted transactions as failed after bookkeeping errors", () => {
+    const route = routeSlice();
+    const completedMarker = route.indexOf("completedResult = { txId, ...result }");
+    const retryFence = route.indexOf("returning completed result to prevent duplicate retry");
+    const failedWebhook = route.indexOf(
+      'dispatchWebhook(tenantId, agentId, "tx_failed"',
+      retryFence,
+    );
+    expect(completedMarker).toBeGreaterThanOrEqual(0);
+    expect(retryFence).toBeGreaterThan(completedMarker);
+    expect(failedWebhook).toBeGreaterThan(retryFence);
+  });
 });
 
 describe("sign-solana — blind signing fallback", () => {
@@ -133,5 +154,14 @@ describe("sign-solana — blind signing fallback", () => {
     // Blind path is audited distinctly so it is reviewable.
     expect(helper).toContain('action: "vault.sign.solana.blind"');
     expect(helper).toContain("blindSigned: true");
+  });
+
+  it("applies the same broadcast idempotency and post-broadcast retry fence", () => {
+    const start = vaultSource.indexOf("async function signSolanaBlind(");
+    const end = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign-solana"', start);
+    const helper = vaultSource.slice(start, end);
+    expect(helper).toContain("Broadcast Solana signing requests");
+    expect(helper).toContain("completedResult = { txId, ...result }");
+    expect(helper).toContain("returning completed result to prevent duplicate retry");
   });
 });

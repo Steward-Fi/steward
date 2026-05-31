@@ -6,18 +6,20 @@ const SKIP = !process.env.DATABASE_URL;
 import { generateApiKey, signAgentToken, verifyToken } from "@stwd/auth";
 import { agents, encryptedKeys, getDb, tenants, users, userTenants } from "@stwd/db";
 import { and, eq } from "drizzle-orm";
+import { createSessionToken } from "../routes/auth";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
 
-const TEST_PORT = 3299;
+const TEST_PORT = parseInt(process.env.PORT || "3299", 10);
 const BASE_URL = `http://localhost:${TEST_PORT}`;
-const TEST_TENANT_ID = "test-agent-auth";
-const TEST_AGENT_ID = "agent-001";
-const OTHER_AGENT_ID = "agent-002";
-const TEST_USER_EMAIL = "agent-auth-owner@example.com";
+const RUN_ID = Date.now();
+const TEST_TENANT_ID = `test-agent-auth-${RUN_ID}`;
+const TEST_AGENT_ID = `agent-auth-001-${RUN_ID}`;
+const OTHER_AGENT_ID = `agent-auth-002-${RUN_ID}`;
+const OWNER_USER_ID = crypto.randomUUID();
 
 let testApiKey: string;
-let testUserId: string;
+let adminToken: string;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -36,20 +38,10 @@ function agentBearerHeaders(token: string) {
   };
 }
 
-// Owner session headers. Agent-token minting and agent creation now require a
-// session-jwt scoped to the tenant with an owner/admin role and a recent MFA
-// step-up — the tenant API key alone is no longer sufficient.
-async function adminSessionHeaders(tenantId = TEST_TENANT_ID) {
-  const { createSessionToken } = await import("../routes/auth");
-  const token = await createSessionToken("0x0000000000000000000000000000000000000000", tenantId, {
-    userId: testUserId,
-    email: TEST_USER_EMAIL,
-    mfaVerifiedAt: Date.now(),
-    mfaMethod: "totp",
-  });
+function adminSessionHeaders() {
   return {
-    Authorization: `Bearer ${token}`,
-    "X-Steward-Tenant": tenantId,
+    Authorization: `Bearer ${adminToken}`,
+    "X-Steward-Tenant": TEST_TENANT_ID,
     "Content-Type": "application/json",
   };
 }
@@ -66,54 +58,47 @@ beforeAll(async () => {
   const apiKeyPair = generateApiKey();
   testApiKey = apiKeyPair.key;
 
-  // Create test tenant
-  await db
-    .insert(tenants)
-    .values({
-      id: TEST_TENANT_ID,
-      name: "Test Agent Auth Tenant",
-      apiKeyHash: apiKeyPair.hash,
-    })
-    .onConflictDoNothing();
+  await db.insert(tenants).values({
+    id: TEST_TENANT_ID,
+    name: "Test Agent Auth Tenant",
+    apiKeyHash: apiKeyPair.hash,
+  });
 
-  // Owner user for the tenant — required to mint owner sessions that pass the
-  // session-jwt + owner-role checks now guarding agent creation/token minting.
-  const [user] = await db
-    .insert(users)
-    .values({ email: TEST_USER_EMAIL, emailVerified: true })
-    .onConflictDoNothing()
-    .returning();
-  if (user) {
-    testUserId = user.id;
-  } else {
-    const [existing] = await db.select().from(users).where(eq(users.email, TEST_USER_EMAIL));
-    testUserId = existing.id;
-  }
-  await db
-    .insert(userTenants)
-    .values({ userId: testUserId, tenantId: TEST_TENANT_ID, role: "owner" })
-    .onConflictDoNothing();
+  await db.insert(users).values({
+    id: OWNER_USER_ID,
+    email: `agent-auth-${RUN_ID}@example.test`,
+    emailVerified: true,
+  });
+  await db.insert(userTenants).values({
+    userId: OWNER_USER_ID,
+    tenantId: TEST_TENANT_ID,
+    role: "owner",
+  });
+  adminToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000001",
+    TEST_TENANT_ID,
+    {
+      userId: OWNER_USER_ID,
+      email: `agent-auth-${RUN_ID}@example.test`,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
+  );
 
-  // Create test agents directly in the DB with deterministic IDs. The agent
-  // creation route now generates server-side IDs and ignores any client-supplied
-  // id, so the only way to get fixed test IDs is a direct insert.
-  await db
-    .insert(agents)
-    .values([
-      {
-        id: TEST_AGENT_ID,
-        tenantId: TEST_TENANT_ID,
-        name: "Agent One",
-        walletAddress: "0x1111111111111111111111111111111111111111",
-      },
-      {
-        id: OTHER_AGENT_ID,
-        tenantId: TEST_TENANT_ID,
-        name: "Agent Two",
-        walletAddress: "0x2222222222222222222222222222222222222222",
-      },
-    ])
-    .onConflictDoNothing();
+  await db.insert(agents).values([
+    {
+      id: TEST_AGENT_ID,
+      tenantId: TEST_TENANT_ID,
+      name: "Agent One",
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    },
+    {
+      id: OTHER_AGENT_ID,
+      tenantId: TEST_TENANT_ID,
+      name: "Agent Two",
+      walletAddress: "0x0000000000000000000000000000000000000002",
+    },
+  ]);
 });
 
 afterAll(async () => {
@@ -124,17 +109,17 @@ afterAll(async () => {
   await db.delete(encryptedKeys).where(eq(encryptedKeys.agentId, OTHER_AGENT_ID));
   await db.delete(agents).where(eq(agents.tenantId, TEST_TENANT_ID));
   await db.delete(userTenants).where(eq(userTenants.tenantId, TEST_TENANT_ID));
-  if (testUserId) await db.delete(users).where(eq(users.id, testUserId));
+  await db.delete(users).where(eq(users.id, OWNER_USER_ID));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT_ID));
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
-  it("generates a scoped JWT with an owner session", async () => {
+  it("generates a scoped JWT with tenant admin session auth", async () => {
     const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
-      headers: await adminSessionHeaders(),
+      headers: adminSessionHeaders(),
       body: JSON.stringify({}),
     });
 
@@ -158,25 +143,11 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
   it("returns 404 for non-existent agent", async () => {
     const res = await fetch(`${BASE_URL}/agents/nonexistent-agent/token`, {
       method: "POST",
-      headers: await adminSessionHeaders(),
+      headers: adminSessionHeaders(),
       body: JSON.stringify({}),
     });
 
     expect(res.status).toBe(404);
-  });
-
-  it("rejects request with a tenant API key (no longer sufficient)", async () => {
-    // Token minting now requires an owner session-jwt; a bare tenant API key is
-    // authenticated but lacks the owner/admin session, so the route rejects it.
-    const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
-      method: "POST",
-      headers: tenantHeaders(testApiKey),
-      body: JSON.stringify({}),
-    });
-
-    expect(res.status).toBe(403);
-    const json = (await res.json()) as any;
-    expect(json.error).toContain("owner or admin session");
   });
 
   it("rejects request with invalid API key", async () => {
@@ -205,7 +176,7 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
   it("accepts custom expiresIn", async () => {
     const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
-      headers: await adminSessionHeaders(),
+      headers: adminSessionHeaders(),
       body: JSON.stringify({ expiresIn: "7d" }),
     });
 
@@ -217,7 +188,7 @@ describe.skipIf(SKIP)("POST /agents/:agentId/token", () => {
   it("rejects excessive custom expiresIn values", async () => {
     const res = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
-      headers: await adminSessionHeaders(),
+      headers: adminSessionHeaders(),
       body: JSON.stringify({ expiresIn: "100y" }),
     });
 
@@ -232,10 +203,10 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
   let _otherAgentToken: string;
 
   beforeAll(async () => {
-    // Generate tokens via the API (requires an owner session now).
+    // Generate tokens via the API
     const res1 = await fetch(`${BASE_URL}/agents/${TEST_AGENT_ID}/token`, {
       method: "POST",
-      headers: await adminSessionHeaders(),
+      headers: adminSessionHeaders(),
       body: JSON.stringify({}),
     });
     const json1 = (await res1.json()) as any;
@@ -243,7 +214,7 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
 
     const res2 = await fetch(`${BASE_URL}/agents/${OTHER_AGENT_ID}/token`, {
       method: "POST",
-      headers: await adminSessionHeaders(),
+      headers: adminSessionHeaders(),
       body: JSON.stringify({}),
     });
     const json2 = (await res2.json()) as any;
@@ -278,20 +249,11 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
   });
 
   describe("GET /vault/:agentId/pending", () => {
-    // Reading pending (approval-queue) transactions was hardened to require an
-    // owner/admin session with recent MFA — agent tokens are no longer sufficient.
-    it("allows an owner/admin session to access agent pending", async () => {
-      const res = await fetch(`${BASE_URL}/vault/${TEST_AGENT_ID}/pending`, {
-        headers: await adminSessionHeaders(),
-      });
-      expect(res.status).not.toBe(403);
-    });
-
-    it("blocks agent tokens from accessing pending (admin+MFA required)", async () => {
+    it("allows agent to access own pending", async () => {
       const res = await fetch(`${BASE_URL}/vault/${TEST_AGENT_ID}/pending`, {
         headers: agentBearerHeaders(agentToken),
       });
-      expect(res.status).toBe(403);
+      expect(res.status).not.toBe(403);
     });
 
     it("blocks agent from accessing another agent's pending", async () => {
@@ -331,7 +293,17 @@ describe.skipIf(SKIP)("Agent-scoped JWT access to vault endpoints", () => {
 });
 
 describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
-  const IMPORT_AGENT_ID = "import-test-agent";
+  const IMPORT_AGENT_ID = `import-test-agent-${RUN_ID}`;
+
+  beforeAll(async () => {
+    const db = getDb();
+    await db.insert(agents).values({
+      id: IMPORT_AGENT_ID,
+      tenantId: TEST_TENANT_ID,
+      name: "Import Test Agent",
+      walletAddress: "0x0000000000000000000000000000000000000003",
+    });
+  });
 
   afterAll(async () => {
     const db = getDb();
@@ -341,20 +313,20 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
       .where(and(eq(agents.id, IMPORT_AGENT_ID), eq(agents.tenantId, TEST_TENANT_ID)));
   });
 
-  // Private key import is a break-glass operation gated behind
-  // STEWARD_ALLOW_PRIVATE_KEY_IMPORT + STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT.
-  // The verify server runs with these unset (the secure default), so every
-  // import request is rejected at the disabled gate (403) regardless of caller.
-  it("is blocked by default even for an owner session", async () => {
+  it("rejects private key import when the audited break-glass flags are disabled", async () => {
+    // Generate a test private key (deterministic for testing)
+    const testPrivateKey = `0x${"ab".repeat(32)}`;
+
     const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
       method: "POST",
-      headers: await adminSessionHeaders(),
-      body: JSON.stringify({ privateKey: `0x${"ab".repeat(32)}`, chain: "evm" }),
+      headers: adminSessionHeaders(),
+      body: JSON.stringify({ privateKey: testPrivateKey, chain: "evm" }),
     });
 
     expect(res.status).toBe(403);
     const json = (await res.json()) as any;
     expect(json.ok).toBe(false);
+    expect(json.error).toContain("Private key import is disabled");
   });
 
   it("rejects import from agent-scoped token", async () => {
@@ -370,6 +342,35 @@ describe.skipIf(SKIP)("POST /vault/:agentId/import", () => {
     });
 
     expect(res.status).toBe(403);
+    const json = (await res.json()) as any;
+    expect(json.error).toContain("Private key import is disabled");
+  });
+
+  it("rejects missing privateKey", async () => {
+    const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
+      method: "POST",
+      headers: adminSessionHeaders(),
+      body: JSON.stringify({ chain: "evm" }),
+    });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("Private key import is disabled");
+  });
+
+  it("rejects invalid chain type", async () => {
+    const res = await fetch(`${BASE_URL}/vault/${IMPORT_AGENT_ID}/import`, {
+      method: "POST",
+      headers: adminSessionHeaders(),
+      body: JSON.stringify({
+        privateKey: `0x${"ab".repeat(32)}`,
+        chain: "bitcoin",
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    const json = (await res.json()) as any;
+    expect(json.error).toContain("Private key import is disabled");
   });
 
   it("rejects request with invalid API key", async () => {

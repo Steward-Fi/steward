@@ -20,6 +20,7 @@ import {
   getDb,
   inArray,
   policies,
+  sessionSigners,
   tenantAppClientSecrets,
   tenantAppClients,
   tenants,
@@ -125,6 +126,12 @@ export function hasAgentTokenScope(
   return Boolean(scopes?.includes(required));
 }
 
+export function setNoStoreHeaders(c: Pick<Context, "header">): void {
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  c.header("Expires", "0");
+}
+
 export async function createSessionToken(address: string, tenantId: string): Promise<string> {
   return signAccessToken({ address, tenantId }, JWT_EXPIRY);
 }
@@ -155,6 +162,8 @@ export async function verifySessionToken(token: string) {
       email?: string;
       mfaVerifiedAt?: number;
       mfaMethod?: string;
+      jti?: string;
+      exp?: number;
     };
     if (payload.typ === "identity") return null;
     await assertTokenNotRevoked(payload);
@@ -429,6 +438,7 @@ export type AppVariables = {
   requestId?: string;
   platformKeyHash?: string;
   platformScopes?: string[];
+  agentPolicyIds?: string[];
 };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
@@ -499,6 +509,24 @@ export async function getPolicySet(tenantId: string, agentId: string): Promise<P
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
   return tenantConfigs.get(tenantId)?.defaultPolicies || [];
+}
+
+export async function getScopedPolicySet(
+  tenantId: string,
+  agentId: string,
+  policyIds: readonly string[] | undefined,
+): Promise<PolicyRule[]> {
+  if (!policyIds || policyIds.length === 0) return getPolicySet(tenantId, agentId);
+
+  const uniquePolicyIds = [...new Set(policyIds.filter((id) => typeof id === "string" && id))];
+  if (uniquePolicyIds.length === 0) return [];
+
+  const storedPolicies = await db
+    .select()
+    .from(policies)
+    .where(and(eq(policies.agentId, agentId), inArray(policies.id, uniquePolicyIds)));
+
+  return storedPolicies.map(toPolicyRule);
 }
 
 export async function loadConditionSetsForPolicies(
@@ -682,6 +710,51 @@ export async function tenantAuth(
           const agent = await ensureAgentForTenant(payload.tenantId, payload.agentId as string);
           if (!agent) {
             return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 403);
+          }
+          if (typeof payload.jti === "string" && payload.jti) {
+            const [sessionSigner] = await db
+              .select({
+                id: sessionSigners.id,
+                tenantId: sessionSigners.tenantId,
+                agentId: sessionSigners.agentId,
+                policyIds: sessionSigners.policyIds,
+                expiresAt: sessionSigners.expiresAt,
+                revokedAt: sessionSigners.revokedAt,
+              })
+              .from(sessionSigners)
+              .where(eq(sessionSigners.jti, payload.jti));
+
+            if (sessionSigner) {
+              if (
+                sessionSigner.tenantId !== payload.tenantId ||
+                sessionSigner.agentId !== payload.agentId
+              ) {
+                return c.json<ApiResponse>(
+                  { ok: false, error: "Session signer does not match token subject" },
+                  403,
+                );
+              }
+              if (sessionSigner.revokedAt || sessionSigner.expiresAt.getTime() <= Date.now()) {
+                return c.json<ApiResponse>(
+                  { ok: false, error: "Session signer is revoked or expired" },
+                  401,
+                );
+              }
+              if (sessionSigner.policyIds.length > 0) {
+                c.set("agentPolicyIds", sessionSigner.policyIds);
+              }
+              try {
+                await db
+                  .update(sessionSigners)
+                  .set({ lastUsedAt: new Date() })
+                  .where(eq(sessionSigners.id, sessionSigner.id));
+              } catch (err) {
+                console.error(
+                  `[session-signer] failed to update lastUsedAt for ${sessionSigner.id}:`,
+                  err,
+                );
+              }
+            }
           }
         } else {
           if (!payload.userId) {

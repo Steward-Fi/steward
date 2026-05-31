@@ -16,9 +16,9 @@
  * STEWARD_ALLOW_MOCK_ADAPTERS=true (intended for staging/load tests only).
  */
 
+import { type BridgeAdapter, MockBridgeAdapter } from "./adapters/bridge.js";
 import { type CustodialWalletAdapter, MockCustodialWalletAdapter } from "./adapters/custodial.js";
 import { type EarnAdapter, MockEarnAdapter } from "./adapters/earn.js";
-import { type BridgeAdapter, MockBridgeAdapter } from "./adapters/bridge.js";
 import { type ExchangeEmbedAdapter, MockExchangeEmbedAdapter } from "./adapters/exchange.js";
 import { type KycAdapter, MockKycAdapter } from "./adapters/kyc.js";
 import { MockOfframpAdapter, type OfframpAdapter } from "./adapters/offramp.js";

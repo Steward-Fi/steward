@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { ApnsPushAdapter, ExpoPushAdapter, FcmPushAdapter, MockPushAdapter, type PushFetch } from "../adapters/push.js";
+import {
+  ApnsPushAdapter,
+  ExpoPushAdapter,
+  FcmPushAdapter,
+  MockPushAdapter,
+  type PushFetch,
+} from "../adapters/push.js";
 import { AdapterValidationError } from "../types.js";
 
 describe("PushAdapter", () => {
@@ -323,7 +329,12 @@ describe("PushAdapter", () => {
 
     await expect(
       adapter.send({
-        target: { id: "push-10", userId: "user-1", provider: "fcm", token: "fcm-token-without-spaces" },
+        target: {
+          id: "push-10",
+          userId: "user-1",
+          provider: "fcm",
+          token: "fcm-token-without-spaces",
+        },
         message: { title: "Title", body: "Body", data: { url: "myapp://home" } },
       }),
     ).resolves.toEqual({
@@ -333,7 +344,9 @@ describe("PushAdapter", () => {
       providerMessageId: "projects/steward-prod/messages/1",
       deliveredAt: 1779819300005,
     });
-    expect(calls[0]?.input).toBe("https://fcm.googleapis.com/v1/projects/steward-prod/messages:send");
+    expect(calls[0]?.input).toBe(
+      "https://fcm.googleapis.com/v1/projects/steward-prod/messages:send",
+    );
     expect(calls[0]?.init.headers.Authorization).toBe("Bearer fcm-token");
     expect(JSON.parse(calls[0]?.init.body ?? "{}")).toEqual({
       message: {
@@ -363,7 +376,12 @@ describe("PushAdapter", () => {
 
     await expect(
       adapter.send({
-        target: { id: "push-11", userId: "user-1", provider: "fcm", token: "fcm-token-without-spaces" },
+        target: {
+          id: "push-11",
+          userId: "user-1",
+          provider: "fcm",
+          token: "fcm-token-without-spaces",
+        },
         message: { title: "Title", body: "Body" },
       }),
     ).resolves.toEqual({

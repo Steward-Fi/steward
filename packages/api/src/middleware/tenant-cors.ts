@@ -94,8 +94,8 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
     try {
       const origins = await getTenantOrigins(tenantId);
       if (origins.length > 0) {
-        if (origins.includes("*") || origins.includes(origin)) {
-          // Exact match or explicit wildcard — echo back the request origin
+        if (origins.includes(origin)) {
+          // Exact match — echo back the request origin
           allowOrigin = origin;
         } else {
           // Origin not in the allowlist — block preflight, let main requests through

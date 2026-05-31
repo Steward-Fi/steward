@@ -4,6 +4,7 @@ import { MockOnrampAdapter } from "../adapters/onramp.js";
 import { AdapterValidationError } from "../types.js";
 
 const DEST = "0x1111111111111111111111111111111111111111";
+const SESSION_OWNER = { tenantId: "tenant-ramp-test", userId: "user-ramp-test" };
 
 function fixedClock(ms: number): { now: () => number } {
   return { now: () => ms };
@@ -32,8 +33,10 @@ describe("MockOnrampAdapter", () => {
       cryptoAsset: "ETH",
       chainId: 8453,
     });
-    const session = await onramp.createSession(quote, DEST);
+    const session = await onramp.createSession(quote, DEST, SESSION_OWNER);
     expect(session.status).toBe("pending");
+    expect(session.tenantId).toBe(SESSION_OWNER.tenantId);
+    expect(session.userId).toBe(SESSION_OWNER.userId);
     expect(session.destinationAddress).toBe(DEST);
 
     const fetched = await onramp.getSession(session.id);
@@ -63,7 +66,7 @@ describe("MockOnrampAdapter", () => {
       cryptoAsset: "ETH",
       chainId: 8453,
     });
-    await expect(onramp.createSession(quote, "nope")).rejects.toBeInstanceOf(
+    await expect(onramp.createSession(quote, "nope", SESSION_OWNER)).rejects.toBeInstanceOf(
       AdapterValidationError,
     );
   });
@@ -77,7 +80,9 @@ describe("MockOnrampAdapter", () => {
       chainId: 8453,
     });
     const later = new MockOnrampAdapter(fixedClock(quote.expiresAt + 1));
-    await expect(later.createSession(quote, DEST)).rejects.toBeInstanceOf(AdapterValidationError);
+    await expect(later.createSession(quote, DEST, SESSION_OWNER)).rejects.toBeInstanceOf(
+      AdapterValidationError,
+    );
   });
 });
 
@@ -93,8 +98,10 @@ describe("MockOfframpAdapter", () => {
     // gross = 100 fiat; net = 99 after 1% fee.
     expect(quote.fiatAmount).toBe(99);
 
-    const session = await offramp.createSession(quote, { payoutMethodId: "pm_123" });
+    const session = await offramp.createSession(quote, { payoutMethodId: "pm_123" }, SESSION_OWNER);
     expect(session.status).toBe("pending");
+    expect(session.tenantId).toBe(SESSION_OWNER.tenantId);
+    expect(session.userId).toBe(SESSION_OWNER.userId);
     expect(session.depositAddress).toBe("0x0ff7a3000000000000000000000000000000dead");
     expect(session.payoutMethodId).toBe("pm_123");
   });
@@ -107,7 +114,7 @@ describe("MockOfframpAdapter", () => {
       chainId: 8453,
       fiatCurrency: "USD",
     });
-    const session = await offramp.createSession(quote, { payoutMethodId: "pm_123" });
+    const session = await offramp.createSession(quote, { payoutMethodId: "pm_123" }, SESSION_OWNER);
     const fetched = await offramp.getSession(session.id);
     expect(fetched?.status).toBe("completed");
   });
@@ -140,9 +147,9 @@ describe("MockOfframpAdapter", () => {
       chainId: 8453,
       fiatCurrency: "USD",
     });
-    await expect(offramp.createSession(quote, { payoutMethodId: "" })).rejects.toBeInstanceOf(
-      AdapterValidationError,
-    );
+    await expect(
+      offramp.createSession(quote, { payoutMethodId: "" }, SESSION_OWNER),
+    ).rejects.toBeInstanceOf(AdapterValidationError);
   });
 
   test("getSession returns null for an unknown id", async () => {

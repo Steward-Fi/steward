@@ -13,17 +13,23 @@
  * non-32-byte payload is rejected (400).
  */
 
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
-import { closeDb, getDb, tenants } from "@stwd/db";
+import { closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Vault } from "@stwd/vault";
 import { Hono } from "hono";
 import { recoverAddress } from "viem";
 import type { AppVariables } from "../services/context";
 
+const dispatchWebhookMock = mock(() => {});
+mock.module("../services/webhook-dispatch", () => ({
+  dispatchWebhook: dispatchWebhookMock,
+}));
+
 const TENANT_ID = `raw-digest-tenant-${Date.now()}`;
 const AGENT_ID = `raw-digest-agent-${Date.now()}`;
+const DENIED_AGENT_ID = `raw-digest-denied-agent-${Date.now()}`;
 const DIGEST = "0x2222222222222222222222222222222222222222222222222222222222222222" as const;
 
 /** Decode a base58 (Bitcoin/Solana alphabet) string to bytes — no extra deps. */
@@ -91,11 +97,32 @@ describe("vault cross-curve raw digest signing", () => {
     const identity = await new Vault({
       masterPassword: process.env.STEWARD_MASTER_PASSWORD,
     }).createAgent(TENANT_ID, AGENT_ID, "Raw Digest Agent");
+    await new Vault({
+      masterPassword: process.env.STEWARD_MASTER_PASSWORD,
+    }).createAgent(TENANT_ID, DENIED_AGENT_ID, "Raw Digest Denied Agent");
+    await getDb()
+      .insert(policies)
+      .values([
+        {
+          id: `${AGENT_ID}-raw-signing`,
+          agentId: AGENT_ID,
+          type: "raw-signing-chain",
+          enabled: true,
+          config: { allowedChains: ["tron", "sui"], allowedCurves: ["secp256k1", "ed25519"] },
+        },
+        {
+          id: `${DENIED_AGENT_ID}-raw-signing`,
+          agentId: DENIED_AGENT_ID,
+          type: "raw-signing-chain",
+          enabled: true,
+          config: { allowedChains: ["sui"], allowedCurves: ["ed25519"] },
+        },
+      ]);
     evmAddress = identity.walletAddress;
     solanaAddress = identity.walletAddresses?.solana ?? "";
     expect(solanaAddress).not.toBe("");
     app = await makeApp();
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await closeDb();
@@ -106,10 +133,16 @@ describe("vault cross-curve raw digest signing", () => {
   });
 
   it("secp256k1: signs a 32-byte digest and recovers the agent EVM address", async () => {
+    dispatchWebhookMock.mockClear();
     const response = await app.request(`/vault/${AGENT_ID}/sign-raw-digest`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ curve: "secp256k1", payloadHex: DIGEST, referenceId: "secp-1" }),
+      body: JSON.stringify({
+        chain: "tron",
+        curve: "secp256k1",
+        payloadHex: DIGEST,
+        referenceId: "secp-1",
+      }),
     });
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
@@ -129,13 +162,31 @@ describe("vault cross-curve raw digest signing", () => {
 
     const recovered = await recoverAddress({ hash: DIGEST, signature: body.data.signature });
     expect(recovered.toLowerCase()).toBe(evmAddress.toLowerCase());
+    expect(dispatchWebhookMock).toHaveBeenCalledWith(
+      TENANT_ID,
+      AGENT_ID,
+      "wallet.raw_signature.created",
+      expect.objectContaining({
+        kind: "raw_digest",
+        chain: "tron",
+        curve: "secp256k1",
+        payloadHex: DIGEST,
+        referenceId: "secp-1",
+        publicKey: evmAddress,
+      }),
+    );
   });
 
   it("ed25519: signs a 32-byte digest and the signature verifies against the agent Solana pubkey", async () => {
     const response = await app.request(`/vault/${AGENT_ID}/sign-raw-digest`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ curve: "ed25519", payloadHex: DIGEST, referenceId: "ed-1" }),
+      body: JSON.stringify({
+        chain: "sui",
+        curve: "ed25519",
+        payloadHex: DIGEST,
+        referenceId: "ed-1",
+      }),
     });
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
@@ -155,19 +206,19 @@ describe("vault cross-curve raw digest signing", () => {
     const response = await app.request(`/vault/${AGENT_ID}/sign-raw-digest`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ curve: "stark", payloadHex: DIGEST }),
+      body: JSON.stringify({ chain: "starknet", curve: "stark", payloadHex: DIGEST }),
     });
     expect(response.status).toBe(400);
     const body = (await response.json()) as { ok: boolean; error?: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("stark curve raw signing is not supported");
+    expect(body.error).toContain("starknet raw signing is not supported");
   });
 
   it("rejects an unknown curve (400)", async () => {
     const response = await app.request(`/vault/${AGENT_ID}/sign-raw-digest`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ curve: "p256", payloadHex: DIGEST }),
+      body: JSON.stringify({ chain: "tron", curve: "p256", payloadHex: DIGEST }),
     });
     expect(response.status).toBe(400);
     const body = (await response.json()) as { ok: boolean; error?: string };
@@ -179,11 +230,43 @@ describe("vault cross-curve raw digest signing", () => {
     const response = await app.request(`/vault/${AGENT_ID}/sign-raw-digest`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ curve: "secp256k1", payloadHex: "0x1234" }),
+      body: JSON.stringify({ chain: "tron", curve: "secp256k1", payloadHex: "0x1234" }),
     });
     expect(response.status).toBe(400);
     const body = (await response.json()) as { ok: boolean; error?: string };
     expect(body.ok).toBe(false);
     expect(body.error).toBe("payloadHex must be a 32-byte hex string");
+  });
+
+  it("rejects curve mismatch for the requested chain before signing", async () => {
+    const response = await app.request(`/vault/${AGENT_ID}/sign-raw-digest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chain: "sui", curve: "secp256k1", payloadHex: DIGEST }),
+    });
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error?: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("sui raw signing requires ed25519");
+  });
+
+  it("rejects a supported chain when the agent raw-signing policy does not allow it", async () => {
+    const response = await app.request(`/vault/${DENIED_AGENT_ID}/sign-raw-digest`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chain: "tron", curve: "secp256k1", payloadHex: DIGEST }),
+    });
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as {
+      ok: boolean;
+      error?: string;
+      data?: { policyResults?: Array<{ type: string; passed: boolean; reason: string }> };
+    };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("Raw digest signing rejected by policy");
+    expect(body.data?.policyResults?.[0]).toMatchObject({
+      type: "raw-signing-chain",
+      passed: false,
+    });
   });
 });

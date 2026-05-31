@@ -247,6 +247,33 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
       }
       return null;
 
+    case "raw-signing-chain":
+      if (
+        config.allowedChains !== undefined &&
+        (!Array.isArray(config.allowedChains) ||
+          config.allowedChains.some((chain) => typeof chain !== "string" || !chain.trim()))
+      ) {
+        return "raw-signing-chain.allowedChains must be a string array";
+      }
+      if (
+        config.blockedChains !== undefined &&
+        (!Array.isArray(config.blockedChains) ||
+          config.blockedChains.some((chain) => typeof chain !== "string" || !chain.trim()))
+      ) {
+        return "raw-signing-chain.blockedChains must be a string array";
+      }
+      if (
+        config.allowedCurves !== undefined &&
+        (!Array.isArray(config.allowedCurves) ||
+          config.allowedCurves.some((curve) => typeof curve !== "string" || !curve.trim()))
+      ) {
+        return "raw-signing-chain.allowedCurves must be a string array";
+      }
+      if (config.requireSupported !== undefined && typeof config.requireSupported !== "boolean") {
+        return "raw-signing-chain.requireSupported must be a boolean";
+      }
+      return null;
+
     default:
       return `Unknown policy type "${policy.type}"`;
   }

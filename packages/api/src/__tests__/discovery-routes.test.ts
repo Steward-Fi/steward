@@ -75,7 +75,7 @@ describe("public discovery routes", () => {
       .values({
         id: tenantId,
         name: "ERC8004 Tenant",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -129,7 +129,7 @@ describe("public discovery routes", () => {
       .values({
         id: tenantId,
         name: "ERC8004 URL Tenant",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -185,7 +185,7 @@ describe("public discovery routes", () => {
       .values({
         id: tenantId,
         name: "ERC8004 API Key Tenant",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -230,7 +230,7 @@ describe("public discovery routes", () => {
       .values({
         id: tenantId,
         name: "ERC8004 Scope Tenant",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb()
       .insert(agents)
@@ -290,7 +290,7 @@ describe("public discovery routes", () => {
       .values({
         id: tenantId,
         name: "ERC8004 Member Tenant",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -354,7 +354,7 @@ describe("public discovery routes", () => {
       .values({
         id: tenantId,
         name: "ERC8004 Ranking Tenant",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb()
       .insert(agents)
@@ -372,21 +372,20 @@ describe("public discovery routes", () => {
           walletAddress: "0x00000000000000000000000000000000000000cb",
         },
       ]);
-    const rankingChainId = 8493001;
     await getDb()
       .insert(agentRegistrations)
       .values([
         {
           tenantId,
           agentId: feedbackAgentId,
-          chainId: rankingChainId,
+          chainId: 8453,
           registryAddress: "0x0000000000000000000000000000000000008004",
           status: "confirmed",
         },
         {
           tenantId,
           agentId: onchainAgentId,
-          chainId: rankingChainId,
+          chainId: 8453,
           registryAddress: "0x0000000000000000000000000000000000008004",
           status: "confirmed",
         },
@@ -396,7 +395,7 @@ describe("public discovery routes", () => {
       .values([
         {
           agentId: feedbackAgentId,
-          chainId: rankingChainId,
+          chainId: 8453,
           tokenId: feedbackAgentId,
           scoreOnchain: "0",
           scoreInternal: "5",
@@ -405,7 +404,7 @@ describe("public discovery routes", () => {
         },
         {
           agentId: onchainAgentId,
-          chainId: rankingChainId,
+          chainId: 8453,
           tokenId: onchainAgentId,
           scoreOnchain: "4",
           scoreInternal: "0",
@@ -414,12 +413,12 @@ describe("public discovery routes", () => {
         },
       ]);
 
-    const response = await discoveryRoutes.request(`/agents?chainId=${rankingChainId}&limit=2`);
+    const response = await discoveryRoutes.request("/agents?chainId=8453&limit=20");
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as { data: Array<{ token_id: string }> };
-    expect(body.data[0]?.token_id).toBe(onchainAgentId);
-    expect(body.data[1]?.token_id).toBe(feedbackAgentId);
+    const rankedIds = body.data.map((row) => row.token_id);
+    expect(rankedIds.indexOf(onchainAgentId)).toBeLessThan(rankedIds.indexOf(feedbackAgentId));
   });
 
   it("does not expose tenant-submitted feedback counts in public discovery", async () => {
@@ -431,7 +430,7 @@ describe("public discovery routes", () => {
       .values({
         id: tenantId,
         name: "ERC8004 Feedback Count Tenant",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb().insert(agents).values({
       id: agentId,
@@ -474,7 +473,7 @@ describe("public discovery routes", () => {
       .values({
         id: tenantId,
         name: "ERC8004 Card Redaction Tenant",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb().insert(agents).values({
       id: agentId,

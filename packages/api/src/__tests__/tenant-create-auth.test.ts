@@ -5,7 +5,8 @@ import { eq } from "drizzle-orm";
 setDefaultTimeout(30000);
 
 const PLATFORM_KEY = "test-platform-key";
-const TENANT_ID = "test-tenant-create-auth";
+const TENANT_ID = `tenant-create-${crypto.randomUUID()}`;
+const SSRF_TENANT_ID = `tenant-ssrf-${crypto.randomUUID()}`;
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
@@ -15,6 +16,9 @@ beforeAll(async () => {
   if (!hasDatabaseUrl) return;
 
   process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
+  process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+    [PLATFORM_KEY]: ["platform:write", "platform:tenant:create"],
+  });
   ({ app } = await import("../app"));
 });
 
@@ -24,6 +28,11 @@ afterAll(async () => {
     .delete(tenants)
     .where(eq(tenants.id, TENANT_ID))
     .catch(() => {});
+  await getDb()
+    .delete(tenants)
+    .where(eq(tenants.id, SSRF_TENANT_ID))
+    .catch(() => {});
+  delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
 });
 
 describeWithDatabase("POST /tenants legacy creation route", () => {
@@ -34,7 +43,7 @@ describeWithDatabase("POST /tenants legacy creation route", () => {
       body: JSON.stringify({
         id: TENANT_ID,
         name: "Attacker Tenant",
-        apiKeyHash: "attacker-controlled-key",
+        apiKeyHash: `attacker-controlled-key-${TENANT_ID}`,
       }),
     });
 
@@ -54,7 +63,7 @@ describeWithDatabase("POST /tenants legacy creation route", () => {
       body: JSON.stringify({
         id: `personal-${crypto.randomUUID()}`,
         name: "Reserved Tenant",
-        apiKeyHash: "platform-controlled-key",
+        apiKeyHash: `platform-controlled-key-${TENANT_ID}`,
       }),
     });
 
@@ -74,7 +83,7 @@ describeWithDatabase("POST /tenants legacy creation route", () => {
       body: JSON.stringify({
         id: TENANT_ID,
         name: "Platform Tenant",
-        apiKeyHash: "platform-controlled-key",
+        apiKeyHash: `platform-controlled-key-${TENANT_ID}`,
       }),
     });
 
@@ -92,9 +101,9 @@ describeWithDatabase("POST /tenants legacy creation route", () => {
         "X-Steward-Platform-Key": PLATFORM_KEY,
       },
       body: JSON.stringify({
-        id: `${TENANT_ID}-ssrf`,
+        id: SSRF_TENANT_ID,
         name: "Platform Tenant SSRF",
-        apiKeyHash: "platform-controlled-key",
+        apiKeyHash: `platform-controlled-key-${TENANT_ID}`,
         webhookUrl: "https://169.254.169.254/latest/meta-data",
       }),
     });

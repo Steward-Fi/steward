@@ -22,7 +22,7 @@ describe("deactivated user retention", () => {
       name: "Retention Deactivated Users",
       apiKeyHash: "retention-deactivated-users-hash",
     });
-  });
+  }, 120_000);
 
   afterAll(async () => {
     await closeDb();

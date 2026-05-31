@@ -168,7 +168,10 @@ jobs:
   integration:
     name: Integration Tests (Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 25m: the per-test timeout was raised to 30s to absorb PGLite migration
+    # latency under the concurrent --isolate load, which lengthens worst-case
+    # wall-clock for the full 122-file run. Give the job comfortable headroom.
+    timeout-minutes: 25
     env:
       REDIS_URL: "redis://localhost:6379"
 
@@ -220,6 +223,8 @@ jobs:
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
+          STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
+          ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
@@ -236,13 +241,19 @@ jobs:
           exit 1
 
       - name: Integration tests (API)
-        run: bun test --isolate packages/api
+        # --timeout=30000: the per-file PGLite beforeEach re-runs all migrations,
+        # which can exceed bun's 5s default under the concurrent --isolate load on
+        # CI runners. These are not real failures (each file passes in isolation);
+        # the higher per-test timeout absorbs the migration latency.
+        run: bun test --isolate --timeout=30000 packages/api
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
           PORT: "3299"
           STEWARD_MASTER_PASSWORD: "ci-test-secret"
           STEWARD_PLATFORM_KEY: "ci-platform-key"
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
+          STEWARD_PLATFORM_KEY_SCOPES: '{"ci-platform-key":["platform:*"]}'
+          ALLOW_USER_TENANT_CREATION: "true"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"

@@ -16,6 +16,7 @@ import type {
   ApiResponse,
   ApprovalQueueEntry,
   ApprovalStats,
+  AuditEventsResponse,
   AuditLogResponse,
   AuditSummaryResponse,
   AutoApprovalRule,
@@ -49,6 +50,8 @@ import type {
   PolicyTemplate,
   PolicyTemplateCreate,
   PolicyTemplateUpdate,
+  PregeneratedUserWalletClaimResult,
+  PregeneratedUserWalletCreateResult,
   RouteRecord,
   RpcResponse,
   SecretRecord,
@@ -84,6 +87,8 @@ import type {
   UserPushSubscriptionInput,
   UserPushSubscriptionListResult,
   UserPushSubscriptionResult,
+  UserWalletRecoveryRestoreResult,
+  UserWalletRecoverySetupResult,
   WebhookConfig,
   WebhookDelivery,
 } from "./types.ts";
@@ -378,6 +383,101 @@ export interface GetAddressesResult {
   agentId: string;
   addresses: Array<{ chainFamily: ChainFamily; address: string }>;
 }
+
+export interface AdapterTokenRef {
+  address: string;
+  symbol?: string;
+  decimals?: number;
+}
+
+export interface AdapterUnsignedIntent {
+  signed: false;
+  kind: "evm-tx" | "evm-typed-data" | "abstract-intent";
+  chainId: number;
+  to: string;
+  value: string;
+  data?: string;
+  owner: string;
+  category: string;
+  provider: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface BridgeQuoteInput {
+  agentId?: string;
+  fromChainId: number;
+  toChainId: number;
+  fromToken: AdapterTokenRef;
+  toToken: AdapterTokenRef;
+  amount: string;
+  recipient: string;
+  slippageBps?: number;
+  estimatedUsd?: number;
+}
+
+export interface BridgeQuote {
+  provider: string;
+  quoteId: string;
+  fromChainId: number;
+  toChainId: number;
+  fromToken: AdapterTokenRef;
+  toToken: AdapterTokenRef;
+  amountIn: string;
+  amountOut: string;
+  minAmountOut: string;
+  feeAmount: string;
+  recipient: string;
+  route: Array<{ bridge: string; fromChainId: number; toChainId: number }>;
+  slippageBps: number;
+  expiresAt: number;
+}
+
+export interface BridgeBuildInput {
+  agentId?: string;
+  quote: BridgeQuote;
+  owner: string;
+  estimatedUsd?: number;
+}
+
+export interface BridgeSession {
+  id: string;
+  provider: string;
+  quoteId: string;
+  status: "created" | "pending" | "completed" | "failed";
+  fromChainId: number;
+  toChainId: number;
+  recipient: string;
+  createdAt: number;
+}
+
+export interface ExchangeEmbedSessionInput {
+  userId?: string;
+  provider: "kraken" | "coinbase" | "binance" | "mock";
+  returnUrl: string;
+  scopes?: string[];
+  locale?: string;
+}
+
+export interface ExchangeEmbedSession {
+  id: string;
+  provider: string;
+  userId: string;
+  tenantId: string;
+  status: "created" | "active" | "expired" | "failed";
+  url: string;
+  scopes: string[];
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface ExchangeAccountLink {
+  id: string;
+  provider: string;
+  userId: string;
+  externalAccountId: string;
+  status: "linked" | "revoked";
+  createdAt: number;
+}
 export type GetHistoryResult = StewardHistoryEntry[];
 export type SignTransactionResult =
   | { txHash: string; caip2?: string }
@@ -489,7 +589,7 @@ export interface GlobalWalletTransactionScan {
   warnings: Array<{ code: string; severity: "info" | "warning" | "error"; message: string }>;
   confirmationRequired: boolean;
   executionSupported: boolean;
-  unsupportedReason?: string;
+  unsupportedReason?: string | null;
 }
 
 export interface UserAccountUnlinkResult {
@@ -1816,6 +1916,69 @@ export class StewardClient {
     return response.data;
   }
 
+  /**
+   * Provision the authenticated user's wallet from a one-time BIP-39 recovery
+   * phrase. Requires a user session token with recent MFA and only works before
+   * a user wallet already exists.
+   */
+  async setupUserWalletRecovery(): Promise<UserWalletRecoverySetupResult> {
+    const response = await this.request<UserWalletRecoverySetupResult, StewardErrorResponse>(
+      "/user/me/wallet/recovery/setup",
+      { method: "POST" },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Restore/import the authenticated user's mnemonic-backed wallet. Requires a
+   * user session with recent MFA. The mnemonic is sent once and is never returned.
+   */
+  async restoreUserWalletRecovery(input: {
+    mnemonic: string;
+  }): Promise<UserWalletRecoveryRestoreResult> {
+    const response = await this.request<UserWalletRecoveryRestoreResult, StewardErrorResponse>(
+      "/user/me/wallet/recovery/restore",
+      {
+        method: "POST",
+        body: JSON.stringify({ mnemonic: input.mnemonic }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Claim a tenant-admin pregenerated wallet for the authenticated user.
+   * Requires a personal user session with recent MFA and no existing user wallet.
+   */
+  async claimPregeneratedUserWallet(input: {
+    tenantId: string;
+    claimToken: string;
+  }): Promise<PregeneratedUserWalletClaimResult> {
+    const response = await this.request<PregeneratedUserWalletClaimResult, StewardErrorResponse>(
+      "/user/me/wallet/claim-pregenerated",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
   /** List linked accounts for the authenticated user. Requires user JWT. */
   async listUserAccounts(): Promise<UserAccountsResult> {
     const response = await this.request<UserAccountsResult, StewardErrorResponse>(
@@ -1835,6 +1998,21 @@ export class StewardClient {
     const qs = params.toString();
     const response = await this.request<UserAccountSummary, StewardErrorResponse>(
       `/user/me/account${qs ? `?${qs}` : ""}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Privy-style alias for the authenticated user's aggregated account summary. */
+  async getUserAccountAggregation(
+    opts: { chainId?: number; tokens?: string[] } = {},
+  ): Promise<UserAccountSummary> {
+    const params = new URLSearchParams();
+    if (opts.chainId) params.set("chainId", String(opts.chainId));
+    if (opts.tokens?.length) params.set("tokens", opts.tokens.join(","));
+    const qs = params.toString();
+    const response = await this.request<UserAccountSummary, StewardErrorResponse>(
+      `/user/me/aggregation${qs ? `?${qs}` : ""}`,
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
@@ -1872,6 +2050,90 @@ export class StewardClient {
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
+  }
+
+  async getBridgeQuote(input: BridgeQuoteInput): Promise<BridgeQuote> {
+    const response = await this.request<{ quote: BridgeQuote }, StewardErrorResponse>(
+      "/adapters/bridge/quote",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.quote;
+  }
+
+  async buildBridgeIntent(input: BridgeBuildInput): Promise<AdapterUnsignedIntent> {
+    const response = await this.request<
+      { unsignedIntent: AdapterUnsignedIntent },
+      StewardErrorResponse
+    >("/adapters/bridge/build", {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.unsignedIntent;
+  }
+
+  async createBridgeSession(quote: BridgeQuote): Promise<BridgeSession> {
+    const response = await this.request<{ session: BridgeSession }, StewardErrorResponse>(
+      "/adapters/bridge/sessions",
+      {
+        method: "POST",
+        body: JSON.stringify({ quote }),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.session;
+  }
+
+  async getBridgeSession(sessionId: string): Promise<BridgeSession> {
+    const response = await this.request<{ session: BridgeSession }, StewardErrorResponse>(
+      `/adapters/bridge/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.session;
+  }
+
+  async createExchangeEmbedSession(
+    input: ExchangeEmbedSessionInput,
+  ): Promise<ExchangeEmbedSession> {
+    const response = await this.request<{ session: ExchangeEmbedSession }, StewardErrorResponse>(
+      "/adapters/exchange/sessions",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.session;
+  }
+
+  async getExchangeEmbedSession(sessionId: string): Promise<ExchangeEmbedSession> {
+    const response = await this.request<{ session: ExchangeEmbedSession }, StewardErrorResponse>(
+      `/adapters/exchange/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.session;
+  }
+
+  async listExchangeAccounts(userId?: string): Promise<ExchangeAccountLink[]> {
+    const qs = userId ? `?userId=${encodeURIComponent(userId)}` : "";
+    const response = await this.request<{ accounts: ExchangeAccountLink[] }, StewardErrorResponse>(
+      `/adapters/exchange/accounts${qs}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.accounts;
+  }
+
+  async revokeExchangeAccount(accountId: string): Promise<ExchangeAccountLink> {
+    const response = await this.request<{ account: ExchangeAccountLink }, StewardErrorResponse>(
+      `/adapters/exchange/accounts/${encodeURIComponent(accountId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.account;
   }
 
   /** Preview a global-wallet consent request for a tenant app. Requires user JWT. */
@@ -1957,7 +2219,7 @@ export class StewardClient {
     return response.data;
   }
 
-  /** Scan a global-wallet transaction request. Does not sign or submit transactions. */
+  /** Scan a global-wallet transaction request before confirming/executing it. */
   async scanGlobalWalletTransaction(input: {
     appId: string;
     origin?: string;
@@ -2753,6 +3015,22 @@ export class StewardClient {
     return response.data;
   }
 
+  /** Privy-style alias for an agent's aggregated digital asset account. */
+  async getAgentAccountAggregation(
+    agentId: string,
+    opts: { chainId?: number; tokens?: string[] } = {},
+  ): Promise<AgentAccountSummary> {
+    const params = new URLSearchParams();
+    if (opts.chainId) params.set("chainId", String(opts.chainId));
+    if (opts.tokens?.length) params.set("tokens", opts.tokens.join(","));
+    const qs = params.toString();
+    const response = await this.request<AgentAccountSummary, StewardErrorResponse>(
+      `/agents/${encodeURIComponent(agentId)}/aggregation${qs ? `?${qs}` : ""}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
   async listAgentSigners(
     agentId: string,
     opts?: { status?: AgentSignerStatus },
@@ -3512,6 +3790,38 @@ export class StewardClient {
     return response.data;
   }
 
+  /** Fetch raw tamper-evident audit events for the tenant audit chain. */
+  async getAuditEvents(params?: {
+    action?: string;
+    actorType?: string;
+    actorId?: string;
+    resourceType?: string;
+    resourceId?: string;
+    requestId?: string;
+    dateFrom?: string;
+    dateTo?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<AuditEventsResponse> {
+    const search = new URLSearchParams();
+    if (params?.action) search.set("action", params.action);
+    if (params?.actorType) search.set("actorType", params.actorType);
+    if (params?.actorId) search.set("actorId", params.actorId);
+    if (params?.resourceType) search.set("resourceType", params.resourceType);
+    if (params?.resourceId) search.set("resourceId", params.resourceId);
+    if (params?.requestId) search.set("requestId", params.requestId);
+    if (params?.dateFrom) search.set("dateFrom", params.dateFrom);
+    if (params?.dateTo) search.set("dateTo", params.dateTo);
+    if (params?.page) search.set("page", String(params.page));
+    if (params?.limit) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    const response = await this.request<AuditEventsResponse, StewardErrorResponse>(
+      `/audit/events${qs ? `?${qs}` : ""}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
   /**
    * Download the audit log as CSV. Returns the raw CSV body as a string.
    * Does not use the `/api/v1` JSON envelope - streams text directly.
@@ -3711,6 +4021,40 @@ export class StewardClient {
     return {
       ...result,
       created: result.created.map(parseAgentIdentity),
+    };
+  }
+
+  /**
+   * Pre-generate encrypted wallets that can later be claimed by end users.
+   * Claim tokens are returned once; Steward stores only token hashes.
+   */
+  async createPregeneratedUserWallets(input: {
+    count?: number;
+    namePrefix?: string;
+    policies?: PolicyRule[];
+  }): Promise<PregeneratedUserWalletCreateResult> {
+    const response = await this.request<PregeneratedUserWalletCreateResult, StewardErrorResponse>(
+      "/agents/pregenerated",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          count: input.count,
+          namePrefix: input.namePrefix,
+          applyPolicies: input.policies,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return {
+      ...response.data,
+      wallets: response.data.wallets.map((wallet) => ({
+        ...wallet,
+        agent: parseAgentIdentity(wallet.agent),
+      })),
     };
   }
 

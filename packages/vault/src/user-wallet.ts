@@ -24,6 +24,10 @@ export interface UserWalletResult {
   chainType: "evm";
 }
 
+export interface UserWalletRestoreResult extends UserWalletResult {
+  restoredExisting: boolean;
+}
+
 // ─── Default policies ─────────────────────────────────────────────────────────
 
 type PersistedPolicyType = (typeof policyTypeEnum.enumValues)[number];
@@ -143,6 +147,95 @@ export async function provisionUserWallet(
     tenantId: resolvedTenantId,
     walletAddress: agent.walletAddress,
     chainType: "evm",
+  };
+}
+
+/**
+ * Provision a user wallet whose EVM and Solana keys are derived from a BIP-39
+ * mnemonic. This is only valid for new wallets; callers must refuse existing
+ * random wallets instead of pretending a newly generated phrase can recover them.
+ */
+export async function provisionRecoverableUserWallet(
+  vault: Vault,
+  userId: string,
+  displayName: string,
+  mnemonic: string,
+  tenantId?: string,
+): Promise<UserWalletResult> {
+  if (!userId || userId.trim().length === 0) {
+    throw new Error("userId is required");
+  }
+  if (!displayName || displayName.trim().length === 0) {
+    throw new Error("displayName is required");
+  }
+
+  const agentId = agentIdFor(userId);
+  const resolvedTenantId = tenantIdFor(userId, tenantId);
+  const agent = await vault.createAgentFromMnemonic(
+    resolvedTenantId,
+    agentId,
+    `${displayName}'s Recoverable Wallet`,
+    mnemonic,
+    {
+      platformId: `user:${userId}`,
+      walletType: "recoverable_user",
+    },
+  );
+
+  await applyUserWalletDefaults(userId, resolvedTenantId);
+
+  return {
+    userId,
+    agentId: agent.id,
+    tenantId: resolvedTenantId,
+    walletAddress: agent.walletAddress,
+    chainType: "evm",
+  };
+}
+
+/**
+ * Restore/import a mnemonic-backed user wallet.
+ *
+ * If no user wallet exists, this recreates the deterministic wallet from the
+ * phrase. If a recoverable wallet already exists, the phrase must derive the
+ * exact same wallet identity; only then are encrypted key rows refreshed.
+ */
+export async function restoreRecoverableUserWallet(
+  vault: Vault,
+  userId: string,
+  displayName: string,
+  mnemonic: string,
+  tenantId?: string,
+): Promise<UserWalletRestoreResult> {
+  if (!userId || userId.trim().length === 0) {
+    throw new Error("userId is required");
+  }
+  if (!displayName || displayName.trim().length === 0) {
+    throw new Error("displayName is required");
+  }
+
+  const agentId = agentIdFor(userId);
+  const resolvedTenantId = tenantIdFor(userId, tenantId);
+  const agent = await vault.restoreAgentFromMnemonic(
+    resolvedTenantId,
+    agentId,
+    `${displayName}'s Recoverable Wallet`,
+    mnemonic,
+    {
+      platformId: `user:${userId}`,
+      walletType: "recoverable_user",
+    },
+  );
+
+  await applyUserWalletDefaults(userId, resolvedTenantId);
+
+  return {
+    userId,
+    agentId: agent.id,
+    tenantId: resolvedTenantId,
+    walletAddress: agent.walletAddress,
+    chainType: "evm",
+    restoredExisting: agent.restoredExisting,
   };
 }
 

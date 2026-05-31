@@ -30,9 +30,15 @@ import {
   MASTER_PASSWORD,
   safeJsonParse,
   sanitizeErrorMessage,
+  setNoStoreHeaders,
 } from "../services/context";
 
 export const secretsRoutes = new Hono<{ Variables: AppVariables }>();
+
+secretsRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 async function writeSecretsAudit(
   c: Context<{ Variables: AppVariables }>,

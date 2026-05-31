@@ -97,4 +97,21 @@ describe("user wallet signing hardening", () => {
     expect(completedAudit).toBeGreaterThan(signCall);
     expect(routeBody).toContain("unsafeCompatibilityMode: true");
   });
+
+  it("marks break-glass private key export responses as non-cacheable", () => {
+    const routeStart = userSource.indexOf('user.post("/me/wallet/export"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const routeEnd = userSource.indexOf("\n});", routeStart);
+    const routeBody = userSource.slice(routeStart, routeEnd);
+    const exportCall = routeBody.indexOf("vault.exportPrivateKey");
+    const cacheControl = routeBody.indexOf('"Cache-Control"', exportCall);
+    const response = routeBody.indexOf("return c.json", cacheControl);
+
+    expect(exportCall).toBeGreaterThanOrEqual(0);
+    expect(cacheControl).toBeGreaterThan(exportCall);
+    expect(response).toBeGreaterThan(cacheControl);
+    expect(routeBody).toContain('"no-store, max-age=0"');
+    expect(routeBody).toContain('"Pragma", "no-cache"');
+    expect(routeBody).toContain('"Expires", "0"');
+  });
 });

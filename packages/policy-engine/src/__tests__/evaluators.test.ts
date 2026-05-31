@@ -1505,7 +1505,7 @@ describe("PolicyEngine.evaluate()", () => {
     expect(result.results.find((r) => r.type === "spending-limit")?.passed).toBe(true);
   });
 
-  it("disabled policy inside engine is skipped (treated as passed)", async () => {
+  it("disabled-only policy sets fail closed inside engine", async () => {
     const policies: PolicyRule[] = [
       {
         id: "disabled",
@@ -1517,8 +1517,31 @@ describe("PolicyEngine.evaluate()", () => {
 
     const result = await engine.evaluate(policies, makeEngineCtx());
 
-    expect(result.approved).toBe(true);
+    expect(result.approved).toBe(false);
+    expect(result.requiresManualApproval).toBe(false);
     expect(result.results[0].passed).toBe(true);
     expect(result.results[0].reason).toBe("Policy disabled");
+  });
+
+  it("disabled policies do not block approval when at least one enabled policy passes", async () => {
+    const policies: PolicyRule[] = [
+      {
+        id: "disabled",
+        type: "spending-limit",
+        enabled: false,
+        config: { maxPerTx: "1", maxPerDay: "1", maxPerWeek: "1" },
+      },
+      makeSpendingRule({
+        maxPerTx: "10000000000000000000",
+        maxPerDay: "50000000000000000000",
+        maxPerWeek: "100000000000000000000",
+      }),
+    ];
+
+    const result = await engine.evaluate(policies, makeEngineCtx());
+
+    expect(result.approved).toBe(true);
+    expect(result.requiresManualApproval).toBe(false);
+    expect(result.results).toHaveLength(2);
   });
 });

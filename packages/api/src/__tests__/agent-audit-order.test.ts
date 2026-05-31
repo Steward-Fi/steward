@@ -51,13 +51,15 @@ describe("agent route audit ordering", () => {
 
     const signerPatchStart = routeSource.indexOf('agentRoutes.patch("/:agentId/signers/:signerId"');
     expect(signerPatchStart).toBeGreaterThanOrEqual(0);
-    expect(routeSource.indexOf("Signer permission updates", signerPatchStart)).toBeGreaterThan(
+    // The signer PATCH handler consolidates all privileged-field changes
+    // (signerType, address, chainFamily, permissions, metadata, status) behind
+    // a single recent-MFA gate labelled "Signer updates", set via the
+    // privilegedSignerUpdate flag. This is the credential-takeover fix from the
+    // PR #79 audit-gap sweep: previously type/address/chainFamily were ungated.
+    expect(routeSource.indexOf("privilegedSignerUpdate", signerPatchStart)).toBeGreaterThan(
       signerPatchStart,
     );
-    expect(routeSource.indexOf("Signer status updates", signerPatchStart)).toBeGreaterThan(
-      signerPatchStart,
-    );
-    expect(routeSource.indexOf("Signer metadata updates", signerPatchStart)).toBeGreaterThan(
+    expect(routeSource.indexOf("Signer updates", signerPatchStart)).toBeGreaterThan(
       signerPatchStart,
     );
     expect(
@@ -93,5 +95,29 @@ describe("agent route audit ordering", () => {
       quorumPatchStart,
     );
     expect(routeSource).toContain("RESERVED_SIGNER_METADATA_KEYS");
+  });
+
+  it("marks secret-bearing agent responses as non-cacheable", () => {
+    const tokenStart = routeSource.indexOf('agentRoutes.post("/:agentId/token"');
+    expect(tokenStart).toBeGreaterThanOrEqual(0);
+    const tokenRoute = routeSource.slice(
+      tokenStart,
+      routeSource.indexOf('agentRoutes.get("/:agentId/tokens"', tokenStart),
+    );
+    expect(tokenRoute.indexOf("createAgentToken")).toBeLessThan(
+      tokenRoute.indexOf('"Cache-Control"'),
+    );
+    expect(tokenRoute).toContain('"no-store, max-age=0"');
+
+    const signerStart = routeSource.indexOf('agentRoutes.post("/:agentId/signers"');
+    expect(signerStart).toBeGreaterThanOrEqual(0);
+    const signerRoute = routeSource.slice(
+      signerStart,
+      routeSource.indexOf('agentRoutes.get("/:agentId/signers"', signerStart),
+    );
+    expect(signerRoute).toContain("if (credentialSecret)");
+    expect(signerRoute).toContain('"Cache-Control"');
+    expect(signerRoute).toContain('"Pragma", "no-cache"');
+    expect(signerRoute).toContain('"Expires", "0"');
   });
 });

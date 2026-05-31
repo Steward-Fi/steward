@@ -16,9 +16,12 @@ function base64url(buf: Buffer): string {
  * on /authorize — the verifier would be used at /oauth/exchange, which this
  * flow stops short of (it asserts the callback redirects back with a code).
  */
-function pkceChallenge(): string {
+function pkcePair(): { verifier: string; challenge: string } {
   const verifier = base64url(randomBytes(32));
-  return base64url(createHash("sha256").update(verifier).digest());
+  return {
+    verifier,
+    challenge: base64url(createHash("sha256").update(verifier).digest()),
+  };
 }
 
 /**
@@ -31,12 +34,20 @@ async function runOAuthFlow(
   request: import("@playwright/test").APIRequestContext,
   provider: "google" | "discord",
   loginHint: string,
-): Promise<{ status: number; location: string | null }> {
+): Promise<{
+  status: number;
+  location: string | null;
+  redirectUri: string;
+  codeVerifier: string;
+}> {
   // 1. Hit Steward's /authorize. It redirects to the fake provider with state.
   const redirectUri = `${WEB}/auth/oauth/${provider}/callback`;
+  const pkce = pkcePair();
+  const appState = randomBytes(16).toString("hex");
   const authorizeUrl =
     `${API}/auth/oauth/${provider}/authorize?redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&code_challenge=${encodeURIComponent(pkceChallenge())}&code_challenge_method=S256`;
+    `&code_challenge=${encodeURIComponent(pkce.challenge)}&code_challenge_method=S256` +
+    `&state=${encodeURIComponent(appState)}`;
   const stewardAuthRes = await request.get(authorizeUrl, { maxRedirects: 0 });
   expect([302, 303]).toContain(stewardAuthRes.status());
   const fakeAuthorize = stewardAuthRes.headers().location;
@@ -58,18 +69,26 @@ async function runOAuthFlow(
   return {
     status: callbackRes.status(),
     location: callbackRes.headers().location ?? null,
+    redirectUri,
+    codeVerifier: pkce.verifier,
   };
 }
 
 test.describe("OAuth — Google + Discord against fake provider", () => {
   for (const provider of ["google", "discord"] as const) {
-    test(`${provider}: full authorization-code flow mints a session`, async ({ request }) => {
+    test(`${provider}: full authorization-code + PKCE exchange mints a session`, async ({
+      request,
+    }) => {
       // Globally unique per run: the 3 engines share one API instance with
       // persistent state, and OAuth identities are keyed by the provider account
       // id (derived from this email). A non-unique email would relink an existing
       // account and (correctly) 403. Date.now() + random guarantees uniqueness.
       const email = `${provider}-user-${Date.now()}-${randomBytes(6).toString("hex")}@example.test`;
-      const { status, location } = await runOAuthFlow(request, provider, email);
+      const { status, location, redirectUri, codeVerifier } = await runOAuthFlow(
+        request,
+        provider,
+        email,
+      );
       expect([302, 303]).toContain(status);
       expect(location).toBeTruthy();
       const cb = new URL(location!);
@@ -78,9 +97,33 @@ test.describe("OAuth — Google + Discord against fake provider", () => {
       // Referer; the legacy path uses `?token=`. Check the fragment first, then
       // fall back to query params, accepting either code or token.
       const frag = new URLSearchParams(cb.hash.replace(/^#/, ""));
-      const hasCode = frag.get("code") ?? cb.searchParams.get("code");
-      const hasToken = frag.get("token") ?? cb.searchParams.get("token");
-      expect(hasCode || hasToken).toBeTruthy();
+      const code = frag.get("code") ?? cb.searchParams.get("code");
+      const state = frag.get("state") ?? cb.searchParams.get("state");
+      expect(code).toBeTruthy();
+      expect(state).toBeTruthy();
+      expect(frag.get("token") ?? cb.searchParams.get("token")).toBeNull();
+      expect(frag.get("refreshToken") ?? cb.searchParams.get("refreshToken")).toBeNull();
+
+      const exchangeRes = await request.post(`${API}/auth/oauth/${provider}/token`, {
+        data: { code, redirectUri, state, codeVerifier },
+      });
+      expect(exchangeRes.status()).toBe(200);
+      const exchange = (await exchangeRes.json()) as {
+        ok: boolean;
+        token: string;
+        refreshToken: string;
+        user: { email: string };
+      };
+      expect(exchange.ok).toBe(true);
+      expect(exchange.token.split(".")).toHaveLength(3);
+      expect(exchange.refreshToken).toBeTruthy();
+      expect(exchange.user.email).toBe(email);
+
+      const replay = await request.post(`${API}/auth/oauth/${provider}/token`, {
+        data: { code, redirectUri, state, codeVerifier },
+      });
+      expect(replay.status()).toBeGreaterThanOrEqual(400);
+      expect(replay.status()).toBeLessThan(500);
     });
   }
 

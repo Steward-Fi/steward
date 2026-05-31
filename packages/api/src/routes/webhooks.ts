@@ -17,6 +17,7 @@ import {
   isNonEmptyString,
   requireTenantLevel,
   safeJsonParse,
+  setNoStoreHeaders,
   webhookConfigs,
   webhookDeliveries,
 } from "../services/context";
@@ -29,6 +30,11 @@ import {
 import { validateWebhookUrl } from "../services/webhook-url";
 
 export const webhookRoutes = new Hono<{ Variables: AppVariables }>();
+
+webhookRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 // Valid webhook event types
 const VALID_EVENTS = CONFIGURED_WEBHOOK_EVENT_TYPES;
@@ -776,18 +782,32 @@ webhookRoutes.post("/:id/test", async (c) => {
     actorId: c.get("userId") ?? null,
   });
 
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? c.get("authType") ?? null,
-    action: "webhook.test_send",
-    resourceType: "webhook_delivery",
-    resourceId: delivery.id,
-    metadata: { webhookId, url: webhook.url, status: delivery.status },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
+  try {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
+      action: "webhook.test_send",
+      resourceType: "webhook_delivery",
+      resourceId: delivery.id,
+      metadata: { webhookId, url: webhook.url, status: delivery.status },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+  } catch (error) {
+    console.error(
+      `[webhooks] Test webhook ${delivery.id} was dispatched but final audit failed:`,
+      error,
+    );
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Webhook test was dispatched but audit record failed to persist",
+      },
+      500,
+    );
+  }
 
   return c.json<ApiResponse>({ ok: true, data: redactDelivery(delivery) }, 202);
 });
@@ -893,7 +913,9 @@ webhookRoutes.get("/:id/deliveries/export", async (c) => {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": `attachment; filename="${filename.replace(/"/g, "")}"`,
-      "Cache-Control": "no-store",
+      "Cache-Control": "no-store, max-age=0",
+      Pragma: "no-cache",
+      Expires: "0",
     },
   });
 });
@@ -999,23 +1021,37 @@ webhookRoutes.post("/deliveries/:id/replay", async (c) => {
     originalCreatedAt: delivery.createdAt,
   });
 
-  await writeAuditEvent({
-    tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? c.get("authType") ?? null,
-    action: "webhook_delivery.replay",
-    resourceType: "webhook_delivery",
-    resourceId: replayed.id,
-    metadata: {
-      originalDeliveryId: deliveryId,
-      webhookUrl: delivery.url,
-      previousStatus: delivery.status,
-      replayStatus: replayed.status,
-    },
-    ipAddress: c.req.header("x-forwarded-for") ?? null,
-    userAgent: c.req.header("user-agent") ?? null,
-    requestId: c.get("requestId") ?? null,
-  });
+  try {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
+      action: "webhook_delivery.replay",
+      resourceType: "webhook_delivery",
+      resourceId: replayed.id,
+      metadata: {
+        originalDeliveryId: deliveryId,
+        webhookUrl: delivery.url,
+        previousStatus: delivery.status,
+        replayStatus: replayed.status,
+      },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+  } catch (error) {
+    console.error(
+      `[webhooks] Replay webhook ${replayed.id} was dispatched but final audit failed:`,
+      error,
+    );
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Webhook replay was dispatched but audit record failed to persist",
+      },
+      500,
+    );
+  }
 
   return c.json<ApiResponse>({ ok: true, data: redactDelivery(replayed) }, 202);
 });

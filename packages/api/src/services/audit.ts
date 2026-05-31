@@ -307,7 +307,7 @@ export function trackAuditEvent(ev: AuditEventInput): void {
  */
 export async function verifyAuditChain(
   tenantId: string,
-  opts: { fromSeq?: number; toSeq?: number } = {},
+  opts: { fromSeq?: number; toSeq?: number; requireHead?: boolean } = {},
 ): Promise<{ valid: true; count: number } | { valid: false; brokenAt: number }> {
   const key = getHmacKey();
   const db = getDb();
@@ -330,6 +330,9 @@ export async function verifyAuditChain(
     ),
   );
   const head = headRows[0];
+  if (!head && opts.requireHead) {
+    return { valid: false, brokenAt: requestedFromSeq };
+  }
   const floorSeq = head?.floor_seq != null ? Number(head.floor_seq) : 0;
   const floorHmac = head?.floor_hmac != null ? toU8(head.floor_hmac) : null;
 

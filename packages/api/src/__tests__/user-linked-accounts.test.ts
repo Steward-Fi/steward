@@ -11,13 +11,11 @@ import {
   closeDb,
   getDb,
   refreshTokens,
-  tenantAppClients,
   tenantConfigs,
   tenants,
   transactions,
   users,
   userTenants,
-  userWalletAppConsents,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import bs58 from "bs58";
@@ -85,7 +83,6 @@ describe("user linked account routes", () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "user-linked-accounts-master-password";
     process.env.STEWARD_JWT_SECRET = "user-linked-accounts-jwt-secret-32chars";
-    process.env.STEWARD_AUDIT_HMAC_KEY = "user-linked-accounts-audit-hmac-key-32chars";
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
@@ -143,23 +140,14 @@ describe("user linked account routes", () => {
         {
           tenantId: `personal-${userId}`,
           allowedOrigins: ["https://app.example.test/auth/callback"],
+          allowedRedirectUrls: ["https://app.example.test/auth/callback"],
         },
         {
           tenantId: `personal-${accountOnlyUserId}`,
           allowedOrigins: ["https://app.example.test/auth/callback"],
+          allowedRedirectUrls: ["https://app.example.test/auth/callback"],
         },
       ]);
-    await getDb()
-      .insert(tenantAppClients)
-      .values({
-        tenantId: TENANT_ID,
-        id: "cross-app-client",
-        name: "Cross App Wallet Consumer",
-        enabled: true,
-        allowedOrigins: ["https://consumer.example.test"],
-        globalWalletEnabled: true,
-        globalWalletAllowedScopes: ["eth_accounts"],
-      });
     await getDb()
       .insert(accounts)
       .values([
@@ -194,18 +182,6 @@ describe("user linked account routes", () => {
         purpose: "primary",
       });
     await getDb()
-      .insert(userWalletAppConsents)
-      .values({
-        tenantId: TENANT_ID,
-        clientId: "cross-app-client",
-        userId,
-        walletAgentId: `user-wallet-${userId}`,
-        walletAddress: "0x1111111111111111111111111111111111111111",
-        origin: "https://consumer.example.test",
-        scopes: ["eth_accounts"],
-        status: "active",
-      });
-    await getDb()
       .insert(transactions)
       .values({
         id: "linked-user-wallet-spend",
@@ -219,14 +195,13 @@ describe("user linked account routes", () => {
 
     ({ userRoutes } = await import("../routes/user"));
     ({ createSessionToken } = await import("../routes/auth"));
-  }, 30_000);
+  });
 
   afterAll(async () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
-    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   async function tokenFor(id: string): Promise<string> {
@@ -263,16 +238,6 @@ describe("user linked account routes", () => {
     expect(body.data.accounts).toEqual([
       expect.objectContaining({ provider: "google", providerAccountId: "google-linked" }),
       expect.objectContaining({ provider: "passkey", providerAccountId: "passkey-linked" }),
-      expect.objectContaining({
-        provider: "cross_app",
-        providerAccountId: `${TENANT_ID}/cross-app-client`,
-        type: "cross_app",
-        embeddedWallets: [{ address: "0x1111111111111111111111111111111111111111" }],
-        providerApp: expect.objectContaining({
-          id: `${TENANT_ID}/cross-app-client`,
-          name: "Cross App Wallet Consumer",
-        }),
-      }),
     ]);
     expect(body.data.primaryLoginMethods).toEqual([
       { provider: "email", providerAccountId: "linked@example.test" },
@@ -326,11 +291,6 @@ describe("user linked account routes", () => {
     expect(body.data.linkedAccounts).toEqual([
       expect.objectContaining({ provider: "google", providerAccountId: "google-linked" }),
       expect.objectContaining({ provider: "passkey", providerAccountId: "passkey-linked" }),
-      expect.objectContaining({
-        provider: "cross_app",
-        providerAccountId: `${TENANT_ID}/cross-app-client`,
-        embeddedWallets: [{ address: "0x1111111111111111111111111111111111111111" }],
-      }),
     ]);
     expect(body.data.primaryLoginMethods).toContainEqual({
       provider: "email",
@@ -359,9 +319,11 @@ describe("user linked account routes", () => {
     expect(Array.isArray(body.data.portfolio.tokens)).toBe(true);
     expect(body.data.spend).toEqual({ todayWei: "123", weekWei: "123", monthWei: "123" });
     expect(body.data.capabilities).toContain("sign_transaction");
-    expect(body.data.sponsorship).toEqual(
-      expect.objectContaining({ enabled: false, provider: null }),
-    );
+    expect(body.data.sponsorship).toEqual({
+      enabled: false,
+      provider: null,
+      circuitBreakerEnabled: false,
+    });
   });
 
   it("links an Ethereum wallet with a one-time user proof and blocks replay/cross-user reuse", async () => {

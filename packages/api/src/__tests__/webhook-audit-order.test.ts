@@ -13,6 +13,15 @@ function expectBefore(first: string, second: string) {
 }
 
 describe("webhook audit ordering", () => {
+  it("marks webhook control-plane and delivery responses as non-cacheable", () => {
+    expect(routeSource).toContain("setNoStoreHeaders");
+    expect(routeSource).toContain('webhookRoutes.use("*"');
+    expect(routeSource).toContain("setNoStoreHeaders(c)");
+    expect(routeSource).toContain('"Cache-Control": "no-store, max-age=0"');
+    expect(routeSource).toContain('Pragma: "no-cache"');
+    expect(routeSource).toContain('Expires: "0"');
+  });
+
   it("requires recent owner/admin MFA for webhook control-plane routes", () => {
     for (const [marker, reason] of [
       ['webhookRoutes.post("/",', "Webhook creation"],
@@ -74,6 +83,32 @@ describe("webhook audit ordering", () => {
     expect(rollback).toBeGreaterThan(finalAudit);
     expect(retryRoute).toContain("nextRetryAt: delivery.nextRetryAt");
     expect(retryRoute).toContain("lastError: delivery.lastError");
+  });
+
+  it("does not report test or replay dispatch success when final audit fails", () => {
+    for (const [marker, error] of [
+      [
+        'webhookRoutes.post("/:id/test"',
+        "Webhook test was dispatched but audit record failed to persist",
+      ],
+      [
+        'webhookRoutes.post("/deliveries/:id/replay"',
+        "Webhook replay was dispatched but audit record failed to persist",
+      ],
+    ] as const) {
+      const start = routeSource.indexOf(marker);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const route = routeSource.slice(start, routeSource.indexOf("\nwebhookRoutes.", start + 1));
+      const dispatch = route.indexOf(marker.includes("/:id/test") ? "dispatchTestWebhook" : "dispatchReplayWebhook");
+      const finalAudit = route.indexOf(
+        marker.includes("/:id/test") ? 'action: "webhook.test_send"' : 'action: "webhook_delivery.replay"',
+        dispatch,
+      );
+      const failure = route.indexOf(error, finalAudit);
+      expect(dispatch).toBeGreaterThanOrEqual(0);
+      expect(finalAudit).toBeGreaterThan(dispatch);
+      expect(failure).toBeGreaterThan(finalAudit);
+    }
   });
 
   it("requires a current enabled webhook before manual delivery retry", () => {

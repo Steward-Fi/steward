@@ -97,7 +97,7 @@ describe("vault delegated action signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("signer-bound");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects bare batch-call delegated signer ids before permission evaluation", async () => {
@@ -117,7 +117,7 @@ describe("vault delegated action signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("signer-bound");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects forged transfer signer ids before policy evaluation", async () => {
@@ -133,7 +133,7 @@ describe("vault delegated action signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("signer-bound");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects forged send-calls signer ids before policy evaluation", async () => {
@@ -153,7 +153,7 @@ describe("vault delegated action signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("signer-bound");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects bare user-operation delegated signer ids before permission evaluation", async () => {

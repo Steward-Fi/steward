@@ -34,7 +34,7 @@ describe("platform tenant email config routes", () => {
     await dbHandle.insert(tenants).values({
       id: TENANT_ID,
       name: "Platform Email Config Tenant",
-      apiKeyHash: "hash",
+      apiKeyHash: "platform-email-config-hash",
     });
 
     ({ platformRoutes } = await import("../routes/platform"));

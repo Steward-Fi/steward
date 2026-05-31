@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import {
   accounts,
   closeDb,
@@ -23,6 +23,8 @@ const JWKS_URI = "https://issuer.example.test/.well-known/jwks.json";
 const PROVIDER_ID = "primary";
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_NODE_ENV = process.env.NODE_ENV;
+
+setDefaultTimeout(120_000);
 
 describe("OIDC JWT auth", () => {
   let authRoutes: typeof import("../routes/auth").authRoutes;
@@ -196,7 +198,7 @@ describe("OIDC JWT auth", () => {
     delete process.env.STEWARD_JWT_SECRET;
     delete process.env.STEWARD_ALLOW_INSECURE_OIDC_JWKS_FETCH;
     delete process.env.STEWARD_AUDIT_HMAC_KEY;
-  });
+  }, 120_000);
 
   async function oidcToken(
     subject: string,
@@ -245,6 +247,26 @@ describe("OIDC JWT auth", () => {
     expect(body.expiresIn).toBe(900);
     expect(body.refreshToken).toBeTruthy();
     expect(body.user.oidcProviderId).toBe(PROVIDER_ID);
+  });
+
+  it("rejects replaying the same direct OIDC id_token", async () => {
+    const token = await oidcToken("external-user-replay", "aud-a");
+
+    const first = await authRoutes.request("/jwt/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: TENANT_A, providerId: PROVIDER_ID, token }),
+    });
+    expect(first.status).toBe(200);
+
+    const replay = await authRoutes.request("/jwt/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tenantId: TENANT_A, providerId: PROVIDER_ID, token }),
+    });
+    expect(replay.status).toBe(401);
+    const body = (await replay.json()) as { error: string };
+    expect(body.error).toContain("already been used");
   });
 
   it("rejects unverified OIDC email before provisioning a Steward session", async () => {

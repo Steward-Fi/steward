@@ -1014,6 +1014,28 @@ async function releaseOAuthCodeRedemptionLock(code: string): Promise<void> {
   getOAuthCodeStore().delete(`oauth-code-lock:${code}`);
 }
 
+async function markOidcIdTokenUsedOnce(
+  tenantId: string,
+  providerId: string,
+  token: string,
+  exp: unknown,
+): Promise<{ ok: true } | { ok: false; response: "expired" | "replayed" | "missing-exp" }> {
+  if (typeof exp !== "number" || !Number.isFinite(exp)) {
+    return { ok: false, response: "missing-exp" };
+  }
+  const ttlMs = Math.floor(exp * 1000 - Date.now());
+  if (ttlMs <= 0) {
+    return { ok: false, response: "expired" };
+  }
+  const tokenHash = hashSha256Hex(token);
+  const inserted = await getOAuthCodeStore().setIfNotExists(
+    `oidc-id-token:${tenantId}:${providerId}:${tokenHash}`,
+    "1",
+    ttlMs,
+  );
+  return inserted ? { ok: true } : { ok: false, response: "replayed" };
+}
+
 function isUnsafeUnboundOAuthProviderCodeExchangeAllowed(): boolean {
   return process.env.STEWARD_ALLOW_UNBOUND_OAUTH_PROVIDER_CODE_EXCHANGE === "true";
 }
@@ -2568,6 +2590,12 @@ function authExchangeJson(c: Context, response: Record<string, unknown>) {
   return c.json(response);
 }
 
+function setAuthNoStoreHeaders(c: Pick<Context, "header">): void {
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  c.header("Expires", "0");
+}
+
 async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProviderConfig[]> {
   const db = getDb();
   const [row] = await db
@@ -3104,6 +3132,11 @@ function redirectEmailAuthFailure(c: Context, reason: string): Response {
 
 const auth = new Hono();
 
+auth.use("*", async (c, next) => {
+  setAuthNoStoreHeaders(c);
+  await next();
+});
+
 // ── Discovery ─────────────────────────────────────────────────────────────────
 
 /**
@@ -3195,6 +3228,22 @@ async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoCo
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+async function loadSamlAuthnRequest(tenantId: string, relayState: string) {
+  const [request] = await getDb()
+    .select()
+    .from(tenantSamlAuthnRequests)
+    .where(
+      and(
+        eq(tenantSamlAuthnRequests.tenantId, tenantId),
+        eq(tenantSamlAuthnRequests.relayState, relayState),
+        isNull(tenantSamlAuthnRequests.consumedAt),
+        gte(tenantSamlAuthnRequests.expiresAt, new Date()),
+      ),
+    );
+  if (!request) throw new Error("Invalid or expired SAML RelayState");
+  return request;
 }
 
 async function consumeSamlAuthnRequest(tenantId: string, relayState: string) {
@@ -3340,10 +3389,10 @@ auth.post("/saml/:tenantId/acs", async (c) => {
     );
   }
 
-  let request: Awaited<ReturnType<typeof consumeSamlAuthnRequest>>;
+  let request: Awaited<ReturnType<typeof loadSamlAuthnRequest>>;
   let redirectUrl: URL;
   try {
-    request = await consumeSamlAuthnRequest(tenantId, relayState);
+    request = await loadSamlAuthnRequest(tenantId, relayState);
     redirectUrl = await assertAllowedOAuthRedirectUri(
       request.redirectUri,
       tenantId,
@@ -3371,6 +3420,12 @@ auth.post("/saml/:tenantId/acs", async (c) => {
     });
     if (!(await isVerifiedSsoEmailDomainForTenant(tenantId, verified.email))) {
       redirectUrl.searchParams.set("error", "saml_email_domain_not_verified");
+      return c.redirect(redirectUrl.toString(), 302);
+    }
+    try {
+      await consumeSamlAuthnRequest(tenantId, relayState);
+    } catch {
+      redirectUrl.searchParams.set("error", "saml_relay_state_replay");
       return c.redirect(redirectUrl.toString(), 302);
     }
     try {
@@ -3836,14 +3891,9 @@ auth.post("/farcaster/verify", async (c) => {
  * POST /jwt/login (direct OIDC id_token login)
  *
  * Accepts an id_token the client already obtained from the IdP and exchanges it
- * for a Steward session. By design this flow is NOT nonce-bound: there is no
- * server-issued nonce echoed back in the id_token, so the only replay bound is
- * the id_token's own `exp`. A captured id_token can be re-submitted until it
- * expires. Signature, issuer, audience, and azp (OIDC §3.1.3.7) are still fully
- * verified in verifyOidcJwt, so substitution/forgery is prevented — only replay
- * within the token lifetime is possible. Prefer the nonce-bound authorization-
- * code flow (/oidc/:provider/authorize → /oidc/:provider/callback), which binds
- * a one-time server nonce into the id_token and eliminates the replay window.
+ * for a Steward session. Signature, issuer, audience, azp (OIDC §3.1.3.7), and
+ * exp are verified first, then the id_token hash is marked one-time-use until
+ * exp so a captured token cannot mint multiple Steward sessions.
  */
 auth.post("/jwt/login", async (c) => {
   const rl = await checkAuthRateLimit(c, "jwt", 60_000, 20);
@@ -3900,7 +3950,23 @@ auth.post("/jwt/login", async (c) => {
   if (methodResponse) return methodResponse;
 
   try {
-    const verified = await verifyOidcJwt(tenantId, provider, body.token.trim());
+    const rawToken = body.token.trim();
+    const verified = await verifyOidcJwt(tenantId, provider, rawToken);
+    const replay = await markOidcIdTokenUsedOnce(
+      tenantId,
+      provider.id,
+      rawToken,
+      verified.claims.exp,
+    );
+    if (!replay.ok) {
+      const error =
+        replay.response === "replayed"
+          ? "OIDC id_token has already been used"
+          : replay.response === "missing-exp"
+            ? "OIDC id_token exp claim is required"
+            : "OIDC id_token is expired";
+      return c.json<ApiResponse>({ ok: false, error }, 401);
+    }
     await writeAuditEvent({
       tenantId,
       actorType: "user",
@@ -4080,7 +4146,8 @@ auth.get("/oidc/:provider/callback", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
   }
 
-  const rawPayload = await getChallengeStore().consume(`oidc:${state}`);
+  const stateKey = `oidc:${state}`;
+  const rawPayload = await getChallengeStore().get(stateKey);
   if (!rawPayload) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OIDC state" }, 401);
   }
@@ -4164,6 +4231,10 @@ auth.get("/oidc/:provider/callback", async (c) => {
         { ok: false, error: "Enterprise OIDC SSO email domain is not verified for this tenant" },
         403,
       );
+    }
+    const consumedPayload = await getChallengeStore().consume(stateKey);
+    if (consumedPayload !== rawPayload) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used OIDC state" }, 401);
     }
     await writeAuditEvent({
       tenantId: stateData.tenantId,
@@ -5253,7 +5324,12 @@ auth.get("/identity-token", async (c) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Identity token generation failed";
-    const status = message === "Not a member of this tenant" ? 403 : 404;
+    const status =
+      message === "Not a member of this tenant"
+        ? 403
+        : message === "Identity JWT private key is not configured"
+          ? 503
+          : 404;
     return c.json<ApiResponse>({ ok: false, error: message }, status);
   }
 });
@@ -7506,7 +7582,15 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     .join("");
 
   const callbackUrl = buildOAuthCallbackUrl(c, providerName);
-  const { url: authUrl, codeVerifier } = oauthClient.generateAuthUrl(state, callbackUrl);
+  const oidcNonce = providerName === "apple" ? randomBase64Url(24) : undefined;
+  const generatedAuth = oauthClient.generateAuthUrl(state, callbackUrl);
+  let authUrl = generatedAuth.url;
+  const codeVerifier = generatedAuth.codeVerifier;
+  if (oidcNonce) {
+    const url = new URL(authUrl);
+    url.searchParams.set("nonce", oidcNonce);
+    authUrl = url.toString();
+  }
 
   // Store state metadata in the challenge store — include PKCE verifier when present
   const statePayload = JSON.stringify({
@@ -7518,6 +7602,7 @@ auth.get("/oauth/:provider/authorize", async (c) => {
     appState,
     codeChallenge,
     codeChallengeMethod,
+    ...(oidcNonce ? { oidcNonce } : {}),
     ...(codeVerifier ? { codeVerifier } : {}),
   });
   await getChallengeStore().set(`oauth:${state}`, statePayload);
@@ -7556,8 +7641,11 @@ auth.get("/oauth/:provider/callback", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "code and state are required" }, 400);
   }
 
-  // Validate and consume the state (one-time use)
-  const rawPayload = await getChallengeStore().consume(`oauth:${state}`);
+  // Load state before provider calls, then consume it only after provider token
+  // exchange and identity verification succeed. Invalid provider codes must not
+  // burn a legitimate browser login attempt's one-time state.
+  const stateKey = `oauth:${state}`;
+  const rawPayload = await getChallengeStore().get(stateKey);
   if (!rawPayload) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired OAuth state" }, 401);
   }
@@ -7572,6 +7660,7 @@ auth.get("/oauth/:provider/callback", async (c) => {
     codeChallenge?: string;
     codeChallengeMethod?: string;
     codeVerifier?: string;
+    oidcNonce?: string;
   };
   try {
     stateData = JSON.parse(rawPayload) as typeof stateData;
@@ -7622,6 +7711,9 @@ auth.get("/oauth/:provider/callback", async (c) => {
   }
 
   const callbackUrl = buildOAuthCallbackUrl(c, providerName);
+  if (providerName === "apple") {
+    oauthClient.setExpectedNonce(stateData.oidcNonce);
+  }
 
   // Exchange code for access token — pass codeVerifier for PKCE providers (e.g. Twitter)
   let tokenResponse: Awaited<ReturnType<OAuthClient["exchangeCode"]>>;
@@ -7668,6 +7760,11 @@ auth.get("/oauth/:provider/callback", async (c) => {
     } as OAuthUserInfoWithEmailSource;
   }
 
+  const consumedPayload = await getChallengeStore().consume(stateKey);
+  if (consumedPayload !== rawPayload) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or already-used OAuth state" }, 401);
+  }
+
   // Create/find user + provision wallet + link tenant
   const result = await provisionOAuthUser({
     c,
@@ -7706,6 +7803,7 @@ auth.get("/oauth/:provider/callback", async (c) => {
     providerName,
     token: result.response.token,
     refreshToken: result.response.refreshToken,
+    user: result.response.user,
     redirectUri: stateData.redirectUri,
     tenantId: stateData.tenantId ?? null,
     codeChallenge: stateData.codeChallenge,
@@ -7802,6 +7900,7 @@ auth.post("/oauth/exchange", async (c) => {
     providerName?: string;
     token: string;
     refreshToken: string;
+    user?: unknown;
     redirectUri: string;
     tenantId: string | null;
     codeChallenge?: string;
@@ -7922,6 +8021,7 @@ auth.post("/oauth/exchange", async (c) => {
     ok: true,
     token: payload.token,
     refreshToken: payload.refreshToken,
+    ...(payload.user ? { user: payload.user } : {}),
     expiresIn: payload.expiresIn,
     expiresAt: payload.expiresAt,
   });
@@ -7994,6 +8094,7 @@ auth.post("/oauth/:provider/token", async (c) => {
       providerName?: string;
       token: string;
       refreshToken: string;
+      user?: unknown;
       redirectUri: string;
       tenantId: string | null;
       codeChallenge?: string;
@@ -8053,6 +8154,7 @@ auth.post("/oauth/:provider/token", async (c) => {
       ok: true,
       token: payload.token,
       refreshToken: payload.refreshToken,
+      ...(payload.user ? { user: payload.user } : {}),
       expiresIn: payload.expiresIn,
       expiresAt: payload.expiresAt,
     });
@@ -8378,19 +8480,25 @@ async function provisionOAuthUser(opts: {
 
 /**
  * Build the canonical OAuth callback URL for the given provider.
- * Uses the APP_URL env var (preferred) or reconstructs from the request host.
+ * APP_URL is mandatory in production so a forged Host/X-Forwarded-Proto header
+ * cannot influence the provider redirect_uri.
  */
+function authCallbackBaseUrl(c: Context): string {
+  const configured = process.env.APP_URL?.trim();
+  if (configured) return configured.replace(/\/$/, "");
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("APP_URL is required for OAuth/OIDC callback URLs in production");
+  }
+  return `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
+}
+
 function buildOAuthCallbackUrl(c: Context, providerName: string): string {
-  const appUrl = process.env.APP_URL
-    ? process.env.APP_URL.replace(/\/$/, "")
-    : `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
+  const appUrl = authCallbackBaseUrl(c);
   return `${appUrl}/auth/oauth/${encodeURIComponent(providerName)}/callback`;
 }
 
 function buildOidcCallbackUrl(c: Context, providerId: string): string {
-  const appUrl = process.env.APP_URL
-    ? process.env.APP_URL.replace(/\/$/, "")
-    : `${c.req.header("x-forwarded-proto") ?? "https"}://${c.req.header("host") ?? "localhost"}`;
+  const appUrl = authCallbackBaseUrl(c);
   return `${appUrl}/auth/oidc/${encodeURIComponent(providerId)}/callback`;
 }
 
@@ -8715,7 +8823,6 @@ async function getAllowedOAuthRedirectEntries(
     .select({
       id: tenantAppClients.id,
       allowedRedirectUrls: tenantAppClients.allowedRedirectUrls,
-      allowedOrigins: tenantAppClients.allowedOrigins,
     })
     .from(tenantAppClients)
     .where(
@@ -8725,10 +8832,7 @@ async function getAllowedOAuthRedirectEntries(
   if (normalizedClientId) {
     const client = appClientRows.find((candidate) => candidate.id === normalizedClientId);
     if (client) {
-      const redirects = client.allowedRedirectUrls?.length
-        ? client.allowedRedirectUrls
-        : (client.allowedOrigins ?? []);
-      for (const entry of redirects) {
+      for (const entry of client.allowedRedirectUrls ?? []) {
         const trimmed = entry.trim();
         if (trimmed && trimmed !== "*") entries.add(trimmed);
       }
@@ -8738,16 +8842,12 @@ async function getAllowedOAuthRedirectEntries(
 
   const [row] = await getDb()
     .select({
-      allowedOrigins: tenantConfigs.allowedOrigins,
       allowedRedirectUrls: tenantConfigs.allowedRedirectUrls,
     })
     .from(tenantConfigs)
     .where(eq(tenantConfigs.tenantId, resolvedTenantId));
 
-  const tenantRedirects = row?.allowedRedirectUrls?.length
-    ? row.allowedRedirectUrls
-    : (row?.allowedOrigins ?? []);
-  for (const entry of tenantRedirects) {
+  for (const entry of row?.allowedRedirectUrls ?? []) {
     const trimmed = entry.trim();
     if (trimmed && trimmed !== "*") {
       entries.add(trimmed);
@@ -8755,10 +8855,7 @@ async function getAllowedOAuthRedirectEntries(
   }
 
   for (const client of appClientRows) {
-    const redirects = client.allowedRedirectUrls?.length
-      ? client.allowedRedirectUrls
-      : (client.allowedOrigins ?? []);
-    for (const entry of redirects) {
+    for (const entry of client.allowedRedirectUrls ?? []) {
       const trimmed = entry.trim();
       if (trimmed && trimmed !== "*") entries.add(trimmed);
     }

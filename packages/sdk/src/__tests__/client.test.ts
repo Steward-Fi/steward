@@ -246,6 +246,109 @@ describe("StewardClient construction", () => {
   });
 });
 
+describe("StewardClient adapter helpers", () => {
+  it("requests bridge quotes and builds unsigned bridge intents", async () => {
+    const quote = {
+      provider: "mock",
+      quoteId: "quote-1",
+      fromChainId: 8453,
+      toChainId: 42161,
+      fromToken: { address: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48" },
+      toToken: { address: "0x4200000000000000000000000000000000000006" },
+      amountIn: "1000000",
+      amountOut: "998000",
+      minAmountOut: "997000",
+      feeAmount: "2000",
+      recipient: "0x1111111111111111111111111111111111111111",
+      route: [{ bridge: "mock-bridge", fromChainId: 8453, toChainId: 42161 }],
+      slippageBps: 50,
+      expiresAt: Date.now() + 60_000,
+    };
+    installMockFetch({ ok: true, data: { quote } });
+    const client = makeClient({ bearerToken: "user-token", tenantId: "tenant-1" });
+
+    const result = await client.getBridgeQuote({
+      agentId: "agent-1",
+      fromChainId: 8453,
+      toChainId: 42161,
+      fromToken: quote.fromToken,
+      toToken: quote.toToken,
+      amount: "1000000",
+      recipient: quote.recipient,
+    });
+
+    expect(result.quoteId).toBe("quote-1");
+    expect(lastCapture?.url).toBe("https://api.steward.example/adapters/bridge/quote");
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.body).toMatchObject({ agentId: "agent-1", toChainId: 42161 });
+
+    const unsignedIntent = {
+      signed: false,
+      kind: "evm-tx",
+      chainId: 8453,
+      to: quote.fromToken.address,
+      value: "0",
+      owner: quote.recipient,
+      category: "bridge",
+      provider: "mock",
+      metadata: { quoteId: quote.quoteId, toChainId: quote.toChainId },
+    };
+    installMockFetch({ ok: true, data: { unsignedIntent } });
+    const built = await client.buildBridgeIntent({
+      agentId: "agent-1",
+      quote,
+      owner: quote.recipient,
+      estimatedUsd: 10,
+    });
+    expect(built.signed).toBe(false);
+    expect(built.category).toBe("bridge");
+    expect(lastCapture?.url).toBe("https://api.steward.example/adapters/bridge/build");
+    expect(lastCapture?.body).toMatchObject({ agentId: "agent-1", estimatedUsd: 10 });
+  });
+
+  it("creates exchange embed sessions and revokes linked exchange accounts", async () => {
+    const session = {
+      id: "exchange_1",
+      provider: "mock",
+      userId: "user-1",
+      tenantId: "tenant-1",
+      status: "created",
+      url: "https://mock.exchange.local/embed/exchange_1",
+      scopes: ["account:read"],
+      createdAt: 1,
+      expiresAt: 2,
+    };
+    installMockFetch({ ok: true, data: { session } });
+    const client = makeClient({ bearerToken: "user-token", tenantId: "tenant-1" });
+
+    const created = await client.createExchangeEmbedSession({
+      userId: "user-1",
+      provider: "kraken",
+      returnUrl: "https://app.example.com/callback",
+      scopes: ["account:read"],
+    });
+    expect(created.id).toBe("exchange_1");
+    expect(lastCapture?.url).toBe("https://api.steward.example/adapters/exchange/sessions");
+    expect(lastCapture?.body).toMatchObject({ provider: "kraken", userId: "user-1" });
+
+    const account = {
+      id: "exchange_link_1",
+      provider: "mock",
+      userId: "user-1",
+      externalAccountId: "external-1",
+      status: "revoked",
+      createdAt: 1,
+    };
+    installMockFetch({ ok: true, data: { account } });
+    const revoked = await client.revokeExchangeAccount("exchange_link_1");
+    expect(revoked.status).toBe("revoked");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/adapters/exchange/accounts/exchange_link_1",
+    );
+    expect(lastCapture?.method).toBe("DELETE");
+  });
+});
+
 describe("StewardClient webhooks", () => {
   it("lists webhook deliveries with pagination and retries delivery ids", async () => {
     installMockFetch({
@@ -927,6 +1030,14 @@ describe("HTTP request building", () => {
     );
     expect(account.type).toBe("user");
     expect(account.wallet?.agentId).toBe("user-wallet-user-1");
+
+    await makeClient({ bearerToken: "user-token" }).getUserAccountAggregation({
+      chainId: 8453,
+      tokens: ["0x1111111111111111111111111111111111111111"],
+    });
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/user/me/aggregation?chainId=8453&tokens=0x1111111111111111111111111111111111111111",
+    );
   });
 
   it("global wallet helpers call consent and read-only RPC endpoints", async () => {
@@ -1154,6 +1265,81 @@ describe("HTTP request building", () => {
     expect(lastCapture?.method).toBe("POST");
     expect(lastCapture?.url).toBe("https://api.steward.example/user/me/accounts/wallet/ethereum");
     expect(linked.account.provider).toBe("wallet:ethereum");
+  });
+
+  it("user wallet recovery setup uses the one-time recovery provisioning endpoint", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        wallet: {
+          agentId: "user-wallet-user-1",
+          walletAddress: "0x1234567890123456789012345678901234567890",
+          recoverable: true,
+        },
+        recovery: {
+          type: "bip39",
+          mnemonic:
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+          warning: "shown once",
+        },
+      },
+    });
+    const result = await makeClient({ bearerToken: "user-token" }).setupUserWalletRecovery();
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/user/me/wallet/recovery/setup");
+    expect(result.wallet.recoverable).toBe(true);
+    expect(result.recovery.type).toBe("bip39");
+  });
+
+  it("user wallet recovery restore sends the mnemonic once and does not expect it back", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        wallet: {
+          agentId: "user-wallet-user-1",
+          walletAddress: "0x1234567890123456789012345678901234567890",
+          recoverable: true,
+          restoredExisting: true,
+        },
+        recovery: {
+          type: "bip39",
+          restored: true,
+        },
+      },
+    });
+    const mnemonic =
+      "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const result = await makeClient({ bearerToken: "user-token" }).restoreUserWalletRecovery({
+      mnemonic,
+    });
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/user/me/wallet/recovery/restore");
+    expect(lastCapture?.body).toEqual({ mnemonic });
+    expect(result.wallet.restoredExisting).toBe(true);
+    expect(result.recovery).toEqual({ type: "bip39", restored: true });
+    expect("mnemonic" in result.recovery).toBe(false);
+  });
+
+  it("user pregenerated wallet claim posts tenant id and one-time claim token", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        agentId: "user-wallet-user-1",
+        walletAddress: "0x1234567890123456789012345678901234567890",
+        claimed: true,
+      },
+    });
+    const result = await makeClient({ bearerToken: "user-token" }).claimPregeneratedUserWallet({
+      tenantId: "app-tenant",
+      claimToken: "stwd_claim_secret",
+    });
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/user/me/wallet/claim-pregenerated");
+    expect(lastCapture?.body).toEqual({
+      tenantId: "app-tenant",
+      claimToken: "stwd_claim_secret",
+    });
+    expect(result.claimed).toBe(true);
   });
 
   it("user Solana wallet link helpers use proof endpoints", async () => {
@@ -2717,6 +2903,14 @@ describe("HTTP request building", () => {
     expect(lastCapture?.url).toBe(
       "https://api.steward.example/agents/agent-1/account?chainId=8453&tokens=0x1111111111111111111111111111111111111111",
     );
+
+    await makeClient().getAgentAccountAggregation("agent-1", {
+      chainId: 8453,
+      tokens: ["0x1111111111111111111111111111111111111111"],
+    });
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/agents/agent-1/aggregation?chainId=8453&tokens=0x1111111111111111111111111111111111111111",
+    );
   });
 
   it("agent signer helpers use /agents/:id/signers", async () => {
@@ -2945,6 +3139,67 @@ describe("HTTP request building", () => {
     expect((lastCapture?.body as Record<string, unknown>)?.agents).toEqual([
       { id: "a1", name: "Agent 1" },
     ]);
+  });
+
+  it("createPregeneratedUserWallets → POST /agents/pregenerated", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        wallets: [{ agent: mockAgent, claimToken: "stwd_claim_secret" }],
+        warning: "shown once",
+      },
+    });
+    const result = await makeClient().createPregeneratedUserWallets({
+      count: 1,
+      namePrefix: "Invite wallet",
+    });
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/agents/pregenerated");
+    expect(lastCapture?.body).toEqual({
+      count: 1,
+      namePrefix: "Invite wallet",
+      applyPolicies: undefined,
+    });
+    expect(result.wallets[0]?.agent.createdAt).toBeInstanceOf(Date);
+    expect(result.wallets[0]?.claimToken).toBe("stwd_claim_secret");
+  });
+});
+
+describe("StewardClient audit helpers", () => {
+  it("fetches filtered raw audit events", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        data: [
+          {
+            id: 1,
+            seq: 7,
+            actor_type: "user",
+            actor_id: "user-1",
+            action: "wallet.sign",
+            resource_type: "wallet",
+            resource_id: "wallet-1",
+            metadata: {},
+            created_at: "2026-05-31T00:00:00.000Z",
+          },
+        ],
+        pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      },
+    });
+
+    const events = await makeClient().getAuditEvents({
+      actorType: "user",
+      actorId: "user-1",
+      resourceType: "wallet",
+      dateFrom: "2026-05-01T00:00:00.000Z",
+      limit: 25,
+    });
+
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/audit/events?actorType=user&actorId=user-1&resourceType=wallet&dateFrom=2026-05-01T00%3A00%3A00.000Z&limit=25",
+    );
+    expect(events.data[0].action).toBe("wallet.sign");
+    expect(events.pagination.total).toBe(1);
   });
 });
 

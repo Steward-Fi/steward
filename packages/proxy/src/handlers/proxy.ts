@@ -427,8 +427,38 @@ function responseHeaderReflectsCredential(headers: Headers, credentialValue: str
   return false;
 }
 
+function responseHeaderReflectsAnyCredential(
+  headers: Headers,
+  credentialValues: string[],
+): boolean {
+  return credentialValues.some((value) => responseHeaderReflectsCredential(headers, value));
+}
+
 function responseBodyCanReflectCredential(headers: Headers): boolean {
   return !responseLooksStreaming(headers);
+}
+
+function responseHasEncodedBody(headers: Headers): boolean {
+  const encoding = headers.get("content-encoding")?.trim().toLowerCase();
+  return Boolean(encoding && encoding !== "identity");
+}
+
+function responseTextReflectsAnyCredential(bodyText: string, credentialValues: string[]): boolean {
+  return credentialValues.some((value) => bodyText.includes(value));
+}
+
+function credentialLeakVariants(values: string[]): string[] {
+  const variants = new Set<string>();
+  for (const value of values) {
+    if (!value) continue;
+    variants.add(value);
+    const encoded = encodeURIComponent(value);
+    variants.add(encoded);
+    variants.add(encoded.toLowerCase());
+    variants.add(encoded.replace(/%20/g, "+"));
+    variants.add(encoded.toLowerCase().replace(/%20/g, "+"));
+  }
+  return [...variants];
 }
 
 async function sha256Hex(input: string | ArrayBuffer): Promise<string> {
@@ -439,6 +469,18 @@ async function sha256Hex(input: string | ArrayBuffer): Promise<string> {
 
 function requestHeader(c: Context, name: string): string | undefined {
   return c.req.header?.(name) ?? c.req.raw.headers.get(name) ?? undefined;
+}
+
+function setProxyNoStoreHeaders(headers: Headers): void {
+  headers.set("Cache-Control", "no-store, max-age=0");
+  headers.set("Pragma", "no-cache");
+  headers.set("Expires", "0");
+}
+
+function setProxyContextNoStore(c: Context): void {
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  c.header("Expires", "0");
 }
 
 async function boundedRequestBodyHash(c: Context): Promise<string | null> {
@@ -998,6 +1040,7 @@ export function __setForwardProxyRequestForTests(forwarder: ProxyForwarder): voi
  * Auth middleware has already run, so agentId and tenantId are available.
  */
 export async function handleProxy(c: Context): Promise<Response> {
+  setProxyContextNoStore(c);
   const startTime = Date.now();
   const agentId = c.get("agentId") as string;
   const tenantId = c.get("tenantId") as string;
@@ -1323,20 +1366,27 @@ export async function handleProxy(c: Context): Promise<Response> {
       outboundHeaders.set(key, value);
     }
   }
+  outboundHeaders.set("accept-encoding", "identity");
 
   // Set the correct host header for the target
   outboundHeaders.set("host", outboundUrl.host);
 
   // Inject credential
+  const rawCredentialValue = credential;
   let injectedCredentialValue: string | null =
     route.injectAs === "header"
       ? (route.injectFormat ?? "{value}").replace("{value}", credential)
       : null;
+  let sensitiveCredentialValues =
+    injectedCredentialValue && rawCredentialValue
+      ? credentialLeakVariants([injectedCredentialValue, rawCredentialValue])
+      : [];
   try {
     injectCredential(outboundHeaders, outboundUrl, null, route, credential);
   } catch {
     credential = "";
     injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
     await recordAudit({
       agentId,
       tenantId,
@@ -1497,8 +1547,8 @@ export async function handleProxy(c: Context): Promise<Response> {
 
   // 8. Build response — stream body through without buffering
   if (
-    injectedCredentialValue &&
-    responseHeaderReflectsCredential(response.headers, injectedCredentialValue)
+    sensitiveCredentialValues.length > 0 &&
+    responseHeaderReflectsAnyCredential(response.headers, sensitiveCredentialValues)
   ) {
     await recordAudit({
       agentId,
@@ -1511,11 +1561,12 @@ export async function handleProxy(c: Context): Promise<Response> {
       reason: "credential-reflected-in-response-header",
     });
     injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
     proxySlot.release();
     return c.json({ ok: false, error: "Upstream response reflected injected credential" }, 502);
   }
 
-  if (injectedCredentialValue && responseLooksStreaming(response.headers)) {
+  if (sensitiveCredentialValues.length > 0 && responseLooksStreaming(response.headers)) {
     await recordAudit({
       agentId,
       tenantId,
@@ -1527,6 +1578,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       reason: "credential-streaming-response-blocked",
     });
     injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
     proxySlot.release();
     return c.json(
       { ok: false, error: "Streaming response blocked after credential injection" },
@@ -1535,7 +1587,28 @@ export async function handleProxy(c: Context): Promise<Response> {
   }
 
   if (
-    injectedCredentialValue &&
+    sensitiveCredentialValues.length > 0 &&
+    responseHasEncodedBody(response.headers) &&
+    responseBodyCanReflectCredential(response.headers)
+  ) {
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 502,
+      latencyMs: Date.now() - startTime,
+      reason: "credential-encoded-response-blocked",
+    });
+    injectedCredentialValue = null;
+    sensitiveCredentialValues = [];
+    proxySlot.release();
+    return c.json({ ok: false, error: "Encoded response blocked after credential injection" }, 502);
+  }
+
+  if (
+    sensitiveCredentialValues.length > 0 &&
     responseBodyCanReflectCredential(response.headers) &&
     responseBody instanceof ReadableStream
   ) {
@@ -1547,7 +1620,7 @@ export async function handleProxy(c: Context): Promise<Response> {
     ) {
       const bodyBuffer = await new Response(responseBody).arrayBuffer();
       const bodyText = new TextDecoder().decode(bodyBuffer);
-      if (bodyText.includes(injectedCredentialValue)) {
+      if (responseTextReflectsAnyCredential(bodyText, sensitiveCredentialValues)) {
         await recordAudit({
           agentId,
           tenantId,
@@ -1559,18 +1632,19 @@ export async function handleProxy(c: Context): Promise<Response> {
           reason: "credential-reflected-in-response-body",
         });
         injectedCredentialValue = null;
+        sensitiveCredentialValues = [];
         proxySlot.release();
         return c.json({ ok: false, error: "Upstream response reflected injected credential" }, 502);
       }
       responseBody = bodyBuffer;
     }
   } else if (
-    injectedCredentialValue &&
+    sensitiveCredentialValues.length > 0 &&
     responseBody instanceof ArrayBuffer &&
     responseBodyCanReflectCredential(response.headers)
   ) {
     const bodyText = new TextDecoder().decode(responseBody);
-    if (bodyText.includes(injectedCredentialValue)) {
+    if (responseTextReflectsAnyCredential(bodyText, sensitiveCredentialValues)) {
       await recordAudit({
         agentId,
         tenantId,
@@ -1582,11 +1656,13 @@ export async function handleProxy(c: Context): Promise<Response> {
         reason: "credential-reflected-in-response-body",
       });
       injectedCredentialValue = null;
+      sensitiveCredentialValues = [];
       proxySlot.release();
       return c.json({ ok: false, error: "Upstream response reflected injected credential" }, 502);
     }
   }
   injectedCredentialValue = null;
+  sensitiveCredentialValues = [];
 
   const responseHeaders = new Headers();
   const skipResponseHeaders = new Set([
@@ -1610,6 +1686,7 @@ export async function handleProxy(c: Context): Promise<Response> {
       responseHeaders.set(key, value);
     }
   }
+  setProxyNoStoreHeaders(responseHeaders);
 
   const releasedResponseBody =
     responseBody instanceof ReadableStream

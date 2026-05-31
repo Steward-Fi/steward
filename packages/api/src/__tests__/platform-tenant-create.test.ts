@@ -18,9 +18,9 @@ describe("platform tenant creation", () => {
         "platform:read",
         "platform:write",
         "platform:tenant:create",
+        "platform:agent:create",
         "platform:tenant:delete",
         "platform:tenant-policy:write",
-        "platform:agent:create",
       ],
     });
 
@@ -118,7 +118,7 @@ describe("platform tenant creation", () => {
       .values({
         id: `${TENANT_ID}-policies`,
         name: "Platform Tenant Policies",
-        apiKeyHash: `hash-${TENANT_ID}-policies`,
+        apiKeyHash: `${TENANT_ID}-policies-hash`,
       });
 
     const putResponse = await platformRoutes.request(`/tenants/${TENANT_ID}-policies/policies`, {
@@ -146,7 +146,7 @@ describe("platform tenant creation", () => {
       .values({
         id: tenantId,
         name: "Platform Tenant Delete",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
     await getDb()
       .insert(agents)
@@ -156,16 +156,18 @@ describe("platform tenant creation", () => {
         name: "Delete Agent",
         walletAddress: "0x0000000000000000000000000000000000000001",
       });
-    const refreshUserId = "00000000-0000-0000-0000-000000000001";
     await getDb()
       .insert(users)
-      .values({ id: refreshUserId, email: `${tenantId}@example.test` })
+      .values({
+        id: "00000000-0000-0000-0000-000000000001",
+        email: "tenant-delete-refresh@example.test",
+      })
       .onConflictDoNothing();
     await getDb()
       .insert(refreshTokens)
       .values({
         id: `${tenantId}-refresh`,
-        userId: refreshUserId,
+        userId: "00000000-0000-0000-0000-000000000001",
         tenantId,
         tokenHash: "stale-refresh-hash",
         expiresAt: new Date(Date.now() + 60_000),
@@ -192,7 +194,7 @@ describe("platform tenant creation", () => {
       .values({
         id: tenantId,
         name: "Platform Tenant Batch",
-        apiKeyHash: `hash-${tenantId}`,
+        apiKeyHash: `${tenantId}-hash`,
       });
 
     const response = await platformRoutes.request(`/tenants/${tenantId}/agents/batch`, {

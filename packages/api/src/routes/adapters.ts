@@ -24,13 +24,16 @@ import {
   AdapterUnavailableError,
   AdapterValidationError,
   adapterRegistry,
+  type BridgeQuote,
   type UnsignedTxIntent,
 } from "@stwd/adapters";
+import { getDb, tenantAppClients, userTenants } from "@stwd/db";
 import {
   dailySpendCapEvaluator,
   evaluateTradeOrder,
   perOrderCapEvaluator,
 } from "@stwd/policy-engine";
+import { and, eq } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import { checkAgentSpendLimit } from "../middleware/redis";
@@ -41,6 +44,7 @@ import {
   ensureAgentForTenant,
   requireTenantLevel,
   safeJsonParse,
+  setNoStoreHeaders,
 } from "../services/context";
 
 export const adapterRoutes = new Hono<{ Variables: AppVariables }>();
@@ -107,6 +111,110 @@ async function resolveAgentId(
     };
   }
   return { ok: true, agentId: requested };
+}
+
+async function tenantHasUser(tenantId: string, userId: string): Promise<boolean> {
+  const [membership] = await getDb()
+    .select({ userId: userTenants.userId })
+    .from(userTenants)
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, userId)));
+  return Boolean(membership);
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+async function resolveAdapterUserId(
+  c: Context<{ Variables: AppVariables }>,
+  requested?: string,
+): Promise<{ ok: true; userId: string } | { ok: false; response: Response }> {
+  const sessionUserId = c.get("userId");
+  if (sessionUserId) {
+    if (requested && requested !== sessionUserId) {
+      return {
+        ok: false,
+        response: c.json<ApiResponse>(
+          { ok: false, error: "Forbidden: user session cannot act for another user" },
+          403,
+        ),
+      };
+    }
+    return { ok: true, userId: sessionUserId };
+  }
+  if (!requireTenantLevel(c)) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403),
+    };
+  }
+  if (!requested) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "userId is required" }, 400),
+    };
+  }
+  if (!isUuid(requested)) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "userId must be a UUID" }, 400),
+    };
+  }
+  if (!(await tenantHasUser(c.get("tenantId"), requested))) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "User not found" }, 404),
+    };
+  }
+  return { ok: true, userId: requested };
+}
+
+async function requireAdapterUserAccess(
+  c: Context<{ Variables: AppVariables }>,
+  userId: string,
+): Promise<Response | null> {
+  const resolved = await resolveAdapterUserId(c, userId);
+  return resolved.ok ? null : resolved.response;
+}
+
+async function requireAdapterSessionAccess(
+  c: Context<{ Variables: AppVariables }>,
+  session: { tenantId: string; userId: string },
+): Promise<Response | null> {
+  if (session.tenantId !== c.get("tenantId")) {
+    return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+  }
+  return requireAdapterUserAccess(c, session.userId);
+}
+
+async function assertAllowedAdapterReturnUrl(
+  c: Context<{ Variables: AppVariables }>,
+  returnUrl: string,
+): Promise<Response | null> {
+  let parsed: URL;
+  try {
+    parsed = new URL(returnUrl);
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "returnUrl must be a valid URL" }, 400);
+  }
+  const allowed = await getDb()
+    .select({ allowedRedirectUrls: tenantAppClients.allowedRedirectUrls })
+    .from(tenantAppClients)
+    .where(
+      and(eq(tenantAppClients.tenantId, c.get("tenantId")), eq(tenantAppClients.enabled, true)),
+    );
+  const entries = allowed
+    .flatMap((row) => row.allowedRedirectUrls ?? [])
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0 && entry !== "*");
+  if (entries.length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "returnUrl allowlist is not configured" }, 400);
+  }
+  const normalized = parsed.toString();
+  if (!entries.includes(normalized)) {
+    return c.json<ApiResponse>({ ok: false, error: "returnUrl is not allowed" }, 400);
+  }
+  return null;
 }
 
 function auditActorType(c: Context<{ Variables: AppVariables }>): ActorType {
@@ -318,6 +426,7 @@ const onrampQuoteSchema = z.object({
 });
 
 const onrampSessionSchema = onrampQuoteSchema.extend({
+  userId: z.string().min(1).max(128).optional(),
   destinationAddress: z.string().min(1).max(128),
 });
 
@@ -329,6 +438,7 @@ const offrampQuoteSchema = z.object({
 });
 
 const offrampSessionSchema = offrampQuoteSchema.extend({
+  userId: z.string().min(1).max(128).optional(),
   payoutMethodId: z.string().min(1).max(128),
 });
 
@@ -352,6 +462,45 @@ const custodialSignSchema = z.object({
   walletId: z.string().min(1).max(128),
   payload: z.string().min(2).max(100_000),
   scheme: z.enum(["evm-personal", "evm-typed-data", "evm-tx", "solana-tx"]),
+});
+
+const bridgeQuoteSchema = z.object({
+  agentId: z.string().min(1).max(128).optional(),
+  fromChainId: z.number().int().positive(),
+  toChainId: z.number().int().positive(),
+  fromToken: tokenRefSchema,
+  toToken: tokenRefSchema,
+  amount: z.string().min(1).max(80),
+  recipient: z.string().min(1).max(128),
+  slippageBps: z.number().int().min(0).max(10_000).optional(),
+  estimatedUsd: z.number().positive().max(1e12).optional(),
+});
+
+const bridgeBuildSchema = z.object({
+  agentId: z.string().min(1).max(128).optional(),
+  owner: z.string().min(1).max(128),
+  quote: z.record(z.string(), z.unknown()),
+  estimatedUsd: z.number().positive().max(1e12).optional(),
+});
+
+const bridgeSessionSchema = z.object({
+  userId: z.string().min(1).max(128).optional(),
+  quote: z.record(z.string(), z.unknown()),
+});
+
+const exchangeSessionSchema = z.object({
+  userId: z.string().min(1).max(128).optional(),
+  provider: z.enum(["kraken", "coinbase", "binance", "mock"]),
+  returnUrl: z.string().min(1).max(2048),
+  scopes: z.array(z.string().min(1).max(64)).min(1).max(16).optional(),
+  locale: z.string().min(1).max(32).optional(),
+});
+
+const exchangeOrderSchema = z.object({
+  provider: z.string().min(1).max(64).optional(),
+  symbol: z.string().min(1).max(64).optional(),
+  side: z.enum(["buy", "sell"]).optional(),
+  amount: z.string().min(1).max(80).optional(),
 });
 
 // ─── Health / introspection ───────────────────────────────────────────────────
@@ -561,6 +710,209 @@ adapterRoutes.post("/earn/withdraw", async (c) => {
   }
 });
 
+// ─── Bridge ──────────────────────────────────────────────────────────────────
+
+adapterRoutes.post("/bridge/quote", async (c) => {
+  const parsed = bridgeQuoteSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const resolution = await resolveAgentId(c, parsed.data.agentId);
+  if (!resolution.ok) return resolution.response;
+
+  try {
+    const quote = await adapterRegistry.bridge().getQuote({
+      fromChainId: parsed.data.fromChainId,
+      toChainId: parsed.data.toChainId,
+      fromToken: parsed.data.fromToken,
+      toToken: parsed.data.toToken,
+      amount: parsed.data.amount,
+      recipient: parsed.data.recipient,
+      slippageBps: parsed.data.slippageBps,
+    });
+    return c.json(ok({ quote }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/bridge/build", async (c) => {
+  const parsed = bridgeBuildSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const resolution = await resolveAgentId(c, parsed.data.agentId);
+  if (!resolution.ok) return resolution.response;
+  const agentId = resolution.agentId;
+
+  try {
+    const bridge = adapterRegistry.bridge();
+    const intent = await bridge.buildBridge({
+      quote: parsed.data.quote as unknown as BridgeQuote,
+      owner: parsed.data.owner,
+    });
+    assertUnsigned(intent);
+
+    const caps = spendCaps();
+    const estimatedUsd = parsed.data.estimatedUsd ?? caps.perOrderCapUsd;
+    const gate = await enforceFundMovingPolicy(c, {
+      agentId,
+      estimatedUsd,
+      perOrderCapUsd: caps.perOrderCapUsd,
+      dailyCapUsd: caps.dailyCapUsd,
+    });
+    if (!gate.allow) {
+      await auditAdapterEvent(c, "adapter.bridge.policy-rejected", agentId, {
+        reason: gate.reason,
+        estimatedUsd,
+      });
+      return c.json({ code: "policy-violation", reason: gate.reason }, 400);
+    }
+
+    await auditAdapterEvent(c, "adapter.bridge.build.authorized", agentId, {
+      fromChainId: intent.chainId,
+      to: intent.to,
+      estimatedUsd,
+      bridge: intent.metadata,
+    });
+    return c.json(ok({ unsignedIntent: intent }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/bridge/sessions", async (c) => {
+  const parsed = bridgeSessionSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const resolvedUser = await resolveAdapterUserId(c, parsed.data.userId);
+  if (!resolvedUser.ok) return resolvedUser.response;
+  try {
+    const session = await adapterRegistry
+      .bridge()
+      .createSession(parsed.data.quote as unknown as BridgeQuote, {
+        tenantId: c.get("tenantId"),
+        userId: resolvedUser.userId,
+      });
+    await auditAdapterEvent(c, "adapter.bridge.session.created", session.id, {
+      quoteId: session.quoteId,
+      fromChainId: session.fromChainId,
+      toChainId: session.toChainId,
+      recipient: session.recipient,
+    });
+    setNoStoreHeaders(c);
+    return c.json(ok({ session }), 201);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+// ─── Exchange Embed ──────────────────────────────────────────────────────────
+
+adapterRoutes.post("/exchange/sessions", async (c) => {
+  const parsed = exchangeSessionSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const resolvedUser = await resolveAdapterUserId(c, parsed.data.userId);
+  if (!resolvedUser.ok) return resolvedUser.response;
+  const userId = resolvedUser.userId;
+  const returnUrlError = await assertAllowedAdapterReturnUrl(c, parsed.data.returnUrl);
+  if (returnUrlError) return returnUrlError;
+  try {
+    const session = await adapterRegistry.exchange().createEmbedSession({
+      userId,
+      tenantId: c.get("tenantId"),
+      provider: parsed.data.provider,
+      returnUrl: parsed.data.returnUrl,
+      scopes: parsed.data.scopes,
+      locale: parsed.data.locale,
+    });
+    await auditAdapterEvent(c, "adapter.exchange.session.created", session.id, {
+      provider: session.provider,
+      userId,
+      scopes: session.scopes,
+    });
+    setNoStoreHeaders(c);
+    return c.json(ok({ session }), 201);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.get("/exchange/sessions/:id", async (c) => {
+  try {
+    const session = await adapterRegistry.exchange().getEmbedSession(c.req.param("id"));
+    if (!session) return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+    if (session.tenantId !== c.get("tenantId")) {
+      return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+    }
+    const accessError = await requireAdapterUserAccess(c, session.userId);
+    if (accessError) return accessError;
+    setNoStoreHeaders(c);
+    return c.json(ok({ session }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.get("/exchange/accounts", async (c) => {
+  const resolvedUser = await resolveAdapterUserId(c, c.req.query("userId"));
+  if (!resolvedUser.ok) return resolvedUser.response;
+  const userId = resolvedUser.userId;
+  try {
+    const accounts = await adapterRegistry.exchange().listLinkedAccounts(userId);
+    return c.json(ok({ accounts }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.delete("/exchange/accounts/:id", async (c) => {
+  try {
+    const exchange = adapterRegistry.exchange();
+    const existing = await exchange.getLinkedAccount(c.req.param("id"));
+    if (!existing) return c.json<ApiResponse>({ ok: false, error: "Account not found" }, 404);
+    const accessError = await requireAdapterUserAccess(c, existing.userId);
+    if (accessError) return accessError;
+    const account = await exchange.revokeLinkedAccount(c.req.param("id"));
+    await auditAdapterEvent(c, "adapter.exchange.account.revoked", account.id, {
+      provider: account.provider,
+      userId: account.userId,
+    });
+    return c.json(ok({ account }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/exchange/orders", async (c) => {
+  const parsed = exchangeOrderSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    await adapterRegistry.exchange().createOrder(parsed.data);
+    return c.json<ApiResponse>({ ok: false, error: "unreachable" }, 500);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.get("/bridge/sessions/:id", async (c) => {
+  try {
+    const session = await adapterRegistry.bridge().getSession(c.req.param("id"));
+    if (!session) return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+    const accessError = await requireAdapterSessionAccess(c, session);
+    if (accessError) return accessError;
+    setNoStoreHeaders(c);
+    return c.json(ok({ session }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
 // ─── Onramp ─────────────────────────────────────────────────────────────────
 
 adapterRoutes.post("/onramp/quote", async (c) => {
@@ -581,15 +933,21 @@ adapterRoutes.post("/onramp/sessions", async (c) => {
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
+  const resolvedUser = await resolveAdapterUserId(c, parsed.data.userId);
+  if (!resolvedUser.ok) return resolvedUser.response;
   try {
     const onramp = adapterRegistry.onramp();
     const quote = await onramp.getQuote(parsed.data);
-    const session = await onramp.createSession(quote, parsed.data.destinationAddress);
+    const session = await onramp.createSession(quote, parsed.data.destinationAddress, {
+      tenantId: c.get("tenantId"),
+      userId: resolvedUser.userId,
+    });
     await auditAdapterEvent(c, "adapter.onramp.session.created", session.id, {
       fiatCurrency: session.fiatCurrency,
       fiatAmount: session.fiatAmount,
       cryptoAsset: session.cryptoAsset,
     });
+    setNoStoreHeaders(c);
     return c.json(ok({ session }), 201);
   } catch (err) {
     return handleAdapterError(c, err);
@@ -600,6 +958,9 @@ adapterRoutes.get("/onramp/sessions/:id", async (c) => {
   try {
     const session = await adapterRegistry.onramp().getSession(c.req.param("id"));
     if (!session) return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+    const accessError = await requireAdapterSessionAccess(c, session);
+    if (accessError) return accessError;
+    setNoStoreHeaders(c);
     return c.json(ok({ session }));
   } catch (err) {
     return handleAdapterError(c, err);
@@ -626,17 +987,24 @@ adapterRoutes.post("/offramp/sessions", async (c) => {
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
+  const resolvedUser = await resolveAdapterUserId(c, parsed.data.userId);
+  if (!resolvedUser.ok) return resolvedUser.response;
   try {
     const offramp = adapterRegistry.offramp();
     const quote = await offramp.getQuote(parsed.data);
-    const session = await offramp.createSession(quote, {
-      payoutMethodId: parsed.data.payoutMethodId,
-    });
+    const session = await offramp.createSession(
+      quote,
+      {
+        payoutMethodId: parsed.data.payoutMethodId,
+      },
+      { tenantId: c.get("tenantId"), userId: resolvedUser.userId },
+    );
     await auditAdapterEvent(c, "adapter.offramp.session.created", session.id, {
       cryptoAsset: session.cryptoAsset,
       cryptoAmount: session.cryptoAmount,
       fiatCurrency: session.fiatCurrency,
     });
+    setNoStoreHeaders(c);
     return c.json(ok({ session }), 201);
   } catch (err) {
     return handleAdapterError(c, err);
@@ -647,6 +1015,9 @@ adapterRoutes.get("/offramp/sessions/:id", async (c) => {
   try {
     const session = await adapterRegistry.offramp().getSession(c.req.param("id"));
     if (!session) return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+    const accessError = await requireAdapterSessionAccess(c, session);
+    if (accessError) return accessError;
+    setNoStoreHeaders(c);
     return c.json(ok({ session }));
   } catch (err) {
     return handleAdapterError(c, err);
@@ -660,11 +1031,9 @@ adapterRoutes.post("/kyc/verifications", async (c) => {
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
-  // Prefer the authenticated user; fall back to explicit userId for tenant ops.
-  const userId = c.get("userId") ?? parsed.data.userId;
-  if (!userId) {
-    return c.json<ApiResponse>({ ok: false, error: "userId is required" }, 400);
-  }
+  const resolvedUser = await resolveAdapterUserId(c, parsed.data.userId);
+  if (!resolvedUser.ok) return resolvedUser.response;
+  const userId = resolvedUser.userId;
   try {
     const verification = await adapterRegistry.kyc().startVerification({
       userId,
@@ -685,6 +1054,8 @@ adapterRoutes.get("/kyc/verifications/:id", async (c) => {
     if (!verification) {
       return c.json<ApiResponse>({ ok: false, error: "Verification not found" }, 404);
     }
+    const accessError = await requireAdapterUserAccess(c, verification.userId);
+    if (accessError) return accessError;
     return c.json(ok({ verification }));
   } catch (err) {
     return handleAdapterError(c, err);
@@ -707,7 +1078,12 @@ adapterRoutes.post("/kyc/verifications/:id/documents", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "contentBase64 is not valid base64" }, 400);
   }
   try {
-    const verification = await adapterRegistry.kyc().submitDocument({
+    const kyc = adapterRegistry.kyc();
+    const existing = await kyc.getStatus(c.req.param("id"));
+    if (!existing) return c.json<ApiResponse>({ ok: false, error: "Verification not found" }, 404);
+    const accessError = await requireAdapterUserAccess(c, existing.userId);
+    if (accessError) return accessError;
+    const verification = await kyc.submitDocument({
       verificationId: c.req.param("id"),
       documentType,
       content,
@@ -731,10 +1107,9 @@ adapterRoutes.post("/tos/acceptances", async (c) => {
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
-  const userId = c.get("userId") ?? parsed.data.userId;
-  if (!userId) {
-    return c.json<ApiResponse>({ ok: false, error: "userId is required" }, 400);
-  }
+  const resolvedUser = await resolveAdapterUserId(c, parsed.data.userId);
+  if (!resolvedUser.ok) return resolvedUser.response;
+  const userId = resolvedUser.userId;
   try {
     const acceptance = await adapterRegistry.tos().recordAcceptance({
       userId,
@@ -753,10 +1128,9 @@ adapterRoutes.post("/tos/acceptances", async (c) => {
 });
 
 adapterRoutes.get("/tos/acceptances/:documentId", async (c) => {
-  const userId = c.get("userId") ?? c.req.query("userId");
-  if (!userId) {
-    return c.json<ApiResponse>({ ok: false, error: "userId is required" }, 400);
-  }
+  const resolvedUser = await resolveAdapterUserId(c, c.req.query("userId"));
+  if (!resolvedUser.ok) return resolvedUser.response;
+  const userId = resolvedUser.userId;
   try {
     const tos = adapterRegistry.tos();
     const acceptance = await tos.getAcceptance(userId, c.req.param("documentId"));
@@ -777,10 +1151,9 @@ adapterRoutes.post("/custodial/wallets", async (c) => {
   if (!parsed.success) {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
-  const userId = c.get("userId") ?? parsed.data.userId;
-  if (!userId) {
-    return c.json<ApiResponse>({ ok: false, error: "userId is required" }, 400);
-  }
+  const resolvedUser = await resolveAdapterUserId(c, parsed.data.userId);
+  if (!resolvedUser.ok) return resolvedUser.response;
+  const userId = resolvedUser.userId;
   try {
     const wallet = await adapterRegistry.custodial().createCustodialWallet({
       userId,
@@ -800,6 +1173,8 @@ adapterRoutes.get("/custodial/wallets/:id", async (c) => {
   try {
     const wallet = await adapterRegistry.custodial().getWallet(c.req.param("id"));
     if (!wallet) return c.json<ApiResponse>({ ok: false, error: "Wallet not found" }, 404);
+    const accessError = await requireAdapterUserAccess(c, wallet.userId);
+    if (accessError) return accessError;
     return c.json(ok({ wallet }));
   } catch (err) {
     return handleAdapterError(c, err);
@@ -813,7 +1188,12 @@ adapterRoutes.post("/custodial/wallets/:id/sign", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
   }
   try {
-    const result = await adapterRegistry.custodial().requestSignature({
+    const custodial = adapterRegistry.custodial();
+    const wallet = await custodial.getWallet(parsed.data.walletId);
+    if (!wallet) return c.json<ApiResponse>({ ok: false, error: "Wallet not found" }, 404);
+    const accessError = await requireAdapterUserAccess(c, wallet.userId);
+    if (accessError) return accessError;
+    const result = await custodial.requestSignature({
       walletId: parsed.data.walletId,
       payload: parsed.data.payload,
       scheme: parsed.data.scheme,
@@ -830,6 +1210,7 @@ adapterRoutes.post("/custodial/wallets/:id/sign", async (c) => {
     await auditAdapterEvent(c, "adapter.custodial.sign.completed", parsed.data.walletId, {
       provider: result.provider,
     });
+    setNoStoreHeaders(c);
     return c.json(ok({ signature: result.signature, provider: result.provider }));
   } catch (err) {
     return handleAdapterError(c, err);

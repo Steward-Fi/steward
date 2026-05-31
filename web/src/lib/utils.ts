@@ -25,19 +25,6 @@ export function formatDate(date: Date | string): string {
   });
 }
 
-export function statusColor(status: string): string {
-  const map: Record<string, string> = {
-    pending: "text-amber-400",
-    approved: "text-emerald-400",
-    rejected: "text-red-400",
-    signed: "text-emerald-400",
-    broadcast: "text-violet-400",
-    confirmed: "text-emerald-300",
-    failed: "text-orange-400",
-  };
-  return map[status] || "text-text-tertiary";
-}
-
 export function policyTypeLabel(type: string): string {
   const map: Record<string, string> = {
     "spending-limit": "Spending Limit",

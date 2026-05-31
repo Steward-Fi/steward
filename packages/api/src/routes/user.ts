@@ -34,6 +34,7 @@ import {
 } from "@stwd/auth";
 import {
   accounts,
+  agents,
   agentWallets,
   auditEvents,
   authenticators,
@@ -62,8 +63,13 @@ import type {
   SignRequest,
 } from "@stwd/shared";
 import {
+  applyUserWalletDefaults,
+  generateMnemonic,
   getUserWallet,
+  isValidMnemonic,
+  provisionRecoverableUserWallet,
   provisionUserWallet,
+  restoreRecoverableUserWallet,
   USER_WALLET_DEFAULT_POLICIES,
   Vault,
 } from "@stwd/vault";
@@ -72,7 +78,7 @@ import { and, desc, eq, gte, ilike, isNull, ne, or, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
-import { priceOracle, verifySessionToken } from "../services/context";
+import { priceOracle, setNoStoreHeaders, verifySessionToken } from "../services/context";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
@@ -166,6 +172,8 @@ const MAX_TENANT_METADATA_STRING_BYTES = 4_096;
 const PUSH_PROVIDERS = ["expo", "apns", "fcm"] as const;
 const PUSH_PLATFORMS = ["ios", "android"] as const;
 const MAX_PUSH_METADATA_BYTES = 8_192;
+const PREGENERATED_USER_WALLET_TYPE = "pregenerated_user";
+const PREGENERATED_CLAIM_PREFIX = "pregenerated:";
 
 type PushProvider = (typeof PUSH_PROVIDERS)[number];
 type PushPlatform = (typeof PUSH_PLATFORMS)[number];
@@ -2865,6 +2873,22 @@ user.get("/me/account", async (c) => {
   });
 });
 
+user.get("/me/aggregation", (c) => {
+  const query = new URL(c.req.url).search;
+  return user.request(`/me/account${query}`, {
+    method: "GET",
+    headers: c.req.raw.headers,
+  });
+});
+
+user.get("/me/accounts/aggregation", (c) => {
+  const query = new URL(c.req.url).search;
+  return user.request(`/me/account${query}`, {
+    method: "GET",
+    headers: c.req.raw.headers,
+  });
+});
+
 // ─── GET /me/wallet ───────────────────────────────────────────────────────────
 
 user.get("/me/wallet", async (c) => {
@@ -2957,6 +2981,386 @@ user.post("/me/wallet", async (c) => {
     },
     201,
   );
+});
+
+// ─── POST /me/wallet/claim-pregenerated ──────────────────────────────────────
+
+user.post("/me/wallet/claim-pregenerated", async (c) => {
+  setNoStoreHeaders(c);
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  if (!hasRecentMfaStepUp(session)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Pregenerated wallet claim requires a recent MFA step-up session" },
+      403,
+    );
+  }
+
+  const body = await safeJsonParse<{ tenantId?: unknown; claimToken?: unknown }>(c);
+  const sourceTenantId = isValidTenantId(body?.tenantId) ? body.tenantId : null;
+  const claimToken = typeof body?.claimToken === "string" ? body.claimToken.trim() : "";
+  if (!sourceTenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "tenantId is required" }, 400);
+  }
+  if (!claimToken || claimToken.length > 160) {
+    return c.json<ApiResponse>({ ok: false, error: "claimToken is required" }, 400);
+  }
+
+  let vault: Vault;
+  try {
+    vault = getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+
+  const existing = await getUserWallet(vault, userId);
+  if (existing) {
+    return c.json<ApiResponse>({ ok: false, error: "User already has an embedded wallet" }, 409);
+  }
+
+  const claimTokenHash = hashSha256Hex(claimToken);
+  const platformId = `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+  const db = getDb();
+  const [claimable] = await db
+    .select()
+    .from(agents)
+    .where(
+      and(
+        eq(agents.tenantId, sourceTenantId),
+        eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+        eq(agents.platformId, platformId),
+      ),
+    );
+  if (!claimable) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or already claimed wallet token" },
+      404,
+    );
+  }
+
+  const displayName = (session.address as string | undefined) ?? session.email ?? userId;
+  const personalTenant = await ensurePersonalTenant(userId, displayName);
+  const targetAgentId = `user-wallet-${userId}`;
+
+  try {
+    const keys = await vault.exportPrivateKey(sourceTenantId, claimable.id, {
+      breakGlass: true,
+      actorId: userId,
+      reason: "claim pregenerated user wallet",
+    });
+    if (!keys.evm?.privateKey) {
+      throw new Error("Pregenerated wallet is missing an EVM key");
+    }
+
+    const [claimed] = await db
+      .update(agents)
+      .set({ platformId: `claimed:${claimTokenHash}`, updatedAt: new Date() })
+      .where(
+        and(
+          eq(agents.id, claimable.id),
+          eq(agents.tenantId, sourceTenantId),
+          eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+          eq(agents.platformId, platformId),
+        ),
+      )
+      .returning({ id: agents.id });
+    if (!claimed) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Invalid or already claimed wallet token" },
+        409,
+      );
+    }
+
+    try {
+      await writeUserAudit(c, {
+        tenantId: personalTenant,
+        actorType: "user",
+        actorId: userId,
+        action: "user.wallet.pregenerated_claim.authorized",
+        resourceType: "wallet",
+        resourceId: targetAgentId,
+        metadata: { sourceTenantId, sourceAgentId: claimable.id, claimTokenHash },
+      });
+
+      if (keys.solana?.privateKey) {
+        await vault.importKey(personalTenant, targetAgentId, keys.solana.privateKey, "solana");
+      }
+      await vault.importKey(personalTenant, targetAgentId, keys.evm.privateKey, "evm");
+      await db
+        .update(agents)
+        .set({
+          name: `${displayName}'s Wallet`,
+          platformId: `user:${userId}`,
+          walletType: "claimed_user",
+          updatedAt: new Date(),
+        })
+        .where(and(eq(agents.id, targetAgentId), eq(agents.tenantId, personalTenant)));
+      await applyUserWalletDefaults(userId, personalTenant);
+      await db
+        .delete(agents)
+        .where(and(eq(agents.id, claimable.id), eq(agents.tenantId, sourceTenantId)));
+    } catch (claimError) {
+      await db
+        .update(agents)
+        .set({ platformId, updatedAt: new Date() })
+        .where(
+          and(
+            eq(agents.id, claimable.id),
+            eq(agents.tenantId, sourceTenantId),
+            eq(agents.platformId, `claimed:${claimTokenHash}`),
+          ),
+        );
+      throw claimError;
+    }
+
+    const wallet = await getUserWallet(vault, userId);
+    if (!wallet) throw new Error("Claim succeeded but wallet could not be fetched");
+
+    await writeUserAudit(c, {
+      tenantId: personalTenant,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet.pregenerated_claim",
+      resourceType: "wallet",
+      resourceId: wallet.id,
+      metadata: { sourceTenantId, sourceAgentId: claimable.id },
+    });
+    dispatchWebhook(personalTenant, wallet.id, "user.wallet_created", {
+      userId,
+      walletId: wallet.id,
+      walletAddress: wallet.walletAddress,
+      pregenerated: true,
+    });
+
+    return c.json<ApiResponse<{ agentId: string; walletAddress: string; claimed: true }>>(
+      {
+        ok: true,
+        data: { agentId: wallet.id, walletAddress: wallet.walletAddress, claimed: true },
+      },
+      201,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: `Failed to claim wallet: ${msg}` }, 500);
+  }
+});
+
+// ─── POST /me/wallet/recovery/setup ──────────────────────────────────────────
+
+user.post("/me/wallet/recovery/setup", async (c) => {
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  if (!hasRecentMfaStepUp(session)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Wallet recovery setup requires a recent MFA step-up session" },
+      403,
+    );
+  }
+
+  let vault: Vault;
+  try {
+    vault = getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+
+  const existing = await getUserWallet(vault, userId);
+  if (existing) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "This wallet already exists and cannot be assigned a new recovery phrase. Use audited key export for break-glass backup or create recovery during initial wallet provisioning.",
+      },
+      409,
+    );
+  }
+
+  const displayName = (session.address as string | undefined) ?? session.email ?? userId;
+  const mnemonic = generateMnemonic(256);
+
+  try {
+    const tenantId = await ensurePersonalTenant(userId, displayName);
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet.recovery_setup.authorized",
+      resourceType: "wallet",
+      resourceId: `user-wallet-${userId}`,
+      metadata: { method: "bip39", strength: 256 },
+    });
+
+    const wallet = await provisionRecoverableUserWallet(
+      vault,
+      userId,
+      displayName,
+      mnemonic,
+      tenantId,
+    );
+
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet.recovery_setup",
+      resourceType: "wallet",
+      resourceId: wallet.agentId,
+      metadata: { method: "bip39", strength: 256 },
+    });
+    dispatchWebhook(tenantId, wallet.agentId, "user.wallet_created", {
+      userId,
+      walletId: wallet.agentId,
+      walletAddress: wallet.walletAddress,
+      recoverable: true,
+    });
+    dispatchWebhook(tenantId, wallet.agentId, "wallet.recovery_setup", {
+      userId,
+      walletId: wallet.agentId,
+      method: "bip39",
+    });
+
+    setNoStoreHeaders(c);
+    return c.json<
+      ApiResponse<{
+        wallet: { agentId: string; walletAddress: string; recoverable: true };
+        recovery: { type: "bip39"; mnemonic: string; warning: string };
+      }>
+    >(
+      {
+        ok: true,
+        data: {
+          wallet: {
+            agentId: wallet.agentId,
+            walletAddress: wallet.walletAddress,
+            recoverable: true,
+          },
+          recovery: {
+            type: "bip39",
+            mnemonic,
+            warning:
+              "This recovery phrase is shown once. Steward does not store it; losing it means the wallet cannot be recovered from this phrase.",
+          },
+        },
+      },
+      201,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unknown error";
+    console.error(`[UserWallet] recovery setup failed for user "${userId}":`, e);
+    return c.json<ApiResponse>({ ok: false, error: `Failed to set up recovery: ${msg}` }, 500);
+  }
+});
+
+// ─── POST /me/wallet/recovery/restore ────────────────────────────────────────
+
+user.post("/me/wallet/recovery/restore", async (c) => {
+  setNoStoreHeaders(c);
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  if (!hasRecentMfaStepUp(session)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Wallet recovery restore requires a recent MFA step-up session" },
+      403,
+    );
+  }
+
+  const body = await safeJsonParse<{ mnemonic?: unknown }>(c);
+  const mnemonic =
+    typeof body?.mnemonic === "string" ? body.mnemonic.trim().replace(/\s+/g, " ") : "";
+  if (!mnemonic || !isValidMnemonic(mnemonic)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid BIP-39 recovery phrase" }, 400);
+  }
+
+  let vault: Vault;
+  try {
+    vault = getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+
+  const displayName = (session.address as string | undefined) ?? session.email ?? userId;
+  const tenantId = await ensurePersonalTenant(userId, displayName);
+
+  try {
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet.recovery_restore.authorized",
+      resourceType: "wallet",
+      resourceId: `user-wallet-${userId}`,
+      metadata: { method: "bip39" },
+    });
+
+    const wallet = await restoreRecoverableUserWallet(
+      vault,
+      userId,
+      displayName,
+      mnemonic,
+      tenantId,
+    );
+
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet.recovered",
+      resourceType: "wallet",
+      resourceId: wallet.agentId,
+      metadata: { method: "bip39", restoredExisting: wallet.restoredExisting },
+    });
+    dispatchWebhook(tenantId, wallet.agentId, "wallet.recovered", {
+      userId,
+      walletId: wallet.agentId,
+      walletAddress: wallet.walletAddress,
+      method: "bip39",
+      restoredExisting: wallet.restoredExisting,
+    });
+    if (!wallet.restoredExisting) {
+      dispatchWebhook(tenantId, wallet.agentId, "user.wallet_created", {
+        userId,
+        walletId: wallet.agentId,
+        walletAddress: wallet.walletAddress,
+        recoverable: true,
+      });
+    }
+
+    return c.json<
+      ApiResponse<{
+        wallet: {
+          agentId: string;
+          walletAddress: string;
+          recoverable: true;
+          restoredExisting: boolean;
+        };
+        recovery: { type: "bip39"; restored: true };
+      }>
+    >(
+      {
+        ok: true,
+        data: {
+          wallet: {
+            agentId: wallet.agentId,
+            walletAddress: wallet.walletAddress,
+            recoverable: true,
+            restoredExisting: wallet.restoredExisting,
+          },
+          recovery: { type: "bip39", restored: true },
+        },
+      },
+      wallet.restoredExisting ? 200 : 201,
+    );
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: `Failed to restore wallet: ${msg}` }, 409);
+  }
 });
 
 // ─── POST /me/wallet/sign ─────────────────────────────────────────────────────
@@ -3401,6 +3805,7 @@ user.post("/me/wallet/sign-message", async (c) => {
       requestId: c.get("requestId") ?? null,
     });
 
+    setNoStoreHeaders(c);
     return c.json<ApiResponse<{ signature: string; address: string }>>({
       ok: true,
       data: { signature, address: wallet.walletAddress },
@@ -3490,6 +3895,9 @@ user.post("/me/wallet/export", async (c) => {
       breakGlass: true,
     });
 
+    c.header("Cache-Control", "no-store, max-age=0");
+    c.header("Pragma", "no-cache");
+    c.header("Expires", "0");
     return c.json<
       ApiResponse<{
         evm?: { privateKey: string; address: string };
@@ -4085,6 +4493,7 @@ user.post("/me/tenants/:tenantId/invitations", async (c) => {
     }
   }
 
+  setNoStoreHeaders(c);
   return c.json<
     ApiResponse<{ invitation: TenantAdminInvitationRow; token: string; emailSent: boolean }>
   >({ ok: true, data: { invitation, token, emailSent } }, 201);

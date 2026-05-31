@@ -10,6 +10,7 @@ let spendResult: any = {
 };
 let fetchCalls = 0;
 const audits: any[] = [];
+let secretPlaintext = "test-secret";
 // When set, the security-required pre-forward audit insert throws so we can
 // exercise the fail-closed (503) path. recordRequiredAudit rethrows, unlike
 // best-effort recordAudit.
@@ -140,7 +141,7 @@ mock.module("@stwd/vault", () => ({
   // spend-limit assertions already expect.
   SecretVault: class {
     async decryptSecret() {
-      return "test-secret";
+      return secretPlaintext;
     }
   },
 }));
@@ -203,6 +204,7 @@ describe("proxy spend-limit enforcement", () => {
     route.injectAs = "header";
     route.injectKey = "x-api-key";
     route.injectFormat = "Bearer {value}";
+    secretPlaintext = "test-secret";
     spendResult = {
       allowed: true,
       configured: true,
@@ -233,6 +235,9 @@ describe("proxy spend-limit enforcement", () => {
     const res = await handleProxy(makeContext());
 
     expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(res.headers.get("Pragma")).toBe("no-cache");
+    expect(res.headers.get("Expires")).toBe("0");
     expect(fetchCalls).toBe(1);
   });
 
@@ -432,6 +437,35 @@ describe("proxy spend-limit enforcement", () => {
       expect(String(url)).toBe("https://example.com/v1/echo");
       return new Response(new TextEncoder().encode("raw bytes: Bearer test-secret"), {
         status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      });
+    }) as typeof fetch;
+
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(fetchCalls).toBe(1);
+    expect(body.error).toContain("reflected injected credential");
+    expect(audits).toContainEqual(
+      expect.objectContaining({
+        targetHost: "example.com",
+        statusCode: 502,
+        reason: "credential-reflected-in-response-body",
+      }),
+    );
+  });
+
+  test("blocks raw secret reflected in opaque response bodies when injectFormat adds a prefix", async () => {
+    spendResult.configured = false;
+    route.injectFormat = "Bearer {value}";
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response(new TextEncoder().encode("upstream error: invalid api key test-secret"), {
+        status: 401,
         headers: { "content-type": "application/octet-stream" },
       });
     }) as typeof fetch;
@@ -712,6 +746,137 @@ describe("proxy spend-limit enforcement", () => {
         targetHost: "example.com",
         statusCode: 502,
         reason: "credential-reflected-in-response-header",
+      }),
+    );
+  });
+
+  test("blocks raw secret reflected in upstream response headers when injectFormat adds a prefix", async () => {
+    spendResult.configured = false;
+    route.injectFormat = "Bearer {value}";
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      fetchCalls++;
+      expect(String(url)).toBe("https://example.com/v1/echo");
+      return new Response(JSON.stringify({ ok: false }), {
+        status: 401,
+        headers: {
+          "content-type": "application/json",
+          "x-error": "invalid api key test-secret",
+        },
+      });
+    }) as typeof fetch;
+
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(fetchCalls).toBe(1);
+    expect(body.error).toContain("reflected injected credential");
+    expect(audits).toContainEqual(
+      expect.objectContaining({
+        targetHost: "example.com",
+        statusCode: 502,
+        reason: "credential-reflected-in-response-header",
+      }),
+    );
+  });
+
+  test("blocks percent-encoded injected credentials reflected in upstream response headers", async () => {
+    spendResult.configured = false;
+    secretPlaintext = "sk/a+b=";
+    route.injectFormat = "Bearer {value}";
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      expect(String(url)).toBe("https://example.com/v1/echo");
+      expect(new Headers(init?.headers).get("x-api-key")).toBe("Bearer sk/a+b=");
+      return new Response(JSON.stringify({ ok: false }), {
+        status: 401,
+        headers: {
+          "content-type": "application/json",
+          "x-error": `invalid ${encodeURIComponent("Bearer sk/a+b=")}`,
+        },
+      });
+    }) as typeof fetch;
+
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(fetchCalls).toBe(1);
+    expect(body.error).toContain("reflected injected credential");
+    expect(audits).toContainEqual(
+      expect.objectContaining({
+        targetHost: "example.com",
+        statusCode: 502,
+        reason: "credential-reflected-in-response-header",
+      }),
+    );
+  });
+
+  test("requests identity encoding and blocks encoded credential-bearing responses", async () => {
+    spendResult.configured = false;
+    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      expect(new Headers(init?.headers).get("accept-encoding")).toBe("identity");
+      return new Response(new TextEncoder().encode("compressed bytes"), {
+        status: 200,
+        headers: {
+          "content-type": "application/octet-stream",
+          "content-encoding": "gzip",
+        },
+      });
+    }) as typeof fetch;
+
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(fetchCalls).toBe(1);
+    expect(body.error).toContain("Encoded response blocked");
+    expect(audits).toContainEqual(
+      expect.objectContaining({
+        targetHost: "example.com",
+        statusCode: 502,
+        reason: "credential-encoded-response-blocked",
+      }),
+    );
+  });
+
+  test("blocks percent-encoded raw secrets reflected in opaque response bodies", async () => {
+    spendResult.configured = false;
+    secretPlaintext = "sk/a+b=";
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      fetchCalls++;
+      expect(String(url)).toBe("https://example.com/v1/echo");
+      expect(new Headers(init?.headers).get("x-api-key")).toBe("Bearer sk/a+b=");
+      return new Response(`upstream error: ${encodeURIComponent("sk/a+b=")}`, {
+        status: 401,
+        headers: { "content-type": "text/plain" },
+      });
+    }) as typeof fetch;
+
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(fetchCalls).toBe(1);
+    expect(body.error).toContain("reflected injected credential");
+    expect(audits).toContainEqual(
+      expect.objectContaining({
+        targetHost: "example.com",
+        statusCode: 502,
+        reason: "credential-reflected-in-response-body",
       }),
     );
   });

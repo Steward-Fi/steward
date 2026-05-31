@@ -27,6 +27,8 @@ describe("platform user lookup aliases", () => {
     }
 
     expect(platformSource).toContain("lookupPlatformUserIdentity(");
+    expect(platformSource).toContain("PLATFORM_READ_ONLY_POST_PATHS");
+    expect(platformSource).toContain("isPlatformReadLikeRequest(c)");
     expect(platformSource).toContain('requirePlatformRouteScope(c, "platform:user:read")');
     expect(platformSource).toContain("providerLookupAlias(");
   });

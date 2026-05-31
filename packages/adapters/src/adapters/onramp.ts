@@ -41,6 +41,8 @@ export interface OnrampQuote {
 export interface OnrampSession {
   readonly id: string;
   readonly provider: string;
+  readonly tenantId: string;
+  readonly userId: string;
   readonly status: OnrampStatus;
   readonly fiatCurrency: string;
   readonly fiatAmount: number;
@@ -55,7 +57,11 @@ export interface OnrampSession {
 export interface OnrampAdapter extends BaseAdapter {
   readonly category: "onramp";
   getQuote(request: OnrampQuoteRequest): Promise<OnrampQuote>;
-  createSession(quote: OnrampQuote, destinationAddress: string): Promise<OnrampSession>;
+  createSession(
+    quote: OnrampQuote,
+    destinationAddress: string,
+    owner: { tenantId: string; userId: string },
+  ): Promise<OnrampSession>;
   getSession(id: string): Promise<OnrampSession | null>;
 }
 
@@ -102,8 +108,14 @@ export class MockOnrampAdapter implements OnrampAdapter {
     };
   }
 
-  async createSession(quote: OnrampQuote, destinationAddress: string): Promise<OnrampSession> {
+  async createSession(
+    quote: OnrampQuote,
+    destinationAddress: string,
+    owner: { tenantId: string; userId: string },
+  ): Promise<OnrampSession> {
     const destination = assertEvmAddress(destinationAddress, "destinationAddress");
+    const tenantId = assertId(owner?.tenantId, "tenantId", 128);
+    const userId = assertId(owner?.userId, "userId", 128);
     if (!quote || typeof quote.expiresAt !== "number") {
       throw new AdapterValidationError("a valid quote is required");
     }
@@ -116,6 +128,8 @@ export class MockOnrampAdapter implements OnrampAdapter {
     const session: OnrampSession = {
       id: `onramp_${crypto.randomUUID()}`,
       provider: this.provider,
+      tenantId,
+      userId,
       status: "pending",
       fiatCurrency: quote.fiatCurrency,
       fiatAmount: quote.fiatAmount,

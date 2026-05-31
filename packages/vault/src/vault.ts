@@ -38,7 +38,7 @@ import {
   mainnet,
   polygon,
 } from "viem/chains";
-
+import { deriveEvmKey, deriveSolanaKey } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
 import {
   assertSolanaTransferTransactionMatches,
@@ -136,6 +136,10 @@ function detectChainType(walletAddress: string): "evm" | "solana" {
   return walletAddress.startsWith("0x") ? "evm" : "solana";
 }
 
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 /**
  * Resolve the Solana RPC URL for a given convention chainId (101/102).
  * Falls back to mainnet-beta if the chainId isn't recognised.
@@ -148,6 +152,17 @@ export interface SignTransactionOptions {
   txId?: string;
   policyResults?: PolicyResult[];
   status?: TxStatus;
+}
+
+interface MnemonicWalletMaterial {
+  evmPrivateKey: `0x${string}`;
+  evmAddress: string;
+  solanaSecretHex: string;
+  solanaAddress: string;
+}
+
+export interface RestoreAgentFromMnemonicResult extends AgentIdentity {
+  restoredExisting: boolean;
 }
 
 /**
@@ -278,6 +293,280 @@ export class Vault {
       platformId,
       createdAt,
     };
+  }
+
+  /**
+   * Create a new agent wallet from a BIP-39 mnemonic.
+   *
+   * This is intentionally only for NEW agents: assigning a mnemonic to an
+   * already-random wallet would create a false recovery guarantee. The caller
+   * is responsible for showing the mnemonic exactly once and never persisting it.
+   */
+  async createAgentFromMnemonic(
+    tenantId: string,
+    agentId: string,
+    name: string,
+    mnemonic: string,
+    options: { platformId?: string; passphrase?: string; walletType?: string } = {},
+  ): Promise<AgentIdentity> {
+    const db = getDb();
+    const [existingAgent] = await db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+
+    if (existingAgent) {
+      throw new Error(`Agent ${agentId} already exists for tenant ${tenantId}`);
+    }
+
+    const material = await this.deriveMnemonicWalletMaterial(mnemonic, options.passphrase);
+
+    const evmEncrypted = this.keyStore.encrypt(material.evmPrivateKey, {
+      tenantId,
+      agentId,
+      chainFamily: "evm",
+      venue: null,
+    });
+    const solEncrypted = this.keyStore.encrypt(material.solanaSecretHex, {
+      tenantId,
+      agentId,
+      chainFamily: "solana",
+      venue: null,
+    });
+    const createdAt = new Date();
+
+    await db.transaction(async (tx) => {
+      await tx.insert(agents).values({
+        id: agentId,
+        tenantId,
+        name,
+        walletAddress: material.evmAddress,
+        platformId: options.platformId,
+        walletType: options.walletType ?? "recoverable",
+        createdAt,
+        updatedAt: createdAt,
+      });
+
+      await tx.insert(encryptedKeys).values({
+        agentId,
+        ciphertext: evmEncrypted.ciphertext,
+        iv: evmEncrypted.iv,
+        tag: evmEncrypted.tag,
+        salt: evmEncrypted.salt,
+      });
+
+      await tx.insert(encryptedChainKeys).values([
+        {
+          agentId,
+          chainFamily: "evm",
+          ciphertext: evmEncrypted.ciphertext,
+          iv: evmEncrypted.iv,
+          tag: evmEncrypted.tag,
+          salt: evmEncrypted.salt,
+        },
+        {
+          agentId,
+          chainFamily: "solana",
+          ciphertext: solEncrypted.ciphertext,
+          iv: solEncrypted.iv,
+          tag: solEncrypted.tag,
+          salt: solEncrypted.salt,
+        },
+      ]);
+
+      await tx.insert(agentWallets).values([
+        { agentId, chainFamily: "evm", address: material.evmAddress, createdAt },
+        { agentId, chainFamily: "solana", address: material.solanaAddress, createdAt },
+      ]);
+    });
+
+    return {
+      id: agentId,
+      tenantId,
+      name,
+      walletAddress: material.evmAddress,
+      walletAddresses: { evm: material.evmAddress, solana: material.solanaAddress },
+      platformId: options.platformId,
+      createdAt,
+    };
+  }
+
+  private async deriveMnemonicWalletMaterial(
+    mnemonic: string,
+    passphrase?: string,
+  ): Promise<MnemonicWalletMaterial> {
+    const evmKey = await deriveEvmKey(mnemonic, { passphrase });
+    const evmAddress = privateKeyToAccount(evmKey.privateKey).address;
+    const solKey = await deriveSolanaKey(mnemonic, { passphrase });
+    const solanaSecretHex = bytesToHex(solKey.secretKey);
+    const solanaAddress = restoreSolanaKeypair(solanaSecretHex).publicKey.toBase58();
+    return {
+      evmPrivateKey: evmKey.privateKey,
+      evmAddress,
+      solanaSecretHex,
+      solanaAddress,
+    };
+  }
+
+  /**
+   * Restore/import a mnemonic-backed agent wallet.
+   *
+   * Safe cases:
+   *   - no agent exists: create the deterministic recoverable wallet;
+   *   - a recoverable agent exists and the mnemonic derives the exact stored
+   *     EVM/Solana identities: re-encrypt the derived keys for this deployment.
+   *
+   * Unsafe cases fail closed: an existing random/non-recoverable wallet or a
+   * mnemonic whose derived addresses differ from the stored identity is refused.
+   */
+  async restoreAgentFromMnemonic(
+    tenantId: string,
+    agentId: string,
+    name: string,
+    mnemonic: string,
+    options: { platformId?: string; passphrase?: string; walletType?: string } = {},
+  ): Promise<RestoreAgentFromMnemonicResult> {
+    const db = getDb();
+    const [existingAgent] = await db
+      .select()
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+
+    if (!existingAgent) {
+      const created = await this.createAgentFromMnemonic(
+        tenantId,
+        agentId,
+        name,
+        mnemonic,
+        options,
+      );
+      return { ...created, restoredExisting: false };
+    }
+
+    const walletType = existingAgent.walletType ?? "agent";
+    const expectedType = options.walletType ?? "recoverable";
+    if (walletType !== expectedType) {
+      throw new Error("Existing wallet is not mnemonic-recoverable; refusing unsafe restore");
+    }
+
+    const material = await this.deriveMnemonicWalletMaterial(mnemonic, options.passphrase);
+    const wallets = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
+    const evmWallet = wallets.find(
+      (wallet) => wallet.chainFamily === "evm" && wallet.venue === null,
+    );
+    const solanaWallet = wallets.find(
+      (wallet) => wallet.chainFamily === "solana" && wallet.venue === null,
+    );
+
+    if (existingAgent.walletAddress.toLowerCase() !== material.evmAddress.toLowerCase()) {
+      throw new Error("Mnemonic does not match the existing wallet identity");
+    }
+    if (evmWallet && evmWallet.address.toLowerCase() !== material.evmAddress.toLowerCase()) {
+      throw new Error("Mnemonic does not match the existing wallet identity");
+    }
+    if (solanaWallet && solanaWallet.address !== material.solanaAddress) {
+      throw new Error("Mnemonic does not match the existing wallet identity");
+    }
+
+    const evmEncrypted = this.keyStore.encrypt(material.evmPrivateKey, {
+      tenantId,
+      agentId,
+      chainFamily: "evm",
+      venue: null,
+    });
+    const solEncrypted = this.keyStore.encrypt(material.solanaSecretHex, {
+      tenantId,
+      agentId,
+      chainFamily: "solana",
+      venue: null,
+    });
+    const now = new Date();
+
+    await db.transaction(async (tx) => {
+      await tx
+        .update(agents)
+        .set({
+          walletAddress: material.evmAddress,
+          platformId: options.platformId ?? existingAgent.platformId,
+          updatedAt: now,
+        })
+        .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+
+      await tx
+        .insert(encryptedKeys)
+        .values({
+          agentId,
+          ciphertext: evmEncrypted.ciphertext,
+          iv: evmEncrypted.iv,
+          tag: evmEncrypted.tag,
+          salt: evmEncrypted.salt,
+        })
+        .onConflictDoUpdate({
+          target: encryptedKeys.agentId,
+          set: {
+            ciphertext: evmEncrypted.ciphertext,
+            iv: evmEncrypted.iv,
+            tag: evmEncrypted.tag,
+            salt: evmEncrypted.salt,
+          },
+        });
+
+      await tx
+        .delete(encryptedChainKeys)
+        .where(
+          and(
+            eq(encryptedChainKeys.agentId, agentId),
+            inArray(encryptedChainKeys.chainFamily, ["evm", "solana"]),
+            isNull(encryptedChainKeys.venue),
+          ),
+        );
+      await tx.insert(encryptedChainKeys).values([
+        {
+          agentId,
+          chainFamily: "evm",
+          venue: null,
+          ciphertext: evmEncrypted.ciphertext,
+          iv: evmEncrypted.iv,
+          tag: evmEncrypted.tag,
+          salt: evmEncrypted.salt,
+        },
+        {
+          agentId,
+          chainFamily: "solana",
+          venue: null,
+          ciphertext: solEncrypted.ciphertext,
+          iv: solEncrypted.iv,
+          tag: solEncrypted.tag,
+          salt: solEncrypted.salt,
+        },
+      ]);
+
+      await tx
+        .insert(agentWallets)
+        .values([
+          {
+            agentId,
+            chainFamily: "evm",
+            venue: null,
+            address: material.evmAddress,
+            createdAt: now,
+          },
+          {
+            agentId,
+            chainFamily: "solana",
+            venue: null,
+            address: material.solanaAddress,
+            createdAt: now,
+          },
+        ])
+        .onConflictDoNothing();
+    });
+
+    const restored = await this.getAgent(tenantId, agentId);
+    if (!restored) {
+      throw new Error(`Restored wallet ${agentId} could not be fetched`);
+    }
+    return { ...restored, restoredExisting: true };
   }
 
   /**

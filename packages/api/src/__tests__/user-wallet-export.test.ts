@@ -1,7 +1,15 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
+import { getDb, tenants, users, userTenants } from "@stwd/db";
+import { eq } from "drizzle-orm";
 
-import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+const previousDatabaseUrl = process.env.DATABASE_URL;
+// This suite seeds real rows (tenants/users/userTenants) and exercises the
+// hardened export routes against an actual database. It cannot run against a
+// dummy localhost URL, so it skips when no real DATABASE_URL is configured
+// (matching agent-route-scope.test.ts). CI's integration job always provides one.
+const hasDatabaseUrl = Boolean(previousDatabaseUrl);
+const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
+process.env.DATABASE_URL ||= "postgres://unused:unused@localhost:5432/unused";
 
 const dispatchWebhookMock = mock(() => {});
 
@@ -9,71 +17,69 @@ mock.module("../services/webhook-dispatch", () => ({
   dispatchWebhook: dispatchWebhookMock,
 }));
 
-const USER_ADDRESS = "0x0000000000000000000000000000000000000001";
+const USER_ID = crypto.randomUUID();
+const USER_ADDRESS = `0x${crypto.randomUUID().replace(/-/g, "").slice(0, 40).padEnd(40, "0")}`;
+const PERSONAL_TENANT_ID = `personal-${USER_ID}`;
 
 let createSessionToken: Awaited<typeof import("../routes/auth")>["createSessionToken"];
 let userRoutes: Awaited<typeof import("../routes/user")>["userRoutes"];
-let userId = "";
-let personalTenantId = "";
 
 beforeAll(async () => {
-  process.env.STEWARD_PGLITE_MEMORY = "true";
+  if (!hasDatabaseUrl) return;
   process.env.STEWARD_MASTER_PASSWORD = "user-wallet-export-master-password";
-  process.env.STEWARD_JWT_SECRET = "user-wallet-export-jwt-secret-with-enough-entropy";
   process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT = "true";
   process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT = "true";
-
-  const { db, client } = await createPGLiteDb("memory://");
-  setPGLiteOverride(db, async () => {
-    await client.close();
-  });
-
-  const [userRow] = await getDb()
-    .insert(users)
-    .values({ email: "wallet-export@example.test", emailVerified: true })
-    .returning({ id: users.id });
-  userId = userRow.id;
-  personalTenantId = `personal-${userId}`;
-
-  // verifySessionToken requires a userTenants row matching the token tenantId.
+  ({ createSessionToken } = await import("../routes/auth"));
+  ({ userRoutes } = await import("../routes/user"));
   await getDb()
     .insert(tenants)
     .values({
-      id: personalTenantId,
-      name: "Wallet Export Personal",
-      apiKeyHash: `${personalTenantId}-hash`,
-    });
-  await getDb().insert(userTenants).values({ userId, tenantId: personalTenantId, role: "owner" });
-
-  ({ createSessionToken } = await import("../routes/auth"));
-  ({ userRoutes } = await import("../routes/user"));
+      id: PERSONAL_TENANT_ID,
+      name: "User Wallet Export Tenant",
+      apiKeyHash: `hash-user-wallet-export-${USER_ID}`,
+    })
+    .onConflictDoNothing();
+  await getDb()
+    .insert(users)
+    .values({ id: USER_ID, walletAddress: USER_ADDRESS, walletChain: "ethereum" })
+    .onConflictDoNothing();
+  await getDb()
+    .insert(userTenants)
+    .values({ userId: USER_ID, tenantId: PERSONAL_TENANT_ID, role: "owner" })
+    .onConflictDoNothing();
 });
 
 beforeEach(() => {
   dispatchWebhookMock.mockClear();
 });
 
-afterAll(async () => {
-  await closeDb();
-  delete process.env.STEWARD_PGLITE_MEMORY;
+afterAll(() => {
+  if (previousDatabaseUrl === undefined) {
+    delete process.env.DATABASE_URL;
+  } else {
+    process.env.DATABASE_URL = previousDatabaseUrl;
+  }
+  if (!hasDatabaseUrl) return;
+  void getDb()
+    .delete(userTenants)
+    .where(eq(userTenants.userId, USER_ID))
+    .catch(() => {});
+  void getDb()
+    .delete(users)
+    .where(eq(users.id, USER_ID))
+    .catch(() => {});
+  void getDb()
+    .delete(tenants)
+    .where(eq(tenants.id, PERSONAL_TENANT_ID))
+    .catch(() => {});
   delete process.env.STEWARD_MASTER_PASSWORD;
-  delete process.env.STEWARD_JWT_SECRET;
   delete process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT;
   delete process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT;
 });
 
-// A personal session WITHOUT a recent MFA step-up (no mfaVerifiedAt) — passes
-// session auth + personal-tenant gating, then must be rejected by the MFA check.
-async function personalSessionWithoutMfa(): Promise<string> {
-  return createSessionToken(USER_ADDRESS, personalTenantId, {
-    userId,
-    tenantId: personalTenantId,
-  });
-}
-
-describe("user wallet private key export hardening", () => {
+describeWithDatabase("user wallet private key export hardening", () => {
   it("requires a recent MFA step-up before wallet transaction signing reaches vault setup", async () => {
-    const token = await personalSessionWithoutMfa();
+    const token = await createSessionToken(USER_ADDRESS, PERSONAL_TENANT_ID, { userId: USER_ID });
 
     const res = await userRoutes.request("/me/wallet/sign", {
       method: "POST",
@@ -92,7 +98,7 @@ describe("user wallet private key export hardening", () => {
   });
 
   it("requires a recent MFA step-up even when break-glass export flags are enabled", async () => {
-    const token = await personalSessionWithoutMfa();
+    const token = await createSessionToken(USER_ADDRESS, PERSONAL_TENANT_ID, { userId: USER_ID });
 
     const res = await userRoutes.request("/me/wallet/export", {
       method: "POST",

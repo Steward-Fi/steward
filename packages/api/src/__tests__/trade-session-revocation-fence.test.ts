@@ -68,4 +68,30 @@ describe("trade session revocation fence", () => {
     expect(hyperliquidSource).toContain("export function toUpdateLeverageAction");
     expect(hyperliquidSource).toContain("async updateLeverage");
   });
+
+  it("does not turn completed venue submissions into retryable route failures", () => {
+    const submitStart = tradeRouteSource.indexOf('tradeRoutes.post("/hyperliquid/order"');
+    expect(submitStart).toBeGreaterThanOrEqual(0);
+    const route = tradeRouteSource.slice(submitStart);
+    const submitOrder = route.indexOf("adapter.submitOrder(signed)");
+    const response = route.indexOf("const response = {", submitOrder);
+    const envelope = route.indexOf("const envelope: TradeIdempotencyResponse", response);
+    const auditTry = route.indexOf("try {", envelope);
+    const completeBestEffort = route.indexOf(
+      "completeTradeIdempotencyBestEffort(idempotency, envelope)",
+      auditTry,
+    );
+    const returnSuccess = route.indexOf(
+      "return c.json(responseData(response))",
+      completeBestEffort,
+    );
+
+    expect(tradeRouteSource).toContain("async function completeTradeIdempotencyBestEffort");
+    expect(submitOrder).toBeGreaterThanOrEqual(0);
+    expect(response).toBeGreaterThan(submitOrder);
+    expect(envelope).toBeGreaterThan(response);
+    expect(auditTry).toBeGreaterThan(envelope);
+    expect(completeBestEffort).toBeGreaterThan(auditTry);
+    expect(returnSuccess).toBeGreaterThan(completeBestEffort);
+  });
 });

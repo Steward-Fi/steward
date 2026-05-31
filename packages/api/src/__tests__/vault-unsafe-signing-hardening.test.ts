@@ -101,6 +101,23 @@ describe("vault unsafe signing hardening", () => {
     expect(importCall).toBeGreaterThan(ensureAgent);
   });
 
+  it("marks tenant-admin private key export responses as non-cacheable", () => {
+    const routeStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/export"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const routeEnd = vaultSource.indexOf("\n});", routeStart);
+    const routeBody = vaultSource.slice(routeStart, routeEnd);
+    const exportCall = routeBody.indexOf("vault.exportPrivateKey");
+    const cacheControl = routeBody.indexOf('"Cache-Control"', exportCall);
+    const response = routeBody.indexOf("return c.json", cacheControl);
+
+    expect(exportCall).toBeGreaterThanOrEqual(0);
+    expect(cacheControl).toBeGreaterThan(exportCall);
+    expect(response).toBeGreaterThan(cacheControl);
+    expect(routeBody).toContain('"no-store, max-age=0"');
+    expect(routeBody).toContain('"Pragma", "no-cache"');
+    expect(routeBody).toContain('"Expires", "0"');
+  });
+
   it("guards direct native transaction signing against contract-recipient gas burn", () => {
     const routeStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign"');
     expect(routeStart).toBeGreaterThanOrEqual(0);

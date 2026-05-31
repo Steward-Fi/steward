@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { revocationStore } from "@stwd/auth";
-import { agents, closeDb, getDb, policies, sessionSigners, tenants } from "@stwd/db";
+import { agents, auditEvents, closeDb, getDb, policies, sessionSigners, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -10,8 +10,9 @@ const TENANT_ID = `sess-signer-tenant-${Date.now()}`;
 const AGENT_ID = `sess-signer-agent-${Date.now()}`;
 const OTHER_AGENT_ID = `sess-signer-other-${Date.now()}`;
 const POLICY_ID = `sess-signer-policy-${Date.now()}`;
+const OTHER_POLICY_ID = `sess-signer-policy-other-${Date.now()}`;
 
-type AuthMode = "tenant" | "owner" | "agent";
+type AuthMode = "tenant" | "owner" | "owner-no-mfa" | "agent";
 
 async function makeApp(authMode: AuthMode = "tenant") {
   const { sessionSignerRoutes } = await import("../routes/session-signers");
@@ -27,8 +28,11 @@ async function makeApp(authMode: AuthMode = "tenant") {
       c.set("tenantRole", "owner");
       c.set("userId", "sess-owner-user");
       c.set("sessionMfaVerifiedAt", Date.now());
+    } else if (authMode === "owner-no-mfa") {
+      c.set("authType", "session-jwt");
+      c.set("tenantRole", "owner");
+      c.set("userId", "sess-owner-user");
     } else {
-      // Tenant API key is also a tenant-level credential.
       c.set("authType", "api-key");
     }
     await next();
@@ -61,6 +65,9 @@ async function mint(
     body: JSON.stringify({ label, ...extra }),
   });
   expect(res.status).toBe(200);
+  expect(res.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+  expect(res.headers.get("Pragma")).toBe("no-cache");
+  expect(res.headers.get("Expires")).toBe("0");
   const body = (await res.json()) as { ok: boolean; data: MintData };
   expect(body.ok).toBe(true);
   return body.data;
@@ -102,7 +109,10 @@ describe("session signers API", () => {
       ]);
     await getDb()
       .insert(policies)
-      .values({ id: POLICY_ID, agentId: AGENT_ID, type: "spending-limit", config: {} });
+      .values([
+        { id: POLICY_ID, agentId: AGENT_ID, type: "spending-limit", config: {} },
+        { id: OTHER_POLICY_ID, agentId: AGENT_ID, type: "approved-addresses", config: {} },
+      ]);
     // Applying the full migration history against in-memory PGLite is slow
     // (~45s for 60+ migrations); give the hook ample headroom.
   }, 180_000);
@@ -116,7 +126,7 @@ describe("session signers API", () => {
   });
 
   it("mints a session signer with default scope and ~24h lifetime", async () => {
-    const app = await makeApp("tenant");
+    const app = await makeApp("owner");
     const data = await mint(app, "trading bot");
     expect(data.label).toBe("trading bot");
     expect(data.scopes).toEqual(["agent"]);
@@ -152,8 +162,40 @@ describe("session signers API", () => {
     expect(ms).toBeLessThanOrEqual(30 * 24 * 3600 * 1000 + 10_000);
   });
 
+  it("enforces pinned policyIds for session-signer requests", async () => {
+    const mintApp = await makeApp("owner");
+    const signer = await mint(mintApp, "limited signer", {
+      policyIds: [POLICY_ID],
+    });
+    const { getScopedPolicySet, tenantAuth } = await import("../services/context");
+    const app = new Hono<{ Variables: AppVariables }>();
+    app.use("*", tenantAuth);
+    app.get("/agents/:agentId/effective-policies", async (c) => {
+      const rules = await getScopedPolicySet(
+        c.get("tenantId"),
+        c.req.param("agentId"),
+        c.get("agentPolicyIds"),
+      );
+      return c.json({ ids: rules.map((rule) => rule.id) });
+    });
+
+    const res = await app.request(`/agents/${AGENT_ID}/effective-policies`, {
+      headers: { authorization: `Bearer ${signer.token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ids: string[] };
+    expect(body.ids).toEqual([POLICY_ID]);
+    expect(body.ids).not.toContain(OTHER_POLICY_ID);
+
+    const [row] = await getDb()
+      .select({ lastUsedAt: sessionSigners.lastUsedAt })
+      .from(sessionSigners)
+      .where(eq(sessionSigners.id, signer.id));
+    expect(row.lastUsedAt).toBeInstanceOf(Date);
+  });
+
   it("rejects a policyId that does not belong to the agent", async () => {
-    const app = await makeApp("tenant");
+    const app = await makeApp("owner");
     const res = await app.request(`/agents/${AGENT_ID}/session-signers`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -166,7 +208,7 @@ describe("session signers API", () => {
   });
 
   it("validates label and other inputs", async () => {
-    const app = await makeApp("tenant");
+    const app = await makeApp("owner");
     const cases: Array<{ name: string; body: Record<string, unknown> }> = [
       { name: "missing label", body: {} },
       { name: "blank label", body: { label: "   " } },
@@ -188,7 +230,7 @@ describe("session signers API", () => {
   });
 
   it("returns 404 when minting for an agent in another tenant / unknown agent", async () => {
-    const app = await makeApp("tenant");
+    const app = await makeApp("owner");
     const res = await app.request(`/agents/unknown-agent/session-signers`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -198,12 +240,13 @@ describe("session signers API", () => {
   });
 
   it("lists active signers without leaking the token, and hides revoked by default", async () => {
-    const app = await makeApp("tenant");
+    const app = await makeApp("owner");
     const a = await mint(app, "list-a");
     const b = await mint(app, "list-b");
 
     const listRes = await app.request(`/agents/${AGENT_ID}/session-signers`);
     expect(listRes.status).toBe(200);
+    expect(listRes.headers.get("Cache-Control")).toBe("no-store, max-age=0");
     const list = (await listRes.json()) as {
       ok: boolean;
       data: Array<Record<string, unknown>>;
@@ -220,7 +263,7 @@ describe("session signers API", () => {
   });
 
   it("revokes a signer, records the revocation, and is idempotent", async () => {
-    const app = await makeApp("tenant");
+    const app = await makeApp("owner");
     const signer = await mint(app, "to-revoke");
 
     expect(await revocationStore.isRevoked(signer.jti)).toBe(false);
@@ -257,7 +300,7 @@ describe("session signers API", () => {
   });
 
   it("refuses cross-agent revocation with a 404", async () => {
-    const app = await makeApp("tenant");
+    const app = await makeApp("owner");
     const signer = await mint(app, "agentA-only");
     // Try to revoke agent A's signer via agent B's path.
     const del = await app.request(`/agents/${OTHER_AGENT_ID}/session-signers/${signer.id}`, {
@@ -268,7 +311,65 @@ describe("session signers API", () => {
     expect(await revocationStore.isRevoked(signer.jti)).toBe(false);
   });
 
-  it("requires tenant-level auth and rejects agent tokens on every route", async () => {
+  it("repairs a missing revocation audit on retry for an already-revoked signer", async () => {
+    const app = await makeApp("owner");
+    const signer = await mint(app, "audit-repair");
+    await getDb()
+      .update(sessionSigners)
+      .set({ revokedAt: new Date() })
+      .where(eq(sessionSigners.id, signer.id));
+
+    const before = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.action, "session_signer.revoked"),
+          eq(auditEvents.resourceId, signer.id),
+        ),
+      );
+    expect(before).toHaveLength(0);
+
+    const retry = await app.request(`/agents/${AGENT_ID}/session-signers/${signer.id}`, {
+      method: "DELETE",
+    });
+    expect(retry.status).toBe(200);
+    const retryBody = (await retry.json()) as { data: { alreadyRevoked?: boolean } };
+    expect(retryBody.data.alreadyRevoked).toBe(true);
+
+    const after = await getDb()
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.action, "session_signer.revoked"),
+          eq(auditEvents.resourceId, signer.id),
+        ),
+      );
+    expect(after).toHaveLength(1);
+  });
+
+  it("requires owner/admin session auth and recent MFA on every route", async () => {
+    const apiKeyApp = await makeApp("tenant");
+    const apiKeyPost = await apiKeyApp.request(`/agents/${AGENT_ID}/session-signers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label: "api-key-nope" }),
+    });
+    expect(apiKeyPost.status).toBe(403);
+
+    const noMfaApp = await makeApp("owner-no-mfa");
+    const noMfaPost = await noMfaApp.request(`/agents/${AGENT_ID}/session-signers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ label: "no-mfa-nope" }),
+    });
+    expect(noMfaPost.status).toBe(403);
+    const noMfaBody = (await noMfaPost.json()) as { error?: string };
+    expect(noMfaBody.error).toContain("requires recent MFA verification");
+
     const app = await makeApp("agent");
     const post = await app.request(`/agents/${AGENT_ID}/session-signers`, {
       method: "POST",

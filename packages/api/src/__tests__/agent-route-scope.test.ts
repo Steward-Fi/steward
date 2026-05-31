@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
-import { getDb, tenants } from "@stwd/db";
+import { agents, getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
@@ -45,23 +45,23 @@ beforeAll(async () => {
     })
     .onConflictDoNothing();
 
+  // Agent creation now requires an owner/admin session (Shaw's hardening),
+  // not tenant API-key auth, so we seed the agents directly. This test is
+  // about agent-token scope on existing agents, not the creation path, so a
+  // direct insert is the correct fixture.
   for (const agentId of [AGENT_A, AGENT_B]) {
-    const res = await app.request("/agents", {
-      method: "POST",
-      headers: {
-        "X-Steward-Tenant": TENANT_ID,
-        "X-Steward-Key": apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ id: agentId, name: agentId }),
-    });
-    // The fixture POST is the canary for "tenant-level auth is wired up
-    // correctly", so a non-200 here is interesting and we surface the
-    // server's error message instead of just an opaque status mismatch.
-    if (res.status !== 200) {
-      const body = await res.text();
-      throw new Error(`Fixture POST /agents for ${agentId} returned ${res.status}: ${body}`);
-    }
+    await getDb()
+      .insert(agents)
+      .values({
+        id: agentId,
+        tenantId: TENANT_ID,
+        name: agentId,
+        walletAddress: `0x${agentId
+          .replace(/[^a-f0-9]/gi, "")
+          .padEnd(40, "0")
+          .slice(0, 40)}`,
+      })
+      .onConflictDoNothing();
   }
 });
 
@@ -160,9 +160,14 @@ describeWithDatabase("agent route scope enforcement", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; data: Array<{ id: string }> };
+    // The listing response is now { data: { agents, limit, offset } } rather
+    // than a bare data array.
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { agents: Array<{ id: string }> };
+    };
     expect(body.ok).toBe(true);
-    const ids = body.data.map((agent) => agent.id).sort();
+    const ids = body.data.agents.map((agent) => agent.id).sort();
     // Other tests may inject agents into this tenant in parallel, so we
     // assert containment rather than exact equality.
     expect(ids).toContain(AGENT_A);
@@ -185,7 +190,7 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("tenant-level authentication");
+    expect(body.error).toContain("owner or admin session");
   });
 
   it("only allows an agent token to read its own policies", async () => {
@@ -221,7 +226,7 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(writeOwnRes.status).toBe(403);
     const writeOwnBody = (await writeOwnRes.json()) as { ok: boolean; error: string };
     expect(writeOwnBody.ok).toBe(false);
-    expect(writeOwnBody.error).toContain("tenant-level authentication");
+    expect(writeOwnBody.error).toContain("owner or admin session");
 
     const writeOtherRes = await app.request(`/agents/${AGENT_B}/policies`, {
       method: "PUT",
@@ -236,6 +241,6 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(writeOtherRes.status).toBe(403);
     const writeOtherBody = (await writeOtherRes.json()) as { ok: boolean; error: string };
     expect(writeOtherBody.ok).toBe(false);
-    expect(writeOtherBody.error).toContain("tenant-level authentication");
+    expect(writeOtherBody.error).toContain("owner or admin session");
   });
 });

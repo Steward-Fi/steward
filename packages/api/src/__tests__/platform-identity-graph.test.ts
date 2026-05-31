@@ -26,6 +26,7 @@ describe("platform global identity graph routes", () => {
         "platform:user:write",
         "platform:user-lifecycle:write",
         "platform:user:delete",
+        "platform:tenant-user:read",
         "platform:tenant-user:write",
         "platform:identity-migration",
         "platform:identity-migration:force",

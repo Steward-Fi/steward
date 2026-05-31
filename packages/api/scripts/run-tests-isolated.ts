@@ -31,7 +31,7 @@
  *   bun scripts/run-tests-isolated.ts                # default concurrency
  *   TEST_JOBS=1   bun scripts/run-tests-isolated.ts  # serial (matches solo)
  *   TEST_JOBS=12  bun scripts/run-tests-isolated.ts  # more parallelism
- *   TEST_TIMEOUT=60000 bun scripts/run-tests-isolated.ts
+ *   TEST_TIMEOUT=60000 bun scripts/run-tests-isolated.ts  # override per-test timeout
  *   bun scripts/run-tests-isolated.ts foo bar        # only files matching
  *                                                    # "foo" or "bar"
  *
@@ -39,7 +39,6 @@
  * `turbo test` / `bun run verify`.
  */
 import { readdirSync } from "node:fs";
-import { cpus } from "node:os";
 import { join } from "node:path";
 
 const apiRoot = join(import.meta.dir, "..");
@@ -71,8 +70,12 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const timeout = process.env.TEST_TIMEOUT ?? "30000";
-const defaultJobs = Math.max(1, Math.min(cpus().length, 8));
+const timeout = process.env.TEST_TIMEOUT ?? "120000";
+// PGLite migration bootstrap is CPU and memory heavy. Even two worker
+// processes can starve each other long enough to trip Bun's per-test timeout
+// before the test body runs, so keep the default serial and let faster hosts
+// opt up explicitly with TEST_JOBS.
+const defaultJobs = 1;
 const jobs = Math.max(1, Number(process.env.TEST_JOBS) || defaultJobs);
 
 interface Result {

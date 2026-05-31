@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { assertTokenNotRevoked, hashSha256Hex, revocationStore, verifyToken } from "@stwd/auth";
+import { assertTokenNotRevoked, hashSha256Hex, revocationStore } from "@stwd/auth";
 import { accounts, closeDb, getDb, refreshTokens, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { jwtVerify, SignJWT } from "jose";
+import { exportPKCS8, generateKeyPair, jwtVerify, SignJWT } from "jose";
 
 process.env.STEWARD_MASTER_PASSWORD ??= "dev-secret";
+process.env.STEWARD_JWT_SECRET ??= "session-revocation-jwt-secret-with-enough-bytes";
+process.env.STEWARD_AUDIT_HMAC_KEY ??= "session-revocation-audit-hmac-key-with-enough-bytes";
 process.env.STEWARD_PGLITE_MEMORY = "true";
 
 const JWT_SECRET = new TextEncoder().encode(
@@ -16,8 +18,25 @@ const JWT_ISSUER = "steward";
 let authRoutes: typeof import("../routes/auth").authRoutes;
 let createSessionToken: typeof import("../routes/auth").createSessionToken;
 let verifySessionToken: typeof import("../routes/auth").verifySessionToken;
+let identityPublicKey: Awaited<ReturnType<typeof generateKeyPair>>["publicKey"];
+
+const ORIGINAL_IDENTITY_ENV = {
+  STEWARD_IDENTITY_JWT_PRIVATE_KEY: process.env.STEWARD_IDENTITY_JWT_PRIVATE_KEY,
+  STEWARD_IDENTITY_JWT_ALG: process.env.STEWARD_IDENTITY_JWT_ALG,
+  STEWARD_IDENTITY_JWT_KID: process.env.STEWARD_IDENTITY_JWT_KID,
+  STEWARD_IDENTITY_JWT_ISSUER: process.env.STEWARD_IDENTITY_JWT_ISSUER,
+  STEWARD_IDENTITY_JWT_AUDIENCE: process.env.STEWARD_IDENTITY_JWT_AUDIENCE,
+};
 
 beforeAll(async () => {
+  const identityKeys = await generateKeyPair("RS256", { extractable: true });
+  identityPublicKey = identityKeys.publicKey;
+  process.env.STEWARD_IDENTITY_JWT_PRIVATE_KEY = await exportPKCS8(identityKeys.privateKey);
+  process.env.STEWARD_IDENTITY_JWT_ALG = "RS256";
+  process.env.STEWARD_IDENTITY_JWT_KID = "session-revocation-identity-test-key";
+  process.env.STEWARD_IDENTITY_JWT_ISSUER = "https://api.example.test";
+  process.env.STEWARD_IDENTITY_JWT_AUDIENCE = "steward-identity";
+
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -30,6 +49,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await closeDb();
+  for (const [key, value] of Object.entries(ORIGINAL_IDENTITY_ENV)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 async function createAgentToken(agentId: string, tenantId: string): Promise<string> {
@@ -67,7 +90,10 @@ describe("API access-token revocation", () => {
         id: tenantId,
         name: "Refresh Test Tenant",
         apiKeyHash: `test-hash-${tenantId}`,
-        ownerAddress: "0x0000000000000000000000000000000000000000",
+        ownerAddress: `0x${tenantId
+          .replace(/[^a-f0-9]/gi, "")
+          .padEnd(40, "0")
+          .slice(0, 40)}`,
       })
       .onConflictDoNothing();
     await db.insert(users).values({ id: userId, email: `${userId}@example.com` });
@@ -198,7 +224,11 @@ describe("API access-token revocation", () => {
     });
     expect(body.claims.linkedAccounts).toBeUndefined();
     expect(body.claims.tenantIds).toBeUndefined();
-    const identityPayload = (await verifyToken(body.token)) as Record<string, unknown>;
+    const { payload: identityPayload } = await jwtVerify(body.token, identityPublicKey, {
+      issuer: `${process.env.STEWARD_IDENTITY_JWT_ISSUER}/tenants/${encodeURIComponent(tenantId)}`,
+      audience: process.env.STEWARD_IDENTITY_JWT_AUDIENCE,
+      algorithms: ["RS256"],
+    });
     expect(identityPayload).toMatchObject({
       typ: "identity",
       sub: userId,

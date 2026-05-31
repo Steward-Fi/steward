@@ -11,6 +11,7 @@ const BASE_USDC = {
 };
 const RECIPIENT = "0x1111111111111111111111111111111111111111";
 const OWNER = "0x2222222222222222222222222222222222222222";
+const SESSION_OWNER = { tenantId: "tenant-bridge-test", userId: "user-bridge-test" };
 
 describe("MockBridgeAdapter", () => {
   test("quotes a deterministic cross-chain transfer with fee and slippage minimum", async () => {
@@ -90,10 +91,12 @@ describe("MockBridgeAdapter", () => {
       recipient: RECIPIENT,
     });
 
-    const session = await adapter.createSession(quote);
+    const session = await adapter.createSession(quote, SESSION_OWNER);
 
     expect(session).toMatchObject({
       provider: "mock",
+      tenantId: SESSION_OWNER.tenantId,
+      userId: SESSION_OWNER.userId,
       quoteId: quote.quoteId,
       status: "created",
       fromChainId: 1,

@@ -166,7 +166,7 @@ describe("typed-data policy enforcement (vault.ts wiring)", () => {
     const route = vaultSource.slice(routeStart, routeEnd);
 
     const auth = route.indexOf("requireAgentAccess(c)");
-    const policyLoad = route.indexOf("getPolicySet(tenantId, agentId)");
+    const policyLoad = route.indexOf("getScopedPolicySet(tenantId, agentId");
     const gate = route.indexOf('p.type === "typed-data"');
     const envOptIn = route.indexOf(
       "allowUnsafeTypedDataSigning() && allowVaultUnsafeTypedDataSigning()",

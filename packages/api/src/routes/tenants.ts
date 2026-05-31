@@ -27,6 +27,7 @@ import {
   type PolicyRule,
   requireTenantLevel,
   safeJsonParse,
+  setNoStoreHeaders,
   type Tenant,
   type TenantConfig,
   tenantAuth,
@@ -360,6 +361,7 @@ tenantRoutes.post("/", platformAuthMiddleware(), async (c) => {
 });
 
 tenantRoutes.get("/:id", requireTenantId, async (c) => {
+  setNoStoreHeaders(c);
   const tenant = c.get("tenant");
   return c.json<ApiResponse<Omit<Tenant, "apiKeyHash"> & Partial<TenantConfig>>>({
     ok: true,
@@ -368,6 +370,7 @@ tenantRoutes.get("/:id", requireTenantId, async (c) => {
 });
 
 tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
+  setNoStoreHeaders(c);
   const mfaResponse = requireRecentTenantAdminMfa(c, "Tenant webhook updates");
   if (mfaResponse) return mfaResponse;
 

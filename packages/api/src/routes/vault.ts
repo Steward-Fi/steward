@@ -7,7 +7,12 @@
 
 import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
 import { recordAggregationEvent } from "@stwd/redis";
-import { type PolicyResult, type TenantAuthAbuseConfig, toCaip2 } from "@stwd/shared";
+import {
+  type PolicyResult,
+  rawSigningChainSupport,
+  type TenantAuthAbuseConfig,
+  toCaip2,
+} from "@stwd/shared";
 import {
   type DerivedSolanaPolicyFields,
   deriveSolanaPolicyFields,
@@ -31,7 +36,7 @@ import {
   db,
   ensureAgentForTenant,
   extractRpcErrorMessage,
-  getPolicySet,
+  getScopedPolicySet,
   getTransactionStats,
   isNonEmptyString,
   isRpcError,
@@ -51,6 +56,7 @@ import {
   type SignTypedDataRequest,
   safeJsonParse,
   sanitizeErrorMessage,
+  setNoStoreHeaders,
   toSignRequest,
   toTxRecord,
   transactions,
@@ -561,7 +567,11 @@ type TransactionLifecycleEventType =
   | "transaction.provider_error"
   | "transaction.still_pending";
 
-const TRANSACTION_LIFECYCLE_EVENTS = new Set<TransactionLifecycleEventType>([
+type WalletFundsEventType = "wallet.funds_deposited" | "wallet.funds_withdrawn";
+
+type TransactionLifecycleUpdateEventType = TransactionLifecycleEventType | WalletFundsEventType;
+
+const TRANSACTION_LIFECYCLE_EVENTS = new Set<TransactionLifecycleUpdateEventType>([
   "transaction.broadcasted",
   "transaction.confirmed",
   "transaction.execution_reverted",
@@ -569,12 +579,14 @@ const TRANSACTION_LIFECYCLE_EVENTS = new Set<TransactionLifecycleEventType>([
   "transaction.failed",
   "transaction.provider_error",
   "transaction.still_pending",
+  "wallet.funds_deposited",
+  "wallet.funds_withdrawn",
 ]);
 
-function isTransactionLifecycleEvent(value: unknown): value is TransactionLifecycleEventType {
+function isTransactionLifecycleEvent(value: unknown): value is TransactionLifecycleUpdateEventType {
   return (
     typeof value === "string" &&
-    TRANSACTION_LIFECYCLE_EVENTS.has(value as TransactionLifecycleEventType)
+    TRANSACTION_LIFECYCLE_EVENTS.has(value as TransactionLifecycleUpdateEventType)
   );
 }
 
@@ -619,6 +631,44 @@ function dispatchTransactionLifecycleWebhook(
     ...(payload.confirmations !== undefined ? { confirmations: payload.confirmations } : {}),
     ...(payload.referenceId ? { reference_id: payload.referenceId } : {}),
     ...(payload.transactionRequest ? { transaction_request: payload.transactionRequest } : {}),
+  });
+}
+
+function dispatchWalletFundsWebhook(
+  tenantId: string,
+  agentId: string,
+  type: WalletFundsEventType,
+  row: typeof transactions.$inferSelect,
+  payload: {
+    txHash?: string | null;
+    walletAddress?: string | null;
+    amount?: string | null;
+    asset?: Record<string, unknown> | null;
+    sender?: string | null;
+    recipient?: string | null;
+    blockNumber?: string | number;
+    confirmations?: number;
+    referenceId?: string | null;
+  },
+): void {
+  const caip2 = toCaip2(row.chainId) ?? `eip155:${row.chainId}`;
+  const walletAddress = payload.walletAddress ?? null;
+  const defaultSender = type === "wallet.funds_withdrawn" ? walletAddress : undefined;
+  const defaultRecipient = type === "wallet.funds_deposited" ? walletAddress : row.toAddress;
+  dispatchWebhook(tenantId, agentId, type, {
+    wallet_id: agentId,
+    transaction_id: row.id,
+    ...(payload.txHash ? { txHash: payload.txHash, transaction_hash: payload.txHash } : {}),
+    caip2,
+    asset: payload.asset ?? { type: "native-token", address: null },
+    amount: payload.amount ?? row.value,
+    ...((payload.sender ?? defaultSender) ? { sender: payload.sender ?? defaultSender } : {}),
+    ...((payload.recipient ?? defaultRecipient)
+      ? { recipient: payload.recipient ?? defaultRecipient }
+      : {}),
+    ...(payload.blockNumber !== undefined ? { block: { number: payload.blockNumber } } : {}),
+    ...(payload.confirmations !== undefined ? { confirmations: payload.confirmations } : {}),
+    ...(payload.referenceId ? { reference_id: payload.referenceId } : {}),
   });
 }
 
@@ -1375,7 +1425,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   );
   if (!signerAuthorization.ok) return signerAuthorization.response;
 
-  const policySet = await getPolicySet(tenantId, agentId);
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
   // ── Redis rate-limit check (before policy evaluation) ──────────────────────
@@ -1790,7 +1840,7 @@ vaultRoutes.post("/:agentId/actions/send-calls", async (c) => {
     );
   }
 
-  const policySet = await getPolicySet(tenantId, agentId);
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
   const rateLimitResult = await enforceRateLimit(agentId, policySet);
   if (!rateLimitResult.allowed) {
@@ -2147,7 +2197,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
     gasLimit: isTokenTransfer ? "65000" : undefined,
     broadcast: transfer.broadcast,
   };
-  const policySet = await getPolicySet(tenantId, agentId);
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
   const rateLimitResult = await enforceRateLimit(agentId, policySet);
@@ -2699,6 +2749,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
   return withAgentSpendLock(agentId, async () => {
     const resolvedAt = new Date();
     let irreversibleResult = false;
+    let completedTxHash: string | null = null;
     try {
       const requestedBroadcast = transferPayload
         ? transferPayload.broadcast
@@ -2717,7 +2768,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             : undefined,
         broadcast: requestedBroadcast,
       };
-      const currentPolicySet = await getPolicySet(tenantId, agentId);
+      const currentPolicySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
       const currentRateLimitResult = await enforceRateLimit(agentId, currentPolicySet);
       if (!currentRateLimitResult.allowed) {
         if (currentRateLimitResult.headers) {
@@ -2863,6 +2914,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         });
         txHash = result.signature;
         irreversibleResult = shouldBroadcast;
+        if (shouldBroadcast) completedTxHash = txHash;
       } else {
         txHash = await vault.signTransaction(approvalSignRequest, {
           txId,
@@ -2870,6 +2922,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           status: shouldBroadcast ? "broadcast" : "signed",
         });
         irreversibleResult = shouldBroadcast;
+        if (shouldBroadcast) completedTxHash = txHash;
       }
 
       const nextStatus = transferPayload
@@ -3009,7 +3062,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       } else {
         await db
           .update(transactions)
-          .set({ status: "broadcast", signedAt: resolvedAt })
+          .set({
+            status: "broadcast",
+            txHash: completedTxHash ?? transaction.txHash ?? null,
+            signedAt: resolvedAt,
+          })
           .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
       }
 
@@ -3019,6 +3076,16 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         `[${requestId}] Approve transaction failed for agent ${agentId}, tx ${txId}:`,
         e,
       );
+
+      if (irreversibleResult && completedTxHash) {
+        console.error(
+          `[${requestId}] Approved transaction ${txId} broadcast before bookkeeping failed; returning broadcast result to prevent duplicate retry`,
+        );
+        return c.json<ApiResponse<{ txId: string; txHash: string }>>({
+          ok: true,
+          data: { txId, txHash: completedTxHash },
+        });
+      }
 
       if (transaction.actionType === "send_calls") {
         dispatchWebhook(tenantId, agentId, "wallet_action.send_calls.failed", {
@@ -3162,15 +3229,6 @@ vaultRoutes.get("/:agentId/pending", async (c) => {
   if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Forbidden: token scope does not match agent" },
-      403,
-    );
-  }
-  if (!hasTenantAdminSession(c) || !hasRecentSessionMfa(c)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Unsafe message signing requires owner or admin session with recent MFA",
-      },
       403,
     );
   }
@@ -3365,6 +3423,10 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
     provider?: unknown;
     blockNumber?: unknown;
     confirmations?: unknown;
+    amount?: unknown;
+    asset?: unknown;
+    sender?: unknown;
+    recipient?: unknown;
   }>(c);
   if (!isTransactionLifecycleEvent(body?.type)) {
     return c.json<ApiResponse>(
@@ -3435,6 +3497,16 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
     typeof body.confirmations === "number" && Number.isSafeInteger(body.confirmations)
       ? body.confirmations
       : undefined;
+  const amount =
+    typeof body.amount === "string" && body.amount.trim() ? body.amount.trim() : undefined;
+  const asset =
+    body.asset && typeof body.asset === "object" && !Array.isArray(body.asset)
+      ? (body.asset as Record<string, unknown>)
+      : undefined;
+  const sender =
+    typeof body.sender === "string" && body.sender.trim() ? body.sender.trim() : undefined;
+  const recipient =
+    typeof body.recipient === "string" && body.recipient.trim() ? body.recipient.trim() : undefined;
 
   const update: Partial<typeof transactions.$inferInsert> = {};
   let eventTxHash = txHash ?? row.txHash;
@@ -3482,6 +3554,16 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       break;
     case "transaction.still_pending":
       break;
+    case "wallet.funds_deposited":
+    case "wallet.funds_withdrawn":
+      if (!eventTxHash) {
+        return c.json<ApiResponse>({ ok: false, error: "txHash is required" }, 400);
+      }
+      update.status = "confirmed";
+      update.txHash = eventTxHash;
+      update.confirmedAt = row.confirmedAt ?? now;
+      nextStatus = "confirmed";
+      break;
   }
 
   await writeVaultAudit(c, {
@@ -3503,6 +3585,10 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       provider,
       blockNumber,
       confirmations,
+      amount,
+      asset,
+      sender,
+      recipient,
     },
   });
 
@@ -3532,25 +3618,43 @@ vaultRoutes.post("/:agentId/transactions/:txId/lifecycle", async (c) => {
       provider,
       blockNumber,
       confirmations,
+      amount,
+      asset,
+      sender,
+      recipient,
     },
   });
 
-  dispatchTransactionLifecycleWebhook(tenantId, agentId, body.type, {
-    txId,
-    txHash: eventTxHash,
-    previousTxHash: body.type === "transaction.replaced" ? row.txHash : undefined,
-    replacementTxHash: body.type === "transaction.replaced" ? replacementTxHash : undefined,
-    chainId: row.chainId,
-    status: nextStatus,
-    reason,
-    error,
-    provider,
-    blockNumber,
-    confirmations,
-    referenceId: actionReferenceId(row.actionPayload),
-    transactionRequest:
-      body.type === "transaction.still_pending" ? transactionRequestPayload(row) : undefined,
-  });
+  if (body.type === "wallet.funds_deposited" || body.type === "wallet.funds_withdrawn") {
+    dispatchWalletFundsWebhook(tenantId, agentId, body.type, updated, {
+      txHash: eventTxHash,
+      walletAddress: agent.walletAddress,
+      amount,
+      asset,
+      sender,
+      recipient,
+      blockNumber,
+      confirmations,
+      referenceId: actionReferenceId(row.actionPayload),
+    });
+  } else {
+    dispatchTransactionLifecycleWebhook(tenantId, agentId, body.type, {
+      txId,
+      txHash: eventTxHash,
+      previousTxHash: body.type === "transaction.replaced" ? row.txHash : undefined,
+      replacementTxHash: body.type === "transaction.replaced" ? replacementTxHash : undefined,
+      chainId: row.chainId,
+      status: nextStatus,
+      reason,
+      error,
+      provider,
+      blockNumber,
+      confirmations,
+      referenceId: actionReferenceId(row.actionPayload),
+      transactionRequest:
+        body.type === "transaction.still_pending" ? transactionRequestPayload(row) : undefined,
+    });
+  }
 
   if (body.type === "transaction.confirmed") {
     const eventPayload = userOperationEventPayload(agentId, updated, {
@@ -3831,6 +3935,7 @@ vaultRoutes.post("/:agentId/sign-message", async (c) => {
         unsafeCompatibilityMode: true,
       },
     });
+    setNoStoreHeaders(c);
     return c.json<ApiResponse>({ ok: true, data: { signature } });
   } catch (e) {
     console.error(`[Vault] sign-message failed for ${tenantId}/${agentId}:`, e);
@@ -3922,7 +4027,14 @@ vaultRoutes.post("/:agentId/sign-raw-hash", async (c) => {
         unsafeCompatibilityMode: true,
       },
     });
+    dispatchWebhook(tenantId, agentId, "wallet.raw_signature.created", {
+      kind: "raw_hash",
+      hash: body.hash,
+      referenceId: body.referenceId ?? null,
+      walletAddress: result.walletAddress,
+    });
 
+    setNoStoreHeaders(c);
     return c.json<ApiResponse>({ ok: true, data: result });
   } catch (e) {
     console.error(`[Vault] sign-raw-hash failed for ${tenantId}/${agentId}:`, e);
@@ -3972,9 +4084,33 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
-  const body = await safeJsonParse<{ curve: string; payloadHex: string; referenceId?: string }>(c);
+  const body = await safeJsonParse<{
+    chain: string;
+    curve: string;
+    payloadHex: string;
+    referenceId?: string;
+  }>(c);
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (!isNonEmptyString(body.chain)) {
+    return c.json<ApiResponse>({ ok: false, error: "chain is required" }, 400);
+  }
+  const chainSupport = rawSigningChainSupport(body.chain);
+  if (!chainSupport) {
+    return c.json<ApiResponse>(
+      { ok: false, error: `Unsupported raw signing chain: ${body.chain}` },
+      400,
+    );
+  }
+  if (!chainSupport.supported) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `${body.chain} raw signing is not supported: ${chainSupport.unsupportedReason ?? "unsupported chain"}`,
+      },
+      400,
+    );
   }
   if (body.curve !== "secp256k1" && body.curve !== "ed25519") {
     const error =
@@ -3982,6 +4118,15 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
         ? "stark curve raw signing is not supported: no vetted starknet signing library is installed"
         : "curve must be 'secp256k1' or 'ed25519'";
     return c.json<ApiResponse>({ ok: false, error }, 400);
+  }
+  if (body.curve !== chainSupport.curve) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `${body.chain} raw signing requires ${chainSupport.curve}, received ${body.curve}`,
+      },
+      400,
+    );
   }
   if (!isBytes32Hex(body.payloadHex)) {
     return c.json<ApiResponse>(
@@ -4000,6 +4145,61 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
   );
   if (!signerAuthorization.ok) return signerAuthorization.response;
 
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+  const hasRawSigningPolicy = policySet.some((p) => p.enabled && p.type === "raw-signing-chain");
+  if (!hasRawSigningPolicy) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Raw digest signing requires a `raw-signing-chain` policy for this agent. Add one that explicitly allows the requested chain and curve.",
+      },
+      403,
+    );
+  }
+  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+  const rateLimitResult = await enforceRateLimit(agentId, policySet);
+  if (!rateLimitResult.allowed) {
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+      429,
+    );
+  }
+  if (rateLimitResult.headers) {
+    for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+  }
+  const stats = await getTransactionStats(agentId);
+  const evaluation = await policyEngine.evaluate(policySet, {
+    request: {
+      agentId,
+      tenantId,
+      to: "0x0000000000000000000000000000000000000000",
+      value: "0",
+      chainId: 0,
+      broadcast: false,
+    },
+    recentTxCount1h: stats.recentTxCount1h,
+    recentTxCount24h: stats.recentTxCount24h,
+    spentToday: stats.spentToday,
+    spentThisWeek: stats.spentThisWeek,
+    priceOracle,
+    conditionSets,
+    rawSigning: { chain: body.chain, curve: body.curve },
+  });
+  if (!evaluation.approved) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Raw digest signing rejected by policy",
+        data: { policyResults: evaluation.results },
+      },
+      403,
+    );
+  }
+
   try {
     await writeVaultAudit(c, {
       tenantId,
@@ -4009,9 +4209,11 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
       resourceType: "wallet",
       resourceId: agentId,
       metadata: {
+        chain: body.chain,
         curve: body.curve,
         payloadHex: body.payloadHex,
         referenceId: body.referenceId ?? null,
+        policyResults: evaluation.results,
         ...signerAuthAuditMetadata(signerAuthorization.auth),
         unsafeCompatibilityMode: true,
       },
@@ -4027,15 +4229,26 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
       resourceType: "wallet",
       resourceId: agentId,
       metadata: {
+        chain: body.chain,
         curve: result.curve,
         payloadHex: result.payloadHex,
         referenceId: body.referenceId ?? null,
+        policyResults: evaluation.results,
         ...signerAuthAuditMetadata(signerAuthorization.auth),
         publicKey: result.publicKey,
         unsafeCompatibilityMode: true,
       },
     });
+    dispatchWebhook(tenantId, agentId, "wallet.raw_signature.created", {
+      kind: "raw_digest",
+      chain: body.chain,
+      curve: result.curve,
+      payloadHex: result.payloadHex,
+      referenceId: body.referenceId ?? null,
+      publicKey: result.publicKey,
+    });
 
+    setNoStoreHeaders(c);
     return c.json<ApiResponse>({ ok: true, data: result });
   } catch (e) {
     console.error(`[Vault] sign-raw-digest failed for ${tenantId}/${agentId}:`, e);
@@ -4118,7 +4331,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     chainId: resolvedChainId,
   };
 
-  const policySet = await getPolicySet(tenantId, agentId);
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
   // ── Fail-closed gate ────────────────────────────────────────────────────────
@@ -4309,6 +4522,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
 
     dispatchWebhook(tenantId, agentId, "tx_signed", { txId });
 
+    setNoStoreHeaders(c);
     return c.json<ApiResponse<{ signature: string; txId: string }>>({
       ok: true,
       data: { signature, txId },
@@ -4441,7 +4655,7 @@ vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
     chainId: body.chainId,
     broadcast: false,
   };
-  const policySet = await getPolicySet(tenantId, agentId);
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
   const rateLimitResult = await enforceRateLimit(agentId, policySet);
   if (!rateLimitResult.allowed) {
@@ -4623,6 +4837,8 @@ vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
 
       dispatchWebhook(tenantId, agentId, "tx_signed", { txId });
 
+      setNoStoreHeaders(c);
+      setNoStoreHeaders(c);
       return c.json<
         ApiResponse<{
           signature: string;
@@ -4761,7 +4977,7 @@ vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
     chainId,
     broadcast: false,
   };
-  const policySet = await getPolicySet(tenantId, agentId);
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
   const rateLimitResult = await enforceRateLimit(agentId, policySet);
   if (!rateLimitResult.allowed) {
@@ -4931,6 +5147,7 @@ vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
 
       dispatchWebhook(tenantId, agentId, "tx_signed", { txId });
 
+      setNoStoreHeaders(c);
       return c.json<ApiResponse<{ authorization: typeof authorization; txId: string }>>({
         ok: true,
         data: { authorization, txId },
@@ -4987,9 +5204,16 @@ async function signSolanaBlind(
   },
 ): Promise<Response> {
   const { agentId, tenantId, chainId, to: toAddress, value: txValue } = args;
+  const shouldBroadcast = args.broadcast !== false;
+  const idempotencyResponse = requireBroadcastActionIdempotency(
+    c,
+    shouldBroadcast,
+    "Broadcast Solana signing requests",
+  );
+  if (idempotencyResponse) return idempotencyResponse;
 
   const signRequest = { agentId, tenantId, to: toAddress, value: txValue, chainId };
-  const policySet = await getPolicySet(tenantId, agentId);
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
   const rl = await enforceRateLimit(agentId, policySet);
@@ -5067,8 +5291,15 @@ async function signSolanaBlind(
       );
     }
 
+    const txId = crypto.randomUUID();
+    let completedResult: {
+      txId: string;
+      signature: string;
+      broadcast: boolean;
+      chainId: number;
+      caip2?: string;
+    } | null = null;
     try {
-      const txId = crypto.randomUUID();
       const result = await vault.signSolanaTransaction({
         agentId,
         tenantId,
@@ -5078,6 +5309,7 @@ async function signSolanaBlind(
         expectedTo: toAddress,
         expectedValue: txValue,
       });
+      completedResult = { txId, ...result };
       await db.insert(transactions).values({
         id: txId,
         agentId,
@@ -5125,6 +5357,21 @@ async function signSolanaBlind(
     } catch (e: unknown) {
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Solana blind sign failed for agent ${agentId}:`, e);
+      if (completedResult?.broadcast) {
+        console.error(
+          `[${requestId}] Solana blind sign completed before bookkeeping failed for agent ${agentId}, tx ${txId}; returning completed result to prevent duplicate retry`,
+        );
+        setNoStoreHeaders(c);
+        return c.json<
+          ApiResponse<{
+            txId: string;
+            signature: string;
+            broadcast: boolean;
+            chainId: number;
+            caip2?: string;
+          }>
+        >({ ok: true, data: completedResult });
+      }
       dispatchWebhook(tenantId, agentId, "tx_failed", {
         error: e instanceof Error ? e.message : "Unknown error",
         requestId,
@@ -5167,6 +5414,13 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
+  const shouldBroadcast = body.broadcast !== false;
+  const idempotencyResponse = requireBroadcastActionIdempotency(
+    c,
+    shouldBroadcast,
+    "Broadcast Solana signing requests",
+  );
+  if (idempotencyResponse) return idempotencyResponse;
 
   if (!isNonEmptyString(body.transaction)) {
     return c.json<ApiResponse>(
@@ -5327,7 +5581,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     chainId,
   };
 
-  const policySet = await getPolicySet(tenantId, agentId);
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
   // ── Redis rate-limit check (Solana) ────────────────────────────────────────
@@ -5465,9 +5719,15 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       );
     }
 
+    const txId = crypto.randomUUID();
+    let completedResult: {
+      txId: string;
+      signature: string;
+      broadcast: boolean;
+      chainId: number;
+      caip2?: string;
+    } | null = null;
     try {
-      const txId = crypto.randomUUID();
-
       // The vault's defense-in-depth envelope check (assertSolanaTransferTransactionMatches)
       // only models a single native SOL transfer. The instruction parser is the
       // authoritative policy check for ALL transaction shapes, so we only pass the
@@ -5489,6 +5749,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         broadcast: body.broadcast,
         ...(isSingleNativeTransfer ? { expectedTo: toAddress, expectedValue: txValue } : {}),
       });
+      completedResult = { txId, ...result };
 
       await db.insert(transactions).values({
         id: txId,
@@ -5537,6 +5798,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         txHash: result.broadcast ? result.signature : undefined,
       });
 
+      setNoStoreHeaders(c);
       return c.json<
         ApiResponse<{
           txId: string;
@@ -5552,6 +5814,21 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     } catch (e: unknown) {
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Solana sign failed for agent ${agentId}:`, e);
+      if (completedResult?.broadcast) {
+        console.error(
+          `[${requestId}] Solana sign completed before bookkeeping failed for agent ${agentId}, tx ${txId}; returning completed result to prevent duplicate retry`,
+        );
+        setNoStoreHeaders(c);
+        return c.json<
+          ApiResponse<{
+            txId: string;
+            signature: string;
+            broadcast: boolean;
+            chainId: number;
+            caip2?: string;
+          }>
+        >({ ok: true, data: completedResult });
+      }
 
       dispatchWebhook(tenantId, agentId, "tx_failed", {
         error: e instanceof Error ? e.message : "Unknown error",
@@ -5825,6 +6102,9 @@ vaultRoutes.post("/:agentId/export", async (c) => {
       breakGlass: true,
     });
 
+    c.header("Cache-Control", "no-store, max-age=0");
+    c.header("Pragma", "no-cache");
+    c.header("Expires", "0");
     return c.json<
       ApiResponse<{
         evm?: { privateKey: string; address: string };

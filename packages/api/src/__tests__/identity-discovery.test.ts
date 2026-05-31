@@ -91,17 +91,16 @@ describe("identity JWKS discovery", () => {
     const otherTenantConfigResponse = await identityDiscoveryRoutes.request(
       "https://api.example.test/tenants/other/.well-known/openid-configuration",
     );
-    expect(otherTenantConfigResponse.status).toBe(200);
+    expect(otherTenantConfigResponse.status).toBe(404);
     expect(await otherTenantConfigResponse.json()).toMatchObject({
-      issuer: "https://api.example.test/tenants/other",
-      tenant_id: "other",
-      jwks_uri: "https://api.example.test/tenants/other/.well-known/jwks.json",
+      ok: false,
+      error: "Tenant not found",
     });
 
     const otherTenantJwksResponse = await identityDiscoveryRoutes.request(
       "https://api.example.test/tenants/other/.well-known/jwks.json",
     );
-    expect(otherTenantJwksResponse.status).toBe(200);
+    expect(otherTenantJwksResponse.status).toBe(404);
 
     const invalidTenantConfigResponse = await identityDiscoveryRoutes.request(
       "https://api.example.test/tenants/bad%20tenant/.well-known/openid-configuration",
@@ -143,5 +142,27 @@ describe("identity JWKS discovery", () => {
       tenantId: "tenant-1",
     });
     await expect(verifyToken(token)).rejects.toThrow();
+  });
+
+  it("does not fall back to the session JWT secret for identity-token signing", async () => {
+    delete process.env.STEWARD_IDENTITY_JWT_PRIVATE_KEY;
+    process.env.STEWARD_IDENTITY_JWT_ALG = "RS256";
+    process.env.STEWARD_IDENTITY_JWT_ISSUER = "https://api.example.test";
+    process.env.STEWARD_IDENTITY_JWT_AUDIENCE = "steward-identity";
+    process.env.STEWARD_JWT_SECRET = "identity-discovery-hs-secret-for-negative-check";
+
+    await expect(
+      signIdentityJwtPayload(
+        {
+          typ: "identity",
+          sub: "user-1",
+          userId: "user-1",
+          tenantId: "tenant-1",
+        },
+        "15m",
+        "https://api.example.test",
+        "custom-audience",
+      ),
+    ).rejects.toThrow("Identity JWT private key is not configured");
   });
 });

@@ -171,6 +171,18 @@ async function auditTradeEvent(
     .catch(() => undefined);
 }
 
+async function completeTradeIdempotencyBestEffort(
+  idempotency: TradeIdempotencyClaim,
+  envelope: TradeIdempotencyResponse,
+): Promise<void> {
+  if (idempotency.status !== "claimed") return;
+  try {
+    await idempotency.complete(envelope);
+  } catch (error) {
+    console.error("[trade] Failed to complete idempotency record after venue result:", error);
+  }
+}
+
 function tradeAuditActor(
   c: Context<{ Variables: AppVariables }>,
   fallbackAgentId: string,
@@ -853,7 +865,32 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
       ...response,
       error: result.error ?? "Hyperliquid rejected order",
     };
-    await auditTradeEvent(tenantId, agentId, agentActor, "trade.order.canceled", {
+    const envelope: TradeIdempotencyResponse = {
+      status: 400,
+      body: { ok: false, error: rejectedResponse.error, data: rejectedResponse },
+    };
+    try {
+      await auditTradeEvent(tenantId, agentId, agentActor, "trade.order.canceled", {
+        sessionId: session.id,
+        venue: "hyperliquid",
+        asset: parsedAsset.data,
+        leverage: body.leverage,
+        size: body.size,
+        priceUsd: notional.priceUsd,
+        sizeUsd,
+        orderId: rejectedResponse.orderId,
+        reason: rejectedResponse.error,
+      });
+    } catch (error) {
+      console.error("[trade] Post-submit rejection audit failed:", error);
+    }
+    await completeTradeIdempotencyBestEffort(idempotency, envelope);
+    return c.json<ApiResponse>(envelope.body as ApiResponse, 400);
+  }
+
+  const envelope: TradeIdempotencyResponse = { status: 200, body: responseData(response) };
+  try {
+    await auditTradeEvent(tenantId, agentId, agentActor, "trade.order.submitted", {
       sessionId: session.id,
       venue: "hyperliquid",
       asset: parsedAsset.data,
@@ -861,28 +898,11 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
       size: body.size,
       priceUsd: notional.priceUsd,
       sizeUsd,
-      orderId: rejectedResponse.orderId,
-      reason: rejectedResponse.error,
+      orderId: response.orderId,
     });
-    const envelope: TradeIdempotencyResponse = {
-      status: 400,
-      body: { ok: false, error: rejectedResponse.error, data: rejectedResponse },
-    };
-    if (idempotency.status === "claimed") await idempotency.complete(envelope);
-    return c.json<ApiResponse>(envelope.body as ApiResponse, 400);
+  } catch (error) {
+    console.error("[trade] Post-submit success audit failed:", error);
   }
-
-  await auditTradeEvent(tenantId, agentId, agentActor, "trade.order.submitted", {
-    sessionId: session.id,
-    venue: "hyperliquid",
-    asset: parsedAsset.data,
-    leverage: body.leverage,
-    size: body.size,
-    priceUsd: notional.priceUsd,
-    sizeUsd,
-    orderId: response.orderId,
-  });
-  const envelope: TradeIdempotencyResponse = { status: 200, body: responseData(response) };
-  if (idempotency.status === "claimed") await idempotency.complete(envelope);
+  await completeTradeIdempotencyBestEffort(idempotency, envelope);
   return c.json(responseData(response));
 });

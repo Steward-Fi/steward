@@ -142,7 +142,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Signing requires owner/admin MFA");
+    expect(body.error).toContain("Signing requires owner/admin MFA or signer-bound");
   });
 
   it("rejects bare delegated signer ids even when the id exists", async () => {
@@ -158,7 +158,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Signing requires owner/admin MFA");
+    expect(body.error).toContain("Signing requires owner/admin MFA or signer-bound");
   });
 
   it("rejects invalid signer credentials before policy evaluation", async () => {

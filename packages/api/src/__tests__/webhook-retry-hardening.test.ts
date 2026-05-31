@@ -102,11 +102,13 @@ describe("webhook retry hardening", () => {
   it("does not copy legacy plaintext webhook secrets into delivery snapshots", () => {
     expect(webhookDispatchSource).toContain("isEncryptedWebhookSecret(config.secret)");
     expect(webhookDispatchSource).toContain("encryptWebhookSecret(signingSecret)");
+    expect(webhookDispatchSource).toContain("const signedAt = Math.floor(Date.now() / 1000)");
     const insertSnapshot = webhookDispatchSource.slice(
       webhookDispatchSource.indexOf(".insert(webhookDeliveries)"),
       webhookDispatchSource.indexOf("const dispatcher = new WebhookDispatcher"),
     );
     expect(insertSnapshot).toContain("secret: encryptedSecret");
+    expect(insertSnapshot).toContain("payload: eventWithDelivery");
     expect(insertSnapshot).not.toContain("secret: config.secret");
   });
 
@@ -127,6 +129,21 @@ describe("webhook retry hardening", () => {
     expect(webhookDispatchSource).toContain("maxRetries: 0");
     expect(webhookDispatchSource).toContain("visibilityTimeoutMs: 0");
     expect(webhookDispatchSource).toContain("maxAttempts: config.maxRetries + 1");
+  });
+
+  it("does not make manual test/replay sends retryable when final audit fails", () => {
+    const testStart = webhookRoutesSource.indexOf('webhookRoutes.post("/:id/test"');
+    const testRoute = webhookRoutesSource.slice(
+      testStart,
+      webhookRoutesSource.indexOf('webhookRoutes.get("/:id/deliveries"', testStart),
+    );
+    expect(testRoute).toContain("dispatchTestWebhook({");
+    expect(testRoute).toContain("was dispatched but final audit failed");
+
+    const replayStart = webhookRoutesSource.indexOf('webhookRoutes.post("/deliveries/:id/replay"');
+    const replayRoute = webhookRoutesSource.slice(replayStart);
+    expect(replayRoute).toContain("dispatchReplayWebhook({");
+    expect(replayRoute).toContain("was dispatched but final audit failed");
   });
 
   it("replays historical deliveries as new audited delivery rows", () => {

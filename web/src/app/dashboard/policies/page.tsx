@@ -470,11 +470,6 @@ export default function PoliciesPage() {
     setSimulating(true);
     setSimResult(null);
     try {
-      // FIXME (flag to Sol): this form collects `method` / `url` / `data`
-      // inputs that the backend `/policies/simulate` route doesn't consume.
-      // It requires `request: { to, value, chainId? }`. For now, pass the
-      // existing inputs through and derive `to`/`value` from the URL+value
-      // fields so the call still reaches the backend.
       const payload: PolicySimulatePayload = {
         policyId: selected.id,
         agentId: simForm.agentId,

@@ -50,7 +50,7 @@ describe("tenant-admin OIDC provider config routes", () => {
 
     ({ tenantConfigRoutes } = await import("../routes/tenant-config"));
     ({ createSessionToken } = await import("../routes/auth"));
-  }, 30_000);
+  }, 120_000);
 
   afterAll(async () => {
     await closeDb();

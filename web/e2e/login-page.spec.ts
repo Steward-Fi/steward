@@ -8,6 +8,9 @@ test.describe("Login page UI", () => {
     await expect(page.getByLabel("email")).toBeVisible();
     await expect(page.getByRole("button", { name: /email me a link/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /passkey/i })).toBeVisible();
+    await expect(page.getByTestId("stwd-login-wallets")).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^ethereum$/i })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^solana$/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /^Google$/i })).toBeVisible();
     await expect(page.getByRole("button", { name: /^Discord$/i })).toBeVisible();
   });
