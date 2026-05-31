@@ -628,6 +628,8 @@ export interface TenantSsoDomain {
   status: "pending" | "verified";
   ssoRequired: boolean;
   verifiedAt?: Date | string | null;
+}
+
 export type GasSponsorshipProvider =
   | "custom_evm_paymaster"
   | "custom_bundler"
@@ -681,6 +683,8 @@ export interface SsoDiscoveryResult {
   tenantId: string | null;
   ssoRequired: boolean;
   available: boolean;
+}
+
 export interface SponsoredGasSpendSummary {
   currency: "USD";
   reservedUsd: string;

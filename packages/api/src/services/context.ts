@@ -14,8 +14,6 @@ import {
   verifyToken,
 } from "@stwd/auth";
 import {
-  agentKeyQuorums,
-  agentSigners,
   conditionSetItems,
   conditionSets,
   getDb,
@@ -707,4 +705,3 @@ export type {
   Tenant,
   TenantConfig,
 } from "@stwd/shared";
-export { agentKeyQuorums, agentSigners };
