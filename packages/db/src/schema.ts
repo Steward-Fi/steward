@@ -414,85 +414,6 @@ export const agentKeyQuorums = pgTable(
 );
 
 /**
- * Wallet ownership and delegated signer metadata for an agent wallet/account.
- * This is an authorization graph, not private-key material: signing routes can
- * use it to expose owners, service signers, quorum members, and scoped
- * delegation policies without changing custody storage.
- */
-export const agentSigners = pgTable(
-  "agent_signers",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    tenantId: varchar("tenant_id", { length: 64 })
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
-    agentId: varchar("agent_id", { length: 64 })
-      .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
-    signerType: varchar("signer_type", { length: 32 }).notNull(),
-    subjectType: varchar("subject_type", { length: 32 }).notNull(),
-    subjectId: varchar("subject_id", { length: 255 }).notNull(),
-    address: varchar("address", { length: 128 }),
-    chainFamily: chainFamilyEnum("chain_family"),
-    label: varchar("label", { length: 255 }),
-    permissions: text("permissions").array().notNull().default([]),
-    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
-    status: varchar("status", { length: 32 }).notNull().default("active"),
-    createdBy: varchar("created_by", { length: 255 }),
-    ...timestamps,
-  },
-  (table) => ({
-    tenantAgentIdx: index("agent_signers_tenant_agent_idx").on(table.tenantId, table.agentId),
-    agentStatusIdx: index("agent_signers_agent_status_idx").on(table.agentId, table.status),
-    agentSubjectUniqueIdx: uniqueIndex("agent_signers_agent_subject_idx").on(
-      table.agentId,
-      table.subjectType,
-      table.subjectId,
-    ),
-    tenantAgentFk: foreignKey({
-      columns: [table.tenantId, table.agentId],
-      foreignColumns: [agents.tenantId, agents.id],
-      name: "agent_signers_tenant_agent_fk",
-    }).onDelete("cascade"),
-  }),
-);
-
-/**
- * Threshold signing/quorum policy objects for an agent wallet/account.
- * Member IDs reference `agent_signers.id` logically; they are kept as an
- * ordered text array so quorum membership can be updated atomically.
- */
-export const agentKeyQuorums = pgTable(
-  "agent_key_quorums",
-  {
-    id: uuid("id").primaryKey().defaultRandom(),
-    tenantId: varchar("tenant_id", { length: 64 })
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
-    agentId: varchar("agent_id", { length: 64 })
-      .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
-    name: varchar("name", { length: 255 }).notNull(),
-    threshold: integer("threshold").notNull(),
-    memberSignerIds: text("member_signer_ids").array().notNull().default([]),
-    permissions: text("permissions").array().notNull().default([]),
-    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
-    status: varchar("status", { length: 32 }).notNull().default("active"),
-    createdBy: varchar("created_by", { length: 255 }),
-    ...timestamps,
-  },
-  (table) => ({
-    tenantAgentIdx: index("agent_key_quorums_tenant_agent_idx").on(table.tenantId, table.agentId),
-    agentStatusIdx: index("agent_key_quorums_agent_status_idx").on(table.agentId, table.status),
-    tenantAgentFk: foreignKey({
-      columns: [table.tenantId, table.agentId],
-      foreignColumns: [agents.tenantId, agents.id],
-      name: "agent_key_quorums_tenant_agent_fk",
-    }).onDelete("cascade"),
-  }),
-);
-
-/**
  * Encrypted private keys for each agent+chainFamily combination.
  * Composite PK: (agentId, chainFamily).
  * New agents store both 'evm' and 'solana' rows here.
@@ -1139,10 +1060,6 @@ export type SponsoredGasEvent = typeof sponsoredGasEvents.$inferSelect;
 export type NewSponsoredGasEvent = typeof sponsoredGasEvents.$inferInsert;
 export type AgentWallet = typeof agentWallets.$inferSelect;
 export type NewAgentWallet = typeof agentWallets.$inferInsert;
-export type AgentSigner = typeof agentSigners.$inferSelect;
-export type NewAgentSigner = typeof agentSigners.$inferInsert;
-export type AgentKeyQuorum = typeof agentKeyQuorums.$inferSelect;
-export type NewAgentKeyQuorum = typeof agentKeyQuorums.$inferInsert;
 export type EncryptedChainKey = typeof encryptedChainKeys.$inferSelect;
 export type NewEncryptedChainKey = typeof encryptedChainKeys.$inferInsert;
 export type PolicyTemplateRow = typeof policyTemplates.$inferSelect;
