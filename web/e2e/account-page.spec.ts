@@ -26,7 +26,10 @@ test.describe("Dashboard account management", () => {
     await expect(page.getByRole("heading", { name: "Account", exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Primary Login Methods" })).toBeVisible();
     await expect(page.getByRole("main").getByText(email)).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Portfolio" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Spend and Capabilities" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Linked Accounts" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Global Wallet Grants" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Embedded Wallets" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Refresh" })).toBeEnabled();
 

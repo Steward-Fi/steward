@@ -8,6 +8,7 @@
  */
 
 import {
+  type CreateWalletFn,
   connectorsForWallets,
   darkTheme,
   RainbowKitProvider,
@@ -44,6 +45,8 @@ export interface CreateDefaultWagmiConfigOptions<TChains extends DefaultWagmiCha
   chains: TChains;
   /** App name shown in wallet connection prompts. Defaults to "Steward". */
   appName?: string;
+  /** Extra RainbowKit wallet entries, e.g. a Steward global-wallet connector. */
+  wallets?: CreateWalletFn[];
   /** Enable wagmi SSR support. Defaults to true. */
   ssr?: boolean;
 }
@@ -65,6 +68,7 @@ export function createDefaultWagmiConfig<TChains extends DefaultWagmiChains>({
   projectId,
   chains,
   appName = "Steward",
+  wallets = [],
   ssr = true,
 }: CreateDefaultWagmiConfigOptions<TChains>): WagmiConfig {
   const connectors = connectorsForWallets(
@@ -72,6 +76,7 @@ export function createDefaultWagmiConfig<TChains extends DefaultWagmiChains>({
       {
         groupName: "Recommended",
         wallets: [
+          ...wallets,
           metaMaskWallet,
           coinbaseWallet,
           walletConnectWallet,

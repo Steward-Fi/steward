@@ -17,7 +17,7 @@
  *       This file exports a Hono route group ready for mounting.
  */
 
-import { createPublicKey, verify as verifySignature } from "node:crypto";
+import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 import {
   ChallengeStore,
   generateApiKey,
@@ -35,17 +35,22 @@ import {
 import {
   accounts,
   agentWallets,
+  auditEvents,
   authenticators,
   getDb,
   policies,
   refreshTokens,
+  tenantAppClients,
   tenantConfigs,
+  tenantInvitations,
   tenants,
   toPolicyRule,
   toTxRecord,
   transactions,
+  userPushSubscriptions,
   users,
   userTenants,
+  userWalletAppConsents,
 } from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import type {
@@ -63,7 +68,7 @@ import {
   Vault,
 } from "@stwd/vault";
 import bs58 from "bs58";
-import { and, desc, eq, ilike, isNull, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, isNull, ne, or, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
@@ -78,6 +83,7 @@ import {
   assertAllowedOAuthRedirectUri,
   createSessionToken,
   encryptOAuthProviderTokens,
+  getEmailAuthForTenant,
   getPhoneAuth,
 } from "./auth";
 
@@ -151,6 +157,18 @@ const oauthLinkChallenges = new ChallengeStore({ ttlMs: OAUTH_LINK_CHALLENGE_TTL
 const TELEGRAM_LINK_MAX_AGE_SEC = 24 * 60 * 60;
 const TENANT_ROLES = ["owner", "admin", "developer", "billing", "viewer", "member"] as const;
 type TenantRole = (typeof TENANT_ROLES)[number];
+const TENANT_INVITATION_ROLES = ["admin", "developer", "billing", "viewer", "member"] as const;
+type TenantInvitationRole = (typeof TENANT_INVITATION_ROLES)[number];
+const MAX_TENANT_METADATA_BYTES = 16_384;
+const MAX_TENANT_METADATA_DEPTH = 8;
+const MAX_TENANT_METADATA_KEYS = 100;
+const MAX_TENANT_METADATA_STRING_BYTES = 4_096;
+const PUSH_PROVIDERS = ["expo", "apns", "fcm"] as const;
+const PUSH_PLATFORMS = ["ios", "android"] as const;
+const MAX_PUSH_METADATA_BYTES = 8_192;
+
+type PushProvider = (typeof PUSH_PROVIDERS)[number];
+type PushPlatform = (typeof PUSH_PLATFORMS)[number];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -170,8 +188,52 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function isValidTenantId(value: unknown): value is string {
   return typeof value === "string" && /^[a-zA-Z0-9_\-.:]{1,64}$/.test(value);
+}
+
+function isPushProvider(value: unknown): value is PushProvider {
+  return typeof value === "string" && PUSH_PROVIDERS.includes(value as PushProvider);
+}
+
+function isPushPlatform(value: unknown): value is PushPlatform {
+  return typeof value === "string" && PUSH_PLATFORMS.includes(value as PushPlatform);
+}
+
+function normalizedOptionalString(value: unknown, maxLength: number): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maxLength) return null;
+  return trimmed;
+}
+
+function normalizePushToken(token: unknown, provider: PushProvider): string | null {
+  if (typeof token !== "string") return null;
+  const normalized = token.trim();
+  if (normalized.length < 16 || normalized.length > 4096 || /\s/.test(normalized)) return null;
+  if (provider === "apns" && !/^[0-9a-f]{64}$/i.test(normalized)) return null;
+  if (provider === "expo" && !/^(ExponentPushToken|ExpoPushToken)\[[^\]]+\]$/.test(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+function normalizePushMetadata(value: unknown): Record<string, unknown> | null {
+  if (value === undefined || value === null) return {};
+  if (!isPlainObject(value)) return null;
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_PUSH_METADATA_BYTES) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  return value;
 }
 
 function isValidUserId(value: unknown): value is string {
@@ -199,6 +261,93 @@ function normalizeTenantRole(value: unknown): TenantRole | null {
   if (typeof value !== "string") return null;
   const role = value.trim().toLowerCase();
   return (TENANT_ROLES as readonly string[]).includes(role) ? (role as TenantRole) : null;
+}
+
+function normalizeTenantInvitationRole(value: unknown): TenantInvitationRole | null {
+  if (value === undefined || value === null || value === "") return "member";
+  if (typeof value !== "string") return null;
+  const role = value.trim().toLowerCase();
+  return (TENANT_INVITATION_ROLES as readonly string[]).includes(role)
+    ? (role as TenantInvitationRole)
+    : null;
+}
+
+function normalizeInvitationExpiry(value: unknown): Date {
+  const maxSeconds = 30 * 24 * 60 * 60;
+  const defaultSeconds = 7 * 24 * 60 * 60;
+  const seconds =
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0
+      ? Math.min(value, maxSeconds)
+      : defaultSeconds;
+  return new Date(Date.now() + seconds * 1000);
+}
+
+function getTenantMetadataValidationError(value: unknown): string | null {
+  if (!isPlainObject(value)) return "tenantCustomMetadata must be an object";
+
+  let keyCount = 0;
+  const stack: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  while (stack.length > 0) {
+    const current = stack.pop() as { value: unknown; depth: number };
+    if (current.depth > MAX_TENANT_METADATA_DEPTH) {
+      return `tenantCustomMetadata must not exceed ${MAX_TENANT_METADATA_DEPTH} levels`;
+    }
+    if (typeof current.value === "string") {
+      if (new TextEncoder().encode(current.value).length > MAX_TENANT_METADATA_STRING_BYTES) {
+        return `tenantCustomMetadata string values must not exceed ${MAX_TENANT_METADATA_STRING_BYTES} bytes`;
+      }
+      continue;
+    }
+    if (
+      current.value === null ||
+      typeof current.value === "number" ||
+      typeof current.value === "boolean"
+    ) {
+      continue;
+    }
+    if (Array.isArray(current.value)) {
+      keyCount += current.value.length;
+      if (keyCount > MAX_TENANT_METADATA_KEYS) {
+        return `tenantCustomMetadata must not contain more than ${MAX_TENANT_METADATA_KEYS} keys or items`;
+      }
+      for (const child of current.value) {
+        stack.push({ value: child, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    if (isPlainObject(current.value)) {
+      const entries = Object.entries(current.value);
+      keyCount += entries.length;
+      if (keyCount > MAX_TENANT_METADATA_KEYS) {
+        return `tenantCustomMetadata must not contain more than ${MAX_TENANT_METADATA_KEYS} keys or items`;
+      }
+      for (const [, child] of entries) {
+        stack.push({ value: child, depth: current.depth + 1 });
+      }
+      continue;
+    }
+    return "tenantCustomMetadata must contain only JSON values";
+  }
+
+  if (new TextEncoder().encode(JSON.stringify(value)).length > MAX_TENANT_METADATA_BYTES) {
+    return `tenantCustomMetadata must not exceed ${MAX_TENANT_METADATA_BYTES} bytes`;
+  }
+  return null;
+}
+
+function tenantUserCsvRow(
+  fields: Array<string | number | boolean | Date | null | undefined>,
+): string {
+  return fields
+    .map((field) => {
+      const raw = field instanceof Date ? field.toISOString() : String(field ?? "");
+      const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+      if (safe.includes(",") || safe.includes('"') || safe.includes("\n")) {
+        return `"${safe.replace(/"/g, '""')}"`;
+      }
+      return safe;
+    })
+    .join(",");
 }
 
 function slugifyTenantId(value: string): string {
@@ -267,6 +416,12 @@ function isTenantAdminRole(role: string | null | undefined): boolean {
   return role === "owner" || role === "admin";
 }
 
+const TENANT_USER_DIRECTORY_READ_ROLES = ["owner", "admin", "developer", "viewer"] as const;
+
+function isTenantUserDirectoryReaderRole(role: string | null | undefined): boolean {
+  return (TENANT_USER_DIRECTORY_READ_ROLES as readonly string[]).includes(role ?? "");
+}
+
 async function activeTenantOwnerCount(
   tx: Pick<ReturnType<typeof getDb>, "select">,
   tenantId: string,
@@ -318,6 +473,18 @@ async function requireTenantAdmin(userId: string, tenantId: string): Promise<str
     .from(userTenants)
     .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
   return isTenantAdminRole(membership?.role) ? membership.role : null;
+}
+
+async function requireTenantUserDirectoryReader(
+  userId: string,
+  tenantId: string,
+): Promise<string | null> {
+  const db = getDb();
+  const [membership] = await db
+    .select({ role: userTenants.role })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+  return isTenantUserDirectoryReaderRole(membership?.role) ? membership.role : null;
 }
 
 async function ensurePersonalTenant(userId: string, displayName: string): Promise<string> {
@@ -881,6 +1048,16 @@ type UserLinkedAccount = {
   provider: string;
   providerAccountId: string;
   expiresAt: number | null;
+  type?: string;
+  embeddedWallets?: Array<{ address: string }>;
+  smartWallets?: Array<{ address: string }>;
+  providerApp?: {
+    id: string;
+    name: string | null;
+    logoUrl: string | null;
+  };
+  firstVerifiedAt?: string | Date;
+  latestVerifiedAt?: string | Date;
 };
 
 async function listUserLinkedAccounts(userId: string): Promise<UserLinkedAccount[]> {
@@ -901,6 +1078,32 @@ async function listUserLinkedAccounts(userId: string): Promise<UserLinkedAccount
     })
     .from(authenticators)
     .where(eq(authenticators.userId, userId));
+  const crossAppAccounts = await db
+    .select({
+      id: userWalletAppConsents.id,
+      tenantId: userWalletAppConsents.tenantId,
+      clientId: userWalletAppConsents.clientId,
+      walletAddress: userWalletAppConsents.walletAddress,
+      grantedAt: userWalletAppConsents.grantedAt,
+      lastUsedAt: userWalletAppConsents.lastUsedAt,
+      expiresAt: userWalletAppConsents.expiresAt,
+      appName: tenantAppClients.name,
+    })
+    .from(userWalletAppConsents)
+    .leftJoin(
+      tenantAppClients,
+      and(
+        eq(tenantAppClients.tenantId, userWalletAppConsents.tenantId),
+        eq(tenantAppClients.id, userWalletAppConsents.clientId),
+      ),
+    )
+    .where(
+      and(
+        eq(userWalletAppConsents.userId, userId),
+        eq(userWalletAppConsents.status, "active"),
+        sql`(${userWalletAppConsents.expiresAt} is null or ${userWalletAppConsents.expiresAt} > now())`,
+      ),
+    );
   return [
     ...linkedAccounts,
     ...passkeys.map((passkey) => ({
@@ -909,6 +1112,25 @@ async function listUserLinkedAccounts(userId: string): Promise<UserLinkedAccount
       providerAccountId: passkey.credentialId,
       expiresAt: null,
     })),
+    ...crossAppAccounts.map((account) => {
+      const appId = `${account.tenantId}/${account.clientId}`;
+      return {
+        id: account.id,
+        provider: "cross_app",
+        providerAccountId: appId,
+        expiresAt: account.expiresAt ? Math.floor(account.expiresAt.getTime() / 1000) : null,
+        type: "cross_app",
+        embeddedWallets: account.walletAddress ? [{ address: account.walletAddress }] : [],
+        smartWallets: [],
+        providerApp: {
+          id: appId,
+          name: account.appName,
+          logoUrl: null,
+        },
+        firstVerifiedAt: account.grantedAt,
+        latestVerifiedAt: account.lastUsedAt ?? account.grantedAt,
+      } satisfies UserLinkedAccount;
+    }),
   ];
 }
 
@@ -959,6 +1181,181 @@ user.get("/me", async (c) => {
       email: session.email as string | undefined,
       wallet: walletInfo,
     },
+  });
+});
+
+// ─── Push Subscriptions ──────────────────────────────────────────────────────
+
+function publicPushSubscription(row: typeof userPushSubscriptions.$inferSelect) {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    provider: row.provider,
+    token: row.token,
+    platform: row.platform,
+    deviceId: row.deviceId,
+    appId: row.appId,
+    locale: row.locale,
+    timezone: row.timezone,
+    metadata: row.metadata,
+    status: row.status,
+    lastSeenAt: row.lastSeenAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+user.get("/me/push-subscriptions", async (c) => {
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const db = getDb();
+
+  const rows = await db
+    .select()
+    .from(userPushSubscriptions)
+    .where(
+      and(eq(userPushSubscriptions.userId, userId), eq(userPushSubscriptions.status, "active")),
+    )
+    .orderBy(desc(userPushSubscriptions.lastSeenAt));
+
+  return c.json<ApiResponse<{ subscriptions: ReturnType<typeof publicPushSubscription>[] }>>({
+    ok: true,
+    data: { subscriptions: rows.map(publicPushSubscription) },
+  });
+});
+
+user.post("/me/push-subscriptions", async (c) => {
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const body = await safeJsonParse<{
+    provider?: unknown;
+    token?: unknown;
+    platform?: unknown;
+    tenantId?: unknown;
+    deviceId?: unknown;
+    appId?: unknown;
+    locale?: unknown;
+    timezone?: unknown;
+    metadata?: unknown;
+  }>(c);
+  if (!body || !isPushProvider(body.provider)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Push provider must be expo, apns, or fcm" },
+      400,
+    );
+  }
+  const token = normalizePushToken(body.token, body.provider);
+  if (!token) return c.json<ApiResponse>({ ok: false, error: "Invalid push token" }, 400);
+  const metadata = normalizePushMetadata(body.metadata);
+  if (!metadata) {
+    return c.json<ApiResponse>({ ok: false, error: "Push metadata must be a small object" }, 400);
+  }
+  const platform =
+    body.platform === undefined ? null : isPushPlatform(body.platform) ? body.platform : null;
+  if (body.platform !== undefined && !platform) {
+    return c.json<ApiResponse>({ ok: false, error: "Push platform must be ios or android" }, 400);
+  }
+  const tenantId =
+    body.tenantId === undefined || body.tenantId === null
+      ? null
+      : isValidTenantId(body.tenantId)
+        ? body.tenantId
+        : null;
+  if (body.tenantId !== undefined && body.tenantId !== null && !tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenantId" }, 400);
+  }
+
+  const db = getDb();
+  const [row] = await db
+    .insert(userPushSubscriptions)
+    .values({
+      userId,
+      tenantId,
+      provider: body.provider,
+      token,
+      platform,
+      deviceId: normalizedOptionalString(body.deviceId, 255),
+      appId: normalizedOptionalString(body.appId, 255),
+      locale: normalizedOptionalString(body.locale, 64),
+      timezone: normalizedOptionalString(body.timezone, 128),
+      metadata,
+      status: "active",
+      lastSeenAt: new Date(),
+      revokedAt: null,
+    })
+    .onConflictDoUpdate({
+      target: [
+        userPushSubscriptions.userId,
+        userPushSubscriptions.provider,
+        userPushSubscriptions.token,
+      ],
+      targetWhere: sql`${userPushSubscriptions.status} = 'active'`,
+      set: {
+        tenantId,
+        platform,
+        deviceId: normalizedOptionalString(body.deviceId, 255),
+        appId: normalizedOptionalString(body.appId, 255),
+        locale: normalizedOptionalString(body.locale, 64),
+        timezone: normalizedOptionalString(body.timezone, 128),
+        metadata,
+        lastSeenAt: new Date(),
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+
+  await writeAuditEvent({
+    tenantId: tenantId ?? personalTenantId(userId),
+    actorType: "user",
+    actorId: userId,
+    action: "user.push_subscription.registered",
+    resourceType: "user_push_subscription",
+    resourceId: row.id,
+    metadata: { provider: row.provider, platform: row.platform, appId: row.appId },
+  });
+
+  return c.json<ApiResponse<{ subscription: ReturnType<typeof publicPushSubscription> }>>({
+    ok: true,
+    data: { subscription: publicPushSubscription(row) },
+  });
+});
+
+user.delete("/me/push-subscriptions/:subscriptionId", async (c) => {
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const subscriptionId = c.req.param("subscriptionId");
+  const db = getDb();
+  const revokedAt = new Date();
+
+  const [row] = await db
+    .update(userPushSubscriptions)
+    .set({ status: "revoked", revokedAt, updatedAt: revokedAt })
+    .where(
+      and(
+        eq(userPushSubscriptions.id, subscriptionId),
+        eq(userPushSubscriptions.userId, userId),
+        eq(userPushSubscriptions.status, "active"),
+      ),
+    )
+    .returning();
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "Push subscription not found" }, 404);
+
+  await writeAuditEvent({
+    tenantId: row.tenantId ?? personalTenantId(userId),
+    actorType: "user",
+    actorId: userId,
+    action: "user.push_subscription.revoked",
+    resourceType: "user_push_subscription",
+    resourceId: row.id,
+    metadata: { provider: row.provider, platform: row.platform, appId: row.appId },
+  });
+
+  return c.json<ApiResponse<{ subscription: ReturnType<typeof publicPushSubscription> }>>({
+    ok: true,
+    data: { subscription: publicPushSubscription(row) },
   });
 });
 
@@ -3427,8 +3824,36 @@ type TenantAdminUserRow = {
   emailVerified: boolean | null;
   name: string | null;
   tenantCustomMetadata: Record<string, unknown>;
+  deactivatedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+};
+
+type TenantAdminInvitationRow = {
+  id: string;
+  tenantId: string;
+  email: string;
+  role: string;
+  status: string;
+  invitedByUserId: string | null;
+  acceptedByUserId: string | null;
+  acceptedAt: Date | null;
+  revokedAt: Date | null;
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+type TenantAdminUserEventRow = {
+  id: number;
+  seq: number;
+  action: string;
+  actorType: string;
+  actorId: string | null;
+  resourceType: string | null;
+  resourceId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: string;
 };
 
 function tenantAdminUserSelection() {
@@ -3441,10 +3866,297 @@ function tenantAdminUserSelection() {
     emailVerified: users.emailVerified,
     name: users.name,
     tenantCustomMetadata: userTenants.customMetadata,
+    deactivatedAt: users.deactivatedAt,
     createdAt: users.createdAt,
     updatedAt: users.updatedAt,
   };
 }
+
+function tenantAdminInvitationSelection() {
+  return {
+    id: tenantInvitations.id,
+    tenantId: tenantInvitations.tenantId,
+    email: tenantInvitations.email,
+    role: tenantInvitations.role,
+    status: tenantInvitations.status,
+    invitedByUserId: tenantInvitations.invitedByUserId,
+    acceptedByUserId: tenantInvitations.acceptedByUserId,
+    acceptedAt: tenantInvitations.acceptedAt,
+    revokedAt: tenantInvitations.revokedAt,
+    expiresAt: tenantInvitations.expiresAt,
+    createdAt: tenantInvitations.createdAt,
+    updatedAt: tenantInvitations.updatedAt,
+  };
+}
+
+async function requireTenantAdminMfa(
+  c: Context<{ Variables: UserVariables }>,
+  tenantId: string,
+  message: string,
+): Promise<{ ok: true; userId: string; role: string } | { ok: false; response: Response }> {
+  const requesterId = c.get("userId");
+  const session = c.get("userSession");
+  if (!sessionTenantMatches(session, tenantId)) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>(
+        { ok: false, error: "Session tenant does not match requested tenant" },
+        403,
+      ),
+    };
+  }
+  const requesterRole = await requireTenantAdmin(requesterId, tenantId);
+  if (!requesterRole) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "Tenant admin access required" }, 403),
+    };
+  }
+  if (!hasRecentMfaStepUp(session)) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: message }, 403),
+    };
+  }
+  return { ok: true, userId: requesterId, role: requesterRole };
+}
+
+async function requireTenantUserDirectoryReaderMfa(
+  c: Context<{ Variables: UserVariables }>,
+  tenantId: string,
+  message: string,
+): Promise<{ ok: true; userId: string; role: string } | { ok: false; response: Response }> {
+  const requesterId = c.get("userId");
+  const session = c.get("userSession");
+  if (!sessionTenantMatches(session, tenantId)) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>(
+        { ok: false, error: "Session tenant does not match requested tenant" },
+        403,
+      ),
+    };
+  }
+  const requesterRole = await requireTenantUserDirectoryReader(requesterId, tenantId);
+  if (!requesterRole) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>(
+        { ok: false, error: "Tenant user directory access required" },
+        403,
+      ),
+    };
+  }
+  if (!hasRecentMfaStepUp(session)) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: message }, 403),
+    };
+  }
+  return { ok: true, userId: requesterId, role: requesterRole };
+}
+
+/**
+ * GET /me/tenants/:tenantId/invitations
+ * Tenant-admin invitation list for dashboard views.
+ */
+user.get("/me/tenants/:tenantId/invitations", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  const admin = await requireTenantAdminMfa(
+    c,
+    tenantId,
+    "Tenant invitations require recent MFA verification",
+  );
+  if (!admin.ok) return admin.response;
+
+  const status = c.req.query("status")?.trim().toLowerCase() || "pending";
+  if (!["pending", "accepted", "revoked", "expired", "all"].includes(status)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid invitation status" }, 400);
+  }
+  const whereConditions = [eq(tenantInvitations.tenantId, tenantId)];
+  if (status !== "all") whereConditions.push(eq(tenantInvitations.status, status));
+  const rows = await getDb()
+    .select(tenantAdminInvitationSelection())
+    .from(tenantInvitations)
+    .where(and(...whereConditions))
+    .limit(clampLimit(c.req.query("limit") ?? null))
+    .offset(parseBoundedOffset(c.req.query("offset") ?? null));
+
+  return c.json<
+    ApiResponse<{ invitations: TenantAdminInvitationRow[]; limit: number; offset: number }>
+  >({
+    ok: true,
+    data: {
+      invitations: rows,
+      limit: clampLimit(c.req.query("limit") ?? null),
+      offset: parseBoundedOffset(c.req.query("offset") ?? null),
+    },
+  });
+});
+
+/**
+ * POST /me/tenants/:tenantId/invitations
+ * Tenant-admin invitation creation. Returns a one-time token for delivery.
+ */
+user.post("/me/tenants/:tenantId/invitations", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  const admin = await requireTenantAdminMfa(
+    c,
+    tenantId,
+    "Tenant invitation creation requires recent MFA verification",
+  );
+  if (!admin.ok) return admin.response;
+
+  const body = await safeJsonParse<{
+    email?: unknown;
+    role?: unknown;
+    expiresInSeconds?: unknown;
+    sendEmail?: unknown;
+  }>(c);
+  const email = typeof body?.email === "string" ? body.email.toLowerCase().trim() : "";
+  if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return c.json<ApiResponse>({ ok: false, error: "valid email is required" }, 400);
+  }
+  const role = normalizeTenantInvitationRole(body?.role);
+  if (!role) {
+    return c.json<ApiResponse>(
+      { ok: false, error: `role must be one of: ${TENANT_INVITATION_ROLES.join(", ")}` },
+      400,
+    );
+  }
+
+  const token = randomBytes(32).toString("hex");
+  const tokenHash = hashSha256Hex(token);
+  const expiresAt = normalizeInvitationExpiry(body?.expiresInSeconds);
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: admin.userId,
+    action: "tenant.invitation.create.authorized",
+    resourceType: "tenant_invitation",
+    resourceId: email,
+    metadata: { email, role, expiresAt: expiresAt.toISOString() },
+  });
+
+  const db = getDb();
+  const invitation = await db.transaction(async (tx) => {
+    const now = new Date();
+    await tx
+      .update(tenantInvitations)
+      .set({ status: "revoked", revokedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(tenantInvitations.tenantId, tenantId),
+          eq(tenantInvitations.email, email),
+          eq(tenantInvitations.status, "pending"),
+        ),
+      );
+    const [created] = await tx
+      .insert(tenantInvitations)
+      .values({ tenantId, email, role, tokenHash, invitedByUserId: admin.userId, expiresAt })
+      .returning(tenantAdminInvitationSelection());
+    return created;
+  });
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: admin.userId,
+    action: "tenant.invitation.create",
+    resourceType: "tenant_invitation",
+    resourceId: invitation.id,
+    metadata: { email, role, expiresAt: expiresAt.toISOString() },
+  });
+
+  let emailSent = false;
+  if (body?.sendEmail === true) {
+    try {
+      const emailAuth = await getEmailAuthForTenant(tenantId);
+      await emailAuth.sendTenantInvitation(email, { tenantId, token, expiresAt });
+      emailSent = true;
+    } catch (error) {
+      console.error("[TenantInvitation] Email delivery failed:", error);
+    }
+  }
+
+  return c.json<
+    ApiResponse<{ invitation: TenantAdminInvitationRow; token: string; emailSent: boolean }>
+  >({ ok: true, data: { invitation, token, emailSent } }, 201);
+});
+
+/**
+ * DELETE /me/tenants/:tenantId/invitations/:invitationId
+ * Tenant-admin pending invitation revocation.
+ */
+user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  const invitationId = c.req.param("invitationId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidUserId(invitationId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid invitation id format" }, 400);
+  }
+  const admin = await requireTenantAdminMfa(
+    c,
+    tenantId,
+    "Tenant invitation revocation requires recent MFA verification",
+  );
+  if (!admin.ok) return admin.response;
+
+  const db = getDb();
+  const [candidate] = await db
+    .select({
+      id: tenantInvitations.id,
+      email: tenantInvitations.email,
+      role: tenantInvitations.role,
+    })
+    .from(tenantInvitations)
+    .where(
+      and(
+        eq(tenantInvitations.tenantId, tenantId),
+        eq(tenantInvitations.id, invitationId),
+        eq(tenantInvitations.status, "pending"),
+      ),
+    )
+    .limit(1);
+  if (!candidate) {
+    return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
+  }
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: admin.userId,
+    action: "tenant.invitation.revoke.authorized",
+    resourceType: "tenant_invitation",
+    resourceId: candidate.id,
+    metadata: { email: candidate.email, role: candidate.role },
+  });
+
+  const [invitation] = await db
+    .update(tenantInvitations)
+    .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(tenantInvitations.tenantId, tenantId),
+        eq(tenantInvitations.id, invitationId),
+        eq(tenantInvitations.status, "pending"),
+      ),
+    )
+    .returning(tenantAdminInvitationSelection());
+  if (!invitation) {
+    return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
+  }
+
+  return c.json<ApiResponse>({ ok: true });
+});
 
 /**
  * GET /me/tenants/:tenantId/users
@@ -3452,27 +4164,16 @@ function tenantAdminUserSelection() {
  * tenant-scoped fields only and never exposes global linked accounts.
  */
 user.get("/me/tenants/:tenantId/users", async (c) => {
-  const requesterId = c.get("userId");
-  const session = c.get("userSession");
   const tenantId = c.req.param("tenantId");
   if (!isValidTenantId(tenantId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
   }
-  if (!sessionTenantMatches(session, tenantId)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Session tenant does not match requested tenant" },
-      403,
-    );
-  }
-  if (!(await requireTenantAdmin(requesterId, tenantId))) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant admin access required" }, 403);
-  }
-  if (!hasRecentMfaStepUp(session)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Tenant user directory requires recent MFA verification" },
-      403,
-    );
-  }
+  const reader = await requireTenantUserDirectoryReaderMfa(
+    c,
+    tenantId,
+    "Tenant user directory requires recent MFA verification",
+  );
+  if (!reader.ok) return reader.response;
 
   const db = getDb();
   const limit = clampLimit(c.req.query("limit") ?? null);
@@ -3484,7 +4185,7 @@ user.get("/me/tenants/:tenantId/users", async (c) => {
   if (q) {
     const like = `%${q.replace(/[%_]/g, "\\$&")}%`;
     whereConditions.push(
-      or(ilike(users.email, like), ilike(users.name, like), ilike(users.id, like))!,
+      or(ilike(users.email, like), ilike(users.name, like), sql`${users.id}::text ilike ${like}`)!,
     );
   }
 
@@ -3503,13 +4204,96 @@ user.get("/me/tenants/:tenantId/users", async (c) => {
 });
 
 /**
+ * GET /me/tenants/:tenantId/users/export
+ * Export the tenant-scoped user directory as CSV. The export intentionally
+ * excludes global metadata, linked accounts, wallets, and identity graph data.
+ */
+user.get("/me/tenants/:tenantId/users/export", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  const admin = await requireTenantAdminMfa(
+    c,
+    tenantId,
+    "Tenant user export requires recent MFA verification",
+  );
+  if (!admin.ok) return admin.response;
+
+  const db = getDb();
+  const limit = Math.min(clampLimit(c.req.query("limit") ?? null, 1000), 10_000);
+  const email = c.req.query("email")?.trim().toLowerCase();
+  const q = c.req.query("q")?.trim().toLowerCase();
+  const whereConditions = [eq(userTenants.tenantId, tenantId)];
+  if (email) whereConditions.push(eq(users.email, email));
+  if (q) {
+    const like = `%${q.replace(/[%_]/g, "\\$&")}%`;
+    whereConditions.push(
+      or(ilike(users.email, like), ilike(users.name, like), sql`${users.id}::text ilike ${like}`)!,
+    );
+  }
+
+  const rows = await db
+    .select(tenantAdminUserSelection())
+    .from(userTenants)
+    .innerJoin(users, eq(userTenants.userId, users.id))
+    .where(and(...whereConditions))
+    .limit(limit);
+
+  const csvRows = [
+    tenantUserCsvRow([
+      "user_id",
+      "tenant_id",
+      "role",
+      "status",
+      "email",
+      "email_verified",
+      "name",
+      "tenant_custom_metadata",
+      "joined_at",
+      "created_at",
+      "updated_at",
+      "deactivated_at",
+    ]),
+    ...rows.map((row) =>
+      tenantUserCsvRow([
+        row.userId,
+        row.tenantId,
+        row.role,
+        row.deactivatedAt ? "deactivated" : "active",
+        row.email,
+        row.emailVerified,
+        row.name,
+        JSON.stringify(row.tenantCustomMetadata ?? {}),
+        row.joinedAt,
+        row.createdAt,
+        row.updatedAt,
+        row.deactivatedAt,
+      ]),
+    ),
+  ];
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: admin.userId,
+    action: "tenant.member.export",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { count: rows.length, limitedTo: limit, filtered: Boolean(email || q) },
+  });
+
+  c.header("Content-Type", "text/csv; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${tenantId}-users.csv"`);
+  return c.body(`${csvRows.join("\n")}\n`);
+});
+
+/**
  * GET /me/tenants/:tenantId/users/:userId
  * Tenant-admin user read. Keeps global identity graph and linked accounts out
  * of the tenant dashboard surface.
  */
 user.get("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
-  const requesterId = c.get("userId");
-  const session = c.get("userSession");
   const tenantId = c.req.param("tenantId");
   const targetUserId = c.req.param("targetUserId");
   if (!isValidTenantId(tenantId)) {
@@ -3518,21 +4302,12 @@ user.get("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   if (!isValidUserId(targetUserId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id" }, 400);
   }
-  if (!sessionTenantMatches(session, tenantId)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Session tenant does not match requested tenant" },
-      403,
-    );
-  }
-  if (!(await requireTenantAdmin(requesterId, tenantId))) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant admin access required" }, 403);
-  }
-  if (!hasRecentMfaStepUp(session)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Tenant user directory requires recent MFA verification" },
-      403,
-    );
-  }
+  const reader = await requireTenantUserDirectoryReaderMfa(
+    c,
+    tenantId,
+    "Tenant user directory requires recent MFA verification",
+  );
+  if (!reader.ok) return reader.response;
 
   const db = getDb();
   const [row] = await db
@@ -3543,6 +4318,95 @@ user.get("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
 
   if (!row) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
   return c.json<ApiResponse<TenantAdminUserRow>>({ ok: true, data: row });
+});
+
+/**
+ * GET /me/tenants/:tenantId/users/:userId/events
+ * Tenant-scoped lifecycle/activity history for a user. Returns only audit rows
+ * for this tenant and user resource, avoiding global identity internals.
+ */
+user.get("/me/tenants/:tenantId/users/:targetUserId/events", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  const targetUserId = c.req.param("targetUserId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidUserId(targetUserId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid user id" }, 400);
+  }
+  const reader = await requireTenantUserDirectoryReaderMfa(
+    c,
+    tenantId,
+    "Tenant user activity requires recent MFA verification",
+  );
+  if (!reader.ok) return reader.response;
+
+  const db = getDb();
+  const [membership] = await db
+    .select({ id: userTenants.id })
+    .from(userTenants)
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
+    .limit(1);
+  if (!membership) {
+    return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
+  }
+
+  const limit = clampLimit(c.req.query("limit") ?? null, 25);
+  const offset = parseBoundedOffset(c.req.query("offset") ?? null);
+  const auditWhere = and(
+    eq(auditEvents.tenantId, tenantId),
+    eq(auditEvents.resourceType, "user"),
+    eq(auditEvents.resourceId, targetUserId),
+  );
+  const rows = await db
+    .select({
+      id: auditEvents.id,
+      seq: auditEvents.seq,
+      action: auditEvents.action,
+      actorType: auditEvents.actorType,
+      actorId: auditEvents.actorId,
+      resourceType: auditEvents.resourceType,
+      resourceId: auditEvents.resourceId,
+      metadata: auditEvents.metadata,
+      createdAt: auditEvents.createdAt,
+    })
+    .from(auditEvents)
+    .where(auditWhere)
+    .orderBy(desc(auditEvents.seq))
+    .limit(limit)
+    .offset(offset);
+  const [{ total } = { total: 0 }] = await db
+    .select({ total: sql<number>`count(*)` })
+    .from(auditEvents)
+    .where(auditWhere);
+
+  return c.json<
+    ApiResponse<{
+      events: TenantAdminUserEventRow[];
+      limit: number;
+      offset: number;
+      total: number;
+    }>
+  >({
+    ok: true,
+    data: {
+      events: rows.map((row) => ({
+        id: row.id,
+        seq: Number(row.seq),
+        action: row.action,
+        actorType: row.actorType,
+        actorId: row.actorId,
+        resourceType: row.resourceType,
+        resourceId: row.resourceId,
+        metadata: row.metadata,
+        createdAt:
+          row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+      })),
+      limit,
+      offset,
+      total: Number(total),
+    },
+  });
 });
 
 /**
@@ -3666,6 +4530,464 @@ user.patch("/me/tenants/:tenantId/users/:targetUserId/role", async (c) => {
 });
 
 /**
+ * PATCH /me/tenants/:tenantId/users/:userId/metadata
+ * Tenant-admin metadata replacement for dashboard user management. This is
+ * limited to the tenant membership metadata and never mutates global user data.
+ */
+user.patch("/me/tenants/:tenantId/users/:targetUserId/metadata", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  const targetUserId = c.req.param("targetUserId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidUserId(targetUserId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid user id" }, 400);
+  }
+  const admin = await requireTenantAdminMfa(
+    c,
+    tenantId,
+    "Tenant user metadata updates require recent MFA verification",
+  );
+  if (!admin.ok) return admin.response;
+
+  const body = await safeJsonParse<{ tenantCustomMetadata?: Record<string, unknown> }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  if (body.tenantCustomMetadata === undefined) {
+    return c.json<ApiResponse>({ ok: false, error: "tenantCustomMetadata is required" }, 400);
+  }
+  const metadataError = getTenantMetadataValidationError(body.tenantCustomMetadata);
+  if (metadataError) return c.json<ApiResponse>({ ok: false, error: metadataError }, 400);
+
+  const db = getDb();
+  const [existing] = await db
+    .select({ customMetadata: userTenants.customMetadata })
+    .from(userTenants)
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
+    .limit(1);
+  if (!existing) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: admin.userId,
+    action: "tenant.member.metadata.update.authorized",
+    resourceType: "user",
+    resourceId: targetUserId,
+    metadata: { updatedTenant: true },
+  });
+
+  await db
+    .update(userTenants)
+    .set({ customMetadata: body.tenantCustomMetadata })
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+
+  const [row] = await db
+    .select(tenantAdminUserSelection())
+    .from(userTenants)
+    .innerJoin(users, eq(userTenants.userId, users.id))
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+
+  try {
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: admin.userId,
+      action: "tenant.member.metadata.update",
+      resourceType: "user",
+      resourceId: targetUserId,
+      metadata: { updatedTenant: true },
+    });
+  } catch (error) {
+    await db
+      .update(userTenants)
+      .set({ customMetadata: existing.customMetadata })
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+    throw error;
+  }
+
+  dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
+    userId: targetUserId,
+    scope: "tenant",
+    field: "tenantCustomMetadata",
+  });
+  return c.json<ApiResponse<TenantAdminUserRow>>({ ok: true, data: row as TenantAdminUserRow });
+});
+
+/**
+ * PATCH /me/tenants/:tenantId/users/:userId/deactivate
+ * Dashboard lifecycle control for app-scoped users. Because deactivatedAt is a
+ * global user field, this refuses targets that also belong to another
+ * non-personal tenant; cross-tenant lifecycle remains platform-key only.
+ */
+user.patch("/me/tenants/:tenantId/users/:targetUserId/deactivate", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  const targetUserId = c.req.param("targetUserId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidUserId(targetUserId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid user id" }, 400);
+  }
+  const admin = await requireTenantAdminMfa(
+    c,
+    tenantId,
+    "Tenant user lifecycle changes require recent MFA verification",
+  );
+  if (!admin.ok) return admin.response;
+
+  const body = await safeJsonParse<{ deactivated?: boolean }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  const deactivated = body.deactivated !== false;
+
+  const db = getDb();
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: admin.userId,
+    action: deactivated
+      ? "tenant.member.deactivate.authorized"
+      : "tenant.member.reactivate.authorized",
+    resourceType: "user",
+    resourceId: targetUserId,
+  });
+
+  const result = await db
+    .transaction(async (tx) => {
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      const [membership] = await tx
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
+        .limit(1);
+      if (!membership) return null;
+      if (deactivated && membership.role === "owner") {
+        if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
+          throw new Error("Cannot deactivate the sole owner");
+        }
+      }
+
+      const [otherTenantCount] = await tx
+        .select({ count: sql<number>`count(*)` })
+        .from(userTenants)
+        .where(
+          and(
+            eq(userTenants.userId, targetUserId),
+            ne(userTenants.tenantId, tenantId),
+            sql`${userTenants.tenantId} <> ${`personal-${targetUserId}`}`,
+          ),
+        );
+      if (Number(otherTenantCount?.count ?? 0) > 0) {
+        throw new Error(
+          "Tenant dashboard lifecycle changes are limited to users without other tenant memberships",
+        );
+      }
+
+      const [previous] = await tx
+        .select({ deactivatedAt: users.deactivatedAt, updatedAt: users.updatedAt })
+        .from(users)
+        .where(eq(users.id, targetUserId))
+        .limit(1);
+      if (!previous) return null;
+
+      const issuedBefore = await revocationStore.revokeUserTokens(targetUserId);
+      await tx
+        .update(users)
+        .set({ deactivatedAt: deactivated ? new Date() : null, updatedAt: new Date() })
+        .where(eq(users.id, targetUserId));
+      await tx
+        .delete(refreshTokens)
+        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
+
+      const [row] = await tx
+        .select(tenantAdminUserSelection())
+        .from(userTenants)
+        .innerJoin(users, eq(userTenants.userId, users.id))
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+      return { row, previous, issuedBefore };
+    })
+    .catch((err: unknown) => {
+      if (err instanceof Error) {
+        if (err.message === "Cannot deactivate the sole owner") return err.message;
+        if (err.message.startsWith("Tenant dashboard lifecycle changes")) return err.message;
+      }
+      throw err;
+    });
+
+  if (typeof result === "string") {
+    return c.json<ApiResponse>({ ok: false, error: result }, 409);
+  }
+  if (result === null || !result.row) {
+    return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
+  }
+
+  try {
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: admin.userId,
+      action: deactivated ? "tenant.member.deactivate" : "tenant.member.reactivate",
+      resourceType: "user",
+      resourceId: targetUserId,
+      metadata: { issuedBefore: result.issuedBefore },
+    });
+  } catch (error) {
+    await db
+      .update(users)
+      .set({
+        deactivatedAt: result.previous.deactivatedAt,
+        updatedAt: result.previous.updatedAt,
+      })
+      .where(eq(users.id, targetUserId));
+    throw error;
+  }
+
+  dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
+    userId: targetUserId,
+    scope: "tenant",
+    field: "deactivatedAt",
+  });
+  return c.json<ApiResponse<TenantAdminUserRow>>({ ok: true, data: result.row });
+});
+
+/**
+ * DELETE /me/tenants/:tenantId/users/:userId
+ * Remove a user from the current tenant. This is the dashboard-safe app-level
+ * delete equivalent; global hard-delete remains platform-key only.
+ */
+user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  const targetUserId = c.req.param("targetUserId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidUserId(targetUserId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid user id" }, 400);
+  }
+  const admin = await requireTenantAdminMfa(
+    c,
+    tenantId,
+    "Tenant user removal requires recent MFA verification",
+  );
+  if (!admin.ok) return admin.response;
+  if (admin.userId === targetUserId) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Use the tenant leave flow to remove your own membership" },
+      400,
+    );
+  }
+
+  const db = getDb();
+  let member: { role: string } | null = null;
+  try {
+    member = await db.transaction(async (tx) => {
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      const [current] = await tx
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+      if (!current) return null;
+      if (current.role === "owner") {
+        if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
+          throw new Error("Cannot remove the sole owner");
+        }
+      }
+      return current;
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "Cannot remove the sole owner") {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 409);
+    }
+    throw err;
+  }
+  if (!member) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: admin.userId,
+    action: "tenant.member.remove.authorized",
+    resourceType: "user",
+    resourceId: targetUserId,
+    metadata: { role: member.role },
+  });
+
+  let deleted: { role: string } | null = null;
+  try {
+    deleted = await db.transaction(async (tx) => {
+      await lockTenantOwnerLifecycle(tx, tenantId);
+      const [current] = await tx
+        .select({ role: userTenants.role })
+        .from(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+      if (!current) return null;
+      if (current.role === "owner") {
+        if ((await activeTenantOwnerCount(tx, tenantId, targetUserId)) < 1) {
+          throw new Error("Cannot remove the sole owner");
+        }
+      }
+      const [row] = await tx
+        .delete(userTenants)
+        .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
+        .returning({ role: userTenants.role });
+      await tx
+        .delete(refreshTokens)
+        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
+      return row ?? null;
+    });
+  } catch (err) {
+    if (err instanceof Error && err.message === "Cannot remove the sole owner") {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 409);
+    }
+    throw err;
+  }
+  if (!deleted) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
+
+  const revokedBefore = await revocationStore.revokeUserTokens(targetUserId);
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: admin.userId,
+    action: "tenant.member.remove",
+    resourceType: "user",
+    resourceId: targetUserId,
+    metadata: { role: deleted.role, revokedUserTokensIssuedBefore: revokedBefore },
+  });
+
+  dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
+    userId: targetUserId,
+    scope: "tenant",
+    field: "tenantMembership",
+  });
+  return c.json<ApiResponse>({ ok: true });
+});
+
+/**
+ * POST /me/tenants/:tenantId/invitations/accept
+ * Accept a pending tenant invitation using a one-time token. The token is
+ * scoped to the authenticated user's verified email and cannot grant owner.
+ */
+user.post("/me/tenants/:tenantId/invitations/accept", async (c) => {
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const tenantId = c.req.param("tenantId");
+  const body = await safeJsonParse<{ token?: string }>(c);
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (isReservedTenantId(tenantId)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Personal tenants cannot be joined by invitation" },
+      403,
+    );
+  }
+  if (!body?.token || typeof body.token !== "string" || !/^[a-f0-9]{64}$/i.test(body.token)) {
+    return c.json<ApiResponse>({ ok: false, error: "token is required" }, 400);
+  }
+
+  const db = getDb();
+  const [userRecord] = await db
+    .select({ email: users.email, emailVerified: users.emailVerified })
+    .from(users)
+    .where(eq(users.id, userId));
+  const email = userRecord?.email?.toLowerCase().trim();
+  if (!email || !userRecord?.emailVerified) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invitation acceptance requires a verified email session" },
+      403,
+    );
+  }
+
+  const tokenHash = hashSha256Hex(body.token);
+  const [candidate] = await db
+    .select({ id: tenantInvitations.id, role: tenantInvitations.role })
+    .from(tenantInvitations)
+    .where(
+      and(
+        eq(tenantInvitations.tenantId, tenantId),
+        eq(tenantInvitations.email, email),
+        eq(tenantInvitations.tokenHash, tokenHash),
+        eq(tenantInvitations.status, "pending"),
+        gte(tenantInvitations.expiresAt, new Date()),
+      ),
+    );
+  if (!candidate) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired invitation" }, 404);
+  }
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "tenant.invitation.accept.authorized",
+    resourceType: "tenant_invitation",
+    resourceId: candidate.id,
+    metadata: { email, role: candidate.role },
+  });
+
+  const accepted = await db.transaction(async (tx) => {
+    const [existingMembership] = await tx
+      .select({ role: userTenants.role })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+      .limit(1);
+    if (existingMembership) {
+      return {
+        id: candidate.id,
+        role: existingMembership.role,
+        alreadyMember: true,
+      };
+    }
+    const [invitation] = await tx
+      .update(tenantInvitations)
+      .set({
+        status: "accepted",
+        acceptedByUserId: userId,
+        acceptedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(tenantInvitations.id, candidate.id),
+          eq(tenantInvitations.tenantId, tenantId),
+          eq(tenantInvitations.email, email),
+          eq(tenantInvitations.tokenHash, tokenHash),
+          eq(tenantInvitations.status, "pending"),
+          gte(tenantInvitations.expiresAt, new Date()),
+        ),
+      )
+      .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
+    if (!invitation) return null;
+    await tx
+      .insert(userTenants)
+      .values({ userId, tenantId, role: invitation.role })
+      .onConflictDoNothing();
+    return { ...invitation, alreadyMember: false };
+  });
+  if (!accepted) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired invitation" }, 404);
+  }
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "tenant.invitation.accept",
+    resourceType: "tenant_invitation",
+    resourceId: accepted.id,
+    metadata: { email, role: accepted.role },
+  });
+  return c.json({
+    ok: true,
+    tenantId,
+    role: accepted.role,
+    invitationId: accepted.id,
+    ...(accepted.alreadyMember ? { alreadyMember: true } : {}),
+  });
+});
+
+/**
  * POST /me/tenants/:tenantId/join
  * Join a tenant that has join_mode = 'open'.
  */
@@ -3710,6 +5032,104 @@ user.post("/me/tenants/:tenantId/join", async (c) => {
     .where(eq(tenantConfigs.tenantId, tenantId));
 
   const joinMode = config?.joinMode;
+
+  if (joinMode === "invite") {
+    const body = await safeJsonParse<{ token?: string }>(c);
+    if (!body?.token || typeof body.token !== "string" || !/^[a-f0-9]{64}$/i.test(body.token)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Tenant invitation token is required to join" },
+        403,
+      );
+    }
+
+    const [userRecord] = await db
+      .select({ email: users.email, emailVerified: users.emailVerified })
+      .from(users)
+      .where(eq(users.id, userId));
+    const email = userRecord?.email?.toLowerCase().trim();
+    if (!email || !userRecord?.emailVerified) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Tenant invitation acceptance requires a verified email session" },
+        403,
+      );
+    }
+
+    const tokenHash = hashSha256Hex(body.token);
+    const [candidate] = await db
+      .select({ id: tenantInvitations.id, role: tenantInvitations.role })
+      .from(tenantInvitations)
+      .where(
+        and(
+          eq(tenantInvitations.tenantId, tenantId),
+          eq(tenantInvitations.email, email),
+          eq(tenantInvitations.tokenHash, tokenHash),
+          eq(tenantInvitations.status, "pending"),
+          gte(tenantInvitations.expiresAt, new Date()),
+        ),
+      );
+    if (!candidate) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Tenant '${tenantId}' requires an invitation to join` },
+        403,
+      );
+    }
+
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "tenant.member.accept_invite.authorized",
+      resourceType: "tenant_invitation",
+      resourceId: candidate.id,
+      metadata: { email, role: candidate.role },
+    });
+
+    const accepted = await db.transaction(async (tx) => {
+      const [invitation] = await tx
+        .update(tenantInvitations)
+        .set({
+          status: "accepted",
+          acceptedByUserId: userId,
+          acceptedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(tenantInvitations.id, candidate.id),
+            eq(tenantInvitations.tenantId, tenantId),
+            eq(tenantInvitations.email, email),
+            eq(tenantInvitations.tokenHash, tokenHash),
+            eq(tenantInvitations.status, "pending"),
+            gte(tenantInvitations.expiresAt, new Date()),
+          ),
+        )
+        .returning({ id: tenantInvitations.id, role: tenantInvitations.role });
+      if (!invitation) return null;
+      await tx
+        .insert(userTenants)
+        .values({ userId, tenantId, role: invitation.role })
+        .onConflictDoNothing();
+      return invitation;
+    });
+    if (!accepted) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `Tenant '${tenantId}' requires an invitation to join` },
+        403,
+      );
+    }
+
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "tenant.member.accept_invite",
+      resourceType: "tenant_invitation",
+      resourceId: accepted.id,
+      metadata: { email, role: accepted.role },
+    });
+
+    return c.json({ ok: true, tenantId, role: accepted.role });
+  }
 
   if (joinMode !== "open") {
     return c.json<ApiResponse>(

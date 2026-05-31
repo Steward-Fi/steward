@@ -6,6 +6,7 @@ export { PolicyControls } from "./components/PolicyControls.js";
 export { SpendDashboard } from "./components/SpendDashboard.js";
 export { StewardAuthGuard } from "./components/StewardAuthGuard.js";
 export { StewardEmailCallback } from "./components/StewardEmailCallback.js";
+export { StewardGlobalWalletConsent } from "./components/StewardGlobalWalletConsent.js";
 export { StewardLinkedAccounts } from "./components/StewardLinkedAccounts.js";
 // ─── Components ───
 export { PASSKEY_ENROLL_PROMPT_KEY, StewardLogin } from "./components/StewardLogin.js";
@@ -66,6 +67,7 @@ export type {
   StewardClient,
   StewardContextValue,
   StewardEmailCallbackProps,
+  StewardGlobalWalletConsentProps,
   StewardLinkedAccountsProps,
   StewardLoginProps,
   StewardMfaChallengeProps,

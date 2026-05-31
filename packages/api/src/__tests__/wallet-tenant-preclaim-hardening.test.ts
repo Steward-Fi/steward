@@ -54,10 +54,7 @@ describe("wallet tenant preclaim hardening", () => {
     ).toBeGreaterThan(conflictStart);
     // The id-conflict branch must look up the conflicting tenant by id and then throw,
     // so a caller never receives a tenant whose ownerAddress does not match.
-    const conflictLookup = authSource.indexOf(
-      "eq(tenants.id, opts.tenantId)",
-      conflictStart,
-    );
+    const conflictLookup = authSource.indexOf("eq(tenants.id, opts.tenantId)", conflictStart);
     expect(conflictLookup).toBeGreaterThan(conflictStart);
     // Any post-conflict retry that returns an existing tenant must be scoped by
     // ownerAddress (never by id alone) before the id-conflict throw.

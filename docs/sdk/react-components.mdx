@@ -160,6 +160,28 @@ Drop-in auth widget supporting passkeys, email magic links, and OAuth providers.
 
 The component auto-discovers enabled providers via `GET /auth/providers` and only shows buttons for methods that are enabled on both the server and in the props.
 
+### `<StewardMfaChallenge>`
+
+Custom MFA verification UI for login or sensitive wallet-action challenges.
+It supports TOTP, SMS, recovery-code fallback for TOTP, and passkey step-up.
+
+```tsx
+<StewardMfaChallenge
+  challenge={result.mfa}
+  onSuccess={(session) => console.log("MFA complete", session)}
+  onError={(err) => console.error(err)}
+/>
+```
+
+### `<StewardMfaSettings>`
+
+User-facing MFA management for enrollment status, TOTP setup, SMS setup, and
+unenrollment flows.
+
+```tsx
+<StewardMfaSettings onUpdated={() => refetchUser()} />
+```
+
 ### `<StewardEmailCallback>`
 
 Mount on your `/auth/callback` route to handle magic link token verification:
@@ -376,11 +398,14 @@ Or pass overrides to the provider:
     accentColor: "#FF8C5A",
     backgroundColor: "#0A0A0A",
     colorScheme: "dark",
+    logoUrl: "https://assets.example.com/logo.png",
+    faviconUrl: "https://assets.example.com/favicon.ico",
   }}
 >
 ```
 
 The tenant's control plane config can also supply a theme — `@stwd/react` fetches it automatically from `GET /tenants/:id/config` and merges it with any prop overrides.
+Hosted asset URLs are carried in the merged theme object for embedded components that render tenant branding; the API only persists absolute HTTPS URLs, with localhost HTTP allowed for development.
 
 ---
 

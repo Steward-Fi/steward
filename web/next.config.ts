@@ -4,6 +4,14 @@ import type { NextConfig } from "next";
 
 const configDir = path.dirname(fileURLToPath(import.meta.url));
 
+// HSTS (HTTPS enforcement) is ON by default and MUST stay on in production.
+// The local e2e harness serves the app over plain http://localhost, where
+// WebKit honors HSTS and upgrades same-origin asset requests to https:// — which
+// the http-only dev server cannot answer, blanking the page. This flag is an
+// explicit, secure-by-default opt-OUT set ONLY by that harness; absent the flag,
+// full enforcement applies, so production is never weakened.
+const ALLOW_INSECURE_HTTP = process.env.STEWARD_ALLOW_INSECURE_HTTP === "true";
+
 /** Security headers applied to static assets. Page CSP is nonce-based in middleware. */
 const SECURITY_HEADERS = [
   // X-Frame-Options is the legacy companion to frame-ancestors for old browsers.
@@ -24,10 +32,13 @@ const config: NextConfig = {
   outputFileTracingRoot: path.resolve(configDir, ".."),
   transpilePackages: ["@stwd/sdk", "@stwd/shared", "@stwd/react", "@simplewebauthn/browser"],
   async headers() {
+    const headers = ALLOW_INSECURE_HTTP
+      ? SECURITY_HEADERS.filter((h) => h.key !== "Strict-Transport-Security")
+      : SECURITY_HEADERS;
     return [
       {
         source: "/:path*",
-        headers: SECURITY_HEADERS,
+        headers,
       },
     ];
   },

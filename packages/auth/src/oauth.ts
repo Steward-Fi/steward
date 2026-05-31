@@ -20,6 +20,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { APPLE_ISSUER, APPLE_JWKS_URI, verifyAppleIdToken } from "./apple";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,6 +36,28 @@ export interface OAuthProvider {
   requiresPkce?: boolean;
   emailUrl?: string;
   profileMap?: OAuthProfileMap;
+  /**
+   * Overrides the OAuth `client_id` parameter name on the authorize and token
+   * requests. TikTok, for example, names the parameter `client_key` rather than
+   * `client_id`. The internal config field stays `clientId`; only the wire
+   * parameter name changes. Defaults to "client_id".
+   */
+  clientIdParam?: string;
+  /**
+   * Marks the provider as OIDC: the user's identity is derived from the
+   * `id_token` returned by the token endpoint (verified against `oidcJwksUri`),
+   * not from a userinfo endpoint. Used for "Sign in with Apple", which exposes
+   * no userinfo endpoint. When set, getUserInfo() verifies the id_token from the
+   * preceding exchangeCode() call instead of calling userInfoUrl.
+   */
+  oidc?: OAuthOidcConfig;
+}
+
+export interface OAuthOidcConfig {
+  /** Expected issuer (`iss`) of the id_token. */
+  issuer: string;
+  /** JWKS endpoint used to verify the id_token signature. */
+  jwksUri: string;
 }
 
 export interface OAuthProfileMap {
@@ -51,6 +74,8 @@ export interface OAuthTokenResponse {
   expires_in?: number;
   refresh_token?: string;
   scope?: string;
+  /** Present for OIDC providers (e.g. Apple). A JWT carrying the user identity. */
+  id_token?: string;
 }
 
 export interface OAuthUserInfo {
@@ -85,6 +110,8 @@ const BUILT_IN_PROVIDERS = [
   "twitch",
   "instagram",
   "line",
+  "apple",
+  "tiktok",
 ] as const;
 type BuiltInProvider = (typeof BUILT_IN_PROVIDERS)[number];
 const CUSTOM_PROVIDER_PREFIX = "custom:";
@@ -428,6 +455,53 @@ export function getProviderConfig(provider: string): OAuthProvider {
       };
     }
 
+    case "apple": {
+      // "Sign in with Apple" is OIDC: the token endpoint returns an id_token
+      // (JWT) and there is NO userinfo endpoint — the identity lives in the
+      // verified id_token. APPLE_CLIENT_ID is the Services ID (the `aud`).
+      // APPLE_CLIENT_SECRET is itself a short-lived ES256 JWT the developer
+      // pre-generates with their private key; this OSS adapter takes it from
+      // config rather than performing Apple key management. See verifyAppleIdToken.
+      const { clientId, clientSecret } = requireCredentials("apple", "Apple");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl: "https://appleid.apple.com/auth/authorize",
+        tokenUrl: "https://appleid.apple.com/auth/token",
+        // No userinfo endpoint exists; getUserInfo() verifies the id_token
+        // instead. Point this at the JWKS URL only to satisfy the https check.
+        userInfoUrl: APPLE_JWKS_URI,
+        scopes: ["name", "email"],
+        oidc: { issuer: APPLE_ISSUER, jwksUri: APPLE_JWKS_URI },
+      };
+    }
+
+    case "tiktok": {
+      // TikTok is a standard OAuth2 authorization-code provider, but it names
+      // the client-id parameter `client_key` (not `client_id`) on both the
+      // authorize and token requests. The userinfo response wraps the profile
+      // in { data: { user: {...} } }; the stable id is open_id (union_id is an
+      // app-group-stable alternative). Display name and avatar are optional.
+      const { clientId, clientSecret } = requireCredentials("tiktok", "TikTok");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl:
+          overrideUrl("tiktok", "AUTHORIZATION") ?? "https://www.tiktok.com/v2/auth/authorize/",
+        tokenUrl: overrideUrl("tiktok", "TOKEN") ?? "https://open.tiktokapis.com/v2/oauth/token/",
+        userInfoUrl:
+          overrideUrl("tiktok", "USERINFO") ??
+          "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,display_name,avatar_url",
+        scopes: ["user.info.basic"],
+        clientIdParam: "client_key",
+        profileMap: {
+          id: "user.open_id",
+          name: "user.display_name",
+          picture: "user.avatar_url",
+        },
+      };
+    }
+
     default:
       throw new Error(`Unknown OAuth provider: ${provider}`);
   }
@@ -458,6 +532,19 @@ function deriveCodeChallenge(verifier: string): string {
  */
 export class OAuthClient {
   private readonly provider: OAuthProvider;
+  /**
+   * For OIDC providers (e.g. Apple), the id_token captured from the most recent
+   * exchangeCode() call. getUserInfo() verifies this rather than fetching a
+   * userinfo endpoint. A fresh OAuthClient is constructed per request, so this
+   * per-instance state never leaks across login attempts.
+   */
+  private lastIdToken: string | undefined;
+  /**
+   * Optional login-request nonce that an OIDC id_token must echo back. When the
+   * caller issued a nonce for the authorize request, it sets this before
+   * getUserInfo() so verification binds the token to this login attempt.
+   */
+  private expectedNonce: string | undefined;
 
   constructor(provider: OAuthProvider) {
     assertProviderUrl("authorizationUrl", provider.authorizationUrl);
@@ -475,8 +562,10 @@ export class OAuthClient {
    * @returns url and, when PKCE is required, a codeVerifier to store server-side
    */
   generateAuthUrl(state: string, redirectUri: string): AuthUrlResult {
+    // Most providers use `client_id`; some (e.g. TikTok) name it `client_key`.
+    const clientIdParam = this.provider.clientIdParam ?? "client_id";
     const params = new URLSearchParams({
-      client_id: this.provider.clientId,
+      [clientIdParam]: this.provider.clientId,
       redirect_uri: redirectUri,
       response_type: "code",
       scope: this.provider.scopes.join(this.provider.scopeDelimiter ?? " "),
@@ -508,9 +597,11 @@ export class OAuthClient {
     redirectUri: string,
     codeVerifier?: string,
   ): Promise<OAuthTokenResponse> {
+    // Most providers use `client_id`; some (e.g. TikTok) name it `client_key`.
+    const clientIdParam = this.provider.clientIdParam ?? "client_id";
     const body = new URLSearchParams({
       grant_type: "authorization_code",
-      client_id: this.provider.clientId,
+      [clientIdParam]: this.provider.clientId,
       client_secret: this.provider.clientSecret,
       code,
       redirect_uri: redirectUri,
@@ -537,7 +628,30 @@ export class OAuthClient {
       throw new Error(`Token exchange failed (${res.status}): ${text}`);
     }
 
-    return res.json() as Promise<OAuthTokenResponse>;
+    const tokenResponse = (await res.json()) as OAuthTokenResponse;
+
+    // For OIDC providers the identity is carried by the id_token, which has no
+    // userinfo equivalent. Capture it here so getUserInfo() can verify it. Fail
+    // closed: a missing id_token from an OIDC provider is an error.
+    if (this.provider.oidc) {
+      const idToken = tokenResponse.id_token;
+      if (typeof idToken !== "string" || idToken.trim().length === 0) {
+        throw new Error("OIDC provider token response is missing an id_token");
+      }
+      this.lastIdToken = idToken;
+    }
+
+    return tokenResponse;
+  }
+
+  /**
+   * Binds the next getUserInfo() call (OIDC providers only) to a login-request
+   * nonce. Apple echoes the authorize-request `nonce` back into the id_token;
+   * setting it here makes verification reject a token minted for a different
+   * login attempt. No-op for non-OIDC providers.
+   */
+  setExpectedNonce(nonce: string | undefined): void {
+    this.expectedNonce = nonce;
   }
 
   /**
@@ -553,6 +667,14 @@ export class OAuthClient {
    * @param accessToken - The access token from exchangeCode
    */
   async getUserInfo(accessToken: string): Promise<OAuthUserInfo> {
+    // OIDC providers (e.g. Apple) have no userinfo endpoint: the identity is the
+    // verified id_token captured during exchangeCode(). Verify it and return the
+    // normalized profile. Fail closed — any verification failure throws and no
+    // identity is established.
+    if (this.provider.oidc) {
+      return this.getOidcUserInfo();
+    }
+
     const res = await fetch(this.provider.userInfoUrl, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -602,6 +724,38 @@ export class OAuthClient {
     }
 
     return userInfo;
+  }
+
+  /**
+   * Verifies the OIDC id_token captured during exchangeCode() and normalizes it
+   * into the common profile shape. Currently the only built-in OIDC provider is
+   * Apple, whose issuer/JWKS are pinned; the verifier checks signature, issuer,
+   * audience (=clientId), expiry, and — when set — the login-request nonce.
+   */
+  private async getOidcUserInfo(): Promise<OAuthUserInfo> {
+    const oidc = this.provider.oidc;
+    if (!oidc) throw new Error("getOidcUserInfo called for a non-OIDC provider");
+    const idToken = this.lastIdToken;
+    if (!idToken) {
+      throw new Error("OIDC id_token unavailable; exchangeCode() must run first");
+    }
+
+    if (oidc.issuer === APPLE_ISSUER && oidc.jwksUri === APPLE_JWKS_URI) {
+      const verified = await verifyAppleIdToken(idToken, {
+        clientId: this.provider.clientId,
+        expectedNonce: this.expectedNonce,
+      });
+      return {
+        id: verified.subject,
+        // Apple may return a @privaterelay.appleid.com address; store as-is.
+        email: verified.email ?? "",
+        // Only trust an explicit `true`; undefined/false ⇒ not verified.
+        verified_email: verified.emailVerified === true,
+      } satisfies OAuthUserInfo;
+    }
+
+    // No other OIDC provider is wired; refuse rather than guess (fail closed).
+    throw new Error("Unsupported OIDC provider configuration");
   }
 
   private async getPrimaryEmail(accessToken: string): Promise<OAuthEmailAddress | null> {

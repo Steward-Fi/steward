@@ -37,6 +37,40 @@ export function StewardMfaChallenge({
     }
   }
 
+  async function completePasskey() {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const result = await auth.completePasskeyMfa();
+      onSuccess?.(result);
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      setMessage(error.message);
+      onError?.(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (challenge.type === "passkey") {
+    return (
+      <div className={["stwd-mfa-challenge", className].filter(Boolean).join(" ")}>
+        <div className="stwd-mfa-challenge__header">
+          <h3>multi-factor verification</h3>
+        </div>
+        <button
+          type="button"
+          className="stwd-mfa-primary"
+          disabled={busy}
+          onClick={() => void completePasskey()}
+        >
+          {busy ? "verifying..." : "verify with passkey"}
+        </button>
+        {message && <div className="stwd-mfa-error">{message}</div>}
+      </div>
+    );
+  }
+
   const inputMode = mode === "recovery" ? "text" : "numeric";
   const pattern = mode === "recovery" ? undefined : "[0-9]*";
   const label = mode === "recovery" ? "recovery code" : `${challenge.type} code`;

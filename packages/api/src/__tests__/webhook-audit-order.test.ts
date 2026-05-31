@@ -103,17 +103,33 @@ describe("webhook audit ordering", () => {
   });
 
   it("keeps delivery history reachable after webhook config deletion", () => {
+    // The delivery-history filter now lives in the shared buildDeliveryHistoryQuery
+    // helper. It must filter by the payload-embedded webhookConfigId (so history
+    // survives config deletion) and only 404 when there are genuinely zero matching
+    // deliveries — not merely because the config row is gone.
+    const builderIndex = routeSource.indexOf("async function buildDeliveryHistoryQuery");
+    expect(builderIndex).toBeGreaterThanOrEqual(0);
+    const builder = routeSource.slice(
+      builderIndex,
+      routeSource.indexOf("\nwebhookRoutes.", builderIndex),
+    );
+    expect(builder).toContain("webhookDeliveryFilter");
+    expect(builder).toContain("payload}->>'webhookConfigId' = ${webhookId}");
+    expect(builder).toContain("deliveryCount.count === 0");
+    // The missing-config branch must count deliveries, not short-circuit to a 404.
+    expect(builder).not.toContain("if (!webhook) {\n    return c.json<ApiResponse>");
+
     const historyRouteIndex = routeSource.indexOf('webhookRoutes.get("/:id/deliveries"');
     expect(historyRouteIndex).toBeGreaterThanOrEqual(0);
     const historyRoute = routeSource.slice(
       historyRouteIndex,
-      routeSource.indexOf('webhookRoutes.post("/deliveries/:id/retry"', historyRouteIndex),
+      routeSource.indexOf('webhookRoutes.get("/:id/deliveries/export"', historyRouteIndex),
     );
-
-    expect(historyRoute).toContain("webhookDeliveryFilter");
-    expect(historyRoute).toContain("payload}->>'webhookConfigId' = ${webhookId}");
-    expect(historyRoute).toContain("deliveryCount.count === 0");
-    expect(historyRoute).not.toContain("if (!webhook) {\n    return c.json<ApiResponse>");
+    // The route delegates filtering to the builder and never independently 404s
+    // on a missing config row.
+    expect(historyRoute).toContain("buildDeliveryHistoryQuery(c)");
+    expect(historyRoute).toContain("deliveryQuery.deliveryWhere");
+    expect(historyRoute).not.toContain("if (!webhook)");
   });
 
   it("redacts stored webhook delivery payloads from manual retry responses", () => {

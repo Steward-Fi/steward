@@ -11,6 +11,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { MAX_SLIPPAGE_BPS } from "./trade-builder.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,6 +41,12 @@ export interface AgentTraderConfig {
   chainId?: number;
   /** DEX portal/router address for swap calldata encoding */
   portalAddress?: string;
+  /**
+   * Acceptable slippage for swaps, in basis points (default 100 = 1%).
+   * Bounded to [0, 5000) — the swap builder refuses to build outside this range
+   * and never emits an unprotected (amountOutMin = 0) swap.
+   */
+  slippageBps?: number;
   /** Strategy-specific parameters — typed per strategy in their own files */
   params: Record<string, unknown>;
 }
@@ -149,6 +156,17 @@ function validate(config: TraderConfig): void {
     }
     if (!agent.intervalSeconds || agent.intervalSeconds < 10) {
       throw new Error(`Config error: agent "${agent.agentId}" intervalSeconds must be ≥ 10`);
+    }
+    if (agent.slippageBps !== undefined) {
+      if (
+        !Number.isInteger(agent.slippageBps) ||
+        agent.slippageBps < 0 ||
+        agent.slippageBps >= MAX_SLIPPAGE_BPS
+      ) {
+        throw new Error(
+          `Config error: agent "${agent.agentId}" slippageBps must be an integer in [0, ${MAX_SLIPPAGE_BPS}) — got ${agent.slippageBps}`,
+        );
+      }
     }
   }
 }

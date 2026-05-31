@@ -17,6 +17,15 @@ export interface AgentState {
    * e.g. if 1 TOKEN = 0.001 ETH, tokenPrice = 1_000_000_000_000_000n (1e15)
    */
   tokenPrice: bigint;
+  /**
+   * Confidence in {@link tokenPrice}:
+   *   - "high": from the hardened, liquidity-weighted, multi-pair price oracle.
+   *   - "low":  from a single Uniswap-V2 pair's spot reserve ratio (last-resort
+   *             fallback) — trivially manipulable, so it must NOT, on its own,
+   *             trigger a buy/sell. Strategies treat low confidence as "hold".
+   *   - "none": no price could be resolved (tokenPrice === 0n).
+   */
+  priceConfidence: "high" | "low" | "none";
   /** Seconds elapsed since the last trade (0 if never traded) */
   lastTradeAge: number;
   /** Aggregate trade value (wei) in the last 24 hours */
@@ -48,6 +57,14 @@ export interface TradeDecision {
 export interface Strategy {
   /** Display name used in logs */
   readonly name: string;
+  /**
+   * Whether this strategy's buy/sell decisions are derived from
+   * {@link AgentState.tokenPrice}. When true, the loop will SUPPRESS a
+   * buy/sell to "hold" unless {@link AgentState.priceConfidence} is "high",
+   * so a manipulable single-pair/spot price cannot, by itself, trigger a trade.
+   * Price-agnostic strategies (e.g. DCA) set this to false.
+   */
+  readonly requiresPriceConfidence: boolean;
   /**
    * Evaluate the current state and return a trading decision.
    * Must not throw — return a "hold" decision on errors.

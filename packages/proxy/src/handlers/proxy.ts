@@ -272,10 +272,8 @@ const MAX_PROXY_RESPONSE_BYTES = Number(
 const MAX_PROXY_STREAM_DURATION_MS = Number(
   process.env.STEWARD_PROXY_STREAM_DURATION_MS ?? 5 * 60_000,
 );
-const MAX_PROXY_IN_FLIGHT_PER_AGENT = Number(
-  process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT ?? 50,
-);
-const MAX_PROXY_IN_FLIGHT_PER_TENANT = Number(
+let MAX_PROXY_IN_FLIGHT_PER_AGENT = Number(process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT ?? 50);
+let MAX_PROXY_IN_FLIGHT_PER_TENANT = Number(
   process.env.STEWARD_PROXY_MAX_IN_FLIGHT_PER_TENANT ?? 250,
 );
 const IDEMPOTENCY_KEY_RE = /^[\x21-\x7e]{8,255}$/;
@@ -395,6 +393,20 @@ export function __setCheckProxyRateLimitForTests(checker: typeof checkProxyRateL
 /** Test hook for overriding proxy DNS resolution without making real network lookups. */
 export function __setResolveProxyHostForTests(resolver: typeof dnsLookup): void {
   resolveProxyHostForHandler = resolver;
+}
+
+/**
+ * Test hook for overriding the in-flight concurrency caps. The production
+ * values are read once from env at module load; this lets tests exercise the
+ * 429 overflow path deterministically regardless of import order. Pass `null`
+ * to leave a cap unchanged.
+ */
+export function __setProxyInFlightCapsForTests(caps: {
+  perAgent?: number | null;
+  perTenant?: number | null;
+}): void {
+  if (typeof caps.perAgent === "number") MAX_PROXY_IN_FLIGHT_PER_AGENT = caps.perAgent;
+  if (typeof caps.perTenant === "number") MAX_PROXY_IN_FLIGHT_PER_TENANT = caps.perTenant;
 }
 
 function responseMayExposeInjectedQueryCredential(response: Response): boolean {

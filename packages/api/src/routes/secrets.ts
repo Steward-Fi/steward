@@ -16,6 +16,7 @@ import {
   getDb as getVaultDb,
   secretRoutes as secretRouteRows,
   secrets as secretRows,
+  tenantConfigs as tenantConfigsTable,
 } from "@stwd/db";
 import { SecretVault } from "@stwd/vault";
 import { and, eq, inArray } from "drizzle-orm";
@@ -350,17 +351,46 @@ function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs =
   );
 }
 
-function requireRecentTenantAdminMfa(
+type TenantMfaPolicyConfig = {
+  maxAgeSeconds?: number;
+  requireFor?: {
+    tenantAdmin?: boolean;
+  };
+};
+
+type TenantAuthAbuseConfigWithMfa = {
+  mfa?: TenantMfaPolicyConfig;
+};
+
+async function readTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {
+  const [row] = await getVaultDb()
+    .select({ authAbuseConfig: tenantConfigsTable.authAbuseConfig })
+    .from(tenantConfigsTable)
+    .where(eq(tenantConfigsTable.tenantId, tenantId));
+  return (row?.authAbuseConfig as TenantAuthAbuseConfigWithMfa | undefined)?.mfa ?? {};
+}
+
+function tenantMfaMaxAgeMs(policy: TenantMfaPolicyConfig): number {
+  const seconds = policy.maxAgeSeconds;
+  return typeof seconds === "number" && Number.isFinite(seconds)
+    ? Math.max(30, Math.min(3600, Math.floor(seconds))) * 1000
+    : 5 * 60_000;
+}
+
+async function requireRecentTenantAdminMfa(
   c: Context<{ Variables: AppVariables }>,
   reason: string,
-): Response | null {
+): Promise<Response | null> {
   if (!requireTenantAdminSession(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: `${reason} requires owner or admin session` },
       403,
     );
   }
-  if (hasRecentSessionMfa(c)) return null;
+  const tenantId = c.get("tenantId");
+  const policy = tenantId ? await readTenantMfaPolicy(tenantId) : {};
+  if (policy.requireFor?.tenantAdmin === false) return null;
+  if (hasRecentSessionMfa(c, tenantMfaMaxAgeMs(policy))) return null;
   return c.json<ApiResponse>(
     { ok: false, error: `${reason} requires recent MFA verification` },
     403,
@@ -378,7 +408,7 @@ function validateSecretValue(value: string): string | null {
 
 /** POST /secrets — create a new secret */
 secretsRoutes.post("/", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Secret management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Secret management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -450,7 +480,7 @@ secretsRoutes.post("/", async (c) => {
 
 /** GET /secrets — list all secrets (metadata only) */
 secretsRoutes.get("/", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Secret management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Secret management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -465,7 +495,7 @@ secretsRoutes.get("/", async (c) => {
 
 /** POST /secrets/routes — create a credential injection route */
 secretsRoutes.post("/routes", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Route management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Route management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -569,7 +599,7 @@ secretsRoutes.post("/routes", async (c) => {
 
 /** GET /secrets/routes — list all routes */
 secretsRoutes.get("/routes", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Route management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Route management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -583,7 +613,7 @@ secretsRoutes.get("/routes", async (c) => {
 
 /** PUT /secrets/routes/:id — update route */
 secretsRoutes.put("/routes/:id", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Route management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Route management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -670,7 +700,7 @@ secretsRoutes.put("/routes/:id", async (c) => {
 
 /** DELETE /secrets/routes/:id — delete route */
 secretsRoutes.delete("/routes/:id", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Route management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Route management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -733,7 +763,7 @@ secretsRoutes.delete("/routes/:id", async (c) => {
 
 /** GET /secrets/:id — get secret metadata */
 secretsRoutes.get("/:id", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Secret management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Secret management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -750,7 +780,7 @@ secretsRoutes.get("/:id", async (c) => {
 
 /** PUT /secrets/:id — update secret value (creates new version) */
 secretsRoutes.put("/:id", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Secret management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Secret management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -820,7 +850,7 @@ secretsRoutes.put("/:id", async (c) => {
 
 /** DELETE /secrets/:id — soft delete */
 secretsRoutes.delete("/:id", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Secret management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Secret management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
@@ -907,7 +937,7 @@ secretsRoutes.delete("/:id", async (c) => {
 
 /** POST /secrets/:id/rotate — rotate with new value */
 secretsRoutes.post("/:id/rotate", async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Secret management");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Secret management");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");

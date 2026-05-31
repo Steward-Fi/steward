@@ -38,10 +38,12 @@ beforeAll(async () => {
   // verifySessionToken requires a userTenants row matching the token tenantId.
   await getDb()
     .insert(tenants)
-    .values({ id: personalTenantId, name: "Wallet Export Personal", apiKeyHash: `${personalTenantId}-hash` });
-  await getDb()
-    .insert(userTenants)
-    .values({ userId, tenantId: personalTenantId, role: "owner" });
+    .values({
+      id: personalTenantId,
+      name: "Wallet Export Personal",
+      apiKeyHash: `${personalTenantId}-hash`,
+    });
+  await getDb().insert(userTenants).values({ userId, tenantId: personalTenantId, role: "owner" });
 
   ({ createSessionToken } = await import("../routes/auth"));
   ({ userRoutes } = await import("../routes/user"));

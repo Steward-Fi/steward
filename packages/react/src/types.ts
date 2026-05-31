@@ -2,6 +2,8 @@ import type {
   AgentBalance,
   AgentIdentity,
   ChainFamily,
+  GlobalWalletApproveResult,
+  GlobalWalletConsentRequest,
   PolicyResult,
   PolicyRule,
   PolicyType,
@@ -89,6 +91,8 @@ export interface TenantTheme {
   borderRadius: number;
   fontFamily?: string;
   colorScheme: "light" | "dark" | "system";
+  logoUrl?: string;
+  faviconUrl?: string;
 }
 
 export interface TenantFeatureFlags {
@@ -217,6 +221,22 @@ export interface StewardContextValue {
   tenantConfig: TenantControlPlaneConfig | null;
   isLoading: boolean;
   pollInterval: number;
+}
+
+export interface StewardGlobalWalletConsentProps {
+  /** Tenant app id in the form `tenant_id/client_id`. */
+  appId: string;
+  /** Exact app origin. Defaults to `window.location.origin` in browsers. */
+  origin?: string;
+  /** Optional redirect URI, validated against the tenant app client's allowlist. */
+  redirectUri?: string;
+  /** Requested global-wallet scopes. Defaults to `eth_accounts`. */
+  scopes?: string[];
+  /** Optional preloaded consent request for SSR or custom data loaders. */
+  initialRequest?: GlobalWalletConsentRequest;
+  onApproved?: (result: GlobalWalletApproveResult) => void;
+  onError?: (error: Error) => void;
+  className?: string;
 }
 
 // ─── Component Props ───
@@ -478,6 +498,7 @@ export interface StewardAuthContextValue {
     challengeId: string,
     code: string,
   ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  completePasskeyMfa: () => Promise<import("@stwd/sdk").StewardAuthResult>;
   unenrollSmsMfa: (code: string) => Promise<{ ok: boolean }>;
   // ─── Multi-Tenant ───
   /** Currently active tenant ID from session */

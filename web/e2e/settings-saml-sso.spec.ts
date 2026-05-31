@@ -26,6 +26,10 @@ type SamlSsoConfig = {
   acsUrl: string;
   emailAttribute: string;
   groupsAttribute?: string;
+  groupRoleMappings: Array<{
+    group: string;
+    role: "admin" | "developer" | "billing" | "viewer" | "member";
+  }>;
   allowJitProvisioning: boolean;
   jitDefaultRole: "viewer";
   createdAt: string;
@@ -61,6 +65,10 @@ test.describe("Dashboard SAML SSO settings", () => {
           idpCertPems: string[];
           emailAttribute?: string;
           groupsAttribute?: string;
+          groupRoleMappings?: Array<{
+            group: string;
+            role: "admin" | "developer" | "billing" | "viewer" | "member";
+          }>;
           allowJitProvisioning?: boolean;
         };
         config = {
@@ -74,6 +82,7 @@ test.describe("Dashboard SAML SSO settings", () => {
           acsUrl: serviceProvider.acsUrl,
           emailAttribute: body.emailAttribute ?? "email",
           groupsAttribute: body.groupsAttribute,
+          groupRoleMappings: body.groupRoleMappings ?? [],
           allowJitProvisioning: body.allowJitProvisioning === true,
           jitDefaultRole: "viewer",
           createdAt: now,
@@ -109,6 +118,9 @@ test.describe("Dashboard SAML SSO settings", () => {
     await samlForm.getByLabel("IdP SSO URL").fill("https://idp.example.com/sso");
     await samlForm.getByLabel("Email Attribute").fill("email");
     await samlForm.getByLabel("Groups Attribute").fill("groups");
+    await samlForm
+      .getByLabel("Group Role Mappings")
+      .fill(JSON.stringify([{ group: "Engineering", role: "developer" }]));
     await samlForm.getByLabel("IdP Certificate PEMs").fill(CERT);
     await samlForm.getByLabel("Auto-create SSO users as Viewer").check();
     await samlForm.getByRole("button", { name: "Save SAML" }).click();
@@ -121,6 +133,7 @@ test.describe("Dashboard SAML SSO settings", () => {
       idpCertPems: [CERT],
       emailAttribute: "email",
       groupsAttribute: "groups",
+      groupRoleMappings: [{ group: "Engineering", role: "developer" }],
       allowJitProvisioning: true,
       jitDefaultRole: "viewer",
     });

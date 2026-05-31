@@ -1,6 +1,4 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 let spendResult: any = {
   allowed: true,
@@ -12,8 +10,11 @@ let spendResult: any = {
 };
 let fetchCalls = 0;
 const audits: any[] = [];
+// When set, the security-required pre-forward audit insert throws so we can
+// exercise the fail-closed (503) path. recordRequiredAudit rethrows, unlike
+// best-effort recordAudit.
+let failRequiredAudit = false;
 const originalFetch = globalThis.fetch;
-const proxySource = readFileSync(join(import.meta.dir, "..", "handlers", "proxy.ts"), "utf8");
 
 const route = {
   id: "route-1",
@@ -114,6 +115,12 @@ mock.module("@stwd/db", () => {
       }),
       insert: () => ({
         values: async (entry: any) => {
+          // The required pre-forward audit is written with the
+          // "credential-proxy-authorized" reason (status 102). Throwing here
+          // models an audit-store outage on the security-critical write.
+          if (failRequiredAudit && entry?.reason === "credential-proxy-authorized") {
+            throw new Error("audit store offline");
+          }
           audits.push(entry);
         },
       }),
@@ -206,6 +213,7 @@ describe("proxy spend-limit enforcement", () => {
     };
     fetchCalls = 0;
     audits.length = 0;
+    failRequiredAudit = false;
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       fetchCalls++;
       expect(String(url)).toBe("https://example.com/v1/echo");
@@ -675,18 +683,160 @@ describe("proxy spend-limit enforcement", () => {
     expect(((await second.json()) as { error: string }).error).toContain("already forwarded");
   });
 
-  test("uses Redis-backed idempotency claims when Redis is available", () => {
-    expect(proxySource).toContain("isProxyRedisAvailable()");
-    expect(proxySource).toContain("getRedis().set");
-    expect(proxySource).toContain('"PX"');
-    expect(proxySource).toContain('"NX"');
-    expect(proxySource).toContain("Shared proxy idempotency store unavailable");
+  test("blocks injected credentials reflected in upstream response headers", async () => {
+    spendResult.configured = false;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      fetchCalls++;
+      expect(String(url)).toBe("https://example.com/v1/echo");
+      // Upstream echoes the injected credential back in a response header.
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "x-echoed-auth": "Bearer test-secret",
+        },
+      });
+    }) as typeof fetch;
+
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = await res.json();
+
+    expect(res.status).toBe(502);
+    expect(fetchCalls).toBe(1);
+    expect(body.error).toContain("reflected injected credential");
+    expect(audits).toContainEqual(
+      expect.objectContaining({
+        targetHost: "example.com",
+        statusCode: 502,
+        reason: "credential-reflected-in-response-header",
+      }),
+    );
   });
 
-  test("forwards through a vetted DNS-bound transport instead of platform fetch", () => {
-    expect(proxySource).toContain("function lookupFromVettedRecords");
-    expect(proxySource).toContain("lookup: lookupFromVettedRecords(records)");
-    expect(proxySource).toContain("forwardProxyRequestForHandler");
-    expect(proxySource).not.toContain("response = await fetch(outboundUrl.toString()");
+  test("fails closed with 503 when the required pre-forward audit cannot be persisted", async () => {
+    spendResult.configured = false;
+    // Force the security-required pre-forward audit write to throw.
+    // recordRequiredAudit rethrows (unlike best-effort recordAudit), so
+    // handleProxy must abort before decrypting/forwarding any credential.
+    failRequiredAudit = true;
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = await res.json();
+
+    expect(res.status).toBe(503);
+    // Credential was never decrypted or forwarded: upstream untouched.
+    expect(fetchCalls).toBe(0);
+    expect(body.error).toContain("Proxy audit logging unavailable");
+  });
+
+  test("rejects CRLF-injecting credential header formats before forwarding", async () => {
+    spendResult.configured = false;
+    // A malicious/misconfigured route format that smuggles a CRLF must be
+    // rejected by injectCredential, surfacing 400 and never reaching upstream.
+    route.injectAs = "header";
+    route.injectKey = "x-api-key";
+    route.injectFormat = "Bearer {value}\r\nX-Injected: evil";
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    const { handleProxy, __setCheckProxySpendLimitForTests } = await loadProxy();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+
+    const res = await handleProxy(makeContext());
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(fetchCalls).toBe(0);
+    expect(body.error).toContain("Invalid credential injection configuration");
+    expect(audits).toContainEqual(
+      expect.objectContaining({
+        targetHost: "example.com",
+        statusCode: 400,
+        reason: "credential-injection-failed",
+      }),
+    );
+  });
+
+  test("caps in-flight proxy requests per agent and fails the overflow with 429", async () => {
+    spendResult.configured = false;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // First request hangs inside the upstream call, holding its slot.
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      fetchCalls++;
+      expect(String(url)).toBe("https://example.com/v1/echo");
+      await gate;
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const mod = await loadProxy();
+    mod.__setCheckProxySpendLimitForTests(async () => spendResult);
+    // Squeeze the per-agent cap to 1 so the second concurrent request overflows.
+    mod.__setProxyInFlightCapsForTests({ perAgent: 1 });
+
+    try {
+      const first = mod.handleProxy(makeContext());
+      // Yield so the first request acquires its slot and parks on `gate`.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      const second = await mod.handleProxy(makeContext());
+      const body = await second.json();
+
+      expect(second.status).toBe(429);
+      expect(body.error).toContain("Too many in-flight proxy requests for agent");
+
+      release();
+      const firstRes = await first;
+      expect(firstRes.status).toBe(200);
+      // Drain the streamed body so the slot is released for later tests.
+      await firstRes.text();
+    } finally {
+      release();
+      // Restore the production default so later tests are unaffected.
+      mod.__setProxyInFlightCapsForTests({ perAgent: 50 });
+    }
+  });
+
+  test("requires an idempotency key for signed safe (GET) proxy requests", async () => {
+    spendResult.configured = false;
+    const { handleProxy, __clearProxyReplayClaimsForTests, __setCheckProxySpendLimitForTests } =
+      await loadProxy();
+    __clearProxyReplayClaimsForTests();
+    __setCheckProxySpendLimitForTests(async () => spendResult);
+    globalThis.fetch = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+
+    // A GET is normally replay-safe, but once it carries a proof-of-possession
+    // signature it must still present an Idempotency-Key (replay binding).
+    const res = await handleProxy(
+      makeContext("/proxy/example.com/v1/echo", {
+        method: "GET",
+        headers: { "X-Steward-Signature": "v1=deadbeef" },
+      }),
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(fetchCalls).toBe(0);
+    expect(body.error).toContain("Idempotency-Key");
+    expect(body.error).toContain("signed proxy requests");
   });
 });

@@ -15,7 +15,7 @@
 
 import { getDb } from "@stwd/db";
 import { sql } from "drizzle-orm";
-import { trackAuditEvent } from "./audit";
+import { writeAuditEvent } from "./audit";
 
 const SYSTEM_TENANT_ID = "system";
 
@@ -24,6 +24,7 @@ const DEFAULT_PROXY_AUDIT_DAYS = 90;
 const DEFAULT_REFRESH_TOKEN_GRACE_DAYS = 7;
 const DEFAULT_FAILED_TX_DAYS = 365;
 const DEFAULT_AUDIT_EVENTS_DAYS = 365;
+const MIN_DEACTIVATED_USERS_DAYS = 30;
 
 const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const INITIAL_DELAY_MS = 5 * 60 * 1000;
@@ -31,6 +32,13 @@ const INITIAL_DELAY_MS = 5 * 60 * 1000;
 export interface SweepResult {
   table: string;
   deleted: number;
+  /**
+   * Set when rows were deleted but the compliance audit record for the sweep
+   * failed to persist. Surfaces a non-repudiation gap to callers/monitoring
+   * instead of silently swallowing it (the deletion itself is irreversible, so
+   * we cannot roll back — we report).
+   */
+  auditFailed?: boolean;
 }
 
 function readPositiveInt(envName: string): number | undefined {
@@ -189,6 +197,58 @@ async function sweepAuthKvStore(): Promise<SweepResult> {
   return { table: "auth_kv_store", deleted };
 }
 
+async function sweepDeactivatedUsers(): Promise<SweepResult | null> {
+  const days = readPositiveInt("STEWARD_RETENTION_DEACTIVATED_USERS_DAYS");
+  if (days === undefined) return null;
+  if (days < MIN_DEACTIVATED_USERS_DAYS) {
+    throw new Error(
+      `[retention] STEWARD_RETENTION_DEACTIVATED_USERS_DAYS=${days} is below the ` +
+        `${MIN_DEACTIVATED_USERS_DAYS}-day floor; refusing to hard-delete users.`,
+    );
+  }
+  if (process.env.STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED !== "true") {
+    throw new Error(
+      "[retention] Deactivated-user cleanup performs global hard deletes. Set " +
+        "STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED=true only after account " +
+        "export/recovery policy is documented.",
+    );
+  }
+
+  const db = getDb();
+  let deleted = 0;
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`
+      DELETE FROM refresh_tokens
+      WHERE user_id IN (
+        SELECT id FROM users
+        WHERE deactivated_at IS NOT NULL
+          AND deactivated_at < now() - make_interval(days => ${days})
+          AND NOT EXISTS (
+            SELECT 1 FROM user_tenants
+            WHERE user_tenants.user_id = users.id
+              AND user_tenants.role = 'owner'
+          )
+      )
+    `);
+    const removed = rowsFromExecute<{ id: string }>(
+      await tx.execute(sql`
+      DELETE FROM users
+      WHERE deactivated_at IS NOT NULL
+        AND deactivated_at < now() - make_interval(days => ${days})
+        AND NOT EXISTS (
+          SELECT 1 FROM user_tenants
+          WHERE user_tenants.user_id = users.id
+            AND user_tenants.role = 'owner'
+        )
+      RETURNING id
+    `),
+    );
+    deleted = removed.length;
+  });
+
+  return { table: "users.deactivated", deleted };
+}
+
 function ttlForTable(table: string): number | undefined {
   switch (table) {
     case "proxy_audit_log":
@@ -204,6 +264,8 @@ function ttlForTable(table: string): number | undefined {
       return readPositiveInt("STEWARD_RETENTION_AUDIT_EVENTS_DAYS");
     case "auth_kv_store":
       return undefined; // per-row expiry
+    case "users.deactivated":
+      return readPositiveInt("STEWARD_RETENTION_DEACTIVATED_USERS_DAYS");
     default:
       return undefined;
   }
@@ -223,6 +285,7 @@ export async function runRetentionSweep(): Promise<SweepResult[]> {
     sweepFailedTransactions,
     sweepAuditEvents,
     sweepAuthKvStore,
+    sweepDeactivatedUsers,
   ];
 
   for (const sweeper of sweepers) {
@@ -232,19 +295,34 @@ export async function runRetentionSweep(): Promise<SweepResult[]> {
       results.push(r);
       if (r.deleted > 0) {
         const ttlDays = ttlForTable(r.table);
-        trackAuditEvent({
-          tenantId: SYSTEM_TENANT_ID,
-          actorType: "system",
-          action: "system.retention.sweep",
-          resourceType: "table",
-          resourceId: r.table,
-          metadata: {
-            table: r.table,
-            deleted: r.deleted,
-            ttlDays: ttlDays ?? null,
-            ageThreshold: ttlDays !== undefined ? `${ttlDays}d` : "per-row expires_at",
-          },
-        });
+        // A retention deletion is a SOC2 data-lifecycle control event; its audit
+        // record must be durable. Write it BLOCKING so a failure surfaces rather
+        // than becoming a fire-and-forget console line. The deletion is already
+        // committed and irreversible (no rollback), so on audit failure we flag
+        // the result and log at error level instead of swallowing it. Other
+        // sweepers still run — a background sweep should not abort wholesale on
+        // one audit failure.
+        try {
+          await writeAuditEvent({
+            tenantId: SYSTEM_TENANT_ID,
+            actorType: "system",
+            action: "system.retention.sweep",
+            resourceType: "table",
+            resourceId: r.table,
+            metadata: {
+              table: r.table,
+              deleted: r.deleted,
+              ttlDays: ttlDays ?? null,
+              ageThreshold: ttlDays !== undefined ? `${ttlDays}d` : "per-row expires_at",
+            },
+          });
+        } catch (auditErr) {
+          r.auditFailed = true;
+          console.error(
+            `[retention] audit record for sweep of ${r.table} (${r.deleted} rows deleted) FAILED to persist:`,
+            auditErr,
+          );
+        }
       }
     } catch (err) {
       console.error("[retention] sweep failed:", err);

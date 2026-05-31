@@ -76,8 +76,18 @@ test.describe("Dashboard OIDC provider settings", () => {
       .fill("https://idp.example.com/oauth2/v1/authorize");
     await oidcForm.getByLabel("Token URL").fill("https://idp.example.com/oauth2/v1/token");
     await oidcForm.getByLabel("Scopes").fill("openid\nemail\nprofile");
-    await oidcForm.getByRole("button", { name: "Save Providers" }).click();
-    await expect(oidcForm.getByText("Saved")).toBeVisible();
+    // The "Saved" confirmation is a 2s auto-hiding toast (a motion.span gated on
+    // a state flag that resets via setTimeout). A single click+assert can lose
+    // the window if the toast's whole lifetime elapses before the first poll
+    // (observed flaky/deterministic on chromium). Retry the save+assert as a
+    // unit — the PUT is mocked and idempotent, so re-clicking is safe, and a
+    // genuine "never saves" bug still fails every cycle (toPass can't mask it).
+    const saveProvidersButton = oidcForm.getByRole("button", { name: "Save Providers" });
+    const savedToast = oidcForm.getByText("Saved");
+    await expect(async () => {
+      await saveProvidersButton.click();
+      await expect(savedToast).toBeVisible({ timeout: 2_000 });
+    }).toPass({ timeout: 15_000 });
 
     expect(providers[0]).toMatchObject({
       id: "acme-sso",

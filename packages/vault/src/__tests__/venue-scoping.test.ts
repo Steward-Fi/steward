@@ -238,7 +238,13 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     const barePrivateKey = privateKey.slice(2);
 
     const imported = await vault.importKey(TENANT_ID, "import-agent", barePrivateKey, "evm");
-    const exported = await vault.exportPrivateKey(TENANT_ID, "import-agent");
+    // exportPrivateKey is break-glass hardened: it requires an explicit
+    // authorization object. The route supplies this only for audited admin+MFA
+    // callers; the test mirrors that contract.
+    const exported = await vault.exportPrivateKey(TENANT_ID, "import-agent", {
+      breakGlass: true,
+      actorId: "venue-scoping-test",
+    });
 
     expect(imported.walletAddress).toBe(privateKeyToAccount(privateKey).address);
     expect(exported.evm?.privateKey).toBe(privateKey);

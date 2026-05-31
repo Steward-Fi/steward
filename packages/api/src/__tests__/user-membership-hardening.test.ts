@@ -9,8 +9,16 @@ const dbSchemaSource = readFileSync(
   join(import.meta.dir, "..", "..", "..", "db", "src", "schema.ts"),
   "utf8",
 );
+const dbAuthSchemaSource = readFileSync(
+  join(import.meta.dir, "..", "..", "..", "db", "src", "schema-auth.ts"),
+  "utf8",
+);
 const joinMigrationSource = readFileSync(
   join(import.meta.dir, "..", "..", "..", "db", "drizzle", "0034_harden_tenant_join_default.sql"),
+  "utf8",
+);
+const inviteMigrationSource = readFileSync(
+  join(import.meta.dir, "..", "..", "..", "db", "drizzle", "0054_tenant_invitations.sql"),
   "utf8",
 );
 
@@ -42,10 +50,31 @@ describe("user membership hardening", () => {
       'user.get("/me/tenants/:tenantId/users/:targetUserId"',
     ]) {
       const routeSource = userSource.slice(userSource.indexOf(route));
-      expect(routeSource.indexOf("hasRecentMfaStepUp(session)")).toBeLessThan(
-        routeSource.indexOf("tenantAdminUserSelection()"),
+      // Directory reads gate on recent MFA via requireTenantUserDirectoryReaderMfa
+      // (which enforces hasRecentMfaStepUp internally) and bail out before
+      // selecting any tenant user rows.
+      const mfaGate = routeSource.indexOf("requireTenantUserDirectoryReaderMfa(");
+      const selection = routeSource.indexOf("tenantAdminUserSelection()");
+      expect(mfaGate).toBeGreaterThanOrEqual(0);
+      expect(mfaGate).toBeLessThan(selection);
+      expect(routeSource.indexOf("if (!reader.ok) return reader.response;")).toBeLessThan(
+        selection,
       );
     }
+    // Lock in that the directory-reader MFA helper actually enforces tenant match,
+    // the directory-reader role, and a recent MFA step-up — so the routes above
+    // can't be silently downgraded by gutting the helper.
+    const readerHelperStart = userSource.indexOf(
+      "async function requireTenantUserDirectoryReaderMfa",
+    );
+    expect(readerHelperStart).toBeGreaterThanOrEqual(0);
+    const readerHelper = userSource.slice(
+      readerHelperStart,
+      userSource.indexOf("\nuser.get(", readerHelperStart),
+    );
+    expect(readerHelper).toContain("sessionTenantMatches(session, tenantId)");
+    expect(readerHelper).toContain("requireTenantUserDirectoryReader(requesterId, tenantId)");
+    expect(readerHelper).toContain("hasRecentMfaStepUp(session)");
     expect(platformSource).toContain("if (!isValidUserId(userId))");
     expect(platformSource).toContain("revocationStore.revokeUserTokens(userId)");
   });
@@ -99,6 +128,115 @@ describe("user membership hardening", () => {
         routeSource.indexOf('const userId = c.get("userId")'),
       );
     }
+  });
+
+  it("models tenant invitations as pending single-use records before membership creation", () => {
+    expect(dbAuthSchemaSource).toContain("export const tenantInvitations = pgTable");
+    expect(dbAuthSchemaSource).toContain('"token_hash"');
+    expect(dbAuthSchemaSource).toContain('"accepted_by_user_id"');
+    expect(inviteMigrationSource).toContain('"tenant_invitations_pending_email_idx"');
+    expect(inviteMigrationSource).toContain("WHERE \"status\" = 'pending'");
+    expect(inviteMigrationSource).toContain('CHECK ("role" IN');
+    expect(inviteMigrationSource).not.toContain("'owner'");
+
+    const platformInviteRoute = platformSource.slice(
+      platformSource.indexOf('platform.post("/tenants/:id/invitations"'),
+      platformSource.indexOf('platform.delete("/tenants/:id/invitations', 1),
+    );
+    expect(platformInviteRoute).toContain('action: "tenant.invitation.create.authorized"');
+    expect(platformInviteRoute.indexOf("writeAuditEvent")).toBeLessThan(
+      platformInviteRoute.indexOf(".insert(tenantInvitations)"),
+    );
+    expect(platformInviteRoute.indexOf('action: "tenant.invitation.create"')).toBeGreaterThan(
+      platformInviteRoute.indexOf(".insert(tenantInvitations)"),
+    );
+    expect(platformInviteRoute).toContain("db.transaction");
+    expect(platformInviteRoute).toContain("valid email is required");
+    expect(platformInviteRoute).toContain("invitedByUserId must belong to the tenant");
+    expect(platformInviteRoute).toContain("hashSha256Hex(token)");
+    expect(platformInviteRoute).toContain("body.sendEmail === true");
+    expect(platformInviteRoute).toContain("sendTenantInvitation(email");
+
+    const platformInviteRevokeRoute = platformSource.slice(
+      platformSource.indexOf('platform.delete("/tenants/:id/invitations/:invitationId"'),
+      platformSource.indexOf('platform.post("/tenants/:id/members"', 1),
+    );
+    expect(
+      platformInviteRevokeRoute.indexOf('action: "tenant.invitation.revoke.authorized"'),
+    ).toBeLessThan(platformInviteRevokeRoute.indexOf(".update(tenantInvitations)"));
+
+    const acceptRoute = userSource.slice(
+      userSource.indexOf('user.post("/me/tenants/:tenantId/invitations/accept"'),
+      userSource.indexOf('user.post("/me/tenants/:tenantId/join"', 1),
+    );
+    expect(acceptRoute).toContain("requirePersonalUserSession(c)");
+    expect(acceptRoute).toContain("emailVerified");
+    expect(acceptRoute).toContain("/^[a-f0-9]{64}$/i.test(body.token)");
+    expect(acceptRoute).toContain("hashSha256Hex(body.token)");
+    expect(acceptRoute).toContain('eq(tenantInvitations.status, "pending")');
+    expect(acceptRoute).toContain("gte(tenantInvitations.expiresAt, new Date())");
+    expect(acceptRoute.indexOf('action: "tenant.invitation.accept.authorized"')).toBeLessThan(
+      acceptRoute.indexOf(".insert(userTenants)"),
+    );
+    expect(acceptRoute.indexOf(".update(tenantInvitations)")).toBeLessThan(
+      acceptRoute.indexOf(".insert(userTenants)"),
+    );
+
+    for (const [routeMarker, auditMarker] of [
+      [
+        'user.get("/me/tenants/:tenantId/invitations"',
+        "Tenant invitations require recent MFA verification",
+      ],
+      [
+        'user.post("/me/tenants/:tenantId/invitations"',
+        'action: "tenant.invitation.create.authorized"',
+      ],
+      [
+        'user.delete("/me/tenants/:tenantId/invitations/:invitationId"',
+        'action: "tenant.invitation.revoke.authorized"',
+      ],
+    ] as const) {
+      const route = userSource.slice(userSource.indexOf(routeMarker));
+      expect(route).toContain("requireTenantAdminMfa(");
+      expect(route).toContain("sessionTenantMatches(session, tenantId)");
+      expect(route).toContain("hasRecentMfaStepUp(session)");
+      expect(route).toContain(auditMarker);
+    }
+    const userInviteCreateRoute = userSource.slice(
+      userSource.indexOf('user.post("/me/tenants/:tenantId/invitations"'),
+      userSource.indexOf('user.delete("/me/tenants/:tenantId/invitations/:invitationId"', 1),
+    );
+    expect(userInviteCreateRoute).toContain("db.transaction");
+    expect(userInviteCreateRoute).toContain("body?.sendEmail === true");
+    expect(userInviteCreateRoute).toContain("sendTenantInvitation(email");
+    const userInviteRevokeRoute = userSource.slice(
+      userSource.indexOf('user.delete("/me/tenants/:tenantId/invitations/:invitationId"'),
+      userSource.indexOf('user.get("/me/tenants/:tenantId/users"', 1),
+    );
+    expect(
+      userInviteRevokeRoute.indexOf('action: "tenant.invitation.revoke.authorized"'),
+    ).toBeLessThan(userInviteRevokeRoute.indexOf(".update(tenantInvitations)"));
+  });
+
+  it("requires matching token-backed pending invites through the self-join route for invite-mode tenants", () => {
+    const joinRoute = userSource.slice(
+      userSource.indexOf('user.post("/me/tenants/:tenantId/join"'),
+      userSource.indexOf('user.delete("/me/tenants/:tenantId/leave"', 1),
+    );
+    expect(joinRoute).toContain('joinMode === "invite"');
+    expect(joinRoute).toContain("/^[a-f0-9]{64}$/i.test(body.token)");
+    expect(joinRoute).toContain("hashSha256Hex(body.token)");
+    expect(joinRoute).toContain("emailVerified");
+    expect(joinRoute).toContain("eq(tenantInvitations.email, email)");
+    expect(joinRoute).toContain("eq(tenantInvitations.tokenHash, tokenHash)");
+    expect(joinRoute).toContain('eq(tenantInvitations.status, "pending")');
+    expect(joinRoute.indexOf('action: "tenant.member.accept_invite.authorized"')).toBeLessThan(
+      joinRoute.indexOf(".insert(userTenants)"),
+    );
+    expect(joinRoute.indexOf(".update(tenantInvitations)")).toBeLessThan(
+      joinRoute.indexOf(".insert(userTenants)"),
+    );
+    expect(joinRoute).toContain('action: "tenant.member.join"');
   });
 
   it("reserves internal tenant namespaces from user-created tenants", () => {

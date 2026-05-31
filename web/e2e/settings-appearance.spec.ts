@@ -16,6 +16,8 @@ type TenantTheme = {
   borderRadius: number;
   fontFamily: string;
   colorScheme: "light" | "dark" | "system";
+  logoUrl: string;
+  faviconUrl: string;
 };
 
 test.describe("Dashboard appearance settings", () => {
@@ -37,6 +39,8 @@ test.describe("Dashboard appearance settings", () => {
       borderRadius: 8,
       fontFamily: "Inter, system-ui, sans-serif",
       colorScheme: "dark",
+      logoUrl: "",
+      faviconUrl: "",
     };
 
     await page.route(/\/tenants\/[^/]+\/config$/, async (route) => {
@@ -73,6 +77,33 @@ test.describe("Dashboard appearance settings", () => {
       }
       await route.fallback();
     });
+    await page.route(/\/tenants\/[^/]+\/idempotency-metrics$/, async (route) => {
+      await route.fulfill({
+        json: {
+          ok: true,
+          data: {
+            tenantId: "personal-test",
+            generatedAt: new Date().toISOString(),
+            windowStartedAt: new Date().toISOString(),
+            lastSeenAt: new Date().toISOString(),
+            ttlMs: 86_400_000,
+            counters: {
+              observed: 3,
+              reserved: 1,
+              completed: 1,
+              replayed: 1,
+              conflicts: 1,
+              inFlightConflicts: 0,
+              suppressedAuthResponses: 0,
+              invalidKeys: 0,
+              storeErrors: 0,
+              skippedUnsafeContext: 0,
+              releasedOnError: 0,
+            },
+          },
+        },
+      });
+    });
 
     const sendRes = await request.post(`${API}/auth/email/send`, { data: { email } });
     expect(sendRes.status()).toBe(200);
@@ -101,17 +132,27 @@ test.describe("Dashboard appearance settings", () => {
     await appearanceForm.getByLabel("Border Radius").fill("10");
     await appearanceForm.getByLabel("Font Family").fill("Inter, system-ui, sans-serif");
     await appearanceForm.getByLabel("Color Scheme").selectOption("system");
+    await appearanceForm.getByLabel("Logo URL").fill("https://assets.example.com/logo.png");
+    await appearanceForm.getByLabel("Favicon URL").fill("https://assets.example.com/favicon.ico");
 
     const preview = appearanceForm.getByTestId("appearance-preview");
     await expect(preview).toHaveCSS("background-color", "rgb(16, 24, 40)");
+    await expect(preview.locator("img")).toHaveAttribute(
+      "src",
+      "https://assets.example.com/logo.png",
+    );
 
     await appearanceForm.getByRole("button", { name: "Save Appearance" }).click();
     await expect(appearanceForm.getByText("Saved")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Idempotency Metrics" })).toBeVisible();
+    await expect(page.getByText("Replayed", { exact: true })).toBeVisible();
 
     expect(theme.primaryColor).toBe("#3366FF");
     expect(theme.backgroundColor).toBe("#101828");
     expect(theme.borderRadius).toBe(10);
     expect(theme.colorScheme).toBe("system");
+    expect(theme.logoUrl).toBe("https://assets.example.com/logo.png");
+    expect(theme.faviconUrl).toBe("https://assets.example.com/favicon.ico");
 
     await page.screenshot({
       path: testInfo.outputPath("dashboard-settings-appearance.png"),

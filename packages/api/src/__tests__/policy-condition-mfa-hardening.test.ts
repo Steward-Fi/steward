@@ -34,12 +34,8 @@ describe("policy and condition-set MFA hardening", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     const storedStateCheck = policiesSource.indexOf("hasPolicySelector || hasAgentSelector", start);
     expect(storedStateCheck).toBeGreaterThan(start);
-    expect(
-      policiesSource.indexOf('Object.hasOwn(body, "policyId")', start),
-    ).toBeGreaterThan(start);
-    expect(
-      policiesSource.indexOf('Object.hasOwn(body, "agentId")', start),
-    ).toBeGreaterThan(start);
+    expect(policiesSource.indexOf('Object.hasOwn(body, "policyId")', start)).toBeGreaterThan(start);
+    expect(policiesSource.indexOf('Object.hasOwn(body, "agentId")', start)).toBeGreaterThan(start);
     expect(policiesSource.indexOf("Invalid policy template id format", start)).toBeLessThan(
       storedStateCheck,
     );

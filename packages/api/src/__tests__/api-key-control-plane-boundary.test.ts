@@ -26,6 +26,10 @@ function expectAdminBeforeTenantLevel(source: string, marker: string) {
 describe("API key control-plane boundary", () => {
   it("requires recent MFA for secret vault and injection route reads and mutations", () => {
     expect(secretsSource).toContain("function requireRecentTenantAdminMfa");
+    expect(secretsSource).toContain("readTenantMfaPolicy");
+    expect(secretsSource).toContain("tenantMfaMaxAgeMs");
+    expect(secretsSource).toContain("policy.requireFor?.tenantAdmin === false");
+    expect(secretsSource).toContain("hasRecentSessionMfa(c, tenantMfaMaxAgeMs(policy))");
     for (const [marker, reason] of [
       ['secretsRoutes.get("/",', "Secret management"],
       ['secretsRoutes.post("/",', "Secret management"],

@@ -2,7 +2,9 @@ import type { TenantSamlSsoConfig, TenantSamlSsoUpdate } from "@stwd/shared";
 import { validateWebhookUrl } from "./webhook-url";
 
 const MAX_CERTS = 5;
+const MAX_GROUP_ROLE_MAPPINGS = 50;
 const DEFAULT_NAME_ID_FORMAT = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress";
+const SAML_GROUP_ROLES = ["admin", "developer", "billing", "viewer", "member"] as const;
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -39,6 +41,37 @@ function normalizePemCert(value: unknown): string | string {
     return "IdP certificate must be PEM encoded";
   }
   return cert.replace(/\r\n/g, "\n");
+}
+
+function normalizeGroupRoleMappings(
+  value: unknown,
+): TenantSamlSsoConfig["groupRoleMappings"] | string {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) return "groupRoleMappings must be an array";
+  if (value.length > MAX_GROUP_ROLE_MAPPINGS) {
+    return `groupRoleMappings may include at most ${MAX_GROUP_ROLE_MAPPINGS} entries`;
+  }
+  const seen = new Set<string>();
+  const mappings: TenantSamlSsoConfig["groupRoleMappings"] = [];
+  for (const entry of value) {
+    if (!isPlainObject(entry)) return "groupRoleMappings entries must be objects";
+    const group = cleanOptionalString(entry.group);
+    if (!group || group.length > 128 || !/^[\w .:@/-]+$/.test(group)) {
+      return "groupRoleMappings group must be 1-128 safe characters";
+    }
+    const groupKey = group.toLowerCase();
+    if (seen.has(groupKey)) return "groupRoleMappings groups must be unique";
+    seen.add(groupKey);
+    const role = typeof entry.role === "string" ? entry.role.trim().toLowerCase() : "";
+    if (!(SAML_GROUP_ROLES as readonly string[]).includes(role)) {
+      return "groupRoleMappings role must be admin, developer, billing, viewer, or member";
+    }
+    mappings.push({
+      group,
+      role: role as TenantSamlSsoConfig["groupRoleMappings"][number]["role"],
+    });
+  }
+  return mappings;
 }
 
 export function buildSamlServiceProviderUrls(tenantId: string): {
@@ -89,6 +122,8 @@ export function normalizeSamlSsoUpdate(
   if (typeof emailAttribute !== "string") return emailAttribute ?? "emailAttribute is required";
   const groupsAttribute = normalizeAttributeName(value.groupsAttribute, "groupsAttribute");
   if (groupsAttribute !== undefined && typeof groupsAttribute !== "string") return groupsAttribute;
+  const groupRoleMappings = normalizeGroupRoleMappings(value.groupRoleMappings);
+  if (typeof groupRoleMappings === "string") return groupRoleMappings;
 
   const nameIdFormat = cleanOptionalString(value.nameIdFormat) ?? DEFAULT_NAME_ID_FORMAT;
   if (
@@ -111,6 +146,7 @@ export function normalizeSamlSsoUpdate(
     nameIdFormat,
     emailAttribute,
     ...(groupsAttribute ? { groupsAttribute } : {}),
+    groupRoleMappings,
     allowJitProvisioning: value.allowJitProvisioning === true,
     jitDefaultRole: "viewer",
   };
@@ -128,6 +164,7 @@ export function sanitizeSamlSsoUpdate(value: unknown): TenantSamlSsoUpdate | str
     nameIdFormat: update.nameIdFormat,
     emailAttribute: update.emailAttribute,
     groupsAttribute: update.groupsAttribute,
+    groupRoleMappings: update.groupRoleMappings,
     allowJitProvisioning: update.allowJitProvisioning,
   };
 }

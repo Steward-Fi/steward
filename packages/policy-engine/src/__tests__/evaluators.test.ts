@@ -284,6 +284,37 @@ describe("Condition Set Policy", () => {
     );
     expect(blocked.passed).toBe(false);
   });
+
+  it("fails closed for malformed condition-set operators and fields", async () => {
+    const typoOperator = await evaluatePolicy(
+      makeConditionSetRule({
+        conditionSetId: "blocked-recipients",
+        operator: "not-in-condition-set",
+      }),
+      makeContext({
+        conditionSets: {
+          "blocked-recipients": ["0x1234567890123456789012345678901234567890"],
+        },
+      }),
+    );
+    expect(typoOperator.passed).toBe(false);
+    expect(typoOperator.reason).toContain("Unsupported condition set operator");
+
+    const unknownField = await evaluatePolicy(
+      makeConditionSetRule({
+        conditionSetId: "blocked-recipients",
+        field: "ethereum_transaction.recipient",
+        operator: "not_in_condition_set",
+      }),
+      makeContext({
+        conditionSets: {
+          "blocked-recipients": ["0x1234567890123456789012345678901234567890"],
+        },
+      }),
+    );
+    expect(unknownField.passed).toBe(false);
+    expect(unknownField.reason).toContain("Unsupported condition set field");
+  });
 });
 
 // ─── Spending Limit Tests ─────────────────────────────────────────────────

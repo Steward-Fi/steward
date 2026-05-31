@@ -491,6 +491,19 @@ AQIDAQAB
     ).rejects.toThrow();
 
     await client.query(`
+      UPDATE tenant_saml_sso_configs
+      SET group_role_mappings = '[{"group":"Engineering","role":"developer"}]'::jsonb
+      WHERE tenant_id = 'tenant-saml'
+    `);
+    await expect(
+      client.query(`
+        UPDATE tenant_saml_sso_configs
+        SET group_role_mappings = '{"group":"Engineering","role":"developer"}'::jsonb
+        WHERE tenant_id = 'tenant-saml'
+      `),
+    ).rejects.toThrow();
+
+    await client.query(`
       INSERT INTO tenant_saml_authn_requests (
         tenant_id, request_id, relay_state, redirect_uri, code_challenge, expires_at
       ) VALUES (
@@ -544,6 +557,84 @@ AQIDAQAB
       );
       expect(readCountRow(remaining.rows)).toBe(0);
     }
+
+    await client.close();
+  });
+
+  test("security invariants enforce tenant invitation lifecycle", async () => {
+    const { client } = await freshDb();
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('tenant-invite', 'Tenant Invite', 'hash-invite')
+    `);
+    const userId = "00000000-0000-4000-8000-000000000054";
+    await client.query(`
+      INSERT INTO users (id, email, email_verified)
+      VALUES ('${userId}', 'alice@example.com', true)
+    `);
+
+    await client.query(`
+      INSERT INTO tenant_invitations (
+        tenant_id, email, role, token_hash, status, expires_at
+      ) VALUES (
+        'tenant-invite', 'alice@example.com', 'developer', 'token-hash-1',
+        'pending', now() + interval '7 days'
+      )
+    `);
+
+    await expect(
+      client.query(`
+        INSERT INTO tenant_invitations (
+          tenant_id, email, role, token_hash, status, expires_at
+        ) VALUES (
+          'tenant-invite', 'ALICE@example.com', 'viewer', 'token-hash-2',
+          'pending', now() + interval '7 days'
+        )
+      `),
+    ).rejects.toThrow();
+
+    await expect(
+      client.query(`
+        INSERT INTO tenant_invitations (
+          tenant_id, email, role, token_hash, status, expires_at
+        ) VALUES (
+          'tenant-invite', 'owner@example.com', 'owner', 'token-hash-3',
+          'pending', now() + interval '7 days'
+        )
+      `),
+    ).rejects.toThrow();
+
+    await client.query(`
+      UPDATE tenant_invitations
+      SET status = 'accepted',
+          accepted_by_user_id = '${userId}',
+          accepted_at = now()
+      WHERE token_hash = 'token-hash-1'
+    `);
+
+    await client.query(`
+      INSERT INTO tenant_invitations (
+        tenant_id, email, role, token_hash, status, expires_at
+      ) VALUES (
+        'tenant-invite', 'alice@example.com', 'viewer', 'token-hash-4',
+        'pending', now() + interval '7 days'
+      )
+    `);
+
+    await expect(
+      client.query(`
+        UPDATE tenant_invitations
+        SET status = 'accepted'
+        WHERE token_hash = 'token-hash-4'
+      `),
+    ).rejects.toThrow();
+
+    await client.query("DELETE FROM tenants WHERE id = 'tenant-invite'");
+    const remaining = await client.query(
+      "SELECT COUNT(*)::int AS cnt FROM tenant_invitations WHERE tenant_id = 'tenant-invite'",
+    );
+    expect(readCountRow(remaining.rows)).toBe(0);
 
     await client.close();
   });

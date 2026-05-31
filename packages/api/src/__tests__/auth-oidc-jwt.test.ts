@@ -414,7 +414,7 @@ describe("OIDC JWT auth", () => {
 
     expect(response.status).toBe(401);
     const body = (await response.json()) as { error: string };
-    expect(body.error).toContain("multiple audiences");
+    expect(body.error).toContain("configured client_id");
   });
 
   it("accepts a single-audience token whose azp matches the client_id", async () => {
@@ -431,7 +431,7 @@ describe("OIDC JWT auth", () => {
     expect(body.ok).toBe(true);
   });
 
-  it("accepts a single-audience token with no azp claim (back-compat)", async () => {
+  it("rejects a single-audience token that omits the configured client_id", async () => {
     const token = await azpToken("azp-absent-user", "aud-azp");
 
     const response = await authRoutes.request("/jwt/login", {
@@ -440,8 +440,8 @@ describe("OIDC JWT auth", () => {
       body: JSON.stringify({ tenantId: TENANT_AZP, providerId: PROVIDER_ID, token }),
     });
 
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as { ok: boolean };
-    expect(body.ok).toBe(true);
+    expect(response.status).toBe(401);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.error).toContain("audience does not include the configured client_id");
   });
 });

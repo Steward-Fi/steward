@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { PublicKey, SystemProgram, Transaction } from "@solana/web3.js";
 import { keccak256, recoverAddress, recoverMessageAddress, toHex, verifyTypedData } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -8,11 +9,13 @@ import {
   assertSolanaTransferTransactionMatches,
   generateSolanaKeypair,
   restoreSolanaKeypair,
+  signEd25519Digest,
 } from "../solana";
 import {
   assertEvmWalletAddressMatches,
   missingSigningKeyError,
   resolveSignVenueSelector,
+  Vault,
 } from "../vault";
 
 // ─── Test Config ──────────────────────────────────────────────────────────
@@ -164,6 +167,96 @@ describe("EVM Signing — sign raw hash, verify recovery", () => {
     expect(recovered1.toLowerCase()).toBe(acc1.address.toLowerCase());
     expect(recovered2.toLowerCase()).toBe(acc2.address.toLowerCase());
     expect(recovered1.toLowerCase()).not.toBe(recovered2.toLowerCase());
+  });
+});
+
+// ─── Ed25519 Raw Digest Signing ───────────────────────────────────────────
+
+/** Verify a detached Ed25519 signature (hex) over `payload` by a base58 pubkey. */
+function verifyEd25519(
+  publicKeyBase58: string,
+  payload: Uint8Array,
+  signatureHex: string,
+): boolean {
+  const pubkeyBytes = new PublicKey(publicKeyBase58).toBytes();
+  const x = Buffer.from(pubkeyBytes).toString("base64url");
+  const keyObject = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x }, format: "jwk" });
+  return cryptoVerify(null, payload, keyObject, Buffer.from(signatureHex, "hex"));
+}
+
+describe("Ed25519 raw digest signing — signEd25519Digest", () => {
+  const digest = () => {
+    const d = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) d[i] = (i * 7 + 3) & 0xff;
+    return d;
+  };
+
+  it("signs a 32-byte digest and the signature verifies against the public key", () => {
+    const kp = generateSolanaKeypair();
+    const payload = digest();
+    const { signature, publicKey } = signEd25519Digest(kp.secretKey, payload);
+
+    expect(publicKey).toBe(kp.publicKey);
+    expect(signature).toMatch(/^[0-9a-f]{128}$/); // 64-byte Ed25519 signature
+    expect(verifyEd25519(kp.publicKey, payload, signature)).toBe(true);
+  });
+
+  it("a tampered payload fails verification against the original signature", () => {
+    const kp = generateSolanaKeypair();
+    const payload = digest();
+    const { signature } = signEd25519Digest(kp.secretKey, payload);
+
+    const tampered = digest();
+    tampered[0] ^= 0xff;
+    expect(verifyEd25519(kp.publicKey, tampered, signature)).toBe(false);
+  });
+
+  it("different keys produce different signatures over the same digest", () => {
+    const a = generateSolanaKeypair();
+    const b = generateSolanaKeypair();
+    const payload = digest();
+
+    const sigA = signEd25519Digest(a.secretKey, payload).signature;
+    const sigB = signEd25519Digest(b.secretKey, payload).signature;
+    expect(sigA).not.toBe(sigB);
+  });
+
+  it("rejects payloads that are not exactly 32 bytes", () => {
+    const kp = generateSolanaKeypair();
+    expect(() => signEd25519Digest(kp.secretKey, new Uint8Array(31))).toThrow(/exactly 32 bytes/);
+    expect(() => signEd25519Digest(kp.secretKey, new Uint8Array(33))).toThrow(/exactly 32 bytes/);
+  });
+});
+
+// ─── Vault.signRawDigest — fail-closed curve dispatch ─────────────────────
+
+describe("Vault.signRawDigest fail-closed dispatch", () => {
+  // These cases throw on validation BEFORE any DB access (curve + hex checks
+  // precede getDb()), so no PGLite harness is required.
+  const vault = new Vault({ masterPassword: MASTER_PASSWORD });
+  const HASH32 = "0x1111111111111111111111111111111111111111111111111111111111111111";
+
+  it("fails closed for the stark curve (no vetted starknet library installed)", async () => {
+    await expect(vault.signRawDigest("t", "a", "stark", HASH32)).rejects.toThrow(
+      /stark curve raw signing is disabled/,
+    );
+  });
+
+  it("rejects an unsupported curve", async () => {
+    // `as never` deliberately bypasses the compile-time union to exercise the
+    // runtime guard against an out-of-type curve value.
+    await expect(vault.signRawDigest("t", "a", "p256" as never, HASH32)).rejects.toThrow(
+      /Unsupported raw-sign curve/,
+    );
+  });
+
+  it("rejects a non-32-byte payload before touching the database", async () => {
+    await expect(vault.signRawDigest("t", "a", "secp256k1", "0x1234")).rejects.toThrow(
+      /32-byte hex string/,
+    );
+    await expect(vault.signRawDigest("t", "a", "ed25519", "not-hex")).rejects.toThrow(
+      /32-byte hex string/,
+    );
   });
 });
 

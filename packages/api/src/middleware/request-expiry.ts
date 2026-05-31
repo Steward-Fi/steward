@@ -1,5 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import type { ApiResponse, AppVariables } from "../services/context";
+import { isSensitivePath } from "./sensitive-paths";
 
 const DEFAULT_MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const DEFAULT_TIMESTAMP_TTL_MS = 5 * 60 * 1000;
@@ -30,28 +31,6 @@ function parseHttpTime(value: string | undefined): number | null {
 
   const parsed = Date.parse(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-function isSensitivePath(path: string): boolean {
-  return (
-    path.startsWith("/vault") ||
-    path.startsWith("/agents") ||
-    path.startsWith("/policies") ||
-    path.startsWith("/secrets") ||
-    path.startsWith("/trade") ||
-    path.startsWith("/v1/trade") ||
-    path.startsWith("/approvals") ||
-    path.startsWith("/intents") ||
-    path.startsWith("/audit") ||
-    path.startsWith("/auth") ||
-    path.startsWith("/user") ||
-    path.startsWith("/webhooks") ||
-    path.startsWith("/tenants") ||
-    path.startsWith("/platform") ||
-    path.startsWith("/condition-sets") ||
-    path.startsWith("/condition_sets") ||
-    path.startsWith("/v1/condition_sets")
-  );
 }
 
 export function requestExpiry(options?: RequestExpiryOptions) {

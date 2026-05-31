@@ -32,6 +32,9 @@ import type {
   IntentCreate,
   IntentListOptions,
   PlatformLinkAccountResult,
+  PlatformTenantInvitation,
+  PlatformTenantInvitationCreateResult,
+  PlatformTenantInvitationListResult,
   PlatformTenantUser,
   PlatformTransferAccountResult,
   PlatformUserDeactivateResult,
@@ -54,6 +57,7 @@ import type {
   TenantAccessAllowlistEntry,
   TenantAccessAllowlistEntryInput,
   TenantAdminUser,
+  TenantAdminUserEventsResult,
   TenantAdminUserSearchResult,
   TenantAppClient,
   TenantAppClientSecret,
@@ -61,10 +65,14 @@ import type {
   TenantAuthAbuseConfig,
   TenantControlPlaneConfig,
   TenantGasSponsorshipConfig,
+  TenantIdempotencyMetrics,
   TenantMembership,
   TenantOidcProviderConfig,
+  TenantRequestSigningKey,
+  TenantRequestSigningKeyCreateResult,
   TenantSamlSsoConfig,
   TenantSamlSsoUpdate,
+  TenantSecurityChecklist,
   TenantSsoDomain,
   TenantTeamRole,
   TenantTestAccountConfig,
@@ -73,6 +81,9 @@ import type {
   TypedDataField,
   UpdateRoutePayload,
   UserAccountSummary,
+  UserPushSubscriptionInput,
+  UserPushSubscriptionListResult,
+  UserPushSubscriptionResult,
   WebhookConfig,
   WebhookDelivery,
 } from "./types.ts";
@@ -104,6 +115,8 @@ export interface StewardClientConfig {
   tenantId?: string;
   /** Optional HMAC secret used to sign sensitive mutating requests. */
   requestSigningSecret?: string;
+  /** Optional tenant request-signing key id, sent as `X-Steward-Signing-Key-Id`. */
+  requestSigningKeyId?: string;
   /**
    * Server-grade credentials are blocked in browser runtimes by default because
    * injected scripts can read request headers. Prefer bearerToken in browsers.
@@ -299,6 +312,10 @@ const SENSITIVE_SIGNED_PATHS = [
 ];
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
+type IdempotencyOptions = {
+  idempotencyKey?: string;
+};
+
 async function sha256Hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
@@ -387,11 +404,92 @@ export interface UserLinkedAccount {
   provider: string;
   providerAccountId: string;
   expiresAt: number | null;
+  type?: string;
+  embeddedWallets?: Array<{ address: string }>;
+  smartWallets?: Array<{ address: string }>;
+  providerApp?: {
+    id: string;
+    name: string | null;
+    logoUrl: string | null;
+  };
+  firstVerifiedAt?: string | Date;
+  latestVerifiedAt?: string | Date;
 }
 
 export interface UserAccountsResult {
   accounts: UserLinkedAccount[];
   primaryLoginMethods: Array<{ provider: "email" | "wallet"; providerAccountId: string }>;
+}
+
+export interface GlobalWalletAppSummary {
+  id: string;
+  appId: string;
+  tenantId: string;
+  name: string;
+  environment: string;
+  origin: string;
+  redirectUri: string | null;
+}
+
+export interface GlobalWalletConsent {
+  id: string;
+  tenantId: string;
+  clientId: string;
+  appId: string;
+  origin: string;
+  redirectUri: string | null;
+  walletAgentId: string | null;
+  walletAddress: string | null;
+  scopes: string[];
+  status: string;
+  grantedAt: string | Date;
+  lastUsedAt: string | Date | null;
+  expiresAt: string | Date | null;
+  revokedAt: string | Date | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+}
+
+export interface GlobalWalletConsentRequest {
+  app: GlobalWalletAppSummary;
+  requestedScopes: string[];
+  wallet: { agentId: string; address: string };
+  consent: GlobalWalletConsent | null;
+}
+
+export interface GlobalWalletApproveResult {
+  consent: GlobalWalletConsent;
+  wallet: { agentId: string; address: string };
+}
+
+export interface GlobalWalletRpcResult<T = unknown> {
+  jsonrpc: string;
+  id: unknown;
+  result: T;
+}
+
+export interface GlobalWalletActionConfirmation {
+  confirmationId: string;
+  method: "personal_sign" | "eth_signTypedData_v4" | "eth_sendTransaction" | string;
+  expiresAt: string;
+}
+
+export interface GlobalWalletTransactionScan {
+  method: "eth_sendTransaction";
+  wallet: { address: string; agentId: string };
+  transaction: {
+    from?: string;
+    to: string;
+    valueWei: string;
+    data?: string;
+    chainId: number;
+  };
+  blocked: boolean;
+  riskLevel: "low" | "medium" | "high" | "blocked";
+  warnings: Array<{ code: string; severity: "info" | "warning" | "error"; message: string }>;
+  confirmationRequired: boolean;
+  executionSupported: boolean;
+  unsupportedReason?: string;
 }
 
 export interface UserAccountUnlinkResult {
@@ -614,12 +712,38 @@ function parsePlatformTenantUser(user: PlatformTenantUser): PlatformTenantUser {
   };
 }
 
+function parsePlatformTenantInvitation(
+  invitation: PlatformTenantInvitation,
+): PlatformTenantInvitation {
+  return {
+    ...invitation,
+    acceptedAt: invitation.acceptedAt ? new Date(invitation.acceptedAt) : null,
+    revokedAt: invitation.revokedAt ? new Date(invitation.revokedAt) : null,
+    expiresAt: new Date(invitation.expiresAt),
+    createdAt: new Date(invitation.createdAt),
+    updatedAt: invitation.updatedAt ? new Date(invitation.updatedAt) : undefined,
+  };
+}
+
 function parseTenantAdminUser(user: TenantAdminUser): TenantAdminUser {
   return {
     ...user,
     joinedAt: new Date(user.joinedAt),
+    deactivatedAt: user.deactivatedAt ? new Date(user.deactivatedAt) : null,
     createdAt: new Date(user.createdAt),
     updatedAt: new Date(user.updatedAt),
+  };
+}
+
+function parseTenantAdminUserEvents(
+  result: TenantAdminUserEventsResult,
+): TenantAdminUserEventsResult {
+  return {
+    ...result,
+    events: result.events.map((event) => ({
+      ...event,
+      createdAt: new Date(event.createdAt),
+    })),
   };
 }
 
@@ -693,6 +817,7 @@ export class StewardClient {
   private readonly bearerToken?: string;
   private readonly tenantId?: string;
   private readonly requestSigningSecret?: string;
+  private readonly requestSigningKeyId?: string;
 
   constructor({
     baseUrl,
@@ -703,6 +828,7 @@ export class StewardClient {
     bearerToken,
     tenantId,
     requestSigningSecret,
+    requestSigningKeyId,
     allowUnsafeBrowserSecrets,
   }: StewardClientConfig) {
     if (
@@ -723,6 +849,7 @@ export class StewardClient {
     this.bearerToken = bearerToken;
     this.tenantId = tenantId;
     this.requestSigningSecret = requestSigningSecret;
+    this.requestSigningKeyId = requestSigningKeyId;
   }
 
   readonly tradeSessions = {
@@ -965,6 +1092,61 @@ export class StewardClient {
       );
       if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
       return parsePlatformTenantUser(response.data);
+    },
+
+    listInvitations: async (
+      tenantId: string,
+      opts?: {
+        status?: "pending" | "accepted" | "revoked" | "expired" | "all";
+        limit?: number;
+        offset?: number;
+      },
+    ): Promise<PlatformTenantInvitationListResult> => {
+      const params = new URLSearchParams();
+      if (opts?.status) params.set("status", opts.status);
+      if (opts?.limit) params.set("limit", String(opts.limit));
+      if (opts?.offset) params.set("offset", String(opts.offset));
+      const qs = params.toString();
+      const response = await this.request<PlatformTenantInvitationListResult, StewardErrorResponse>(
+        `/platform/tenants/${encodeURIComponent(tenantId)}/invitations${qs ? `?${qs}` : ""}`,
+      );
+      if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+      return {
+        invitations: response.data.invitations.map(parsePlatformTenantInvitation),
+      };
+    },
+
+    createInvitation: async (
+      tenantId: string,
+      input: {
+        email: string;
+        role?: Exclude<TenantTeamRole, "owner"> | string;
+        expiresInSeconds?: number;
+        invitedByUserId?: string;
+        sendEmail?: boolean;
+      },
+    ): Promise<PlatformTenantInvitationCreateResult> => {
+      const response = await this.request<
+        PlatformTenantInvitationCreateResult,
+        StewardErrorResponse
+      >(`/platform/tenants/${encodeURIComponent(tenantId)}/invitations`, {
+        method: "POST",
+        body: JSON.stringify(input),
+      });
+      if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+      return {
+        token: response.data.token,
+        emailSent: response.data.emailSent,
+        invitation: parsePlatformTenantInvitation(response.data.invitation),
+      };
+    },
+
+    revokeInvitation: async (tenantId: string, invitationId: string): Promise<void> => {
+      const response = await this.request<Record<string, never>, StewardErrorResponse>(
+        `/platform/tenants/${encodeURIComponent(tenantId)}/invitations/${encodeURIComponent(invitationId)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     },
 
     linkAccount: async (
@@ -1658,6 +1840,175 @@ export class StewardClient {
     return response.data;
   }
 
+  /** List active push subscriptions for the authenticated user. Requires user JWT. */
+  async listUserPushSubscriptions(): Promise<UserPushSubscriptionListResult> {
+    const response = await this.request<UserPushSubscriptionListResult, StewardErrorResponse>(
+      "/user/me/push-subscriptions",
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Register or refresh a push subscription for the authenticated user. Requires user JWT. */
+  async registerUserPushSubscription(
+    input: UserPushSubscriptionInput,
+  ): Promise<UserPushSubscriptionResult> {
+    const response = await this.request<UserPushSubscriptionResult, StewardErrorResponse>(
+      "/user/me/push-subscriptions",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Revoke a push subscription for the authenticated user. Requires user JWT. */
+  async revokeUserPushSubscription(subscriptionId: string): Promise<UserPushSubscriptionResult> {
+    const response = await this.request<UserPushSubscriptionResult, StewardErrorResponse>(
+      `/user/me/push-subscriptions/${encodeURIComponent(subscriptionId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Preview a global-wallet consent request for a tenant app. Requires user JWT. */
+  async getGlobalWalletConsentRequest(input: {
+    appId: string;
+    origin?: string;
+    redirectUri?: string;
+    scopes?: string[];
+  }): Promise<GlobalWalletConsentRequest> {
+    const params = new URLSearchParams({ app_id: input.appId });
+    if (input.origin) params.set("origin", input.origin);
+    if (input.redirectUri) params.set("redirect_uri", input.redirectUri);
+    for (const scope of input.scopes ?? []) params.append("scope", scope);
+    const response = await this.request<GlobalWalletConsentRequest, StewardErrorResponse>(
+      `/global-wallet/consent/request?${params.toString()}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Approve global-wallet access for a tenant app. Requires user JWT with recent MFA. */
+  async approveGlobalWalletConsent(input: {
+    appId: string;
+    origin?: string;
+    redirectUri?: string;
+    scopes?: string[];
+  }): Promise<GlobalWalletApproveResult> {
+    const response = await this.request<GlobalWalletApproveResult, StewardErrorResponse>(
+      "/global-wallet/consent/approve",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          app_id: input.appId,
+          origin: input.origin,
+          redirect_uri: input.redirectUri,
+          scopes: input.scopes,
+        }),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** List global-wallet app consents for the authenticated user. Requires user JWT. */
+  async listGlobalWalletConsents(): Promise<{ consents: GlobalWalletConsent[] }> {
+    const response = await this.request<{ consents: GlobalWalletConsent[] }, StewardErrorResponse>(
+      "/global-wallet/consents",
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Revoke a global-wallet app consent. Requires user JWT with recent MFA. */
+  async revokeGlobalWalletConsent(consentId: string): Promise<{ consent: GlobalWalletConsent }> {
+    const response = await this.request<{ consent: GlobalWalletConsent }, StewardErrorResponse>(
+      `/global-wallet/consents/${encodeURIComponent(consentId)}/revoke`,
+      { method: "POST" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Call the global-wallet RPC bridge. Write methods require explicit server-side enablement. */
+  async confirmGlobalWalletAction(input: {
+    appId: string;
+    origin?: string;
+    method: "personal_sign" | "eth_signTypedData_v4" | "eth_sendTransaction" | string;
+    params?: unknown;
+  }): Promise<GlobalWalletActionConfirmation> {
+    const response = await this.request<GlobalWalletActionConfirmation, StewardErrorResponse>(
+      "/global-wallet/rpc/confirm",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          app_id: input.appId,
+          origin: input.origin,
+          method: input.method,
+          params: input.params,
+        }),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Scan a global-wallet transaction request. Does not sign or submit transactions. */
+  async scanGlobalWalletTransaction(input: {
+    appId: string;
+    origin?: string;
+    method?: "eth_sendTransaction";
+    params: unknown;
+  }): Promise<GlobalWalletTransactionScan> {
+    const response = await this.request<GlobalWalletTransactionScan, StewardErrorResponse>(
+      "/global-wallet/rpc/scan",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          app_id: input.appId,
+          origin: input.origin,
+          method: input.method ?? "eth_sendTransaction",
+          params: input.params,
+        }),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Call the global-wallet RPC bridge. Write methods require a one-time action confirmation. */
+  async globalWalletRpc<T = unknown>(input: {
+    appId: string;
+    origin?: string;
+    method: string;
+    params?: unknown;
+    confirmationId?: string;
+    id?: unknown;
+    jsonrpc?: string;
+  }): Promise<GlobalWalletRpcResult<T>> {
+    const response = await this.request<GlobalWalletRpcResult<T>, StewardErrorResponse>(
+      "/global-wallet/rpc",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          app_id: input.appId,
+          origin: input.origin,
+          method: input.method,
+          params: input.params,
+          confirmation_id: input.confirmationId,
+          id: input.id,
+          jsonrpc: input.jsonrpc,
+        }),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
   /** Create a one-time message for linking an Ethereum wallet to the authenticated user. */
   async createUserEthereumWalletLinkNonce(address?: string): Promise<UserEthereumWalletLinkNonce> {
     const response = await this.request<UserEthereumWalletLinkNonce, StewardErrorResponse>(
@@ -2310,6 +2661,62 @@ export class StewardClient {
     return response.data.gasSponsorshipConfig;
   }
 
+  /** Get the production security checklist for a tenant deployment. Requires tenant-admin MFA server-side. */
+  async getTenantSecurityChecklist(tenantId: string): Promise<TenantSecurityChecklist> {
+    const response = await this.request<TenantSecurityChecklist, StewardErrorResponse>(
+      `/tenants/${encodeURIComponent(tenantId)}/security-checklist`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Get privacy-preserving idempotency counters for a tenant. Requires tenant-admin MFA server-side. */
+  async getTenantIdempotencyMetrics(tenantId: string): Promise<TenantIdempotencyMetrics> {
+    const response = await this.request<TenantIdempotencyMetrics, StewardErrorResponse>(
+      `/tenants/${encodeURIComponent(tenantId)}/idempotency-metrics`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** List tenant request-signing key metadata. Requires tenant-admin MFA server-side. */
+  async listTenantRequestSigningKeys(tenantId: string): Promise<TenantRequestSigningKey[]> {
+    const response = await this.request<{ keys: TenantRequestSigningKey[] }, StewardErrorResponse>(
+      `/tenants/${encodeURIComponent(tenantId)}/request-signing-keys`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.keys;
+  }
+
+  /** Rotate tenant request-signing keys and reveal the new secret once. */
+  async rotateTenantRequestSigningKey(
+    tenantId: string,
+    input: { name?: string } = {},
+  ): Promise<TenantRequestSigningKeyCreateResult> {
+    const response = await this.request<TenantRequestSigningKeyCreateResult, StewardErrorResponse>(
+      `/tenants/${encodeURIComponent(tenantId)}/request-signing-keys`,
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Revoke a tenant request-signing key. Requires tenant-admin MFA server-side. */
+  async revokeTenantRequestSigningKey(
+    tenantId: string,
+    keyId: string,
+  ): Promise<TenantRequestSigningKey> {
+    const response = await this.request<{ key: TenantRequestSigningKey }, StewardErrorResponse>(
+      `/tenants/${encodeURIComponent(tenantId)}/request-signing-keys/${encodeURIComponent(keyId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data.key;
+  }
+
   // ─── Agent Dashboard ──────────────────────────────────────────
 
   /** Get the aggregated dashboard for an agent (balance, spend, policies, recent tx, pending approvals). */
@@ -2676,11 +3083,20 @@ export class StewardClient {
   /** Get delivery history for a webhook. */
   async getWebhookDeliveries(
     webhookId: string,
-    opts?: { limit?: number; offset?: number },
+    opts?: {
+      limit?: number;
+      offset?: number;
+      status?: WebhookDelivery["status"];
+      eventType?: string;
+      hasError?: boolean;
+    },
   ): Promise<WebhookDelivery[]> {
     const params = new URLSearchParams();
     if (opts?.limit) params.set("limit", String(opts.limit));
     if (opts?.offset) params.set("offset", String(opts.offset));
+    if (opts?.status) params.set("status", opts.status);
+    if (opts?.eventType) params.set("eventType", opts.eventType);
+    if (opts?.hasError !== undefined) params.set("hasError", String(opts.hasError));
     const qs = params.toString();
     const response = await this.request<WebhookDelivery[], StewardErrorResponse>(
       `/webhooks/${encodeURIComponent(webhookId)}/deliveries${qs ? `?${qs}` : ""}`,
@@ -2689,10 +3105,67 @@ export class StewardClient {
     return response.data;
   }
 
+  /** Export redacted webhook delivery history as CSV. */
+  async exportWebhookDeliveriesCsv(
+    webhookId: string,
+    opts?: {
+      limit?: number;
+      status?: WebhookDelivery["status"];
+      eventType?: string;
+      hasError?: boolean;
+    },
+  ): Promise<string> {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.status) params.set("status", opts.status);
+    if (opts?.eventType) params.set("eventType", opts.eventType);
+    if (opts?.hasError !== undefined) params.set("hasError", String(opts.hasError));
+    const qs = params.toString();
+    const url = `${this.baseUrl}/webhooks/${encodeURIComponent(webhookId)}/deliveries/export${qs ? `?${qs}` : ""}`;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: this.buildHeaders({ Accept: "text/csv" }),
+      });
+    } catch (error) {
+      throw new StewardApiError(
+        error instanceof Error ? error.message : "Network request failed",
+        0,
+      );
+    }
+    if (!response.ok) {
+      throw new StewardApiError(
+        `Webhook delivery export failed: ${response.status}`,
+        response.status,
+      );
+    }
+    return response.text();
+  }
+
   /** Retry a failed webhook delivery. */
   async retryDelivery(deliveryId: string): Promise<WebhookDelivery> {
     const response = await this.request<WebhookDelivery, StewardErrorResponse>(
       `/webhooks/deliveries/${encodeURIComponent(deliveryId)}/retry`,
+      { method: "POST" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Replay a historical webhook delivery as a new signed delivery. */
+  async replayDelivery(deliveryId: string): Promise<WebhookDelivery> {
+    const response = await this.request<WebhookDelivery, StewardErrorResponse>(
+      `/webhooks/deliveries/${encodeURIComponent(deliveryId)}/replay`,
+      { method: "POST" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Send a signed one-off diagnostic webhook delivery. */
+  async testWebhook(webhookId: string): Promise<WebhookDelivery> {
+    const response = await this.request<WebhookDelivery, StewardErrorResponse>(
+      `/webhooks/${encodeURIComponent(webhookId)}/test`,
       { method: "POST" },
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
@@ -2873,14 +3346,21 @@ export class StewardClient {
   // ─── Condition Sets ────────────────────────────
 
   async listConditionSets(): Promise<ConditionSet[]> {
-    const response = await this.request<ConditionSet[], StewardErrorResponse>("/condition-sets");
+    const response = await this.request<
+      { conditionSets: ConditionSet[]; limit?: number; offset?: number },
+      StewardErrorResponse
+    >("/condition-sets");
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
-    return response.data;
+    return response.data.conditionSets ?? [];
   }
 
-  async createConditionSet(payload: ConditionSetCreate): Promise<ConditionSet> {
+  async createConditionSet(
+    payload: ConditionSetCreate,
+    options?: IdempotencyOptions,
+  ): Promise<ConditionSet> {
     const response = await this.request<ConditionSet, StewardErrorResponse>("/condition-sets", {
       method: "POST",
+      headers: options?.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : undefined,
       body: JSON.stringify(payload),
     });
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
@@ -2898,20 +3378,30 @@ export class StewardClient {
   async updateConditionSet(
     conditionSetId: string,
     payload: ConditionSetUpdate,
+    options?: IdempotencyOptions,
   ): Promise<ConditionSet> {
     const response = await this.request<ConditionSet, StewardErrorResponse>(
       `/condition-sets/${encodeURIComponent(conditionSetId)}`,
-      { method: "PATCH", body: JSON.stringify(payload) },
+      {
+        method: "PATCH",
+        headers: options?.idempotencyKey
+          ? { "Idempotency-Key": options.idempotencyKey }
+          : undefined,
+        body: JSON.stringify(payload),
+      },
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }
 
-  async deleteConditionSet(conditionSetId: string): Promise<void> {
+  async deleteConditionSet(conditionSetId: string, options?: IdempotencyOptions): Promise<void> {
     const response = await this.request<Record<string, never> | undefined, StewardErrorResponse>(
       `/condition-sets/${encodeURIComponent(conditionSetId)}`,
       {
         method: "DELETE",
+        headers: options?.idempotencyKey
+          ? { "Idempotency-Key": options.idempotencyKey }
+          : undefined,
       },
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
@@ -2928,10 +3418,17 @@ export class StewardClient {
   async upsertConditionSetItem(
     conditionSetId: string,
     payload: ConditionSetItemInput,
+    options?: IdempotencyOptions,
   ): Promise<ConditionSetItem> {
     const response = await this.request<ConditionSetItem, StewardErrorResponse>(
       `/condition-sets/${encodeURIComponent(conditionSetId)}/items`,
-      { method: "POST", body: JSON.stringify(payload) },
+      {
+        method: "POST",
+        headers: options?.idempotencyKey
+          ? { "Idempotency-Key": options.idempotencyKey }
+          : undefined,
+        body: JSON.stringify(payload),
+      },
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
@@ -2940,11 +3437,15 @@ export class StewardClient {
   async replaceConditionSetItems(
     conditionSetId: string,
     items: ConditionSetItemInput[],
+    options?: IdempotencyOptions,
   ): Promise<ConditionSetItem[]> {
     const response = await this.request<ConditionSetItem[], StewardErrorResponse>(
       `/condition-sets/${encodeURIComponent(conditionSetId)}/items`,
       {
         method: "PUT",
+        headers: options?.idempotencyKey
+          ? { "Idempotency-Key": options.idempotencyKey }
+          : undefined,
         body: JSON.stringify({ items }),
       },
     );
@@ -2952,10 +3453,19 @@ export class StewardClient {
     return response.data;
   }
 
-  async deleteConditionSetItem(conditionSetId: string, itemId: string): Promise<void> {
+  async deleteConditionSetItem(
+    conditionSetId: string,
+    itemId: string,
+    options?: IdempotencyOptions,
+  ): Promise<void> {
     const response = await this.request<Record<string, never> | undefined, StewardErrorResponse>(
       `/condition-sets/${encodeURIComponent(conditionSetId)}/items/${encodeURIComponent(itemId)}`,
-      { method: "DELETE" },
+      {
+        method: "DELETE",
+        headers: options?.idempotencyKey
+          ? { "Idempotency-Key": options.idempotencyKey }
+          : undefined,
+      },
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
   }
@@ -3068,6 +3578,32 @@ export class StewardClient {
     };
   }
 
+  /** Export the tenant-scoped user directory as CSV. Requires user JWT, tenant admin role, and recent MFA. */
+  async exportTenantUsersCsv(
+    tenantId: string,
+    opts?: { q?: string; email?: string; limit?: number },
+  ): Promise<string> {
+    const params = new URLSearchParams();
+    if (opts?.q) params.set("q", opts.q);
+    if (opts?.email) params.set("email", opts.email);
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const qs = params.toString();
+    const url = `${this.baseUrl}/user/me/tenants/${encodeURIComponent(tenantId)}/users/export${qs ? `?${qs}` : ""}`;
+    let response: Response;
+    try {
+      response = await fetch(url, { headers: this.buildHeaders() });
+    } catch (error) {
+      throw new StewardApiError(
+        error instanceof Error ? error.message : "Network request failed",
+        0,
+      );
+    }
+    if (!response.ok) {
+      throw new StewardApiError(`Tenant user export failed: ${response.status}`, response.status);
+    }
+    return response.text();
+  }
+
   /** Read a tenant-scoped user record. Requires user JWT, tenant admin role, and recent MFA. */
   async getTenantUser(tenantId: string, userId: string): Promise<TenantAdminUser> {
     const response = await this.request<TenantAdminUser, StewardErrorResponse>(
@@ -3075,6 +3611,23 @@ export class StewardClient {
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return parseTenantAdminUser(response.data);
+  }
+
+  /** List tenant-scoped activity for a user. Requires user JWT, tenant admin role, and recent MFA. */
+  async listTenantUserEvents(
+    tenantId: string,
+    userId: string,
+    opts?: { limit?: number; offset?: number },
+  ): Promise<TenantAdminUserEventsResult> {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.offset) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    const response = await this.request<TenantAdminUserEventsResult, StewardErrorResponse>(
+      `/user/me/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}/events${qs ? `?${qs}` : ""}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return parseTenantAdminUserEvents(response.data);
   }
 
   /** Update a tenant user's team role. Requires user JWT, tenant admin role, and recent MFA. */
@@ -3092,6 +3645,49 @@ export class StewardClient {
     );
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return parseTenantAdminUser(response.data);
+  }
+
+  /** Replace tenant-scoped custom metadata. Requires user JWT, tenant admin role, and recent MFA. */
+  async updateTenantUserMetadata(
+    tenantId: string,
+    userId: string,
+    tenantCustomMetadata: Record<string, unknown>,
+  ): Promise<TenantAdminUser> {
+    const response = await this.request<TenantAdminUser, StewardErrorResponse>(
+      `/user/me/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}/metadata`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ tenantCustomMetadata }),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return parseTenantAdminUser(response.data);
+  }
+
+  /** Deactivate or reactivate an app-scoped tenant user. Requires user JWT, admin role, and MFA. */
+  async setTenantUserDeactivated(
+    tenantId: string,
+    userId: string,
+    deactivated = true,
+  ): Promise<TenantAdminUser> {
+    const response = await this.request<TenantAdminUser, StewardErrorResponse>(
+      `/user/me/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}/deactivate`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ deactivated }),
+      },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return parseTenantAdminUser(response.data);
+  }
+
+  /** Remove a user from the current tenant. Requires user JWT, tenant admin role, and recent MFA. */
+  async removeTenantUser(tenantId: string, userId: string): Promise<void> {
+    const response = await this.request<Record<string, never>, StewardErrorResponse>(
+      `/user/me/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
   }
 
   /**
@@ -3195,6 +3791,9 @@ export class StewardClient {
     }
     if (!headers.has("Idempotency-Key")) {
       headers.set("Idempotency-Key", randomIdempotencyKey());
+    }
+    if (this.requestSigningKeyId && !headers.has("X-Steward-Signing-Key-Id")) {
+      headers.set("X-Steward-Signing-Key-Id", this.requestSigningKeyId);
     }
 
     const body = typeof init.body === "string" ? init.body : "";

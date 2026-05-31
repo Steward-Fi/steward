@@ -61,7 +61,9 @@ curl https://api.steward.fi/tenants/my-platform/config \
       "backgroundColor": "#0F0F0F",
       "surfaceColor": "#1A1A2E",
       "textColor": "#FAFAFA",
-      "colorScheme": "dark"
+      "colorScheme": "dark",
+      "logoUrl": "https://assets.example.com/logo.png",
+      "faviconUrl": "https://assets.example.com/favicon.ico"
     }
   }
 }
@@ -121,7 +123,7 @@ DELETE /tenants/:id/app-clients/:clientId
 
 ### App Client Secrets
 
-App clients can also have backend-only app secrets for Privy-style REST API authentication. The app ID is stable and public in the form `<tenantId>/<clientId>`. The app secret is returned only once when rotated or created.
+App clients can also have backend-only app secrets for Privy-style REST API authentication and HMAC request signing. The app ID is stable and public in the form `<tenantId>/<clientId>`. The app secret is returned only once when rotated or created.
 
 Use Basic Auth with the app ID as the username and the app secret as the password, plus `X-Steward-App-Id`:
 
@@ -137,6 +139,120 @@ Secret management requires an owner/admin session with recent MFA:
 GET /tenants/:id/app-clients/:clientId/secrets
 POST /tenants/:id/app-clients/:clientId/secrets
 DELETE /tenants/:id/app-clients/:clientId/secrets/:secretId
+```
+
+For signed API requests, use the same app secret as the SDK
+`requestSigningSecret`. Steward validates the Basic auth secret and then checks
+`X-Steward-Signature` against that tenant-scoped secret, so production
+deployments do not need a separate global signing secret for app-client server
+integrations.
+
+```ts
+const steward = new StewardClient({
+  baseUrl: "https://api.steward.fi",
+  appId: "my-platform/web-prod",
+  appSecret: "stw_app_...",
+  requestSigningSecret: "stw_app_...",
+});
+```
+
+### Request Signing Keys
+
+Tenants can also manage standalone encrypted request-signing keys for server
+integrations that use tenant API keys, platform keys, or delegated signer
+credentials instead of app-client Basic auth.
+
+```bash
+GET /tenants/:id/request-signing-keys
+POST /tenants/:id/request-signing-keys
+DELETE /tenants/:id/request-signing-keys/:keyId
+```
+
+All routes require an owner/admin session with recent MFA. `POST` returns
+`signingSecret` once, stores the secret encrypted with the Steward keystore, and
+marks previous active keys as `retiring` for a seven-day overlap. `GET` returns
+metadata only.
+
+```ts
+const steward = new StewardClient({
+  baseUrl: "https://api.steward.fi",
+  tenantId: "my-platform",
+  apiKey: "stw_...",
+  requestSigningSecret: "stw_sig_...",
+  requestSigningKeyId: "6dd98a21-fbb6-4a2d-a840-f89a527a4244"
+});
+```
+
+## Security Checklist
+
+Tenant admins can read a production-readiness checklist for API headers, HSTS,
+request freshness, HMAC request signatures, browser allowlists, production app
+clients, and dashboard CSP coverage.
+
+```bash
+GET /tenants/:id/security-checklist
+```
+
+This endpoint requires an owner/admin session with recent MFA. It returns only
+status metadata, never raw secrets or environment values.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "tenantId": "my-platform",
+    "generatedAt": "2026-05-29T00:00:00.000Z",
+    "summary": { "pass": 5, "warning": 1, "fail": 1 },
+    "items": [
+      {
+        "id": "authorization-signatures",
+        "label": "Authorization signatures",
+        "status": "fail",
+        "description": "Sensitive mutating requests need enforced HMAC signatures and configured signing secrets.",
+        "remediation": "Set STEWARD_REQUIRE_AUTH_SIGNATURE=true and configure STEWARD_REQUEST_SIGNING_SECRETS or rotate an app client secret."
+      }
+    ]
+  }
+}
+```
+
+## Idempotency Metrics
+
+Tenant admins can inspect privacy-preserving idempotency counters for replay and
+conflict triage:
+
+```bash
+GET /tenants/:id/idempotency-metrics
+```
+
+The endpoint requires an owner/admin session with recent MFA. It returns only
+aggregated counters for the tenant; it never returns idempotency keys, request
+bodies, stored response bodies, or credential material.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "tenantId": "my-platform",
+    "generatedAt": "2026-05-30T00:00:00.000Z",
+    "windowStartedAt": "2026-05-30T00:00:00.000Z",
+    "lastSeenAt": "2026-05-30T00:00:01.000Z",
+    "ttlMs": 86400000,
+    "counters": {
+      "observed": 3,
+      "reserved": 1,
+      "completed": 1,
+      "replayed": 1,
+      "conflicts": 1,
+      "inFlightConflicts": 0,
+      "suppressedAuthResponses": 0,
+      "invalidKeys": 0,
+      "storeErrors": 0,
+      "skippedUnsafeContext": 0,
+      "releasedOnError": 0
+    }
+  }
+}
 ```
 
 `POST` rotates the secret, returns `appSecret` once, and marks the previous active secret as `retiring` for a short overlap window. `GET` returns metadata only: secret prefix, status, timestamps, and the public app ID.
@@ -200,6 +316,30 @@ POST /auth/sso/discover
 }
 ```
 
+## Team Invitations
+
+Invite-only tenants can create pending team invitations without creating a membership up front. Invitation tokens are returned once and stored hashed.
+
+```bash
+GET /platform/tenants/:id/invitations
+POST /platform/tenants/:id/invitations
+DELETE /platform/tenants/:id/invitations/:invitationId
+POST /user/me/tenants/:tenantId/invitations/accept
+```
+
+Create an invitation:
+
+```json
+{
+  "email": "alice@example.com",
+  "role": "developer",
+  "expiresInSeconds": 604800,
+  "sendEmail": true
+}
+```
+
+The platform response includes `{ invitation, token, emailSent }`. Steward stores only the token hash and can send the invitation through the tenant email provider when `sendEmail` is true. If you do not send through Steward, deliver `token` through your own email channel. The user accepts it from a personal session with a verified matching email. Invite-only tenants must use `POST /user/me/tenants/:tenantId/invitations/accept` with the one-time token; email-matched invites are not accepted without the token. Invitation roles can be `admin`, `developer`, `billing`, `viewer`, or `member`; `owner` cannot be granted by invitation.
+
 ## SAML Dashboard SSO
 
 Tenant admins can configure one SAML 2.0 IdP for dashboard/team SSO. The SAML configuration is separate from domain verification: verified SSO domains decide which tenant owns an email domain, while SAML metadata and ACS routes define the tenant's service-provider integration.
@@ -235,11 +375,15 @@ POST /auth/saml/:tenantId/acs
   "idpCertPems": ["-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"],
   "emailAttribute": "email",
   "groupsAttribute": "groups",
+  "groupRoleMappings": [
+    { "group": "Engineering", "role": "developer" },
+    { "group": "Finance", "role": "billing" }
+  ],
   "allowJitProvisioning": false
 }
 ```
 
-Steward validates that the IdP SSO URL is a public `https` URL, certificate entries are PEM certificates without private key material, at most five IdP certs are configured, and JIT-created SSO memberships can only default to `viewer`. The metadata route emits unsigned SP metadata with `WantAssertionsSigned=true` and stable Entity ID/ACS URLs derived from `APP_URL`, not the request host.
+Steward validates that the IdP SSO URL is a public `https` URL, certificate entries are PEM certificates without private key material, at most five IdP certs are configured, and JIT-created SSO memberships can only default to `viewer` unless a SAML group maps the new user to `admin`, `developer`, `billing`, `viewer`, or `member`. SAML group mappings cannot grant `owner`. The metadata route emits unsigned SP metadata with `WantAssertionsSigned=true` and stable Entity ID/ACS URLs derived from `APP_URL`, not the request host.
 
 The SP-initiated login route mirrors OIDC auth-code SSO and requires app-side PKCE:
 
@@ -247,9 +391,36 @@ The SP-initiated login route mirrors OIDC auth-code SSO and requires app-side PK
 GET /auth/saml/:tenantId/login?redirect_uri=https%3A%2F%2Fapp.example.com%2Fauth%2Fcallback&code_challenge=...&code_challenge_method=S256
 ```
 
-Steward stores an opaque `RelayState` and `InResponseTo` request ID, redirects to the tenant IdP, then the ACS route validates the signed SAML response/assertion against the tenant IdP certs, SP Entity ID, ACS URL, request ID, assertion timestamps, verified email domain, and assertion replay table. Successful ACS returns the app to `redirect_uri` with a short-lived exchange `code`; the app redeems it through `POST /auth/oauth/exchange`.
+Steward stores an opaque `RelayState` and `InResponseTo` request ID, redirects to the tenant IdP, then the ACS route atomically consumes the RelayState and validates the signed SAML response/assertion against the tenant IdP certs, SP Entity ID, ACS URL, request ID, assertion timestamps, configured email attribute, verified email domain, group attributes, and assertion replay table. Successful ACS returns the app to `redirect_uri` with a short-lived exchange `code`; the app redeems it through `POST /auth/oauth/exchange`.
 
 Client IDs must match `^[a-z0-9][a-z0-9_-]{2,63}$`. Redirect URLs must be exact `https` URLs, except loopback development URLs. Origins must be exact origins; app clients cannot use wildcard origins.
+
+---
+
+## MFA Policy
+
+`authAbuseConfig.mfa` controls tenant-level step-up behavior for sensitive custody operations:
+
+```json
+{
+  "authAbuseConfig": {
+    "mfa": {
+      "maxAgeSeconds": 120,
+      "requireFor": {
+        "vaultSigning": true,
+        "keyImport": true,
+        "keyExport": true,
+        "recoveryCodes": true,
+        "tenantAdmin": true
+      },
+      "allowDelegatedSignerAutomation": false,
+      "allowKeyQuorumAutomation": false
+    }
+  }
+}
+```
+
+`maxAgeSeconds` is bounded from 30 seconds to 1 hour. Each `requireFor` flag defaults to `true`; setting a flag to `false` disables only that action's MFA freshness gate. When signer or key-quorum automation is disabled, vault signing routes require an owner/admin session with recent MFA instead of signer-bound API credentials. Vault signing, key import/export, and tenant-admin control-plane routes use the tenant MFA freshness window and per-action `requireFor` flags. TOTP, SMS, recovery-code, and passkey MFA step-up sessions can satisfy recent-MFA checks; passkey step-up reuses the signed-in user's enrolled WebAuthn credentials.
 
 ---
 
@@ -292,7 +463,9 @@ curl -X PUT https://api.steward.fi/tenants/my-platform/config \
     },
     "theme": {
       "primaryColor": "#FF6B35",
-      "colorScheme": "dark"
+      "colorScheme": "dark",
+      "logoUrl": "https://assets.example.com/logo.png",
+      "faviconUrl": "https://assets.example.com/favicon.ico"
     }
   }'
 ```
@@ -457,7 +630,9 @@ Full color and typography control:
     "warningColor": "#F59E0B",
     "borderRadius": 12,
     "fontFamily": "Inter, system-ui, sans-serif",
-    "colorScheme": "dark"
+    "colorScheme": "dark",
+    "logoUrl": "https://assets.example.com/logo.png",
+    "faviconUrl": "https://assets.example.com/favicon.ico"
   }
 }
 ```
@@ -465,6 +640,8 @@ Full color and typography control:
 These map directly to the CSS custom properties in `@stwd/react`. Any fields not provided fall back to the component library defaults.
 
 Theme updates are validated before persistence: color tokens must be exact 6-digit hex values, `borderRadius` must be between `0` and `32`, `colorScheme` must be `light`, `dark`, or `system`, and `fontFamily` is restricted to common CSS font-family characters.
+
+`logoUrl` and `faviconUrl` must be absolute HTTPS URLs. Local development URLs using `http://localhost`, `http://127.0.0.1`, or `*.localhost` are accepted; `javascript:`, `data:`, `blob:`, `file:`, relative URLs, protocol-relative URLs, non-local HTTP URLs, credentials in URLs, and values over 2048 characters are rejected. Logos must end in `.png`; favicons must end in `.ico` or `.png`. Submit an empty string to clear a saved asset URL.
 
 ---
 

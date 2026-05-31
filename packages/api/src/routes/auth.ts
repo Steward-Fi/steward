@@ -101,11 +101,11 @@ import {
   authenticators,
   getDb,
   refreshTokens,
-  tenantSamlAssertionReplays,
-  tenantSamlAuthnRequests,
   type TenantEmailConfig,
   tenantAppClients,
   tenantConfigs,
+  tenantSamlAssertionReplays,
+  tenantSamlAuthnRequests,
   tenantSamlSsoConfigs,
   tenantSsoDomains,
   tenants,
@@ -122,10 +122,11 @@ import type {
 } from "@stwd/shared";
 import { KeyStore, provisionUserWallet, Vault } from "@stwd/vault";
 import bs58 from "bs58";
-import { and, eq, gte, lt, sql } from "drizzle-orm";
+import { and, eq, gte, isNull, lt, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { generateNonce, SiweMessage } from "siwe";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
+import { formatRateLimitHeaders } from "../middleware/redis-enforcement";
 import { writeAuditEvent } from "../services/audit";
 import {
   publicAuthAbuseConfig,
@@ -220,25 +221,34 @@ async function checkAuthRateLimit(
   const subject = subjectOverride ?? authRateLimitSubject(c);
   const key = `ratelimit:auth:${endpoint}:${subject}:${windowMs}`;
 
+  const deny = (retryAfterSecs: number) => {
+    const headers = formatRateLimitHeaders({
+      limit: max,
+      remaining: 0,
+      resetMs: retryAfterSecs * 1000,
+      retryAfterMs: retryAfterSecs * 1000,
+    });
+    headers["RateLimit-Policy"] = `${max};w=${Math.ceil(windowMs / 1000)}`;
+    for (const [name, value] of Object.entries(headers)) c.header(name, value);
+    return { allowed: false, retryAfterSecs };
+  };
+
   try {
     const redisMw = await import("../middleware/redis.js");
     if (!redisMw.isRedisAvailable()) {
       if (allowAuthRateLimitSoftFail()) return { allowed: true };
-      return { allowed: false, retryAfterSecs: 60 };
+      return deny(60);
     }
 
     const { checkRateLimit } = await import("@stwd/redis");
     const result = await checkRateLimit(key, windowMs, max);
     if (!result.allowed) {
-      return {
-        allowed: false,
-        retryAfterSecs: Math.ceil(result.resetMs / 1000),
-      };
+      return deny(Math.ceil(result.resetMs / 1000));
     }
     return { allowed: true };
   } catch {
     if (allowAuthRateLimitSoftFail()) return { allowed: true };
-    return { allowed: false, retryAfterSecs: 60 };
+    return deny(60);
   }
 }
 
@@ -790,10 +800,21 @@ export async function verifySessionToken(token: string): Promise<{
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
       const [user] = await getDb()
-        .select({ deactivatedAt: users.deactivatedAt })
+        .select({
+          deactivatedAt: users.deactivatedAt,
+          isGuest: users.isGuest,
+          guestExpiresAt: users.guestExpiresAt,
+        })
         .from(users)
         .where(eq(users.id, payload.userId));
       if (!user || user.deactivatedAt) return null;
+      // Fail-closed guest expiry: enforce the guest's hard expiry against the
+      // authoritative DB column, not just the access-token `exp`, so a refreshed
+      // or long-lived token cannot outlive the guest window. Full accounts have
+      // guestExpiresAt = null and are unaffected.
+      if (user.isGuest && user.guestExpiresAt && user.guestExpiresAt.getTime() <= Date.now()) {
+        return null;
+      }
       if (payload.tenantId) {
         const [membership] = await getDb()
           .select({ role: userTenants.role })
@@ -2416,6 +2437,10 @@ type PendingMfaAuth = {
   expiresAt: number;
 };
 
+function passkeyMfaChallengeKey(userId: string, challengeId: string): string {
+  return `mfa:passkey:${userId}:${challengeId}`;
+}
+
 async function hasTotpEnabled(userId: string): Promise<boolean> {
   return Boolean(await readMfaJson<StoredTotp>(mfaKey("totp:enabled", userId)));
 }
@@ -2773,6 +2798,7 @@ async function provisionSamlUser(opts: {
   config: TenantSamlSsoConfig;
   subject: string;
   email: string;
+  groups?: string[];
   tenantRole?: string;
 }): Promise<
   | {
@@ -2782,7 +2808,7 @@ async function provisionSamlUser(opts: {
     }
   | { ok: false; status?: 400 | 403 | 404 | 409 | 500; error: string }
 > {
-  const { c, tenantId, config, subject, email, tenantRole } = opts;
+  const { c, tenantId, config, subject, email, groups = [], tenantRole } = opts;
   const db = getDb();
   const providerAccountId = hashSha256Hex(`${tenantId}:${config.idpEntityId}:${subject}`);
   const providerName = "saml";
@@ -2818,10 +2844,7 @@ async function provisionSamlUser(opts: {
       if (existingEmailUser) {
         user = existingEmailUser;
       } else {
-        const [created] = await db
-          .insert(users)
-          .values({ email, emailVerified: true })
-          .returning();
+        const [created] = await db.insert(users).values({ email, emailVerified: true }).returning();
         user = created;
         createdUser = true;
       }
@@ -2840,7 +2863,11 @@ async function provisionSamlUser(opts: {
     if (!tenantResult.ok) {
       return { ok: false, status: tenantResult.status, error: tenantResult.error };
     }
-    await ensureUserTenantLink(user.id, tenantResult.tenantId, tenantRole ?? "viewer");
+    await ensureUserTenantLink(
+      user.id,
+      tenantResult.tenantId,
+      tenantRole ?? resolveSamlMappedRole(config, groups),
+    );
 
     let walletAddress = user.walletAddress;
     try {
@@ -3025,6 +3052,21 @@ async function completeEmailAuth(
   };
 }
 
+function resolveSamlMappedRole(config: TenantSamlSsoConfig, groups: string[]): string {
+  const precedence = ["admin", "developer", "billing", "viewer", "member"] as const;
+  const normalizedGroups = new Set(groups.map((group) => group.trim()).filter(Boolean));
+  for (const role of precedence) {
+    if (
+      config.groupRoleMappings.some(
+        (mapping) => mapping.role === role && normalizedGroups.has(mapping.group),
+      )
+    ) {
+      return role;
+    }
+  }
+  return "viewer";
+}
+
 function getEmailAuthRedirectBaseUrl(): string {
   return (process.env.EMAIL_AUTH_REDIRECT_BASE_URL || "https://www.elizacloud.ai").replace(
     /\/$/,
@@ -3146,6 +3188,7 @@ async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoCo
     nameIdFormat: row.nameIdFormat ?? undefined,
     emailAttribute: row.emailAttribute,
     groupsAttribute: row.groupsAttribute ?? undefined,
+    groupRoleMappings: row.groupRoleMappings as TenantSamlSsoConfig["groupRoleMappings"],
     allowJitProvisioning: row.allowJitProvisioning,
     jitDefaultRole: "viewer",
     lastTestedAt: row.lastTestedAt,
@@ -3157,21 +3200,18 @@ async function getActiveSamlSsoConfig(tenantId: string): Promise<TenantSamlSsoCo
 async function consumeSamlAuthnRequest(tenantId: string, relayState: string) {
   const db = getDb();
   const [request] = await db
-    .select()
-    .from(tenantSamlAuthnRequests)
+    .update(tenantSamlAuthnRequests)
+    .set({ consumedAt: new Date(), updatedAt: new Date() })
     .where(
       and(
         eq(tenantSamlAuthnRequests.tenantId, tenantId),
         eq(tenantSamlAuthnRequests.relayState, relayState),
+        isNull(tenantSamlAuthnRequests.consumedAt),
+        gte(tenantSamlAuthnRequests.expiresAt, new Date()),
       ),
-    );
+    )
+    .returning();
   if (!request) throw new Error("Invalid or expired SAML RelayState");
-  if (request.consumedAt) throw new Error("SAML RelayState has already been consumed");
-  if (request.expiresAt.getTime() < Date.now()) throw new Error("SAML RelayState has expired");
-  await db
-    .update(tenantSamlAuthnRequests)
-    .set({ consumedAt: new Date(), updatedAt: new Date() })
-    .where(eq(tenantSamlAuthnRequests.id, request.id));
   return request;
 }
 
@@ -3180,12 +3220,14 @@ async function recordSamlAssertionReplay(
   assertionId: string,
   responseId: string | undefined,
 ): Promise<void> {
-  await getDb().insert(tenantSamlAssertionReplays).values({
-    tenantId,
-    assertionId,
-    responseId,
-    expiresAt: new Date(Date.now() + 10 * 60_000),
-  });
+  await getDb()
+    .insert(tenantSamlAssertionReplays)
+    .values({
+      tenantId,
+      assertionId,
+      responseId,
+      expiresAt: new Date(Date.now() + 10 * 60_000),
+    });
 }
 
 /**
@@ -3247,16 +3289,18 @@ auth.get("/saml/:tenantId/login", async (c) => {
     spEntityId: config.spEntityId,
     acsUrl: config.acsUrl,
   });
-  await getDb().insert(tenantSamlAuthnRequests).values({
-    tenantId,
-    requestId: built.requestId,
-    relayState,
-    redirectUri,
-    appClientId: clientId,
-    codeChallenge,
-    codeChallengeMethod: "S256",
-    expiresAt: new Date(Date.now() + 5 * 60_000),
-  });
+  await getDb()
+    .insert(tenantSamlAuthnRequests)
+    .values({
+      tenantId,
+      requestId: built.requestId,
+      relayState,
+      redirectUri,
+      appClientId: clientId,
+      codeChallenge,
+      codeChallengeMethod: "S256",
+      expiresAt: new Date(Date.now() + 5 * 60_000),
+    });
 
   if (appState) {
     await getChallengeStore().set(`saml-app-state:${relayState}`, appState);
@@ -3290,7 +3334,10 @@ auth.post("/saml/:tenantId/acs", async (c) => {
   const samlResponse = typeof body?.SAMLResponse === "string" ? body.SAMLResponse : "";
   const relayState = typeof body?.RelayState === "string" ? body.RelayState : "";
   if (!samlResponse || !relayState) {
-    return c.json<ApiResponse>({ ok: false, error: "SAMLResponse and RelayState are required" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "SAMLResponse and RelayState are required" },
+      400,
+    );
   }
 
   let request: Awaited<ReturnType<typeof consumeSamlAuthnRequest>>;
@@ -3339,7 +3386,7 @@ auth.post("/saml/:tenantId/acs", async (c) => {
       config,
       subject: verified.nameId || verified.assertionId,
       email: verified.email,
-      tenantRole: "viewer",
+      groups: verified.groups,
     });
     if (!result.ok) {
       redirectUrl.searchParams.set("error", result.error);
@@ -3839,6 +3886,15 @@ auth.post("/jwt/login", async (c) => {
   const provider = selectOidcProvider(await getTenantOidcProviders(tenantId), providerId);
   if (!provider) {
     return c.json<ApiResponse>({ ok: false, error: "OIDC provider not found or disabled" }, 404);
+  }
+  if (provider.authorizationUrl || provider.tokenUrl) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Direct JWT login is disabled for authorization-code OIDC providers",
+      },
+      403,
+    );
   }
   const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "oidc", provider.id);
   if (methodResponse) return methodResponse;
@@ -5829,6 +5885,175 @@ auth.post("/mfa/sms/complete", async (c) => {
   return c.json(buildAuthResponse(token, refreshToken, challenge.user));
 });
 
+auth.post("/mfa/passkey/options", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+  if (!session.payload.userId) {
+    return c.json<ApiResponse>({ ok: false, error: "User session is required" }, 403);
+  }
+  const rl = await checkAuthRateLimit(c, "mfa-passkey-options", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const methodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    session.payload.tenantId,
+    "passkey",
+  );
+  if (methodResponse) return methodResponse;
+
+  const passkeys = await getDb()
+    .select({
+      credentialId: authenticators.credentialId,
+      transports: authenticators.transports,
+    })
+    .from(authenticators)
+    .where(eq(authenticators.userId, session.payload.userId));
+  if (passkeys.length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "No passkey is registered for this user" }, 404);
+  }
+
+  const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(
+    `mfa:${session.payload.userId}`,
+    {
+      allowCredentials: passkeys.map((credential) => ({
+        id: credential.credentialId,
+        transports: (credential.transports ?? []) as never[],
+      })),
+    },
+  );
+  const challengeId = options.challenge;
+  await getChallengeStore().set(
+    passkeyMfaChallengeKey(session.payload.userId, challengeId),
+    options.challenge,
+  );
+
+  return c.json({ ...options, challengeId });
+});
+
+const completePasskeyMfaHandler = async (c: Context) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+  if (!session.payload.userId) {
+    return c.json<ApiResponse>({ ok: false, error: "User session is required" }, 403);
+  }
+  const rl = await checkAuthRateLimit(c, "mfa-passkey-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{
+    challengeId: string;
+    response: { id: string; [key: string]: unknown };
+  }>(c);
+  if (!body?.challengeId || typeof body.challengeId !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "challengeId is required" }, 400);
+  }
+  if (!body.response?.id || typeof body.response.id !== "string") {
+    return c.json<ApiResponse>({ ok: false, error: "response.id is required" }, 400);
+  }
+
+  const methodResponse = await requireTenantLoginMethodAllowed(
+    c,
+    session.payload.tenantId,
+    "passkey",
+  );
+  if (methodResponse) return methodResponse;
+
+  const [cred] = await getDb()
+    .select()
+    .from(authenticators)
+    .where(
+      and(
+        eq(authenticators.userId, session.payload.userId),
+        eq(authenticators.credentialId, body.response.id),
+      ),
+    );
+  if (!cred) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
+  }
+
+  let verification: Awaited<ReturnType<PasskeyAuth["verifyAuthentication"]>>;
+  try {
+    const challengeKey = passkeyMfaChallengeKey(session.payload.userId, body.challengeId);
+    const expectedChallenge = await getChallengeStore().get(challengeKey);
+    if (!expectedChallenge) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
+    }
+    verification = await getPasskeyAuth(c.req.header("origin")).verifyAuthentication(
+      body.response as unknown as Parameters<PasskeyAuth["verifyAuthentication"]>[0],
+      expectedChallenge,
+      cred.credentialPublicKey,
+      cred.counter,
+    );
+    if ((await getChallengeStore().consume(challengeKey)) === null) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired passkey challenge" }, 401);
+    }
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 400);
+  }
+
+  if (!verification.verified) {
+    return c.json<ApiResponse>({ ok: false, error: "Passkey MFA verification failed" }, 401);
+  }
+  if (!(await isActiveTenantMember(session.payload.userId, session.payload.tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
+  }
+
+  await getDb()
+    .update(authenticators)
+    .set({ counter: verification.authenticationInfo.newCounter })
+    .where(eq(authenticators.id, cred.id));
+
+  const [user] = await getDb()
+    .select({
+      id: users.id,
+      email: users.email,
+      walletAddress: users.walletAddress,
+      walletChain: users.walletChain,
+    })
+    .from(users)
+    .where(eq(users.id, session.payload.userId));
+
+  const mfaClaims = {
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "passkey",
+    factorEnrollmentVerifiedAt: Date.now(),
+  };
+  const token = await createSessionToken(session.payload.address, session.payload.tenantId, {
+    userId: session.payload.userId,
+    email: session.payload.email,
+    authMethod: session.payload.authMethod,
+    ...mfaClaims,
+  });
+  const refreshToken = await createRefreshToken(
+    session.payload.userId,
+    session.payload.tenantId,
+    mfaClaims,
+  );
+
+  return c.json(
+    buildAuthResponse(token, refreshToken, {
+      id: user?.id ?? session.payload.userId,
+      email: user?.email ?? session.payload.email ?? "",
+      walletAddress: user?.walletAddress ?? session.payload.address,
+      walletChain: user?.walletChain ?? undefined,
+    }),
+  );
+};
+
+auth.post("/mfa/passkey/complete", completePasskeyMfaHandler);
+auth.post("/mfa/passkey/verify", completePasskeyMfaHandler);
+
 auth.post("/mfa/sms/unenroll", async (c) => {
   const session = await requireSession(c);
   if (!session.ok) return session.response;
@@ -6284,6 +6509,13 @@ auth.post("/passkey/register/options", async (c) => {
       403,
     );
   }
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    session.payload.tenantId,
+    email,
+    "Passkey",
+  );
+  if (ssoRequiredResponse) return ssoRequiredResponse;
 
   const existingCreds = await db
     .select({ credentialId: authenticators.credentialId })
@@ -6357,6 +6589,8 @@ auth.post("/passkey/register/verify", async (c) => {
   const { tenantId } = tenantResult;
   const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "passkey");
   if (methodResponse) return methodResponse;
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, tenantId, email, "Passkey");
+  if (ssoRequiredResponse) return ssoRequiredResponse;
 
   let verification: Awaited<ReturnType<PasskeyAuth["verifyRegistration"]>>;
   try {
@@ -6460,6 +6694,13 @@ auth.post("/passkey/login/options", async (c) => {
   if (methodResponse) return methodResponse;
 
   const email = body.email.toLowerCase().trim();
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    optionTenantId,
+    email,
+    "Passkey",
+  );
+  if (ssoRequiredResponse) return ssoRequiredResponse;
 
   const options = await getPasskeyAuth(c.req.header("origin")).generateAuthenticationOptions(email);
   const challengeId = options.challenge;
@@ -6504,6 +6745,17 @@ auth.post("/passkey/login/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
 
+  // Resolve tenant policy before consuming the one-time WebAuthn challenge.
+  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const { tenantId } = tenantResult;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "passkey");
+  if (methodResponse) return methodResponse;
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, tenantId, email, "Passkey");
+  if (ssoRequiredResponse) return ssoRequiredResponse;
+
   const [cred] = await db
     .select()
     .from(authenticators)
@@ -6543,15 +6795,6 @@ auth.post("/passkey/login/verify", async (c) => {
   if (!verification.verified) {
     return c.json<ApiResponse>({ ok: false, error: "Passkey authentication failed" }, 401);
   }
-
-  // Resolve the requesting tenant before mutating counters or provisioning wallets.
-  const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
-  if (!tenantResult.ok) {
-    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
-  }
-  const { tenantId } = tenantResult;
-  const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "passkey");
-  if (methodResponse) return methodResponse;
 
   // Update counter to prevent replay attacks
   await db
@@ -6828,6 +7071,322 @@ auth.post("/email/verify", async (c) => {
   }
 
   return authExchangeJson(c, authResult.response);
+});
+
+// ── Guest (ephemeral / anonymous) accounts — Privy parity ─────────────────────
+//
+// POST /auth/guest          — mint an ephemeral guest user + bounded session.
+// POST /auth/guest/upgrade  — promote a guest into a full account by attaching a
+//                             verified identity, preserving the user id + data.
+//
+// A guest carries strictly LIMITED authority: it is linked to its tenant with
+// role "guest", which does NOT satisfy requireTenantLevel(), so guest sessions
+// are denied from owner/admin/tenant-config/key-import/export actions. The
+// guest session is hard-bounded by users.guest_expires_at (enforced server-side
+// in verifySessionToken, fail-closed), independent of the access-token exp.
+
+/** Guest session role — deliberately below "member" so requireTenantLevel() is false. */
+const GUEST_TENANT_ROLE = "guest";
+/** Default guest session lifetime (24h) and hard cap (7d). Bounded + revocable. */
+const GUEST_DEFAULT_LIFETIME_MS = 24 * 3600 * 1000;
+const GUEST_MAX_LIFETIME_MS = 7 * 24 * 3600 * 1000;
+
+/** Parse a duration string like "30m", "24h", "7d" into ms. Null on parse error. */
+function parseGuestLifetimeMs(input: unknown): number | null {
+  if (input === undefined || input === null || input === "") return GUEST_DEFAULT_LIFETIME_MS;
+  if (typeof input !== "string") return null;
+  const m = /^(\d+)\s*(s|m|h|d)$/i.exec(input.trim());
+  if (!m) return null;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const unit = m[2].toLowerCase();
+  const mult = unit === "s" ? 1000 : unit === "m" ? 60_000 : unit === "h" ? 3_600_000 : 86_400_000;
+  return Math.min(n * mult, GUEST_MAX_LIFETIME_MS);
+}
+
+/**
+ * Resolve + gate the tenant a guest is created into. A guest may only be minted
+ * into the default tenant or an explicitly "open"-join tenant; reserved/personal
+ * tenants of other users and invite/closed tenants are refused (fail-closed).
+ */
+async function resolveGuestTenant(
+  c: Context,
+  bodyTenantId: unknown,
+): Promise<TenantResolutionResult> {
+  const headerTenant = c.req.header("X-Steward-Tenant")?.trim();
+  const requested =
+    headerTenant ||
+    (typeof bodyTenantId === "string" ? bodyTenantId.trim() : "") ||
+    _DEFAULT_TENANT_ID;
+
+  if (!isValidTenantId(requested)) {
+    return { ok: false, status: 400, error: "Invalid tenant id format" };
+  }
+  if (isReservedTenantId(requested)) {
+    return { ok: false, status: 403, error: "Guests cannot be created in a personal tenant" };
+  }
+  if (!(await tenantExists(requested))) {
+    return { ok: false, status: 404, error: `Tenant '${requested}' not found` };
+  }
+  if (requested === _DEFAULT_TENANT_ID) {
+    return { ok: true, tenantId: requested, isPersonal: false };
+  }
+  const [config] = await getDb()
+    .select({ joinMode: tenantConfigs.joinMode })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, requested));
+  if (config?.joinMode === "open") {
+    return { ok: true, tenantId: requested, isPersonal: false };
+  }
+  return {
+    ok: false,
+    status: 403,
+    error: `Tenant '${requested}' does not accept guest sign-in`,
+  };
+}
+
+auth.post("/guest", async (c) => {
+  const rl = await checkAuthRateLimit(c, "guest-create", 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many guest sign-in attempts. Try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{ tenantId?: unknown; expiresIn?: unknown }>(c);
+  // A malformed JSON body is tolerated (guest create takes no required fields),
+  // but if a body was sent it must be an object so we don't silently ignore a
+  // mistyped tenantId/expiresIn.
+  if (body !== null && (typeof body !== "object" || Array.isArray(body))) {
+    return c.json<ApiResponse>({ ok: false, error: "Request body must be a JSON object" }, 400);
+  }
+
+  const lifetimeMs = parseGuestLifetimeMs(body?.expiresIn);
+  if (lifetimeMs === null) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "'expiresIn' must be like '30m', '24h', '7d'" },
+      400,
+    );
+  }
+
+  const tenantResult = await resolveGuestTenant(c, body?.tenantId);
+  if (!tenantResult.ok) {
+    return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
+  }
+  const tenantId = tenantResult.tenantId;
+
+  const guestExpiresAt = new Date(Date.now() + lifetimeMs);
+  const db = getDb();
+  const [guest] = await db
+    .insert(users)
+    .values({
+      email: null,
+      emailVerified: false,
+      isGuest: true,
+      guestExpiresAt,
+    })
+    .returning();
+
+  // Link the guest to the requesting tenant with the LIMITED "guest" role so the
+  // session cannot satisfy requireTenantLevel(). onConflictDoNothing keeps this
+  // idempotent against a racing insert on the (userId, tenantId) unique index.
+  await db
+    .insert(userTenants)
+    .values({ userId: guest.id, tenantId, role: GUEST_TENANT_ROLE })
+    .onConflictDoNothing();
+
+  // Provision the guest's wallet under its own personal namespace so it has a
+  // wallet/agents immediately AND those rows survive a later upgrade unchanged.
+  let walletAddress = guest.walletAddress;
+  try {
+    const provisioned = await provisionWalletForUser(guest.id, `guest-${guest.id}`);
+    walletAddress = provisioned.walletAddress;
+  } catch (err) {
+    console.error("[GuestAuth] Wallet provision failed:", err);
+  }
+
+  const sessionClaims: Record<string, unknown> = {
+    userId: guest.id,
+    tenantId,
+    guest: true,
+    guestExpiresAt: guestExpiresAt.toISOString(),
+    authMethod: "guest",
+  };
+  const token = await createSessionToken(walletAddress ?? "", tenantId, sessionClaims);
+  const refreshToken = await createRefreshToken(guest.id, tenantId, sessionClaims);
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: guest.id,
+    action: "auth.guest.created",
+    resourceType: "session",
+    metadata: { method: "guest", guestExpiresAt: guestExpiresAt.toISOString() },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  dispatchUserAuthenticated(tenantId, guest.id, "guest");
+
+  return c.json(
+    buildAuthResponse(token, refreshToken, {
+      id: guest.id,
+      isGuest: true,
+      guestExpiresAt: guestExpiresAt.toISOString(),
+      email: null,
+      walletAddress: walletAddress ?? null,
+      tenantId,
+    }),
+  );
+});
+
+auth.post("/guest/upgrade", async (c) => {
+  const rl = await checkAuthRateLimit(c, "guest-upgrade", 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many upgrade attempts. Try again later." },
+      429,
+    );
+  }
+
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+  const userId = session.payload.userId;
+  const tenantId = session.payload.tenantId;
+
+  const body = await safeJsonParse<{
+    method?: unknown;
+    token?: unknown;
+    email?: unknown;
+  }>(c);
+  // Only email-magic-link upgrade is supported here. The identity MUST be
+  // verified (a valid, unexpired magic-link token) BEFORE any promotion — never
+  // promote on an unverified/claimed email.
+  if (!body || (body.method !== undefined && body.method !== "email")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Unsupported upgrade method — only 'email' is supported" },
+      400,
+    );
+  }
+  const magicLinkToken = typeof body.token === "string" ? body.token.trim() : "";
+  const rawEmail = typeof body.email === "string" ? body.email.trim() : "";
+  if (!magicLinkToken || !rawEmail) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "token and email are required to upgrade a guest" },
+      400,
+    );
+  }
+  const email = rawEmail.toLowerCase();
+
+  const emailAuth = await getEmailAuthForTenant(tenantId);
+  const result = await emailAuth.verifyMagicLink(magicLinkToken);
+  if (!result.valid || result.email.toLowerCase().trim() !== email) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired magic link" }, 401);
+  }
+  if (result.tenantId && result.tenantId !== tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Magic link tenant mismatch" }, 401);
+  }
+
+  const db = getDb();
+  const [user] = await db.select().from(users).where(eq(users.id, userId));
+  if (!user) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
+
+  // Idempotent replay: re-running the upgrade with the SAME verified email on an
+  // already-upgraded account is a no-op success (same id, no re-guesting).
+  if (!user.isGuest) {
+    if (user.email && user.email.toLowerCase() === email) {
+      const token = await createSessionToken(user.walletAddress ?? "", tenantId, {
+        userId,
+        tenantId,
+        authMethod: "email",
+      });
+      const refreshToken = await createRefreshToken(userId, tenantId, {
+        userId,
+        tenantId,
+        authMethod: "email",
+      });
+      return c.json(
+        buildAuthResponse(token, refreshToken, {
+          id: userId,
+          isGuest: false,
+          email: user.email,
+          walletAddress: user.walletAddress ?? null,
+          tenantId,
+          alreadyUpgraded: true,
+        }),
+      );
+    }
+    return c.json<ApiResponse>({ ok: false, error: "Account is already a full user" }, 409);
+  }
+
+  // Reject upgrading an expired guest (fail-closed): the session is dead.
+  if (user.guestExpiresAt && user.guestExpiresAt.getTime() <= Date.now()) {
+    return c.json<ApiResponse>({ ok: false, error: "Guest session has expired" }, 401);
+  }
+
+  // The verified email must not already belong to a DIFFERENT user, or upgrading
+  // would either collide on the unique email index or hijack another identity.
+  const existingByEmail = await findUserByEmail(email);
+  if (existingByEmail && existingByEmail.id !== userId) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Email is already associated with another account" },
+      409,
+    );
+  }
+
+  // Promote in a single transaction, preserving users.id and every owned row
+  // (agents/wallets/memberships are keyed by user id and are untouched). The
+  // membership role is raised guest -> member only; never auto-escalated to
+  // admin/owner, and the tenant is never changed (no cross-tenant escalation).
+  await db.transaction(async (tx) => {
+    await tx
+      .update(users)
+      .set({ email, emailVerified: true, isGuest: false, guestExpiresAt: null })
+      .where(eq(users.id, userId));
+    await tx
+      .update(userTenants)
+      .set({ role: "member" })
+      .where(
+        and(
+          eq(userTenants.userId, userId),
+          eq(userTenants.tenantId, tenantId),
+          eq(userTenants.role, GUEST_TENANT_ROLE),
+        ),
+      );
+  });
+
+  const sessionClaims: Record<string, unknown> = {
+    userId,
+    tenantId,
+    authMethod: "email",
+  };
+  const token = await createSessionToken(user.walletAddress ?? "", tenantId, sessionClaims);
+  const refreshToken = await createRefreshToken(userId, tenantId, sessionClaims);
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "auth.guest.upgraded",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { method: "email" },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+  dispatchUserAuthenticated(tenantId, userId, "email");
+
+  return c.json(
+    buildAuthResponse(token, refreshToken, {
+      id: userId,
+      isGuest: false,
+      email,
+      walletAddress: user.walletAddress ?? null,
+      tenantId,
+    }),
+  );
 });
 
 // ── OAuth authorization-code flow ─────────────────────────────────────────────

@@ -79,6 +79,35 @@ describe("trade-order evaluators", () => {
     }
   });
 
+  it("adapter gate composition (per-order + daily) denies an under-per-order order once rolling daily spend is counted", () => {
+    // Mirrors routes/adapters.ts `enforceFundMovingPolicy`, which runs ONLY the
+    // USD-cap evaluators. Regression guard for the bug where the route passed a
+    // hardcoded dailySpendUsd:0, making the daily cap a no-op: an order UNDER the
+    // per-order cap must still be DENIED when the agent's REAL rolling daily
+    // spend would push the day's total over the daily cap.
+    const adapterSession = { perOrderCapUsd: 100, dailyCapUsd: 1000, dailySpendUsd: 950 };
+    const adapterEvaluators = [perOrderCapEvaluator, dailySpendCapEvaluator];
+
+    // $80 is under the $100 per-order cap, but 950 + 80 = 1030 > 1000 daily cap.
+    expect(
+      evaluateTradeOrder(adapterSession, { estimatedOrderUsd: 80 }, adapterEvaluators),
+    ).toEqual({
+      allow: false,
+      reason: "daily-spend-cap: $1030 would exceed daily cap $1000",
+      failedEvaluator: "dailySpendCapEvaluator",
+    });
+
+    // With the previous (buggy) dailySpendUsd:0 baseline the SAME order is allowed,
+    // proving the rolling spend is what binds the cap.
+    expect(
+      evaluateTradeOrder(
+        { perOrderCapUsd: 100, dailyCapUsd: 1000, dailySpendUsd: 0 },
+        { estimatedOrderUsd: 80 },
+        adapterEvaluators,
+      ),
+    ).toEqual({ allow: true });
+  });
+
   it("compose returns the first failure for an ETH buy 3x at $200", () => {
     const result = evaluateTradeOrder(session, {
       venue: "hyperliquid",

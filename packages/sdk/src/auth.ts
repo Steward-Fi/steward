@@ -520,6 +520,14 @@ export class StewardAuth {
     options: unknown,
     lib: Pick<SimpleWebAuthnBrowser, "startAuthentication">,
   ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
+    const challengeId =
+      options && typeof options === "object" && "challengeId" in options
+        ? String((options as { challengeId?: unknown }).challengeId ?? "")
+        : "";
+    if (!challengeId) {
+      throw new StewardApiError("Passkey login options did not include a challengeId.", 0);
+    }
+
     let authResponse: unknown;
     try {
       // Server-provided options; types are validated by the WebAuthn browser library.
@@ -540,6 +548,7 @@ export class StewardAuth {
         method: "POST",
         body: JSON.stringify({
           email,
+          challengeId,
           response: authResponse,
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
@@ -1077,6 +1086,72 @@ export class StewardAuth {
     );
   }
 
+  async completePasskeyMfa(): Promise<StewardAuthResult> {
+    if (!isBrowser()) {
+      throw new StewardApiError("Passkey MFA requires a browser environment.", 0);
+    }
+    const token = this.getToken();
+    if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
+
+    let browserLib: SimpleWebAuthnBrowser;
+    try {
+      browserLib = await import("@simplewebauthn/browser");
+    } catch {
+      throw new StewardApiError(
+        "Missing peer dependency: @simplewebauthn/browser. Install it to use passkeys.",
+        0,
+      );
+    }
+
+    const optionsRes = await authRequest<Record<string, unknown>>(
+      this.baseUrl,
+      "/auth/mfa/passkey/options",
+      { method: "POST", body: JSON.stringify({}) },
+      token,
+    );
+    if (!optionsRes.ok) {
+      throw new StewardApiError(optionsRes.error, optionsRes.status);
+    }
+
+    const challengeId =
+      typeof optionsRes.data.challengeId === "string" ? optionsRes.data.challengeId : "";
+    if (!challengeId) {
+      throw new StewardApiError("Passkey MFA options did not include a challengeId.", 0);
+    }
+
+    let authResponse: unknown;
+    try {
+      authResponse = await browserLib.startAuthentication(
+        optionsRes.data as Parameters<SimpleWebAuthnBrowser["startAuthentication"]>[0],
+      );
+    } catch (err) {
+      throw new StewardApiError(
+        `WebAuthn authentication cancelled or failed: ${err instanceof Error ? err.message : String(err)}`,
+        0,
+      );
+    }
+
+    const verifyRes = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/mfa/passkey/complete",
+      {
+        method: "POST",
+        body: JSON.stringify({ challengeId, response: authResponse }),
+      },
+      token,
+    );
+    if (!verifyRes.ok) {
+      throw new StewardApiError(verifyRes.error, verifyRes.status);
+    }
+
+    return this.storeAndReturn(
+      verifyRes.data.token,
+      (verifyRes.data as { refreshToken?: string }).refreshToken ?? "",
+      verifyRes.data.user,
+      (verifyRes.data as { expiresIn?: number }).expiresIn,
+    );
+  }
+
   async unenrollSmsMfa(code: string): Promise<{ ok: boolean }> {
     const token = this.getToken();
     if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
@@ -1579,10 +1654,7 @@ export class StewardAuth {
     return Array.isArray(res.data) ? res.data : res.data.data;
   }
 
-  /**
-   * Join an open tenant/app.
-   * Requires an active session.
-   */
+  /** Join an open tenant/app. Invite-only tenants require acceptTenantInvitation. */
   async joinTenant(tenantId: string): Promise<StewardTenantMembership> {
     const token = this.getToken();
     if (!token) {
@@ -1594,6 +1666,36 @@ export class StewardAuth {
       `/user/me/tenants/${encodeURIComponent(tenantId)}/join`,
       { method: "POST" },
       token,
+    );
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    return res.data;
+  }
+
+  /**
+   * Accept a tenant invitation using a single-use invite token.
+   * Requires an active personal session with a verified email.
+   */
+  async acceptTenantInvitation(
+    tenantId: string,
+    token: string,
+  ): Promise<{ tenantId: string; role: string; invitationId: string }> {
+    const sessionToken = this.getToken();
+    if (!sessionToken) {
+      throw new StewardApiError("Not authenticated. Sign in first.", 0);
+    }
+
+    const res = await authRequest<{ tenantId: string; role: string; invitationId: string }>(
+      this.baseUrl,
+      `/user/me/tenants/${encodeURIComponent(tenantId)}/invitations/accept`,
+      {
+        method: "POST",
+        body: JSON.stringify({ token }),
+      },
+      sessionToken,
     );
 
     if (!res.ok) {

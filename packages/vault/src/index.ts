@@ -18,6 +18,25 @@ export {
   signSolanaMessage,
   signSolanaTransaction,
 } from "./solana";
+export type {
+  DerivedSolanaPolicyFields,
+  ParsedInstruction,
+  ParsedTransactionSummary,
+  SolanaInstructionType,
+  TokenTransferSummary,
+} from "./solana-instructions";
+export {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  COMPUTE_BUDGET_PROGRAM_ID,
+  deriveSolanaPolicyFields,
+  deserializeSolanaMessage,
+  detectSolanaPolicyConflicts,
+  MEMO_PROGRAM_ID,
+  parseSolanaTransaction,
+  SYSTEM_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+} from "./solana-instructions";
 export type { TokenBalance, TokenDef } from "./tokens";
 export { COMMON_TOKENS, ERC20_ABI, getTokenBalances } from "./tokens";
 export type { UserWalletResult } from "./user-wallet";

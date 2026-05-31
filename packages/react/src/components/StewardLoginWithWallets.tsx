@@ -23,6 +23,7 @@ import type { Chain } from "viem";
 import type { Config as WagmiConfig } from "wagmi";
 import { arbitrum, base, bsc, gnosis, mainnet, optimism, polygon } from "wagmi/chains";
 import {
+  type CreateDefaultWagmiConfigOptions,
   createDefaultWagmiConfig,
   EVMWalletProvider,
   type EVMWalletProviderProps,
@@ -57,6 +58,8 @@ export interface StewardLoginWithWalletsEvmConfig {
   chains?: readonly [Chain, ...Chain[]];
   /** App name shown in the WalletConnect connection prompt. Default: "Steward". */
   appName?: string;
+  /** Extra RainbowKit wallet entries, such as Steward global-wallet connectors. */
+  wallets?: CreateDefaultWagmiConfigOptions<readonly [Chain, ...Chain[]]>["wallets"];
   /** Forwarded to `<EVMWalletProvider>` (theme / modalSize / queryClient / etc). */
   providerProps?: Omit<EVMWalletProviderProps, "config" | "children">;
 }
@@ -150,8 +153,9 @@ export function StewardLoginWithWallets({
       projectId: resolveProjectId(evm?.projectId),
       chains: evm?.chains ?? (DEFAULT_EVM_CHAINS as unknown as readonly [Chain, ...Chain[]]),
       appName: evm?.appName ?? "Steward",
+      wallets: evm?.wallets,
     });
-  }, [evmEnabled, evm?.config, evm?.projectId, evm?.chains, evm?.appName]);
+  }, [evmEnabled, evm?.config, evm?.projectId, evm?.chains, evm?.appName, evm?.wallets]);
 
   const solanaEndpoint = useMemo(
     () => (solanaEnabled ? resolveSolanaEndpoint(solana?.endpoint) : null),

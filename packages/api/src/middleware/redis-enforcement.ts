@@ -25,6 +25,13 @@ interface RateLimitParams {
   maxTxPerDay: number;
 }
 
+interface RateLimitHeaderInput {
+  limit: number;
+  remaining: number;
+  resetMs: number;
+  retryAfterMs?: number;
+}
+
 /**
  * Extract rate-limit parameters from an agent's policy set.
  * Returns null if no enabled rate-limit policy exists.
@@ -91,6 +98,24 @@ export interface RedisEnforcementResult {
   headers?: Record<string, string>;
 }
 
+export function formatRateLimitHeaders(input: RateLimitHeaderInput): Record<string, string> {
+  const limit = Math.max(0, Math.floor(input.limit));
+  const remaining = Math.max(0, Math.floor(input.remaining));
+  const resetSecs = Math.max(0, Math.ceil(input.resetMs / 1000));
+  const headers: Record<string, string> = {
+    "RateLimit-Limit": String(limit),
+    "RateLimit-Remaining": String(remaining),
+    "RateLimit-Reset": String(resetSecs),
+    "X-RateLimit-Limit": String(limit),
+    "X-RateLimit-Remaining": String(remaining),
+    "X-RateLimit-Reset": String(resetSecs),
+  };
+  if (input.retryAfterMs !== undefined) {
+    headers["Retry-After"] = String(Math.max(1, Math.ceil(input.retryAfterMs / 1000)));
+  }
+  return headers;
+}
+
 /**
  * Run Redis-backed rate limit checks before signing.
  *
@@ -107,7 +132,12 @@ export async function enforceRateLimit(
     return {
       allowed: false,
       reason: "Rate limit enforcement is unavailable",
-      headers: { "Retry-After": "60" },
+      headers: formatRateLimitHeaders({
+        limit: 0,
+        remaining: 0,
+        resetMs: 60_000,
+        retryAfterMs: 60_000,
+      }),
     };
   }
 
@@ -122,12 +152,12 @@ export async function enforceRateLimit(
     return {
       allowed: false,
       reason: `Hourly rate limit exceeded (${rlParams.maxTxPerHour}/hour). Retry after ${Math.ceil(hourlyResult.resetMs / 1000)}s`,
-      headers: {
-        "X-RateLimit-Limit": String(rlParams.maxTxPerHour),
-        "X-RateLimit-Remaining": "0",
-        "X-RateLimit-Reset": String(Math.ceil(hourlyResult.resetMs / 1000)),
-        "Retry-After": String(Math.ceil(hourlyResult.resetMs / 1000)),
-      },
+      headers: formatRateLimitHeaders({
+        limit: rlParams.maxTxPerHour,
+        remaining: 0,
+        resetMs: hourlyResult.resetMs,
+        retryAfterMs: hourlyResult.resetMs,
+      }),
     };
   }
 
@@ -142,20 +172,26 @@ export async function enforceRateLimit(
     return {
       allowed: false,
       reason: `Daily rate limit exceeded (${rlParams.maxTxPerDay}/day). Retry after ${Math.ceil(dailyResult.resetMs / 1000)}s`,
-      headers: {
-        "X-RateLimit-Limit": String(rlParams.maxTxPerDay),
-        "X-RateLimit-Remaining": "0",
-        "X-RateLimit-Reset": String(Math.ceil(dailyResult.resetMs / 1000)),
-        "Retry-After": String(Math.ceil(dailyResult.resetMs / 1000)),
-      },
+      headers: formatRateLimitHeaders({
+        limit: rlParams.maxTxPerDay,
+        remaining: 0,
+        resetMs: dailyResult.resetMs,
+        retryAfterMs: dailyResult.resetMs,
+      }),
     };
   }
 
   return {
     allowed: true,
     headers: {
+      ...formatRateLimitHeaders({
+        limit: rlParams.maxTxPerHour,
+        remaining: hourlyResult.remaining,
+        resetMs: hourlyResult.resetMs,
+      }),
       "X-RateLimit-Remaining-Hourly": String(hourlyResult.remaining),
       "X-RateLimit-Remaining-Daily": String(dailyResult.remaining),
+      "RateLimit-Policy": `${rlParams.maxTxPerHour};w=3600, ${rlParams.maxTxPerDay};w=86400`,
     },
   };
 }

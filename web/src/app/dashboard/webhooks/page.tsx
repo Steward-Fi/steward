@@ -24,6 +24,15 @@ function canRetry(delivery: WebhookDelivery) {
   return delivery.status !== "delivered" && delivery.attempts < delivery.maxAttempts;
 }
 
+function canReplay(delivery: WebhookDelivery) {
+  return (
+    (delivery.status === "delivered" ||
+      delivery.status === "failed" ||
+      delivery.status === "dead") &&
+    delivery.eventType !== "webhook.test"
+  );
+}
+
 function parseEventList(value: string) {
   return value
     .split(/[\n,]/)
@@ -41,29 +50,50 @@ export default function WebhooksPage() {
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [retryingId, setRetryingId] = useState<string | null>(null);
+  const [replayingId, setReplayingId] = useState<string | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [createdSecret, setCreatedSecret] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [deliveryStatusFilter, setDeliveryStatusFilter] = useState<string>("all");
+  const [deliveryEventFilter, setDeliveryEventFilter] = useState("");
+  const [deliveryErrorFilter, setDeliveryErrorFilter] = useState<string>("all");
   const [newWebhook, setNewWebhook] = useState({
     url: "",
     description: "",
     events: "user.created\nuser.authenticated\ntransaction.confirmed",
   });
 
+  const deliveryQuery = useMemo(
+    () => ({
+      limit: 100,
+      ...(deliveryStatusFilter !== "all"
+        ? { status: deliveryStatusFilter as WebhookDelivery["status"] }
+        : {}),
+      ...(deliveryEventFilter.trim() ? { eventType: deliveryEventFilter.trim() } : {}),
+      ...(deliveryErrorFilter !== "all" ? { hasError: deliveryErrorFilter === "with_error" } : {}),
+    }),
+    [deliveryErrorFilter, deliveryEventFilter, deliveryStatusFilter],
+  );
+
   const selectedWebhook = useMemo(
     () => webhooks.find((webhook) => webhook.id === selectedId),
     [selectedId, webhooks],
   );
 
-  const loadDeliveries = useCallback(async (webhookId: string) => {
-    setDeliveryLoading(true);
-    try {
-      const rows = await steward.getWebhookDeliveries(webhookId, { limit: 100 });
-      setDeliveries(rows);
-    } finally {
-      setDeliveryLoading(false);
-    }
-  }, []);
+  const loadDeliveries = useCallback(
+    async (webhookId: string) => {
+      setDeliveryLoading(true);
+      try {
+        const rows = await steward.getWebhookDeliveries(webhookId, deliveryQuery);
+        setDeliveries(rows);
+      } finally {
+        setDeliveryLoading(false);
+      }
+    },
+    [deliveryQuery],
+  );
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -111,6 +141,81 @@ export default function WebhooksPage() {
       setError(e instanceof Error ? e.message : "Failed to retry webhook delivery");
     } finally {
       setRetryingId(null);
+    }
+  }
+
+  async function replayDelivery(delivery: WebhookDelivery) {
+    if (!window.confirm("Replay this event as a new signed webhook delivery?")) return;
+    setReplayingId(delivery.id);
+    setError(null);
+    try {
+      const replayed = await steward.replayDelivery(delivery.id);
+      const matchesFilters =
+        (deliveryStatusFilter === "all" || replayed.status === deliveryStatusFilter) &&
+        (!deliveryEventFilter.trim() || replayed.eventType === deliveryEventFilter.trim()) &&
+        (deliveryErrorFilter === "all" ||
+          (deliveryErrorFilter === "with_error" ? replayed.hasError : !replayed.hasError));
+      setDeliveries((rows) =>
+        matchesFilters
+          ? [replayed, ...rows.filter((row) => row.id !== replayed.id)]
+          : rows.filter((row) => row.id !== replayed.id),
+      );
+      setExpanded(matchesFilters ? replayed.id : null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to replay webhook delivery");
+    } finally {
+      setReplayingId(null);
+    }
+  }
+
+  async function sendTest(webhook: WebhookConfig) {
+    setTestingId(webhook.id);
+    setError(null);
+    try {
+      const delivery = await steward.testWebhook(webhook.id);
+      if (selectedId !== webhook.id) {
+        setSelectedId(webhook.id);
+      }
+      const matchesFilters =
+        (deliveryStatusFilter === "all" || delivery.status === deliveryStatusFilter) &&
+        (!deliveryEventFilter.trim() || delivery.eventType === deliveryEventFilter.trim()) &&
+        (deliveryErrorFilter === "all" ||
+          (deliveryErrorFilter === "with_error" ? delivery.hasError : !delivery.hasError));
+      setDeliveries((rows) =>
+        matchesFilters
+          ? [delivery, ...rows.filter((row) => row.id !== delivery.id)]
+          : rows.filter((row) => row.id !== delivery.id),
+      );
+      setExpanded(matchesFilters ? delivery.id : null);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to send test webhook");
+    } finally {
+      setTestingId(null);
+    }
+  }
+
+  async function exportDeliveries() {
+    if (!selectedId) return;
+    setExporting(true);
+    setError(null);
+    try {
+      const csv = await steward.exportWebhookDeliveriesCsv(selectedId, {
+        ...deliveryQuery,
+        limit: 1000,
+      });
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `webhook-deliveries-${selectedId}.csv`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to export webhook deliveries");
+    } finally {
+      setExporting(false);
     }
   }
 
@@ -333,6 +438,14 @@ export default function WebhooksPage() {
                       </button>
                       <button
                         type="button"
+                        onClick={() => sendTest(webhook)}
+                        disabled={testingId === webhook.id || !webhook.enabled}
+                        className="text-xs text-text-tertiary hover:text-accent transition-colors disabled:opacity-50"
+                      >
+                        {testingId === webhook.id ? "Sending..." : "Send Test"}
+                      </button>
+                      <button
+                        type="button"
                         onClick={() => deleteEndpoint(webhook)}
                         disabled={deletingId === webhook.id}
                         className="text-xs text-text-tertiary hover:text-red-400 transition-colors disabled:opacity-50"
@@ -379,9 +492,60 @@ export default function WebhooksPage() {
             )}
 
             <div className="space-y-2">
-              <h2 className="text-xs text-text-tertiary uppercase tracking-wider">
-                Delivery History
-              </h2>
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-xs text-text-tertiary uppercase tracking-wider">
+                    Delivery History
+                  </h2>
+                  <button
+                    type="button"
+                    onClick={exportDeliveries}
+                    disabled={!selectedId || exporting}
+                    className="text-xs text-text-tertiary hover:text-accent transition-colors disabled:opacity-50"
+                  >
+                    {exporting ? "Exporting..." : "Export CSV"}
+                  </button>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-3 lg:w-[560px]">
+                  <select
+                    value={deliveryStatusFilter}
+                    onChange={(event) => setDeliveryStatusFilter(event.target.value)}
+                    className="bg-bg border border-border px-3 py-2 text-xs text-text-secondary"
+                    aria-label="Delivery status"
+                  >
+                    <option value="all">All statuses</option>
+                    <option value="pending">Pending</option>
+                    <option value="processing">Processing</option>
+                    <option value="delivered">Delivered</option>
+                    <option value="failed">Failed</option>
+                    <option value="dead">Dead</option>
+                  </select>
+                  <input
+                    value={deliveryEventFilter}
+                    onChange={(event) => setDeliveryEventFilter(event.target.value)}
+                    list="webhook-event-filter-options"
+                    placeholder="Event type"
+                    className="bg-bg border border-border px-3 py-2 text-xs text-text-secondary"
+                    aria-label="Delivery event type"
+                  />
+                  <datalist id="webhook-event-filter-options">
+                    <option value="webhook.test" />
+                    {WEBHOOK_EVENT_TYPES.map((eventType) => (
+                      <option key={eventType} value={eventType} />
+                    ))}
+                  </datalist>
+                  <select
+                    value={deliveryErrorFilter}
+                    onChange={(event) => setDeliveryErrorFilter(event.target.value)}
+                    className="bg-bg border border-border px-3 py-2 text-xs text-text-secondary"
+                    aria-label="Delivery error state"
+                  >
+                    <option value="all">All errors</option>
+                    <option value="with_error">With error</option>
+                    <option value="without_error">Without error</option>
+                  </select>
+                </div>
+              </div>
               {deliveryLoading ? (
                 <div className="space-y-px bg-border">
                   {[...Array(4)].map((_, i) => (
@@ -459,6 +623,14 @@ export default function WebhooksPage() {
                                       {delivery.id}
                                     </div>
                                   </div>
+                                  {delivery.replayedFromDeliveryId && (
+                                    <div>
+                                      <div className="text-text-tertiary">Replayed from</div>
+                                      <div className="font-mono text-text-secondary break-all">
+                                        {delivery.replayedFromDeliveryId}
+                                      </div>
+                                    </div>
+                                  )}
                                   <div>
                                     <div className="text-text-tertiary">Next retry</div>
                                     <div className="font-mono text-text-secondary">
@@ -490,6 +662,18 @@ export default function WebhooksPage() {
                                     className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-50"
                                   >
                                     {retryingId === delivery.id ? "Retrying..." : "Retry Delivery"}
+                                  </button>
+                                )}
+                                {canReplay(delivery) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => replayDelivery(delivery)}
+                                    disabled={replayingId === delivery.id}
+                                    className="text-xs text-text-tertiary hover:text-accent transition-colors disabled:opacity-50"
+                                  >
+                                    {replayingId === delivery.id
+                                      ? "Replaying..."
+                                      : "Replay Delivery"}
                                   </button>
                                 )}
                               </div>

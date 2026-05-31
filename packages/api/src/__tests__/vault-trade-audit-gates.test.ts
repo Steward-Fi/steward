@@ -1,51 +1,64 @@
+/**
+ * STRUCTURAL BACKSTOP (source-order assertions) for the residual audit/ordering
+ * invariants whose high-value behavior is NOT yet behaviorally executable in
+ * this package.
+ *
+ * Most of what this file used to grep for is now driven for REAL elsewhere —
+ * the substring checks were deleted, not weakened:
+ *   - step-up / fail-closed gates on approve/reject/lifecycle/replace/
+ *     sign-message/sign-user-operation/sign-authorization → vault-approval-gates
+ *     .test.ts + vault-signing-gates.test.ts
+ *   - audit-before-irreversible-sign on the two primary signing paths
+ *     (/sign and approve) via fault injection → vault-native-transfer-guard
+ *     .test.ts + vault-approval-gates.test.ts
+ *   - direct-broadcast idempotency (428) and approval-time policy revalidation
+ *     → vault-native-transfer-guard.test.ts + vault-approval-gates.test.ts
+ *   - lifecycle-pending-approval block → vault-approval-gates.test.ts
+ *   - trade session create/get/revoke MFA gates + human-actor attribution +
+ *     authorized-before-create ordering → trade-session-gates.test.ts
+ *   - Solana offline signing withholds the broadcast, and the offline return is a
+ *     fully-signed transfer → @stwd/vault solana-offline-broadcast.test.ts
+ *   - the deep Hyperliquid venue-submit path fences spend + idempotency on
+ *     venue-rejection (releaseSpend + canceled audit, no submitted) and unknown-
+ *     status (502, spend retained), and sequences submit-authorization before the
+ *     submitted audit (signOrder before submitOrder) → trade-venue-submit-fence
+ *     .test.ts
+ *
+ * What remains here is ONLY source-order coverage for invariants that cannot be
+ * proven in-process without machinery that does not belong in this package:
+ *   - the disabled-by-default signing routes (message / user-operation /
+ *     authorization) write their authorization audit before the signer call —
+ *     reachable behaviorally only behind a break-glass env opt-in AND real key
+ *     material, so the ordering is asserted structurally;
+ *   - the secondary transfer + lifecycle routes order authorization-audit before
+ *     their mutation (a lower-value second instance of the pattern already
+ *     proven behaviorally on /sign + approve);
+ *   - the legacy manual-approval broadcast-intent plumbing — including that the
+ *     Solana approve branch threads the caller's broadcast flag into
+ *     vault.signSolanaTransaction rather than force-broadcasting (the offline
+ *     gate itself is now behavioral, see above) — and the first-class replace
+ *     route's audit/webhook wiring.
+ *
+ * A source-order assertion proves the lines are in the safe order TODAY; it does
+ * not execute the guard. Where it was feasible to execute, the behavior now is —
+ * in the files listed above.
+ */
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const vaultSource = readFileSync(join(import.meta.dir, "..", "routes", "vault.ts"), "utf8");
 const tradeSource = readFileSync(join(import.meta.dir, "..", "routes", "trade.ts"), "utf8");
-const vaultPackageSource = readFileSync(
-  join(import.meta.dir, "..", "..", "..", "vault", "src", "vault.ts"),
-  "utf8",
-);
-const solanaSource = readFileSync(
-  join(import.meta.dir, "..", "..", "..", "vault", "src", "solana.ts"),
-  "utf8",
-);
 
-describe("vault and trade audit gates", () => {
-  it("requires human MFA for manual vault approval and rejection", () => {
-    const markers = [
-      'vaultRoutes.post("/:agentId/approve/:txId"',
-      'vaultRoutes.post("/:agentId/reject/:txId"',
-      'vaultRoutes.post("/:agentId/transactions/:txId/lifecycle"',
-      'vaultRoutes.post("/:agentId/transactions/:txId/replace"',
-      'vaultRoutes.post("/:agentId/sign-message"',
-      'vaultRoutes.post("/:agentId/sign-user-operation"',
-      'vaultRoutes.post("/:agentId/sign-authorization"',
-    ];
-    for (const marker of markers) {
-      const start = vaultSource.indexOf(marker);
-      expect(start).toBeGreaterThanOrEqual(0);
-      const nextStart = vaultSource.indexOf("vaultRoutes.", start + marker.length);
-      const source = vaultSource.slice(start, nextStart > start ? nextStart : undefined);
-      expect(source).toContain("hasTenantAdminSession(c)");
-      expect(source).toContain("hasRecentSessionMfa(c)");
-    }
-    const transferStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"');
-    const nextStart = vaultSource.indexOf("vaultRoutes.", transferStart + 1);
-    const transferRoute = vaultSource.slice(transferStart, nextStart);
-    expect(transferRoute).toContain("requireSignerPermission");
-    expect(transferRoute).toContain('"wallet_action_transfer"');
-  });
-
-  it("writes blocking audit events before signing or submitting irreversible actions", () => {
-    expect(vaultSource.indexOf('action: "vault.sign.authorized"')).toBeLessThan(
-      vaultSource.indexOf("vault.signTransaction(signRequest"),
-    );
+describe("vault and trade audit-ordering structural backstops", () => {
+  it("orders authorization-audit before the irreversible action on secondary/disabled signing routes", () => {
+    // Secondary signing/lifecycle routes (the audit-before-sign pattern itself is
+    // proven behaviorally on /sign + approve; these are the lower-value siblings).
     const transferRouteStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"');
     const transferRouteEnd = vaultSource.indexOf("vaultRoutes.", transferRouteStart + 1);
     const transferRoute = vaultSource.slice(transferRouteStart, transferRouteEnd);
+    expect(transferRoute).toContain("requireSignerPermission");
+    expect(transferRoute).toContain('"wallet_action_transfer"');
     expect(transferRoute.indexOf('action: "wallet_action.transfer.authorized"')).toBeLessThan(
       transferRoute.indexOf("vault.signTransaction(signRequest"),
     );
@@ -55,6 +68,9 @@ describe("vault and trade audit gates", () => {
         vaultSource.indexOf("transactions/:txId/lifecycle"),
       ),
     );
+
+    // Disabled-by-default arbitrary/AA signing routes: reachable only behind a
+    // break-glass env opt-in + real key material, so the order is asserted here.
     expect(vaultSource.indexOf('action: "vault.message.sign.authorized"')).toBeLessThan(
       vaultSource.indexOf("vault.signMessage"),
     );
@@ -64,56 +80,13 @@ describe("vault and trade audit gates", () => {
     expect(vaultSource.indexOf('action: "vault.sign.authorization.authorized"')).toBeLessThan(
       vaultSource.indexOf("vault.signAuthorization"),
     );
-    expect(tradeSource.indexOf('"trade.order.submit.authorized"')).toBeLessThan(
-      tradeSource.indexOf("adapter.signOrder(order)"),
-    );
-    expect(tradeSource.indexOf('"trade.session.create.authorized"')).toBeLessThan(
-      tradeSource.indexOf("sessionManager.createSession"),
-    );
+
+    // Session revoke-authorization before the manager revoke (control-plane). The
+    // venue-submit ordering that used to live here is now behavioral — see
+    // trade-venue-submit-fence.test.ts.
     expect(tradeSource.indexOf('"trade.session.revoke.authorized"')).toBeLessThan(
       tradeSource.indexOf("getSessionManager().revokeSession"),
     );
-    expect(tradeSource).toContain('c.get("authType") === "session-jwt"');
-  });
-
-  it("requires recent MFA for trade session management", () => {
-    expect(tradeSource).toContain("function requireRecentTradeSessionMfa");
-    for (const marker of [
-      'tradeRoutes.post("/sessions"',
-      'tradeRoutes.get("/sessions/:id"',
-      'tradeRoutes.post("/sessions/:id/revoke"',
-    ]) {
-      const start = tradeSource.indexOf(marker);
-      expect(start).toBeGreaterThanOrEqual(0);
-      const routeSource = tradeSource.slice(start, tradeSource.indexOf("tradeRoutes.", start + 1));
-      expect(routeSource).toContain("canManageTradeSession(c");
-      expect(routeSource).toContain("requireRecentTradeSessionMfa(c)");
-    }
-  });
-
-  it("attributes human trade session control-plane audits to the session user", () => {
-    expect(tradeSource).toContain("function tradeAuditActor");
-    expect(tradeSource).toContain('authType === "session-jwt" && userId');
-    expect(tradeSource).toContain('return { actorType: "user", actorId: userId }');
-
-    const sessionCreateStart = tradeSource.indexOf('tradeRoutes.post("/sessions"');
-    expect(sessionCreateStart).toBeGreaterThanOrEqual(0);
-    const sessionCreateRoute = tradeSource.slice(
-      sessionCreateStart,
-      tradeSource.indexOf('tradeRoutes.get("/sessions/:id"', sessionCreateStart),
-    );
-    expect(sessionCreateRoute).toContain("const actor = tradeAuditActor(c, agentId)");
-    expect(sessionCreateRoute).toContain('"trade.session.create.authorized"');
-    expect(sessionCreateRoute).toContain('"trade.session.created"');
-
-    const revokeStart = tradeSource.indexOf('tradeRoutes.post("/sessions/:id/revoke"');
-    expect(revokeStart).toBeGreaterThanOrEqual(0);
-    const revokeRoute = tradeSource.slice(
-      revokeStart,
-      tradeSource.indexOf('tradeRoutes.post("/hyperliquid/order"', revokeStart),
-    );
-    expect(revokeRoute).toContain("tradeAuditActor(c, existing.agentId)");
-    expect(revokeRoute).toContain("tradeAuditActor(c, revoked.agentId)");
   });
 
   it("preserves legacy sign broadcast intent through manual approval", () => {
@@ -133,71 +106,12 @@ describe("vault and trade audit gates", () => {
     expect(approvalRoute).toContain("transactionPayload.broadcast");
     expect(approvalRoute).toContain("const shouldBroadcast");
     expect(approvalRoute).toContain("signedTx: shouldBroadcast ? undefined : txHash");
-  });
-
-  it("requires replay protection for direct broadcast signing", () => {
-    const signStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign"');
-    expect(signStart).toBeGreaterThanOrEqual(0);
-    const signRoute = vaultSource.slice(
-      signStart,
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/rpc"', signStart),
-    );
-    expect(signRoute).toContain('c.req.header("Idempotency-Key")');
-    expect(signRoute).toContain("Broadcast signing requires an Idempotency-Key header");
-    expect(signRoute).toContain('const txStatus: "broadcast" | "signed"');
-    expect(signRoute).toContain("status: txStatus");
-  });
-
-  it("revalidates current policy before executing manual approvals", () => {
-    const approvalStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"');
-    expect(approvalStart).toBeGreaterThanOrEqual(0);
-    const approvalRoute = vaultSource.slice(
-      approvalStart,
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/reject/:txId"', approvalStart),
-    );
-    expect(approvalRoute).toContain("return withAgentSpendLock(agentId");
-    expect(approvalRoute).toContain("const currentPolicySet = await getPolicySet");
-    expect(approvalRoute).toContain("await enforceRateLimit(agentId, currentPolicySet)");
-    expect(approvalRoute).toContain("const currentEvaluation = await policyEngine.evaluate");
-    expect(approvalRoute).toContain("Pending transaction no longer satisfies current policy");
-    expect(approvalRoute).toContain("policyResults: currentEvaluation.results");
-    expect(approvalRoute.indexOf("const currentEvaluation")).toBeLessThan(
-      approvalRoute.indexOf("vault.signTransaction"),
-    );
-  });
-
-  it("does not broadcast Solana offline signing requests", () => {
-    expect(vaultPackageSource).toContain("broadcast: shouldBroadcast");
-    expect(solanaSource).toContain("options: { broadcast?: boolean } = {}");
-    expect(solanaSource).toContain("const shouldBroadcast = options.broadcast !== false");
-    expect(solanaSource.indexOf("if (!shouldBroadcast)")).toBeLessThan(
-      solanaSource.indexOf("connection.sendTransaction"),
-    );
-    expect(solanaSource.indexOf("btoa(Array.from(tx.serialize()")).toBeLessThan(
-      solanaSource.indexOf("connection.sendTransaction"),
-    );
-    const approvalStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"');
-    const approvalRoute = vaultSource.slice(
-      approvalStart,
-      vaultSource.indexOf('vaultRoutes.post("/:agentId/reject/:txId"', approvalStart),
-    );
+    // The Solana approve branch threads the caller's broadcast intent into
+    // vault.signSolanaTransaction rather than force-broadcasting an offline sign.
+    // (signSolanaTransaction's own offline-vs-broadcast gate is proven behaviorally
+    // in @stwd/vault's solana-offline-broadcast.test.ts.)
     expect(approvalRoute).toContain("broadcast: shouldBroadcast");
     expect(approvalRoute).not.toContain("broadcast: true");
-  });
-
-  it("prevents lifecycle promotion while approval is pending", () => {
-    const lifecycleStart = vaultSource.indexOf(
-      'vaultRoutes.post("/:agentId/transactions/:txId/lifecycle"',
-    );
-    expect(lifecycleStart).toBeGreaterThanOrEqual(0);
-    const lifecycleRoute = vaultSource.slice(lifecycleStart);
-    expect(lifecycleRoute).toContain("Transaction must be broadcast before confirmation");
-    expect(lifecycleRoute).toContain(
-      "Pending approval must be resolved before lifecycle promotion",
-    );
-    expect(lifecycleRoute.indexOf("Pending approval must be resolved")).toBeLessThan(
-      lifecycleRoute.indexOf('action: "transaction.lifecycle.authorized"'),
-    );
   });
 
   it("exposes a guarded first-class transaction replacement route", () => {
@@ -216,45 +130,5 @@ describe("vault and trade audit gates", () => {
     expect(replaceRoute).toContain('action: "transaction.replaced"');
     expect(replaceRoute).toContain("dispatchTransactionLifecycleWebhook");
     expect(replaceRoute).toContain('"transaction.replaced"');
-  });
-
-  it("fails venue-rejected trade submissions without retaining spend or success audit", () => {
-    const rejectionStart = tradeSource.indexOf('if (result.status === "rejected")');
-    expect(rejectionStart).toBeGreaterThanOrEqual(0);
-    expect(
-      tradeSource.indexOf(
-        ".releaseSpend({ tenantId, id: session.id, amountUsd: sizeUsd })",
-        rejectionStart,
-      ),
-    ).toBeGreaterThan(rejectionStart);
-    expect(tradeSource.indexOf('"trade.order.canceled"', rejectionStart)).toBeGreaterThan(
-      rejectionStart,
-    );
-    expect(tradeSource.indexOf("return c.json<ApiResponse>", rejectionStart)).toBeLessThan(
-      tradeSource.indexOf('"trade.order.submitted"', rejectionStart),
-    );
-  });
-
-  it("keeps spend and idempotency fenced when venue submit status is unknown", () => {
-    const submitStart = tradeSource.indexOf("let submitAttempted = false");
-    expect(submitStart).toBeGreaterThanOrEqual(0);
-    expect(tradeSource.indexOf("submitAttempted = true", submitStart)).toBeLessThan(
-      tradeSource.indexOf("adapter.submitOrder(signed)", submitStart),
-    );
-    const unknownStart = tradeSource.indexOf("if (submitAttempted)", submitStart);
-    expect(unknownStart).toBeGreaterThan(submitStart);
-    expect(tradeSource.indexOf("idempotency.complete(envelope)", unknownStart)).toBeGreaterThan(
-      unknownStart,
-    );
-    expect(tradeSource.indexOf("Trade submission status unknown", unknownStart)).toBeGreaterThan(
-      unknownStart,
-    );
-    const releaseStart = tradeSource.indexOf(
-      ".releaseSpend({ tenantId, id: session.id, amountUsd: sizeUsd })",
-      unknownStart,
-    );
-    const unknownReturn = tradeSource.indexOf("return c.json<ApiResponse>", unknownStart);
-    expect(unknownReturn).toBeGreaterThan(unknownStart);
-    expect(releaseStart === -1 || unknownReturn < releaseStart).toBe(true);
   });
 });

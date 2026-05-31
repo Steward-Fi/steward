@@ -11,7 +11,16 @@ import {
   type GasSponsorshipMode,
   type GasSponsorshipProvider,
   getTenantGasSponsorshipConfig,
+  getTenantIdempotencyMetrics,
+  getTenantSecurityChecklist,
+  listTenantRequestSigningKeys,
+  revokeTenantRequestSigningKey,
+  rotateTenantRequestSigningKey,
   type TenantGasSponsorshipConfig,
+  type TenantIdempotencyMetrics,
+  type TenantRequestSigningKey,
+  type TenantRequestSigningKeyCreateResult,
+  type TenantSecurityChecklist,
   updateTenantGasSponsorshipConfig,
 } from "@/lib/api";
 
@@ -77,6 +86,14 @@ type AuthAbuseForm = {
   blockVoip: boolean;
   allowedCountryCodes: string;
   blockedCountryCodes: string;
+  mfaMaxAgeSeconds: string;
+  mfaVaultSigning: boolean;
+  mfaKeyImport: boolean;
+  mfaKeyExport: boolean;
+  mfaRecoveryCodes: boolean;
+  mfaTenantAdmin: boolean;
+  mfaAllowDelegatedSignerAutomation: boolean;
+  mfaAllowKeyQuorumAutomation: boolean;
 };
 
 type GasSponsorshipForm = {
@@ -103,6 +120,8 @@ type ThemeForm = {
   borderRadius: string;
   fontFamily: string;
   colorScheme: "light" | "dark" | "system";
+  logoUrl: string;
+  faviconUrl: string;
 };
 
 type ThemeConfigInput = Partial<Omit<ThemeForm, "borderRadius">> & {
@@ -118,6 +137,21 @@ type AppClientForm = {
   enabled: boolean;
   allowedOrigins: string;
   allowedRedirectUrls: string;
+  loginPasskey: boolean;
+  loginEmail: boolean;
+  loginSms: boolean;
+  loginWhatsapp: boolean;
+  loginTotp: boolean;
+  loginSiwe: boolean;
+  loginSiws: boolean;
+  loginTelegram: boolean;
+  loginFarcaster: boolean;
+  oauthGoogle: boolean;
+  oauthDiscord: boolean;
+  oauthGithub: boolean;
+  oauthTwitter: boolean;
+  globalWalletEnabled: boolean;
+  globalWalletAllowedScopes: string;
 };
 
 type RotatedAppClientSecret = {
@@ -156,6 +190,10 @@ type SamlSsoConfig = {
   nameIdFormat?: string;
   emailAttribute: string;
   groupsAttribute?: string;
+  groupRoleMappings: Array<{
+    group: string;
+    role: "admin" | "developer" | "billing" | "viewer" | "member";
+  }>;
   allowJitProvisioning: boolean;
   jitDefaultRole: "viewer";
   lastTestedAt?: string | null;
@@ -170,6 +208,7 @@ type SamlSsoForm = {
   idpCertPems: string;
   emailAttribute: string;
   groupsAttribute: string;
+  groupRoleMappings: string;
   allowJitProvisioning: boolean;
 };
 
@@ -248,6 +287,7 @@ const emptySamlSsoForm = (): SamlSsoForm => ({
   idpCertPems: "",
   emailAttribute: "email",
   groupsAttribute: "",
+  groupRoleMappings: "[]",
   allowJitProvisioning: false,
 });
 
@@ -260,6 +300,7 @@ function samlFormFromConfig(config: SamlSsoConfig | null): SamlSsoForm {
     idpCertPems: config.idpCertPems.join("\n\n"),
     emailAttribute: config.emailAttribute,
     groupsAttribute: config.groupsAttribute ?? "",
+    groupRoleMappings: JSON.stringify(config.groupRoleMappings ?? [], null, 2),
     allowJitProvisioning: config.allowJitProvisioning,
   };
 }
@@ -295,6 +336,14 @@ const emptyAuthAbuseForm = (): AuthAbuseForm => ({
   blockVoip: false,
   allowedCountryCodes: "",
   blockedCountryCodes: "",
+  mfaMaxAgeSeconds: "300",
+  mfaVaultSigning: true,
+  mfaKeyImport: true,
+  mfaKeyExport: true,
+  mfaRecoveryCodes: true,
+  mfaTenantAdmin: true,
+  mfaAllowDelegatedSignerAutomation: true,
+  mfaAllowKeyQuorumAutomation: true,
 });
 
 const defaultThemeForm = (): ThemeForm => ({
@@ -310,6 +359,8 @@ const defaultThemeForm = (): ThemeForm => ({
   borderRadius: "8",
   fontFamily: "Inter, system-ui, sans-serif",
   colorScheme: "dark",
+  logoUrl: "",
+  faviconUrl: "",
 });
 
 const emptyGasSponsorshipForm = (): GasSponsorshipForm => ({
@@ -330,6 +381,21 @@ const emptyAppClient = (): AppClientForm => ({
   enabled: true,
   allowedOrigins: "",
   allowedRedirectUrls: "",
+  loginPasskey: true,
+  loginEmail: true,
+  loginSms: true,
+  loginWhatsapp: true,
+  loginTotp: true,
+  loginSiwe: true,
+  loginSiws: true,
+  loginTelegram: true,
+  loginFarcaster: true,
+  oauthGoogle: true,
+  oauthDiscord: true,
+  oauthGithub: true,
+  oauthTwitter: true,
+  globalWalletEnabled: false,
+  globalWalletAllowedScopes: "eth_accounts\npersonal_sign",
 });
 
 function listToLines(value: string[] | undefined): string {
@@ -356,6 +422,8 @@ function appClientFormFromConfig(client: any): AppClientForm {
   const environment = APP_CLIENT_ENVIRONMENTS.some((item) => item.value === client?.environment)
     ? client.environment
     : "development";
+  const loginMethods = client?.loginMethods ?? {};
+  const oauth = loginMethods.oauth ?? {};
   return {
     id: typeof client?.id === "string" ? client.id : "",
     name: typeof client?.name === "string" ? client.name : "",
@@ -363,6 +431,25 @@ function appClientFormFromConfig(client: any): AppClientForm {
     enabled: client?.enabled !== false,
     allowedOrigins: listToLines(client?.allowedOrigins),
     allowedRedirectUrls: listToLines(client?.allowedRedirectUrls),
+    loginPasskey: loginMethods.passkey !== false,
+    loginEmail: loginMethods.email !== false,
+    loginSms: loginMethods.sms !== false,
+    loginWhatsapp: loginMethods.whatsapp !== false,
+    loginTotp: loginMethods.totp !== false,
+    loginSiwe: loginMethods.siwe !== false,
+    loginSiws: loginMethods.siws !== false,
+    loginTelegram: loginMethods.telegram !== false,
+    loginFarcaster: loginMethods.farcaster !== false,
+    oauthGoogle: oauth.google !== false,
+    oauthDiscord: oauth.discord !== false,
+    oauthGithub: oauth.github !== false,
+    oauthTwitter: oauth.twitter !== false,
+    globalWalletEnabled: client?.globalWalletEnabled === true,
+    globalWalletAllowedScopes: listToLines(
+      Array.isArray(client?.globalWalletAllowedScopes)
+        ? client.globalWalletAllowedScopes
+        : ["eth_accounts", "personal_sign"],
+    ),
   };
 }
 
@@ -374,6 +461,25 @@ function appClientPayloadFromForm(client: AppClientForm) {
     enabled: client.enabled,
     allowedOrigins: linesToList(client.allowedOrigins),
     allowedRedirectUrls: linesToList(client.allowedRedirectUrls),
+    loginMethods: {
+      passkey: client.loginPasskey,
+      email: client.loginEmail,
+      sms: client.loginSms,
+      whatsapp: client.loginWhatsapp,
+      totp: client.loginTotp,
+      siwe: client.loginSiwe,
+      siws: client.loginSiws,
+      telegram: client.loginTelegram,
+      farcaster: client.loginFarcaster,
+      oauth: {
+        google: client.oauthGoogle,
+        discord: client.oauthDiscord,
+        github: client.oauthGithub,
+        twitter: client.oauthTwitter,
+      },
+    },
+    globalWalletEnabled: client.globalWalletEnabled,
+    globalWalletAllowedScopes: linesToList(client.globalWalletAllowedScopes),
   };
 }
 
@@ -403,11 +509,36 @@ function themePayloadFromForm(theme: ThemeForm) {
     borderRadius: Number(theme.borderRadius),
     fontFamily: theme.fontFamily.trim(),
     colorScheme: theme.colorScheme,
+    logoUrl: theme.logoUrl.trim(),
+    faviconUrl: theme.faviconUrl.trim(),
   };
 }
 
 function accessAllowlistTypeLabel(type: AccessAllowlistEntryType): string {
   return ACCESS_ALLOWLIST_TYPES.find((item) => item.value === type)?.label ?? type;
+}
+
+function parseAccessAllowlistBulkEntries(
+  value: string,
+  fallbackType: AccessAllowlistEntryType,
+): Array<{ type: AccessAllowlistEntryType; value: string }> {
+  const validTypes = new Set<AccessAllowlistEntryType>(
+    ACCESS_ALLOWLIST_TYPES.map((item) => item.value),
+  );
+  return value
+    .split(/[\n;]/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const typed = line.match(/^(email_domain|email|wallet|phone)\s*[:,]\s*(.+)$/i);
+      if (!typed) return { type: fallbackType, value: line };
+      const type = typed[1].toLowerCase() as AccessAllowlistEntryType;
+      return {
+        type: validTypes.has(type) ? type : fallbackType,
+        value: typed[2].trim(),
+      };
+    })
+    .filter((entry) => entry.value.length > 0);
 }
 
 function authAbuseFormFromConfig(config: any): AuthAbuseForm {
@@ -445,6 +576,15 @@ function authAbuseFormFromConfig(config: any): AuthAbuseForm {
     blockVoip: config?.phone?.blockVoip === true,
     allowedCountryCodes: listToLines(config?.phone?.allowedCountryCodes),
     blockedCountryCodes: listToLines(config?.phone?.blockedCountryCodes),
+    mfaMaxAgeSeconds:
+      typeof config?.mfa?.maxAgeSeconds === "number" ? String(config.mfa.maxAgeSeconds) : "300",
+    mfaVaultSigning: config?.mfa?.requireFor?.vaultSigning !== false,
+    mfaKeyImport: config?.mfa?.requireFor?.keyImport !== false,
+    mfaKeyExport: config?.mfa?.requireFor?.keyExport !== false,
+    mfaRecoveryCodes: config?.mfa?.requireFor?.recoveryCodes !== false,
+    mfaTenantAdmin: config?.mfa?.requireFor?.tenantAdmin !== false,
+    mfaAllowDelegatedSignerAutomation: config?.mfa?.allowDelegatedSignerAutomation !== false,
+    mfaAllowKeyQuorumAutomation: config?.mfa?.allowKeyQuorumAutomation !== false,
   };
 }
 
@@ -453,6 +593,7 @@ function authAbusePayloadFromForm(form: AuthAbuseForm) {
     ...(form.captchaEmailOtp ? ["email_otp"] : []),
     ...(form.captchaSmsOtp ? ["sms_otp"] : []),
   ];
+  const mfaMaxAgeSeconds = Number(form.mfaMaxAgeSeconds);
   return {
     loginMethods: {
       passkey: form.loginPasskey,
@@ -495,6 +636,21 @@ function authAbusePayloadFromForm(form: AuthAbuseForm) {
       allowedCountryCodes: linesToList(form.allowedCountryCodes),
       blockedCountryCodes: linesToList(form.blockedCountryCodes),
     },
+    mfa: {
+      maxAgeSeconds:
+        Number.isSafeInteger(mfaMaxAgeSeconds) && mfaMaxAgeSeconds > 0
+          ? mfaMaxAgeSeconds
+          : undefined,
+      requireFor: {
+        vaultSigning: form.mfaVaultSigning,
+        keyImport: form.mfaKeyImport,
+        keyExport: form.mfaKeyExport,
+        recoveryCodes: form.mfaRecoveryCodes,
+        tenantAdmin: form.mfaTenantAdmin,
+      },
+      allowDelegatedSignerAutomation: form.mfaAllowDelegatedSignerAutomation,
+      allowKeyQuorumAutomation: form.mfaAllowKeyQuorumAutomation,
+    },
   };
 }
 
@@ -534,6 +690,18 @@ function gasSponsorshipProviderLabel(provider: GasSponsorshipProvider | ""): str
   );
 }
 
+function securityChecklistStatusClass(status: "pass" | "warning" | "fail") {
+  if (status === "pass") return "text-emerald-400 border-emerald-500/30 bg-emerald-500/10";
+  if (status === "warning") return "text-amber-300 border-amber-500/30 bg-amber-500/10";
+  return "text-red-400 border-red-500/30 bg-red-500/10";
+}
+
+function securityChecklistStatusLabel(status: "pass" | "warning" | "fail") {
+  if (status === "pass") return "Pass";
+  if (status === "warning") return "Review";
+  return "Fail";
+}
+
 export default function SettingsPage() {
   const stewardAuth = useStewardAuth();
   const { address, tenant } = useAuth();
@@ -562,6 +730,21 @@ export default function SettingsPage() {
   const [gasSponsorshipSaving, setGasSponsorshipSaving] = useState(false);
   const [gasSponsorshipSaved, setGasSponsorshipSaved] = useState(false);
   const [gasSponsorshipError, setGasSponsorshipError] = useState<string | null>(null);
+  const [securityChecklist, setSecurityChecklist] = useState<TenantSecurityChecklist | null>(null);
+  const [securityChecklistLoading, setSecurityChecklistLoading] = useState(false);
+  const [securityChecklistError, setSecurityChecklistError] = useState<string | null>(null);
+  const [idempotencyMetrics, setIdempotencyMetrics] = useState<TenantIdempotencyMetrics | null>(
+    null,
+  );
+  const [idempotencyMetricsLoading, setIdempotencyMetricsLoading] = useState(false);
+  const [idempotencyMetricsError, setIdempotencyMetricsError] = useState<string | null>(null);
+  const [requestSigningKeys, setRequestSigningKeys] = useState<TenantRequestSigningKey[]>([]);
+  const [requestSigningKeyName, setRequestSigningKeyName] = useState("Production signing key");
+  const [requestSigningKeyReveal, setRequestSigningKeyReveal] =
+    useState<TenantRequestSigningKeyCreateResult | null>(null);
+  const [requestSigningKeysLoading, setRequestSigningKeysLoading] = useState(false);
+  const [requestSigningKeysSaving, setRequestSigningKeysSaving] = useState(false);
+  const [requestSigningKeysError, setRequestSigningKeysError] = useState<string | null>(null);
   const [theme, setTheme] = useState<ThemeForm>(defaultThemeForm);
   const [themeSaving, setThemeSaving] = useState(false);
   const [themeSaved, setThemeSaved] = useState(false);
@@ -600,6 +783,7 @@ export default function SettingsPage() {
   const [accessAllowlist, setAccessAllowlist] = useState<AccessAllowlistEntry[]>([]);
   const [accessAllowlistType, setAccessAllowlistType] = useState<AccessAllowlistEntryType>("email");
   const [accessAllowlistValue, setAccessAllowlistValue] = useState("");
+  const [accessAllowlistBulkValue, setAccessAllowlistBulkValue] = useState("");
   const [accessAllowlistLoading, setAccessAllowlistLoading] = useState(false);
   const [accessAllowlistSaving, setAccessAllowlistSaving] = useState(false);
   const [accessAllowlistSaved, setAccessAllowlistSaved] = useState(false);
@@ -740,6 +924,60 @@ export default function SettingsPage() {
       })
       .finally(() => {
         if (!cancelled) setGasSponsorshipLoading(false);
+      });
+
+    setSecurityChecklistLoading(true);
+    setSecurityChecklistError(null);
+    getTenantSecurityChecklist(TENANT_ID, authToken)
+      .then((checklist) => {
+        if (!cancelled) setSecurityChecklist(checklist);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setSecurityChecklist(null);
+          setSecurityChecklistError(
+            e instanceof Error ? e.message : "Failed to load security checklist",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSecurityChecklistLoading(false);
+      });
+
+    setIdempotencyMetricsLoading(true);
+    setIdempotencyMetricsError(null);
+    getTenantIdempotencyMetrics(TENANT_ID, authToken)
+      .then((metrics) => {
+        if (!cancelled) setIdempotencyMetrics(metrics);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setIdempotencyMetrics(null);
+          setIdempotencyMetricsError(
+            e instanceof Error ? e.message : "Failed to load idempotency metrics",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIdempotencyMetricsLoading(false);
+      });
+
+    setRequestSigningKeysLoading(true);
+    setRequestSigningKeysError(null);
+    listTenantRequestSigningKeys(TENANT_ID, authToken)
+      .then((keys) => {
+        if (!cancelled) setRequestSigningKeys(keys);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setRequestSigningKeys([]);
+          setRequestSigningKeysError(
+            e instanceof Error ? e.message : "Failed to load request signing keys",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setRequestSigningKeysLoading(false);
       });
 
     setTestAccountLoading(true);
@@ -902,7 +1140,12 @@ export default function SettingsPage() {
       return;
     }
     const value = accessAllowlistValue.trim();
-    if (!value) {
+    const bulkEntries = parseAccessAllowlistBulkEntries(
+      accessAllowlistBulkValue,
+      accessAllowlistType,
+    );
+    const entries = [...(value ? [{ type: accessAllowlistType, value }] : []), ...bulkEntries];
+    if (entries.length === 0) {
       setAccessAllowlistError("Enter an email, domain, wallet, or phone number");
       return;
     }
@@ -919,7 +1162,7 @@ export default function SettingsPage() {
             Authorization: `Bearer ${authToken}`,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ type: accessAllowlistType, value }),
+          body: JSON.stringify(entries.length === 1 ? entries[0] : { entries }),
         },
       );
       const data = await res.json();
@@ -928,6 +1171,7 @@ export default function SettingsPage() {
       }
       setAccessAllowlist(data.data.entries ?? []);
       setAccessAllowlistValue("");
+      setAccessAllowlistBulkValue("");
       setAccessAllowlistSaved(true);
       setTimeout(() => setAccessAllowlistSaved(false), 2000);
     } catch (e: unknown) {
@@ -1113,6 +1357,7 @@ export default function SettingsPage() {
             .filter(Boolean),
           emailAttribute: samlSso.emailAttribute.trim() || "email",
           groupsAttribute: samlSso.groupsAttribute.trim() || undefined,
+          groupRoleMappings: JSON.parse(samlSso.groupRoleMappings || "[]"),
           allowJitProvisioning: samlSso.allowJitProvisioning,
         }),
       });
@@ -1315,6 +1560,54 @@ export default function SettingsPage() {
       setAppClientsError(e instanceof Error ? e.message : "Failed to rotate app secret");
     } finally {
       setAppClientSecretRotating(null);
+    }
+  }
+
+  async function rotateRequestSigningKey() {
+    if (!TENANT_ID || !authToken) {
+      setRequestSigningKeysError("Sign in again to rotate request signing keys");
+      return;
+    }
+    setRequestSigningKeysSaving(true);
+    setRequestSigningKeysError(null);
+    try {
+      const result = await rotateTenantRequestSigningKey(
+        TENANT_ID,
+        authToken,
+        requestSigningKeyName,
+      );
+      setRequestSigningKeyReveal(result);
+      setRequestSigningKeys((keys) => [
+        result.key,
+        ...keys.map((key) =>
+          key.status === "active" ? { ...key, status: "retiring" as const } : key,
+        ),
+      ]);
+    } catch (e: unknown) {
+      setRequestSigningKeysError(
+        e instanceof Error ? e.message : "Failed to rotate request signing key",
+      );
+    } finally {
+      setRequestSigningKeysSaving(false);
+    }
+  }
+
+  async function revokeRequestSigningKey(keyId: string) {
+    if (!TENANT_ID || !authToken) {
+      setRequestSigningKeysError("Sign in again to revoke request signing keys");
+      return;
+    }
+    setRequestSigningKeysSaving(true);
+    setRequestSigningKeysError(null);
+    try {
+      const key = await revokeTenantRequestSigningKey(TENANT_ID, authToken, keyId);
+      setRequestSigningKeys((keys) => keys.map((entry) => (entry.id === key.id ? key : entry)));
+    } catch (e: unknown) {
+      setRequestSigningKeysError(
+        e instanceof Error ? e.message : "Failed to revoke request signing key",
+      );
+    } finally {
+      setRequestSigningKeysSaving(false);
     }
   }
 
@@ -1658,6 +1951,28 @@ const policies = await steward.getPolicies("my-agent")`;
                 />
               </label>
             </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-border-subtle">
+              <label className="bg-bg p-4 space-y-1.5 block">
+                <span className="text-xs text-text-tertiary block">Logo URL</span>
+                <input
+                  type="url"
+                  value={theme.logoUrl}
+                  onChange={(event) => updateTheme({ logoUrl: event.target.value })}
+                  placeholder="https://app.example/logo.png"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                />
+              </label>
+              <label className="bg-bg p-4 space-y-1.5 block">
+                <span className="text-xs text-text-tertiary block">Favicon URL</span>
+                <input
+                  type="url"
+                  value={theme.faviconUrl}
+                  onChange={(event) => updateTheme({ faviconUrl: event.target.value })}
+                  placeholder="https://app.example/favicon.ico"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                />
+              </label>
+            </div>
           </div>
           <div
             className="p-5 space-y-4"
@@ -1679,7 +1994,36 @@ const policies = await steward.getPolicies("my-agent")`;
                 borderRadius: `${Number(theme.borderRadius) || 0}px`,
               }}
             >
-              <div className="text-sm font-medium">Sign in to Steward</div>
+              <div className="flex items-center gap-3">
+                {theme.logoUrl.trim() ? (
+                  <img
+                    src={theme.logoUrl.trim()}
+                    alt=""
+                    className="h-9 w-9 object-contain border"
+                    style={{
+                      borderColor: theme.mutedColor,
+                      borderRadius: `${Math.max((Number(theme.borderRadius) || 0) - 4, 0)}px`,
+                    }}
+                  />
+                ) : (
+                  <div
+                    className="h-9 w-9 border grid place-items-center text-xs font-semibold"
+                    style={{
+                      borderColor: theme.mutedColor,
+                      borderRadius: `${Math.max((Number(theme.borderRadius) || 0) - 4, 0)}px`,
+                      color: theme.primaryColor,
+                    }}
+                  >
+                    ST
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">Sign in to Steward</div>
+                  <div className="text-xs truncate" style={{ color: theme.mutedColor }}>
+                    {theme.faviconUrl.trim() ? "Custom icon configured" : "Default icon"}
+                  </div>
+                </div>
+              </div>
               <div className="text-xs" style={{ color: theme.mutedColor }}>
                 Continue with your wallet or email.
               </div>
@@ -1856,6 +2200,77 @@ const policies = await steward.getPolicies("my-agent")`;
                     />
                   </label>
                 </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-px bg-border-subtle">
+                  <label className="bg-bg p-4 flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      checked={client.globalWalletEnabled}
+                      onChange={(event) =>
+                        updateAppClient(index, { globalWalletEnabled: event.target.checked })
+                      }
+                      className="h-4 w-4 accent-accent"
+                    />
+                    <span className="text-xs text-text-tertiary">Global Wallet</span>
+                  </label>
+                  <label className="bg-bg p-4 space-y-1.5 block">
+                    <span className="text-xs text-text-tertiary block">Global Wallet Scopes</span>
+                    <textarea
+                      value={client.globalWalletAllowedScopes}
+                      onChange={(event) =>
+                        updateAppClient(index, {
+                          globalWalletAllowedScopes: event.target.value,
+                        })
+                      }
+                      rows={3}
+                      placeholder={"eth_accounts\npersonal_sign"}
+                      className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+                    />
+                  </label>
+                </div>
+                <div className="bg-bg border border-border-subtle p-4 space-y-3">
+                  <div>
+                    <div className="text-xs text-text-secondary uppercase tracking-wider">
+                      Login Methods
+                    </div>
+                    <p className="text-xs text-text-tertiary mt-1">
+                      Override which tenant login methods this client can request.
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    {[
+                      ["Passkey", "loginPasskey"],
+                      ["Email", "loginEmail"],
+                      ["SMS", "loginSms"],
+                      ["WhatsApp", "loginWhatsapp"],
+                      ["TOTP", "loginTotp"],
+                      ["SIWE", "loginSiwe"],
+                      ["SIWS", "loginSiws"],
+                      ["Telegram", "loginTelegram"],
+                      ["Farcaster", "loginFarcaster"],
+                      ["Google", "oauthGoogle"],
+                      ["Discord", "oauthDiscord"],
+                      ["GitHub", "oauthGithub"],
+                      ["Twitter/X", "oauthTwitter"],
+                    ].map(([label, key]) => (
+                      <label
+                        key={key}
+                        className="flex items-center gap-2 text-sm text-text-secondary"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={client[key as keyof AppClientForm] as boolean}
+                          onChange={(event) =>
+                            updateAppClient(index, {
+                              [key]: event.target.checked,
+                            } as Partial<AppClientForm>)
+                          }
+                          className="accent-accent"
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
                 <div className="border border-border-subtle bg-bg-elevated p-4 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
@@ -1885,9 +2300,25 @@ const policies = await steward.getPolicies("my-agent")`;
                       <div className="mt-2 font-mono text-text-secondary break-all">
                         App ID: {appClientSecrets[client.id.trim().toLowerCase()].appId}
                       </div>
-                      <div className="mt-1 font-mono text-text-secondary break-all">
+                      <div
+                        className="mt-1 font-mono text-text-secondary break-all"
+                        data-testid="app-client-secret-value"
+                      >
                         Secret: {appClientSecrets[client.id.trim().toLowerCase()].appSecret}
                       </div>
+                      <div className="mt-3 text-text-tertiary">
+                        Use the same secret as requestSigningSecret for signed server requests.
+                      </div>
+                      <CodeBlock
+                        code={`const steward = new StewardClient({
+  baseUrl: "${API_URL}",
+  appId: "${appClientSecrets[client.id.trim().toLowerCase()].appId}",
+  appSecret: "${appClientSecrets[client.id.trim().toLowerCase()].appSecret}",
+  requestSigningSecret: "${appClientSecrets[client.id.trim().toLowerCase()].appSecret}",
+});`}
+                        language="typescript"
+                        className="mt-2"
+                      />
                     </div>
                   )}
                 </div>
@@ -2123,6 +2554,16 @@ const policies = await steward.getPolicies("my-agent")`;
               </label>
             </div>
             <label className="space-y-1.5 block">
+              <span className="text-xs text-text-tertiary block">Group Role Mappings</span>
+              <textarea
+                value={samlSso.groupRoleMappings}
+                onChange={(event) => updateSamlSso({ groupRoleMappings: event.target.value })}
+                rows={5}
+                placeholder={'[{"group":"Engineering","role":"developer"}]'}
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+              />
+            </label>
+            <label className="space-y-1.5 block">
               <span className="text-xs text-text-tertiary block">IdP Certificate PEMs</span>
               <textarea
                 value={samlSso.idpCertPems}
@@ -2326,6 +2767,22 @@ const policies = await steward.getPolicies("my-agent")`;
                 />
               </label>
             </div>
+            <label className="space-y-1.5 block mt-4">
+              <span className="text-xs text-text-tertiary block">Bulk Entries</span>
+              <textarea
+                value={accessAllowlistBulkValue}
+                onChange={(event) => setAccessAllowlistBulkValue(event.target.value)}
+                rows={4}
+                placeholder={
+                  "email: alice@example.com\nemail_domain: example.com\nwallet: 0x...\nphone: +14155550100"
+                }
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+              />
+              <span className="text-xs text-text-tertiary block">
+                Use one entry per line. Start with email, email_domain, wallet, or phone; unprefixed
+                lines use the selected category.
+              </span>
+            </label>
           </div>
           <div className="bg-bg overflow-x-auto">
             <table className="w-full min-w-[640px] text-sm">
@@ -2566,6 +3023,201 @@ const policies = await steward.getPolicies("my-agent")`;
         </div>
       </form>
 
+      {/* Security Checklist */}
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+            Security Checklist
+          </h2>
+          {securityChecklist && (
+            <div className="flex items-center gap-2 text-xs text-text-tertiary">
+              <span>{securityChecklist.summary.pass} pass</span>
+              <span>{securityChecklist.summary.warning} review</span>
+              <span>{securityChecklist.summary.fail} fail</span>
+            </div>
+          )}
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5 space-y-4">
+            {securityChecklistLoading && (
+              <div className="text-sm text-text-tertiary">Loading security posture...</div>
+            )}
+            {!securityChecklistLoading && securityChecklistError && (
+              <div className="text-sm text-red-400">{securityChecklistError}</div>
+            )}
+            {!securityChecklistLoading && securityChecklist && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-px bg-border-subtle">
+                {securityChecklist.items.map((item) => (
+                  <div key={item.id} className="bg-bg p-4 space-y-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="text-sm font-medium text-text-secondary">{item.label}</div>
+                      <span
+                        className={`shrink-0 border px-2 py-0.5 text-[11px] uppercase tracking-wider ${securityChecklistStatusClass(
+                          item.status,
+                        )}`}
+                      >
+                        {securityChecklistStatusLabel(item.status)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-text-tertiary">{item.description}</p>
+                    {item.remediation && (
+                      <p className="text-xs text-text-secondary">{item.remediation}</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Idempotency Metrics */}
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              Idempotency Metrics
+            </h2>
+            {idempotencyMetrics?.lastSeenAt && (
+              <p className="text-xs text-text-tertiary mt-1">
+                Last idempotent request: {new Date(idempotencyMetrics.lastSeenAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+          {idempotencyMetrics && (
+            <div className="text-xs text-text-tertiary">
+              TTL {Math.round(idempotencyMetrics.ttlMs / 1000)}s
+            </div>
+          )}
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5 space-y-4">
+            {idempotencyMetricsLoading && (
+              <div className="text-sm text-text-tertiary">Loading idempotency metrics...</div>
+            )}
+            {!idempotencyMetricsLoading && idempotencyMetricsError && (
+              <div className="text-sm text-red-400">{idempotencyMetricsError}</div>
+            )}
+            {!idempotencyMetricsLoading && idempotencyMetrics && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-border-subtle">
+                {[
+                  ["Observed", idempotencyMetrics.counters.observed],
+                  ["Reserved", idempotencyMetrics.counters.reserved],
+                  ["Completed", idempotencyMetrics.counters.completed],
+                  ["Replayed", idempotencyMetrics.counters.replayed],
+                  ["Conflicts", idempotencyMetrics.counters.conflicts],
+                  ["In flight", idempotencyMetrics.counters.inFlightConflicts],
+                  ["Auth suppressed", idempotencyMetrics.counters.suppressedAuthResponses],
+                  ["Store errors", idempotencyMetrics.counters.storeErrors],
+                ].map(([label, value]) => (
+                  <div key={label} className="bg-bg p-4">
+                    <div className="text-[11px] uppercase tracking-wider text-text-tertiary">
+                      {label}
+                    </div>
+                    <div className="mt-2 font-mono text-xl text-text-secondary">{value}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            {!idempotencyMetricsLoading && idempotencyMetrics && (
+              <div className="text-xs text-text-tertiary">
+                Counters are tenant-scoped and do not expose idempotency keys, request bodies, or
+                replayed response payloads.
+              </div>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* Request Signing Keys */}
+      <section className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+            Request Signing Keys
+          </h2>
+          <button
+            type="button"
+            onClick={rotateRequestSigningKey}
+            disabled={requestSigningKeysSaving || requestSigningKeysLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {requestSigningKeysSaving ? "Rotating..." : "Rotate Key"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5 space-y-4">
+            <label className="space-y-1.5 block max-w-md">
+              <span className="text-xs text-text-tertiary block">Key Name</span>
+              <input
+                value={requestSigningKeyName}
+                onChange={(event) => setRequestSigningKeyName(event.target.value)}
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+              />
+            </label>
+            {requestSigningKeyReveal && (
+              <div className="border border-amber-400/20 bg-amber-400/5 p-3 text-xs">
+                <div className="text-amber-300">Copy this signing secret now.</div>
+                <div className="mt-2 font-mono text-text-secondary break-all">
+                  Key ID: {requestSigningKeyReveal.key.id}
+                </div>
+                <div className="mt-1 font-mono text-text-secondary break-all">
+                  Secret: {requestSigningKeyReveal.signingSecret}
+                </div>
+                <CodeBlock
+                  code={`const steward = new StewardClient({
+  baseUrl: "${API_URL}",
+  tenantId: "${TENANT_ID}",
+  requestSigningSecret: "${requestSigningKeyReveal.signingSecret}",
+  requestSigningKeyId: "${requestSigningKeyReveal.key.id}",
+});`}
+                  language="typescript"
+                  className="mt-2"
+                />
+              </div>
+            )}
+            {requestSigningKeysLoading && (
+              <div className="text-sm text-text-tertiary">Loading request signing keys...</div>
+            )}
+            {!requestSigningKeysLoading && requestSigningKeys.length === 0 && (
+              <div className="text-sm text-text-tertiary">No request signing keys yet.</div>
+            )}
+            {requestSigningKeys.length > 0 && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-px bg-border-subtle">
+                {requestSigningKeys.map((key) => (
+                  <div key={key.id} className="bg-bg p-4 space-y-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-medium text-text-secondary">{key.name}</div>
+                        <div className="text-xs font-mono text-text-tertiary mt-1">
+                          {key.secretPrefix}
+                        </div>
+                      </div>
+                      <span className="text-[11px] uppercase tracking-wider text-text-tertiary">
+                        {key.status}
+                      </span>
+                    </div>
+                    <div className="text-xs font-mono text-text-tertiary break-all">{key.id}</div>
+                    {key.status !== "revoked" && (
+                      <button
+                        type="button"
+                        onClick={() => revokeRequestSigningKey(key.id)}
+                        disabled={requestSigningKeysSaving}
+                        className="px-3 py-1.5 text-xs border border-border text-text-secondary hover:border-red-400 hover:text-red-300 transition-colors disabled:opacity-40"
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            {requestSigningKeysError && (
+              <span className="text-xs text-red-400">{requestSigningKeysError}</span>
+            )}
+          </div>
+        </div>
+      </section>
+
       {/* Webhook */}
       <form onSubmit={saveWebhook} className="space-y-4">
         <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
@@ -2715,6 +3367,46 @@ const policies = await steward.getPolicies("my-agent")`;
                   className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                 />
               </label>
+            </div>
+          </div>
+          <div className="bg-bg p-5 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-[180px_minmax(0,1fr)] gap-4">
+              <label className="space-y-1.5">
+                <span className="text-xs text-text-tertiary block">MFA Max Age Seconds</span>
+                <input
+                  type="number"
+                  min={30}
+                  max={3600}
+                  value={authAbuse.mfaMaxAgeSeconds}
+                  onChange={(event) => updateAuthAbuse({ mfaMaxAgeSeconds: event.target.value })}
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                />
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                {[
+                  ["Vault signing MFA", "mfaVaultSigning"],
+                  ["Key import MFA", "mfaKeyImport"],
+                  ["Key export MFA", "mfaKeyExport"],
+                  ["Recovery code MFA", "mfaRecoveryCodes"],
+                  ["Tenant admin MFA", "mfaTenantAdmin"],
+                  ["Delegated signer automation", "mfaAllowDelegatedSignerAutomation"],
+                  ["Key quorum automation", "mfaAllowKeyQuorumAutomation"],
+                ].map(([label, key]) => (
+                  <label key={key} className="flex items-center gap-2 text-sm text-text-secondary">
+                    <input
+                      type="checkbox"
+                      checked={authAbuse[key as keyof AuthAbuseForm] as boolean}
+                      onChange={(event) =>
+                        updateAuthAbuse({
+                          [key]: event.target.checked,
+                        } as Partial<AuthAbuseForm>)
+                      }
+                      className="accent-accent"
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
             </div>
           </div>
           <div className="bg-bg p-5 space-y-4">

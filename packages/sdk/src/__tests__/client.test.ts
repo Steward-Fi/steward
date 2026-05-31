@@ -53,6 +53,35 @@ function installMockFetch(responseBody: object, status = 200): void {
   };
 }
 
+function installTextMockFetch(responseBody: string, status = 200): void {
+  global.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (input as Request).url;
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+      const h = new Headers(init.headers);
+      h.forEach((v, k) => {
+        headers[k] = v;
+      });
+    }
+    lastCapture = {
+      url,
+      method: (init?.method ?? "GET").toUpperCase(),
+      headers,
+      rawBody: init?.body as string | undefined,
+      body: init?.body ? JSON.parse(init.body as string) : undefined,
+    };
+    return new Response(responseBody, {
+      status,
+      headers: { "Content-Type": "text/csv" },
+    });
+  };
+}
+
 function installNetworkErrorFetch(): void {
   global.fetch = async () => {
     throw new Error("Network error: connection refused");
@@ -238,13 +267,30 @@ describe("StewardClient webhooks", () => {
     const deliveries = await makeClient().getWebhookDeliveries("webhook-1", {
       limit: 25,
       offset: 50,
+      status: "failed",
+      eventType: "user.created",
+      hasError: true,
     });
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe(
-      "https://api.steward.example/webhooks/webhook-1/deliveries?limit=25&offset=50",
+      "https://api.steward.example/webhooks/webhook-1/deliveries?limit=25&offset=50&status=failed&eventType=user.created&hasError=true",
     );
     expect(deliveries[0].eventType).toBe("user.created");
     expect(deliveries[0].hasError).toBe(true);
+
+    installTextMockFetch('id,eventType\n"delivery-1","user.created"\n');
+    const csv = await makeClient().exportWebhookDeliveriesCsv("webhook-1", {
+      limit: 1000,
+      status: "failed",
+      eventType: "user.created",
+      hasError: true,
+    });
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/webhooks/webhook-1/deliveries/export?limit=1000&status=failed&eventType=user.created&hasError=true",
+    );
+    expect(lastCapture?.headers.accept).toBe("text/csv");
+    expect(csv).toContain("delivery-1");
 
     installMockFetch({
       ok: true,
@@ -266,6 +312,49 @@ describe("StewardClient webhooks", () => {
       "https://api.steward.example/webhooks/deliveries/delivery-1/retry",
     );
     expect(retried.status).toBe("pending");
+
+    installMockFetch({
+      ok: true,
+      data: {
+        id: "delivery-replay",
+        eventType: "user.created",
+        replayedFromDeliveryId: "delivery-1",
+        status: "delivered",
+        attempts: 1,
+        maxAttempts: 6,
+        nextRetryAt: null,
+        hasError: false,
+        createdAt: "2026-05-28T11:04:00.000Z",
+        deliveredAt: "2026-05-28T11:04:01.000Z",
+      },
+    });
+    const replayed = await makeClient().replayDelivery("delivery-1");
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/webhooks/deliveries/delivery-1/replay",
+    );
+    expect(replayed.id).toBe("delivery-replay");
+    expect(replayed.replayedFromDeliveryId).toBe("delivery-1");
+
+    installMockFetch({
+      ok: true,
+      data: {
+        id: "delivery-test",
+        eventType: "webhook.test",
+        status: "delivered",
+        attempts: 1,
+        maxAttempts: 1,
+        nextRetryAt: null,
+        hasError: false,
+        createdAt: "2026-05-28T11:05:00.000Z",
+        deliveredAt: "2026-05-28T11:05:01.000Z",
+      },
+    });
+    const tested = await makeClient().testWebhook("webhook-1");
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/webhooks/webhook-1/test");
+    expect(tested.eventType).toBe("webhook.test");
+    expect(tested.maxAttempts).toBe(1);
   });
 });
 
@@ -358,9 +447,28 @@ describe("Request headers", () => {
 
     expect(lastCapture?.headers["x-steward-request-timestamp"]).toMatch(/^\d+$/);
     expect(lastCapture?.headers["idempotency-key"]).toMatch(/^[\x21-\x7e]{8,255}$/);
+    expect(lastCapture?.headers["x-steward-signing-key-id"]).toBeUndefined();
     expect(lastCapture?.headers["x-steward-signature"]).toMatch(/^v1=[0-9a-f]{64}$/);
     expect(lastCapture?.headers["x-steward-signature"]).toBe(
       await expectedServerSignature(lastCapture!, requestSigningSecret),
+    );
+  });
+
+  it("sends request signing key ids on signed sensitive mutations", async () => {
+    installMockFetch({ ok: true, data: { txHash: "0xdeadbeef" } });
+    const client = makeClient({
+      tenantId: "tenant-1",
+      requestSigningSecret: "request-signing-secret-with-enough-entropy",
+      requestSigningKeyId: "6dd98a21-fbb6-4a2d-a840-f89a527a4244",
+    });
+
+    await client.signTransaction("agent-1", {
+      to: "0x1234567890123456789012345678901234567890",
+      value: "1000000000000000000",
+    });
+
+    expect(lastCapture?.headers["x-steward-signing-key-id"]).toBe(
+      "6dd98a21-fbb6-4a2d-a840-f89a527a4244",
     );
   });
 
@@ -732,6 +840,18 @@ describe("HTTP request building", () => {
             providerAccountId: "google-1",
             expiresAt: null,
           },
+          {
+            id: "cross-app-1",
+            provider: "cross_app",
+            providerAccountId: "tenant/client",
+            expiresAt: null,
+            type: "cross_app",
+            embeddedWallets: [{ address: "0x123" }],
+            smartWallets: [],
+            providerApp: { id: "tenant/client", name: "Consumer App", logoUrl: null },
+            firstVerifiedAt: new Date().toISOString(),
+            latestVerifiedAt: new Date().toISOString(),
+          },
         ],
         primaryLoginMethods: [{ provider: "email", providerAccountId: "user@example.test" }],
       },
@@ -740,6 +860,12 @@ describe("HTTP request building", () => {
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe("https://api.steward.example/user/me/accounts");
     expect(accounts.accounts[0].provider).toBe("google");
+    expect(accounts.accounts[1]).toMatchObject({
+      provider: "cross_app",
+      providerAccountId: "tenant/client",
+      embeddedWallets: [{ address: "0x123" }],
+      providerApp: { id: "tenant/client", name: "Consumer App", logoUrl: null },
+    });
 
     installMockFetch({ ok: true, data: { deleted: true, issuedBefore: 123 } });
     await makeClient({ bearerToken: "user-token" }).unlinkUserAccount("google", "google-1");
@@ -801,6 +927,189 @@ describe("HTTP request building", () => {
     );
     expect(account.type).toBe("user");
     expect(account.wallet?.agentId).toBe("user-wallet-user-1");
+  });
+
+  it("global wallet helpers call consent and read-only RPC endpoints", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        app: {
+          id: "client",
+          appId: "tenant/client",
+          tenantId: "tenant",
+          name: "Wallet App",
+          environment: "production",
+          origin: "https://wallet.example.test",
+          redirectUri: "https://wallet.example.test/callback",
+        },
+        requestedScopes: ["eth_accounts"],
+        wallet: { agentId: "user-wallet-user-1", address: "0x123" },
+        consent: null,
+      },
+    });
+    await makeClient({ bearerToken: "user-token" }).getGlobalWalletConsentRequest({
+      appId: "tenant/client",
+      origin: "https://wallet.example.test",
+      redirectUri: "https://wallet.example.test/callback",
+      scopes: ["eth_accounts"],
+    });
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/global-wallet/consent/request?app_id=tenant%2Fclient&origin=https%3A%2F%2Fwallet.example.test&redirect_uri=https%3A%2F%2Fwallet.example.test%2Fcallback&scope=eth_accounts",
+    );
+
+    installMockFetch({
+      ok: true,
+      data: {
+        consent: {
+          id: "consent-1",
+          tenantId: "tenant",
+          clientId: "client",
+          appId: "tenant/client",
+          origin: "https://wallet.example.test",
+          redirectUri: "https://wallet.example.test/callback",
+          walletAgentId: "user-wallet-user-1",
+          walletAddress: "0x123",
+          scopes: ["eth_accounts"],
+          status: "active",
+          grantedAt: new Date().toISOString(),
+          lastUsedAt: null,
+          expiresAt: null,
+          revokedAt: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        },
+        wallet: { agentId: "user-wallet-user-1", address: "0x123" },
+      },
+    });
+    await makeClient({ bearerToken: "user-token" }).approveGlobalWalletConsent({
+      appId: "tenant/client",
+      origin: "https://wallet.example.test",
+      redirectUri: "https://wallet.example.test/callback",
+      scopes: ["eth_accounts"],
+    });
+    expect(lastCapture?.url).toBe("https://api.steward.example/global-wallet/consent/approve");
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.body).toMatchObject({
+      app_id: "tenant/client",
+      origin: "https://wallet.example.test",
+      redirect_uri: "https://wallet.example.test/callback",
+      scopes: ["eth_accounts"],
+    });
+
+    installMockFetch({
+      ok: true,
+      data: {
+        confirmationId: "confirmation-1",
+        method: "personal_sign",
+        expiresAt: new Date().toISOString(),
+      },
+    });
+    const confirmation = await makeClient({ bearerToken: "user-token" }).confirmGlobalWalletAction({
+      appId: "tenant/client",
+      origin: "https://wallet.example.test",
+      method: "personal_sign",
+      params: ["hello", "0x123"],
+    });
+    expect(lastCapture?.url).toBe("https://api.steward.example/global-wallet/rpc/confirm");
+    expect(lastCapture?.body).toMatchObject({
+      app_id: "tenant/client",
+      origin: "https://wallet.example.test",
+      method: "personal_sign",
+      params: ["hello", "0x123"],
+    });
+    expect(confirmation.confirmationId).toBe("confirmation-1");
+
+    installMockFetch({
+      ok: true,
+      data: {
+        method: "eth_sendTransaction",
+        wallet: { address: "0x123", agentId: "user-wallet-user-1" },
+        transaction: {
+          from: "0x123",
+          to: "0x0000000000000000000000000000000000000001",
+          valueWei: "1",
+          chainId: 8453,
+        },
+        blocked: false,
+        riskLevel: "medium",
+        warnings: [],
+        confirmationRequired: true,
+        executionSupported: false,
+        unsupportedReason: "execution disabled",
+      },
+    });
+    const scan = await makeClient({ bearerToken: "user-token" }).scanGlobalWalletTransaction({
+      appId: "tenant/client",
+      origin: "https://wallet.example.test",
+      params: [
+        {
+          from: "0x123",
+          to: "0x0000000000000000000000000000000000000001",
+          value: "0x1",
+        },
+      ],
+    });
+    expect(lastCapture?.url).toBe("https://api.steward.example/global-wallet/rpc/scan");
+    expect(lastCapture?.body).toMatchObject({
+      app_id: "tenant/client",
+      origin: "https://wallet.example.test",
+      method: "eth_sendTransaction",
+      params: [
+        {
+          from: "0x123",
+          to: "0x0000000000000000000000000000000000000001",
+          value: "0x1",
+        },
+      ],
+    });
+    expect(scan.executionSupported).toBe(false);
+
+    installMockFetch({
+      ok: true,
+      data: {
+        confirmationId: "tx-confirmation-1",
+        method: "eth_sendTransaction",
+        expiresAt: new Date().toISOString(),
+      },
+    });
+    const transactionConfirmation = await makeClient({
+      bearerToken: "user-token",
+    }).confirmGlobalWalletAction({
+      appId: "tenant/client",
+      origin: "https://wallet.example.test",
+      method: "eth_sendTransaction",
+      params: [
+        {
+          from: "0x123",
+          to: "0x0000000000000000000000000000000000000001",
+          value: "0x1",
+        },
+      ],
+    });
+    expect(lastCapture?.url).toBe("https://api.steward.example/global-wallet/rpc/confirm");
+    expect(lastCapture?.body).toMatchObject({
+      app_id: "tenant/client",
+      origin: "https://wallet.example.test",
+      method: "eth_sendTransaction",
+    });
+    expect(transactionConfirmation.method).toBe("eth_sendTransaction");
+
+    installMockFetch({ ok: true, data: { jsonrpc: "2.0", id: 1, result: ["0x123"] } });
+    const rpc = await makeClient({ bearerToken: "user-token" }).globalWalletRpc<string[]>({
+      appId: "tenant/client",
+      origin: "https://wallet.example.test",
+      method: "eth_accounts",
+      id: 1,
+    });
+    expect(lastCapture?.url).toBe("https://api.steward.example/global-wallet/rpc");
+    expect(lastCapture?.body).toMatchObject({
+      app_id: "tenant/client",
+      origin: "https://wallet.example.test",
+      method: "eth_accounts",
+      id: 1,
+    });
+    expect(rpc.result).toEqual(["0x123"]);
   });
 
   it("user Ethereum wallet link helpers use proof endpoints", async () => {
@@ -1051,7 +1360,7 @@ describe("HTTP request building", () => {
     expect(lastCapture?.url).toBe("https://api.steward.example/agents/agent-1/policies");
   });
 
-  it("tenant config helpers preserve allowedOrigins", async () => {
+  it("tenant config helpers preserve allowedOrigins and theme assets", async () => {
     installMockFetch({
       ok: true,
       data: {
@@ -1061,6 +1370,10 @@ describe("HTTP request building", () => {
         secretRoutePresets: [],
         approvalConfig: {},
         featureFlags: {},
+        theme: {
+          logoUrl: "https://assets.example.test/logo.png",
+          faviconUrl: "https://assets.example.test/favicon.ico",
+        },
         allowedOrigins: ["https://app.example.test", "http://localhost:3000"],
       },
     });
@@ -1069,6 +1382,8 @@ describe("HTTP request building", () => {
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe("https://api.steward.example/tenants/tenant-1/config");
     expect(config.allowedOrigins).toEqual(["https://app.example.test", "http://localhost:3000"]);
+    expect(config.theme?.logoUrl).toBe("https://assets.example.test/logo.png");
+    expect(config.theme?.faviconUrl).toBe("https://assets.example.test/favicon.ico");
 
     installMockFetch({
       ok: true,
@@ -1085,9 +1400,19 @@ describe("HTTP request building", () => {
 
     await makeClient({ bearerToken: "user-token" }).updateTenantConfig("tenant-1", {
       allowedOrigins: ["https://dashboard.example.test"],
+      theme: {
+        logoUrl: "https://assets.example.test/new-logo.png",
+        faviconUrl: "https://assets.example.test/new-favicon.ico",
+      },
     });
     expect(lastCapture?.method).toBe("PUT");
-    expect(lastCapture?.body).toEqual({ allowedOrigins: ["https://dashboard.example.test"] });
+    expect(lastCapture?.body).toEqual({
+      allowedOrigins: ["https://dashboard.example.test"],
+      theme: {
+        logoUrl: "https://assets.example.test/new-logo.png",
+        faviconUrl: "https://assets.example.test/new-favicon.ico",
+      },
+    });
   });
 
   it("app origin helpers use tenant app-origin aliases", async () => {
@@ -1303,12 +1628,36 @@ describe("HTTP request building", () => {
       entries: [{ type: "email_domain", value: "example.com" }],
     });
 
+    installMockFetch({ ok: true, data: { entries: allowlist } });
+    await makeClient({ bearerToken: "user-token" }).addAccessAllowlistEntries("tenant/one", [
+      { type: "email", value: "person@example.com" },
+      { type: "wallet", value: "0x1111111111111111111111111111111111111111" },
+      { type: "phone", value: "+15555550123" },
+    ]);
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.body).toEqual({
+      entries: [
+        { type: "email", value: "person@example.com" },
+        { type: "wallet", value: "0x1111111111111111111111111111111111111111" },
+        { type: "phone", value: "+15555550123" },
+      ],
+    });
+
     installMockFetch({ ok: true, data: { entries: [] } });
     await makeClient({ bearerToken: "user-token" }).removeAccessAllowlistEntry("tenant/one", {
       id: "email_123",
     });
     expect(lastCapture?.method).toBe("DELETE");
     expect(lastCapture?.body).toEqual({ ids: ["email_123"] });
+
+    installMockFetch({ ok: true, data: { entries: [] } });
+    await makeClient({ bearerToken: "user-token" }).removeAccessAllowlistEntries("tenant/one", {
+      entries: [{ type: "email_domain", value: "example.com" }],
+    });
+    expect(lastCapture?.method).toBe("DELETE");
+    expect(lastCapture?.body).toEqual({
+      entries: [{ type: "email_domain", value: "example.com" }],
+    });
   });
 
   it("policy rule helpers use nested /agents/:id/policies/rules endpoints", async () => {
@@ -1396,6 +1745,64 @@ describe("HTTP request building", () => {
     expect(result.joinedAt).toBeInstanceOf(Date);
   });
 
+  it("platformUsers invitation helpers use tenant invitation endpoints", async () => {
+    const invitation = {
+      id: "00000000-0000-4000-8000-000000000054",
+      tenantId: "tenant-1",
+      email: "alice@example.com",
+      role: "developer",
+      status: "pending",
+      invitedByUserId: null,
+      acceptedByUserId: null,
+      acceptedAt: null,
+      revokedAt: null,
+      expiresAt: "2026-06-01T00:00:00.000Z",
+      createdAt: "2026-05-28T00:00:00.000Z",
+      updatedAt: "2026-05-28T00:00:00.000Z",
+    };
+    const client = makeClient({ platformKey: "platform-key" });
+
+    installMockFetch({ ok: true, data: { invitations: [invitation] } });
+    const listed = await client.platformUsers.listInvitations("tenant/one", {
+      status: "pending",
+      limit: 10,
+      offset: 5,
+    });
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      `https://api.steward.example/platform/tenants/${encodeURIComponent("tenant/one")}/invitations?status=pending&limit=10&offset=5`,
+    );
+    expect(listed.invitations[0].expiresAt).toBeInstanceOf(Date);
+
+    installMockFetch({ ok: true, data: { invitation, token: "invite-token", emailSent: true } });
+    const created = await client.platformUsers.createInvitation("tenant-1", {
+      email: "alice@example.com",
+      role: "developer",
+      expiresInSeconds: 3600,
+      sendEmail: true,
+    });
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/platform/tenants/tenant-1/invitations",
+    );
+    expect(lastCapture?.body).toEqual({
+      email: "alice@example.com",
+      role: "developer",
+      expiresInSeconds: 3600,
+      sendEmail: true,
+    });
+    expect(created.token).toBe("invite-token");
+    expect(created.emailSent).toBe(true);
+    expect(created.invitation.createdAt).toBeInstanceOf(Date);
+
+    installMockFetch({ ok: true, data: {} });
+    await client.platformUsers.revokeInvitation("tenant-1", invitation.id);
+    expect(lastCapture?.method).toBe("DELETE");
+    expect(lastCapture?.url).toBe(
+      `https://api.steward.example/platform/tenants/tenant-1/invitations/${invitation.id}`,
+    );
+  });
+
   it("platformUsers.get returns the tenant-scoped user shape", async () => {
     installMockFetch({
       ok: true,
@@ -1434,6 +1841,7 @@ describe("HTTP request building", () => {
       emailVerified: true,
       name: "Alice",
       tenantCustomMetadata: { team: "eng" },
+      deactivatedAt: null,
       createdAt: "2024-01-01T00:00:00Z",
       updatedAt: "2024-01-02T00:00:00Z",
     };
@@ -1447,12 +1855,48 @@ describe("HTTP request building", () => {
     );
     expect(listed.users[0].joinedAt).toBeInstanceOf(Date);
 
+    installTextMockFetch("user_id,email\nuser-1,alice@example.com\n");
+    const csv = await client.exportTenantUsersCsv("tenant/one", { q: "alice", limit: 10 });
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      `https://api.steward.example/user/me/tenants/${encodeURIComponent("tenant/one")}/users/export?q=alice&limit=10`,
+    );
+    expect(csv).toContain("alice@example.com");
+
     installMockFetch({ ok: true, data: user });
     await client.getTenantUser("tenant-1", "user-1");
     expect(lastCapture?.method).toBe("GET");
     expect(lastCapture?.url).toBe(
       "https://api.steward.example/user/me/tenants/tenant-1/users/user-1",
     );
+
+    installMockFetch({
+      ok: true,
+      data: {
+        events: [
+          {
+            id: 1,
+            seq: 1,
+            action: "tenant.member.role.update",
+            actorType: "user",
+            actorId: "admin-1",
+            resourceType: "user",
+            resourceId: "user-1",
+            metadata: {},
+            createdAt: "2024-01-03T00:00:00Z",
+          },
+        ],
+        limit: 10,
+        offset: 0,
+        total: 1,
+      },
+    });
+    const events = await client.listTenantUserEvents("tenant-1", "user-1", { limit: 10 });
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/user/me/tenants/tenant-1/users/user-1/events?limit=10",
+    );
+    expect(events.events[0].createdAt).toBeInstanceOf(Date);
 
     installMockFetch({ ok: true, data: { ...user, role: "developer" } });
     const updated = await client.updateTenantUserRole("tenant-1", "user-1", "developer");
@@ -1463,6 +1907,36 @@ describe("HTTP request building", () => {
     expect(lastCapture?.body).toEqual({ role: "developer" });
     expect(updated.role).toBe("developer");
     expect(updated.updatedAt).toBeInstanceOf(Date);
+
+    installMockFetch({ ok: true, data: { ...user, tenantCustomMetadata: { team: "ops" } } });
+    const metadataUpdated = await client.updateTenantUserMetadata("tenant-1", "user-1", {
+      team: "ops",
+    });
+    expect(lastCapture?.method).toBe("PATCH");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/user/me/tenants/tenant-1/users/user-1/metadata",
+    );
+    expect(lastCapture?.body).toEqual({ tenantCustomMetadata: { team: "ops" } });
+    expect(metadataUpdated.tenantCustomMetadata).toEqual({ team: "ops" });
+
+    installMockFetch({
+      ok: true,
+      data: { ...user, deactivatedAt: "2024-01-03T00:00:00Z" },
+    });
+    const deactivated = await client.setTenantUserDeactivated("tenant-1", "user-1");
+    expect(lastCapture?.method).toBe("PATCH");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/user/me/tenants/tenant-1/users/user-1/deactivate",
+    );
+    expect(lastCapture?.body).toEqual({ deactivated: true });
+    expect(deactivated.deactivatedAt).toBeInstanceOf(Date);
+
+    installMockFetch({ ok: true, data: {} });
+    await client.removeTenantUser("tenant-1", "user-1");
+    expect(lastCapture?.method).toBe("DELETE");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/user/me/tenants/tenant-1/users/user-1",
+    );
   });
 
   it("platformUsers.linkAccount and unlinkAccount use linked account endpoints", async () => {
@@ -1822,6 +2296,104 @@ describe("HTTP request building", () => {
       `https://api.steward.example/tenants/${encodeURIComponent("tenant/one")}/gas-sponsorship`,
     );
     expect(lastCapture?.body).toEqual({ gasSponsorshipConfig });
+  });
+
+  it("tenant security checklist helper uses the tenant config endpoint", async () => {
+    const checklist = {
+      tenantId: "tenant/one",
+      generatedAt: "2026-05-29T00:00:00.000Z",
+      summary: { pass: 2, warning: 1, fail: 0 },
+      items: [
+        {
+          id: "api-security-headers",
+          label: "API security headers",
+          status: "pass" as const,
+          description: "Headers are configured.",
+        },
+      ],
+    };
+
+    installMockFetch({ ok: true, data: checklist });
+    const loaded = await makeClient({
+      bearerToken: "session-token",
+    }).getTenantSecurityChecklist("tenant/one");
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      `https://api.steward.example/tenants/${encodeURIComponent("tenant/one")}/security-checklist`,
+    );
+    expect(loaded).toEqual(checklist);
+  });
+
+  it("tenant idempotency metrics helper uses the tenant config endpoint", async () => {
+    const metrics = {
+      tenantId: "tenant/one",
+      generatedAt: "2026-05-30T00:00:00.000Z",
+      windowStartedAt: "2026-05-30T00:00:00.000Z",
+      lastSeenAt: "2026-05-30T00:00:01.000Z",
+      ttlMs: 86_400_000,
+      counters: {
+        observed: 3,
+        reserved: 1,
+        completed: 1,
+        replayed: 1,
+        conflicts: 1,
+        inFlightConflicts: 0,
+        suppressedAuthResponses: 0,
+        invalidKeys: 0,
+        storeErrors: 0,
+        skippedUnsafeContext: 0,
+        releasedOnError: 0,
+      },
+    };
+
+    installMockFetch({ ok: true, data: metrics });
+    const loaded = await makeClient({
+      bearerToken: "session-token",
+    }).getTenantIdempotencyMetrics("tenant/one");
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      `https://api.steward.example/tenants/${encodeURIComponent("tenant/one")}/idempotency-metrics`,
+    );
+    expect(loaded).toEqual(metrics);
+  });
+
+  it("tenant request signing key helpers use tenant endpoints", async () => {
+    const key = {
+      id: "key-1",
+      tenantId: "tenant/one",
+      name: "Production signing key",
+      secretPrefix: "stw_sig_1234...abcd",
+      status: "active" as const,
+      createdAt: "2026-05-29T00:00:00.000Z",
+      updatedAt: "2026-05-29T00:00:00.000Z",
+    };
+
+    installMockFetch({ ok: true, data: { keys: [key] } });
+    await makeClient({ bearerToken: "session-token" }).listTenantRequestSigningKeys("tenant/one");
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      `https://api.steward.example/tenants/${encodeURIComponent("tenant/one")}/request-signing-keys`,
+    );
+
+    installMockFetch({ ok: true, data: { key, signingSecret: "stw_sig_secret" } });
+    const rotated = await makeClient({
+      bearerToken: "session-token",
+    }).rotateTenantRequestSigningKey("tenant/one", { name: "Production signing key" });
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.body).toEqual({ name: "Production signing key" });
+    expect(rotated.signingSecret).toBe("stw_sig_secret");
+
+    installMockFetch({ ok: true, data: { key: { ...key, status: "revoked" } } });
+    await makeClient({ bearerToken: "session-token" }).revokeTenantRequestSigningKey(
+      "tenant/one",
+      "key-1",
+    );
+    expect(lastCapture?.method).toBe("DELETE");
+    expect(lastCapture?.url).toBe(
+      `https://api.steward.example/tenants/${encodeURIComponent(
+        "tenant/one",
+      )}/request-signing-keys/${encodeURIComponent("key-1")}`,
+    );
   });
 
   it("platform gas spend helper uses Privy-compatible query params", async () => {

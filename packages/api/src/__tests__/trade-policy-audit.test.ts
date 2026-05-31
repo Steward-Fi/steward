@@ -37,11 +37,13 @@ describe("trade policy audit", () => {
     const realWallet = "0x00000000000000000000000000000000000000aa";
     const spoofedWallet = "0x00000000000000000000000000000000000000bb";
 
-    await getDb().insert(tenants).values({
-      id: tenantId,
-      name: "Trade Wallet Test Tenant",
-      apiKeyHash: `test-hash-${tenantId}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Trade Wallet Test Tenant",
+        apiKeyHash: `test-hash-${tenantId}`,
+      });
     await getDb().insert(agents).values({
       id: agentId,
       tenantId,
@@ -107,11 +109,13 @@ describe("trade policy audit", () => {
     const agentId = `agent-trade-policy-${Date.now()}`;
     const sessionId = `ses_${crypto.randomUUID()}`;
 
-    await getDb().insert(tenants).values({
-      id: tenantId,
-      name: "Trade Policy Test Tenant",
-      apiKeyHash: `test-hash-${tenantId}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Trade Policy Test Tenant",
+        apiKeyHash: `test-hash-${tenantId}`,
+      });
     await getDb().insert(agents).values({
       id: agentId,
       tenantId,
@@ -189,11 +193,13 @@ describe("trade policy audit", () => {
     const agentId = `agent-trade-notional-${Date.now()}`;
     const sessionId = `ses_${crypto.randomUUID()}`;
 
-    await getDb().insert(tenants).values({
-      id: tenantId,
-      name: "Trade Notional Test Tenant",
-      apiKeyHash: `test-hash-${tenantId}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Trade Notional Test Tenant",
+        apiKeyHash: `test-hash-${tenantId}`,
+      });
     await getDb().insert(agents).values({
       id: agentId,
       tenantId,
@@ -266,11 +272,13 @@ describe("trade policy audit", () => {
     const agentId = `agent-trade-price-${Date.now()}`;
     const sessionId = `ses_${crypto.randomUUID()}`;
 
-    await getDb().insert(tenants).values({
-      id: tenantId,
-      name: "Trade Price Test Tenant",
-      apiKeyHash: `test-hash-${tenantId}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Trade Price Test Tenant",
+        apiKeyHash: `test-hash-${tenantId}`,
+      });
     await getDb().insert(agents).values({
       id: agentId,
       tenantId,
@@ -341,11 +349,13 @@ describe("trade policy audit", () => {
     const tenantId = `tenant-trade-member-${Date.now()}`;
     const agentId = `agent-trade-member-${Date.now()}`;
 
-    await getDb().insert(tenants).values({
-      id: tenantId,
-      name: "Trade Member Test Tenant",
-      apiKeyHash: `test-hash-${tenantId}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Trade Member Test Tenant",
+        apiKeyHash: `test-hash-${tenantId}`,
+      });
     await getDb().insert(agents).values({
       id: agentId,
       tenantId,

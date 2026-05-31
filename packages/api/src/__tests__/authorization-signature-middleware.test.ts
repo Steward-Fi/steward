@@ -98,6 +98,31 @@ async function signedDelegatedHeaders(path = "/vault/agent-1/sign", body = BODY)
   };
 }
 
+async function signedAppSecretHeaders(path = "/agents", body = BODY) {
+  const appId = "tenant-1/web-prod";
+  const appSecret = "stw_app_request_signing_secret";
+  const authorization = `Basic ${btoa(`${appId}:${appSecret}`)}`;
+  const signature = await createAuthorizationSignature(
+    {
+      method: "POST",
+      url: `https://api.test${path}`,
+      authorization,
+      timestamp: TIMESTAMP,
+      idempotencyKey: "idem-key-123",
+      body,
+    },
+    appSecret,
+  );
+  return {
+    "content-type": "application/json",
+    authorization,
+    "x-steward-app-id": appId,
+    "x-steward-request-timestamp": TIMESTAMP,
+    "idempotency-key": "idem-key-123",
+    "x-steward-signature": signature,
+  };
+}
+
 describe("authorizationSignature", () => {
   it("allows sensitive mutating requests without a signature while optional", async () => {
     const app = makeApp();
@@ -114,6 +139,30 @@ describe("authorizationSignature", () => {
     const res = await app.request("/vault/agent-1/sign", {
       method: "POST",
       headers: await signedHeaders(),
+      body: BODY,
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, verified: true });
+  });
+
+  it("can verify app-secret signed requests without global signing secrets", async () => {
+    const app = new Hono<{ Variables: { requestSignatureVerified?: boolean } }>();
+    app.use(
+      "*",
+      authorizationSignature({
+        required: true,
+        secrets: [],
+        appSecretResolver: () => ["stw_app_request_signing_secret"],
+      }),
+    );
+    app.post("/agents", (c) =>
+      c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
+    );
+
+    const res = await app.request("/agents", {
+      method: "POST",
+      headers: await signedAppSecretHeaders(),
       body: BODY,
     });
 

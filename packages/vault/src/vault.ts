@@ -45,6 +45,7 @@ import {
   generateSolanaKeypair,
   getSolanaBalance,
   restoreSolanaKeypair,
+  signEd25519Digest,
   signSolanaMessage,
   signSolanaTransaction,
 } from "./solana";
@@ -976,6 +977,124 @@ export class Vault {
       signature: await account.sign({ hash }),
       hash,
       walletAddress: account.address,
+    };
+  }
+
+  /**
+   * Sign a raw 32-byte digest across signature curves. This is the cross-curve
+   * generalization of {@link signRawHash} and is intentionally lower-level than
+   * the transaction/message signers — it MUST stay guarded at API edges because
+   * raw signatures bypass transaction and message policy semantics.
+   *
+   * Curve dispatch (all require an exactly-32-byte payload so the edge cannot be
+   * abused to blind-sign a full transaction message):
+   *  - `secp256k1` → agent's EVM key, recoverable ECDSA via viem `account.sign`.
+   *  - `ed25519`   → agent's Solana key, detached Ed25519 over the 32 bytes.
+   *  - `stark`     → fail closed. No vetted starknet curve library is installed,
+   *                  and hand-rolling curve crypto in a money path is unacceptable.
+   */
+  async signRawDigest(
+    tenantId: string,
+    agentId: string,
+    curve: "secp256k1" | "ed25519" | "stark",
+    payloadHex: string,
+  ): Promise<{
+    signature: string;
+    curve: "secp256k1" | "ed25519";
+    payloadHex: `0x${string}`;
+    publicKey: string;
+  }> {
+    if (curve === "stark") {
+      throw new Error(
+        "stark curve raw signing is disabled: no vetted starknet signing library is installed",
+      );
+    }
+    if (curve !== "secp256k1" && curve !== "ed25519") {
+      throw new Error(`Unsupported raw-sign curve: ${String(curve)}`);
+    }
+
+    // Normalize + validate: a raw digest is exactly 32 bytes (64 hex chars).
+    const normalized = payloadHex.startsWith("0x") ? payloadHex.slice(2) : payloadHex;
+    if (!/^[0-9a-fA-F]{64}$/.test(normalized)) {
+      throw new Error("payloadHex must be a 32-byte hex string");
+    }
+    const payloadHex0x = `0x${normalized.toLowerCase()}` as `0x${string}`;
+
+    const db = getDb();
+    const [agentRow] = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    if (!agentRow) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+
+    // Curve selects which key family signs: secp256k1 → the agent's EVM key,
+    // ed25519 → the agent's Solana key. An agent provisioned via createAgent
+    // owns both, so we resolve the requested family directly rather than gating
+    // on the agent's "primary" wallet address. The tenant scoping above is the
+    // authorization boundary (the encrypted-key tables are keyed by agentId).
+    const chainFamily = curve === "secp256k1" ? "evm" : "solana";
+
+    let secretKey: string;
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, chainFamily),
+          isNull(encryptedChainKeys.venue),
+        ),
+      );
+    if (chainKey) {
+      secretKey = this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        { tenantId, agentId, chainFamily, venue: null },
+      );
+    } else if (curve === "secp256k1") {
+      // Legacy encrypted_keys holds the EVM key only — a safe fallback for
+      // secp256k1. NEVER fall back here for ed25519: it would decrypt the EVM
+      // key under a Solana chainFamily context and produce a bogus signer.
+      const [legacyKey] = await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, agentId));
+      if (!legacyKey) {
+        throw new Error(`No evm signing key for agent ${agentId}`);
+      }
+      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId,
+        agentId,
+        chainFamily: "evm",
+        venue: null,
+      });
+    } else {
+      throw new Error(`No solana signing key for agent ${agentId}`);
+    }
+
+    if (curve === "ed25519") {
+      // Decode the validated 64-char hex to 32 bytes without depending on the
+      // Buffer global (vault.ts otherwise avoids Node globals).
+      const payloadBytes = new Uint8Array(32);
+      for (let i = 0; i < 32; i++) {
+        payloadBytes[i] = Number.parseInt(normalized.slice(i * 2, i * 2 + 2), 16);
+      }
+      const { signature, publicKey } = signEd25519Digest(secretKey, payloadBytes);
+      return { signature, curve, payloadHex: payloadHex0x, publicKey };
+    }
+
+    const account = privateKeyToAccount(secretKey as `0x${string}`);
+    return {
+      signature: await account.sign({ hash: payloadHex0x }),
+      curve,
+      payloadHex: payloadHex0x,
+      publicKey: account.address,
     };
   }
 

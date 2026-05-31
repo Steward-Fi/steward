@@ -7,9 +7,10 @@ let vaultRoutes: Awaited<typeof import("../routes/vault")>["vaultRoutes"];
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD ??= "vault-message-signing-test-master-password";
-  process.env.STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING = "true";
-  process.env.STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING = "true";
-  process.env.STEWARD_ALLOW_VAULT_TYPED_DATA_POLICY_BYPASS = "true";
+  // Typed-data signing is now enabled (fail-closed): it is authorized per-agent
+  // by a `typed-data` policy, so we deliberately do NOT set the unsafe env
+  // opt-in here — the default posture (no policy, no opt-in) must still apply
+  // the auth gate first, which is what this suite asserts.
   process.env.STEWARD_ALLOW_UNSAFE_SOLANA_TRANSACTION_SIGNING = "true";
   process.env.STEWARD_ALLOW_VAULT_UNSAFE_SOLANA_TRANSACTION_SIGNING = "true";
   process.env.STEWARD_ALLOW_VAULT_SOLANA_POLICY_BYPASS = "true";
@@ -21,9 +22,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  delete process.env.STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING;
-  delete process.env.STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING;
-  delete process.env.STEWARD_ALLOW_VAULT_TYPED_DATA_POLICY_BYPASS;
   delete process.env.STEWARD_ALLOW_UNSAFE_SOLANA_TRANSACTION_SIGNING;
   delete process.env.STEWARD_ALLOW_VAULT_UNSAFE_SOLANA_TRANSACTION_SIGNING;
   delete process.env.STEWARD_ALLOW_VAULT_SOLANA_POLICY_BYPASS;
@@ -44,7 +42,11 @@ describe("vault message signing hardening", () => {
     expect(body.error).toContain("Message signing is disabled");
   });
 
-  it("ignores typed-data bypass env flags and remains disabled", async () => {
+  it("applies the agent-access auth gate on typed-data signing before any policy checks", async () => {
+    // Typed-data signing is now enabled (it is gated per-agent by a `typed-data`
+    // policy / audited env opt-in, then the decoded payload is policy-evaluated).
+    // The auth gate must still fire FIRST: an unauthenticated request is rejected
+    // as forbidden, not parsed and not treated as "globally disabled".
     const res = await vaultRoutes.request("/agent-1/sign-typed-data", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -61,11 +63,16 @@ describe("vault message signing hardening", () => {
 
     expect(res.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("EIP-712 typed data signing is disabled");
-    expect(body.error).not.toContain("STEWARD_ALLOW_VAULT_TYPED_DATA_POLICY_BYPASS");
+    expect(body.error).toContain("Forbidden");
+    // The old blanket-disable message must be gone now that typed-data policy
+    // extraction is wired in.
+    expect(body.error).not.toContain("EIP-712 typed data signing is disabled");
   });
 
-  it("ignores Solana bypass env flags and remains disabled", async () => {
+  it("enforces the agent-access auth gate on Solana signing before any parsing", async () => {
+    // Solana signing is now enabled by default (policy fields are derived from
+    // the serialized instructions), but the auth gate is still applied FIRST.
+    // An unauthenticated request must be rejected as forbidden, not parsed.
     const res = await vaultRoutes.request("/agent-1/sign-solana", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -81,7 +88,9 @@ describe("vault message signing hardening", () => {
 
     expect(res.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Serialized Solana transaction signing is disabled");
+    expect(body.error).toContain("Forbidden");
+    // The old blanket-disable message must be gone now that parsing is wired in.
+    expect(body.error).not.toContain("Serialized Solana transaction signing is disabled");
     expect(body.error).not.toContain("STEWARD_ALLOW_VAULT_SOLANA_POLICY_BYPASS");
   });
 
@@ -111,6 +120,25 @@ describe("vault message signing hardening", () => {
     expect(res.status).toBe(403);
     expect(body.ok).toBe(false);
     expect(body.error).toContain("Raw secp256k1 signing");
+  });
+
+  it("fails closed for cross-curve raw digest signing by default", async () => {
+    // The env opt-in (STEWARD_ALLOW_UNSAFE_RAW_SIGNING / VAULT) is intentionally
+    // not set in this suite, so the cross-curve raw-digest route must refuse
+    // before parsing the body — even for the ed25519 curve.
+    const res = await vaultRoutes.request("/agent-1/sign-raw-digest", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        curve: "ed25519",
+        payloadHex: "0x1111111111111111111111111111111111111111111111111111111111111111",
+      }),
+    });
+    const body = (await res.json()) as { ok: boolean; error?: string };
+
+    expect(res.status).toBe(403);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Raw digest signing is disabled");
   });
 
   it("fails closed for EIP-7702 authorization signing by default", async () => {

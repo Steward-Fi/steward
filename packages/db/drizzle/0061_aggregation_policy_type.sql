@@ -1,0 +1,14 @@
+-- Privy-parity stateful aggregation policy conditions.
+--
+-- Adds the `aggregation` value to the policy_type enum so rolling-window
+-- aggregation conditions (value_sum / tx_count / unique_recipients over a
+-- window, optionally scoped per-recipient or per-chain) can be persisted in the
+-- existing `policies` table. No new table is required: aggregation conditions
+-- are stored as ordinary policy rows (config carries metric/window/scope/
+-- comparator/threshold), and their rolling aggregates are computed server-side
+-- from authoritative Redis counters at evaluation time — never from the
+-- caller-supplied request.
+--
+-- IF NOT EXISTS keeps this idempotent and safe to re-run, matching the other
+-- enum-extension migrations (see 0015, 0039).
+ALTER TYPE "policy_type" ADD VALUE IF NOT EXISTS 'aggregation';

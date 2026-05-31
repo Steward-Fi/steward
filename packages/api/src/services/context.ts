@@ -28,13 +28,21 @@ import {
   users,
   userTenants,
 } from "@stwd/db";
-import { PolicyEngine } from "@stwd/policy-engine";
+import {
+  type AggregationLookup,
+  aggregationLookupFromMap,
+  aggregationQueriesForPolicies,
+  aggregationQueryKey,
+  PolicyEngine,
+} from "@stwd/policy-engine";
+import { getAggregationSnapshot } from "@stwd/redis";
 import {
   type AgentIdentity,
   type ApiResponse,
   createPriceOracle,
   type PolicyRule,
   type PriceOracle,
+  type SignRequest,
   type Tenant,
   type TenantConfig,
 } from "@stwd/shared";
@@ -47,8 +55,27 @@ import type { Context, Next } from "hono";
 
 export const API_VERSION = process.env.API_VERSION || "0.3.0";
 export const DEFAULT_TENANT_ID = "default";
-export const RATE_LIMIT_WINDOW_MS = 60_000;
-export const RATE_LIMIT_MAX_REQUESTS = 100;
+
+/**
+ * Read a positive-integer env override, falling back to a safe default when the
+ * variable is unset or malformed. Used for operator-tunable limits so a bad
+ * value can never silently disable a guard — it just reverts to the default.
+ */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+// Global in-memory request rate limit (Bun entry only). Operator-tunable via env
+// so load tests and local e2e suites — which hammer a single socket IP far harder
+// than any real client — can raise the ceiling without changing the production
+// default (100 requests / 60s per client IP). A missing or invalid override
+// falls back to that default, so this can never weaken the guard unintentionally.
+export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
+export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
 export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 export const isWorkersRuntime =
   process.env.STEWARD_RUNTIME === "workers" ||
@@ -133,10 +160,21 @@ export async function verifySessionToken(token: string) {
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
       const [user] = await getDb()
-        .select({ deactivatedAt: users.deactivatedAt })
+        .select({
+          deactivatedAt: users.deactivatedAt,
+          isGuest: users.isGuest,
+          guestExpiresAt: users.guestExpiresAt,
+        })
         .from(users)
         .where(eq(users.id, payload.userId));
       if (!user || user.deactivatedAt) return null;
+      // Fail-closed guest expiry: enforce the guest's hard expiry against the
+      // authoritative DB column, not just the access-token `exp`. A refreshed
+      // access token (or one minted with a longer TTL) is still rejected once
+      // the guest window has elapsed. Full accounts have guestExpiresAt = null.
+      if (user.isGuest && user.guestExpiresAt && user.guestExpiresAt.getTime() <= Date.now()) {
+        return null;
+      }
       if (payload.tenantId) {
         const [membership] = await getDb()
           .select({ role: userTenants.role })
@@ -275,12 +313,77 @@ if (process.env.DATABASE_URL) {
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 
-export const db = getDb();
+// `db` is a late-bound Proxy over getDb() rather than a captured handle.
+//
+// In production this is behaviorally identical to `const db = getDb()`:
+// getDb() memoizes a single `globalDb` connection on first call and returns
+// that same handle on every subsequent call, so each property access resolves
+// to the one real connection.
+//
+// The reason for the Proxy is the test harness: the api suite runs all ~135
+// test files in ONE `bun test` process, and Bun shares the module registry, so
+// context.ts evaluates exactly once — a captured `const db = getDb()` would
+// freeze whichever file imported a route first and route every later file's
+// writes to that stale db. Resolving getDb() per access instead picks up each
+// file's own setPGLiteOverride(). Methods are bound to the live handle so
+// Drizzle's internal `this` (private session/dialect fields) stays intact.
+type DbHandle = ReturnType<typeof getDb>;
+export const db: DbHandle = new Proxy({} as DbHandle, {
+  get(_target, property) {
+    const active = getDb() as unknown as Record<PropertyKey, unknown>;
+    const value = active[property];
+    return typeof value === "function"
+      ? (value as (...args: unknown[]) => unknown).bind(active)
+      : value;
+  },
+});
 
-export const vault = new Vault({
-  masterPassword: MASTER_PASSWORD,
-  rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-  chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
+// `vault` is a late-bound Proxy resolving the Vault for the CURRENT master
+// password, memoized per password. In production STEWARD_MASTER_PASSWORD is
+// fixed before this module loads, so exactly one Vault is ever built and every
+// access returns it — behaviorally identical to `const vault = new Vault(...)`.
+//
+// In the single-process api test suite, individual files set their own
+// STEWARD_MASTER_PASSWORD in beforeAll, and a few construct their OWN Vault with
+// that password to seal keys directly into their per-file PGLite db. A captured
+// singleton would have frozen the first (preload) password, so the route-level
+// vault could not decrypt keys those files sealed under a different password —
+// surfacing as AES-GCM "Unsupported state or unable to authenticate data". A
+// per-password memo keeps the route vault in lockstep with whatever password
+// sealed each key. MASTER_PASSWORD (captured at import) is the fallback when the
+// env var is transiently unset (e.g. another file's afterAll deleted it).
+const vaultsByPassword = new Map<string, Vault>();
+function activeVault(): Vault {
+  const masterPassword = process.env.STEWARD_MASTER_PASSWORD?.trim() || MASTER_PASSWORD;
+  let resolved = vaultsByPassword.get(masterPassword);
+  if (!resolved) {
+    resolved = new Vault({
+      masterPassword,
+      rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
+      chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
+    });
+    vaultsByPassword.set(masterPassword, resolved);
+  }
+  return resolved;
+}
+export const vault: Vault = new Proxy({} as Vault, {
+  get(_target, property) {
+    const active = activeVault() as unknown as Record<PropertyKey, unknown>;
+    const value = active[property];
+    return typeof value === "function"
+      ? (value as (...args: unknown[]) => unknown).bind(active)
+      : value;
+  },
+  // Forward assignments to the live instance. Production never mutates the
+  // vault; this exists so tests that monkeypatch a method (e.g.
+  // `context.vault.getBalance = mock`) and restore it in a `finally` land on
+  // the same per-password instance the get trap resolves — without a set trap
+  // the assignment would silently write to the empty Proxy target and the get
+  // trap would keep returning the real method.
+  set(_target, property, value) {
+    (activeVault() as unknown as Record<PropertyKey, unknown>)[property] = value;
+    return true;
+  },
 });
 
 export const policyEngine = new PolicyEngine();
@@ -463,6 +566,48 @@ export async function getConditionSetReferenceValidationError(
   }
 
   return null;
+}
+
+/**
+ * Materialise the rolling-aggregate lookup for a policy set's `aggregation`
+ * conditions. Snapshots are computed from the authoritative Redis tracker —
+ * never from caller-supplied request fields — and exposed to the engine as a
+ * synchronous lookup. Any snapshot that cannot be sourced is simply omitted
+ * from the map, which makes the evaluator fail closed (deny) for that
+ * condition.
+ *
+ * Callers wire the returned lookup onto the `aggregations` field of the
+ * evaluation context. The recording side (recordAggregationEvent) must be
+ * driven on transaction commit, inside the same per-agent serialization window
+ * used for spend caps, so the aggregate cannot be raced.
+ */
+export async function loadAggregationsForPolicies(
+  policySet: PolicyRule[],
+  request: SignRequest,
+  now: number = Date.now(),
+): Promise<AggregationLookup> {
+  const queries = aggregationQueriesForPolicies(policySet, request);
+  if (queries.length === 0) return aggregationLookupFromMap(new Map());
+
+  const snapshots = new Map<string, bigint>();
+  await Promise.all(
+    queries.map(async (query) => {
+      const value = await getAggregationSnapshot(
+        {
+          agentId: query.agentId,
+          metric: query.metric,
+          windowSeconds: query.windowSeconds,
+          scope: query.scope,
+          scopeKey: query.scopeKey,
+        },
+        now,
+      );
+      // null → unavailable; leave it out so the evaluator denies that condition.
+      if (value !== null) snapshots.set(aggregationQueryKey(query), value);
+    }),
+  );
+
+  return aggregationLookupFromMap(snapshots);
 }
 
 export async function getTransactionStats(agentId: string) {

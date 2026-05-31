@@ -1,4 +1,9 @@
-import { SAML, ValidateInResponseTo, type CacheItem, type CacheProvider } from "@node-saml/node-saml";
+import {
+  type CacheItem,
+  type CacheProvider,
+  SAML,
+  ValidateInResponseTo,
+} from "@node-saml/node-saml";
 
 export interface VerifySamlAcsInput {
   samlResponse: string;
@@ -127,11 +132,7 @@ export async function verifySamlAcsResponse(
   if (!assertionId) throw new Error("SAML assertion ID is required for replay protection");
 
   const emailAttribute = input.emailAttribute || "email";
-  const email =
-    firstString(profile[emailAttribute]) ??
-    firstString(profile.email) ??
-    firstString(profile.mail) ??
-    firstString(profile["urn:oid:0.9.2342.19200300.100.1.3"]);
+  const email = firstString(profile[emailAttribute]);
   if (!email) throw new Error("SAML assertion did not include a verified email attribute");
 
   return {

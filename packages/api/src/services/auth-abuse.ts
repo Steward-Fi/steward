@@ -20,6 +20,32 @@ const LOGIN_METHODS = new Set([
 type ScalarLoginMethod = typeof LOGIN_METHODS extends Set<infer Method> ? Method : never;
 const CAPTCHA_SECRET_ENV_RE =
   /^STEWARD_(?=.*(?:CAPTCHA|TURNSTILE|HCAPTCHA))(?=.*SECRET)[A-Z0-9_]{1,96}$/;
+const MFA_REQUIRE_FOR = new Set([
+  "vaultSigning",
+  "keyImport",
+  "keyExport",
+  "recoveryCodes",
+  "tenantAdmin",
+] as const);
+const MIN_MFA_MAX_AGE_SECONDS = 30;
+const MAX_MFA_MAX_AGE_SECONDS = 60 * 60;
+
+type TenantMfaPolicyConfig = {
+  maxAgeSeconds?: number;
+  requireFor?: {
+    vaultSigning?: boolean;
+    keyImport?: boolean;
+    keyExport?: boolean;
+    recoveryCodes?: boolean;
+    tenantAdmin?: boolean;
+  };
+  allowDelegatedSignerAutomation?: boolean;
+  allowKeyQuorumAutomation?: boolean;
+};
+
+type TenantAuthAbuseConfigWithMfa = TenantAuthAbuseConfig & {
+  mfa?: TenantMfaPolicyConfig;
+};
 
 const DEFAULT_DISPOSABLE_DOMAINS = new Set([
   "10minutemail.com",
@@ -139,11 +165,57 @@ function normalizeBooleanRecord(value: unknown, field: string): Record<string, b
   return result;
 }
 
-export function normalizeAuthAbuseConfig(value: unknown): TenantAuthAbuseConfig | string {
+function normalizeMfaPolicy(value: unknown): TenantMfaPolicyConfig | string {
+  if (!isPlainObject(value)) return "mfa policy config must be an object";
+  const policy: TenantMfaPolicyConfig = {};
+
+  if (value.maxAgeSeconds !== undefined) {
+    const maxAgeSeconds = Number(value.maxAgeSeconds);
+    if (
+      !Number.isSafeInteger(maxAgeSeconds) ||
+      maxAgeSeconds < MIN_MFA_MAX_AGE_SECONDS ||
+      maxAgeSeconds > MAX_MFA_MAX_AGE_SECONDS
+    ) {
+      return `mfa.maxAgeSeconds must be an integer between ${MIN_MFA_MAX_AGE_SECONDS} and ${MAX_MFA_MAX_AGE_SECONDS}`;
+    }
+    policy.maxAgeSeconds = maxAgeSeconds;
+  }
+
+  if (value.requireFor !== undefined) {
+    if (!isPlainObject(value.requireFor)) return "mfa.requireFor must be an object";
+    const requireFor: NonNullable<TenantMfaPolicyConfig["requireFor"]> = {};
+    for (const key of MFA_REQUIRE_FOR) {
+      const enabled = value.requireFor[key];
+      if (enabled !== undefined) {
+        if (typeof enabled !== "boolean") return `mfa.requireFor.${key} must be a boolean`;
+        requireFor[key] = enabled;
+      }
+    }
+    policy.requireFor = requireFor;
+  }
+
+  if (value.allowDelegatedSignerAutomation !== undefined) {
+    if (typeof value.allowDelegatedSignerAutomation !== "boolean") {
+      return "mfa.allowDelegatedSignerAutomation must be a boolean";
+    }
+    policy.allowDelegatedSignerAutomation = value.allowDelegatedSignerAutomation;
+  }
+
+  if (value.allowKeyQuorumAutomation !== undefined) {
+    if (typeof value.allowKeyQuorumAutomation !== "boolean") {
+      return "mfa.allowKeyQuorumAutomation must be a boolean";
+    }
+    policy.allowKeyQuorumAutomation = value.allowKeyQuorumAutomation;
+  }
+
+  return policy;
+}
+
+export function normalizeAuthAbuseConfig(value: unknown): TenantAuthAbuseConfigWithMfa | string {
   if (value === undefined || value === null) return {};
   if (!isPlainObject(value)) return "authAbuseConfig must be an object";
 
-  const config: TenantAuthAbuseConfig = {};
+  const config: TenantAuthAbuseConfigWithMfa = {};
 
   if (value.loginMethods !== undefined) {
     if (!isPlainObject(value.loginMethods)) return "loginMethods config must be an object";
@@ -259,6 +331,12 @@ export function normalizeAuthAbuseConfig(value: unknown): TenantAuthAbuseConfig 
       allowedCountryCodes,
       blockedCountryCodes,
     };
+  }
+
+  if (value.mfa !== undefined) {
+    const mfa = normalizeMfaPolicy(value.mfa);
+    if (typeof mfa === "string") return mfa;
+    config.mfa = mfa;
   }
 
   return config;

@@ -132,12 +132,12 @@ curl -X DELETE https://api.steward.fi/webhooks/wh_550e8400-... \
 ## Delivery History
 
 ```bash
-GET /webhooks/:id/deliveries?limit=50&offset=0
+GET /webhooks/:id/deliveries?limit=50&offset=0&status=failed&eventType=tx.pending&hasError=true
 ```
 
 Returns recent delivery attempts with redacted status metadata. Payloads,
 webhook URLs, secrets, and raw error text are intentionally omitted from this
-list response.
+list response. Optional filters include `status`, `eventType`, and `hasError`.
 
 ```json
 {
@@ -157,6 +157,7 @@ list response.
     {
       "id": "del_...",
       "eventType": "tx.pending",
+      "replayedFromDeliveryId": "del_original_...",
       "status": "failed",
       "attempts": 5,
       "maxAttempts": 6,
@@ -169,6 +170,17 @@ list response.
 }
 ```
 
+## Export Delivery History
+
+```bash
+GET /webhooks/:id/deliveries/export?limit=1000&status=failed&eventType=tx.pending&hasError=true
+```
+
+Downloads the same redacted delivery-history fields as CSV for offline incident
+review. The export is bounded to 10,000 rows, supports the same filters as the
+JSON history endpoint, omits payloads, webhook URLs, secrets, and raw error
+text, and escapes spreadsheet formula prefixes in every cell.
+
 ## Retry a Failed Delivery
 
 ```bash
@@ -177,6 +189,33 @@ POST /webhooks/deliveries/:id/retry
 
 Queues an eligible failed delivery for immediate retry without resetting its
 attempt count or bypassing the configured retry budget.
+
+## Replay a Historical Delivery
+
+```bash
+POST /webhooks/deliveries/:id/replay
+```
+
+Creates and sends a new signed delivery from a historical delivery payload.
+Replay is separate from retry: retry reschedules the original failed delivery
+and preserves its attempt budget, while replay creates a new delivery ID and
+signature so receivers can distinguish it from the original. Replay requires an
+owner/admin session with recent MFA, and Steward only replays if the original
+webhook still exists, is enabled, has the same URL, and is still subscribed to
+the event type. Pending or processing deliveries cannot be replayed.
+
+The response is the new redacted delivery. Replayed deliveries include
+`replayedFromDeliveryId`.
+
+## Send a Diagnostic Test Delivery
+
+```bash
+POST /webhooks/:id/test
+```
+
+Sends a one-off signed `webhook.test` delivery to an enabled endpoint. Test
+deliveries are diagnostic only; `webhook.test` is not a subscribable event type
+and is not added to endpoint event filters.
 
 ---
 

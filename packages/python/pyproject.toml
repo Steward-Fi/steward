@@ -1,0 +1,17 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "steward-sdk"
+version = "0.1.0"
+description = "Python backend SDK for Steward API integrations"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Steward-Fi" }]
+keywords = ["steward", "wallets", "auth", "backend-sdk"]
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["steward_sdk"]

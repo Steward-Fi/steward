@@ -34,7 +34,7 @@ describe("resolveTarget", () => {
   test("resolves alias with no trailing path", () => {
     const result = resolveTarget("/openai");
     expect(result).toEqual({
-      url: "https://api.openai.com",
+      url: "https://api.openai.com/",
       host: "api.openai.com",
       path: "/",
     });

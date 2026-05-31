@@ -48,6 +48,14 @@ export interface EmailAuthConfig {
   replyTo?: string;
 }
 
+export interface TenantInvitationEmailContext {
+  tenantId: string;
+  token: string;
+  expiresAt: Date;
+  acceptPath?: string;
+  tenantName?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -75,6 +83,29 @@ function buildMagicLink(
   url.searchParams.set("token", token);
   url.searchParams.set("email", email);
   return url.toString();
+}
+
+function buildInvitationLink(
+  baseUrl: string,
+  acceptPath: string,
+  token: string,
+  tenantId: string,
+  email: string,
+): string {
+  const url = new URL(acceptPath, baseUrl);
+  url.searchParams.set("tenantId", tenantId);
+  url.searchParams.set("token", token);
+  url.searchParams.set("email", email);
+  return url.toString();
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 type MagicLinkPayload = {
@@ -161,6 +192,56 @@ export class EmailAuth {
     await this.provider.send(email, subject, body, html, { replyTo: this.replyTo });
 
     return { tokenHash, expiresAt };
+  }
+
+  async sendTenantInvitation(email: string, context: TenantInvitationEmailContext): Promise<void> {
+    const acceptLink = buildInvitationLink(
+      this.baseUrl,
+      context.acceptPath ?? "/accept-invitation",
+      context.token,
+      context.tenantId,
+      email,
+    );
+    const expiresAt = context.expiresAt.toISOString();
+    const tenantLabel = context.tenantName || context.tenantId;
+    const subject = `You're invited to ${tenantLabel} on Steward`;
+    const text = [
+      `You've been invited to join ${tenantLabel} on Steward.`,
+      "",
+      "Open this link to accept the invitation:",
+      "",
+      acceptLink,
+      "",
+      `This invitation expires at ${expiresAt}.`,
+      "If you were not expecting this invitation, you can ignore this email.",
+      "",
+      "— Steward",
+    ].join("\n");
+    const escapedTenant = escapeHtml(tenantLabel);
+    const escapedLink = escapeHtml(acceptLink);
+    const escapedExpiresAt = escapeHtml(expiresAt);
+    const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background-color:#0b0a09;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color:#0b0a09;min-height:100vh;">
+    <tr><td align="center" style="padding:60px 24px;">
+      <table width="100%" cellpadding="0" cellspacing="0" style="max-width:420px;">
+        <tr><td style="background-color:#141210;border:1px solid #2a2722;padding:40px 32px;">
+          <div style="font-size:22px;font-weight:700;color:#e8e5e0;padding-bottom:8px;">Join ${escapedTenant}</div>
+          <div style="font-size:14px;color:#9c9788;line-height:1.5;padding-bottom:32px;">You've been invited to Steward. This invitation expires at ${escapedExpiresAt}.</div>
+          <div style="text-align:center;padding-bottom:32px;">
+            <a href="${escapedLink}" target="_blank" style="display:inline-block;background-color:#c4873a;color:#0b0a09;font-size:14px;font-weight:600;text-decoration:none;padding:12px 32px;">Accept invitation</a>
+          </div>
+          <div style="border-top:1px solid #2a2722;padding-top:24px;font-size:11px;color:#9c9788;word-break:break-all;line-height:1.5;">${escapedLink}</div>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+
+    await this.provider.send(email, subject, text, html, { replyTo: this.replyTo });
   }
 
   /**

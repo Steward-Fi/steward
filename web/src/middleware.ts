@@ -6,8 +6,19 @@ const SECURITY_HEADERS = [
   ["X-Content-Type-Options", "nosniff"],
   ["Referrer-Policy", "strict-origin-when-cross-origin"],
   ["Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload"],
-  ["Permissions-Policy", "camera=(), microphone=(), geolocation=(), browsing-topics=(), payment=()"],
+  [
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), browsing-topics=(), payment=()",
+  ],
 ] as const;
+
+// HTTPS enforcement is ON by default and MUST stay on in production. Both HSTS
+// and the CSP `upgrade-insecure-requests` directive cause WebKit to upgrade
+// same-origin http://localhost asset requests to https:// (which the http-only
+// dev server cannot answer). The local e2e harness sets this flag — an explicit,
+// secure-by-default opt-OUT — to omit both; absent the flag, full enforcement
+// applies, so production is never weakened.
+const ALLOW_INSECURE_HTTP = process.env.STEWARD_ALLOW_INSECURE_HTTP === "true";
 
 function makeNonce(): string {
   const bytes = new Uint8Array(16);
@@ -15,21 +26,36 @@ function makeNonce(): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
+function configuredApiOrigin(): string | null {
+  const raw = process.env.NEXT_PUBLIC_STEWARD_API_URL;
+  if (!raw) return null;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return null;
+  }
+}
+
 function buildCsp(nonce: string): string {
-  return [
+  const apiOrigin = configuredApiOrigin();
+  const connectSrc = ["'self'", "https:", "wss:"];
+  if (apiOrigin) connectSrc.push(apiOrigin);
+
+  const directives = [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'wasm-unsafe-eval'`,
-    "style-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "img-src 'self' data: blob: https:",
-    "font-src 'self' data:",
-    "connect-src 'self' https: wss:",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    `connect-src ${connectSrc.join(" ")}`,
     "frame-src 'self' https://verify.walletconnect.com https://verify.walletconnect.org https://*.walletconnect.com https://*.walletconnect.org",
     "frame-ancestors 'none'",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-    "upgrade-insecure-requests",
-  ].join("; ");
+  ];
+  if (!ALLOW_INSECURE_HTTP) directives.push("upgrade-insecure-requests");
+  return directives.join("; ");
 }
 
 export function middleware(request: NextRequest) {
@@ -47,6 +73,7 @@ export function middleware(request: NextRequest) {
 
   response.headers.set("Content-Security-Policy", csp);
   for (const [key, value] of SECURITY_HEADERS) {
+    if (ALLOW_INSECURE_HTTP && key === "Strict-Transport-Security") continue;
     response.headers.set(key, value);
   }
 
@@ -56,7 +83,8 @@ export function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     {
-      source: "/((?!api|_next/static|_next/image|favicon.ico|icon-192.png|icon-512.png|apple-touch-icon.png|site.webmanifest).*)",
+      source:
+        "/((?!api|_next/static|_next/image|favicon.ico|icon-192.png|icon-512.png|apple-touch-icon.png|site.webmanifest).*)",
       missing: [
         { type: "header", key: "next-router-prefetch" },
         { type: "header", key: "purpose", value: "prefetch" },

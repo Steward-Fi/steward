@@ -40,11 +40,13 @@ describe("user wallet creation webhooks", () => {
     // verifySessionToken requires a userTenants row matching the token tenantId.
     await getDb()
       .insert(tenants)
-      .values({ id: personalTenantId, name: "Wallet Created Personal", apiKeyHash: `${personalTenantId}-hash` })
+      .values({
+        id: personalTenantId,
+        name: "Wallet Created Personal",
+        apiKeyHash: `${personalTenantId}-hash`,
+      })
       .onConflictDoNothing();
-    await getDb()
-      .insert(userTenants)
-      .values({ userId, tenantId: personalTenantId, role: "owner" });
+    await getDb().insert(userTenants).values({ userId, tenantId: personalTenantId, role: "owner" });
 
     ({ createSessionToken } = await import("../routes/auth"));
     ({ userRoutes } = await import("../routes/user"));

@@ -225,6 +225,46 @@ export function signSolanaMessage(secretKeyHex: string, message: string): string
   return signature.toString("hex");
 }
 
+/**
+ * Sign a raw byte payload with Ed25519 using Node.js built-in crypto
+ * (no tweetnacl required). Returns the detached signature as a hex string and
+ * the signing public key in base58.
+ *
+ * Unlike secp256k1 (which signs a pre-computed 32-byte digest), Ed25519 signs
+ * the message bytes directly (it hashes internally with SHA-512). The vault
+ * intentionally restricts the payload to a fixed 32-byte digest before calling
+ * this helper so the raw-sign edge cannot be abused to blind-sign a full Solana
+ * transaction message; this helper enforces that floor defensively.
+ */
+export function signEd25519Digest(
+  secretKeyHex: string,
+  payload: Uint8Array,
+): { signature: string; publicKey: string } {
+  if (payload.length !== 32) {
+    throw new Error("Ed25519 raw digest payload must be exactly 32 bytes");
+  }
+  const keypair = restoreSolanaKeypair(secretKeyHex);
+
+  // keypair.secretKey is 64 bytes: [0..31] = 32-byte seed, [32..63] = public key
+  const seed = keypair.secretKey.slice(0, 32);
+
+  const keyObject = createPrivateKey({
+    key: {
+      kty: "OKP",
+      crv: "Ed25519",
+      d: uint8ArrayToBase64url(seed),
+      x: uint8ArrayToBase64url(keypair.publicKey.toBytes()),
+    },
+    format: "jwk",
+  });
+
+  const signature = cryptoSign(null, payload, keyObject);
+  return {
+    signature: signature.toString("hex"),
+    publicKey: keypair.publicKey.toBase58(),
+  };
+}
+
 export function assertSolanaTransferTransactionMatches(
   tx: Transaction,
   expected: { from: PublicKey; to: string; lamports: bigint },

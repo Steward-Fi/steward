@@ -64,5 +64,6 @@ describe("enterprise OIDC authorization-code SSO hardening", () => {
     expect(source).toContain("OIDC token endpoint redirects are not allowed");
     expect(source).toContain("assertPublicOidcAddress");
     expect(source).toContain("OIDC token endpoint did not return an id_token");
+    expect(source).toContain("Direct JWT login is disabled for authorization-code OIDC providers");
   });
 });

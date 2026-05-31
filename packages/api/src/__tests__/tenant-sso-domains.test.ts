@@ -86,4 +86,30 @@ describe("tenant SSO domain hardening", () => {
     expect(auth).toContain("OAuth login is disabled because this email domain requires SSO");
     expect(auth).toContain('authMethod: "oidc"');
   });
+
+  it("enforces SSO-required domains against passkey enrollment and login", () => {
+    const auth = read("packages/api/src/routes/auth.ts");
+
+    for (const [routeMarker, tenantMarker] of [
+      ['auth.post("/passkey/register/options"', "session.payload.tenantId"],
+      ['auth.post("/passkey/register/verify"', "tenantId"],
+      ['auth.post("/passkey/login/options"', "optionTenantId"],
+      ['auth.post("/passkey/login/verify"', "tenantId"],
+    ] as const) {
+      const routeStart = auth.indexOf(routeMarker);
+      expect(routeStart).toBeGreaterThanOrEqual(0);
+      const nextRoute = auth.indexOf("\nauth.", routeStart + routeMarker.length);
+      const route = auth.slice(routeStart, nextRoute === -1 ? undefined : nextRoute);
+      expect(route).toContain("requireNonSsoEmailLoginAllowed(");
+      expect(route).toContain(tenantMarker);
+      expect(route).toContain("email");
+      expect(route).toContain('"Passkey"');
+      expect(route).toContain("if (ssoRequiredResponse) return ssoRequiredResponse");
+      if (routeMarker === 'auth.post("/passkey/login/verify"') {
+        expect(route.indexOf("if (ssoRequiredResponse) return ssoRequiredResponse")).toBeLessThan(
+          route.indexOf("getChallengeStore().consume"),
+        );
+      }
+    }
+  });
 });

@@ -55,6 +55,26 @@ describe("vault unsafe signing hardening", () => {
     );
   });
 
+  it("applies tenant MFA policy to delegated signer automation and key import/export freshness", () => {
+    expect(vaultSource).toContain("readTenantMfaPolicy");
+    expect(vaultSource).toContain("tenantMfaMaxAgeMs");
+    expect(vaultSource).toContain("tenantMfaRequiredFor");
+    expect(vaultSource).toContain("hasRecentTenantSessionMfa");
+    expect(vaultSource).toContain('tenantMfaRequiredFor(mfaPolicy, "vaultSigning")');
+    expect(vaultSource).toContain("mfaPolicy.allowKeyQuorumAutomation === false");
+    expect(vaultSource).toContain("mfaPolicy.allowDelegatedSignerAutomation === false");
+    expect(vaultSource).toContain("Tenant MFA policy disables key quorum automation");
+    expect(vaultSource).toContain("Tenant MFA policy disables delegated signer automation");
+    const importStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/import"');
+    const exportStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/export"');
+    expect(
+      vaultSource.indexOf('hasRecentTenantSessionMfa(c, tenantId, "keyImport")', importStart),
+    ).toBeGreaterThan(importStart);
+    expect(
+      vaultSource.indexOf('hasRecentTenantSessionMfa(c, tenantId, "keyExport")', exportStart),
+    ).toBeGreaterThan(exportStart);
+  });
+
   it("does not replay pending typed wallet actions as normal transactions", () => {
     const approvalStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"');
     expect(approvalStart).toBeGreaterThanOrEqual(0);

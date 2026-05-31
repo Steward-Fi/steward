@@ -27,6 +27,13 @@ export interface DCAParams {
 
 export class DCAStrategy implements Strategy {
   readonly name = "dca";
+  /**
+   * DCA buys a fixed native amount on a schedule regardless of price, so a
+   * low-confidence price feed does not, by itself, gate the buy decision.
+   * (The loop still requires a real swap quote to compute amountOutMin; if no
+   * price is available at all, the swap build fails closed.)
+   */
+  readonly requiresPriceConfidence = false;
 
   private readonly buyAmount: bigint;
   private readonly minInterval: number;

@@ -85,7 +85,9 @@ export const policyTypeEnum = pgEnum("policy_type", [
   "rate-limit",
   "allowed-chains",
   "condition-set",
+  "aggregation",
   "contract-allowlist",
+  "typed-data",
   "reputation-threshold",
   "reputation-scaling",
   "venue-allowlist",
@@ -178,6 +180,11 @@ export const tenantAppClients = pgTable(
     allowedOrigins: text("allowed_origins").array().notNull().default([]),
     allowedRedirectUrls: text("allowed_redirect_urls").array().notNull().default([]),
     loginMethods: jsonb("login_methods").$type<TenantAppClient["loginMethods"]>(),
+    globalWalletEnabled: boolean("global_wallet_enabled").notNull().default(false),
+    globalWalletAllowedScopes: text("global_wallet_allowed_scopes")
+      .array()
+      .notNull()
+      .default(["eth_accounts", "personal_sign"]),
     ...timestamps,
   },
   (table) => ({
@@ -212,6 +219,33 @@ export const tenantAppClientSecrets = pgTable(
       foreignColumns: [tenantAppClients.tenantId, tenantAppClients.id],
       name: "tenant_app_client_secrets_client_fk",
     }).onDelete("cascade"),
+  }),
+);
+
+export const tenantRequestSigningKeys = pgTable(
+  "tenant_request_signing_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 120 }).notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    secretIv: text("secret_iv").notNull(),
+    secretAuthTag: text("secret_auth_tag").notNull(),
+    secretSalt: text("secret_salt").notNull(),
+    secretPrefix: varchar("secret_prefix", { length: 32 }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: index("tenant_request_signing_keys_tenant_idx").on(table.tenantId),
+    tenantStatusIdx: index("tenant_request_signing_keys_tenant_status_idx").on(
+      table.tenantId,
+      table.status,
+    ),
   }),
 );
 
@@ -261,6 +295,10 @@ export const tenantSamlSsoConfigs = pgTable(
     nameIdFormat: text("name_id_format"),
     emailAttribute: varchar("email_attribute", { length: 128 }).notNull().default("email"),
     groupsAttribute: varchar("groups_attribute", { length: 128 }),
+    groupRoleMappings: jsonb("group_role_mappings")
+      .$type<Array<{ group: string; role: string }>>()
+      .notNull()
+      .default([]),
     allowJitProvisioning: boolean("allow_jit_provisioning").notNull().default(false),
     jitDefaultRole: varchar("jit_default_role", { length: 32 }).notNull().default("viewer"),
     lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
@@ -426,6 +464,20 @@ export const agentSigners = pgTable(
     subjectType: varchar("subject_type", { length: 32 }).notNull(),
     subjectId: varchar("subject_id", { length: 255 }).notNull(),
     address: varchar("address", { length: 128 }),
+    /**
+     * Authorization-key scheme for this signer's *request* signatures:
+     *   "hmac" (default) — symmetric request signing (legacy/interchangeable).
+     *   "p256"           — asymmetric ECDSA over secp256r1; `publicKey` holds
+     *                      the registered key (Privy authorization-keys parity).
+     * The middleware selects the verification path from this column.
+     */
+    keyType: varchar("key_type", { length: 16 }).notNull().default("hmac"),
+    /**
+     * Registered P-256 public key when `keyType="p256"`. Accepts base64 SPKI,
+     * raw uncompressed `04||X||Y`, or a JWK string (see
+     * `@stwd/auth` importP256PublicKey). NULL for HMAC signers.
+     */
+    publicKey: text("public_key"),
     chainFamily: chainFamilyEnum("chain_family"),
     label: varchar("label", { length: 255 }),
     permissions: text("permissions").array().notNull().default([]),
@@ -468,6 +520,15 @@ export const agentKeyQuorums = pgTable(
     name: varchar("name", { length: 255 }).notNull(),
     threshold: integer("threshold").notNull(),
     memberSignerIds: text("member_signer_ids").array().notNull().default([]),
+    /**
+     * Nested-quorum children: ordered `agent_key_quorums.id` values that are
+     * themselves quorums. A parent quorum is satisfied iff the number of
+     * satisfied members (a verified leaf signer in `memberSignerIds` OR a
+     * satisfied child quorum in `memberQuorumIds`) is ≥ `threshold`. Recursion
+     * is bounded by a hard depth limit with cycle detection (see the
+     * authorization-signature middleware); both violations fail closed.
+     */
+    memberQuorumIds: text("member_quorum_ids").array().notNull().default([]),
     permissions: text("permissions").array().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     status: varchar("status", { length: 32 }).notNull().default("active"),
@@ -481,6 +542,51 @@ export const agentKeyQuorums = pgTable(
       columns: [table.tenantId, table.agentId],
       foreignColumns: [agents.tenantId, agents.id],
       name: "agent_key_quorums_tenant_agent_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/**
+ * Session signers — labeled, scoped, revocable delegated signing tokens
+ * (Privy "session signers" parity). Each row pins a single minted agent JWT
+ * (by its `jti`) to an operator-facing label, an optional policy subset, and a
+ * bounded expiry. Revocation flips `revokedAt` AND records the jti in the
+ * auth revocation store, so the token is rejected even before it expires.
+ *
+ * Rows are append-only except for `revokedAt`/`lastUsedAt`; there is no
+ * `updatedAt` because a session signer is never re-issued in place.
+ */
+export const sessionSigners = pgTable(
+  "session_signers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** Unique JWT id of the minted agent token; mirrored into the revocation store. */
+    jti: varchar("jti", { length: 64 }).notNull(),
+    label: varchar("label", { length: 128 }).notNull(),
+    scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+    /** Subset of the agent's policy ids enforced when this token signs. */
+    policyIds: jsonb("policy_ids").$type<string[]>().notNull().default([]),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  },
+  (table) => ({
+    jtiUniqueIdx: uniqueIndex("session_signers_jti_idx").on(table.jti),
+    tenantAgentIdx: index("session_signers_tenant_agent_idx").on(table.tenantId, table.agentId),
+    activeIdx: index("session_signers_active_idx")
+      .on(table.agentId)
+      .where(sql`${table.revokedAt} IS NULL`),
+    tenantAgentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "session_signers_tenant_agent_fk",
     }).onDelete("cascade"),
   }),
 );
@@ -924,6 +1030,7 @@ export const webhookDeliveries = pgTable(
     }),
     agentId: text("agent_id"),
     eventType: text("event_type").notNull(),
+    replayedFromDeliveryId: uuid("replayed_from_delivery_id"),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     url: text("url").notNull(),
     secret: text("secret"),
@@ -941,6 +1048,7 @@ export const webhookDeliveries = pgTable(
     nextRetryIdx: index("webhook_deliveries_next_retry_idx").on(table.nextRetryAt),
     tenantIdx: index("webhook_deliveries_tenant_idx").on(table.tenantId),
     webhookConfigIdx: index("webhook_deliveries_webhook_config_idx").on(table.webhookConfigId),
+    replayedFromIdx: index("webhook_deliveries_replayed_from_idx").on(table.replayedFromDeliveryId),
   }),
 );
 
@@ -994,6 +1102,7 @@ export const tenantRelations = relations(tenants, ({ many, one }) => ({
   webhookConfigs: many(webhookConfigs),
   appClients: many(tenantAppClients),
   appClientSecrets: many(tenantAppClientSecrets),
+  requestSigningKeys: many(tenantRequestSigningKeys),
   ssoDomains: many(tenantSsoDomains),
   autoApprovalRule: one(autoApprovalRules, {
     fields: [tenants.id],
@@ -1016,6 +1125,13 @@ export const tenantAppClientSecretRelations = relations(tenantAppClientSecrets, 
   appClient: one(tenantAppClients, {
     fields: [tenantAppClientSecrets.tenantId, tenantAppClientSecrets.clientId],
     references: [tenantAppClients.tenantId, tenantAppClients.id],
+  }),
+}));
+
+export const tenantRequestSigningKeyRelations = relations(tenantRequestSigningKeys, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [tenantRequestSigningKeys.tenantId],
+    references: [tenants.id],
   }),
 }));
 
@@ -1144,6 +1260,8 @@ export type TenantAppClientRow = typeof tenantAppClients.$inferSelect;
 export type NewTenantAppClientRow = typeof tenantAppClients.$inferInsert;
 export type TenantAppClientSecretRow = typeof tenantAppClientSecrets.$inferSelect;
 export type NewTenantAppClientSecretRow = typeof tenantAppClientSecrets.$inferInsert;
+export type TenantRequestSigningKeyRow = typeof tenantRequestSigningKeys.$inferSelect;
+export type NewTenantRequestSigningKeyRow = typeof tenantRequestSigningKeys.$inferInsert;
 export type TenantSsoDomainRow = typeof tenantSsoDomains.$inferSelect;
 export type NewTenantSsoDomainRow = typeof tenantSsoDomains.$inferInsert;
 export type Agent = typeof agents.$inferSelect;

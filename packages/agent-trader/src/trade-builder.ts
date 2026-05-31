@@ -48,6 +48,92 @@ export const PORTAL_ABI = [
 // Sentinel used when the input currency is native (ETH/BNB)
 export const NATIVE_TOKEN_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE" as const;
 
+/**
+ * Hard upper bound on the slippage a caller may request, in basis points.
+ * 50% (5000 bps) is already absurdly loose for any honest trade; anything at
+ * or above this is treated as a misconfiguration and refused. This is a sanity
+ * clamp, NOT a substitute for a tight per-strategy slippage setting.
+ */
+export const MAX_SLIPPAGE_BPS = 5_000;
+
+const BPS_DENOMINATOR = 10_000n;
+
+/**
+ * Thrown when a swap cannot be built with a safe, enforceable minimum-output
+ * bound. The trade builder fails CLOSED: callers must NOT fall back to an
+ * unprotected (amountOutMin = 0) swap when this is raised — they must skip the
+ * trade. Submitting a swap with no slippage floor exposes the full trade value
+ * to sandwich/MEV extraction.
+ */
+export class UnsafeSwapError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsafeSwapError";
+  }
+}
+
+/**
+ * Compute the expected output amount (in output-token wei) for a swap, given
+ * the current token price expressed as native-wei per single token-unit
+ * (the same convention as {@link AgentState.tokenPrice}).
+ *
+ *   buy  (native → token):  expectedOut[token]  = amountIn[native] * 1e18 / price
+ *   sell (token  → native): expectedOut[native] = amountIn[token]  * price / 1e18
+ *
+ * Returns null when no usable quote can be derived (non-positive price or
+ * amount). Callers MUST treat null as "no quote available" and refuse to build
+ * the swap rather than defaulting to an unprotected one.
+ */
+export function computeExpectedOut(
+  side: "buy" | "sell",
+  amountIn: bigint,
+  tokenPriceNativePerToken: bigint,
+): bigint | null {
+  if (amountIn <= 0n || tokenPriceNativePerToken <= 0n) return null;
+
+  const ONE = 10n ** 18n;
+  const expectedOut =
+    side === "buy"
+      ? (amountIn * ONE) / tokenPriceNativePerToken
+      : (amountIn * tokenPriceNativePerToken) / ONE;
+
+  return expectedOut > 0n ? expectedOut : null;
+}
+
+/**
+ * Derive a slippage-protected `amountOutMin` from an expected-output quote.
+ *
+ *   amountOutMin = expectedOut * (10_000 - slippageBps) / 10_000
+ *
+ * Fails CLOSED via {@link UnsafeSwapError} when the inputs cannot produce a
+ * meaningful floor: missing/non-positive quote, out-of-range slippage, or a
+ * computed floor of zero (which would be indistinguishable from "accept any
+ * output"). NEVER returns 0n.
+ */
+export function computeAmountOutMin(expectedOut: bigint | null, slippageBps: number): bigint {
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps >= MAX_SLIPPAGE_BPS) {
+    throw new UnsafeSwapError(
+      `Refusing to build swap: slippageBps must be an integer in [0, ${MAX_SLIPPAGE_BPS}) — got ${slippageBps}`,
+    );
+  }
+
+  if (expectedOut === null || expectedOut <= 0n) {
+    throw new UnsafeSwapError(
+      "Refusing to build swap: no reliable output quote available — cannot compute a safe amountOutMin (would otherwise leave the swap fully exposed to MEV/sandwich extraction).",
+    );
+  }
+
+  const amountOutMin = (expectedOut * (BPS_DENOMINATOR - BigInt(slippageBps))) / BPS_DENOMINATOR;
+
+  if (amountOutMin <= 0n) {
+    throw new UnsafeSwapError(
+      `Refusing to build swap: computed amountOutMin floored to zero (expectedOut=${expectedOut.toString()}, slippageBps=${slippageBps}); an unprotected swap will not be submitted.`,
+    );
+  }
+
+  return amountOutMin;
+}
+
 // ─── Built transaction type ────────────────────────────────────────────────────
 
 export interface BuiltTx {
@@ -81,7 +167,15 @@ export function buildNativeTransfer(to: string, amountWei: string, chainId: numb
  * @param portalAddress DEX portal / router address
  * @param recipient     Address to receive the output tokens (usually the agent wallet)
  * @param chainId       Chain to submit on
+ * @param expectedOut   Expected output amount in output-token wei, from a price
+ *                      quote/oracle (see {@link computeExpectedOut}). REQUIRED:
+ *                      pass `null` only to force a fail-closed refusal. There is
+ *                      no unprotected (amountOutMin = 0) path.
  * @param slippageBps   Acceptable slippage in basis points (default 100 = 1%)
+ *
+ * @throws {UnsafeSwapError} when a safe `amountOutMin` cannot be computed
+ *   (no quote, out-of-range slippage, or a floor that rounds to zero). The
+ *   caller MUST skip the trade — it must NOT retry with a looser bound.
  */
 export function buildSwapTx(
   side: "buy" | "sell",
@@ -90,14 +184,19 @@ export function buildSwapTx(
   portalAddress: string,
   recipient: string,
   chainId: number,
+  expectedOut: bigint | null,
   slippageBps = 100,
 ): BuiltTx {
   const amountBig = BigInt(amount);
 
-  // amountOutMin = 0 means accept any output; real integrations should use an
-  // oracle for minOut.  slippageBps is here for future use.
-  const amountOutMin = 0n;
-  void slippageBps; // future: amountOut * (10000 - slippageBps) / 10000
+  if (amountBig <= 0n) {
+    throw new UnsafeSwapError(`Refusing to build swap: amountIn must be positive — got ${amount}`);
+  }
+
+  // Derive a real, enforceable minimum-output floor from the quote. This THROWS
+  // (fail-closed) rather than ever emitting amountOutMin = 0, so a swap with no
+  // slippage protection can never be signed.
+  const amountOutMin = computeAmountOutMin(expectedOut, slippageBps);
 
   let tokenIn: string;
   let tokenOut: string;

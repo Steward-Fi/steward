@@ -97,12 +97,22 @@ All endpoints return a consistent format:
 | 403 | Forbidden (policy denied, wrong scope) |
 | 404 | Not found |
 | 409 | Conflict (duplicate resource) |
+| 429 | Too many requests |
 | 500 | Internal server error |
 | 502 | Bad gateway (RPC error from blockchain) |
 
 ## Rate Limits
 
-The API does not currently enforce global rate limits. Per-agent rate limits are configured via [policies](/guides/policies).
+The Bun API entrypoint enforces a process-local global request limit per client
+IP, and sensitive wallet routes can enforce Redis-backed per-agent limits via
+[policies](/guides/policies). Production multi-instance deployments should
+configure Redis for shared auth and wallet-action throttles.
+
+Rate-limited responses return `429` with `Retry-After`, standard
+`RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` headers, plus
+legacy `X-RateLimit-*` compatibility headers. Successful wallet-action
+responses that evaluate a rate-limit policy include the same standard remaining
+budget headers without `Retry-After`.
 
 ## Route Groups
 
@@ -111,6 +121,7 @@ The API does not currently enforce global rate limits. Per-agent rate limits are
 | `/agents` | Agent CRUD + policy management | Tenant key or agent JWT |
 | `/vault` | Signing, approvals, history | Agent JWT or tenant key |
 | `/secrets` | Secret + route CRUD | Tenant key only |
+| `/condition-sets` | Reusable policy allow/block list CRUD and item management | Tenant owner/admin session |
 | `/tenants` | Tenant management | Tenant key |
 | `/auth` | SIWE, passkeys, email login | Varies |
 | `/platform` | Cross-tenant admin | Platform key |

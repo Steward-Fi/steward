@@ -3,9 +3,15 @@ import * as React from "react";
 import { renderToString } from "react-dom/server";
 
 let capturedSolanaWallets: unknown[] | undefined;
+let capturedWalletGroups: Array<{ groupName: string; wallets: unknown[] }> | undefined;
 const mockConnectors = [{ id: "connector" }];
 const mockHttpTransport = { key: "http" };
-const mockConnectorsForWallets = mock(() => mockConnectors);
+const mockConnectorsForWallets = mock(
+  (walletGroups: Array<{ groupName: string; wallets: unknown[] }>) => {
+    capturedWalletGroups = walletGroups;
+    return mockConnectors;
+  },
+);
 const mockCreateConfig = mock((config: unknown) => ({ kind: "wagmi-config", config }));
 const mockHttp = mock(() => mockHttpTransport);
 
@@ -132,6 +138,7 @@ function walletNames(wallets: unknown[]) {
 describe("Wallet provider helpers", () => {
   beforeEach(() => {
     capturedSolanaWallets = undefined;
+    capturedWalletGroups = undefined;
     mockConnectorsForWallets.mockClear();
     mockCreateConfig.mockClear();
     mockHttp.mockClear();
@@ -230,5 +237,27 @@ describe("Wallet provider helpers", () => {
     expect(mockConnectorsForWallets).toHaveBeenCalledTimes(1);
     expect(mockCreateConfig).toHaveBeenCalledTimes(1);
     expect(mockHttp).toHaveBeenCalledTimes(1);
+  });
+
+  test("createDefaultWagmiConfig prepends extra global wallet entries", () => {
+    const chains = [
+      {
+        id: 1,
+        name: "Ethereum",
+        nativeCurrency: { decimals: 18, name: "Ether", symbol: "ETH" },
+        rpcUrls: { default: { http: ["https://example.invalid"] } },
+      },
+    ] as const;
+    const stewardWallet = () => ({ id: "steward-global" });
+
+    createDefaultWagmiConfig({
+      projectId: "test-project-id",
+      chains,
+      wallets: [stewardWallet],
+    });
+
+    expect(capturedWalletGroups?.[0]?.groupName).toBe("Recommended");
+    expect(capturedWalletGroups?.[0]?.wallets[0]).toBe(stewardWallet);
+    expect(capturedWalletGroups?.[0]?.wallets.length).toBeGreaterThan(1);
   });
 });

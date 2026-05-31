@@ -53,7 +53,7 @@ export interface StewardMfaRequiredResult {
   ok: true;
   mfaRequired: true;
   mfa: {
-    type: "totp" | "sms";
+    type: "totp" | "sms" | "passkey";
     challengeId: string;
     expiresAt: string;
   };

@@ -35,6 +35,22 @@ describe("policy rule validation", () => {
     ).toBeNull();
   });
 
+  it("rejects malformed condition-set references before database lookup", () => {
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "condition-set",
+          type: "condition-set",
+          enabled: true,
+          config: {
+            conditionSetId: "not-a-uuid",
+            operator: "not_in_condition_set",
+          },
+        },
+      ]),
+    ).toBe("condition-set.conditionSetId must be a UUID");
+  });
+
   it("rejects duplicate enabled auto-approve thresholds", () => {
     expect(
       getPolicyRulesValidationError([

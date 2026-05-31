@@ -5,11 +5,17 @@
  * Mount: app.route("/vault", vaultRoutes)
  */
 
-import { type PolicyResult, toCaip2 } from "@stwd/shared";
+import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
+import { recordAggregationEvent } from "@stwd/redis";
+import { type PolicyResult, type TenantAuthAbuseConfig, toCaip2 } from "@stwd/shared";
 import {
+  type DerivedSolanaPolicyFields,
+  deriveSolanaPolicyFields,
+  detectSolanaPolicyConflicts,
   ENTRY_POINT_V07,
   getUserOperationHash,
   packUserOperation,
+  parseSolanaTransaction,
   type UnpackedUserOperationFields,
 } from "@stwd/vault";
 import { and, desc, eq, type SQL, sql } from "drizzle-orm";
@@ -33,6 +39,7 @@ import {
   isValidAgentId,
   isValidAnyAddress,
   isValidSolanaAddress,
+  loadAggregationsForPolicies,
   loadConditionSetsForPolicies,
   policyEngine,
   priceOracle,
@@ -70,23 +77,58 @@ async function writeVaultAudit(
     requestId: c.get("requestId") ?? null,
   });
 }
-const ALLOW_PRIVATE_KEY_EXPORT = process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
-const ALLOW_VAULT_PRIVATE_KEY_EXPORT =
+// ─── Unsafe-signing opt-in flags (read LIVE, not captured at module-init) ──────
+//
+// Each accessor reads its env var on every call instead of freezing the value
+// when this module first loads. In production the relevant env vars are fixed
+// before this module is imported, so a live read returns exactly what a captured
+// `const` would — behavior is identical. Reading live matters only for the api
+// test suite, which runs all ~135 files in ONE `bun test` process: Bun shares
+// the module registry, so a captured const would freeze whichever file imported
+// vault.ts first and ignore every later file's beforeAll/afterAll flag toggles.
+// Live reads let each file exercise BOTH the opt-in path and the fail-closed
+// default within the single process.
+//
+// Fail-closed by construction: anything other than the exact string "true"
+// (unset, "false", "1", etc.) yields false, i.e. signing disabled.
+const allowPrivateKeyExport = (): boolean =>
+  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+const allowVaultPrivateKeyExport = (): boolean =>
   process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT === "true";
-const ALLOW_UNSAFE_MESSAGE_SIGNING = process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
-const ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING =
+const allowUnsafeMessageSigning = (): boolean =>
+  process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
+const allowVaultUnsafeMessageSigning = (): boolean =>
   process.env.STEWARD_ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING === "true";
-const ALLOW_UNSAFE_RAW_SIGNING = process.env.STEWARD_ALLOW_UNSAFE_RAW_SIGNING === "true";
-const ALLOW_VAULT_UNSAFE_RAW_SIGNING =
+// Audited opt-in for UNCONSTRAINED EIP-712 typed-data signing (no `typed-data`
+// policy required). Both flags must be set. Normally typed-data signing is
+// authorized per-agent by a `typed-data` policy instead; this is the
+// break-glass equivalent of the message-signing flags.
+const allowUnsafeTypedDataSigning = (): boolean =>
+  process.env.STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING === "true";
+const allowVaultUnsafeTypedDataSigning = (): boolean =>
+  process.env.STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING === "true";
+const allowUnsafeRawSigning = (): boolean =>
+  process.env.STEWARD_ALLOW_UNSAFE_RAW_SIGNING === "true";
+const allowVaultUnsafeRawSigning = (): boolean =>
   process.env.STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING === "true";
-const ALLOW_UNSAFE_CONTRACT_CALL_SIGNING =
+const allowUnsafeContractCallSigning = (): boolean =>
   process.env.STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING === "true";
-const ALLOW_UNSAFE_USER_OPERATION_SIGNING =
+const allowUnsafeUserOperationSigning = (): boolean =>
   process.env.STEWARD_ALLOW_UNSAFE_USER_OPERATION_SIGNING === "true";
-const ALLOW_UNSAFE_AUTHORIZATION_SIGNING =
+const allowUnsafeAuthorizationSigning = (): boolean =>
   process.env.STEWARD_ALLOW_UNSAFE_AUTHORIZATION_SIGNING === "true";
-const ALLOW_PRIVATE_KEY_IMPORT = process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
-const ALLOW_VAULT_PRIVATE_KEY_IMPORT =
+/**
+ * Blind-signing opt-in for Solana. When false (default), the sign-solana route
+ * refuses any transaction whose instructions cannot all be confidently decoded
+ * into policy fields (unknown program ids, lookup-table-loaded accounts, etc.).
+ * Set to "true" ONLY for audited compatibility flows where the caller accepts
+ * that policy controls cannot be enforced against the transaction's real effects.
+ */
+const allowUnsafeSolanaBlindSigning = (): boolean =>
+  process.env.STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING === "true";
+const allowPrivateKeyImport = (): boolean =>
+  process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
+const allowVaultPrivateKeyImport = (): boolean =>
   process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT === "true";
 const VAULT_RPC_ALLOWLIST = new Set(
   (process.env.STEWARD_VAULT_RPC_ALLOWLIST ?? "eth_chainId,eth_blockNumber,eth_getBalance")
@@ -99,6 +141,24 @@ const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const MAX_UINT256_DECIMAL_DIGITS = 78;
 const MAX_QUORUM_CREDENTIALS = 32;
+const DEFAULT_MFA_MAX_AGE_MS = 5 * 60_000;
+
+type TenantMfaPolicyConfig = {
+  maxAgeSeconds?: number;
+  requireFor?: {
+    vaultSigning?: boolean;
+    keyImport?: boolean;
+    keyExport?: boolean;
+    recoveryCodes?: boolean;
+    tenantAdmin?: boolean;
+  };
+  allowDelegatedSignerAutomation?: boolean;
+  allowKeyQuorumAutomation?: boolean;
+};
+
+type TenantAuthAbuseConfigWithMfa = TenantAuthAbuseConfig & {
+  mfa?: TenantMfaPolicyConfig;
+};
 
 function userOperationPolicyModelAvailable(): boolean {
   return false;
@@ -813,7 +873,10 @@ function looksLikeAuthMessage(message: string): boolean {
   );
 }
 
-function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
+function hasRecentSessionMfa(
+  c: Context<{ Variables: AppVariables }>,
+  maxAgeMs = DEFAULT_MFA_MAX_AGE_MS,
+) {
   const verifiedAt = c.get("sessionMfaVerifiedAt");
   return (
     typeof verifiedAt === "number" &&
@@ -825,6 +888,38 @@ function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs =
 function hasTenantAdminSession(c: Context<{ Variables: AppVariables }>): boolean {
   const role = c.get("tenantRole");
   return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
+}
+
+async function readTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {
+  const [row] = await db
+    .select({ authAbuseConfig: tenantConfigsTable.authAbuseConfig })
+    .from(tenantConfigsTable)
+    .where(eq(tenantConfigsTable.tenantId, tenantId));
+  return (row?.authAbuseConfig as TenantAuthAbuseConfigWithMfa | undefined)?.mfa ?? {};
+}
+
+function tenantMfaMaxAgeMs(policy: TenantMfaPolicyConfig): number {
+  const seconds = policy.maxAgeSeconds;
+  return typeof seconds === "number" && Number.isFinite(seconds)
+    ? Math.max(30, Math.min(3600, Math.floor(seconds))) * 1000
+    : DEFAULT_MFA_MAX_AGE_MS;
+}
+
+function tenantMfaRequiredFor(
+  policy: TenantMfaPolicyConfig,
+  action: keyof NonNullable<TenantMfaPolicyConfig["requireFor"]>,
+): boolean {
+  return policy.requireFor?.[action] !== false;
+}
+
+async function hasRecentTenantSessionMfa(
+  c: Context<{ Variables: AppVariables }>,
+  tenantId: string,
+  action?: keyof NonNullable<TenantMfaPolicyConfig["requireFor"]>,
+): Promise<boolean> {
+  const policy = await readTenantMfaPolicy(tenantId);
+  if (action && !tenantMfaRequiredFor(policy, action)) return true;
+  return hasRecentSessionMfa(c, tenantMfaMaxAgeMs(policy));
 }
 
 function signerHasPermission(permissions: readonly string[], required: string): boolean {
@@ -869,8 +964,10 @@ async function requireSignerPermission(
   agentId: string,
   requiredPermission: string,
 ): Promise<{ ok: true; auth: SignerAuthorization } | { ok: false; response: Response }> {
+  const mfaPolicy = await readTenantMfaPolicy(tenantId);
+  const vaultSigningRequiresMfa = tenantMfaRequiredFor(mfaPolicy, "vaultSigning");
   if (hasTenantAdminSession(c)) {
-    if (hasRecentSessionMfa(c)) {
+    if (!vaultSigningRequiresMfa || hasRecentSessionMfa(c, tenantMfaMaxAgeMs(mfaPolicy))) {
       return { ok: true, auth: { authMode: "admin", signerId: c.get("userId") ?? null } };
     }
     return {
@@ -886,6 +983,15 @@ async function requireSignerPermission(
   const signerSecret = c.req.header("x-steward-signer-secret");
   const quorumId = c.req.header("x-steward-key-quorum-id")?.trim();
   if (quorumId) {
+    if (mfaPolicy.allowKeyQuorumAutomation === false) {
+      return {
+        ok: false,
+        response: c.json<ApiResponse>(
+          { ok: false, error: "Tenant MFA policy disables key quorum automation" },
+          403,
+        ),
+      };
+    }
     const credentialsHeader = c.req.header("x-steward-key-quorum-credentials");
     if (!credentialsHeader) {
       return {
@@ -1053,6 +1159,16 @@ async function requireSignerPermission(
     };
   }
 
+  if (mfaPolicy.allowDelegatedSignerAutomation === false) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>(
+        { ok: false, error: "Tenant MFA policy disables delegated signer automation" },
+        403,
+      ),
+    };
+  }
+
   const [signer] = await db
     .select()
     .from(agentSigners)
@@ -1104,14 +1220,6 @@ async function requireSignerPermission(
     .where(eq(agentSigners.id, signer.id));
 
   return { ok: true, auth: { authMode: "signer", signerId: signer.id } };
-}
-
-function typedDataSigningDisabled(): boolean {
-  return true;
-}
-
-function solanaTransactionSigningDisabled(): boolean {
-  return true;
 }
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
@@ -1194,15 +1302,6 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       403,
     );
   }
-  if (!hasTenantAdminSession(c) || !hasRecentSessionMfa(c)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Unsafe message signing requires owner or admin session with recent MFA",
-      },
-      403,
-    );
-  }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -1234,7 +1333,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   if (!isNonEmptyString(request.value) || !isUint256DecimalString(request.value)) {
     return c.json<ApiResponse>({ ok: false, error: "'value' must be a uint256 wei string" }, 400);
   }
-  if (hasCalldata(request.data) && !ALLOW_UNSAFE_CONTRACT_CALL_SIGNING) {
+  if (hasCalldata(request.data) && !allowUnsafeContractCallSigning()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -1302,6 +1401,14 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   return withAgentSpendLock(agentId, async () => {
     const stats = await getTransactionStats(agentId);
 
+    // Authoritative cumulative aggregates (Redis-sourced) for any aggregation
+    // policies on this agent. Loaded INSIDE the per-agent spend lock so the
+    // snapshot the evaluator sees is consistent with the recordAggregationEvent
+    // write we make on commit below — concurrent signs cannot race a cap.
+    // Fail-closed: snapshots that cannot be sourced are omitted from the lookup,
+    // which makes the evaluator deny that aggregation condition.
+    const aggregations = await loadAggregationsForPolicies(policySet, signRequest);
+
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,
       recentTxCount1h: stats.recentTxCount1h,
@@ -1310,6 +1417,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       spentThisWeek: stats.spentThisWeek,
       priceOracle,
       conditionSets,
+      aggregations,
     });
 
     if (!evaluation.approved) {
@@ -1461,6 +1569,25 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       recordVaultSpend(agentId, tenantId, signRequest.value, resolvedChainId).catch((err) =>
         console.error("[vault] Failed to record spend:", err),
       );
+
+      // ── Record the authoritative aggregation event ───────────────────────────
+      // AWAITED (unlike recordVaultSpend) and still inside the per-agent spend
+      // lock, so the next request's loadAggregationsForPolicies snapshot already
+      // includes this contribution — cumulative caps cannot be raced past the
+      // threshold by overlapping signs. The tx is already committed/broadcast at
+      // this point, so a record failure cannot retroactively fail the request;
+      // we log it loudly (an undercounted aggregate is a known residual risk of
+      // any post-commit counter, bounded by the spend lock's serialization).
+      try {
+        await recordAggregationEvent({
+          agentId,
+          valueRaw: signRequest.value,
+          to: signRequest.to,
+          chainId: resolvedChainId,
+        });
+      } catch (err) {
+        console.error("[vault] Failed to record aggregation event:", err);
+      }
 
       await writeVaultAudit(c, {
         tenantId,
@@ -1635,7 +1762,7 @@ vaultRoutes.post("/:agentId/actions/send-calls", async (c) => {
       : parsed.sponsor
         ? { requested: true, sponsored: false }
         : undefined;
-  if (parsed.calls.some((call) => hasCalldata(call.data)) && !ALLOW_UNSAFE_CONTRACT_CALL_SIGNING) {
+  if (parsed.calls.some((call) => hasCalldata(call.data)) && !allowUnsafeContractCallSigning()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3624,7 +3751,7 @@ vaultRoutes.post("/:agentId/transactions/:txId/replace", async (c) => {
 // body: { "message": "<string>" }
 // resp: { ok: true, data: { signature: "0x..." } }
 vaultRoutes.post("/:agentId/sign-message", async (c) => {
-  if (!ALLOW_UNSAFE_MESSAGE_SIGNING || !ALLOW_VAULT_UNSAFE_MESSAGE_SIGNING) {
+  if (!allowUnsafeMessageSigning() || !allowVaultUnsafeMessageSigning()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3717,7 +3844,7 @@ vaultRoutes.post("/:agentId/sign-message", async (c) => {
 // body: { "hash": "0x<32-byte digest>", "referenceId"?: "caller-id" }
 // resp: { ok: true, data: { signature, hash, walletAddress } }
 vaultRoutes.post("/:agentId/sign-raw-hash", async (c) => {
-  if (!ALLOW_UNSAFE_RAW_SIGNING || !ALLOW_VAULT_UNSAFE_RAW_SIGNING) {
+  if (!allowUnsafeRawSigning() || !allowVaultUnsafeRawSigning()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3803,18 +3930,120 @@ vaultRoutes.post("/:agentId/sign-raw-hash", async (c) => {
   }
 });
 
-vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
-  if (typedDataSigningDisabled()) {
+// POST /vault/:agentId/sign-raw-digest
+// Cross-curve generalization of sign-raw-hash: signs an exactly-32-byte digest
+// with the agent's secp256k1 (EVM) or ed25519 (Solana) key. `stark` fails closed.
+// body: { "curve": "secp256k1"|"ed25519"|"stark", "payloadHex": "0x<32-byte>", "referenceId"?: "caller-id" }
+// resp: { ok: true, data: { signature, curve, payloadHex, publicKey } }
+//
+// Shares the same audited env opt-in as sign-raw-hash because both produce raw
+// signatures that bypass transaction/message policy controls. Fail-closed by
+// default; auth gate fires before any parsing.
+vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
+  if (!allowUnsafeRawSigning() || !allowVaultUnsafeRawSigning()) {
     return c.json<ApiResponse>(
       {
         ok: false,
         error:
-          "EIP-712 typed data signing is disabled until typed-data-specific policy extraction is configured.",
+          "Raw digest signing is disabled because digest signatures bypass transaction and message policy controls. Set STEWARD_ALLOW_UNSAFE_RAW_SIGNING=true and STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING=true only for audited compatibility flows.",
       },
       403,
     );
   }
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  if (!hasTenantAdminSession(c) || !hasRecentSessionMfa(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Unsafe raw digest signing requires owner or admin session with recent MFA",
+      },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
 
+  const body = await safeJsonParse<{ curve: string; payloadHex: string; referenceId?: string }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (body.curve !== "secp256k1" && body.curve !== "ed25519") {
+    const error =
+      body.curve === "stark"
+        ? "stark curve raw signing is not supported: no vetted starknet signing library is installed"
+        : "curve must be 'secp256k1' or 'ed25519'";
+    return c.json<ApiResponse>({ ok: false, error }, 400);
+  }
+  if (!isBytes32Hex(body.payloadHex)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "payloadHex must be a 32-byte hex string" },
+      400,
+    );
+  }
+  if (body.referenceId !== undefined && !isNonEmptyString(body.referenceId)) {
+    return c.json<ApiResponse>({ ok: false, error: "referenceId must be a non-empty string" }, 400);
+  }
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_raw_digest",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
+  try {
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
+      action: "vault.raw_digest.sign.authorized",
+      resourceType: "wallet",
+      resourceId: agentId,
+      metadata: {
+        curve: body.curve,
+        payloadHex: body.payloadHex,
+        referenceId: body.referenceId ?? null,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
+        unsafeCompatibilityMode: true,
+      },
+    });
+
+    const result = await vault.signRawDigest(tenantId, agentId, body.curve, body.payloadHex);
+
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
+      action: "vault.raw_digest.signed",
+      resourceType: "wallet",
+      resourceId: agentId,
+      metadata: {
+        curve: result.curve,
+        payloadHex: result.payloadHex,
+        referenceId: body.referenceId ?? null,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
+        publicKey: result.publicKey,
+        unsafeCompatibilityMode: true,
+      },
+    });
+
+    return c.json<ApiResponse>({ ok: true, data: result });
+  } catch (e) {
+    console.error(`[Vault] sign-raw-digest failed for ${tenantId}/${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
+vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Forbidden: token scope does not match agent" },
@@ -3872,16 +4101,52 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   const resolvedChainId =
     (typeof body.domain.chainId === "number" ? body.domain.chainId : 0) ||
     parseInt(process.env.CHAIN_ID || "8453", 10);
+  // Use the EIP-712 domain's verifyingContract as the request `to` so that
+  // destination-based policies (approved-addresses, condition-set, contract
+  // allowlist) meaningfully gate the contract the typed data authorizes. Falls
+  // back to the zero address when the domain has no (valid) verifyingContract.
+  const verifyingContractTo =
+    typeof body.domain.verifyingContract === "string" &&
+    isValidAddress(body.domain.verifyingContract)
+      ? body.domain.verifyingContract
+      : "0x0000000000000000000000000000000000000000";
   const signRequest: SignRequest = {
     agentId,
     tenantId,
-    to: "0x0000000000000000000000000000000000000000",
+    to: verifyingContractTo,
     value: "0",
     chainId: resolvedChainId,
   };
 
   const policySet = await getPolicySet(tenantId, agentId);
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+
+  // ── Fail-closed gate ────────────────────────────────────────────────────────
+  // EIP-712 typed-data signing produces off-chain signatures (permits, orders,
+  // delegations) that can move funds without an on-chain transaction passing
+  // through the vault's normal policy path. We therefore REFUSE it unless the
+  // agent has an explicit `typed-data` policy authorizing (and constraining)
+  // it, OR an audited env break-glass opt-in is set. When a `typed-data` policy
+  // is present, the decoded payload below is evaluated against it.
+  const hasTypedDataPolicy = policySet.some((p) => p.enabled && p.type === "typed-data");
+  const typedDataEnvOptIn = allowUnsafeTypedDataSigning() && allowVaultUnsafeTypedDataSigning();
+  if (!hasTypedDataPolicy && !typedDataEnvOptIn) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "EIP-712 typed-data signing requires a `typed-data` policy for this agent (to constrain the domain/primaryType/message). Add one, or set STEWARD_ALLOW_UNSAFE_TYPED_DATA_SIGNING=true and STEWARD_ALLOW_VAULT_UNSAFE_TYPED_DATA_SIGNING=true only for audited compatibility flows.",
+      },
+      403,
+    );
+  }
+
+  const typedData = {
+    domain: body.domain,
+    types: body.types,
+    primaryType: body.primaryType,
+    value: body.value,
+  };
 
   // ── Redis rate-limit check (typed data) ────────────────────────────────────
   const rlResult = await enforceRateLimit(agentId, policySet);
@@ -3904,6 +4169,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     spentThisWeek: stats.spentThisWeek,
     priceOracle,
     conditionSets,
+    typedData,
   });
 
   if (!evaluation.approved) {
@@ -4065,7 +4331,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
 // ─── ERC-4337 User Operation Signing ─────────────────────────────────────────
 
 vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
-  if (!ALLOW_UNSAFE_USER_OPERATION_SIGNING) {
+  if (!allowUnsafeUserOperationSigning()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -4398,7 +4664,7 @@ vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
 // ─── EIP-7702 Authorization Signing ──────────────────────────────────────────
 
 vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
-  if (!ALLOW_UNSAFE_AUTHORIZATION_SIGNING) {
+  if (!allowUnsafeAuthorizationSigning()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -4698,18 +4964,184 @@ vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
 
 // ─── Solana Transaction Signing ───────────────────────────────────────────────
 
-vaultRoutes.post("/:agentId/sign-solana", async (c) => {
-  if (solanaTransactionSigningDisabled()) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "Serialized Solana transaction signing is disabled until policy fields are derived from transaction instructions.",
-      },
-      403,
-    );
+/**
+ * Blind-signing fallback for Solana transactions that could NOT be fully decoded
+ * into policy fields. Only reachable when STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING
+ * is set. Policy is evaluated against the CALLER-SUPPLIED (unverifiable) envelope,
+ * which is why this path is opt-in only — the platform cannot guarantee the signed
+ * bytes match the envelope. The vault's single-transfer byte assertion is still
+ * applied via expectedTo/expectedValue as a best-effort last line of defense
+ * (it succeeds for single native transfers and throws for anything else).
+ */
+async function signSolanaBlind(
+  c: Context<{ Variables: AppVariables }>,
+  args: {
+    agentId: string;
+    tenantId: string;
+    transaction: string;
+    chainId: number;
+    broadcast?: boolean;
+    to: string;
+    value: string;
+    unparsedReason: string;
+  },
+): Promise<Response> {
+  const { agentId, tenantId, chainId, to: toAddress, value: txValue } = args;
+
+  const signRequest = { agentId, tenantId, to: toAddress, value: txValue, chainId };
+  const policySet = await getPolicySet(tenantId, agentId);
+  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+
+  const rl = await enforceRateLimit(agentId, policySet);
+  if (!rl.allowed) {
+    if (rl.headers) {
+      for (const [key, value] of Object.entries(rl.headers)) c.header(key, value);
+    }
+    return c.json<ApiResponse>({ ok: false, error: rl.reason || "Rate limit exceeded" }, 429);
   }
 
+  // Same per-agent advisory spend lock as the parsed path: serialize eval+sign+
+  // commit so concurrent blind-sign requests cannot race the spend cap.
+  return withAgentSpendLock(agentId, async () => {
+    const stats = await getTransactionStats(agentId);
+    const evaluation = await policyEngine.evaluate(policySet, {
+      request: signRequest,
+      recentTxCount1h: stats.recentTxCount1h,
+      recentTxCount24h: stats.recentTxCount24h,
+      spentToday: stats.spentToday,
+      spentThisWeek: stats.spentThisWeek,
+      priceOracle,
+      conditionSets,
+    });
+
+    if (!evaluation.approved) {
+      const txId = crypto.randomUUID();
+      const manual = evaluation.requiresManualApproval;
+      await db.insert(transactions).values({
+        id: txId,
+        agentId,
+        status: manual ? "pending" : "rejected",
+        toAddress,
+        value: txValue,
+        data: manual ? args.transaction : undefined,
+        chainId,
+        policyResults: evaluation.results,
+      });
+      if (manual) {
+        await db.insert(approvalQueue).values({
+          id: crypto.randomUUID(),
+          txId,
+          agentId,
+          status: "pending",
+        });
+      }
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: manual
+          ? "vault.sign.solana.blind.queued_for_approval"
+          : "vault.sign.solana.blind.rejected_by_policy",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          chainId,
+          to: toAddress,
+          value: txValue,
+          blindSigned: true,
+          unparsedReason: args.unparsedReason,
+          policyResults: evaluation.results,
+        },
+      });
+      dispatchWebhook(tenantId, agentId, manual ? "approval_required" : "tx_rejected", {
+        txId,
+        results: evaluation.results,
+      });
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: manual ? "Transaction requires manual approval" : "Transaction rejected by policy",
+          data: { txId, results: evaluation.results },
+        },
+        manual ? 202 : 403,
+      );
+    }
+
+    try {
+      const txId = crypto.randomUUID();
+      const result = await vault.signSolanaTransaction({
+        agentId,
+        tenantId,
+        transaction: args.transaction,
+        chainId,
+        broadcast: args.broadcast,
+        expectedTo: toAddress,
+        expectedValue: txValue,
+      });
+      await db.insert(transactions).values({
+        id: txId,
+        agentId,
+        status: "signed",
+        toAddress,
+        value: txValue,
+        chainId,
+        txHash: result.broadcast ? result.signature : undefined,
+        policyResults: evaluation.results,
+        signedAt: new Date(),
+      });
+      recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
+        console.error("[vault] Failed to record Solana spend:", err),
+      );
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: "vault.sign.solana.blind",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          chainId,
+          to: toAddress,
+          value: txValue,
+          blindSigned: true,
+          unparsedReason: args.unparsedReason,
+          broadcast: result.broadcast,
+          signature: result.broadcast ? result.signature : undefined,
+        },
+      });
+      dispatchWebhook(tenantId, agentId, "tx_signed", {
+        txId,
+        txHash: result.broadcast ? result.signature : undefined,
+      });
+      return c.json<
+        ApiResponse<{
+          txId: string;
+          signature: string;
+          broadcast: boolean;
+          chainId: number;
+          caip2?: string;
+        }>
+      >({ ok: true, data: { txId, ...result } });
+    } catch (e: unknown) {
+      const requestId = c.get("requestId") || "unknown";
+      console.error(`[${requestId}] Solana blind sign failed for agent ${agentId}:`, e);
+      dispatchWebhook(tenantId, agentId, "tx_failed", {
+        error: e instanceof Error ? e.message : "Unknown error",
+        requestId,
+      });
+      if (isRpcError(e)) {
+        return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
+      }
+      return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+    }
+  });
+}
+
+vaultRoutes.post("/:agentId/sign-solana", async (c) => {
+  // Serialized Solana signing is now enabled by default for transactions whose
+  // instructions can be fully decoded into authoritative policy fields (see
+  // parseSolanaTransaction below). Transactions that cannot be fully parsed are
+  // rejected unless STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING is explicitly set.
   if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Forbidden: token scope does not match agent" },
@@ -4746,6 +5178,9 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     );
   }
 
+  // Caller-supplied 'to'/'value' are ADVISORY ONLY. The authoritative policy
+  // fields are derived from the serialized transaction bytes below. We still
+  // validate their shape if present so a malformed hint is rejected early.
   if (body.to !== undefined && body.to !== "") {
     if (!isValidSolanaAddress(body.to) && !isValidAddress(body.to)) {
       return c.json<ApiResponse>(
@@ -4757,27 +5192,132 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       );
     }
   }
+  if (body.value !== undefined && body.value !== "") {
+    if (!isUint256DecimalString(body.value)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "'value' must be a uint256 lamports string" },
+        400,
+      );
+    }
+  }
 
-  if (!body.to || !body.value) {
+  const chainId = body.chainId ?? 101;
+
+  // ── Derive authoritative policy fields from the transaction bytes ───────────
+  // This is the core spoof-resistance control: nothing the caller claims about
+  // the transaction is trusted. We decode the real recipient(s), lamports, and
+  // token transfers from the serialized message itself.
+  let derived: DerivedSolanaPolicyFields;
+  try {
+    const summary = parseSolanaTransaction(body.transaction);
+    derived = deriveSolanaPolicyFields(summary);
+  } catch (parseErr) {
+    // The payload could not even be deserialized into a transaction. Fail closed
+    // unless blind-signing is explicitly opted into.
+    if (!allowUnsafeSolanaBlindSigning()) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Solana transaction could not be decoded for policy evaluation and was rejected. Set STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING=true only for audited blind-signing flows.",
+        },
+        422,
+      );
+    }
+    // Blind-signing path requires caller-supplied policy fields (legacy envelope).
+    if (!body.to || !body.value || !isUint256DecimalString(body.value)) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Blind Solana signing requires caller-supplied 'to' and uint256 'value' because the transaction could not be parsed",
+        },
+        400,
+      );
+    }
+    return await signSolanaBlind(c, {
+      agentId,
+      tenantId,
+      transaction: body.transaction,
+      chainId,
+      broadcast: body.broadcast,
+      to: body.to,
+      value: body.value,
+      unparsedReason: parseErr instanceof Error ? parseErr.message : "undecodable transaction",
+    });
+  }
+
+  // ── Fail-closed gate: any instruction we could not decode ───────────────────
+  if (!derived.fullyParsed) {
+    if (!allowUnsafeSolanaBlindSigning()) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Solana transaction contains instruction(s) that could not be verified against policy and was rejected (fail-closed). Set STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING=true only for audited blind-signing flows.",
+          data: { unparsedReasons: derived.summary.unparsedReasons },
+        },
+        422,
+      );
+    }
+    if (!body.to || !body.value || !isUint256DecimalString(body.value)) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Blind Solana signing requires caller-supplied 'to' and uint256 'value' because the transaction is not fully parseable",
+        },
+        400,
+      );
+    }
+    return await signSolanaBlind(c, {
+      agentId,
+      tenantId,
+      transaction: body.transaction,
+      chainId,
+      broadcast: body.broadcast,
+      to: body.to,
+      value: body.value,
+      unparsedReason: derived.summary.unparsedReasons.join("; "),
+    });
+  }
+
+  // ── Spoof check: caller hints must not CONFLICT with the parsed truth ───────
+  const conflicts = detectSolanaPolicyConflicts(derived, { to: body.to, value: body.value });
+  if (conflicts.length > 0) {
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign.solana.rejected_spoofed_fields",
+      resourceType: "transaction",
+      resourceId: agentId,
+      metadata: {
+        chainId,
+        callerTo: body.to,
+        callerValue: body.value,
+        derivedTo: derived.to,
+        derivedValue: derived.value,
+        conflicts,
+      },
+    });
     return c.json<ApiResponse>(
       {
         ok: false,
         error:
-          "Solana signing requires 'to' (recipient address) and 'value' (lamports as string) for policy evaluation",
+          "Caller-supplied policy fields conflict with the serialized transaction and were rejected",
+        data: { conflicts },
       },
-      400,
-    );
-  }
-  if (!isNonEmptyString(body.value) || !isUint256DecimalString(body.value)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "'value' must be a uint256 lamports string" },
-      400,
+      422,
     );
   }
 
-  const chainId = body.chainId ?? 101;
-  const toAddress = body.to;
-  const txValue = body.value;
+  // Authoritative recipient/value come from the parser, NOT from the caller.
+  // For transactions with no derivable recipient (e.g. close-account only) we
+  // fall back to the agent's own Solana address so policy still evaluates a
+  // value of 0 against a stable, non-spoofable target.
+  const toAddress = derived.to ?? agent.walletAddresses?.solana ?? agent.walletAddress;
+  const txValue = derived.value;
 
   const signRequest = {
     agentId,
@@ -4804,46 +5344,102 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     );
   }
 
-  const stats = await getTransactionStats(agentId);
+  // Hold the per-agent advisory spend lock across policy evaluation, signing,
+  // and the signed-transaction commit so concurrent Solana sign requests cannot
+  // race the spend cap. Without it, two concurrent requests can both read the
+  // same `spentToday`/`spentThisWeek`, each pass a spending-limit policy, and
+  // both sign — overspending the cap. This mirrors the EVM sign/transfer/
+  // user-operation/authorization paths, which all wrap eval+sign under the lock.
+  return withAgentSpendLock(agentId, async () => {
+    const stats = await getTransactionStats(agentId);
 
-  const evaluation = await policyEngine.evaluate(policySet, {
-    request: signRequest,
-    recentTxCount1h: stats.recentTxCount1h,
-    recentTxCount24h: stats.recentTxCount24h,
-    spentToday: stats.spentToday,
-    spentThisWeek: stats.spentThisWeek,
-    priceOracle,
-    conditionSets,
-  });
+    const evaluation = await policyEngine.evaluate(policySet, {
+      request: signRequest,
+      recentTxCount1h: stats.recentTxCount1h,
+      recentTxCount24h: stats.recentTxCount24h,
+      spentToday: stats.spentToday,
+      spentThisWeek: stats.spentThisWeek,
+      priceOracle,
+      conditionSets,
+    });
 
-  if (!evaluation.approved) {
-    const txId = crypto.randomUUID();
+    if (!evaluation.approved) {
+      const txId = crypto.randomUUID();
 
-    if (evaluation.requiresManualApproval) {
-      await db.transaction(async (tx) => {
-        await tx.insert(transactions).values({
-          id: txId,
-          agentId,
+      if (evaluation.requiresManualApproval) {
+        await db.transaction(async (tx) => {
+          await tx.insert(transactions).values({
+            id: txId,
+            agentId,
+            status: "pending",
+            toAddress,
+            value: txValue,
+            data: body.transaction,
+            chainId,
+            policyResults: evaluation.results,
+          });
+          await tx.insert(approvalQueue).values({
+            id: crypto.randomUUID(),
+            txId,
+            agentId,
+            status: "pending",
+          });
+        });
+
+        await writeVaultAudit(c, {
+          tenantId,
+          actorType: "agent",
+          actorId: agentId,
+          action: "vault.sign.solana.queued_for_approval",
+          resourceType: "transaction",
+          resourceId: txId,
+          metadata: {
+            chainId,
+            to: toAddress,
+            value: txValue,
+            policyResults: evaluation.results,
+          },
+        });
+
+        dispatchWebhook(tenantId, agentId, "approval_required", {
+          txId,
+          results: evaluation.results,
+        });
+        dispatchIntentWebhook(tenantId, agentId, "intent.created", {
+          intentId: txId,
           status: "pending",
-          toAddress,
-          value: txValue,
-          data: body.transaction,
-          chainId,
           policyResults: evaluation.results,
         });
-        await tx.insert(approvalQueue).values({
-          id: crypto.randomUUID(),
-          txId,
-          agentId,
-          status: "pending",
-        });
+
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Transaction requires manual approval",
+            data: {
+              txId,
+              results: evaluation.results,
+              status: "pending_approval",
+            },
+          },
+          202,
+        );
+      }
+
+      await db.insert(transactions).values({
+        id: txId,
+        agentId,
+        status: "rejected",
+        toAddress,
+        value: txValue,
+        chainId,
+        policyResults: evaluation.results,
       });
 
       await writeVaultAudit(c, {
         tenantId,
         actorType: "agent",
         actorId: agentId,
-        action: "vault.sign.solana.queued_for_approval",
+        action: "vault.sign.solana.rejected_by_policy",
         resourceType: "transaction",
         resourceId: txId,
         metadata: {
@@ -4854,147 +5450,120 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         },
       });
 
-      dispatchWebhook(tenantId, agentId, "approval_required", {
+      dispatchWebhook(tenantId, agentId, "tx_rejected", {
         txId,
         results: evaluation.results,
-      });
-      dispatchIntentWebhook(tenantId, agentId, "intent.created", {
-        intentId: txId,
-        status: "pending",
-        policyResults: evaluation.results,
       });
 
       return c.json<ApiResponse>(
         {
           ok: false,
-          error: "Transaction requires manual approval",
-          data: {
-            txId,
-            results: evaluation.results,
-            status: "pending_approval",
-          },
+          error: "Transaction rejected by policy",
+          data: { txId, results: evaluation.results },
         },
-        202,
+        403,
       );
     }
 
-    await db.insert(transactions).values({
-      id: txId,
-      agentId,
-      status: "rejected",
-      toAddress,
-      value: txValue,
-      chainId,
-      policyResults: evaluation.results,
-    });
+    try {
+      const txId = crypto.randomUUID();
 
-    await writeVaultAudit(c, {
-      tenantId,
-      actorType: "agent",
-      actorId: agentId,
-      action: "vault.sign.solana.rejected_by_policy",
-      resourceType: "transaction",
-      resourceId: txId,
-      metadata: {
+      // The vault's defense-in-depth envelope check (assertSolanaTransferTransactionMatches)
+      // only models a single native SOL transfer. The instruction parser is the
+      // authoritative policy check for ALL transaction shapes, so we only pass the
+      // legacy envelope for the single-SystemProgram-transfer case (where it adds a
+      // redundant byte-level assertion). For token / multi-instruction transactions
+      // the parser already verified the effects against policy above.
+      const isSingleNativeTransfer =
+        derived.movesNativeSol &&
+        derived.summary.tokenTransfers.length === 0 &&
+        derived.summary.instructions.length === 1 &&
+        derived.summary.instructions[0].instructionType === "system:Transfer" &&
+        derived.to !== undefined;
+
+      const result = await vault.signSolanaTransaction({
+        agentId,
+        tenantId,
+        transaction: body.transaction,
         chainId,
-        to: toAddress,
+        broadcast: body.broadcast,
+        ...(isSingleNativeTransfer ? { expectedTo: toAddress, expectedValue: txValue } : {}),
+      });
+
+      await db.insert(transactions).values({
+        id: txId,
+        agentId,
+        status: "signed",
+        toAddress,
         value: txValue,
+        chainId,
+        txHash: result.broadcast ? result.signature : undefined,
         policyResults: evaluation.results,
-      },
-    });
+        signedAt: new Date(),
+      });
 
-    dispatchWebhook(tenantId, agentId, "tx_rejected", {
-      txId,
-      results: evaluation.results,
-    });
+      // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
+      recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
+        console.error("[vault] Failed to record Solana spend:", err),
+      );
 
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Transaction rejected by policy",
-        data: { txId, results: evaluation.results },
-      },
-      403,
-    );
-  }
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: "vault.sign.solana",
+        resourceType: "transaction",
+        resourceId: txId,
+        metadata: {
+          chainId,
+          to: toAddress,
+          value: txValue,
+          broadcast: result.broadcast,
+          signature: result.broadcast ? result.signature : undefined,
+          // Authoritative, parser-derived effects (not caller-supplied).
+          derivedFromTransaction: true,
+          movesNativeSol: derived.movesNativeSol,
+          programIds: derived.programIds,
+          tokenTransfers: derived.summary.tokenTransfers.map((t) => ({
+            mint: t.mint,
+            destination: t.destination,
+            amount: t.amount,
+          })),
+        },
+      });
 
-  try {
-    const txId = crypto.randomUUID();
+      dispatchWebhook(tenantId, agentId, "tx_signed", {
+        txId,
+        txHash: result.broadcast ? result.signature : undefined,
+      });
 
-    const result = await vault.signSolanaTransaction({
-      agentId,
-      tenantId,
-      transaction: body.transaction,
-      chainId,
-      broadcast: body.broadcast,
-      expectedTo: toAddress,
-      expectedValue: txValue,
-    });
+      return c.json<
+        ApiResponse<{
+          txId: string;
+          signature: string;
+          broadcast: boolean;
+          chainId: number;
+          caip2?: string;
+        }>
+      >({
+        ok: true,
+        data: { txId, ...result },
+      });
+    } catch (e: unknown) {
+      const requestId = c.get("requestId") || "unknown";
+      console.error(`[${requestId}] Solana sign failed for agent ${agentId}:`, e);
 
-    await db.insert(transactions).values({
-      id: txId,
-      agentId,
-      status: "signed",
-      toAddress,
-      value: txValue,
-      chainId,
-      txHash: result.broadcast ? result.signature : undefined,
-      policyResults: evaluation.results,
-      signedAt: new Date(),
-    });
+      dispatchWebhook(tenantId, agentId, "tx_failed", {
+        error: e instanceof Error ? e.message : "Unknown error",
+        requestId,
+      });
 
-    // ── Record spend in Redis (fire-and-forget) ──────────────────────────────
-    recordVaultSpend(agentId, tenantId, txValue, chainId).catch((err) =>
-      console.error("[vault] Failed to record Solana spend:", err),
-    );
-
-    await writeVaultAudit(c, {
-      tenantId,
-      actorType: "agent",
-      actorId: agentId,
-      action: "vault.sign.solana",
-      resourceType: "transaction",
-      resourceId: txId,
-      metadata: {
-        chainId,
-        to: toAddress,
-        value: txValue,
-        broadcast: result.broadcast,
-        signature: result.broadcast ? result.signature : undefined,
-      },
-    });
-
-    dispatchWebhook(tenantId, agentId, "tx_signed", {
-      txId,
-      txHash: result.broadcast ? result.signature : undefined,
-    });
-
-    return c.json<
-      ApiResponse<{
-        txId: string;
-        signature: string;
-        broadcast: boolean;
-        chainId: number;
-        caip2?: string;
-      }>
-    >({
-      ok: true,
-      data: { txId, ...result },
-    });
-  } catch (e: unknown) {
-    const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] Solana sign failed for agent ${agentId}:`, e);
-
-    dispatchWebhook(tenantId, agentId, "tx_failed", {
-      error: e instanceof Error ? e.message : "Unknown error",
-      requestId,
-    });
-
-    if (isRpcError(e)) {
-      return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
+      if (isRpcError(e)) {
+        return c.json<ApiResponse>({ ok: false, error: extractRpcErrorMessage(e) }, 502);
+      }
+      return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
     }
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
-  }
+  });
 });
 
 // ─── Generic RPC Passthrough ──────────────────────────────────────────────────
@@ -5086,7 +5655,7 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
 // ─── Key Import ───────────────────────────────────────────────────────────────
 
 vaultRoutes.post("/:agentId/import", async (c) => {
-  if (!ALLOW_PRIVATE_KEY_IMPORT || !ALLOW_VAULT_PRIVATE_KEY_IMPORT) {
+  if (!allowPrivateKeyImport() || !allowVaultPrivateKeyImport()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5103,21 +5672,21 @@ vaultRoutes.post("/:agentId/import", async (c) => {
       403,
     );
   }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+
   if (!hasTenantAdminSession(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Key import requires tenant admin session authentication" },
       403,
     );
   }
-  if (!hasRecentSessionMfa(c)) {
+  if (!(await hasRecentTenantSessionMfa(c, tenantId, "keyImport"))) {
     return c.json<ApiResponse>(
       { ok: false, error: "Key import requires a recent MFA step-up session" },
       403,
     );
   }
-
-  const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId");
 
   if (!isValidAgentId(agentId)) {
     return c.json<ApiResponse>(
@@ -5183,7 +5752,7 @@ vaultRoutes.post("/:agentId/import", async (c) => {
 // ─── Key Export ──────────────────────────────────────────────────────────
 
 vaultRoutes.post("/:agentId/export", async (c) => {
-  if (!ALLOW_PRIVATE_KEY_EXPORT || !ALLOW_VAULT_PRIVATE_KEY_EXPORT) {
+  if (!allowPrivateKeyExport() || !allowVaultPrivateKeyExport()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5200,21 +5769,21 @@ vaultRoutes.post("/:agentId/export", async (c) => {
       403,
     );
   }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+
   if (!hasTenantAdminSession(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Key export requires tenant admin session authentication" },
       403,
     );
   }
-  if (!hasRecentSessionMfa(c)) {
+  if (!(await hasRecentTenantSessionMfa(c, tenantId, "keyExport"))) {
     return c.json<ApiResponse>(
       { ok: false, error: "Key export requires a recent MFA step-up session" },
       403,
     );
   }
-
-  const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId");
   const agent = await ensureAgentForTenant(tenantId, agentId);
 
   if (!agent) {

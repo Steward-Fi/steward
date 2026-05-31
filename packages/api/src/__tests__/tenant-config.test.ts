@@ -78,16 +78,12 @@ beforeAll(async () => {
     .onConflictDoNothing();
 
   const { createSessionToken } = await import("../routes/auth");
-  sessionToken = await createSessionToken(
-    "0x0000000000000000000000000000000000000000",
-    TENANT_ID,
-    {
-      userId: DASHBOARD_USER_ID,
-      email: DASHBOARD_USER_EMAIL,
-      mfaVerifiedAt: Date.now(),
-      mfaMethod: "totp",
-    },
-  );
+  sessionToken = await createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID, {
+    userId: DASHBOARD_USER_ID,
+    email: DASHBOARD_USER_EMAIL,
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
+  });
 });
 
 afterAll(async () => {
@@ -271,6 +267,8 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
         theme: {
           primaryColor: "#FF0000",
           colorScheme: "dark",
+          logoUrl: "https://assets.example.com/logo.png",
+          faviconUrl: "https://assets.example.com/favicon.ico",
         },
       };
 
@@ -290,6 +288,90 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       expect(body.data.featureFlags.showFundingQR).toBe(true);
       expect(body.data.featureFlags.showSpendDashboard).toBe(false);
       expect(body.data.theme.primaryColor).toBe("#FF0000");
+      expect(body.data.theme.logoUrl).toBe("https://assets.example.com/logo.png");
+      expect(body.data.theme.faviconUrl).toBe("https://assets.example.com/favicon.ico");
+    });
+
+    it("rejects unsafe tenant theme asset URLs", async () => {
+      const javascriptRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: sessionHeaders(),
+        body: JSON.stringify({
+          theme: {
+            logoUrl: "javascript:alert(1)",
+          },
+        }),
+      });
+      expect(javascriptRes.status).toBe(400);
+      expect((await javascriptRes.json()).error).toContain("theme.logoUrl must use HTTPS");
+
+      const httpRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: sessionHeaders(),
+        body: JSON.stringify({
+          theme: {
+            faviconUrl: "http://assets.example.com/favicon.ico",
+          },
+        }),
+      });
+      expect(httpRes.status).toBe(400);
+      expect((await httpRes.json()).error).toContain("theme.faviconUrl must use HTTPS");
+
+      const credentialsRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: sessionHeaders(),
+        body: JSON.stringify({
+          theme: {
+            logoUrl: "https://user:pass@assets.example.com/logo.png",
+          },
+        }),
+      });
+      expect(credentialsRes.status).toBe(400);
+      expect((await credentialsRes.json()).error).toContain(
+        "theme.logoUrl cannot include URL credentials",
+      );
+
+      const svgRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: sessionHeaders(),
+        body: JSON.stringify({
+          theme: {
+            logoUrl: "https://assets.example.com/logo.svg",
+          },
+        }),
+      });
+      expect(svgRes.status).toBe(400);
+      expect((await svgRes.json()).error).toContain("theme.logoUrl must end with .png");
+    });
+
+    it("clears tenant theme asset URLs when blank values are submitted", async () => {
+      const setRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: sessionHeaders(),
+        body: JSON.stringify({
+          theme: {
+            logoUrl: "https://assets.example.com/logo.png",
+            faviconUrl: "https://assets.example.com/favicon.ico",
+          },
+        }),
+      });
+      expect(setRes.status).toBe(200);
+
+      const clearRes = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: sessionHeaders(),
+        body: JSON.stringify({
+          theme: {
+            logoUrl: "",
+            faviconUrl: "",
+          },
+        }),
+      });
+      expect(clearRes.status).toBe(200);
+      const body = await clearRes.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.theme.logoUrl).toBeUndefined();
+      expect(body.data.theme.faviconUrl).toBeUndefined();
     });
 
     it("GET returns the saved config", async () => {

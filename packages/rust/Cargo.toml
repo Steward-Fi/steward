@@ -1,0 +1,22 @@
+[package]
+name = "steward-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "First-pass Rust backend SDK for Steward API integrations"
+
+[lib]
+name = "steward_sdk"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.22"
+hex = "0.4"
+hmac = "0.12"
+percent-encoding = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }

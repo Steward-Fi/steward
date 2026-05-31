@@ -25,7 +25,7 @@
  * NEVER deploy this. It accepts any client_id / client_secret pair.
  */
 
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 export interface FakeUser {
   id: string;
@@ -68,8 +68,16 @@ export function clearFakeOAuthState(): void {
 
 function userFromHint(provider: string, loginHint: string | null): FakeUser {
   if (loginHint) {
+    // The provider account id (`sub`) must be UNIQUE per distinct email and
+    // STABLE for the same email. A previous impl hex-encoded the email and took
+    // `.slice(0, 16)` — only the first 8 chars — so every "google-user-…" /
+    // "discord-user-…" address collapsed to one constant sub per provider. The
+    // 3 Playwright engines share one API instance with persistent state, so the
+    // first engine claimed that sub and later engines hit the (correct, secure)
+    // "OAuth account is already linked to another user" 403. Hash the FULL email
+    // so the unique suffix survives.
     return {
-      id: `${provider}-${Buffer.from(loginHint).toString("hex").slice(0, 16)}`,
+      id: `${provider}-${createHash("sha256").update(loginHint).digest("hex").slice(0, 32)}`,
       email: loginHint,
       name: loginHint.split("@")[0],
       verified_email: true,

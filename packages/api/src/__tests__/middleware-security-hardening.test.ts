@@ -9,19 +9,28 @@ const redisEnforcementSource = readFileSync(
   join(apiRoot, "middleware", "redis-enforcement.ts"),
   "utf8",
 );
+const securityHeadersSource = readFileSync(
+  join(apiRoot, "middleware", "security-headers.ts"),
+  "utf8",
+);
 const tenantCorsSource = readFileSync(join(apiRoot, "middleware", "tenant-cors.ts"), "utf8");
 const contextSource = readFileSync(join(apiRoot, "services", "context.ts"), "utf8");
 const indexSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
+const webRoot = join(import.meta.dir, "..", "..", "..", "..", "web", "src");
+const webMiddlewareSource = readFileSync(join(webRoot, "middleware.ts"), "utf8");
 
 describe("middleware security hardening", () => {
-  it("uses durable production idempotency and skips unauthenticated reservations", () => {
+  it("uses durable production idempotency and avoids broad unauthenticated reservations", () => {
     expect(idempotencySource).toContain("class RedisIdempotencyStore");
     expect(idempotencySource).toContain('throw new Error("Durable idempotency store unavailable")');
     expect(idempotencySource).toContain('redis.set(redisKey, value, "PX", ttlMs, "NX")');
     expect(idempotencySource).toContain("hasIdempotencyAuthMaterial");
-    expect(idempotencySource).toContain(
-      'if (!hasIdempotencyAuthMaterial(c.req.raw, Boolean(c.get("requestSignatureVerified")))) {',
-    );
+    expect(idempotencySource).toContain("hasReplaySafePublicContext");
+    expect(idempotencySource).toContain("PUBLIC_AUTH_IDEMPOTENCY_PATHS");
+    expect(idempotencySource).toContain('hasCredentialScope ? "" : "public-auth"');
+    expect(idempotencySource).toContain('hasCredentialScope ? "" : url.pathname');
+    expect(idempotencySource).toContain("if (hasAuthMaterial) {");
+    expect(idempotencySource).toContain("} else if (!hasReplaySafePublicContext(c)) {");
   });
 
   it("fails closed when configured Redis rate-limit enforcement is unavailable", () => {
@@ -51,5 +60,18 @@ describe("middleware security hardening", () => {
       "fetch: (request: Request) => runtimeGate(request) ?? app.fetch(request)",
     );
     expect(indexSource).not.toContain('app.use("*", async (c, next) => {');
+  });
+
+  it("documents production security headers and dashboard CSP checks in source", () => {
+    expect(securityHeadersSource).toContain('"X-Frame-Options": "DENY"');
+    expect(securityHeadersSource).toContain('"Content-Security-Policy"');
+    expect(securityHeadersSource).toContain("default-src 'none'");
+    expect(securityHeadersSource).toContain("frame-ancestors 'none'");
+    expect(securityHeadersSource).toContain('"X-Content-Type-Options": "nosniff"');
+    expect(securityHeadersSource).toContain('"Permissions-Policy"');
+    expect(securityHeadersSource).toContain("Strict-Transport-Security");
+    expect(webMiddlewareSource).toContain("Content-Security-Policy");
+    expect(webMiddlewareSource).toContain("frame-ancestors 'none'");
+    expect(webMiddlewareSource).toContain("object-src 'none'");
   });
 });

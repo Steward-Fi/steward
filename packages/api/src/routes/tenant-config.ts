@@ -5,7 +5,7 @@
  * These extend the existing tenant routes with config management.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { resolveTxt } from "node:dns/promises";
 import { hashSha256Hex } from "@stwd/auth";
 import {
@@ -13,6 +13,7 @@ import {
   tenantAppClientSecrets,
   tenantAppClients as tenantAppClientsTable,
   tenantConfigs as tenantConfigsTable,
+  tenantRequestSigningKeys,
   tenantSamlSsoConfigs,
   tenantSsoDomains,
   toPersistedPolicyRule,
@@ -37,9 +38,15 @@ import type {
   TenantTestAccountConfig,
   TenantTheme,
 } from "@stwd/shared";
+import { type EncryptedKey, KeyStore } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { DEFAULT_TENANT_CONFIGS } from "../defaults/tenant-configs";
+import {
+  getTenantIdempotencyMetrics,
+  type TenantIdempotencyMetricsSnapshot,
+} from "../middleware/idempotency";
+import { isHstsEnabled } from "../middleware/security-headers";
 import { invalidateTenantCorsCache } from "../middleware/tenant-cors";
 import { writeAuditEvent } from "../services/audit";
 import { normalizeAuthAbuseConfig } from "../services/auth-abuse";
@@ -49,6 +56,7 @@ import {
   db,
   ensureAgentForTenant,
   getConditionSetReferenceValidationError,
+  MASTER_PASSWORD,
   requireTenantLevel,
   safeJsonParse,
 } from "../services/context";
@@ -87,6 +95,11 @@ const THEME_COLOR_KEYS = [
   "warningColor",
 ] as const;
 const THEME_COLOR_SCHEMES = new Set(["light", "dark", "system"] as const);
+const THEME_ASSET_URL_KEYS = ["logoUrl", "faviconUrl"] as const;
+const THEME_ASSET_EXTENSIONS: Record<(typeof THEME_ASSET_URL_KEYS)[number], string[]> = {
+  logoUrl: [".png"],
+  faviconUrl: [".ico", ".png"],
+};
 const ACCESS_ALLOWLIST_TYPES = new Set(["email", "email_domain", "wallet", "phone"] as const);
 const APP_CLIENT_ENVIRONMENTS = new Set<TenantAppClientEnvironment>([
   "development",
@@ -104,6 +117,40 @@ interface AccessAllowlistEntry {
   type: AccessAllowlistEntryType;
   value: string;
   acceptedAt: string | null;
+}
+
+type TenantSecurityChecklistStatus = "pass" | "warning" | "fail";
+
+interface TenantSecurityChecklistItem {
+  id: string;
+  label: string;
+  status: TenantSecurityChecklistStatus;
+  description: string;
+  remediation?: string;
+}
+
+interface TenantSecurityChecklist {
+  tenantId: string;
+  generatedAt: string;
+  summary: Record<TenantSecurityChecklistStatus, number>;
+  items: TenantSecurityChecklistItem[];
+}
+
+interface TenantRequestSigningKey {
+  id: string;
+  tenantId: string;
+  name: string;
+  secretPrefix: string;
+  status: "active" | "retiring" | "revoked";
+  createdAt: Date;
+  updatedAt: Date;
+  expiresAt?: Date | null;
+  revokedAt?: Date | null;
+}
+
+interface TenantRequestSigningKeyCreateResult {
+  key: TenantRequestSigningKey;
+  signingSecret: string;
 }
 
 const emptyTenantConfig = (tenantId: string): TenantControlPlaneConfig => ({
@@ -191,6 +238,27 @@ async function restoreTenantAppClientSecrets(
       );
     if (snapshot.length > 0) {
       await tx.insert(tenantAppClientSecrets).values(snapshot);
+    }
+  });
+}
+
+async function snapshotTenantRequestSigningKeys(tenantId: string) {
+  return db
+    .select()
+    .from(tenantRequestSigningKeys)
+    .where(eq(tenantRequestSigningKeys.tenantId, tenantId));
+}
+
+async function restoreTenantRequestSigningKeys(
+  tenantId: string,
+  snapshot: Array<typeof tenantRequestSigningKeys.$inferSelect>,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(tenantRequestSigningKeys)
+      .where(eq(tenantRequestSigningKeys.tenantId, tenantId));
+    if (snapshot.length > 0) {
+      await tx.insert(tenantRequestSigningKeys).values(snapshot);
     }
   });
 }
@@ -386,21 +454,262 @@ function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAge
   );
 }
 
-function requireRecentTenantAdminMfa(
+type TenantMfaPolicyConfig = {
+  maxAgeSeconds?: number;
+  requireFor?: {
+    tenantAdmin?: boolean;
+  };
+};
+
+type TenantAuthAbuseConfigWithMfa = TenantAuthAbuseConfig & {
+  mfa?: TenantMfaPolicyConfig;
+};
+
+async function readTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {
+  const [row] = await db
+    .select({ authAbuseConfig: tenantConfigsTable.authAbuseConfig })
+    .from(tenantConfigsTable)
+    .where(eq(tenantConfigsTable.tenantId, tenantId));
+  return (row?.authAbuseConfig as TenantAuthAbuseConfigWithMfa | undefined)?.mfa ?? {};
+}
+
+function tenantMfaMaxAgeMs(policy: TenantMfaPolicyConfig): number {
+  const seconds = policy.maxAgeSeconds;
+  return typeof seconds === "number" && Number.isFinite(seconds)
+    ? Math.max(30, Math.min(3600, Math.floor(seconds))) * 1000
+    : 5 * 60_000;
+}
+
+async function requireRecentTenantAdminMfa(
   c: Parameters<typeof requireTenantLevel>[0],
   reason: string,
-): Response | null {
+): Promise<Response | null> {
   if (!requireTenantAdminSession(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: `${reason} requires owner or admin session` },
       403,
     );
   }
-  if (hasRecentSessionMfa(c)) return null;
+  const tenantId = c.req.param("id") || c.get("tenantId");
+  const policy = tenantId ? await readTenantMfaPolicy(tenantId) : {};
+  if (policy.requireFor?.tenantAdmin === false) return null;
+  if (hasRecentSessionMfa(c, tenantMfaMaxAgeMs(policy))) return null;
   return c.json<ApiResponse>(
     { ok: false, error: `${reason} requires recent MFA verification` },
     403,
   );
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function hasLocalhostUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname;
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function configuredRequestSigningSecrets(): string[] {
+  return [
+    ...(process.env.STEWARD_REQUEST_SIGNING_SECRETS ?? "").split(","),
+    process.env.STEWARD_REQUEST_SIGNING_SECRET ?? "",
+  ]
+    .map((secret) => secret.trim())
+    .filter(Boolean);
+}
+
+function checklistSummary(
+  items: TenantSecurityChecklistItem[],
+): TenantSecurityChecklist["summary"] {
+  return items.reduce(
+    (summary, item) => {
+      summary[item.status] += 1;
+      return summary;
+    },
+    { pass: 0, warning: 0, fail: 0 },
+  );
+}
+
+function buildTenantSecurityChecklist(
+  tenantId: string,
+  row:
+    | {
+        allowedOrigins: string[] | null;
+        allowedRedirectUrls: string[] | null;
+      }
+    | null
+    | undefined,
+  appClients: TenantAppClient[],
+  appClientSecrets: TenantAppClientSecret[],
+  requestSigningKeys: TenantRequestSigningKey[],
+): TenantSecurityChecklist {
+  const production = process.env.NODE_ENV === "production";
+  const requestExpiryRequired =
+    process.env.STEWARD_REQUIRE_REQUEST_EXPIRY === "true" ||
+    (production && process.env.STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS !== "true");
+  const authSignatureRequired = process.env.STEWARD_REQUIRE_AUTH_SIGNATURE === "true" || production;
+  const signingSecrets = configuredRequestSigningSecrets();
+  const appClientSigningSecrets = appClientSecrets.filter(
+    (secret) =>
+      secret.status !== "revoked" &&
+      (!secret.expiresAt || new Date(secret.expiresAt).getTime() > Date.now()),
+  );
+  const standaloneSigningKeys = requestSigningKeys.filter(
+    (key) =>
+      key.status !== "revoked" &&
+      (!key.expiresAt || new Date(key.expiresAt).getTime() > Date.now()),
+  );
+  const allowedOrigins = row?.allowedOrigins ?? [];
+  const allowedRedirectUrls = row?.allowedRedirectUrls ?? [];
+  const productionClients = appClients.filter(
+    (client) => client.enabled !== false && client.environment === "production",
+  );
+  const productionClientUrls = productionClients.flatMap((client) => [
+    ...(client.allowedOrigins ?? []),
+    ...(client.allowedRedirectUrls ?? []),
+  ]);
+  const browserUrls = [...allowedOrigins, ...allowedRedirectUrls, ...productionClientUrls];
+  const insecureBrowserUrls = browserUrls.filter(
+    (url) => !isHttpsUrl(url) && !hasLocalhostUrl(url),
+  );
+  const missingProductionClientUrls =
+    productionClients.length > 0 &&
+    productionClients.some(
+      (client) =>
+        (client.allowedOrigins ?? []).length === 0 ||
+        (client.allowedRedirectUrls ?? []).length === 0,
+    );
+
+  const items: TenantSecurityChecklistItem[] = [
+    {
+      id: "api-security-headers",
+      label: "API security headers",
+      status: "pass",
+      description:
+        "API responses set X-Frame-Options, X-Content-Type-Options, Referrer-Policy, and Permissions-Policy.",
+    },
+    {
+      id: "api-hsts",
+      label: "API HSTS",
+      status: isHstsEnabled() ? "pass" : production ? "fail" : "warning",
+      description: isHstsEnabled()
+        ? "Strict-Transport-Security is enabled for non-local API hosts."
+        : "Strict-Transport-Security is disabled by STEWARD_HSTS_DISABLED.",
+      remediation: isHstsEnabled()
+        ? undefined
+        : "Remove STEWARD_HSTS_DISABLED=true before serving production traffic over HTTPS.",
+    },
+    {
+      id: "request-expiry",
+      label: "Request freshness",
+      status: requestExpiryRequired ? "pass" : production ? "fail" : "warning",
+      description: requestExpiryRequired
+        ? "Sensitive mutating requests require an expiry or timestamp freshness header."
+        : "Sensitive mutating requests validate freshness headers when present but do not require them.",
+      remediation: requestExpiryRequired
+        ? undefined
+        : "Set STEWARD_REQUIRE_REQUEST_EXPIRY=true or run production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true.",
+    },
+    {
+      id: "authorization-signatures",
+      label: "Authorization signatures",
+      status: authSignatureRequired
+        ? signingSecrets.length > 0 ||
+          appClientSigningSecrets.length > 0 ||
+          standaloneSigningKeys.length > 0
+          ? "pass"
+          : "fail"
+        : signingSecrets.length > 0 ||
+            appClientSigningSecrets.length > 0 ||
+            standaloneSigningKeys.length > 0
+          ? "warning"
+          : "fail",
+      description:
+        authSignatureRequired &&
+        (signingSecrets.length > 0 ||
+          appClientSigningSecrets.length > 0 ||
+          standaloneSigningKeys.length > 0)
+          ? "Sensitive mutating requests require X-Steward-Signature and have an env, app-client, or tenant signing key available."
+          : "Sensitive mutating requests need enforced HMAC signatures and configured signing secrets.",
+      remediation:
+        authSignatureRequired &&
+        (signingSecrets.length > 0 ||
+          appClientSigningSecrets.length > 0 ||
+          standaloneSigningKeys.length > 0)
+          ? undefined
+          : "Set STEWARD_REQUIRE_AUTH_SIGNATURE=true and configure STEWARD_REQUEST_SIGNING_SECRETS, rotate an app client secret, or rotate a request signing key.",
+    },
+    {
+      id: "tenant-browser-allowlists",
+      label: "Browser origin allowlists",
+      status:
+        allowedOrigins.length > 0 &&
+        allowedRedirectUrls.length > 0 &&
+        insecureBrowserUrls.length === 0
+          ? "pass"
+          : production
+            ? "fail"
+            : "warning",
+      description:
+        allowedOrigins.length > 0 &&
+        allowedRedirectUrls.length > 0 &&
+        insecureBrowserUrls.length === 0
+          ? "Tenant CORS origins and auth redirect URLs are explicitly allowlisted with HTTPS-compatible URLs."
+          : "Tenant CORS origins and auth redirect URLs are missing or include non-HTTPS production URLs.",
+      remediation:
+        allowedOrigins.length > 0 &&
+        allowedRedirectUrls.length > 0 &&
+        insecureBrowserUrls.length === 0
+          ? undefined
+          : "Add production HTTPS origins and redirect URLs under App Origins.",
+    },
+    {
+      id: "production-app-clients",
+      label: "Production app clients",
+      status:
+        productionClients.length > 0 &&
+        !missingProductionClientUrls &&
+        insecureBrowserUrls.length === 0
+          ? "pass"
+          : productionClients.length === 0
+            ? "warning"
+            : "fail",
+      description:
+        productionClients.length > 0 &&
+        !missingProductionClientUrls &&
+        insecureBrowserUrls.length === 0
+          ? "At least one enabled production app client has scoped origins and redirect URLs."
+          : "Production app clients should isolate production origins, redirects, login methods, and backend secrets.",
+      remediation:
+        productionClients.length > 0 &&
+        !missingProductionClientUrls &&
+        insecureBrowserUrls.length === 0
+          ? undefined
+          : "Create an enabled production app client with HTTPS origins and redirect URLs.",
+    },
+    {
+      id: "dashboard-csp",
+      label: "Dashboard CSP",
+      status: "pass",
+      description:
+        "The dashboard middleware emits a nonce-based Content-Security-Policy with frame-ancestors none and object-src none.",
+    },
+  ];
+
+  return {
+    tenantId,
+    generatedAt: new Date().toISOString(),
+    summary: checklistSummary(items),
+    items,
+  };
 }
 
 function redactPolicyTemplatesForTenantAuth(
@@ -528,6 +837,17 @@ function normalizeTenantAppClients(value: unknown): TenantAppClient[] | string {
 
     const isDefault = raw.isDefault === true;
     if (isDefault) defaultCount += 1;
+    const globalWalletAllowedScopes =
+      raw.globalWalletAllowedScopes === undefined
+        ? ["eth_accounts", "personal_sign"]
+        : Array.isArray(raw.globalWalletAllowedScopes)
+          ? raw.globalWalletAllowedScopes.filter(
+              (scope): scope is string => typeof scope === "string" && scope.trim().length > 0,
+            )
+          : null;
+    if (!globalWalletAllowedScopes) {
+      return `app client "${id}" globalWalletAllowedScopes must be an array of strings`;
+    }
 
     clients.push({
       id,
@@ -538,6 +858,8 @@ function normalizeTenantAppClients(value: unknown): TenantAppClient[] | string {
       allowedOrigins,
       allowedRedirectUrls,
       ...(loginMethods ? { loginMethods } : {}),
+      globalWalletEnabled: raw.globalWalletEnabled === true,
+      globalWalletAllowedScopes,
     });
   }
 
@@ -559,6 +881,8 @@ function serializeTenantAppClient(row: typeof tenantAppClientsTable.$inferSelect
     allowedOrigins: row.allowedOrigins ?? [],
     allowedRedirectUrls: row.allowedRedirectUrls ?? [],
     ...(row.loginMethods ? { loginMethods: row.loginMethods } : {}),
+    globalWalletEnabled: row.globalWalletEnabled,
+    globalWalletAllowedScopes: row.globalWalletAllowedScopes ?? [],
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -592,6 +916,51 @@ function serializeTenantAppClientSecret(
     expiresAt: row.expiresAt,
     revokedAt: row.revokedAt,
   };
+}
+
+function requestSigningKeyStore(): KeyStore {
+  return new KeyStore(MASTER_PASSWORD, undefined, "secret-vault");
+}
+
+function generateRequestSigningSecret(): { secret: string; prefix: string } {
+  const secret = `stw_sig_${randomBytes(32).toString("hex")}`;
+  return {
+    secret,
+    prefix: `${secret.slice(0, 12)}...${secret.slice(-4)}`,
+  };
+}
+
+function normalizeRequestSigningKeyName(value: unknown): string {
+  const name = typeof value === "string" ? value.trim() : "";
+  return name ? name.slice(0, 120) : "Request signing key";
+}
+
+function serializeTenantRequestSigningKey(
+  row: typeof tenantRequestSigningKeys.$inferSelect,
+): TenantRequestSigningKey {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    name: row.name,
+    secretPrefix: row.secretPrefix,
+    status: row.status as TenantRequestSigningKey["status"],
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    expiresAt: row.expiresAt,
+    revokedAt: row.revokedAt,
+  };
+}
+
+function encryptRequestSigningSecret(
+  tenantId: string,
+  keyId: string,
+  secret: string,
+): EncryptedKey {
+  return requestSigningKeyStore().encrypt(secret, {
+    tenantId,
+    name: `request-signing-key:${keyId}`,
+    version: 1,
+  });
 }
 
 function normalizeSsoDomain(value: unknown): string | null {
@@ -635,6 +1004,7 @@ function serializeTenantSamlSsoConfig(row: TenantSamlSsoConfigRow): TenantSamlSs
     nameIdFormat: row.nameIdFormat ?? undefined,
     emailAttribute: row.emailAttribute,
     groupsAttribute: row.groupsAttribute ?? undefined,
+    groupRoleMappings: row.groupRoleMappings as TenantSamlSsoConfig["groupRoleMappings"],
     allowJitProvisioning: row.allowJitProvisioning,
     jitDefaultRole: "viewer",
     lastTestedAt: row.lastTestedAt,
@@ -770,6 +1140,41 @@ function normalizeTenantTheme(value: unknown): TenantTheme | null | string {
       return "theme.colorScheme must be light, dark, or system";
     }
     theme.colorScheme = input.colorScheme as TenantTheme["colorScheme"];
+  }
+
+  for (const key of THEME_ASSET_URL_KEYS) {
+    const raw = input[key];
+    if (raw === undefined || raw === null) continue;
+    if (typeof raw !== "string") return `theme.${key} must be a URL string`;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    if (trimmed.length > 2048) return `theme.${key} cannot exceed 2048 characters`;
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      return `theme.${key} must be an absolute URL`;
+    }
+    if (url.username || url.password) {
+      return `theme.${key} cannot include URL credentials`;
+    }
+    if (url.protocol === "http:") {
+      const hostname = url.hostname.toLowerCase();
+      const isLocal =
+        hostname === "localhost" ||
+        hostname === "127.0.0.1" ||
+        hostname === "::1" ||
+        hostname.endsWith(".localhost");
+      if (!isLocal) return `theme.${key} must use HTTPS`;
+    } else if (url.protocol !== "https:") {
+      return `theme.${key} must use HTTPS`;
+    }
+    const pathname = url.pathname.toLowerCase();
+    const allowedExtensions = THEME_ASSET_EXTENSIONS[key];
+    if (!allowedExtensions.some((extension) => pathname.endsWith(extension))) {
+      return `theme.${key} must end with ${allowedExtensions.join(" or ")}`;
+    }
+    theme[key] = url.toString();
   }
 
   return theme;
@@ -1035,6 +1440,11 @@ async function persistTenantAppClientsForTenant(
           allowedOrigins: client.allowedOrigins ?? [],
           allowedRedirectUrls: client.allowedRedirectUrls ?? [],
           loginMethods: client.loginMethods ?? null,
+          globalWalletEnabled: client.globalWalletEnabled === true,
+          globalWalletAllowedScopes: client.globalWalletAllowedScopes ?? [
+            "eth_accounts",
+            "personal_sign",
+          ],
         })),
       );
     }
@@ -1145,7 +1555,7 @@ tenantConfigRoutes.get("/:id/config", requireTenantId, async (c) => {
 // ─── GET /tenants/:id/oidc-providers — tenant-admin OIDC config ──────────────
 
 tenantConfigRoutes.get("/:id/oidc-providers", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "OIDC provider config access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "OIDC provider config access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1163,7 +1573,7 @@ tenantConfigRoutes.get("/:id/oidc-providers", requireTenantId, async (c) => {
 // ─── PUT /tenants/:id/oidc-providers — tenant-admin OIDC config ──────────────
 
 tenantConfigRoutes.put("/:id/oidc-providers", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "OIDC provider config updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "OIDC provider config updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1225,7 +1635,7 @@ tenantConfigRoutes.put("/:id/oidc-providers", requireTenantId, async (c) => {
 // ─── Tenant-admin SAML dashboard/team SSO config ────────────────────────────
 
 tenantConfigRoutes.get("/:id/saml-sso", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "SAML SSO config access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "SAML SSO config access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1240,7 +1650,7 @@ tenantConfigRoutes.get("/:id/saml-sso", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "SAML SSO config updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "SAML SSO config updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1263,6 +1673,7 @@ tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
       enabled: config.enabled,
       idpEntityId: config.idpEntityId,
       allowJitProvisioning: config.allowJitProvisioning,
+      groupRoleMappings: config.groupRoleMappings.length,
     },
     ipAddress: c.req.header("x-forwarded-for") ?? null,
     userAgent: c.req.header("user-agent") ?? null,
@@ -1284,6 +1695,7 @@ tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
       nameIdFormat: config.nameIdFormat,
       emailAttribute: config.emailAttribute,
       groupsAttribute: config.groupsAttribute,
+      groupRoleMappings: config.groupRoleMappings,
       allowJitProvisioning: config.allowJitProvisioning,
       jitDefaultRole: "viewer",
     })
@@ -1300,6 +1712,7 @@ tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
         nameIdFormat: config.nameIdFormat,
         emailAttribute: config.emailAttribute,
         groupsAttribute: config.groupsAttribute,
+        groupRoleMappings: config.groupRoleMappings,
         allowJitProvisioning: config.allowJitProvisioning,
         jitDefaultRole: "viewer",
         updatedAt: new Date(),
@@ -1319,6 +1732,7 @@ tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
         enabled: config.enabled,
         idpEntityId: config.idpEntityId,
         allowJitProvisioning: config.allowJitProvisioning,
+        groupRoleMappings: config.groupRoleMappings.length,
       },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
@@ -1336,7 +1750,7 @@ tenantConfigRoutes.put("/:id/saml-sso", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.delete("/:id/saml-sso", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "SAML SSO config updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "SAML SSO config updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1383,7 +1797,7 @@ tenantConfigRoutes.delete("/:id/saml-sso", requireTenantId, async (c) => {
 // ─── Tenant-admin SSO verified domains ───────────────────────────────────────
 
 tenantConfigRoutes.get("/:id/sso-domains", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "SSO domain access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "SSO domain access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1398,7 +1812,7 @@ tenantConfigRoutes.get("/:id/sso-domains", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.post("/:id/sso-domains", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "SSO domain updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "SSO domain updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1467,7 +1881,7 @@ tenantConfigRoutes.post("/:id/sso-domains", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.post("/:id/sso-domains/:domain/verify", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "SSO domain verification");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "SSO domain verification");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1540,7 +1954,7 @@ tenantConfigRoutes.post("/:id/sso-domains/:domain/verify", requireTenantId, asyn
 });
 
 tenantConfigRoutes.delete("/:id/sso-domains/:domain", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "SSO domain updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "SSO domain updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1590,7 +2004,7 @@ tenantConfigRoutes.delete("/:id/sso-domains/:domain", requireTenantId, async (c)
 // ─── Tenant-admin auth abuse / login controls ────────────────────────────────
 
 tenantConfigRoutes.get("/:id/auth-abuse-config", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Auth abuse config access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Auth abuse config access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1606,7 +2020,7 @@ tenantConfigRoutes.get("/:id/auth-abuse-config", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.put("/:id/auth-abuse-config", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Auth abuse config updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Auth abuse config updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1675,10 +2089,206 @@ tenantConfigRoutes.put("/:id/auth-abuse-config", requireTenantId, async (c) => {
   });
 });
 
+// ─── Tenant-admin security checklist ────────────────────────────────────────
+
+tenantConfigRoutes.get("/:id/security-checklist", requireTenantId, async (c) => {
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Security checklist access");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.req.param("id") as string;
+  const [row] = await db
+    .select({
+      allowedOrigins: tenantConfigsTable.allowedOrigins,
+      allowedRedirectUrls: tenantConfigsTable.allowedRedirectUrls,
+    })
+    .from(tenantConfigsTable)
+    .where(eq(tenantConfigsTable.tenantId, tenantId));
+  const appClients = await readTenantAppClientsForTenant(tenantId);
+  const appClientSecretRows = await snapshotTenantAppClientSecretsForTenant(tenantId);
+  const requestSigningKeyRows = await snapshotTenantRequestSigningKeys(tenantId);
+
+  return c.json<ApiResponse<TenantSecurityChecklist>>({
+    ok: true,
+    data: buildTenantSecurityChecklist(
+      tenantId,
+      row,
+      appClients,
+      appClientSecretRows.map(serializeTenantAppClientSecret),
+      requestSigningKeyRows.map(serializeTenantRequestSigningKey),
+    ),
+  });
+});
+
+tenantConfigRoutes.get("/:id/idempotency-metrics", requireTenantId, async (c) => {
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Idempotency metrics access");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.req.param("id") as string;
+  return c.json<ApiResponse<TenantIdempotencyMetricsSnapshot>>({
+    ok: true,
+    data: await getTenantIdempotencyMetrics(tenantId),
+  });
+});
+
+// ─── Tenant-admin request signing keys ──────────────────────────────────────
+
+tenantConfigRoutes.get("/:id/request-signing-keys", requireTenantId, async (c) => {
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Request signing key access");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.req.param("id") as string;
+  const rows = await db
+    .select()
+    .from(tenantRequestSigningKeys)
+    .where(eq(tenantRequestSigningKeys.tenantId, tenantId));
+  return c.json<ApiResponse<{ keys: TenantRequestSigningKey[] }>>({
+    ok: true,
+    data: { keys: rows.map(serializeTenantRequestSigningKey) },
+  });
+});
+
+tenantConfigRoutes.post("/:id/request-signing-keys", requireTenantId, async (c) => {
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Request signing key rotation");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.req.param("id") as string;
+  const body = await safeJsonParse<{ name?: unknown }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+
+  const keyId = randomUUID();
+  const generated = generateRequestSigningSecret();
+  const encrypted = encryptRequestSigningSecret(tenantId, keyId, generated.secret);
+  const retiringExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: c.get("userId") ?? tenantId,
+    action: "tenant.request_signing_key.rotate.authorized",
+    resourceType: "tenant_request_signing_key",
+    resourceId: keyId,
+    metadata: { name: normalizeRequestSigningKeyName(body.name) },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
+  const previousKeys = await snapshotTenantRequestSigningKeys(tenantId);
+  const [inserted] = await db.transaction(async (tx) => {
+    await tx
+      .update(tenantRequestSigningKeys)
+      .set({ status: "retiring", expiresAt: retiringExpiresAt, updatedAt: new Date() })
+      .where(
+        and(
+          eq(tenantRequestSigningKeys.tenantId, tenantId),
+          eq(tenantRequestSigningKeys.status, "active"),
+        ),
+      );
+    return tx
+      .insert(tenantRequestSigningKeys)
+      .values({
+        id: keyId,
+        tenantId,
+        name: normalizeRequestSigningKeyName(body.name),
+        secretCiphertext: encrypted.ciphertext,
+        secretIv: encrypted.iv,
+        secretAuthTag: encrypted.tag,
+        secretSalt: encrypted.salt,
+        secretPrefix: generated.prefix,
+        status: "active",
+      })
+      .returning();
+  });
+
+  try {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? tenantId,
+      action: "tenant.request_signing_key.rotate",
+      resourceType: "tenant_request_signing_key",
+      resourceId: inserted.id,
+      metadata: { previousKeysRetireAt: retiringExpiresAt },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+  } catch (error) {
+    await restoreTenantRequestSigningKeys(tenantId, previousKeys);
+    throw error;
+  }
+
+  return c.json<ApiResponse<TenantRequestSigningKeyCreateResult>>(
+    {
+      ok: true,
+      data: {
+        key: serializeTenantRequestSigningKey(inserted),
+        signingSecret: generated.secret,
+      },
+    },
+    201,
+  );
+});
+
+tenantConfigRoutes.delete("/:id/request-signing-keys/:keyId", requireTenantId, async (c) => {
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Request signing key revocation");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.req.param("id") as string;
+  const keyId = c.req.param("keyId");
+  if (!keyId) return c.json<ApiResponse>({ ok: false, error: "Invalid signing key id" }, 400);
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: c.get("userId") ?? tenantId,
+    action: "tenant.request_signing_key.revoke.authorized",
+    resourceType: "tenant_request_signing_key",
+    resourceId: keyId,
+    metadata: {},
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
+  const previousKeys = await snapshotTenantRequestSigningKeys(tenantId);
+  const [row] = await db
+    .update(tenantRequestSigningKeys)
+    .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(eq(tenantRequestSigningKeys.tenantId, tenantId), eq(tenantRequestSigningKeys.id, keyId)),
+    )
+    .returning();
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "request signing key not found" }, 404);
+
+  try {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? tenantId,
+      action: "tenant.request_signing_key.revoke",
+      resourceType: "tenant_request_signing_key",
+      resourceId: row.id,
+      metadata: {},
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+  } catch (error) {
+    await restoreTenantRequestSigningKeys(tenantId, previousKeys);
+    throw error;
+  }
+
+  return c.json<ApiResponse<{ key: TenantRequestSigningKey }>>({
+    ok: true,
+    data: { key: serializeTenantRequestSigningKey(row) },
+  });
+});
+
 // ─── Tenant-admin gas sponsorship / paymaster config ────────────────────────
 
 tenantConfigRoutes.get("/:id/gas-sponsorship", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Gas sponsorship config access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Gas sponsorship config access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1697,7 +2307,7 @@ tenantConfigRoutes.get("/:id/gas-sponsorship", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.patch("/:id/gas-sponsorship", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Gas sponsorship config updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Gas sponsorship config updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1796,7 +2406,7 @@ tenantConfigRoutes.patch("/:id/gas-sponsorship", requireTenantId, async (c) => {
 // ─── App access allowlist aliases for tenant login controls ─────────────────
 
 tenantConfigRoutes.get("/:id/access-allowlist", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Access allowlist access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Access allowlist access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1808,7 +2418,7 @@ tenantConfigRoutes.get("/:id/access-allowlist", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.post("/:id/access-allowlist", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Access allowlist updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Access allowlist updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1887,7 +2497,7 @@ tenantConfigRoutes.post("/:id/access-allowlist", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.delete("/:id/access-allowlist", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Access allowlist updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Access allowlist updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1983,7 +2593,7 @@ tenantConfigRoutes.delete("/:id/access-allowlist", requireTenantId, async (c) =>
 // ─── Redirect URL aliases for tenant OAuth/email callback allowlists ─────────
 
 tenantConfigRoutes.get("/:id/redirect-urls", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Redirect URL access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Redirect URL access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -1992,7 +2602,7 @@ tenantConfigRoutes.get("/:id/redirect-urls", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.post("/:id/redirect-urls", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Redirect URL updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Redirect URL updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2050,7 +2660,7 @@ tenantConfigRoutes.post("/:id/redirect-urls", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.delete("/:id/redirect-urls", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Redirect URL updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Redirect URL updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2108,7 +2718,7 @@ tenantConfigRoutes.delete("/:id/redirect-urls", requireTenantId, async (c) => {
 // ─── App origin aliases for tenant allowed origins ────────────────────────
 
 tenantConfigRoutes.get("/:id/app-origins", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App origin access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App origin access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2117,7 +2727,7 @@ tenantConfigRoutes.get("/:id/app-origins", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.post("/:id/app-origins", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App origin updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App origin updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2179,7 +2789,7 @@ tenantConfigRoutes.post("/:id/app-origins", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.delete("/:id/app-origins", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App origin updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App origin updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2241,7 +2851,7 @@ tenantConfigRoutes.delete("/:id/app-origins", requireTenantId, async (c) => {
 // ─── App clients / environments ─────────────────────────────────────────────
 
 tenantConfigRoutes.get("/:id/app-clients", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App client access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App client access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2250,7 +2860,7 @@ tenantConfigRoutes.get("/:id/app-clients", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.put("/:id/app-clients", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App client updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App client updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2301,7 +2911,7 @@ tenantConfigRoutes.put("/:id/app-clients", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.post("/:id/app-clients", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App client updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App client updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2382,7 +2992,7 @@ tenantConfigRoutes.post("/:id/app-clients", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.get("/:id/app-clients/:clientId/secrets", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App client secret access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App client secret access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2408,7 +3018,7 @@ tenantConfigRoutes.get("/:id/app-clients/:clientId/secrets", requireTenantId, as
 });
 
 tenantConfigRoutes.post("/:id/app-clients/:clientId/secrets", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App client secret rotation");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App client secret rotation");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2497,7 +3107,7 @@ tenantConfigRoutes.delete(
   "/:id/app-clients/:clientId/secrets/:secretId",
   requireTenantId,
   async (c) => {
-    const mfaResponse = requireRecentTenantAdminMfa(c, "App client secret revocation");
+    const mfaResponse = await requireRecentTenantAdminMfa(c, "App client secret revocation");
     if (mfaResponse) return mfaResponse;
 
     const tenantId = c.req.param("id") as string;
@@ -2560,7 +3170,7 @@ tenantConfigRoutes.delete(
 );
 
 tenantConfigRoutes.delete("/:id/app-clients/:clientId", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "App client updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "App client updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2612,7 +3222,7 @@ tenantConfigRoutes.delete("/:id/app-clients/:clientId", requireTenantId, async (
 // ─── Tenant-admin test account credentials ──────────────────────────────────
 
 tenantConfigRoutes.get("/:id/test-account", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Test account access");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Test account access");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2628,7 +3238,7 @@ tenantConfigRoutes.get("/:id/test-account", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.post("/:id/test-account", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Test account updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Test account updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2680,7 +3290,7 @@ tenantConfigRoutes.post("/:id/test-account", requireTenantId, async (c) => {
 });
 
 tenantConfigRoutes.delete("/:id/test-account", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Test account updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Test account updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -2733,7 +3343,7 @@ tenantConfigRoutes.delete("/:id/test-account", requireTenantId, async (c) => {
 // ─── PUT /tenants/:id/config — update tenant control plane config ─────────────
 
 tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Tenant config updates");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Tenant config updates");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;
@@ -3030,7 +3640,7 @@ tenantConfigRoutes.get("/:id/config/templates", requireTenantId, async (c) => {
 // ─── POST /tenants/:id/config/templates/:name/apply — apply template to agent ─
 
 tenantConfigRoutes.post("/:id/config/templates/:name/apply", requireTenantId, async (c) => {
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Policy template application");
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Policy template application");
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.req.param("id") as string;

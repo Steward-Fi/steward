@@ -11,6 +11,7 @@
  *   { ok: true, data: T }  |  { ok: false, error: string }
  */
 
+import { randomBytes } from "node:crypto";
 import {
   generateApiKey,
   hashSha256Hex,
@@ -36,6 +37,7 @@ import {
   secretRoutes,
   secrets,
   tenantConfigs,
+  tenantInvitations,
   tenants,
   toPersistedPolicyRule,
   transactions,
@@ -70,9 +72,10 @@ import {
   redactedTestAccount,
 } from "../services/test-account-credentials";
 import { dispatchWebhook } from "../services/webhook-dispatch";
-import { invalidateEmailAuthForTenant } from "./auth";
+import { getEmailAuthForTenant, invalidateEmailAuthForTenant } from "./auth";
 
 const TENANT_MEMBER_ROLES = new Set(["owner", "admin", "member"]);
+const TENANT_INVITATION_ROLES = new Set(["admin", "developer", "billing", "viewer", "member"]);
 const MAX_PLATFORM_AGENT_TOKEN_SECONDS = 7 * 24 * 60 * 60;
 const PLATFORM_AUDIT_TENANT_ID = "platform";
 const MAX_PLATFORM_LIST_LIMIT = 200;
@@ -172,6 +175,26 @@ function normalizeTenantMemberRole(role: string | undefined): "owner" | "admin" 
     throw new Error("role must be one of: owner, admin, member");
   }
   return normalized as "owner" | "admin" | "member";
+}
+
+function normalizeTenantInvitationRole(
+  role: string | undefined,
+): "admin" | "developer" | "billing" | "viewer" | "member" {
+  const normalized = (role ?? "member").trim().toLowerCase();
+  if (!TENANT_INVITATION_ROLES.has(normalized)) {
+    throw new Error("role must be one of: admin, developer, billing, viewer, member");
+  }
+  return normalized as "admin" | "developer" | "billing" | "viewer" | "member";
+}
+
+function normalizeInvitationExpiry(value: unknown): Date {
+  const maxSeconds = 30 * 24 * 60 * 60;
+  const defaultSeconds = 7 * 24 * 60 * 60;
+  const seconds =
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0
+      ? Math.min(value, maxSeconds)
+      : defaultSeconds;
+  return new Date(Date.now() + seconds * 1000);
 }
 
 async function activeTenantOwnerCount(
@@ -3190,6 +3213,259 @@ platform.get("/tenants/:id/members", async (c) => {
     .offset(offset);
 
   return c.json<ApiResponse<typeof members>>({ ok: true, data: members });
+});
+
+/**
+ * GET /tenants/:id/invitations
+ * List pending/accepted/revoked invitations for a tenant.
+ */
+platform.get("/tenants/:id/invitations", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-member:read");
+  if (scopeResponse) return scopeResponse;
+
+  const tenantId = c.req.param("id");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const status = c.req.query("status")?.trim().toLowerCase() || "pending";
+  if (!["pending", "accepted", "revoked", "expired", "all"].includes(status)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid invitation status" }, 400);
+  }
+
+  const filters = [eq(tenantInvitations.tenantId, tenantId)];
+  if (status !== "all") filters.push(eq(tenantInvitations.status, status));
+  const rows = await getDb()
+    .select({
+      id: tenantInvitations.id,
+      tenantId: tenantInvitations.tenantId,
+      email: tenantInvitations.email,
+      role: tenantInvitations.role,
+      status: tenantInvitations.status,
+      invitedByUserId: tenantInvitations.invitedByUserId,
+      acceptedByUserId: tenantInvitations.acceptedByUserId,
+      acceptedAt: tenantInvitations.acceptedAt,
+      revokedAt: tenantInvitations.revokedAt,
+      expiresAt: tenantInvitations.expiresAt,
+      createdAt: tenantInvitations.createdAt,
+      updatedAt: tenantInvitations.updatedAt,
+    })
+    .from(tenantInvitations)
+    .where(and(...filters))
+    .limit(parseListLimit(c.req.query("limit"), 100))
+    .offset(parseListOffset(c.req.query("offset")));
+
+  return c.json<ApiResponse<{ invitations: typeof rows }>>({
+    ok: true,
+    data: { invitations: rows },
+  });
+});
+
+/**
+ * POST /tenants/:id/invitations
+ * Create a single-use invitation token. Tokens are returned once and stored
+ * hashed, so callers must deliver the token through their own email channel.
+ */
+platform.post("/tenants/:id/invitations", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-member:write");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const body = await safeJsonParse<{
+    email: string;
+    role?: string;
+    expiresInSeconds?: number;
+    invitedByUserId?: string;
+    sendEmail?: boolean;
+  }>(c);
+  if (!body || !isNonEmptyString(body.email)) {
+    return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
+  }
+
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const email = body.email.toLowerCase().trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return c.json<ApiResponse>({ ok: false, error: "valid email is required" }, 400);
+  }
+  let role: ReturnType<typeof normalizeTenantInvitationRole>;
+  try {
+    role = normalizeTenantInvitationRole(body.role);
+  } catch (err) {
+    return c.json<ApiResponse>(
+      { ok: false, error: err instanceof Error ? err.message : "Invalid role" },
+      400,
+    );
+  }
+
+  const token = randomBytes(32).toString("hex");
+  const tokenHash = hashSha256Hex(token);
+  const expiresAt = normalizeInvitationExpiry(body.expiresInSeconds);
+  let invitedByUserId: string | null = null;
+  if (body.invitedByUserId !== undefined) {
+    if (!isValidUserId(body.invitedByUserId)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "invitedByUserId must be a valid user id" },
+        400,
+      );
+    }
+    const [inviterMembership] = await db
+      .select({ userId: userTenants.userId })
+      .from(userTenants)
+      .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, body.invitedByUserId)))
+      .limit(1);
+    if (!inviterMembership) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "invitedByUserId must belong to the tenant" },
+        400,
+      );
+    }
+    invitedByUserId = body.invitedByUserId;
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.invitation.create.authorized",
+    resourceType: "tenant_invitation",
+    resourceId: email,
+    metadata: { email, role, expiresAt: expiresAt.toISOString() },
+    ...auditCtx(c),
+  });
+
+  const invitation = await db.transaction(async (tx) => {
+    const now = new Date();
+    await tx
+      .update(tenantInvitations)
+      .set({ status: "revoked", revokedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(tenantInvitations.tenantId, tenantId),
+          eq(tenantInvitations.email, email),
+          eq(tenantInvitations.status, "pending"),
+        ),
+      );
+
+    const [created] = await tx
+      .insert(tenantInvitations)
+      .values({ tenantId, email, role, tokenHash, invitedByUserId, expiresAt })
+      .returning({
+        id: tenantInvitations.id,
+        tenantId: tenantInvitations.tenantId,
+        email: tenantInvitations.email,
+        role: tenantInvitations.role,
+        status: tenantInvitations.status,
+        expiresAt: tenantInvitations.expiresAt,
+        createdAt: tenantInvitations.createdAt,
+      });
+    return created;
+  });
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.invitation.create",
+    resourceType: "tenant_invitation",
+    resourceId: invitation.id,
+    metadata: { email, role, expiresAt: expiresAt.toISOString() },
+    ...auditCtx(c),
+  });
+
+  let emailSent = false;
+  if (body.sendEmail === true) {
+    try {
+      const emailAuth = await getEmailAuthForTenant(tenantId);
+      await emailAuth.sendTenantInvitation(email, { tenantId, token, expiresAt });
+      emailSent = true;
+    } catch (error) {
+      console.error("[TenantInvitation] Email delivery failed:", error);
+    }
+  }
+
+  return c.json<ApiResponse<{ invitation: typeof invitation; token: string; emailSent: boolean }>>(
+    { ok: true, data: { invitation, token, emailSent } },
+    201,
+  );
+});
+
+/**
+ * DELETE /tenants/:id/invitations/:invitationId
+ * Revoke a pending invitation.
+ */
+platform.delete("/tenants/:id/invitations/:invitationId", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-member:write");
+  if (scopeResponse) return scopeResponse;
+
+  const tenantId = c.req.param("id");
+  const invitationId = c.req.param("invitationId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidUserId(invitationId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid invitation id format" }, 400);
+  }
+
+  const db = getDb();
+  const [candidate] = await db
+    .select({
+      id: tenantInvitations.id,
+      email: tenantInvitations.email,
+      role: tenantInvitations.role,
+    })
+    .from(tenantInvitations)
+    .where(
+      and(
+        eq(tenantInvitations.tenantId, tenantId),
+        eq(tenantInvitations.id, invitationId),
+        eq(tenantInvitations.status, "pending"),
+      ),
+    )
+    .limit(1);
+  if (!candidate) {
+    return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.invitation.revoke.authorized",
+    resourceType: "tenant_invitation",
+    resourceId: candidate.id,
+    metadata: { email: candidate.email, role: candidate.role },
+    ...auditCtx(c),
+  });
+
+  const [invitation] = await db
+    .update(tenantInvitations)
+    .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+    .where(
+      and(
+        eq(tenantInvitations.tenantId, tenantId),
+        eq(tenantInvitations.id, invitationId),
+        eq(tenantInvitations.status, "pending"),
+      ),
+    )
+    .returning({
+      id: tenantInvitations.id,
+      email: tenantInvitations.email,
+      role: tenantInvitations.role,
+    });
+  if (!invitation) {
+    return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
+  }
+
+  return c.json<ApiResponse>({ ok: true });
 });
 
 /**

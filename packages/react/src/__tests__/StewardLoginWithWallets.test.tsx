@@ -90,6 +90,19 @@ describe("<StewardLoginWithWallets />", () => {
     expect(opts.chains?.map((chain) => chain.id)).toContain(100);
   });
 
+  test("forwards extra EVM wallet entries into the default wagmi config", () => {
+    const stewardWallet = () => ({ id: "steward-global" });
+    renderToString(
+      React.createElement(StewardLoginWithWallets, {
+        evm: { projectId: "p", wallets: [stewardWallet] },
+      }),
+    );
+    const opts = mockCreateDefaultWagmiConfig.mock.calls.at(-1)?.[0] as {
+      wallets?: unknown[];
+    };
+    expect(opts.wallets).toEqual([stewardWallet]);
+  });
+
   test("enable={{ evm: false }} skips EVM wrap", () => {
     const html = renderToString(
       React.createElement(StewardLoginWithWallets, {

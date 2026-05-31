@@ -1,15 +1,23 @@
 "use client";
 
-import type { UserAccountSummary, UserAccountsResult, UserLinkedAccount } from "@stwd/sdk";
+import type {
+  GlobalWalletConsent,
+  UserAccountSummary,
+  UserAccountsResult,
+  UserLinkedAccount,
+} from "@stwd/sdk";
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { steward } from "@/lib/api";
-import { formatDate, shortenAddress } from "@/lib/utils";
+import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
 type LoadState = {
   accounts: UserAccountsResult | null;
   summary: UserAccountSummary | null;
+  globalWalletConsents: GlobalWalletConsent[];
 };
+
+type PortfolioAsset = NonNullable<UserAccountSummary["portfolio"]["native"]>;
 
 const providerLabels: Record<string, string> = {
   discord: "Discord",
@@ -74,6 +82,23 @@ function providerTone(provider: string): string {
   }
 }
 
+function formatUsd(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "Unavailable";
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return String(value);
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: numeric >= 1 ? 2 : 6,
+  }).format(numeric);
+}
+
+function formatPortfolioAssetValue(asset: PortfolioAsset): string {
+  if (asset.usdValueText) return formatUsd(asset.usdValueText);
+  if (asset.usdValue !== null) return formatUsd(asset.usdValue);
+  return "No USD price";
+}
+
 function Stat({
   label,
   value,
@@ -130,19 +155,48 @@ function MethodRow({
   );
 }
 
+function PortfolioAssetRow({ asset }: { asset: PortfolioAsset }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-[1fr_180px_160px] gap-3 py-4 border-b border-border-subtle last:border-b-0">
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-text-secondary truncate">{asset.symbol}</div>
+        <div className="font-mono text-xs text-text-tertiary mt-1 break-all">{asset.token}</div>
+      </div>
+      <div>
+        <div className="text-xs text-text-tertiary uppercase tracking-wider">Balance</div>
+        <div className="text-sm text-text mt-1 tabular-nums break-all">
+          {asset.formatted} {asset.symbol}
+        </div>
+      </div>
+      <div>
+        <div className="text-xs text-text-tertiary uppercase tracking-wider">USD Value</div>
+        <div className="text-sm text-text mt-1 tabular-nums">
+          {formatPortfolioAssetValue(asset)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function DashboardAccountPage() {
-  const [state, setState] = useState<LoadState>({ accounts: null, summary: null });
+  const [state, setState] = useState<LoadState>({
+    accounts: null,
+    summary: null,
+    globalWalletConsents: [],
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [unlinking, setUnlinking] = useState<string | null>(null);
+  const [revokingConsent, setRevokingConsent] = useState<string | null>(null);
 
   const loadAccount = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const [accounts, summaryResult] = await Promise.allSettled([
+      const [accounts, summaryResult, globalWalletConsents] = await Promise.allSettled([
         steward.listUserAccounts(),
         steward.getUserAccount(),
+        steward.listGlobalWalletConsents(),
       ]);
 
       if (accounts.status === "rejected") throw accounts.reason;
@@ -150,6 +204,8 @@ export default function DashboardAccountPage() {
       setState({
         accounts: accounts.value,
         summary: summaryResult.status === "fulfilled" ? summaryResult.value : null,
+        globalWalletConsents:
+          globalWalletConsents.status === "fulfilled" ? globalWalletConsents.value.consents : [],
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load account");
@@ -165,7 +221,18 @@ export default function DashboardAccountPage() {
   const primaryMethods = state.accounts?.primaryLoginMethods ?? [];
   const linkedAccounts = state.accounts?.accounts ?? [];
   const userWallets = state.summary?.wallets ?? [];
-  const canUnlink = primaryMethods.length + linkedAccounts.length > 1;
+  const portfolio = state.summary?.portfolio;
+  const nativeAsset = portfolio?.native;
+  const tokenAssets = portfolio?.tokens ?? [];
+  const spend = state.summary?.spend;
+  const capabilities = state.summary?.capabilities ?? [];
+  const unlinkableLinkedAccounts = linkedAccounts.filter(
+    (account) => account.provider !== "cross_app",
+  );
+  const canUnlink = primaryMethods.length + unlinkableLinkedAccounts.length > 1;
+  const activeGlobalWalletConsents = state.globalWalletConsents.filter(
+    (consent) => consent.status === "active",
+  );
 
   const groupedLinkedAccounts = useMemo(() => {
     return linkedAccounts.reduce<Record<string, UserLinkedAccount[]>>((acc, account) => {
@@ -187,6 +254,19 @@ export default function DashboardAccountPage() {
       setError(err instanceof Error ? err.message : "Failed to unlink account");
     } finally {
       setUnlinking(null);
+    }
+  }
+
+  async function revokeGlobalWalletConsent(consent: GlobalWalletConsent) {
+    try {
+      setRevokingConsent(consent.id);
+      setError(null);
+      await steward.revokeGlobalWalletConsent(consent.id);
+      await loadAccount();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to revoke global wallet grant");
+    } finally {
+      setRevokingConsent(null);
     }
   }
 
@@ -255,6 +335,81 @@ export default function DashboardAccountPage() {
       </div>
 
       <section>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-5">
+          <h2 className="font-display text-lg font-600">Portfolio</h2>
+          <span className="text-xs text-text-tertiary">
+            {portfolio?.chainId ? `Chain ${portfolio.chainId}` : "Best effort"}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border mb-5">
+          <Stat
+            label="Total USD"
+            value={formatUsd(portfolio?.totalUsdText ?? portfolio?.totalUsd)}
+            detail={
+              portfolio?.walletAddress ? shortenAddress(portfolio.walletAddress, 6) : "No wallet"
+            }
+          />
+          <Stat
+            label="Native balance"
+            value={
+              nativeAsset
+                ? `${nativeAsset.formatted} ${nativeAsset.symbol}`
+                : portfolio?.unavailableReason
+                  ? "Unavailable"
+                  : "None"
+            }
+            detail={
+              nativeAsset ? formatPortfolioAssetValue(nativeAsset) : portfolio?.unavailableReason
+            }
+          />
+          <Stat
+            label="Token assets"
+            value={tokenAssets.length}
+            detail={tokenAssets.length === 1 ? "One tracked token" : "Tracked tokens"}
+          />
+        </div>
+        <div className="border-t border-border-subtle">
+          {nativeAsset && <PortfolioAssetRow asset={nativeAsset} />}
+          {tokenAssets.map((asset) => (
+            <PortfolioAssetRow key={`${asset.token}:${asset.symbol}`} asset={asset} />
+          ))}
+          {!nativeAsset && tokenAssets.length === 0 && (
+            <div className="py-10 text-sm text-text-tertiary">
+              {portfolio?.unavailableReason ?? "No portfolio assets returned"}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-5">
+          <h2 className="font-display text-lg font-600">Spend and Capabilities</h2>
+          <span className="text-xs text-text-tertiary">
+            {state.summary?.sponsorship.enabled ? "Gas sponsorship enabled" : "Gas sponsorship off"}
+          </span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border mb-5">
+          <Stat label="Today" value={formatWei(spend?.todayWei ?? "0", "ETH")} />
+          <Stat label="This week" value={formatWei(spend?.weekWei ?? "0", "ETH")} />
+          <Stat label="This month" value={formatWei(spend?.monthWei ?? "0", "ETH")} />
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {capabilities.length === 0 ? (
+            <span className="text-sm text-text-tertiary">No wallet capabilities returned</span>
+          ) : (
+            capabilities.map((capability) => (
+              <span
+                key={capability}
+                className="border border-border-subtle px-2.5 py-1 text-xs text-text-secondary font-mono"
+              >
+                {capability}
+              </span>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section>
         <div className="flex items-center justify-between mb-5">
           <h2 className="font-display text-lg font-600">Primary Login Methods</h2>
           <span className="text-xs text-text-tertiary">Cannot be removed here</span>
@@ -300,18 +455,67 @@ export default function DashboardAccountPage() {
                       expiresAt={account.expiresAt}
                       busy={unlinking === key}
                       action={
-                        <button
-                          type="button"
-                          onClick={() => void unlink(account)}
-                          disabled={!canUnlink || unlinking === key}
-                          className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-error hover:border-error/50 disabled:opacity-40 disabled:hover:text-text-tertiary disabled:hover:border-border transition-colors"
-                        >
-                          Unlink
-                        </button>
+                        account.provider === "cross_app" ? (
+                          <span className="text-xs text-text-tertiary">Grant-backed</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void unlink(account)}
+                            disabled={!canUnlink || unlinking === key}
+                            className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-error hover:border-error/50 disabled:opacity-40 disabled:hover:text-text-tertiary disabled:hover:border-border transition-colors"
+                          >
+                            Unlink
+                          </button>
+                        )
                       }
                     />
                   );
                 })}
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-5">
+          <h2 className="font-display text-lg font-600">Global Wallet Grants</h2>
+          <span className="text-xs text-text-tertiary">
+            Revocation requires a recent MFA session
+          </span>
+        </div>
+        <div className="border-t border-border-subtle">
+          {activeGlobalWalletConsents.length === 0 ? (
+            <div className="py-10 text-sm text-text-tertiary">No active global wallet grants</div>
+          ) : (
+            activeGlobalWalletConsents.map((consent) => (
+              <div
+                key={consent.id}
+                className="grid grid-cols-1 md:grid-cols-[1fr_180px_120px] gap-3 py-4 border-b border-border-subtle last:border-b-0"
+              >
+                <div className="min-w-0">
+                  <div className="font-mono text-sm text-text break-all">{consent.appId}</div>
+                  <div className="text-xs text-text-tertiary mt-1 break-all">{consent.origin}</div>
+                  <div className="text-xs text-text-tertiary mt-1 font-mono break-all">
+                    {consent.scopes.join(", ")}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs text-text-tertiary uppercase tracking-wider">Granted</div>
+                  <div className="text-sm text-text-secondary mt-1">
+                    {formatDate(String(consent.grantedAt))}
+                  </div>
+                </div>
+                <div className="md:text-right">
+                  <button
+                    type="button"
+                    onClick={() => void revokeGlobalWalletConsent(consent)}
+                    disabled={revokingConsent === consent.id}
+                    className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-error hover:border-error/50 disabled:opacity-40 transition-colors"
+                  >
+                    {revokingConsent === consent.id ? "Revoking..." : "Revoke"}
+                  </button>
+                </div>
               </div>
             ))
           )}

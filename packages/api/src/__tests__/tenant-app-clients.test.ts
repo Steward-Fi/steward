@@ -21,6 +21,8 @@ describe("tenant app clients hardening", () => {
     expect(schema).toContain(
       'allowedRedirectUrls: text("allowed_redirect_urls").array().notNull().default([])',
     );
+    expect(schema).toContain('globalWalletEnabled: boolean("global_wallet_enabled")');
+    expect(schema).toContain('globalWalletAllowedScopes: text("global_wallet_allowed_scopes")');
     expect(migration).toContain('CREATE TABLE IF NOT EXISTS "tenant_app_clients"');
     expect(migration).toContain('"tenant_id" varchar(64) NOT NULL REFERENCES "tenants"("id")');
     expect(migration).toContain('"allowed_redirect_urls" text[] DEFAULT');
@@ -37,7 +39,26 @@ describe("tenant app clients hardening", () => {
     expect(source).toContain("normalizeTenantAppClients");
     expect(source).toContain("normalizeAllowedOrigins(raw.allowedOrigins ?? [])");
     expect(source).toContain("normalizeAllowedRedirectUrls(raw.allowedRedirectUrls ?? [])");
+    expect(source).toContain("globalWalletAllowedScopes");
     expect(source).toContain("allowedOrigins cannot include wildcard");
+  });
+
+  it("adds provider-side global wallet app-client and consent storage foundations", () => {
+    const schema = read("packages/db/src/schema.ts");
+    const authSchema = read("packages/db/src/schema-auth.ts");
+    const migration = read("packages/db/drizzle/0057_global_wallet_consents.sql");
+    const sharedTypes = read("packages/shared/src/index.ts");
+    const sdkTypes = read("packages/sdk/src/types.ts");
+
+    expect(schema).toContain('globalWalletEnabled: boolean("global_wallet_enabled")');
+    expect(schema).toContain('globalWalletAllowedScopes: text("global_wallet_allowed_scopes")');
+    expect(authSchema).toContain("export const userWalletAppConsents");
+    expect(authSchema).toContain("user_wallet_app_consents_active_unique_idx");
+    expect(authSchema).toContain("user_wallet_app_consents_app_client_fk");
+    expect(migration).toContain('CREATE TABLE IF NOT EXISTS "user_wallet_app_consents"');
+    expect(migration).toContain('"global_wallet_enabled" boolean DEFAULT false NOT NULL');
+    expect(sharedTypes).toContain("globalWalletEnabled?: boolean");
+    expect(sdkTypes).toContain("globalWalletAllowedScopes?: string[]");
   });
 
   it("audits app-client create/delete authorization before mutation and rolls back on final audit failure", () => {
@@ -130,6 +151,61 @@ describe("tenant app clients hardening", () => {
     expect(context).toContain("App secret auth requires Basic auth and X-Steward-App-Id");
   });
 
+  it("keeps app access allowlist aliases MFA-gated, tenant-isolated, normalized, and batch-safe", () => {
+    const tenantConfig = read("packages/api/src/routes/tenant-config.ts");
+
+    for (const [marker, mfaReason] of [
+      ['tenantConfigRoutes.get("/:id/access-allowlist"', "Access allowlist access"],
+      ['tenantConfigRoutes.post("/:id/access-allowlist"', "Access allowlist updates"],
+      ['tenantConfigRoutes.delete("/:id/access-allowlist"', "Access allowlist updates"],
+    ] as const) {
+      const start = tenantConfig.indexOf(marker);
+      expect(start).toBeGreaterThanOrEqual(0);
+      const nextRoute = tenantConfig.indexOf("\ntenantConfigRoutes.", start + marker.length);
+      const route = tenantConfig.slice(start, nextRoute === -1 ? undefined : nextRoute);
+
+      expect(route).toContain(`${marker}, requireTenantId`);
+      expect(route).toContain(`requireRecentTenantAdminMfa(c, "${mfaReason}")`);
+      expect(route.indexOf("requireRecentTenantAdminMfa")).toBeLessThan(
+        route.indexOf('c.req.param("id")'),
+      );
+      expect(route).toContain("tenantId");
+    }
+
+    expect(tenantConfig).toContain(
+      'const ACCESS_ALLOWLIST_TYPES = new Set(["email", "email_domain", "wallet", "phone"] as const)',
+    );
+    expect(tenantConfig).toContain("function normalizeAccessAllowlistEntry");
+    expect(tenantConfig).toContain("normalizeAuthAbuseConfig(candidate)");
+    expect(tenantConfig).toContain("function normalizeAccessAllowlistEntries");
+    expect(tenantConfig).toContain("const values = Array.isArray(value) ? value : [value]");
+    expect(tenantConfig).toContain("readAuthAbuseConfigForTenant(tenantId)");
+    expect(tenantConfig).toContain("persistAuthAbuseConfigForTenant(tenantId, next)");
+    expect(tenantConfig).toContain("toAccessAllowlistEntries(tenantId, persisted)");
+
+    const postStart = tenantConfig.indexOf('tenantConfigRoutes.post("/:id/access-allowlist"');
+    const deleteStart = tenantConfig.indexOf('tenantConfigRoutes.delete("/:id/access-allowlist"');
+    const postRoute = tenantConfig.slice(postStart, deleteStart);
+    const deleteRoute = tenantConfig.slice(deleteStart);
+    expect(postRoute).toContain("body.entries !== undefined");
+    expect(postRoute).toContain("normalizeAccessAllowlistEntries(rawEntries)");
+    expect(postRoute).toContain('action: "tenant.access_allowlist.add.authorized"');
+    expect(postRoute).toContain('action: "tenant.access_allowlist.add"');
+    expect(postRoute).toContain(
+      "const previousConfigRow = await snapshotTenantConfigRow(tenantId)",
+    );
+    expect(postRoute).toContain("await restoreTenantConfigRow(tenantId, previousConfigRow)");
+    expect(deleteRoute).toContain("body.ids !== undefined");
+    expect(deleteRoute).toContain("body.entries !== undefined");
+    expect(deleteRoute).toContain("removeAccessAllowlistEntriesFromConfig(tenantId, current");
+    expect(deleteRoute).toContain('action: "tenant.access_allowlist.remove.authorized"');
+    expect(deleteRoute).toContain('action: "tenant.access_allowlist.remove"');
+    expect(deleteRoute).toContain(
+      "const previousConfigRow = await snapshotTenantConfigRow(tenantId)",
+    );
+    expect(deleteRoute).toContain("await restoreTenantConfigRow(tenantId, previousConfigRow)");
+  });
+
   it("rolls back app-client secret mutations when final audits fail", () => {
     const tenantConfig = read("packages/api/src/routes/tenant-config.ts");
 
@@ -154,5 +230,34 @@ describe("tenant app clients hardening", () => {
         "await restoreTenantAppClientSecrets(tenantId, clientId, previousSecrets)",
       );
     }
+  });
+
+  it("adds encrypted tenant request-signing keys with MFA, audit, and rollback", () => {
+    const schema = read("packages/db/src/schema.ts");
+    const migration = read("packages/db/drizzle/0056_tenant_request_signing_keys.sql");
+    const tenantConfig = read("packages/api/src/routes/tenant-config.ts");
+    const middleware = read("packages/api/src/middleware/authorization-signature.ts");
+    const sdk = read("packages/sdk/src/client.ts");
+
+    expect(schema).toContain("export const tenantRequestSigningKeys");
+    expect(migration).toContain('CREATE TABLE IF NOT EXISTS "tenant_request_signing_keys"');
+    expect(migration).toContain('"secret_ciphertext" text NOT NULL');
+    expect(tenantConfig).toContain('tenantConfigRoutes.get("/:id/request-signing-keys"');
+    expect(tenantConfig).toContain('tenantConfigRoutes.post("/:id/request-signing-keys"');
+    expect(tenantConfig).toContain('tenantConfigRoutes.delete("/:id/request-signing-keys/:keyId"');
+    expect(tenantConfig).toContain("requestSigningKeyStore().encrypt");
+    expect(tenantConfig).toContain("signingSecret: generated.secret");
+    expect(tenantConfig).toContain("tenant.request_signing_key.rotate.authorized");
+    expect(tenantConfig).toContain("tenant.request_signing_key.rotate");
+    expect(tenantConfig).toContain("tenant.request_signing_key.revoke.authorized");
+    expect(tenantConfig).toContain("tenant.request_signing_key.revoke");
+    expect(tenantConfig).toContain("restoreTenantRequestSigningKeys");
+    expect(middleware).toContain("tenantRequestSigningKeyCandidates");
+    expect(middleware).toContain("X-Steward-Signing-Key-Id");
+    expect(middleware).toContain("keyStore.decrypt");
+    expect(sdk).toContain("listTenantRequestSigningKeys");
+    expect(sdk).toContain("rotateTenantRequestSigningKey");
+    expect(sdk).toContain("revokeTenantRequestSigningKey");
+    expect(sdk).toContain("requestSigningKeyId");
   });
 });

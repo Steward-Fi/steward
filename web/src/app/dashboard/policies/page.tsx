@@ -1,10 +1,22 @@
 "use client";
 
-import type { AgentIdentity, PolicyRule, PolicySimulateResult, PolicyTemplate } from "@stwd/sdk";
+import type {
+  AgentIdentity,
+  ConditionSet,
+  ConditionSetItem,
+  PolicyRule,
+  PolicySimulateResult,
+  PolicyTemplate,
+} from "@stwd/sdk";
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useState } from "react";
 import { steward } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
+
+function randomIdempotencyKey(prefix: string): string {
+  if (typeof crypto.randomUUID === "function") return `${prefix}:${crypto.randomUUID()}`;
+  return `${prefix}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard-local policy shape.
@@ -160,6 +172,7 @@ function typeColor(type: PolicyRecord["type"]) {
 export default function PoliciesPage() {
   const [policies, setPolicies] = useState<PolicyRecord[]>([]);
   const [agents, setAgents] = useState<AgentIdentity[]>([]);
+  const [conditionSets, setConditionSets] = useState<ConditionSet[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -205,6 +218,15 @@ export default function PoliciesPage() {
   const [simResult, setSimResult] = useState<PolicySimulateResult | null>(null);
   const [simulating, setSimulating] = useState(false);
 
+  // Condition sets
+  const [conditionSetName, setConditionSetName] = useState("");
+  const [conditionSetDescription, setConditionSetDescription] = useState("");
+  const [conditionSetItems, setConditionSetItems] = useState("");
+  const [conditionSetLoading, setConditionSetLoading] = useState(false);
+  const [conditionSetSaving, setConditionSetSaving] = useState(false);
+  const [conditionSetError, setConditionSetError] = useState<string | null>(null);
+  const [selectedConditionSetId, setSelectedConditionSetId] = useState<string | null>(null);
+
   // Delete
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -219,9 +241,17 @@ export default function PoliciesPage() {
     try {
       setLoading(true);
       setError(null);
-      const [p, a] = await Promise.all([steward.listPolicyTemplates(), steward.listAgents()]);
+      const [p, a, conditionSetRows] = await Promise.all([
+        steward.listPolicyTemplates(),
+        steward.listAgents(),
+        steward.listConditionSets(),
+      ]);
       setPolicies(p.map(fromTemplate));
       setAgents(a);
+      setConditionSets(conditionSetRows);
+      if (!selectedConditionSetId && conditionSetRows[0]) {
+        void loadConditionSetItems(conditionSetRows[0].id);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to load policies");
     } finally {
@@ -231,7 +261,83 @@ export default function PoliciesPage() {
 
   useEffect(() => {
     loadAll();
-  }, [loadAll]);
+  }, []);
+
+  async function loadConditionSetItems(conditionSetId: string) {
+    setSelectedConditionSetId(conditionSetId);
+    setConditionSetLoading(true);
+    setConditionSetError(null);
+    try {
+      const items = await steward.listConditionSetItems(conditionSetId);
+      setConditionSetItems(items.map((item) => item.value).join("\n"));
+    } catch (e: unknown) {
+      setConditionSetError(e instanceof Error ? e.message : "Failed to load condition set items");
+    } finally {
+      setConditionSetLoading(false);
+    }
+  }
+
+  function conditionSetItemsFromText(): Array<{ value: string }> {
+    return Array.from(
+      new Set(
+        conditionSetItems
+          .split(/[\n,]/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    ).map((value) => ({ value }));
+  }
+
+  async function handleCreateConditionSet(e: React.FormEvent) {
+    e.preventDefault();
+    if (!conditionSetName.trim()) return;
+    setConditionSetSaving(true);
+    setConditionSetError(null);
+    try {
+      const created = await steward.createConditionSet(
+        {
+          name: conditionSetName.trim(),
+          description: conditionSetDescription.trim() || undefined,
+          ownerId: "dashboard",
+        },
+        { idempotencyKey: randomIdempotencyKey("condition-set-create") },
+      );
+      const items = conditionSetItemsFromText();
+      if (items.length > 0) {
+        await steward.replaceConditionSetItems(created.id, items, {
+          idempotencyKey: randomIdempotencyKey("condition-set-items-create"),
+        });
+      }
+      setConditionSets((rows) => [created, ...rows]);
+      setSelectedConditionSetId(created.id);
+      setConditionSetName("");
+      setConditionSetDescription("");
+      toast("Condition set created", "success");
+    } catch (e: unknown) {
+      setConditionSetError(e instanceof Error ? e.message : "Failed to create condition set");
+    } finally {
+      setConditionSetSaving(false);
+    }
+  }
+
+  async function handleSaveConditionSetItems() {
+    if (!selectedConditionSetId) return;
+    setConditionSetSaving(true);
+    setConditionSetError(null);
+    try {
+      const items = await steward.replaceConditionSetItems(
+        selectedConditionSetId,
+        conditionSetItemsFromText(),
+        { idempotencyKey: randomIdempotencyKey("condition-set-items-save") },
+      );
+      setConditionSetItems(items.map((item: ConditionSetItem) => item.value).join("\n"));
+      toast("Condition set items saved", "success");
+    } catch (e: unknown) {
+      setConditionSetError(e instanceof Error ? e.message : "Failed to save condition set items");
+    } finally {
+      setConditionSetSaving(false);
+    }
+  }
 
   const openDetail = useCallback((policy: PolicyRecord) => {
     setSelected(policy);
@@ -666,6 +772,117 @@ export default function PoliciesPage() {
           </button>
         </div>
       )}
+
+      {/* Condition sets */}
+      <section className="border border-border bg-bg-elevated p-6 space-y-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              Condition Sets
+            </h2>
+            <p className="text-xs text-text-tertiary mt-1 max-w-2xl">
+              Maintain reusable allow/block lists for policy rules that reference condition-set IDs.
+            </p>
+          </div>
+          {selectedConditionSetId && (
+            <button
+              type="button"
+              onClick={handleSaveConditionSetItems}
+              disabled={conditionSetSaving || conditionSetLoading}
+              className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+            >
+              {conditionSetSaving ? "Saving..." : "Save Items"}
+            </button>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(320px,420px)] gap-5">
+          <div className="space-y-px bg-border">
+            {conditionSets.length === 0 ? (
+              <div className="bg-bg p-5 text-sm text-text-tertiary">
+                {loading ? "Loading condition sets..." : "No condition sets yet"}
+              </div>
+            ) : (
+              conditionSets.map((set) => (
+                <button
+                  key={set.id}
+                  type="button"
+                  onClick={() => loadConditionSetItems(set.id)}
+                  className={`w-full bg-bg p-4 text-left transition-colors ${
+                    selectedConditionSetId === set.id ? "bg-accent-bg" : "hover:bg-bg-surface"
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-text-secondary truncate">
+                        {set.name}
+                      </div>
+                      {set.description && (
+                        <div className="text-xs text-text-tertiary mt-1 truncate">
+                          {set.description}
+                        </div>
+                      )}
+                    </div>
+                    <span className="text-[11px] font-mono text-text-tertiary shrink-0">
+                      {set.id}
+                    </span>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
+
+          <div className="space-y-4">
+            <form
+              onSubmit={handleCreateConditionSet}
+              className="bg-bg border border-border p-4 space-y-3"
+            >
+              <label className="space-y-1.5 block">
+                <span className="text-xs text-text-tertiary block">Name</span>
+                <input
+                  value={conditionSetName}
+                  onChange={(event) => setConditionSetName(event.target.value)}
+                  placeholder="Approved recipients"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                />
+              </label>
+              <label className="space-y-1.5 block">
+                <span className="text-xs text-text-tertiary block">Description</span>
+                <input
+                  value={conditionSetDescription}
+                  onChange={(event) => setConditionSetDescription(event.target.value)}
+                  placeholder="Production transfer allowlist"
+                  className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={conditionSetSaving || !conditionSetName.trim()}
+                className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+              >
+                {conditionSetSaving ? "Creating..." : "Create Set"}
+              </button>
+            </form>
+
+            <label className="space-y-1.5 block">
+              <span className="text-xs text-text-tertiary block">Items</span>
+              <textarea
+                value={conditionSetItems}
+                onChange={(event) => setConditionSetItems(event.target.value)}
+                disabled={!selectedConditionSetId || conditionSetLoading}
+                rows={8}
+                placeholder={
+                  "0x1111111111111111111111111111111111111111\n0x2222222222222222222222222222222222222222"
+                }
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y disabled:opacity-50"
+              />
+            </label>
+            {conditionSetError && (
+              <p className="text-xs text-red-400 font-mono">{conditionSetError}</p>
+            )}
+          </div>
+        </div>
+      </section>
 
       {/* Main: list + detail */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">

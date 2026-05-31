@@ -141,11 +141,13 @@ describe("platform tenant creation", () => {
 
   it("deletes tenant-scoped refresh tokens when deleting a tenant", async () => {
     const tenantId = `${TENANT_ID}-delete`;
-    await getDb().insert(tenants).values({
-      id: tenantId,
-      name: "Platform Tenant Delete",
-      apiKeyHash: `hash-${tenantId}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Platform Tenant Delete",
+        apiKeyHash: `hash-${tenantId}`,
+      });
     await getDb()
       .insert(agents)
       .values({
@@ -185,11 +187,13 @@ describe("platform tenant creation", () => {
   it("rejects invalid batch applyPolicies before creating agents", async () => {
     const tenantId = `${TENANT_ID}-batch`;
     const agentId = `${tenantId}-agent`;
-    await getDb().insert(tenants).values({
-      id: tenantId,
-      name: "Platform Tenant Batch",
-      apiKeyHash: `hash-${tenantId}`,
-    });
+    await getDb()
+      .insert(tenants)
+      .values({
+        id: tenantId,
+        name: "Platform Tenant Batch",
+        apiKeyHash: `hash-${tenantId}`,
+      });
 
     const response = await platformRoutes.request(`/tenants/${tenantId}/agents/batch`, {
       method: "POST",

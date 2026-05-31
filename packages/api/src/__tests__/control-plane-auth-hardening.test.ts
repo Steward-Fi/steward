@@ -28,12 +28,19 @@ describe("control-plane auth hardening", () => {
 
   it("requires recent MFA before tenant admins can read or rotate sensitive login config", () => {
     expect(tenantConfigSource).toContain("function requireRecentTenantAdminMfa");
+    expect(tenantConfigSource).toContain("readTenantMfaPolicy");
+    expect(tenantConfigSource).toContain("tenantMfaMaxAgeMs");
+    expect(tenantConfigSource).toContain("policy.requireFor?.tenantAdmin === false");
+    expect(tenantConfigSource).toContain("hasRecentSessionMfa(c, tenantMfaMaxAgeMs(policy))");
     for (const marker of [
       'tenantConfigRoutes.get("/:id/oidc-providers"',
       'tenantConfigRoutes.put("/:id/oidc-providers"',
       'tenantConfigRoutes.get("/:id/auth-abuse-config"',
       'tenantConfigRoutes.put("/:id/auth-abuse-config"',
       'tenantConfigRoutes.get("/:id/security-checklist"',
+      'tenantConfigRoutes.get("/:id/request-signing-keys"',
+      'tenantConfigRoutes.post("/:id/request-signing-keys"',
+      'tenantConfigRoutes.delete("/:id/request-signing-keys/:keyId"',
       'tenantConfigRoutes.get("/:id/test-account"',
       'tenantConfigRoutes.post("/:id/test-account"',
       'tenantConfigRoutes.delete("/:id/test-account"',
@@ -89,6 +96,11 @@ describe("control-plane auth hardening", () => {
   });
 
   it("does not allow tenant API keys or stale admin sessions to manage persistent webhooks", () => {
+    expect(webhookSource).toContain("function requireRecentTenantAdminMfa");
+    expect(webhookSource).toContain("readTenantMfaPolicy");
+    expect(webhookSource).toContain("tenantMfaMaxAgeMs");
+    expect(webhookSource).toContain("policy.requireFor?.tenantAdmin === false");
+    expect(webhookSource).toContain("hasRecentSessionMfa(c, tenantMfaMaxAgeMs(policy))");
     for (const [source, marker] of [
       [webhookSource, 'webhookRoutes.post("/",'],
       [webhookSource, 'webhookRoutes.put("/:id",'],

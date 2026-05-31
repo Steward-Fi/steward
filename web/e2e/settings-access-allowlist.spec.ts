@@ -36,19 +36,20 @@ test.describe("Dashboard access allowlist controls", () => {
       }
       if (request.method() === "POST") {
         const body = request.postDataJSON() as {
-          type: AccessAllowlistEntry["type"];
-          value: string;
+          entries?: Array<{ type: AccessAllowlistEntry["type"]; value: string }>;
+          type?: AccessAllowlistEntry["type"];
+          value?: string;
         };
-        entries = [
-          ...entries,
-          {
-            id: `${body.type}:${body.value}`,
+        const additions = body.entries ?? [{ type: body.type!, value: body.value! }];
+        entries = entries.concat(
+          additions.map((entry) => ({
+            id: `${entry.type}:${entry.value}`,
             tenantId,
-            type: body.type,
-            value: body.value,
+            type: entry.type,
+            value: entry.value,
             acceptedAt: null,
-          },
-        ];
+          })),
+        );
         await route.fulfill({ json: { ok: true, data: { entries } } });
         return;
       }
@@ -81,10 +82,19 @@ test.describe("Dashboard access allowlist controls", () => {
     });
     await expect(allowlist.getByText("example.test")).toBeVisible();
 
-    await allowlist.getByLabel("Type").selectOption("email");
-    await allowlist.getByLabel("Value").fill("alice@example.test");
+    await allowlist.getByRole("combobox", { name: /^Type$/ }).selectOption("email");
+    const valueInput = allowlist.getByRole("textbox", { name: /^Value$/ });
+    await valueInput.fill("alice@example.test");
+    await expect(valueInput).toHaveValue("alice@example.test");
     await allowlist.getByRole("button", { name: "Add Entry" }).click();
     await expect(allowlist.getByText("alice@example.test")).toBeVisible();
+
+    await allowlist
+      .getByRole("textbox", { name: /^Bulk Entries/ })
+      .fill("email_domain: customer.test\nwallet: 0x0000000000000000000000000000000000000001");
+    await allowlist.getByRole("button", { name: "Add Entry" }).click();
+    await expect(allowlist.getByText("customer.test")).toBeVisible();
+    await expect(allowlist.getByText("0x0000000000000000000000000000000000000001")).toBeVisible();
 
     await allowlist
       .getByRole("row", { name: /alice@example\.test/ })

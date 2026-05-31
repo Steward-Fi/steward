@@ -138,7 +138,10 @@ export function StewardLinkedAccounts({
     void refresh();
   }, [refresh]);
 
-  const canUnlink = primaryMethods.length + linkedAccounts.length > 1;
+  const unlinkableLinkedAccounts = linkedAccounts.filter(
+    (account) => account.provider !== "cross_app",
+  );
+  const canUnlink = primaryMethods.length + unlinkableLinkedAccounts.length > 1;
   const groupedLinkedAccounts = useMemo(() => {
     return linkedAccounts.reduce<Record<string, UserLinkedAccount[]>>((acc, account) => {
       const key = labelProvider(account.provider);
@@ -513,7 +516,9 @@ export function StewardLinkedAccounts({
                       accountId={account.providerAccountId}
                       expiresAt={account.expiresAt}
                       action={
-                        allowUnlink ? (
+                        account.provider === "cross_app" ? (
+                          <span className="stwd-muted-text">grant-backed</span>
+                        ) : allowUnlink ? (
                           <button
                             type="button"
                             className="stwd-btn stwd-btn-ghost stwd-btn-sm"

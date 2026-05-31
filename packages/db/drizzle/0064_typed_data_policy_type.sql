@@ -1,0 +1,14 @@
+-- Privy-parity EIP-712 typed-data policy conditions.
+--
+-- Adds the `typed-data` value to the policy_type enum so EIP-712
+-- (`eth_signTypedData_v4`) conditions can be persisted in the existing
+-- `policies` table. No new table is required: a typed-data condition is stored
+-- as an ordinary policy row whose config carries the domain allowlists
+-- (verifyingContract / chainId / name), the allowed primaryType set, and
+-- per-field message constraints. The typed-data signing route refuses to sign
+-- unless the agent carries one of these policies (fail-closed), and the policy
+-- engine evaluates the decoded payload against it.
+--
+-- IF NOT EXISTS keeps this idempotent and safe to re-run, matching the other
+-- enum-extension migrations (see 0015, 0039, 0061).
+ALTER TYPE "policy_type" ADD VALUE IF NOT EXISTS 'typed-data';

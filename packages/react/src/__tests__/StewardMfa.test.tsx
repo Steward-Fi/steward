@@ -92,6 +92,12 @@ function authCtx(): NonNullable<AuthCtx> {
       expiresIn: 900,
       user: { id: "user-1", email: "u@example.com" },
     }),
+    completePasskeyMfa: async () => ({
+      token: "token",
+      refreshToken: "refresh",
+      expiresIn: 900,
+      user: { id: "user-1", email: "u@example.com" },
+    }),
     unenrollSmsMfa: async () => ({ ok: true }),
     activeTenantId: "tenant-1",
     tenants: null,
@@ -139,6 +145,23 @@ describe("<StewardMfaChallenge />", () => {
     );
     expect(html).toContain("sms code");
     expect(html).not.toContain("use recovery code");
+  });
+
+  test("renders passkey verification as a WebAuthn button", () => {
+    const html = renderToString(
+      wrap(
+        React.createElement(StewardMfaChallenge, {
+          challenge: {
+            type: "passkey",
+            challengeId: "challenge-3",
+            expiresAt: "2026-05-25T12:00:00.000Z",
+          },
+        }),
+      ),
+    );
+    expect(html).toContain("verify with passkey");
+    expect(html).not.toContain("recovery code");
+    expect(html).not.toContain("one-time-code");
   });
 });
 

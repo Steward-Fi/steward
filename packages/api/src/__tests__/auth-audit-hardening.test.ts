@@ -67,9 +67,9 @@ describe("auth and audit hardening", () => {
       rotationStart,
     );
     // Rotation fences concurrent revocation via a per-user session advisory lock.
-    expect(authSource.indexOf("lockUserSession(tx, refreshCandidate.userId)", rotationStart)).toBeGreaterThan(
-      rotationStart,
-    );
+    expect(
+      authSource.indexOf("lockUserSession(tx, refreshCandidate.userId)", rotationStart),
+    ).toBeGreaterThan(rotationStart);
     expect(
       authSource.indexOf("revocationStore.getUserRevokedBefore(record.userId)", rotationStart),
     ).toBeGreaterThan(rotationStart);

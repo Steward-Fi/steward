@@ -1,0 +1,48 @@
+{
+  "name": "@stwd/react-native",
+  "version": "0.1.0",
+  "description": "React Native and Expo helpers for Steward authentication and API clients",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@stwd/sdk": "^0.10.0"
+  },
+  "peerDependencies": {
+    "@react-native-async-storage/async-storage": ">=1.0.0",
+    "react-native": ">=0.72.0"
+  },
+  "peerDependenciesMeta": {
+    "@react-native-async-storage/async-storage": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "steward",
+    "react-native",
+    "expo",
+    "wallet",
+    "auth"
+  ],
+  "author": "Steward-Fi",
+  "license": "MIT"
+}

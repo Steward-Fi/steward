@@ -105,6 +105,7 @@ export interface PlatformTenantUser {
   emailVerified: boolean | null;
   name: string | null;
   tenantCustomMetadata: Record<string, unknown>;
+  deactivatedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -120,6 +121,7 @@ export interface TenantAdminUser {
   emailVerified: boolean | null;
   name: string | null;
   tenantCustomMetadata: Record<string, unknown>;
+  deactivatedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -128,6 +130,25 @@ export interface TenantAdminUserSearchResult {
   users: TenantAdminUser[];
   limit: number;
   offset: number;
+}
+
+export interface TenantAdminUserEvent {
+  id: number;
+  seq: number;
+  action: string;
+  actorType: string;
+  actorId: string | null;
+  resourceType: string | null;
+  resourceId: string | null;
+  metadata: Record<string, unknown> | null;
+  createdAt: Date;
+}
+
+export interface TenantAdminUserEventsResult {
+  events: TenantAdminUserEvent[];
+  limit: number;
+  offset: number;
+  total: number;
 }
 
 export interface PlatformUserIdentity {
@@ -154,6 +175,31 @@ export interface PlatformUserSearchResult {
   users: PlatformTenantUser[];
   limit: number;
   offset: number;
+}
+
+export interface PlatformTenantInvitation {
+  id: string;
+  tenantId: string;
+  email: string;
+  role: Exclude<TenantTeamRole, "owner"> | string;
+  status: "pending" | "accepted" | "revoked" | "expired" | string;
+  invitedByUserId?: string | null;
+  acceptedByUserId?: string | null;
+  acceptedAt?: Date | null;
+  revokedAt?: Date | null;
+  expiresAt: Date;
+  createdAt: Date;
+  updatedAt?: Date;
+}
+
+export interface PlatformTenantInvitationListResult {
+  invitations: PlatformTenantInvitation[];
+}
+
+export interface PlatformTenantInvitationCreateResult {
+  invitation: PlatformTenantInvitation;
+  token: string;
+  emailSent?: boolean;
 }
 
 export interface PlatformLinkAccountResult extends PlatformLinkedAccount {
@@ -343,6 +389,12 @@ export interface TenantOidcProviderConfig {
 }
 
 export type TenantSamlSsoStatus = "pending" | "active" | "error";
+export type TenantSamlGroupRole = "admin" | "developer" | "billing" | "viewer" | "member";
+
+export interface TenantSamlGroupRoleMapping {
+  group: string;
+  role: TenantSamlGroupRole;
+}
 
 export interface TenantSamlSsoConfig {
   tenantId: string;
@@ -356,6 +408,7 @@ export interface TenantSamlSsoConfig {
   nameIdFormat?: string;
   emailAttribute: string;
   groupsAttribute?: string;
+  groupRoleMappings: TenantSamlGroupRoleMapping[];
   allowJitProvisioning: boolean;
   jitDefaultRole: "viewer";
   lastTestedAt?: Date | string | null;
@@ -371,11 +424,25 @@ export interface TenantSamlSsoUpdate {
   nameIdFormat?: string;
   emailAttribute?: string;
   groupsAttribute?: string;
+  groupRoleMappings?: TenantSamlGroupRoleMapping[];
   allowJitProvisioning?: boolean;
 }
 
 export type TenantCaptchaProvider = "turnstile" | "hcaptcha";
 export type TenantCaptchaAction = "email_otp" | "sms_otp";
+
+export interface TenantMfaPolicyConfig {
+  maxAgeSeconds?: number;
+  requireFor?: {
+    vaultSigning?: boolean;
+    keyImport?: boolean;
+    keyExport?: boolean;
+    recoveryCodes?: boolean;
+    tenantAdmin?: boolean;
+  };
+  allowDelegatedSignerAutomation?: boolean;
+  allowKeyQuorumAutomation?: boolean;
+}
 
 export interface TenantAuthAbuseConfig {
   loginMethods?: {
@@ -417,6 +484,7 @@ export interface TenantAuthAbuseConfig {
     allowedCountryCodes?: string[];
     blockedCountryCodes?: string[];
   };
+  mfa?: TenantMfaPolicyConfig;
 }
 
 export type TenantAccessAllowlistEntryType = "email" | "email_domain" | "wallet" | "phone";
@@ -445,6 +513,8 @@ export interface TenantAppClient {
   allowedOrigins?: string[];
   allowedRedirectUrls?: string[];
   loginMethods?: TenantAuthAbuseConfig["loginMethods"];
+  globalWalletEnabled?: boolean;
+  globalWalletAllowedScopes?: string[];
   createdAt?: Date | string;
   updatedAt?: Date | string;
 }
@@ -500,6 +570,8 @@ export interface TenantTheme {
   borderRadius?: number;
   fontFamily?: string;
   colorScheme?: "light" | "dark" | "system";
+  logoUrl?: string;
+  faviconUrl?: string;
 }
 
 export interface TenantTestAccountConfig {
@@ -598,6 +670,67 @@ export interface TenantControlPlaneConfig {
   theme?: TenantTheme;
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export type TenantSecurityChecklistStatus = "pass" | "warning" | "fail";
+
+export interface TenantSecurityChecklistItem {
+  id: string;
+  label: string;
+  status: TenantSecurityChecklistStatus;
+  description: string;
+  remediation?: string;
+}
+
+export interface TenantSecurityChecklist {
+  tenantId: string;
+  generatedAt: Date | string;
+  summary: {
+    pass: number;
+    warning: number;
+    fail: number;
+  };
+  items: TenantSecurityChecklistItem[];
+}
+
+export interface IdempotencyMetricCounters {
+  observed: number;
+  reserved: number;
+  completed: number;
+  replayed: number;
+  conflicts: number;
+  inFlightConflicts: number;
+  suppressedAuthResponses: number;
+  invalidKeys: number;
+  storeErrors: number;
+  skippedUnsafeContext: number;
+  releasedOnError: number;
+}
+
+export interface TenantIdempotencyMetrics {
+  tenantId: string;
+  generatedAt: Date | string;
+  windowStartedAt: Date | string;
+  lastSeenAt: Date | string | null;
+  ttlMs: number;
+  counters: IdempotencyMetricCounters;
+}
+
+export interface TenantRequestSigningKey {
+  id: string;
+  tenantId: string;
+  name: string;
+  secretPrefix: string;
+  status: "active" | "retiring" | "revoked";
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  expiresAt?: Date | string | null;
+  revokedAt?: Date | string | null;
+}
+
+export interface TenantRequestSigningKeyCreateResult {
+  key: TenantRequestSigningKey;
+  signingSecret: string;
 }
 
 // ─── Dashboard Types ──────────────────────────────────────────
@@ -746,6 +879,16 @@ export interface UserAccountSummary {
     provider: string;
     providerAccountId: string;
     expiresAt: number | null;
+    type?: string;
+    embeddedWallets?: Array<{ address: string }>;
+    smartWallets?: Array<{ address: string }>;
+    providerApp?: {
+      id: string;
+      name: string | null;
+      logoUrl: string | null;
+    };
+    firstVerifiedAt?: Date | string;
+    latestVerifiedAt?: Date | string;
   }>;
   primaryLoginMethods: Array<{ provider: "email" | "wallet"; providerAccountId: string }>;
   wallet: null | {
@@ -785,6 +928,46 @@ export interface UserAccountSummary {
   sponsorship: AccountGasSponsorshipState;
   createdAt: Date | string;
   updatedAt: Date | string;
+}
+
+export type UserPushProvider = "expo" | "apns" | "fcm";
+export type UserPushPlatform = "ios" | "android";
+
+export interface UserPushSubscription {
+  id: string;
+  tenantId: string | null;
+  provider: UserPushProvider;
+  token: string;
+  platform: UserPushPlatform | null;
+  deviceId: string | null;
+  appId: string | null;
+  locale: string | null;
+  timezone: string | null;
+  metadata: Record<string, unknown>;
+  status: "active" | "revoked";
+  lastSeenAt: Date | string;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface UserPushSubscriptionInput {
+  provider: UserPushProvider;
+  token: string;
+  platform?: UserPushPlatform;
+  tenantId?: string;
+  deviceId?: string;
+  appId?: string;
+  locale?: string;
+  timezone?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface UserPushSubscriptionResult {
+  subscription: UserPushSubscription;
+}
+
+export interface UserPushSubscriptionListResult {
+  subscriptions: UserPushSubscription[];
 }
 
 export type AgentSignerType = "owner" | "delegated" | "service" | "quorum_member";
@@ -1082,6 +1265,7 @@ export interface WebhookConfig {
 export interface WebhookDelivery {
   id: string;
   eventType: string;
+  replayedFromDeliveryId?: string | null;
   status: "pending" | "processing" | "delivered" | "failed" | "dead";
   attempts: number;
   maxAttempts: number;

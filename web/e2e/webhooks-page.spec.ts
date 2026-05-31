@@ -6,6 +6,7 @@ const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
 type WebhookDelivery = {
   id: string;
   eventType: string;
+  replayedFromDeliveryId?: string | null;
   status: "pending" | "processing" | "delivered" | "failed" | "dead";
   attempts: number;
   maxAttempts: number;
@@ -30,6 +31,8 @@ type WebhookConfig = {
 };
 
 test.describe("Dashboard webhook delivery history", () => {
+  test.setTimeout(120_000);
+
   test("authenticated users can inspect and retry webhook deliveries", async ({
     page,
     request,
@@ -73,6 +76,7 @@ test.describe("Dashboard webhook delivery history", () => {
         deliveredAt: "2026-05-28T11:45:01.000Z",
       },
     ];
+    let lastDeliveryQuery = "";
 
     await page.route(`${API}/webhooks`, async (route) => {
       if (route.request().method() === "POST") {
@@ -114,24 +118,80 @@ test.describe("Dashboard webhook delivery history", () => {
     });
 
     await page.route(`${API}/webhooks/webhook-1/deliveries**`, async (route) => {
-      await route.fulfill({ json: { ok: true, data: deliveries } });
+      const params = new URL(route.request().url()).searchParams;
+      if (new URL(route.request().url()).pathname.endsWith("/deliveries/export")) {
+        lastDeliveryQuery = params.toString();
+        await route.fulfill({
+          status: 200,
+          headers: {
+            "content-type": "text/csv; charset=utf-8",
+            "content-disposition": 'attachment; filename="webhook-deliveries-webhook-1.csv"',
+          },
+          body: 'id,eventType,status\n"delivery-failed","user.created","failed"\n',
+        });
+        return;
+      }
+      lastDeliveryQuery = params.toString();
+      const status = params.get("status");
+      const eventType = params.get("eventType");
+      const hasError = params.get("hasError");
+      const filtered = deliveries.filter((delivery) => {
+        if (status && delivery.status !== status) return false;
+        if (eventType && delivery.eventType !== eventType) return false;
+        if (hasError === "true" && !delivery.hasError) return false;
+        if (hasError === "false" && delivery.hasError) return false;
+        return true;
+      });
+      await route.fulfill({ json: { ok: true, data: filtered } });
     });
     await page.route(`${API}/webhooks/webhook-created/deliveries**`, async (route) => {
       await route.fulfill({ json: { ok: true, data: [] } });
     });
 
     await page.route(`${API}/webhooks/deliveries/delivery-failed/retry`, async (route) => {
+      let updated: WebhookDelivery | undefined;
       deliveries = deliveries.map((delivery) =>
         delivery.id === "delivery-failed"
-          ? {
+          ? (updated = {
               ...delivery,
               status: "pending",
               nextRetryAt: "2026-05-28T12:35:00.000Z",
               hasError: false,
-            }
+            })
           : delivery,
       );
-      await route.fulfill({ json: { ok: true, data: deliveries[0] } });
+      await route.fulfill({ json: { ok: true, data: updated } });
+    });
+    await page.route(`${API}/webhooks/deliveries/delivery-failed/replay`, async (route) => {
+      const replayed: WebhookDelivery = {
+        id: "delivery-replay",
+        eventType: "user.created",
+        replayedFromDeliveryId: "delivery-failed",
+        status: "delivered",
+        attempts: 1,
+        maxAttempts: 6,
+        nextRetryAt: null,
+        hasError: false,
+        createdAt: "2026-05-28T12:10:00.000Z",
+        deliveredAt: "2026-05-28T12:10:01.000Z",
+      };
+      deliveries = [replayed, ...deliveries.filter((row) => row.id !== replayed.id)];
+      await route.fulfill({ status: 202, json: { ok: true, data: replayed } });
+    });
+    await page.route(`${API}/webhooks/webhook-1/test`, async (route) => {
+      const testDelivery: WebhookDelivery = {
+        id: "delivery-test",
+        eventType: "webhook.test",
+        status: "delivered",
+        attempts: 1,
+        maxAttempts: 1,
+        nextRetryAt: null,
+        hasError: false,
+        createdAt: "2026-05-28T12:20:00.000Z",
+        deliveredAt: "2026-05-28T12:20:01.000Z",
+      };
+      deliveries = [testDelivery, ...deliveries.filter((row) => row.id !== testDelivery.id)];
+      await route.fulfill({ status: 202, json: { ok: true, data: testDelivery } });
     });
 
     const sendRes = await request.post(`${API}/auth/email/send`, { data: { email } });
@@ -163,10 +223,28 @@ test.describe("Dashboard webhook delivery history", () => {
     await expect(page.getByText("disabled").first()).toBeVisible();
     await page.getByText("https://example.test/steward-webhooks").first().click();
 
+    await page.getByLabel("Delivery status").selectOption("failed");
+    await expect.poll(() => lastDeliveryQuery).toContain("status=failed");
+    const downloadPromise = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export CSV" }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toContain("webhook-deliveries-webhook-1");
+    await expect.poll(() => lastDeliveryQuery).toContain("status=failed");
+    await page.getByLabel("Delivery status").selectOption("all");
+    await expect(page.getByRole("button", { name: /user\.created/ })).toBeVisible();
     await page.getByRole("button", { name: /user\.created/ }).click();
     await expect(page.getByText("Last error")).toBeVisible();
+    page.once("dialog", async (dialog) => {
+      expect(dialog.message()).toContain("Replay this event");
+      await dialog.accept();
+    });
+    await page.getByRole("button", { name: "Replay Delivery" }).click();
+    await expect(page.getByText("delivery-failed").first()).toBeVisible();
+    await page.getByRole("button", { name: /user\.created failed/ }).click();
     await page.getByRole("button", { name: "Retry Delivery" }).click();
-    await expect(page.getByText("pending")).toBeVisible();
+    await expect(page.getByRole("button", { name: /user\.created pending/ })).toBeVisible();
+    await page.getByRole("button", { name: "Send Test" }).nth(1).click();
+    await expect(page.getByText("webhook.test")).toBeVisible();
 
     await page.screenshot({
       path: testInfo.outputPath("dashboard-webhook-delivery-history.png"),

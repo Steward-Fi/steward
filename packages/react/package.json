@@ -26,6 +26,11 @@
       "types": "./dist/wallet/solana.d.ts",
       "import": "./dist/wallet/solana.js",
       "default": "./dist/wallet/solana.js"
+    },
+    "./wallet/global": {
+      "types": "./dist/wallet/global.d.ts",
+      "import": "./dist/wallet/global.js",
+      "default": "./dist/wallet/global.js"
     }
   },
   "files": [

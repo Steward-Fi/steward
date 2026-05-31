@@ -8,11 +8,29 @@ Clients may send `Idempotency-Key` on `POST`, `PUT`, `PATCH`, and `DELETE` reque
 
 - Header format: visible ASCII, 8 to 255 characters.
 - Replay scope: HTTP method, path, query string, request body, `Authorization`, `X-Steward-Key`, and `X-Steward-Tenant`.
+- Public auth scope: OTP, passkey login, OAuth exchange, SAML ACS, JWT login, refresh, revoke, and test-token auth routes also accept idempotency keys before a user session exists. Those unauthenticated reservations are additionally scoped by path, query string, `Origin`, `X-Steward-App-Id`, and tenant so one public login surface cannot replay another.
 - Conflict behavior: reusing a key with different request content returns `409`.
 - In-flight behavior: a concurrent duplicate returns `409` with `Retry-After: 1`.
-- Retention: bounded in-process store, default 24 hours, configurable with `STEWARD_IDEMPOTENCY_TTL_MS` and `STEWARD_IDEMPOTENCY_MAX_ENTRIES`.
+- Retention: Redis-backed durable store in production, with a bounded in-process development fallback. The default is 24 hours, configurable with `STEWARD_IDEMPOTENCY_TTL_MS` and `STEWARD_IDEMPOTENCY_MAX_ENTRIES`.
 
 Responses include `Idempotency-Replayed: false` for the original completed request and `Idempotency-Replayed: true` for a replay.
+Token-minting `/auth` responses are suppressed rather than replayed; a duplicate verified login or refresh returns `409` without exposing the original token body.
+
+Tenant admins can inspect privacy-preserving counters without exposing keys,
+request bodies, or replayed response payloads:
+
+```bash
+GET /tenants/:id/idempotency-metrics
+```
+
+The response includes the current metrics window, retention TTL, and counters
+for observed idempotency-key usage, first reservations, completed responses,
+replays, fingerprint conflicts, in-flight duplicate conflicts, suppressed auth
+token responses, invalid keys, unsafe-context skips, store errors, and
+reservations released after handler failures. When Redis is connected, counters
+are aggregated in Redis across API instances; otherwise Steward falls back to
+bounded in-process counters for local development. The dashboard Settings page
+surfaces the same metrics for quick production triage.
 
 ## Request expiry
 
@@ -21,7 +39,11 @@ Sensitive mutating routes can validate request freshness with:
 - `X-Steward-Request-Expires-At`: ISO-8601 time, Unix seconds, or Unix milliseconds.
 - `X-Steward-Request-Timestamp`: ISO-8601 time, Unix seconds, or Unix milliseconds.
 
-The middleware currently validates these headers when present on sensitive mutating routes (`/vault`, `/secrets`, `/trade`, `/v1/trade`, `/approvals`) without requiring them by default. Set `STEWARD_REQUIRE_REQUEST_EXPIRY=true` to require one of the freshness headers on those routes.
+The middleware validates these headers on sensitive mutating routes and requires
+one by default in production. Set `STEWARD_REQUIRE_REQUEST_EXPIRY=true` to
+force the requirement outside production, or set
+`STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true` only for controlled production
+exceptions.
 
 Defaults:
 
@@ -37,14 +59,59 @@ Sensitive mutating routes can be protected with an HMAC request signature:
   `X-Steward-Request-Timestamp` or `X-Steward-Request-Expires-At`.
 - Covered fields: method, path + query, `X-Steward-Tenant`,
   request timestamp, request expiry, `Idempotency-Key`, and SHA-256 body hash.
-- Sensitive route scope: `/vault`, `/secrets`, `/trade`, `/v1/trade`, and
-  `/approvals`.
+- Sensitive route scope includes auth, user, tenant, platform, agent, vault,
+  secret, trade, approval, intent, audit, webhook, policy, and condition-set
+  mutation paths.
 
-By default, signatures are optional and verified when present. Set
-`STEWARD_REQUIRE_AUTH_SIGNATURE=true` to require signatures on sensitive
-mutating routes. Configure one or more comma-separated secrets with
+By default, signatures are required in production and verified when present in
+development. Set `STEWARD_REQUIRE_AUTH_SIGNATURE=true` to require signatures
+outside production. Configure one or more comma-separated secrets with
 `STEWARD_REQUEST_SIGNING_SECRETS`, or a single secret with
-`STEWARD_REQUEST_SIGNING_SECRET`.
+`STEWARD_REQUEST_SIGNING_SECRET`. Tenant app-client secrets can also sign
+requests: when a request uses Basic auth plus `X-Steward-App-Id`, Steward
+validates the app secret and accepts an HMAC generated with that same secret.
 
 The TypeScript SDK can sign these requests automatically by passing
-`requestSigningSecret` to `StewardClient`.
+`requestSigningSecret` to `StewardClient`. For app-client integrations, set
+`appSecret` and `requestSigningSecret` to the one-time-revealed app secret.
+For non-app-secret integrations, tenant admins can create encrypted standalone
+request-signing keys from dashboard settings or
+`POST /tenants/:id/request-signing-keys`; pass the one-time `signingSecret` as
+`requestSigningSecret` and the returned key id as `requestSigningKeyId`.
+
+## Production security checklist
+
+Tenant admins can inspect deployment hardening from the dashboard settings page
+or with:
+
+```bash
+GET /tenants/:id/security-checklist
+```
+
+The checklist requires an owner/admin session with recent MFA and returns
+pass/review/fail metadata for API security headers, HSTS, request freshness,
+authorization signatures, browser origin/redirect allowlists, production app
+clients, and dashboard CSP. It intentionally exposes only boolean posture and
+remediation text, not raw environment values or secrets.
+
+## Tenant MFA policy
+
+Tenant admins can tune sensitive-action step-up policy through
+`authAbuseConfig.mfa` on tenant config APIs. Supported controls include:
+
+- `maxAgeSeconds`: accepted age for recent MFA, bounded from 30 seconds to 1 hour.
+- `allowDelegatedSignerAutomation`: set `false` to require owner/admin MFA instead of signer-bound API automation for vault signing routes.
+- `allowKeyQuorumAutomation`: set `false` to disable quorum credential automation for vault signing routes.
+- `requireFor`: typed policy flags for vault signing, key import/export, recovery-code, and tenant-admin surfaces.
+
+Vault key import/export and delegated signer/quorum authorization read this
+policy before allowing sensitive custody operations. Recent-MFA sessions can be
+created by TOTP, SMS, recovery-code, or passkey step-up; passkey step-up is
+session-bound, uses only the signed-in user's registered authenticators, and
+updates the WebAuthn counter before minting a refreshed `mfaMethod: "passkey"`
+session.
+By default all listed sensitive actions require MFA. Setting a specific
+`requireFor` flag to `false` disables only that action's MFA freshness gate.
+Vault signing, key import/export, and tenant-admin control-plane routes use the
+tenant freshness window; delegated signer and key-quorum automation still obey
+their separate automation switches.

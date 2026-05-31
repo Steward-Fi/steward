@@ -10,6 +10,25 @@ type AppClient = {
   enabled: boolean;
   allowedOrigins: string[];
   allowedRedirectUrls: string[];
+  loginMethods?: {
+    passkey?: boolean;
+    email?: boolean;
+    sms?: boolean;
+    whatsapp?: boolean;
+    totp?: boolean;
+    siwe?: boolean;
+    siws?: boolean;
+    telegram?: boolean;
+    farcaster?: boolean;
+    oauth?: {
+      google?: boolean;
+      discord?: boolean;
+      github?: boolean;
+      twitter?: boolean;
+    };
+  };
+  globalWalletEnabled?: boolean;
+  globalWalletAllowedScopes?: string[];
 };
 
 test.describe("Dashboard app client settings", () => {
@@ -23,6 +42,25 @@ test.describe("Dashboard app client settings", () => {
         enabled: true,
         allowedOrigins: ["https://app.example.com"],
         allowedRedirectUrls: ["https://app.example.com/auth/callback"],
+        loginMethods: {
+          passkey: true,
+          email: true,
+          sms: false,
+          whatsapp: false,
+          totp: true,
+          siwe: true,
+          siws: true,
+          telegram: true,
+          farcaster: true,
+          oauth: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: false,
+          },
+        },
+        globalWalletEnabled: false,
+        globalWalletAllowedScopes: ["eth_accounts", "personal_sign"],
       },
     ];
 
@@ -105,13 +143,22 @@ test.describe("Dashboard app client settings", () => {
     await expect(firstClient.getByLabel("Name")).toHaveValue("Production Web");
     await expect(firstClient.getByLabel("Environment")).toHaveValue("production");
 
-    await firstClient.getByLabel("Name").fill("Production Web Updated");
     await firstClient.getByLabel("Environment").selectOption("preview");
     await firstClient.getByLabel("Enabled").uncheck();
     await firstClient.getByLabel("Allowed Origins").fill("https://preview.example.com");
     await firstClient.getByLabel("Redirect URLs").fill("https://preview.example.com/auth/callback");
+    await firstClient.getByRole("checkbox", { name: "SMS" }).check();
+    await firstClient.getByRole("checkbox", { name: "SIWE" }).uncheck();
+    await firstClient.getByRole("checkbox", { name: "Twitter/X" }).check();
+    await firstClient.getByRole("checkbox", { name: "Global Wallet" }).check();
+    await firstClient.getByLabel("Global Wallet Scopes").fill("eth_accounts");
     await firstClient.getByRole("button", { name: "Rotate Secret" }).click();
-    await expect(firstClient.getByText("stw_app_created_once")).toBeVisible();
+    await expect(firstClient.getByTestId("app-client-secret-value")).toContainText(
+      "stw_app_created_once",
+    );
+    await expect(firstClient.getByText("Use the same secret as")).toBeVisible();
+    await firstClient.getByLabel("Name").fill("Production Web Updated");
+    await expect(firstClient.getByLabel("Name")).toHaveValue("Production Web Updated");
 
     await appClientsForm.getByRole("button", { name: "Add Client" }).click();
     const secondClient = appClientsForm.getByTestId("app-client-row").nth(1);
@@ -120,6 +167,7 @@ test.describe("Dashboard app client settings", () => {
     await secondClient.getByLabel("Environment").selectOption("development");
     await secondClient.getByLabel("Allowed Origins").fill("http://localhost:3000");
     await secondClient.getByLabel("Redirect URLs").fill("http://localhost:3000/auth/callback");
+    await secondClient.getByLabel("Global Wallet Scopes").fill("eth_accounts\npersonal_sign");
 
     await appClientsForm.getByRole("button", { name: "Save Clients" }).click();
     await expect(appClientsForm.getByText("Saved")).toBeVisible();
@@ -132,6 +180,25 @@ test.describe("Dashboard app client settings", () => {
         enabled: false,
         allowedOrigins: ["https://preview.example.com"],
         allowedRedirectUrls: ["https://preview.example.com/auth/callback"],
+        loginMethods: {
+          passkey: true,
+          email: true,
+          sms: true,
+          whatsapp: false,
+          totp: true,
+          siwe: false,
+          siws: true,
+          telegram: true,
+          farcaster: true,
+          oauth: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: true,
+          },
+        },
+        globalWalletEnabled: true,
+        globalWalletAllowedScopes: ["eth_accounts"],
       },
       {
         id: "mobile-dev",
@@ -140,6 +207,25 @@ test.describe("Dashboard app client settings", () => {
         enabled: true,
         allowedOrigins: ["http://localhost:3000"],
         allowedRedirectUrls: ["http://localhost:3000/auth/callback"],
+        loginMethods: {
+          passkey: true,
+          email: true,
+          sms: true,
+          whatsapp: true,
+          totp: true,
+          siwe: true,
+          siws: true,
+          telegram: true,
+          farcaster: true,
+          oauth: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: true,
+          },
+        },
+        globalWalletEnabled: false,
+        globalWalletAllowedScopes: ["eth_accounts", "personal_sign"],
       },
     ]);
 

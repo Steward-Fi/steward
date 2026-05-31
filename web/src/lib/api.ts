@@ -29,6 +29,67 @@ export type TenantGasSponsorshipConfig = {
   circuitBreakerEnabled?: boolean;
 };
 
+export type TenantSecurityChecklistStatus = "pass" | "warning" | "fail";
+
+export type TenantSecurityChecklistItem = {
+  id: string;
+  label: string;
+  status: TenantSecurityChecklistStatus;
+  description: string;
+  remediation?: string;
+};
+
+export type TenantSecurityChecklist = {
+  tenantId: string;
+  generatedAt: string;
+  summary: {
+    pass: number;
+    warning: number;
+    fail: number;
+  };
+  items: TenantSecurityChecklistItem[];
+};
+
+export type IdempotencyMetricCounters = {
+  observed: number;
+  reserved: number;
+  completed: number;
+  replayed: number;
+  conflicts: number;
+  inFlightConflicts: number;
+  suppressedAuthResponses: number;
+  invalidKeys: number;
+  storeErrors: number;
+  skippedUnsafeContext: number;
+  releasedOnError: number;
+};
+
+export type TenantIdempotencyMetrics = {
+  tenantId: string;
+  generatedAt: string;
+  windowStartedAt: string;
+  lastSeenAt: string | null;
+  ttlMs: number;
+  counters: IdempotencyMetricCounters;
+};
+
+export type TenantRequestSigningKey = {
+  id: string;
+  tenantId: string;
+  name: string;
+  secretPrefix: string;
+  status: "active" | "retiring" | "revoked";
+  createdAt: string;
+  updatedAt: string;
+  expiresAt?: string | null;
+  revokedAt?: string | null;
+};
+
+export type TenantRequestSigningKeyCreateResult = {
+  key: TenantRequestSigningKey;
+  signingSecret: string;
+};
+
 let _apiKey = "";
 let _tenantId = "";
 let _steward: StewardClient;
@@ -115,6 +176,81 @@ export async function updateTenantGasSponsorshipConfig(
     "Failed to save gas sponsorship config",
   );
   return data.gasSponsorshipConfig ?? {};
+}
+
+export async function getTenantSecurityChecklist(
+  tenantId: string,
+  authToken: string,
+): Promise<TenantSecurityChecklist> {
+  return readJson<TenantSecurityChecklist>(
+    await fetch(`${API_URL}/tenants/${encodeURIComponent(tenantId)}/security-checklist`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    }),
+    "Failed to load security checklist",
+  );
+}
+
+export async function getTenantIdempotencyMetrics(
+  tenantId: string,
+  authToken: string,
+): Promise<TenantIdempotencyMetrics> {
+  return readJson<TenantIdempotencyMetrics>(
+    await fetch(`${API_URL}/tenants/${encodeURIComponent(tenantId)}/idempotency-metrics`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    }),
+    "Failed to load idempotency metrics",
+  );
+}
+
+export async function listTenantRequestSigningKeys(
+  tenantId: string,
+  authToken: string,
+): Promise<TenantRequestSigningKey[]> {
+  const data = await readJson<{ keys: TenantRequestSigningKey[] }>(
+    await fetch(`${API_URL}/tenants/${encodeURIComponent(tenantId)}/request-signing-keys`, {
+      headers: { Authorization: `Bearer ${authToken}` },
+    }),
+    "Failed to load request signing keys",
+  );
+  return data.keys ?? [];
+}
+
+export async function rotateTenantRequestSigningKey(
+  tenantId: string,
+  authToken: string,
+  name?: string,
+): Promise<TenantRequestSigningKeyCreateResult> {
+  return readJson<TenantRequestSigningKeyCreateResult>(
+    await fetch(`${API_URL}/tenants/${encodeURIComponent(tenantId)}/request-signing-keys`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name }),
+    }),
+    "Failed to rotate request signing key",
+  );
+}
+
+export async function revokeTenantRequestSigningKey(
+  tenantId: string,
+  authToken: string,
+  keyId: string,
+): Promise<TenantRequestSigningKey> {
+  const data = await readJson<{ key: TenantRequestSigningKey }>(
+    await fetch(
+      `${API_URL}/tenants/${encodeURIComponent(
+        tenantId,
+      )}/request-signing-keys/${encodeURIComponent(keyId)}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${authToken}` },
+      },
+    ),
+    "Failed to revoke request signing key",
+  );
+  return data.key;
 }
 
 export { _apiKey as API_KEY, _tenantId as TENANT_ID };

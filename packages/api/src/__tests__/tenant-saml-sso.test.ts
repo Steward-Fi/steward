@@ -34,6 +34,7 @@ describe("tenant SAML SSO config foundation", () => {
       idpCertPems: [CERT],
       emailAttribute: "email",
       groupsAttribute: "groups",
+      groupRoleMappings: [{ group: "Engineering", role: "developer" }],
       allowJitProvisioning: true,
     });
 
@@ -45,6 +46,7 @@ describe("tenant SAML SSO config foundation", () => {
         spEntityId: "https://api.example.com/auth/saml/tenant-saml/metadata",
         acsUrl: "https://api.example.com/auth/saml/tenant-saml/acs",
         allowJitProvisioning: true,
+        groupRoleMappings: [{ group: "Engineering", role: "developer" }],
         jitDefaultRole: "viewer",
       }),
     );
@@ -70,6 +72,15 @@ describe("tenant SAML SSO config foundation", () => {
         idpCertPems: ["-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"],
       }),
     ).toBe("IdP certificate must not contain private key material");
+
+    expect(
+      normalizeSamlSsoUpdate("tenant-saml", {
+        idpEntityId: "https://idp.example.com/saml",
+        idpSsoUrl: "https://idp.example.com/sso",
+        idpCertPems: [CERT],
+        groupRoleMappings: [{ group: "Owners", role: "owner" }],
+      }),
+    ).toBe("groupRoleMappings role must be admin, developer, billing, viewer, or member");
   });
 
   it("adds MFA-gated tenant routes, audit rollback, metadata, login, and ACS guardrails", () => {
@@ -92,10 +103,13 @@ describe("tenant SAML SSO config foundation", () => {
     expect(authSource).toContain("verifySamlAcsResponse");
     expect(authSource).toContain("isVerifiedSsoEmailDomainForTenant");
     expect(authSource).toContain("recordSamlAssertionReplay");
-    expect(authSource).toContain('tenantRole: "viewer"');
+    expect(authSource).toContain("resolveSamlMappedRole(config, groups)");
 
     expect(migration).toContain("\"jit_default_role\" varchar(32) NOT NULL DEFAULT 'viewer'");
     expect(migration).toContain('"tenant_saml_sso_configs_viewer_jit_role_check"');
     expect(migration).toContain('cardinality("idp_cert_pems") BETWEEN 1 AND 5');
+    expect(read("packages/db/drizzle/0053_saml_group_role_mappings.sql")).toContain(
+      '"group_role_mappings" jsonb NOT NULL DEFAULT',
+    );
   });
 });

@@ -1,0 +1,62 @@
+{
+  "name": "@stwd/mcp",
+  "version": "0.1.0",
+  "description": "Model Context Protocol (MCP) server exposing Steward agent-wallet and auth operations as tools for AI agents and IDEs",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "stwd-mcp": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
+    "lint": "bunx @biomejs/biome check src package.json tsconfig.json",
+    "test": "bun test src/__tests__/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "steward",
+    "mcp",
+    "model-context-protocol",
+    "agent",
+    "wallet",
+    "policy",
+    "ai-agent",
+    "claude",
+    "cursor"
+  ],
+  "author": "Steward-Fi",
+  "license": "MIT",
+  "homepage": "https://steward.fi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Steward-Fi/steward.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@stwd/sdk": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^25.5.0",
+    "typescript": "^5.8.0"
+  }
+}

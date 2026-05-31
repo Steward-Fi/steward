@@ -10,9 +10,20 @@ const API = process.env.E2E_API_URL ?? "http://localhost:3299";
 const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
 const DOMAIN = new URL(WEB).host;
 
+/**
+ * The server binds each SIWE nonce to an allowed Origin (and rejects nonce
+ * requests that carry none). A real browser attaches that Origin header
+ * automatically to the cross-origin fetch the SDK makes; Playwright's
+ * APIRequestContext does not, so we send it explicitly to exercise the genuine
+ * origin-bound nonce path rather than the unauthenticated rejection.
+ */
+function fetchNonce(request: import("@playwright/test").APIRequestContext) {
+  return request.get(`${API}/auth/nonce`, { headers: { Origin: WEB } });
+}
+
 test.describe("SIWE / SIWS — legitimate signatures against live API", () => {
   test("SIWE: fresh EVM keypair signs and verifies, mints JWT", async ({ request }) => {
-    const nonceRes = await request.get(`${API}/auth/nonce`);
+    const nonceRes = await fetchNonce(request);
     expect(nonceRes.ok()).toBe(true);
     const { nonce } = (await nonceRes.json()) as { nonce: string };
     expect(nonce.length).toBeGreaterThan(8);
@@ -43,7 +54,7 @@ test.describe("SIWE / SIWS — legitimate signatures against live API", () => {
   });
 
   test("SIWE: nonce is single-use", async ({ request }) => {
-    const { nonce } = (await (await request.get(`${API}/auth/nonce`)).json()) as { nonce: string };
+    const { nonce } = (await (await fetchNonce(request)).json()) as { nonce: string };
     const signer = await makeEvmSigner();
     const message = buildSiweMessage({
       domain: DOMAIN,
@@ -61,7 +72,7 @@ test.describe("SIWE / SIWS — legitimate signatures against live API", () => {
   });
 
   test("SIWS: fresh Solana keypair signs and verifies, mints JWT", async ({ request }) => {
-    const { nonce } = (await (await request.get(`${API}/auth/nonce`)).json()) as { nonce: string };
+    const { nonce } = (await (await fetchNonce(request)).json()) as { nonce: string };
     const signer = makeSolanaSigner();
     const message = buildSiwsMessage({
       domain: DOMAIN,
@@ -83,7 +94,7 @@ test.describe("SIWE / SIWS — legitimate signatures against live API", () => {
   });
 
   test("SIWS: rejects a tampered signature", async ({ request }) => {
-    const { nonce } = (await (await request.get(`${API}/auth/nonce`)).json()) as { nonce: string };
+    const { nonce } = (await (await fetchNonce(request)).json()) as { nonce: string };
     const signer = makeSolanaSigner();
     const message = buildSiwsMessage({
       domain: DOMAIN,

@@ -27,6 +27,8 @@ describe("isBuiltInProvider", () => {
       "twitch",
       "instagram",
       "line",
+      "apple",
+      "tiktok",
     ]) {
       expect(isBuiltInProvider(provider)).toBe(true);
     }
@@ -83,6 +85,10 @@ describe("getEnabledProviders", () => {
       INSTAGRAM_CLIENT_SECRET: process.env.INSTAGRAM_CLIENT_SECRET,
       LINE_CLIENT_ID: process.env.LINE_CLIENT_ID,
       LINE_CLIENT_SECRET: process.env.LINE_CLIENT_SECRET,
+      APPLE_CLIENT_ID: process.env.APPLE_CLIENT_ID,
+      APPLE_CLIENT_SECRET: process.env.APPLE_CLIENT_SECRET,
+      TIKTOK_CLIENT_ID: process.env.TIKTOK_CLIENT_ID,
+      TIKTOK_CLIENT_SECRET: process.env.TIKTOK_CLIENT_SECRET,
       STEWARD_CUSTOM_OAUTH_PROVIDERS: process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS,
     };
     delete process.env.GOOGLE_CLIENT_ID;
@@ -103,6 +109,10 @@ describe("getEnabledProviders", () => {
     delete process.env.INSTAGRAM_CLIENT_SECRET;
     delete process.env.LINE_CLIENT_ID;
     delete process.env.LINE_CLIENT_SECRET;
+    delete process.env.APPLE_CLIENT_ID;
+    delete process.env.APPLE_CLIENT_SECRET;
+    delete process.env.TIKTOK_CLIENT_ID;
+    delete process.env.TIKTOK_CLIENT_SECRET;
     delete process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS;
     expect(getEnabledProviders()).toEqual([]);
     Object.assign(process.env, orig);
@@ -209,6 +219,49 @@ describe("getProviderConfig", () => {
       delete process.env[`${prefix}_CLIENT_ID`];
       delete process.env[`${prefix}_CLIENT_SECRET`];
     }
+  });
+
+  it("throws when apple env vars are missing", () => {
+    delete process.env.APPLE_CLIENT_ID;
+    delete process.env.APPLE_CLIENT_SECRET;
+    expect(() => getProviderConfig("apple")).toThrow("Apple OAuth not configured");
+  });
+
+  it("throws when tiktok env vars are missing", () => {
+    delete process.env.TIKTOK_CLIENT_ID;
+    delete process.env.TIKTOK_CLIENT_SECRET;
+    expect(() => getProviderConfig("tiktok")).toThrow("TikTok OAuth not configured");
+  });
+
+  it("returns an OIDC config for Apple (id_token, no userinfo endpoint)", () => {
+    process.env.APPLE_CLIENT_ID = "com.example.service";
+    process.env.APPLE_CLIENT_SECRET = "apple-client-secret-jwt";
+    const config = getProviderConfig("apple");
+    expect(config.clientId).toBe("com.example.service");
+    expect(config.authorizationUrl).toBe("https://appleid.apple.com/auth/authorize");
+    expect(config.tokenUrl).toBe("https://appleid.apple.com/auth/token");
+    expect(config.oidc).toEqual({
+      issuer: "https://appleid.apple.com",
+      jwksUri: "https://appleid.apple.com/auth/keys",
+    });
+    expect(config.scopes).toEqual(["name", "email"]);
+    delete process.env.APPLE_CLIENT_ID;
+    delete process.env.APPLE_CLIENT_SECRET;
+  });
+
+  it("returns a TikTok config that remaps the client-id param to client_key", () => {
+    process.env.TIKTOK_CLIENT_ID = "tiktok-key";
+    process.env.TIKTOK_CLIENT_SECRET = "tiktok-secret";
+    const config = getProviderConfig("tiktok");
+    expect(config.clientId).toBe("tiktok-key");
+    expect(config.clientIdParam).toBe("client_key");
+    expect(config.authorizationUrl).toBe("https://www.tiktok.com/v2/auth/authorize/");
+    expect(config.tokenUrl).toBe("https://open.tiktokapis.com/v2/oauth/token/");
+    expect(config.userInfoUrl).toStartWith("https://open.tiktokapis.com/v2/user/info/");
+    expect(config.scopes).toEqual(["user.info.basic"]);
+    expect(config.profileMap).toMatchObject({ id: "user.open_id" });
+    delete process.env.TIKTOK_CLIENT_ID;
+    delete process.env.TIKTOK_CLIENT_SECRET;
   });
 
   it("loads custom OAuth2 provider configs with PKCE and profile mapping", () => {
@@ -627,6 +680,126 @@ describe("OAuthClient.getUserInfo — provider response normalization", () => {
     );
     const client = makeClient();
     await expect(client.getUserInfo("bad-token")).rejects.toThrow("getUserInfo failed (401)");
+    globalThis.fetch = originalFetch;
+  });
+});
+
+// ─── TikTok OAuth2 flow ───────────────────────────────────────────────────────
+
+describe("OAuthClient — TikTok provider", () => {
+  function tiktokClient() {
+    return new OAuthClient({
+      clientId: "tiktok-key",
+      clientSecret: "tiktok-secret",
+      authorizationUrl: "https://www.tiktok.com/v2/auth/authorize/",
+      tokenUrl: "https://open.tiktokapis.com/v2/oauth/token/",
+      userInfoUrl: "https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name",
+      scopes: ["user.info.basic"],
+      clientIdParam: "client_key",
+      profileMap: {
+        id: "user.open_id",
+        name: "user.display_name",
+        picture: "user.avatar_url",
+      },
+    });
+  }
+
+  it("names the client-id param client_key in the authorize URL", () => {
+    const { url } = tiktokClient().generateAuthUrl("state-xyz", "https://app.com/cb");
+    const params = new URLSearchParams(new URL(url).search);
+    expect(params.get("client_key")).toBe("tiktok-key");
+    expect(params.get("client_id")).toBeNull();
+    expect(params.get("scope")).toBe("user.info.basic");
+  });
+
+  it("sends client_key (not client_id) in the token exchange body", async () => {
+    const originalFetch = globalThis.fetch;
+    let capturedBody = "";
+    globalThis.fetch = asFetchMock(async (_url, init?: RequestInit) => {
+      capturedBody = init?.body?.toString() ?? "";
+      return new Response(JSON.stringify({ access_token: "tt-token", token_type: "Bearer" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    await tiktokClient().exchangeCode("auth-code", "https://app.com/cb");
+    const body = new URLSearchParams(capturedBody);
+    expect(body.get("client_key")).toBe("tiktok-key");
+    expect(body.get("client_id")).toBeNull();
+    expect(body.get("client_secret")).toBe("tiktok-secret");
+    globalThis.fetch = originalFetch;
+  });
+
+  it("parses TikTok's nested { data: { user: {...} } } userinfo shape", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              user: {
+                open_id: "tiktok-open-id",
+                union_id: "tiktok-union-id",
+                display_name: "TikTok User",
+                avatar_url: "https://p16.tiktokcdn.com/avatar.jpg",
+              },
+            },
+            error: { code: "ok", message: "" },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    const info = await tiktokClient().getUserInfo("tt-token");
+    expect(info.id).toBe("tiktok-open-id");
+    expect(info.name).toBe("TikTok User");
+    expect(info.picture).toBe("https://p16.tiktokcdn.com/avatar.jpg");
+    // TikTok user.info.basic returns no email — must be empty string.
+    expect(info.email).toBe("");
+    globalThis.fetch = originalFetch;
+  });
+
+  it("fails closed on a failed TikTok token exchange", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response(JSON.stringify({ error: "invalid_request", error_description: "bad" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    await expect(tiktokClient().exchangeCode("bad-code", "https://app.com/cb")).rejects.toThrow(
+      "Token exchange failed (400)",
+    );
+    globalThis.fetch = originalFetch;
+  });
+
+  it("does not fabricate an identity from a malformed userinfo response", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetchMock(
+      async () =>
+        // Wrong shape: no `data.user`, just an error envelope. The mapped open_id
+        // path resolves to nothing, so no provider account id is produced and the
+        // caller (auth.ts) rejects an empty id rather than provisioning a user.
+        new Response(JSON.stringify({ data: {}, error: { code: "access_token_invalid" } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    const info = await tiktokClient().getUserInfo("tt-token");
+    expect(info.id).toBe("");
+    expect(info.email).toBe("");
+    globalThis.fetch = originalFetch;
+  });
+
+  it("propagates a non-200 TikTok userinfo response (fail closed)", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = asFetchMock(
+      async () =>
+        new Response("forbidden", { status: 403, headers: { "Content-Type": "text/plain" } }),
+    );
+    await expect(tiktokClient().getUserInfo("tt-token")).rejects.toThrow(
+      "getUserInfo failed (403)",
+    );
     globalThis.fetch = originalFetch;
   });
 });

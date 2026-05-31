@@ -357,199 +357,201 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     // model it. Restored in the finally so it never leaks to other tests.
     const restoreClock = installClockShift(2_000);
     try {
-    // Phone-login users are keyed on a `phone:<hash>` walletAddress. The SIWE
-    // check below temporarily attaches a real wallet to assert that a SIWE login
-    // for a TOTP-enabled user requires MFA — capture the phone subject so we can
-    // restore it afterwards, otherwise later phone logins would resolve to a
-    // brand-new (TOTP-less) user.
-    const [{ walletAddress: phoneSubject }] = await getDb()
-      .select({ walletAddress: users.walletAddress })
-      .from(users)
-      .where(eq(users.id, auth.user.id));
-    const account = privateKeyToAccount(generatePrivateKey());
-    await getDb()
-      .update(users)
-      .set({ walletAddress: account.address.toLowerCase(), walletChain: "ethereum" })
-      .where(eq(users.id, auth.user.id));
-    const siweNonce = await fetchSiweNonce();
-    const siweMessage = buildSiweMessage(account.address, siweNonce);
-    const siweSignature = await account.signMessage({ message: siweMessage });
-    const siweRes = await authRoutes.request("/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: siweMessage, signature: siweSignature }),
-    });
-    expect(siweRes.status).toBe(200);
-    const siweMfaRequired = (await siweRes.json()) as {
-      token?: string;
-      refreshToken?: string;
-      mfaRequired: boolean;
-      mfa: { type: string; challengeId: string };
-    };
-    expect(siweMfaRequired.mfaRequired).toBe(true);
-    expect(siweMfaRequired.mfa.type).toBe("totp");
-    expect(siweMfaRequired.token).toBeUndefined();
-    expect(siweMfaRequired.refreshToken).toBeUndefined();
+      // Phone-login users are keyed on a `phone:<hash>` walletAddress. The SIWE
+      // check below temporarily attaches a real wallet to assert that a SIWE login
+      // for a TOTP-enabled user requires MFA — capture the phone subject so we can
+      // restore it afterwards, otherwise later phone logins would resolve to a
+      // brand-new (TOTP-less) user.
+      const [{ walletAddress: phoneSubject }] = await getDb()
+        .select({ walletAddress: users.walletAddress })
+        .from(users)
+        .where(eq(users.id, auth.user.id));
+      const account = privateKeyToAccount(generatePrivateKey());
+      await getDb()
+        .update(users)
+        .set({ walletAddress: account.address.toLowerCase(), walletChain: "ethereum" })
+        .where(eq(users.id, auth.user.id));
+      const siweNonce = await fetchSiweNonce();
+      const siweMessage = buildSiweMessage(account.address, siweNonce);
+      const siweSignature = await account.signMessage({ message: siweMessage });
+      const siweRes = await authRoutes.request("/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: siweMessage, signature: siweSignature }),
+      });
+      expect(siweRes.status).toBe(200);
+      const siweMfaRequired = (await siweRes.json()) as {
+        token?: string;
+        refreshToken?: string;
+        mfaRequired: boolean;
+        mfa: { type: string; challengeId: string };
+      };
+      expect(siweMfaRequired.mfaRequired).toBe(true);
+      expect(siweMfaRequired.mfa.type).toBe("totp");
+      expect(siweMfaRequired.token).toBeUndefined();
+      expect(siweMfaRequired.refreshToken).toBeUndefined();
 
-    // Restore the phone subject so subsequent SMS logins resolve the same user.
-    await getDb()
-      .update(users)
-      .set({ walletAddress: phoneSubject })
-      .where(eq(users.id, auth.user.id));
+      // Restore the phone subject so subsequent SMS logins resolve the same user.
+      await getDb()
+        .update(users)
+        .set({ walletAddress: phoneSubject })
+        .where(eq(users.id, auth.user.id));
 
-    const recoveryStatusRes = await authRoutes.request("/mfa/recovery-codes/status", {
-      headers: { Authorization: `Bearer ${manageToken}` },
-    });
-    expect(recoveryStatusRes.status).toBe(200);
-    const recoveryStatus = (await recoveryStatusRes.json()) as {
-      enabled: boolean;
-      remaining: number;
-    };
-    expect(recoveryStatus).toMatchObject({ enabled: true, remaining: 10 });
+      const recoveryStatusRes = await authRoutes.request("/mfa/recovery-codes/status", {
+        headers: { Authorization: `Bearer ${manageToken}` },
+      });
+      expect(recoveryStatusRes.status).toBe(200);
+      const recoveryStatus = (await recoveryStatusRes.json()) as {
+        enabled: boolean;
+        remaining: number;
+      };
+      expect(recoveryStatus).toMatchObject({ enabled: true, remaining: 10 });
 
-    const replayRes = await authRoutes.request("/mfa/totp/verify", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${manageToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ code }),
-    });
-    expect(replayRes.status).toBe(401);
-
-    const secondSendRes = await authRoutes.request("/sms/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone }),
-    });
-    expect(secondSendRes.status).toBe(200);
-    const secondInboxRes = await authRoutes.request(`/test/sms-inbox/${encodeURIComponent(phone)}`);
-    const secondInbox = (await secondInboxRes.json()) as { code: string };
-
-    const secondVerifyRes = await authRoutes.request("/sms/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone, code: secondInbox.code }),
-    });
-    expect(secondVerifyRes.status).toBe(200);
-    const mfaRequired = (await secondVerifyRes.json()) as {
-      token?: string;
-      refreshToken?: string;
-      mfaRequired: boolean;
-      mfa: { challengeId: string };
-    };
-    expect(mfaRequired.mfaRequired).toBe(true);
-    expect(mfaRequired.token).toBeUndefined();
-    expect(mfaRequired.refreshToken).toBeUndefined();
-
-    const completeRes = await authRoutes.request("/mfa/totp/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challengeId: mfaRequired.mfa.challengeId,
-        recoveryCode: mfaVerify.recoveryCodes[0],
-      }),
-    });
-    expect(completeRes.status).toBe(200);
-    const completed = (await completeRes.json()) as { token: string; refreshToken: string };
-    expect(completed.refreshToken).toBeTruthy();
-    expect(await verifySessionToken(completed.token)).toMatchObject({
-      userId: auth.user.id,
-      mfaMethod: "recovery_code",
-    });
-
-    const reusedRecoveryRes = await authRoutes.request("/mfa/totp/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challengeId: mfaRequired.mfa.challengeId,
-        recoveryCode: mfaVerify.recoveryCodes[0],
-      }),
-    });
-    expect(reusedRecoveryRes.status).toBe(401);
-
-    const recoveryStatusAfterUseRes = await authRoutes.request("/mfa/recovery-codes/status", {
-      headers: { Authorization: `Bearer ${completed.token}` },
-    });
-    const recoveryStatusAfterUse = (await recoveryStatusAfterUseRes.json()) as {
-      remaining: number;
-    };
-    expect(recoveryStatusAfterUse.remaining).toBe(9);
-
-    const regenerateTime = Date.now() + 60_000;
-    const regenerateCode = await generateTotp(enrollment.secret, { time: regenerateTime });
-    const originalNowForRegenerate = Date.now;
-    Date.now = () => regenerateTime;
-    let regeneratedCodes: string[];
-    try {
-      const regenerateRes = await authRoutes.request("/mfa/recovery-codes/regenerate", {
+      const replayRes = await authRoutes.request("/mfa/totp/verify", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${completed.token}`,
+          Authorization: `Bearer ${manageToken}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ code: regenerateCode }),
+        body: JSON.stringify({ code }),
       });
-      expect(regenerateRes.status).toBe(200);
-      const regenerate = (await regenerateRes.json()) as { recoveryCodes: string[] };
-      expect(regenerate.recoveryCodes).toHaveLength(10);
-      regeneratedCodes = regenerate.recoveryCodes;
-    } finally {
-      Date.now = originalNowForRegenerate;
-    }
-    expect(regeneratedCodes![0]).not.toBe(mfaVerify.recoveryCodes[0]);
+      expect(replayRes.status).toBe(401);
 
-    const challengeIds: string[] = [];
-    for (let i = 0; i < 2; i++) {
-      const sendConcurrentRes = await authRoutes.request("/sms/send", {
+      const secondSendRes = await authRoutes.request("/sms/send", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone }),
       });
-      expect(sendConcurrentRes.status).toBe(200);
-      const inboxConcurrentRes = await authRoutes.request(
+      expect(secondSendRes.status).toBe(200);
+      const secondInboxRes = await authRoutes.request(
         `/test/sms-inbox/${encodeURIComponent(phone)}`,
       );
-      const inboxConcurrent = (await inboxConcurrentRes.json()) as { code: string };
-      const verifyConcurrentRes = await authRoutes.request("/sms/verify", {
+      const secondInbox = (await secondInboxRes.json()) as { code: string };
+
+      const secondVerifyRes = await authRoutes.request("/sms/verify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone, code: inboxConcurrent.code }),
+        body: JSON.stringify({ phone, code: secondInbox.code }),
       });
-      expect(verifyConcurrentRes.status).toBe(200);
-      const verifyConcurrent = (await verifyConcurrentRes.json()) as {
+      expect(secondVerifyRes.status).toBe(200);
+      const mfaRequired = (await secondVerifyRes.json()) as {
+        token?: string;
+        refreshToken?: string;
+        mfaRequired: boolean;
         mfa: { challengeId: string };
       };
-      challengeIds.push(verifyConcurrent.mfa.challengeId);
-    }
-    const concurrentRecoveryResults = await Promise.all(
-      challengeIds.map((challengeId) =>
-        authRoutes.request("/mfa/totp/complete", {
+      expect(mfaRequired.mfaRequired).toBe(true);
+      expect(mfaRequired.token).toBeUndefined();
+      expect(mfaRequired.refreshToken).toBeUndefined();
+
+      const completeRes = await authRoutes.request("/mfa/totp/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: mfaRequired.mfa.challengeId,
+          recoveryCode: mfaVerify.recoveryCodes[0],
+        }),
+      });
+      expect(completeRes.status).toBe(200);
+      const completed = (await completeRes.json()) as { token: string; refreshToken: string };
+      expect(completed.refreshToken).toBeTruthy();
+      expect(await verifySessionToken(completed.token)).toMatchObject({
+        userId: auth.user.id,
+        mfaMethod: "recovery_code",
+      });
+
+      const reusedRecoveryRes = await authRoutes.request("/mfa/totp/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: mfaRequired.mfa.challengeId,
+          recoveryCode: mfaVerify.recoveryCodes[0],
+        }),
+      });
+      expect(reusedRecoveryRes.status).toBe(401);
+
+      const recoveryStatusAfterUseRes = await authRoutes.request("/mfa/recovery-codes/status", {
+        headers: { Authorization: `Bearer ${completed.token}` },
+      });
+      const recoveryStatusAfterUse = (await recoveryStatusAfterUseRes.json()) as {
+        remaining: number;
+      };
+      expect(recoveryStatusAfterUse.remaining).toBe(9);
+
+      const regenerateTime = Date.now() + 60_000;
+      const regenerateCode = await generateTotp(enrollment.secret, { time: regenerateTime });
+      const originalNowForRegenerate = Date.now;
+      Date.now = () => regenerateTime;
+      let regeneratedCodes: string[];
+      try {
+        const regenerateRes = await authRoutes.request("/mfa/recovery-codes/regenerate", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${completed.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ code: regenerateCode }),
+        });
+        expect(regenerateRes.status).toBe(200);
+        const regenerate = (await regenerateRes.json()) as { recoveryCodes: string[] };
+        expect(regenerate.recoveryCodes).toHaveLength(10);
+        regeneratedCodes = regenerate.recoveryCodes;
+      } finally {
+        Date.now = originalNowForRegenerate;
+      }
+      expect(regeneratedCodes![0]).not.toBe(mfaVerify.recoveryCodes[0]);
+
+      const challengeIds: string[] = [];
+      for (let i = 0; i < 2; i++) {
+        const sendConcurrentRes = await authRoutes.request("/sms/send", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ challengeId, recoveryCode: regeneratedCodes![0] }),
-        }),
-      ),
-    );
-    expect(concurrentRecoveryResults.map((res) => res.status).sort()).toEqual([200, 401]);
+          body: JSON.stringify({ phone }),
+        });
+        expect(sendConcurrentRes.status).toBe(200);
+        const inboxConcurrentRes = await authRoutes.request(
+          `/test/sms-inbox/${encodeURIComponent(phone)}`,
+        );
+        const inboxConcurrent = (await inboxConcurrentRes.json()) as { code: string };
+        const verifyConcurrentRes = await authRoutes.request("/sms/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ phone, code: inboxConcurrent.code }),
+        });
+        expect(verifyConcurrentRes.status).toBe(200);
+        const verifyConcurrent = (await verifyConcurrentRes.json()) as {
+          mfa: { challengeId: string };
+        };
+        challengeIds.push(verifyConcurrent.mfa.challengeId);
+      }
+      const concurrentRecoveryResults = await Promise.all(
+        challengeIds.map((challengeId) =>
+          authRoutes.request("/mfa/totp/complete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ challengeId, recoveryCode: regeneratedCodes![0] }),
+          }),
+        ),
+      );
+      expect(concurrentRecoveryResults.map((res) => res.status).sort()).toEqual([200, 401]);
 
-    const originalNow = Date.now;
-    const unenrollTime = originalNow() + 120_000;
-    const nextCode = await generateTotp(enrollment.secret, { time: unenrollTime });
-    Date.now = () => unenrollTime;
-    try {
-      const unenrollRes = await authRoutes.request("/mfa/totp/unenroll", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${completed.token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ code: nextCode }),
-      });
-      expect(unenrollRes.status).toBe(200);
-    } finally {
-      Date.now = originalNow;
-    }
+      const originalNow = Date.now;
+      const unenrollTime = originalNow() + 120_000;
+      const nextCode = await generateTotp(enrollment.secret, { time: unenrollTime });
+      Date.now = () => unenrollTime;
+      try {
+        const unenrollRes = await authRoutes.request("/mfa/totp/unenroll", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${completed.token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ code: nextCode }),
+        });
+        expect(unenrollRes.status).toBe(200);
+      } finally {
+        Date.now = originalNow;
+      }
     } finally {
       restoreClock();
     }
@@ -641,187 +643,191 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     // the clock to model the realistic re-auth gap. Restored in the finally.
     const restoreClock = installClockShift(2_000);
     try {
-    const secondSendRes = await authRoutes.request("/sms/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone }),
-    });
-    expect(secondSendRes.status).toBe(200);
-    const secondInboxRes = await authRoutes.request(`/test/sms-inbox/${encodeURIComponent(phone)}`);
-    const secondInbox = (await secondInboxRes.json()) as { code: string };
+      const secondSendRes = await authRoutes.request("/sms/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      expect(secondSendRes.status).toBe(200);
+      const secondInboxRes = await authRoutes.request(
+        `/test/sms-inbox/${encodeURIComponent(phone)}`,
+      );
+      const secondInbox = (await secondInboxRes.json()) as { code: string };
 
-    const secondVerifyRes = await authRoutes.request("/sms/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone, code: secondInbox.code }),
-    });
-    expect(secondVerifyRes.status).toBe(200);
-    const mfaRequired = (await secondVerifyRes.json()) as {
-      token?: string;
-      mfaRequired: boolean;
-      mfa: { type: string; challengeId: string };
-    };
-    expect(mfaRequired.token).toBeUndefined();
-    expect(mfaRequired).toMatchObject({ mfaRequired: true, mfa: { type: "sms" } });
+      const secondVerifyRes = await authRoutes.request("/sms/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, code: secondInbox.code }),
+      });
+      expect(secondVerifyRes.status).toBe(200);
+      const mfaRequired = (await secondVerifyRes.json()) as {
+        token?: string;
+        mfaRequired: boolean;
+        mfa: { type: string; challengeId: string };
+      };
+      expect(mfaRequired.token).toBeUndefined();
+      expect(mfaRequired).toMatchObject({ mfaRequired: true, mfa: { type: "sms" } });
 
-    const mfaInboxRes = await authRoutes.request(`/test/sms-inbox/${encodeURIComponent(phone)}`);
-    const mfaInbox = (await mfaInboxRes.json()) as { code: string };
-    const unrelatedLoginOtpRes = await authRoutes.request("/sms/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone }),
-    });
-    expect(unrelatedLoginOtpRes.status).toBe(200);
-    const unrelatedInboxRes = await authRoutes.request(
-      `/test/sms-inbox/${encodeURIComponent(phone)}`,
-    );
-    const unrelatedInbox = (await unrelatedInboxRes.json()) as { code: string };
-    const wrongPurposeRes = await authRoutes.request("/mfa/sms/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challengeId: mfaRequired.mfa.challengeId,
-        code: unrelatedInbox.code,
-      }),
-    });
-    expect(wrongPurposeRes.status).toBe(401);
+      const mfaInboxRes = await authRoutes.request(`/test/sms-inbox/${encodeURIComponent(phone)}`);
+      const mfaInbox = (await mfaInboxRes.json()) as { code: string };
+      const unrelatedLoginOtpRes = await authRoutes.request("/sms/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      expect(unrelatedLoginOtpRes.status).toBe(200);
+      const unrelatedInboxRes = await authRoutes.request(
+        `/test/sms-inbox/${encodeURIComponent(phone)}`,
+      );
+      const unrelatedInbox = (await unrelatedInboxRes.json()) as { code: string };
+      const wrongPurposeRes = await authRoutes.request("/mfa/sms/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: mfaRequired.mfa.challengeId,
+          code: unrelatedInbox.code,
+        }),
+      });
+      expect(wrongPurposeRes.status).toBe(401);
 
-    const repeatSendRes = await authRoutes.request("/sms/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone }),
-    });
-    expect(repeatSendRes.status).toBe(200);
-    const repeatInboxRes = await authRoutes.request(`/test/sms-inbox/${encodeURIComponent(phone)}`);
-    const repeatInbox = (await repeatInboxRes.json()) as { code: string };
-    const repeatVerifyRes = await authRoutes.request("/sms/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone, code: repeatInbox.code }),
-    });
-    const repeatMfaRequired = (await repeatVerifyRes.json()) as {
-      mfa: { challengeId: string };
-    };
-    const completeRes = await authRoutes.request("/mfa/sms/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challengeId: repeatMfaRequired.mfa.challengeId,
-        code: mfaInbox.code,
-      }),
-    });
-    expect(completeRes.status).toBe(401);
+      const repeatSendRes = await authRoutes.request("/sms/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      expect(repeatSendRes.status).toBe(200);
+      const repeatInboxRes = await authRoutes.request(
+        `/test/sms-inbox/${encodeURIComponent(phone)}`,
+      );
+      const repeatInbox = (await repeatInboxRes.json()) as { code: string };
+      const repeatVerifyRes = await authRoutes.request("/sms/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, code: repeatInbox.code }),
+      });
+      const repeatMfaRequired = (await repeatVerifyRes.json()) as {
+        mfa: { challengeId: string };
+      };
+      const completeRes = await authRoutes.request("/mfa/sms/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: repeatMfaRequired.mfa.challengeId,
+          code: mfaInbox.code,
+        }),
+      });
+      expect(completeRes.status).toBe(401);
 
-    const validSendRes = await authRoutes.request("/sms/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone }),
-    });
-    expect(validSendRes.status).toBe(200);
-    const validLoginInboxRes = await authRoutes.request(
-      `/test/sms-inbox/${encodeURIComponent(phone)}`,
-    );
-    const validLoginInbox = (await validLoginInboxRes.json()) as { code: string };
-    const validVerifyRes = await authRoutes.request("/sms/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone, code: validLoginInbox.code }),
-    });
-    expect(validVerifyRes.status).toBe(200);
-    const validMfaRequired = (await validVerifyRes.json()) as {
-      mfa: { challengeId: string };
-    };
-    const validMfaInboxRes = await authRoutes.request(
-      `/test/sms-inbox/${encodeURIComponent(phone)}`,
-    );
-    const validMfaInbox = (await validMfaInboxRes.json()) as { code: string };
-    const validCompleteRes = await authRoutes.request("/mfa/sms/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challengeId: validMfaRequired.mfa.challengeId,
-        code: validMfaInbox.code,
-      }),
-    });
-    expect(validCompleteRes.status).toBe(200);
-    const completed = (await validCompleteRes.json()) as { token: string; refreshToken: string };
-    expect(await verifySessionToken(completed.token)).toMatchObject({
-      userId: auth.user.id,
-      mfaMethod: "sms",
-    });
+      const validSendRes = await authRoutes.request("/sms/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      expect(validSendRes.status).toBe(200);
+      const validLoginInboxRes = await authRoutes.request(
+        `/test/sms-inbox/${encodeURIComponent(phone)}`,
+      );
+      const validLoginInbox = (await validLoginInboxRes.json()) as { code: string };
+      const validVerifyRes = await authRoutes.request("/sms/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone, code: validLoginInbox.code }),
+      });
+      expect(validVerifyRes.status).toBe(200);
+      const validMfaRequired = (await validVerifyRes.json()) as {
+        mfa: { challengeId: string };
+      };
+      const validMfaInboxRes = await authRoutes.request(
+        `/test/sms-inbox/${encodeURIComponent(phone)}`,
+      );
+      const validMfaInbox = (await validMfaInboxRes.json()) as { code: string };
+      const validCompleteRes = await authRoutes.request("/mfa/sms/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: validMfaRequired.mfa.challengeId,
+          code: validMfaInbox.code,
+        }),
+      });
+      expect(validCompleteRes.status).toBe(200);
+      const completed = (await validCompleteRes.json()) as { token: string; refreshToken: string };
+      expect(await verifySessionToken(completed.token)).toMatchObject({
+        userId: auth.user.id,
+        mfaMethod: "sms",
+      });
 
-    const refreshRes = await authRoutes.request("/refresh", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken: completed.refreshToken }),
-    });
-    expect(refreshRes.status).toBe(200);
-    const refreshed = (await refreshRes.json()) as { token: string };
-    expect(await verifySessionToken(refreshed.token)).toMatchObject({
-      userId: auth.user.id,
-      mfaMethod: "sms",
-    });
+      const refreshRes = await authRoutes.request("/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: completed.refreshToken }),
+      });
+      expect(refreshRes.status).toBe(200);
+      const refreshed = (await refreshRes.json()) as { token: string };
+      expect(await verifySessionToken(refreshed.token)).toMatchObject({
+        userId: auth.user.id,
+        mfaMethod: "sms",
+      });
 
-    const replayRes = await authRoutes.request("/mfa/sms/complete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        challengeId: validMfaRequired.mfa.challengeId,
-        code: validMfaInbox.code,
-      }),
-    });
-    expect(replayRes.status).toBe(401);
+      const replayRes = await authRoutes.request("/mfa/sms/complete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: validMfaRequired.mfa.challengeId,
+          code: validMfaInbox.code,
+        }),
+      });
+      expect(replayRes.status).toBe(401);
 
-    const unenrollSendRes = await authRoutes.request("/mfa/sms/send", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${completed.token}` },
-    });
-    expect(unenrollSendRes.status).toBe(200);
-    const unenrollInboxRes = await authRoutes.request(
-      `/test/sms-inbox/${encodeURIComponent(phone)}`,
-    );
-    const unenrollInbox = (await unenrollInboxRes.json()) as { code: string };
-    const invalidUnenrollCode = unenrollInbox.code === "000000" ? "000001" : "000000";
-    const invalidUnenrollRes = await authRoutes.request("/mfa/sms/unenroll", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${completed.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ code: invalidUnenrollCode }),
-    });
-    expect(invalidUnenrollRes.status).toBe(401);
-    // Drop the user.authenticated/user.created webhooks emitted by the SMS
-    // logins above so the assertions below isolate the MFA factor lifecycle
-    // (enable then disable). An invalid unenroll must add no MFA webhook.
-    {
-      const mfaLifecycle = webhookDispatches.filter((d) => d.type.startsWith("mfa."));
-      webhookDispatches.length = 0;
-      webhookDispatches.push(...mfaLifecycle);
-    }
-    expect(webhookDispatches).toHaveLength(1);
-
-    const unenrollRes = await authRoutes.request("/mfa/sms/unenroll", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${completed.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ code: unenrollInbox.code }),
-    });
-    expect(unenrollRes.status).toBe(200);
-    expect(webhookDispatches).toEqual([
-      expect.objectContaining({ type: "mfa.enabled" }),
-      expect.objectContaining({
-        agentId: auth.user.id,
-        type: "mfa.disabled",
-        data: {
-          userId: auth.user.id,
-          factor: "sms",
-          phoneHash: hashSha256Hex(phone),
+      const unenrollSendRes = await authRoutes.request("/mfa/sms/send", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${completed.token}` },
+      });
+      expect(unenrollSendRes.status).toBe(200);
+      const unenrollInboxRes = await authRoutes.request(
+        `/test/sms-inbox/${encodeURIComponent(phone)}`,
+      );
+      const unenrollInbox = (await unenrollInboxRes.json()) as { code: string };
+      const invalidUnenrollCode = unenrollInbox.code === "000000" ? "000001" : "000000";
+      const invalidUnenrollRes = await authRoutes.request("/mfa/sms/unenroll", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${completed.token}`,
+          "Content-Type": "application/json",
         },
-      }),
-    ]);
+        body: JSON.stringify({ code: invalidUnenrollCode }),
+      });
+      expect(invalidUnenrollRes.status).toBe(401);
+      // Drop the user.authenticated/user.created webhooks emitted by the SMS
+      // logins above so the assertions below isolate the MFA factor lifecycle
+      // (enable then disable). An invalid unenroll must add no MFA webhook.
+      {
+        const mfaLifecycle = webhookDispatches.filter((d) => d.type.startsWith("mfa."));
+        webhookDispatches.length = 0;
+        webhookDispatches.push(...mfaLifecycle);
+      }
+      expect(webhookDispatches).toHaveLength(1);
+
+      const unenrollRes = await authRoutes.request("/mfa/sms/unenroll", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${completed.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ code: unenrollInbox.code }),
+      });
+      expect(unenrollRes.status).toBe(200);
+      expect(webhookDispatches).toEqual([
+        expect.objectContaining({ type: "mfa.enabled" }),
+        expect.objectContaining({
+          agentId: auth.user.id,
+          type: "mfa.disabled",
+          data: {
+            userId: auth.user.id,
+            factor: "sms",
+            phoneHash: hashSha256Hex(phone),
+          },
+        }),
+      ]);
     } finally {
       restoreClock();
     }

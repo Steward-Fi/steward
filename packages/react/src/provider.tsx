@@ -395,6 +395,16 @@ export function StewardProvider({
     [authInstance],
   );
 
+  const completePasskeyMfa = useCallback(async () => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    setAuthLoading(true);
+    try {
+      return await authInstance.completePasskeyMfa();
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [authInstance]);
+
   const unenrollSmsMfa = useCallback(
     async (code: string) => {
       if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
@@ -568,6 +578,7 @@ export function StewardProvider({
       verifySmsMfa,
       sendSmsMfaCode,
       completeSmsMfa,
+      completePasskeyMfa,
       unenrollSmsMfa,
       // Multi-tenant
       activeTenantId,
@@ -614,6 +625,7 @@ export function StewardProvider({
     verifySmsMfa,
     sendSmsMfaCode,
     completeSmsMfa,
+    completePasskeyMfa,
     unenrollSmsMfa,
     activeTenantId,
     tenants,

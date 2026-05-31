@@ -17,6 +17,11 @@ beforeAll(async () => {
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-secret-lifecycle-jwt-secret-with-enough-bytes";
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com,api.deleted.example.com";
+  // The secret-route host allowlist is enforced independently of the proxy
+  // allowlist (DEFAULT_SECRET_ROUTE_HOSTS only covers the built-in vendor
+  // APIs). These lifecycle tests use example hosts, so they must be added to
+  // the secret-route allowlist for createRoute() to accept them.
+  process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com,api.deleted.example.com";
 
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
@@ -33,6 +38,7 @@ afterAll(async () => {
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
+  delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
 });
 
 function buildApp() {
@@ -45,7 +51,10 @@ function buildApp() {
 async function ensureTenant(tenantId: string) {
   await getDb()
     .insert(tenants)
-    .values({ id: tenantId, name: tenantId, apiKeyHash: "hash" })
+    // apiKeyHash has a UNIQUE index, so each tenant needs a distinct hash —
+    // otherwise the second tenant's insert is silently swallowed by
+    // onConflictDoNothing() and dependent agent inserts fail the FK check.
+    .values({ id: tenantId, name: tenantId, apiKeyHash: `hash-${tenantId}` })
     .onConflictDoNothing();
 }
 
@@ -75,7 +84,7 @@ describe("proxy secret lifecycle enforcement", () => {
     await vault.createRoute(tenantId, secret.id, {
       agentId: ownerAgentId,
       hostPattern: "api.openai.com",
-      pathPattern: "/*",
+      pathPattern: "/v1/*",
       injectAs: "header",
       injectKey: "authorization",
       injectFormat: "Bearer {value}",
@@ -106,7 +115,7 @@ describe("proxy secret lifecycle enforcement", () => {
     await vault.createRoute(tenantId, secret.id, {
       agentId,
       hostPattern: "api.example.com",
-      pathPattern: "/*",
+      pathPattern: "/v1/*",
       injectAs: "header",
       injectKey: "authorization",
       injectFormat: "Bearer {value}",
@@ -139,7 +148,7 @@ describe("proxy secret lifecycle enforcement", () => {
     await vault.createRoute(tenantId, secret.id, {
       agentId,
       hostPattern: "api.deleted.example.com",
-      pathPattern: "/*",
+      pathPattern: "/v1/*",
       injectAs: "header",
       injectKey: "x-api-key",
     });

@@ -280,9 +280,17 @@ async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
 }
 
 /**
- * Fire-and-forget audit write. Use only for high-frequency, low-sensitivity
- * sites where the operation has already committed and an audit failure
- * should not bubble. Logs errors but does not throw.
+ * Fire-and-forget audit write. Use ONLY for genuinely best-effort, low-
+ * sensitivity observability where the operation has already committed and an
+ * audit failure must not bubble (e.g. high-frequency telemetry, boot breadcrumbs).
+ * Logs errors but does not throw.
+ *
+ * Do NOT use this for security-relevant mutations or tamper-evident COMPLIANCE
+ * control events (auth, signing, key export, policy/signer/quorum changes,
+ * credential issuance/revocation, retention/data-lifecycle, tenant admin). Those
+ * MUST use the awaited `writeAuditEvent` and treat a write failure as an action
+ * failure (deny / roll back / surface), so a security event cannot occur without
+ * a durable record.
  */
 export function trackAuditEvent(ev: AuditEventInput): void {
   writeAuditEvent(ev).catch((err) => {

@@ -38,6 +38,7 @@ describe("vault raw secp256k1 signing", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "vault-raw-signing-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY ??= "a".repeat(64);
     process.env.STEWARD_ALLOW_UNSAFE_RAW_SIGNING = "true";
     process.env.STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING = "true";
     const { db, client } = await createPGLiteDb("memory://");

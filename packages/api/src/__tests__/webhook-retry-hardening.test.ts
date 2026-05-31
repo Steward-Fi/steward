@@ -14,6 +14,7 @@ const webhookRetrySchedulerSource = readFileSync(
   join(apiRoot, "services", "webhook-retry-scheduler.ts"),
   "utf8",
 );
+const dbSchemaSource = readFileSync(join(apiRoot, "..", "..", "db", "src", "schema.ts"), "utf8");
 
 describe("webhook retry hardening", () => {
   it("does not allow manual retries after the webhook URL has changed", () => {
@@ -107,6 +108,89 @@ describe("webhook retry hardening", () => {
     );
     expect(insertSnapshot).toContain("secret: encryptedSecret");
     expect(insertSnapshot).not.toContain("secret: config.secret");
+  });
+
+  it("sends diagnostic webhooks as one-off non-retry deliveries", () => {
+    const routeStart = webhookRoutesSource.indexOf('webhookRoutes.post("/:id/test"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const authorized = webhookRoutesSource.indexOf(
+      'action: "webhook.test_send.authorized"',
+      routeStart,
+    );
+    const dispatch = webhookRoutesSource.indexOf("dispatchTestWebhook({", routeStart);
+    const completed = webhookRoutesSource.indexOf('action: "webhook.test_send"', dispatch);
+    expect(authorized).toBeGreaterThan(routeStart);
+    expect(authorized).toBeLessThan(dispatch);
+    expect(completed).toBeGreaterThan(dispatch);
+    expect(webhookRoutesSource).toContain('error: "Webhook is disabled"');
+    expect(webhookDispatchSource).toContain('type: "webhook.test"');
+    expect(webhookDispatchSource).toContain("maxRetries: 0");
+    expect(webhookDispatchSource).toContain("visibilityTimeoutMs: 0");
+    expect(webhookDispatchSource).toContain("maxAttempts: config.maxRetries + 1");
+  });
+
+  it("replays historical deliveries as new audited delivery rows", () => {
+    const routeStart = webhookRoutesSource.indexOf('webhookRoutes.post("/deliveries/:id/replay"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const tenantLookup = webhookRoutesSource.indexOf(
+      "eq(webhookDeliveries.tenantId, tenantId)",
+      routeStart,
+    );
+    const pendingReject = webhookRoutesSource.indexOf('delivery.status === "pending"', routeStart);
+    const webhookLookup = webhookRoutesSource.indexOf(
+      "eq(webhookConfigs.id, delivery.webhookConfigId)",
+      routeStart,
+    );
+    const urlMismatch = webhookRoutesSource.indexOf(
+      "activeWebhook.url !== delivery.url",
+      routeStart,
+    );
+    const subscriptionCheck = webhookRoutesSource.indexOf(
+      "currentWebhookAcceptsDelivery(activeWebhook.events, delivery.eventType)",
+      routeStart,
+    );
+    const authorized = webhookRoutesSource.indexOf(
+      'action: "webhook_delivery.replay.authorized"',
+      routeStart,
+    );
+    const dispatch = webhookRoutesSource.indexOf("dispatchReplayWebhook({", routeStart);
+    const completed = webhookRoutesSource.indexOf('action: "webhook_delivery.replay"', dispatch);
+    const retryMutation = webhookRoutesSource.indexOf(".update(webhookDeliveries)", routeStart);
+    expect(tenantLookup).toBeGreaterThan(routeStart);
+    expect(pendingReject).toBeGreaterThan(tenantLookup);
+    expect(webhookLookup).toBeGreaterThan(pendingReject);
+    expect(urlMismatch).toBeGreaterThan(webhookLookup);
+    expect(subscriptionCheck).toBeGreaterThan(urlMismatch);
+    expect(authorized).toBeGreaterThan(subscriptionCheck);
+    expect(authorized).toBeLessThan(dispatch);
+    expect(completed).toBeGreaterThan(dispatch);
+    expect(dispatch).toBeLessThan(retryMutation);
+    expect(webhookDispatchSource).toContain("dispatchReplayWebhook");
+    expect(webhookDispatchSource).toContain(
+      "replayedFromDeliveryId: config.replayedFromDeliveryId",
+    );
+    expect(dbSchemaSource).toContain('uuid("replayed_from_delivery_id")');
+    expect(dbSchemaSource).toContain("webhook_deliveries_replayed_from_idx");
+  });
+
+  it("exports only redacted bounded webhook delivery history", () => {
+    const routeStart = webhookRoutesSource.indexOf('webhookRoutes.get("/:id/deliveries/export"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const routeEnd = webhookRoutesSource.indexOf(
+      'webhookRoutes.post("/deliveries/:id/replay"',
+      routeStart,
+    );
+    const route = webhookRoutesSource.slice(routeStart, routeEnd);
+    expect(webhookRoutesSource).toContain("const WEBHOOK_DELIVERY_EXPORT_LIMIT = 10_000");
+    expect(webhookRoutesSource).toContain("function csvCell");
+    expect(route).toContain("Webhook delivery export requires owner or admin session");
+    expect(route).toContain('requireRecentTenantAdminMfa(c, "Webhook delivery export")');
+    expect(route).toContain("deliveryCsv(deliveries)");
+    expect(route).toContain('"Content-Type": "text/csv; charset=utf-8"');
+    expect(route).toContain('"Cache-Control": "no-store"');
+    expect(route).not.toContain("payload:");
+    expect(route).not.toContain("url:");
+    expect(route).not.toContain("lastError:");
   });
 
   it("starts a persistent webhook retry scheduler in the long-lived API runtime", () => {

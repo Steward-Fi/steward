@@ -5,7 +5,39 @@
 
 declare module "wagmi" {
   export type Config = unknown;
-  export type CreateConnectorFn = unknown;
+  export interface ConnectorChain {
+    id: number;
+    name?: string;
+    [key: string]: unknown;
+  }
+  export interface CreateConnectorConfig {
+    chains: readonly ConnectorChain[];
+    emitter: { emit(event: string, payload?: unknown): void };
+    storage?: unknown;
+    transports?: Record<number, unknown>;
+  }
+  export type CreateConnectorFn<provider = unknown> = (config: CreateConnectorConfig) => {
+    id: string;
+    name: string;
+    type: string;
+    connect: (parameters?: { chainId?: number }) => Promise<{
+      accounts: readonly `0x${string}`[];
+      chainId: number;
+    }>;
+    disconnect: () => Promise<void>;
+    getAccounts: () => Promise<readonly `0x${string}`[]>;
+    getChainId: () => Promise<number>;
+    getProvider: () => Promise<provider>;
+    isAuthorized: () => Promise<boolean>;
+    switchChain?: (parameters: { chainId: number }) => Promise<ConnectorChain>;
+    onAccountsChanged: (accounts: string[]) => void;
+    onChainChanged: (chainId: string) => void;
+    onConnect?: (connectInfo: { chainId?: string | number }) => void;
+    onDisconnect: (error?: Error) => void;
+    onMessage?: (message: { type: string; data?: unknown }) => void;
+    setup?: () => Promise<void>;
+    [key: string]: unknown;
+  };
   export type Transport = unknown;
   export interface WagmiProviderProps {
     config: Config;
@@ -14,6 +46,9 @@ declare module "wagmi" {
   }
   export const WagmiProvider: import("react").FC<WagmiProviderProps>;
   export function createConfig(config: Record<string, unknown>): Config;
+  export function createConnector<provider = unknown>(
+    connector: CreateConnectorFn<provider>,
+  ): CreateConnectorFn<provider>;
   export function http(url?: string): Transport;
   export function useAccount(): {
     address?: `0x${string}`;

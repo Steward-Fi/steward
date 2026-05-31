@@ -1,10 +1,16 @@
 "use client";
 
-import type { AgentIdentity, PolicyRule, PolicyType, TxRecord } from "@stwd/sdk";
+import type {
+  AgentAccountSummary,
+  AgentIdentity,
+  PolicyRule,
+  PolicyType,
+  TxRecord,
+} from "@stwd/sdk";
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
 import { CopyButton } from "@/components/copy-button";
 import { StatusBadge } from "@/components/status-badge";
@@ -21,6 +27,48 @@ interface BalanceInfo {
     chainId: number;
     symbol: string;
   };
+}
+
+type PortfolioAsset = NonNullable<AgentAccountSummary["portfolio"]["native"]>;
+
+function formatUsd(value: number | string | null | undefined): string {
+  if (value === null || value === undefined || value === "") return "Unavailable";
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return String(value);
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: numeric >= 1 ? 2 : 6,
+  }).format(numeric);
+}
+
+function formatPortfolioAssetValue(asset: PortfolioAsset): string {
+  if (asset.usdValueText) return formatUsd(asset.usdValueText);
+  if (asset.usdValue !== null) return formatUsd(asset.usdValue);
+  return "No USD price";
+}
+
+function PortfolioAssetRow({ asset }: { asset: PortfolioAsset }) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-[1fr_180px_160px] gap-3 py-4 border-b border-border-subtle last:border-b-0">
+      <div className="min-w-0">
+        <div className="text-sm font-medium text-text-secondary truncate">{asset.symbol}</div>
+        <div className="font-mono text-xs text-text-tertiary mt-1 break-all">{asset.token}</div>
+      </div>
+      <div>
+        <div className="text-xs text-text-tertiary uppercase tracking-wider">Balance</div>
+        <div className="text-sm text-text mt-1 tabular-nums break-all">
+          {asset.formatted} {asset.symbol}
+        </div>
+      </div>
+      <div>
+        <div className="text-xs text-text-tertiary uppercase tracking-wider">USD Value</div>
+        <div className="text-sm text-text mt-1 tabular-nums">
+          {formatPortfolioAssetValue(asset)}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // All canonical policy types with sensible display defaults
@@ -76,28 +124,71 @@ export default function AgentDetailPage() {
   const [policies, setPolicies] = useState<PolicyRule[]>([]);
   const [transactions, setTransactions] = useState<TxRecord[]>([]);
   const [balance, setBalance] = useState<BalanceInfo | null>(null);
+  const [account, setAccount] = useState<AgentAccountSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [policiesError, setPoliciesError] = useState<string | null>(null);
+  const [transactionsError, setTransactionsError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"transactions" | "policies">("transactions");
 
-  useEffect(() => {
-    loadAgent();
-  }, [loadAgent]);
-
-  async function loadAgent() {
+  const loadAgent = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const [agentData, policyData, txData] = await Promise.all([
+      // Load policies/transactions alongside the agent, but track their failures
+      // independently. Collapsing a failed fetch into an empty array would make a
+      // load error look identical to "no policies"/"no transactions" — and on a
+      // wallet-security page that could read as "this wallet is unprotected".
+      setPoliciesError(null);
+      setTransactionsError(null);
+      const [agentData, policyResult, txResult] = await Promise.all([
         steward.getAgent(agentId),
-        steward.getPolicies(agentId).catch(() => [] as PolicyRule[]),
-        steward.getTransactionHistory(agentId).catch(() => [] as TxRecord[]),
+        steward
+          .getPolicies(agentId)
+          .then((data) => ({ data }) as const)
+          .catch(
+            (err: unknown) =>
+              ({
+                error: err instanceof Error ? err.message : "Failed to load policies",
+              }) as const,
+          ),
+        steward
+          .getTransactionHistory(agentId)
+          .then((data) => ({ data }) as const)
+          .catch(
+            (err: unknown) =>
+              ({
+                error: err instanceof Error ? err.message : "Failed to load transactions",
+              }) as const,
+          ),
       ]);
       setAgent(agentData);
-      setPolicies(mergePolicies(policyData));
-      setTransactions(txData);
 
-      // Fetch balance separately (non-blocking)
+      if ("error" in policyResult) {
+        setPoliciesError(policyResult.error);
+        setPolicies(mergePolicies([]));
+      } else {
+        setPolicies(mergePolicies(policyResult.data));
+      }
+
+      if ("error" in txResult) {
+        setTransactionsError(txResult.error);
+        setTransactions([]);
+      } else {
+        setTransactions(txResult.data);
+      }
+
+      // Fetch account aggregation separately so the legacy detail shell still loads
+      // if portfolio providers are unavailable.
+      try {
+        const accountData = await steward.getAgentAccount(agentId);
+        setAccount(accountData);
+      } catch {
+        setAccount(null);
+      }
+
+      // Keep the older balance endpoint as a fallback for deployments that have
+      // not enabled the richer account aggregation route yet.
       try {
         const balanceData = await steward.getBalance(agentId);
         setBalance(balanceData as BalanceInfo);
@@ -109,7 +200,11 @@ export default function AgentDetailPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [agentId]);
+
+  useEffect(() => {
+    void loadAgent();
+  }, [loadAgent]);
 
   if (loading) {
     return (
@@ -173,6 +268,16 @@ export default function AgentDetailPage() {
   const pendingCount = transactions.filter((tx) => tx.status === "pending").length;
 
   const activePolicies = policies.filter((p) => p.enabled).length;
+  const portfolio = account?.portfolio;
+  const nativeAsset = portfolio?.native;
+  const tokenAssets = portfolio?.tokens ?? [];
+  const wallets = account?.wallets ?? [];
+  const capabilities = account?.capabilities ?? [];
+  const nativeBalanceLabel = nativeAsset
+    ? `${nativeAsset.formatted} ${nativeAsset.symbol}`
+    : balance
+      ? `${balance.balances.nativeFormatted || formatWei(balance.balances.native || "0")} ${balance.balances.symbol || "ETH"}`
+      : "—";
 
   return (
     <motion.div
@@ -229,24 +334,31 @@ export default function AgentDetailPage() {
         {[
           {
             label: "Balance",
-            value: balance
-              ? `${balance.balances.nativeFormatted || formatWei(balance.balances.native || "0")} ${balance.balances.symbol || "ETH"}`
-              : "—",
+            value: nativeBalanceLabel,
           },
-          { label: "Transactions", value: transactions.length },
+          {
+            label: "Portfolio",
+            value: portfolio ? formatUsd(portfolio.totalUsdText ?? portfolio.totalUsd) : "—",
+          },
+          {
+            label: "Transactions",
+            value: transactionsError ? "Unavailable" : transactions.length,
+            accent: Boolean(transactionsError),
+          },
           {
             label: "Pending",
-            value: pendingCount,
-            accent: pendingCount > 0,
+            value: transactionsError ? "Unavailable" : pendingCount,
+            accent: Boolean(transactionsError) || pendingCount > 0,
           },
           {
             label: "Volume",
-            value: `${formatWei(totalVolume.toString())} ETH`,
+            value: transactionsError ? "Unavailable" : `${formatWei(totalVolume.toString())} ETH`,
+            accent: Boolean(transactionsError),
           },
           {
             label: "Active Policies",
-            value: `${activePolicies} / ${policies.length}`,
-            accent: activePolicies === 0,
+            value: policiesError ? "Unavailable" : `${activePolicies} / ${policies.length}`,
+            accent: Boolean(policiesError) || activePolicies === 0,
           },
         ].map((stat, i) => (
           <motion.div
@@ -268,6 +380,107 @@ export default function AgentDetailPage() {
         ))}
       </div>
 
+      {/* Account aggregation */}
+      <section className="space-y-6">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div>
+            <h2 className="font-display text-lg font-600">Account Portfolio</h2>
+            <p className="text-xs text-text-tertiary mt-1">
+              Wallets, token assets, sponsorship state, and signing capabilities
+            </p>
+          </div>
+          <span className="text-xs text-text-tertiary">
+            {account?.sponsorship.enabled ? "Gas sponsorship enabled" : "Gas sponsorship off"}
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border">
+          <div className="bg-bg p-5">
+            <div className="text-xs text-text-tertiary tracking-wider uppercase">Wallets</div>
+            <div className="font-display text-2xl font-700 mt-2 tabular-nums">{wallets.length}</div>
+            <div className="text-xs text-text-tertiary mt-1">
+              {portfolio?.walletAddress
+                ? shortenAddress(portfolio.walletAddress, 6)
+                : agent.walletAddress}
+            </div>
+          </div>
+          <div className="bg-bg p-5">
+            <div className="text-xs text-text-tertiary tracking-wider uppercase">Native Asset</div>
+            <div className="font-display text-2xl font-700 mt-2 tabular-nums">
+              {nativeBalanceLabel}
+            </div>
+            <div className="text-xs text-text-tertiary mt-1">
+              {nativeAsset ? formatPortfolioAssetValue(nativeAsset) : portfolio?.unavailableReason}
+            </div>
+          </div>
+          <div className="bg-bg p-5">
+            <div className="text-xs text-text-tertiary tracking-wider uppercase">Token Assets</div>
+            <div className="font-display text-2xl font-700 mt-2 tabular-nums">
+              {tokenAssets.length}
+            </div>
+            <div className="text-xs text-text-tertiary mt-1">
+              {portfolio?.chainId ? `Chain ${portfolio.chainId}` : "Best effort"}
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-border-subtle">
+          {nativeAsset && <PortfolioAssetRow asset={nativeAsset} />}
+          {tokenAssets.map((asset) => (
+            <PortfolioAssetRow key={`${asset.token}:${asset.symbol}`} asset={asset} />
+          ))}
+          {!nativeAsset && tokenAssets.length === 0 && (
+            <div className="py-10 text-sm text-text-tertiary">
+              {portfolio?.unavailableReason ?? "No portfolio assets returned"}
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div>
+            <h3 className="text-xs text-text-tertiary tracking-wider uppercase mb-3">
+              Wallet Rows
+            </h3>
+            <div className="border-t border-border-subtle">
+              {wallets.length === 0 ? (
+                <div className="py-6 text-sm text-text-tertiary">No wallet rows returned</div>
+              ) : (
+                wallets.map((wallet) => (
+                  <div
+                    key={wallet.id}
+                    className="py-4 border-b border-border-subtle last:border-b-0"
+                  >
+                    <div className="font-mono text-sm text-text break-all">{wallet.address}</div>
+                    <div className="text-xs text-text-tertiary mt-1">
+                      {wallet.chainFamily} · {wallet.purpose ?? "agent wallet"}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div>
+            <h3 className="text-xs text-text-tertiary tracking-wider uppercase mb-3">
+              Capabilities
+            </h3>
+            <div className="flex flex-wrap gap-2">
+              {capabilities.length === 0 ? (
+                <span className="text-sm text-text-tertiary">No capabilities returned</span>
+              ) : (
+                capabilities.map((capability) => (
+                  <span
+                    key={capability}
+                    className="border border-border-subtle px-2.5 py-1 text-xs text-text-secondary font-mono"
+                  >
+                    {capability}
+                  </span>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      </section>
+
       {/* Tabs */}
       <div className="flex gap-1 border-b border-border-subtle">
         {(["transactions", "policies"] as const).map((tab) => (
@@ -279,8 +492,8 @@ export default function AgentDetailPage() {
             }`}
           >
             {tab === "transactions"
-              ? `Transactions (${transactions.length})`
-              : `Policies (${activePolicies}/${policies.length})`}
+              ? `Transactions ${transactionsError ? "(!)" : `(${transactions.length})`}`
+              : `Policies ${policiesError ? "(!)" : `(${activePolicies}/${policies.length})`}`}
             {activeTab === tab && (
               <motion.div
                 layoutId="agent-tab-indicator"
@@ -299,7 +512,18 @@ export default function AgentDetailPage() {
       {/* Transactions Tab */}
       {activeTab === "transactions" && (
         <div>
-          {transactions.length === 0 ? (
+          {transactionsError ? (
+            <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
+              <p className="text-text-secondary text-sm mb-1">Couldn&apos;t load transactions</p>
+              <p className="text-text-tertiary text-xs mb-4 font-mono">{transactionsError}</p>
+              <button
+                onClick={loadAgent}
+                className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          ) : transactions.length === 0 ? (
             <div className="py-16 text-center border border-border-subtle">
               <p className="text-text-tertiary text-sm">No transactions for this agent yet.</p>
             </div>
@@ -369,54 +593,73 @@ export default function AgentDetailPage() {
       )}
 
       {/* Policies Tab */}
-      {activeTab === "policies" && (
-        <div className="space-y-2">
-          <p className="text-xs text-text-tertiary mb-4">
-            All 5 policy types are shown. Disabled policies are placeholders — configure them via
-            the API or SDK.
-          </p>
-          <div className="space-y-px bg-border">
-            {policies.map((policy, i) => (
-              <motion.div
-                key={policy.id || i}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: i * 0.05, duration: 0.3 }}
-                className="bg-bg p-5 flex items-center justify-between"
-              >
-                <div className="flex items-center gap-4">
-                  <span
-                    className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                      policy.enabled ? "bg-emerald-400" : "bg-text-tertiary/30"
-                    }`}
-                  />
-                  <div>
-                    <div
-                      className={`text-sm font-display font-600 ${
-                        policy.enabled ? "text-text" : "text-text-tertiary"
+      {activeTab === "policies" &&
+        (policiesError ? (
+          // Never collapse a failed policy load into the "all disabled" placeholder
+          // list — on a wallet-security page that would falsely imply this wallet has
+          // no protections configured. Surface the failure explicitly instead.
+          <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
+            <p className="text-text-secondary text-sm mb-1">Couldn&apos;t load policies</p>
+            <p className="text-text-tertiary text-xs mb-2 font-mono">{policiesError}</p>
+            <p className="text-text-tertiary text-xs mb-4 max-w-md mx-auto">
+              Policy state is unavailable — this does not mean the wallet is unprotected. Retry to
+              load the agent&apos;s active policies.
+            </p>
+            <button
+              onClick={loadAgent}
+              className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-xs text-text-tertiary mb-4">
+              All 5 policy types are shown. Disabled policies are placeholders — configure them via
+              the API or SDK.
+            </p>
+            <div className="space-y-px bg-border">
+              {policies.map((policy, i) => (
+                <motion.div
+                  key={policy.id || i}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: i * 0.05, duration: 0.3 }}
+                  className="bg-bg p-5 flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-4">
+                    <span
+                      className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                        policy.enabled ? "bg-emerald-400" : "bg-text-tertiary/30"
                       }`}
-                    >
-                      {policyTypeLabel(policy.type)}
-                    </div>
-                    <div className="text-xs text-text-tertiary mt-0.5">
-                      {policy.enabled
-                        ? formatPolicyConfig(policy.type, policy.config as Record<string, string>)
-                        : "Not configured"}
+                    />
+                    <div>
+                      <div
+                        className={`text-sm font-display font-600 ${
+                          policy.enabled ? "text-text" : "text-text-tertiary"
+                        }`}
+                      >
+                        {policyTypeLabel(policy.type)}
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-0.5">
+                        {policy.enabled
+                          ? formatPolicyConfig(policy.type, policy.config as Record<string, string>)
+                          : "Not configured"}
+                      </div>
                     </div>
                   </div>
-                </div>
-                <span
-                  className={`text-xs flex-shrink-0 ${
-                    policy.enabled ? "text-emerald-400" : "text-text-tertiary/50"
-                  }`}
-                >
-                  {policy.enabled ? "Active" : "Disabled"}
-                </span>
-              </motion.div>
-            ))}
+                  <span
+                    className={`text-xs flex-shrink-0 ${
+                      policy.enabled ? "text-emerald-400" : "text-text-tertiary/50"
+                    }`}
+                  >
+                    {policy.enabled ? "Active" : "Disabled"}
+                  </span>
+                </motion.div>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
+        ))}
     </motion.div>
   );
 }

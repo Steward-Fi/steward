@@ -43,7 +43,7 @@ describe("enterprise SAML authorization-code SSO hardening", () => {
     expect(acsRoute).toContain("recordSamlAssertionReplay");
     expect(acsRoute).toContain("saml_assertion_replay");
     expect(acsRoute).toContain("provisionSamlUser");
-    expect(acsRoute).toContain('tenantRole: "viewer"');
+    expect(acsRoute).toContain("groups: verified.groups");
     expect(acsRoute).toContain("oauth-code:${exchangeCode}");
     expect(acsRoute).toContain("setRedirectFragment(redirectUrl, { code: exchangeCode");
     expect(acsRoute).not.toContain('searchParams.set("token"');

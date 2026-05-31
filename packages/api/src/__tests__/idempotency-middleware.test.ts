@@ -2,7 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Hono } from "hono";
-import { idempotencyMiddleware, MemoryIdempotencyStore } from "../middleware/idempotency";
+import {
+  getTenantIdempotencyMetrics,
+  idempotencyMiddleware,
+  MemoryIdempotencyStore,
+  resetIdempotencyMetricsForTests,
+} from "../middleware/idempotency";
 import type { AppVariables } from "../services/context";
 
 const AUTHORIZATION = "Bearer idempotency-test-token";
@@ -39,6 +44,37 @@ function makeApp() {
 }
 
 describe("idempotencyMiddleware", () => {
+  it("records tenant-scoped privacy-preserving counters", async () => {
+    resetIdempotencyMetricsForTests();
+    const { app } = makeApp();
+    const init = {
+      method: "POST",
+      headers: {
+        Authorization: AUTHORIZATION,
+        "Content-Type": "application/json",
+        "X-Steward-Tenant": "tenant-metrics",
+        "Idempotency-Key": "idem-key-metrics",
+      },
+      body: JSON.stringify({ value: "first" }),
+    };
+
+    await app.request("/mutate", init);
+    await app.request("/mutate", init);
+    await app.request("/mutate", {
+      ...init,
+      body: JSON.stringify({ value: "changed" }),
+    });
+
+    const metrics = await getTenantIdempotencyMetrics("tenant-metrics");
+    expect(metrics.counters.observed).toBe(3);
+    expect(metrics.counters.reserved).toBe(1);
+    expect(metrics.counters.completed).toBe(1);
+    expect(metrics.counters.replayed).toBe(1);
+    expect(metrics.counters.conflicts).toBe(1);
+    expect(metrics.counters.inFlightConflicts).toBe(0);
+    expect(metrics.lastSeenAt).toBeString();
+  });
+
   it("replays a completed mutating response for the same key and request", async () => {
     const { app, getCount } = makeApp();
     const init = {
@@ -301,6 +337,89 @@ describe("idempotencyMiddleware", () => {
     expect(await first.json()).toEqual({ ok: true, count: 1, value: "first" });
     expect(await second.json()).toEqual({ ok: true, count: 2, value: "first" });
     expect(getCount()).toBe(2);
+  });
+
+  it("suppresses duplicate public auth mutations without replaying token bodies", async () => {
+    const app = new Hono<{ Variables: AppVariables }>();
+    const store = new MemoryIdempotencyStore(100);
+    let count = 0;
+
+    app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
+    app.post("/auth/email/verify", async (c) => {
+      count += 1;
+      const body = await c.req.json<{ code: string; email: string }>();
+      return c.json({
+        ok: true,
+        count,
+        token: `access-${count}`,
+        refreshToken: `refresh-${count}`,
+        email: body.email,
+      });
+    });
+
+    const init = {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Idempotency-Key": "public-auth-idem-key",
+        "X-Steward-Tenant": "tenant-auth",
+        Origin: "https://app.example.com",
+      },
+      body: JSON.stringify({ email: "user@example.com", code: "123456" }),
+    };
+
+    const first = await app.request("/auth/email/verify", init);
+    const second = await app.request("/auth/email/verify", init);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(409);
+    expect(first.headers.get("Idempotency-Replayed")).toBe("false");
+    expect(second.headers.get("Idempotency-Replayed")).toBeNull();
+    expect(await first.json()).toMatchObject({ ok: true, count: 1, token: "access-1" });
+    expect(await second.json()).toEqual({
+      ok: false,
+      error: "Idempotency key has already been used",
+    });
+    expect(count).toBe(1);
+  });
+
+  it("scopes unauthenticated public auth idempotency by path and origin", async () => {
+    const app = new Hono<{ Variables: AppVariables }>();
+    const store = new MemoryIdempotencyStore(100);
+    let count = 0;
+
+    app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
+    app.post("/auth/email/send", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, path: c.req.path });
+    });
+    app.post("/auth/sms/send", async (c) => {
+      count += 1;
+      return c.json({ ok: true, count, path: c.req.path });
+    });
+
+    const headers = {
+      "Content-Type": "application/json",
+      "Idempotency-Key": "public-auth-shared-key",
+      "X-Steward-Tenant": "tenant-auth",
+      Origin: "https://app.example.com",
+    };
+    const first = await app.request("/auth/email/send", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ email: "user@example.com" }),
+    });
+    const second = await app.request("/auth/sms/send", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ phone: "+15555550123" }),
+    });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await first.json()).toEqual({ ok: true, count: 1, path: "/auth/email/send" });
+    expect(await second.json()).toEqual({ ok: true, count: 2, path: "/auth/sms/send" });
+    expect(count).toBe(2);
   });
 
   it("does not replay session-scoped requests before route-level MFA checks can run", async () => {
