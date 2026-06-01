@@ -310,8 +310,11 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
       to: destination,
       value: "0",
       chainId: 42161, // Arbitrum — HL withdraw destination chain
-      venue: "hyperliquid" as const,
     },
+    // `venue` must be top-level on the evaluation context: the engine reads
+    // `ctx.venue` (engine.ts) for the venue-allowlist evaluator. Nesting it
+    // inside `request` leaves ctx.venue undefined → venue-allowlist fails closed.
+    venue: "hyperliquid" as const,
     recentTxCount1h: 0,
     recentTxCount24h: 0,
     spentToday: 0n,
