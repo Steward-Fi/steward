@@ -22,6 +22,7 @@ import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { requireAgentJwt } from "./middleware/agent-jwt";
 import { correlationId } from "./middleware/correlation";
+import { operatorAuth } from "./middleware/operator-auth";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
 import { agentRoutes } from "./routes/agents";
@@ -30,6 +31,7 @@ import { auditRoutes } from "./routes/audit";
 import { authRoutes } from "./routes/auth";
 import { dashboardRoutes } from "./routes/dashboard";
 import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
+import { operatorRecoveryRoutes } from "./routes/operator-recovery";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { secretsRoutes } from "./routes/secrets";
@@ -122,16 +124,25 @@ app.use("/audit", (c, next) => tenantAuth(c, next));
 app.use("/audit/*", (c, next) => tenantAuth(c, next));
 app.use("/policies", (c, next) => tenantAuth(c, next));
 app.use("/policies/*", (c, next) => tenantAuth(c, next));
+// Operator fund-recovery endpoints use the operator gate (platform key OR
+// tenant-admin), NOT requireAgentJwt. See middleware/operator-auth.ts.
+const isOperatorRecoveryPath = (path: string): boolean =>
+  path.endsWith("/close-all") || path.endsWith("/withdraw");
+
 app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/trade", (c, next) => tenantAuth(c, next));
-app.use("/trade/*", (c, next) =>
-  c.req.path.endsWith("/trade/hyperliquid/order") ? next() : tenantAuth(c, next),
-);
+app.use("/trade/*", (c, next) => {
+  if (c.req.path.endsWith("/trade/hyperliquid/order")) return next();
+  if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
+  return tenantAuth(c, next);
+});
 app.use("/v1/trade", (c, next) => tenantAuth(c, next));
-app.use("/v1/trade/*", (c, next) =>
-  c.req.path.endsWith("/v1/trade/hyperliquid/order") ? next() : tenantAuth(c, next),
-);
+app.use("/v1/trade/*", (c, next) => {
+  if (c.req.path.endsWith("/v1/trade/hyperliquid/order")) return next();
+  if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
+  return tenantAuth(c, next);
+});
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
@@ -164,6 +175,8 @@ app.route("/audit", auditRoutes);
 app.route("/policies", policiesStandaloneRoutes);
 app.route("/trade", tradeRoutes);
 app.route("/v1/trade", tradeRoutes);
+app.route("/trade", operatorRecoveryRoutes);
+app.route("/v1/trade", operatorRecoveryRoutes);
 app.route("/agents", erc8004Routes);
 app.route("/discovery", discoveryRoutes);
 
