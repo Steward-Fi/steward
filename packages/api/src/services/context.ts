@@ -279,7 +279,7 @@ export type AppVariables = {
   tenantRole?: string;
   agentScope?: string;
   agentSubject?: string;
-  authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt";
+  authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt" | "platform";
 };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
