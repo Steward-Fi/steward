@@ -12,6 +12,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import { getRedisClient } from "../middleware/redis";
+import { getAgentTokenStatus } from "../services/agent-token-status";
 import { writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
@@ -23,6 +24,36 @@ import {
 } from "../services/context";
 
 export const tradeRoutes = new Hono<{ Variables: AppVariables }>();
+
+tradeRoutes.get("/token-status", async (c) => {
+  const agentId = c.req.query("agentId")?.trim();
+  if (!agentId) {
+    return c.json<ApiResponse>({ ok: false, error: "agentId is required" }, 400);
+  }
+
+  const status = await getAgentTokenStatus(agentId);
+  if (!status) {
+    return c.json(
+      responseData({
+        agentId,
+        status: "unknown" as const,
+        exp: null,
+        observedAt: null,
+        expiresInSeconds: null,
+      }),
+    );
+  }
+
+  return c.json(
+    responseData({
+      agentId,
+      status: "observed" as const,
+      exp: status.exp,
+      observedAt: status.observedAt,
+      expiresInSeconds: status.exp - Math.floor(Date.now() / 1000),
+    }),
+  );
+});
 
 const createSessionSchema = z.object({
   agentId: z.string().min(1).optional(),
