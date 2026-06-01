@@ -7,7 +7,7 @@ import {
   isEncryptedWebhookSecret,
   WebhookDispatcher,
 } from "@stwd/webhooks";
-import { db } from "./context";
+import { db, tenantConfigs } from "./context";
 import {
   acceptsConfiguredWebhookEvent,
   type ConfiguredWebhookEventType,
@@ -34,6 +34,25 @@ export function dispatchWebhook(
   void dispatchConfiguredWebhooks(event, configuredType).catch((error) => {
     console.error("[webhooks] Failed to dispatch configured webhooks:", error);
   });
+
+  // Legacy tenant-config single webhook URL. Tenants can still set a webhookUrl
+  // via the tenants route (tenants.ts), so this fan-out must remain until that
+  // path is fully migrated to persisted webhook configs. It fires for every
+  // event regardless of configured-type mapping, using the raw event type.
+  const tenantConfigWebhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
+  if (tenantConfigWebhookUrl) {
+    const tenantConfigEvent: WebhookEvent = {
+      type,
+      tenantId,
+      agentId,
+      data,
+      timestamp: new Date(),
+    };
+    const dispatcher = new WebhookDispatcher();
+    dispatcher.dispatch(tenantConfigEvent, tenantConfigWebhookUrl).catch((error) => {
+      console.error("[webhooks] Failed to dispatch tenant config webhook:", error);
+    });
+  }
 }
 
 async function dispatchConfiguredWebhooks(

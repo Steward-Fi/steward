@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import type { WebhookEvent } from "@stwd/shared";
+import {
+  decryptWebhookSecret,
+  encryptWebhookSecret,
+  isEncryptedWebhookSecret,
+} from "@stwd/webhooks";
 
 type StoredWebhookConfig = {
   tenantId: string;
@@ -49,6 +54,12 @@ mock.module("@stwd/db", () => ({
   webhookConfigs: { tenantId: "tenantId", enabled: "enabled" },
   webhookDeliveries: { id: "id" },
 }));
+// NOTE: bun's mock.module replaces the ENTIRE module and is sticky per-process,
+// so this mock must re-export every binding the module-under-test (and any
+// sibling test running in the same process) imports from @stwd/webhooks.
+// Omitting the secret-codec helpers previously cascaded into "export not found"
+// failures across the webhook + approvals API suites. We mock only the
+// dispatcher and pass the real secret-codec functions through.
 mock.module("@stwd/webhooks", () => ({
   WebhookDispatcher: class {
     async dispatch(
@@ -59,6 +70,9 @@ mock.module("@stwd/webhooks", () => ({
       return { success: true, attempts: 1, deliveredAt: new Date("2026-05-20T00:00:00Z") };
     }
   },
+  decryptWebhookSecret,
+  encryptWebhookSecret,
+  isEncryptedWebhookSecret,
 }));
 
 const { dispatchWebhook } = await import("../services/webhook-dispatch");
@@ -103,14 +117,24 @@ describe("dispatchWebhook", () => {
       url: "https://example.com/signed",
       secret: "whsec_signed",
     });
+    // New delivery lifecycle: the row is inserted as "processing" first, then
+    // updated to "delivered" after the dispatcher returns. The persisted secret is
+    // re-encrypted at rest (stwd_whsec_v1 envelope) even when the config supplied
+    // a plaintext secret.
     expect(insertedDeliveries[0]).toMatchObject({
       tenantId: "tenant-1",
       agentId: "agent-1",
       eventType: "tx.signed",
       url: "https://example.com/signed",
-      status: "pending",
+      status: "processing",
+      attempts: 0,
     });
-    expect(updatedDeliveries[0]).toMatchObject({
+    expect(insertedDeliveries[0]?.secret).toMatch(/^stwd_whsec_v1:/);
+    // The new code issues two updates: one to re-encrypt the config secret at rest
+    // and one to mark the delivery delivered. Assert against the delivery-status
+    // update specifically rather than a positional index.
+    const deliveredUpdate = updatedDeliveries.find((u) => u.status === "delivered");
+    expect(deliveredUpdate).toMatchObject({
       status: "delivered",
       attempts: 1,
       lastError: null,
