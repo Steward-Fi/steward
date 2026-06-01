@@ -45,28 +45,6 @@ function generateSecret(): string {
   return `whsec_${randomBytes(32).toString("hex")}`;
 }
 
-function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]): boolean {
-  const role = c.get("tenantRole");
-  return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
-}
-
-function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
-}
-
-function requireRecentTenantAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {
-  if (hasRecentSessionMfa(c)) return null;
-  return c.json<ApiResponse>(
-    { ok: false, error: `${reason} requires recent MFA verification` },
-    403,
-  );
-}
-
 function currentWebhookAcceptsDelivery(
   events: string[],
   eventType: string,
@@ -156,14 +134,9 @@ function parsePaginationParam(
 // ─── Register webhook ─────────────────────────────────────────────────────────
 
 webhookRoutes.post("/", async (c) => {
-  if (!requireTenantAdminSession(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Webhook creation requires owner or admin session" },
-      403,
-    );
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
   }
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Webhook creation");
-  if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
   const body = await safeJsonParse<{
@@ -317,14 +290,9 @@ webhookRoutes.post("/", async (c) => {
 // ─── List webhooks ────────────────────────────────────────────────────────────
 
 webhookRoutes.get("/", async (c) => {
-  if (!requireTenantAdminSession(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Webhook configuration access requires owner or admin session" },
-      403,
-    );
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
   }
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Webhook configuration access");
-  if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
 
@@ -352,14 +320,9 @@ webhookRoutes.get("/", async (c) => {
 // ─── Update webhook ───────────────────────────────────────────────────────────
 
 webhookRoutes.put("/:id", async (c) => {
-  if (!requireTenantAdminSession(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Webhook updates require owner or admin session" },
-      403,
-    );
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
   }
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Webhook updates");
-  if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
   const webhookId = c.req.param("id");
@@ -511,14 +474,9 @@ webhookRoutes.put("/:id", async (c) => {
 // ─── Delete webhook ───────────────────────────────────────────────────────────
 
 webhookRoutes.delete("/:id", async (c) => {
-  if (!requireTenantAdminSession(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Webhook deletion requires owner or admin session" },
-      403,
-    );
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
   }
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Webhook deletion");
-  if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
   const webhookId = c.req.param("id");
@@ -587,14 +545,9 @@ webhookRoutes.delete("/:id", async (c) => {
 // ─── Delivery history ─────────────────────────────────────────────────────────
 
 webhookRoutes.get("/:id/deliveries", async (c) => {
-  if (!requireTenantAdminSession(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Webhook delivery history requires owner or admin session" },
-      403,
-    );
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
   }
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Webhook delivery history");
-  if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
   const webhookId = c.req.param("id");
@@ -654,14 +607,9 @@ webhookRoutes.get("/:id/deliveries", async (c) => {
 // ─── Retry delivery ───────────────────────────────────────────────────────────
 
 webhookRoutes.post("/deliveries/:id/retry", async (c) => {
-  if (!requireTenantAdminSession(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Webhook delivery retry requires owner or admin session" },
-      403,
-    );
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
   }
-  const mfaResponse = requireRecentTenantAdminMfa(c, "Webhook delivery retry");
-  if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
   const deliveryId = c.req.param("id");

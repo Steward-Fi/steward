@@ -101,9 +101,12 @@ describe("webhook retry hardening", () => {
   it("does not copy legacy plaintext webhook secrets into delivery snapshots", () => {
     expect(webhookDispatchSource).toContain("isEncryptedWebhookSecret(config.secret)");
     expect(webhookDispatchSource).toContain("encryptWebhookSecret(signingSecret)");
+    const insertIndex = webhookDispatchSource.indexOf(".insert(webhookDeliveries)");
     const insertSnapshot = webhookDispatchSource.slice(
-      webhookDispatchSource.indexOf(".insert(webhookDeliveries)"),
-      webhookDispatchSource.indexOf("const dispatcher = new WebhookDispatcher"),
+      insertIndex,
+      // Search for the dispatcher construction that follows the delivery insert,
+      // not the legacy tenant-config dispatcher that appears earlier in the file.
+      webhookDispatchSource.indexOf("new WebhookDispatcher", insertIndex),
     );
     expect(insertSnapshot).toContain("secret: encryptedSecret");
     expect(insertSnapshot).not.toContain("secret: config.secret");

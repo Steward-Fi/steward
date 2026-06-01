@@ -13,8 +13,6 @@ import { trackAuditEvent, writeAuditEvent } from "../services/audit";
 import {
   type ApiResponse,
   type AppVariables,
-  agentKeyQuorums,
-  agentSigners,
   approvalQueue,
   db,
   ensureAgentForTenant,
@@ -45,220 +43,9 @@ import {
   transactions,
   vault,
 } from "../services/context";
-import { verifySignerCredential } from "../services/signer-credentials";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const vaultRoutes = new Hono<{ Variables: AppVariables }>();
-
-const MAX_QUORUM_CREDENTIALS = 16;
-
-function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
-  const verifiedAt = c.get("sessionMfaVerifiedAt");
-  return (
-    typeof verifiedAt === "number" &&
-    Number.isFinite(verifiedAt) &&
-    Date.now() - verifiedAt <= maxAgeMs
-  );
-}
-
-function hasTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]): boolean {
-  const role = c.get("tenantRole");
-  return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
-}
-
-function signerHasPermission(permissions: readonly string[], required: string): boolean {
-  const family = required.includes("_") ? `${required.split("_")[0]}:*` : `${required}:*`;
-  const aliases =
-    required === "wallet_action_transfer"
-      ? ["transfer"]
-      : required === "wallet_action_send_calls"
-        ? ["send_calls"]
-        : [];
-  return (
-    permissions.includes("*") ||
-    (required.startsWith("sign_") && permissions.includes("sign:*")) ||
-    permissions.includes(required) ||
-    aliases.some((permission) => permissions.includes(permission)) ||
-    permissions.includes(family)
-  );
-}
-
-type SignerAuthorization =
-  | { authMode: "admin"; signerId: string | null }
-  | { authMode: "signer"; signerId: string }
-  | { authMode: "quorum"; quorumId: string; memberSignerIds: string[] };
-
-function signerAuthAuditMetadata(auth: SignerAuthorization): Record<string, unknown> {
-  if (auth.authMode === "quorum") {
-    return {
-      authMode: "quorum",
-      quorumId: auth.quorumId,
-      memberSignerIds: auth.memberSignerIds,
-    };
-  }
-  return {
-    authMode: auth.authMode,
-    signerId: auth.signerId,
-  };
-}
-
-async function requireSignerPermission(
-  c: Parameters<typeof requireTenantLevel>[0],
-  tenantId: string,
-  agentId: string,
-  requiredPermission: string,
-): Promise<{ ok: true; auth: SignerAuthorization } | { ok: false; response: Response }> {
-  const genericError =
-    "Signing requires owner/admin MFA; owner/admin session; owner or admin session with recent MFA or valid signer-bound credentials";
-  if (hasTenantAdminSession(c)) {
-    if (hasRecentSessionMfa(c)) {
-      return { ok: true, auth: { authMode: "admin", signerId: c.get("userId") ?? null } };
-    }
-    return {
-      ok: false,
-      response: c.json<ApiResponse>(
-        { ok: false, error: "Signing requires recent MFA verification" },
-        403,
-      ),
-    };
-  }
-
-  const signerId = c.req.header("x-steward-signer-id")?.trim();
-  const signerSecret = c.req.header("x-steward-signer-secret");
-  const quorumId = c.req.header("x-steward-key-quorum-id")?.trim();
-  if (quorumId) {
-    const credentialsHeader = c.req.header("x-steward-key-quorum-credentials");
-    if (!credentialsHeader) {
-      return { ok: false, response: c.json<ApiResponse>({ ok: false, error: genericError }, 403) };
-    }
-
-    let credentials: Array<{ signerId: string; signerSecret: string }>;
-    try {
-      const parsed = JSON.parse(credentialsHeader) as unknown;
-      if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > MAX_QUORUM_CREDENTIALS) {
-        throw new Error("invalid quorum credential count");
-      }
-      credentials = parsed.map((credential) => {
-        if (!credential || typeof credential !== "object")
-          throw new Error("invalid quorum credential");
-        const value = credential as Record<string, unknown>;
-        if (typeof value.signerId !== "string" || !value.signerId.trim()) {
-          throw new Error("invalid quorum signer id");
-        }
-        if (typeof value.signerSecret !== "string" || !value.signerSecret) {
-          throw new Error("invalid quorum signer secret");
-        }
-        return { signerId: value.signerId.trim(), signerSecret: value.signerSecret };
-      });
-    } catch {
-      return { ok: false, response: c.json<ApiResponse>({ ok: false, error: genericError }, 403) };
-    }
-
-    const uniqueSignerIds = [...new Set(credentials.map((credential) => credential.signerId))];
-    if (uniqueSignerIds.length !== credentials.length) {
-      return { ok: false, response: c.json<ApiResponse>({ ok: false, error: genericError }, 403) };
-    }
-
-    const [quorum] = await db
-      .select()
-      .from(agentKeyQuorums)
-      .where(
-        and(
-          eq(agentKeyQuorums.id, quorumId),
-          eq(agentKeyQuorums.tenantId, tenantId),
-          eq(agentKeyQuorums.agentId, agentId),
-        ),
-      );
-    if (
-      !quorum ||
-      quorum.status !== "active" ||
-      !signerHasPermission(quorum.permissions, requiredPermission)
-    ) {
-      return { ok: false, response: c.json<ApiResponse>({ ok: false, error: genericError }, 403) };
-    }
-    const memberSet = new Set(quorum.memberSignerIds);
-    if (
-      uniqueSignerIds.some((id) => !memberSet.has(id)) ||
-      uniqueSignerIds.length < quorum.threshold
-    ) {
-      return { ok: false, response: c.json<ApiResponse>({ ok: false, error: genericError }, 403) };
-    }
-
-    const rows = await db
-      .select()
-      .from(agentSigners)
-      .where(and(eq(agentSigners.tenantId, tenantId), eq(agentSigners.agentId, agentId)));
-    const signersById = new Map(rows.map((row) => [row.id, row]));
-    const now = new Date();
-    for (const credential of credentials) {
-      const signer = signersById.get(credential.signerId);
-      const credentialHash =
-        signer?.metadata && typeof signer.metadata.credentialHash === "string"
-          ? signer.metadata.credentialHash
-          : null;
-      if (
-        !signer ||
-        signer.status !== "active" ||
-        !credentialHash ||
-        !(await verifySignerCredential(credential.signerSecret, credentialHash)) ||
-        !signerHasPermission(signer.permissions, requiredPermission)
-      ) {
-        return {
-          ok: false,
-          response: c.json<ApiResponse>({ ok: false, error: genericError }, 403),
-        };
-      }
-      await db
-        .update(agentSigners)
-        .set({
-          metadata: { ...signer.metadata, credentialLastUsedAt: now.toISOString() },
-          updatedAt: now,
-        })
-        .where(eq(agentSigners.id, signer.id));
-    }
-    return {
-      ok: true,
-      auth: { authMode: "quorum", quorumId: quorum.id, memberSignerIds: uniqueSignerIds },
-    };
-  }
-
-  if (!signerId || !signerSecret) {
-    return { ok: false, response: c.json<ApiResponse>({ ok: false, error: genericError }, 403) };
-  }
-
-  const [signer] = await db
-    .select()
-    .from(agentSigners)
-    .where(
-      and(
-        eq(agentSigners.id, signerId),
-        eq(agentSigners.tenantId, tenantId),
-        eq(agentSigners.agentId, agentId),
-      ),
-    );
-  const credentialHash =
-    signer?.metadata && typeof signer.metadata.credentialHash === "string"
-      ? signer.metadata.credentialHash
-      : null;
-  if (
-    !signer ||
-    signer.status !== "active" ||
-    !credentialHash ||
-    !(await verifySignerCredential(signerSecret, credentialHash)) ||
-    !signerHasPermission(signer.permissions, requiredPermission)
-  ) {
-    return { ok: false, response: c.json<ApiResponse>({ ok: false, error: genericError }, 403) };
-  }
-  const now = new Date();
-  await db
-    .update(agentSigners)
-    .set({
-      metadata: { ...signer.metadata, credentialLastUsedAt: now.toISOString() },
-      updatedAt: now,
-    })
-    .where(eq(agentSigners.id, signer.id));
-  return { ok: true, auth: { authMode: "signer", signerId: signer.id } };
-}
 
 // ─── Sign transaction (EVM) ───────────────────────────────────────────────────
 
@@ -306,25 +93,6 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     chainId: resolvedChainId,
   };
   const requester = getAuthenticatedPrincipal(c);
-  const signerAuthorization = await requireSignerPermission(
-    c,
-    tenantId,
-    agentId,
-    "sign_transaction",
-  );
-  if (!signerAuthorization.ok) return signerAuthorization.response;
-  const signerAuditMetadata = signerAuthAuditMetadata(signerAuthorization.auth);
-  if (signerAuthorization.auth.authMode !== "admin") {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error:
-          "Signing requires owner/admin MFA; owner/admin session; owner or admin session with recent MFA or valid signer-bound credentials",
-      },
-      403,
-    );
-  }
-  void signerAuditMetadata;
   const policySet = await getPolicySet(tenantId, agentId);
 
   // ── Redis rate-limit check (before policy evaluation) ──────────────────────
@@ -544,38 +312,9 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   }
 });
 
-/*
- * Gas sponsorship hookpoint reference for the wallet action transfer route.
- * The full wallet-action route lands in another wave; keep these anchors near
- * the approval path so gas-sponsorship invariant tests can verify the required
- * ordering without disturbing the existing 4-eyes approval queue code here.
- *
- * vaultRoutes.post("/:agentId/actions/transfer"
- * transfer.sponsor === true && transfer.broadcast === false
- * signed-only actions do not spend sponsored gas
- * resolveGasSponsorshipRequest
- * status: "pending"
- * status: "reserved"
- * db.delete(transactions).where(eq(transactions.id, actionId))
- * status: "failed"
- * wallet_action.transfer.queued_for_approval
- * vault.signTransaction(signRequest
- * reservedUsd: input.status === "failed" ? 0 : estimatedUsd
- */
-
 // ─── Approve transaction ──────────────────────────────────────────────────────
 
 vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
-  /*
-   * Gas sponsorship approval hookpoint reference.
-   * transferPayload?.sponsorship?.sponsored === true && !shouldBroadcast
-   * resolvedAt: null
-   * status: "reserved"
-   * vault.signTransaction(approvalSignRequest
-   * sponsorship: transferPayload.sponsorship
-   * wallet_action.transfer.succeeded
-   * status: shouldBroadcast ? "submitted" : "signed"
-   */
   if (!requireTenantLevel(c)) {
     return c.json<ApiResponse>(
       {
@@ -898,9 +637,6 @@ vaultRoutes.post("/:agentId/sign-message", async (c) => {
   if (!isNonEmptyString(body.message)) {
     return c.json<ApiResponse>({ ok: false, error: "'message' is required" }, 400);
   }
-
-  const signerAuthorization = await requireSignerPermission(c, tenantId, agentId, "sign_message");
-  if (!signerAuthorization.ok) return signerAuthorization.response;
 
   try {
     const signature = await vault.signMessage(tenantId, agentId, body.message);
@@ -1442,49 +1178,6 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     }
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
-});
-
-// ─── Delegated wallet action signing placeholders ────────────────────────────
-
-async function rejectWithoutSignerAuth(
-  c: Parameters<typeof requireTenantLevel>[0],
-  requiredPermission: string,
-) {
-  if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
-      403,
-    );
-  }
-  const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId") ?? "";
-  const signerAuthorization = await requireSignerPermission(
-    c,
-    tenantId,
-    agentId,
-    requiredPermission,
-  );
-  if (!signerAuthorization.ok) return signerAuthorization.response;
-  return c.json<ApiResponse>(
-    { ok: false, error: "Delegated wallet action signing is not enabled on this branch" },
-    501,
-  );
-}
-
-vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
-  return rejectWithoutSignerAuth(c, "wallet_action_transfer");
-});
-
-vaultRoutes.post("/:agentId/actions/send-calls", async (c) => {
-  return rejectWithoutSignerAuth(c, "wallet_action_send_calls");
-});
-
-vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
-  return rejectWithoutSignerAuth(c, "sign_user_operation");
-});
-
-vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
-  return rejectWithoutSignerAuth(c, "sign_authorization");
 });
 
 // ─── Generic RPC Passthrough ──────────────────────────────────────────────────
