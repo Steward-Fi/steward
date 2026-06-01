@@ -262,15 +262,25 @@ async function evaluateSpendingLimit(
 function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
   const config = rule.config as unknown as ApprovedAddressesConfig;
   const base = { policyId: rule.id, type: rule.type } as const;
-  const target = ctx.request.to.toLowerCase();
-  const listed = config.addresses.map((a) => a.toLowerCase());
+  const targetAddress = getApprovedAddressTarget(ctx.request);
+  if (!targetAddress) {
+    return {
+      ...base,
+      passed: false,
+      reason: "No destination address found for approved-addresses policy",
+    };
+  }
 
-  if (config.mode === "whitelist") {
+  const target = targetAddress.toLowerCase();
+  const listed = config.addresses.map((a) => a.toLowerCase());
+  const mode = config.mode ?? "whitelist";
+
+  if (mode === "whitelist") {
     if (!listed.includes(target)) {
       return {
         ...base,
         passed: false,
-        reason: `Address ${ctx.request.to} not in whitelist`,
+        reason: `Destination address ${targetAddress} not in whitelist`,
       };
     }
   } else {
@@ -278,12 +288,30 @@ function evaluateApprovedAddresses(rule: PolicyRule, ctx: EvaluatorContext): Pol
       return {
         ...base,
         passed: false,
-        reason: `Address ${ctx.request.to} is blacklisted`,
+        reason: `Destination address ${targetAddress} is blacklisted`,
       };
     }
   }
 
   return { ...base, passed: true };
+}
+
+function getApprovedAddressTarget(request: SignRequest): string | undefined {
+  const withdrawalRequest = request as SignRequest & {
+    destination?: unknown;
+    action?: { destination?: unknown };
+    withdraw?: { destination?: unknown };
+  };
+
+  if (typeof withdrawalRequest.destination === "string") return withdrawalRequest.destination;
+  if (typeof withdrawalRequest.action?.destination === "string") {
+    return withdrawalRequest.action.destination;
+  }
+  if (typeof withdrawalRequest.withdraw?.destination === "string") {
+    return withdrawalRequest.withdraw.destination;
+  }
+
+  return request.to;
 }
 
 async function evaluateAutoApprove(rule: PolicyRule, ctx: EvaluatorContext): Promise<PolicyResult> {
