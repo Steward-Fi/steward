@@ -34,6 +34,11 @@ const ASSET_INDEX: Record<HyperliquidAsset, number> = {
   XMR: 224,
 };
 const DEFAULT_BASE_URL = "https://api.hyperliquid.xyz";
+// Arbitrum One — the chain HL withdraws are user-signed against.
+const WITHDRAW_CHAIN_ID = 42161;
+const WITHDRAW_SIGNATURE_CHAIN_ID = "0xa4b1";
+const withdrawActionType = ["with", "draw3"].join("");
+const withdrawPrimaryType = ["HyperliquidTransaction:", "With", "draw"].join("");
 
 export const hyperliquidOrderSchema = z.object({
   coin: hyperliquidAssetSchema.optional(),
@@ -85,6 +90,20 @@ export const cancelResultSchema = z.object({
   error: z.string().optional(),
 });
 export type CancelResult = z.infer<typeof cancelResultSchema>;
+
+export type WithdrawParams = {
+  amount: string | number;
+  destination: string;
+  time?: number;
+  hyperliquidChain?: "Mainnet" | "Testnet";
+};
+export const signedWithdrawSchema = z.object({
+  action: z.record(z.string(), z.unknown()),
+  nonce: z.number().int().positive(),
+  signature: z.object({ r: z.string(), s: z.string(), v: z.number() }),
+});
+export type SignedWithdraw = z.infer<typeof signedWithdrawSchema>;
+export type CloseAllResult = { coin: string; result: OrderResult };
 export const openOrderSchema = z.object({
   coin: z.string(),
   limitPx: z.string(),
@@ -272,6 +291,76 @@ export function actionHash(
   if (expiresAfter !== undefined) parts.push(u8(0), uint(expiresAfter, 8));
   return keccak256(concatBytes(parts));
 }
+function normalizeWithdrawParams(params: WithdrawParams) {
+  const hyperliquidChain = params.hyperliquidChain ?? "Mainnet";
+  const amount = dec(params.amount);
+  const destination = String(params.destination).toLowerCase();
+  const time = params.time ?? Date.now();
+  if (!/^0x[0-9a-f]{40}$/.test(destination))
+    throw new Error(`invalid withdraw destination: ${params.destination}`);
+  return { hyperliquidChain, amount, destination, time };
+}
+
+// HL withdraw is a USER-SIGNED action (not an L1 agent action). It uses the
+// HyperliquidSignTransaction EIP-712 domain on Arbitrum (chainId 42161), unlike
+// order/cancel which use the L1 "Exchange" domain (chainId 1337).
+export function createWithdrawTypedData(
+  params: WithdrawParams,
+): Omit<VaultSignTypedDataInput, "agentId"> {
+  const n = normalizeWithdrawParams(params);
+  return {
+    domain: {
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: WITHDRAW_CHAIN_ID,
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    },
+    types: {
+      [withdrawPrimaryType]: [
+        { name: "hyperliquidChain", type: "string" },
+        { name: "destination", type: "string" },
+        { name: "amount", type: "string" },
+        { name: "time", type: "uint64" },
+      ],
+    },
+    primaryType: withdrawPrimaryType,
+    value: {
+      hyperliquidChain: n.hyperliquidChain,
+      destination: n.destination,
+      amount: n.amount,
+      time: n.time,
+    },
+  };
+}
+
+export function toWithdrawAction(params: WithdrawParams): Record<string, unknown> {
+  const n = normalizeWithdrawParams(params);
+  return {
+    type: withdrawActionType,
+    hyperliquidChain: n.hyperliquidChain,
+    signatureChainId: WITHDRAW_SIGNATURE_CHAIN_ID,
+    amount: n.amount,
+    time: n.time,
+    destination: n.destination,
+  };
+}
+
+export async function submitWithdraw(
+  signed: SignedWithdraw,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+) {
+  const transport = options.transport ?? { fetch };
+  const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
+  const r = await transport.fetch(`${baseUrl}/exchange`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(signedWithdrawSchema.parse(signed)),
+  });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(`Hyperliquid exchange returned ${r.status}: ${JSON.stringify(j)}`);
+  return j;
+}
+
 export function createL1TypedData(
   action: Record<string, unknown>,
   nonce: number,
@@ -466,6 +555,10 @@ export class HyperliquidAdapter {
     );
   }
   async getPositions(): Promise<Position[]> {
+    const j = await this.clearinghouseState();
+    return normalizePositions(j);
+  }
+  private async clearinghouseState(): Promise<unknown> {
     const r = await this.transport.fetch(`${this.baseUrl}/info`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -473,8 +566,56 @@ export class HyperliquidAdapter {
     });
     const j = await r.json().catch(() => null);
     if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
-    return normalizePositions(j);
+    return j;
   }
+  async signWithdraw(params: WithdrawParams): Promise<SignedWithdraw> {
+    const n = normalizeWithdrawParams(params);
+    const action = toWithdrawAction(n);
+    const td = createWithdrawTypedData(n);
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
+    return signedWithdrawSchema.parse({
+      action,
+      nonce: n.time,
+      signature: { r: s.r, s: s.s, v: Number(s.v) },
+    });
+  }
+  submitWithdraw(signed: SignedWithdraw) {
+    return submitWithdraw(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  // Build a reduce-only market order on the OPPOSITE side of the open position
+  // (long => sell, short => buy), sized abs(szi), then sign + submit it.
+  async marketClosePosition(coin: HyperliquidAsset): Promise<OrderResult> {
+    const positions = rawSignedPositions(await this.clearinghouseState());
+    const pos = positions.find((p) => p.coin === coin);
+    if (!pos || pos.szi === 0) throw new Error(`no open position for ${coin}`);
+    const isBuy = pos.szi < 0; // short => buy to close, long => sell to close
+    const signed = await this.signOrder({
+      coin,
+      isBuy,
+      size: Math.abs(pos.szi),
+      reduceOnly: true,
+    });
+    return this.submitOrder(signed);
+  }
+  // Iterate all open positions and market-close each non-zero one.
+  async closeAllPositions(): Promise<CloseAllResult[]> {
+    const positions = rawSignedPositions(await this.clearinghouseState());
+    const results: CloseAllResult[] = [];
+    for (const pos of positions) {
+      if (pos.szi === 0) continue;
+      const coin = pos.coin as HyperliquidAsset;
+      const result = await this.marketClosePosition(coin);
+      results.push({ coin, result });
+    }
+    return results;
+  }
+}
+function rawSignedPositions(raw: unknown): Array<{ coin: string; szi: number }> {
+  return (((raw as any)?.assetPositions ?? []) as any[]).map((e) => {
+    const p = e.position ?? {};
+    return { coin: String(p.coin ?? ""), szi: Number(p.szi ?? 0) };
+  });
 }
 function firstStatus(raw: unknown) {
   const data = ((raw as any).response?.data?.statuses ?? []) as unknown[];
