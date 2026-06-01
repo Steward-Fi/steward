@@ -436,6 +436,46 @@ describe("Approved Addresses Policy", () => {
 
     expect(result.passed).toBe(true);
   });
+
+  it("passes withdrawal when destination is approved", async () => {
+    const destination = "0xfeed00000000000000000000000000000000beef";
+    const rule = makeAddressRule({
+      addresses: [destination],
+      mode: "whitelist",
+    });
+
+    const ctx = makeContext({
+      request: {
+        ...makeContext().request,
+        to: "0x0000000000000000000000000000000000000000",
+        destination,
+      } as SignRequest & { destination: string },
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(true);
+  });
+
+  it("rejects withdrawal when destination is not approved", async () => {
+    const destination = "0xfeed00000000000000000000000000000000beef";
+    const rule = makeAddressRule({
+      addresses: ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      mode: "whitelist",
+    });
+
+    const ctx = makeContext({
+      request: {
+        ...makeContext().request,
+        to: "0x0000000000000000000000000000000000000000",
+        destination,
+      } as SignRequest & { destination: string },
+    });
+    const result = await evaluatePolicy(rule, ctx);
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("Destination address");
+    expect(result.reason).toContain("not in whitelist");
+  });
 });
 
 // ─── Rate Limit Tests ─────────────────────────────────────────────────────

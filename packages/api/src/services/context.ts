@@ -294,7 +294,13 @@ export type AppVariables = {
   sessionMfaMethod?: string;
   agentScope?: string;
   agentSubject?: string;
-  authType?: "api-key" | "app-secret" | "session-jwt" | "agent-token" | "dashboard-jwt";
+  authType?:
+    | "api-key"
+    | "app-secret"
+    | "session-jwt"
+    | "agent-token"
+    | "dashboard-jwt"
+    | "platform";
   requestId?: string;
 };
 
