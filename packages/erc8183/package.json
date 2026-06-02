@@ -1,0 +1,20 @@
+{
+  "name": "@stwd/erc8183",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "lint": "bunx @biomejs/biome check src package.json tsconfig.json",
+    "test": "bun test src/__tests__"
+  },
+  "dependencies": {
+    "viem": "^2.30.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}
