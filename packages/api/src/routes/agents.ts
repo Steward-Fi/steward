@@ -413,7 +413,10 @@ agentRoutes.put("/:agentId/policy", async (c) => {
   // auth (tenant API key / owner session); reject agent-token auth.
   if (c.get("authType") === "agent-token") {
     return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: agents cannot modify their own policy; patron/owner auth required" },
+      {
+        ok: false,
+        error: "Forbidden: agents cannot modify their own policy; patron/owner auth required",
+      },
       403,
     );
   }
@@ -856,7 +859,10 @@ agentRoutes.put("/:agentId/policies", async (c) => {
   // (caps, leverage, withdrawal allowlist) would defeat the policy system.
   if (c.get("authType") === "agent-token") {
     return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: agents cannot modify their own policies; patron/owner auth required" },
+      {
+        ok: false,
+        error: "Forbidden: agents cannot modify their own policies; patron/owner auth required",
+      },
       403,
     );
   }
