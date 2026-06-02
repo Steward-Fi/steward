@@ -407,15 +407,22 @@ agentRoutes.get("/:agentId/policy", async (c) => {
 });
 
 agentRoutes.put("/:agentId/policy", async (c) => {
-  if (c.get("authType") !== "agent-token") {
+  // SECURITY: policy/cap changes are PATRON/OWNER-only, never the agent itself.
+  // An agent must NOT be able to raise its own caps, leverage, or withdrawal
+  // allowlist — that would defeat the entire policy system. Require tenant-level
+  // auth (tenant API key / owner session); reject agent-token auth.
+  if (c.get("authType") === "agent-token") {
     return c.json<ApiResponse>(
-      { ok: false, error: "Agent policy updates require agent JWT authentication" },
+      {
+        ok: false,
+        error: "Forbidden: agents cannot modify their own policy; patron/owner auth required",
+      },
       403,
     );
   }
-  if (!requireAgentAccess(c)) {
+  if (!requireTenantLevel(c)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
+      { ok: false, error: "Policy updates require patron/owner (tenant-level) authentication" },
       403,
     );
   }
@@ -847,9 +854,21 @@ agentRoutes.get("/:agentId/policies", async (c) => {
 // ─── Update agent policies ────────────────────────────────────────────────────
 
 agentRoutes.put("/:agentId/policies", async (c) => {
-  if (!requireAgentAccess(c)) {
+  // SECURITY: policy/cap changes are PATRON/OWNER-only, never the agent itself.
+  // See PUT /:agentId/policy above — an agent raising its own policy rules
+  // (caps, leverage, withdrawal allowlist) would defeat the policy system.
+  if (c.get("authType") === "agent-token") {
     return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
+      {
+        ok: false,
+        error: "Forbidden: agents cannot modify their own policies; patron/owner auth required",
+      },
+      403,
+    );
+  }
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Policy updates require patron/owner (tenant-level) authentication" },
       403,
     );
   }
