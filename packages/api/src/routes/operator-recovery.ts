@@ -176,6 +176,10 @@ const ARBITRUM_USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
 const HYPERLIQUID_ARBITRUM_BRIDGE = "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7";
 // HL enforces a 5 USDC minimum deposit. Below this, funds are lost.
 const HL_MIN_DEPOSIT_USDC = 5;
+// Sane upper bound: a single deposit call may not exceed this. Defends against
+// a fat-finger/typo moving the whole reserve in one tx. Larger deposits must be
+// split into multiple deliberate calls. (Override per-tenant later if needed.)
+const HL_MAX_DEPOSIT_USDC = 2000;
 const USDC_DECIMALS = 6;
 const ERC20_TRANSFER_SELECTOR = "0xa9059cbb";
 
@@ -231,8 +235,26 @@ operatorRecoveryRoutes.post("/:venue/deposit", async (c) => {
       400,
     );
   }
-  // Convert to 6-decimal base units without float drift.
-  const amountBaseUnits = BigInt(Math.round(amountNum * 10 ** USDC_DECIMALS));
+  if (amountNum > HL_MAX_DEPOSIT_USDC) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `amount exceeds the per-deposit maximum of ${HL_MAX_DEPOSIT_USDC} USDC; split into smaller deposits`,
+      },
+      400,
+    );
+  }
+  // Reject sub-cent precision the 6-decimal conversion can't represent exactly,
+  // so the on-chain amount always matches the requested amount.
+  const scaled = amountNum * 10 ** USDC_DECIMALS;
+  if (!Number.isInteger(scaled)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "amount has more than 6 decimal places" },
+      400,
+    );
+  }
+  // Convert to 6-decimal base units (exact: `scaled` is an integer here).
+  const amountBaseUnits = BigInt(scaled);
 
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
