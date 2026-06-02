@@ -5,6 +5,8 @@
  * and discovery protocol defined in ERC-8004.
  */
 
+import type { Address, Hex, PublicClient } from "viem";
+
 /** Describes an agent's public identity card stored on-chain or off-chain (IPFS / HTTP). */
 export interface AgentCard {
   name: string;
@@ -13,15 +15,37 @@ export interface AgentCard {
   apiUrl: string;
   capabilities: string[];
   services: string[];
+  image?: string;
+  active?: boolean;
+  supportedTrust?: string[];
+  agentURI?: string;
+  tokenId?: string;
+}
+
+/** EIP-8004 registration JSON payload wrapped by the on-chain agentURI data URI. */
+export interface AgentRegistrationPayload {
+  type: string;
+  name: string;
+  description: string;
+  image: string;
+  active: boolean;
+  supportedTrust: string[];
+}
+
+/** Minimal signer adapter accepted by identity registration. */
+export interface Eip8004Signer {
+  sendTransaction(args: { to: Address; data: Hex; value?: bigint }): Promise<Hex>;
 }
 
 /** Result returned after successfully registering an agent on-chain. */
 export interface RegistrationResult {
   tokenId: string;
-  txHash: string;
+  txHash: Hex;
   chainId: number;
-  registryAddress: string;
+  registryAddress: Address;
   agentCardUri: string;
+  agentURI: string;
+  payload: AgentRegistrationPayload;
 }
 
 /** Aggregated reputation for a registered agent. */
@@ -50,5 +74,9 @@ export interface RegistryConfig {
   chainId: number;
   name: string;
   rpcUrl: string;
-  registryAddress: string;
+  /** Backward-compatible alias for identityRegistry. */
+  registryAddress: Address;
+  identityRegistry: Address;
+  reputationRegistry?: Address;
+  publicClient?: PublicClient;
 }
