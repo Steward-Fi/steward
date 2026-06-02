@@ -108,6 +108,17 @@
         "typescript": "^5.0.0",
       },
     },
+    "packages/erc8183": {
+      "name": "@stwd/erc8183",
+      "version": "0.1.0",
+      "dependencies": {
+        "viem": "^2.30.0",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.0.0",
+      },
+    },
     "packages/examples/waifu-integration": {
       "name": "@stwd/example-waifu-integration",
       "version": "0.3.0",
@@ -1317,6 +1328,8 @@
     "@stwd/eliza-plugin": ["@stwd/eliza-plugin@workspace:packages/eliza-plugin"],
 
     "@stwd/erc8004": ["@stwd/erc8004@workspace:packages/erc8004"],
+
+    "@stwd/erc8183": ["@stwd/erc8183@workspace:packages/erc8183"],
 
     "@stwd/example-waifu-integration": ["@stwd/example-waifu-integration@workspace:packages/examples/waifu-integration"],
 

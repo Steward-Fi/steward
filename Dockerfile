@@ -48,6 +48,7 @@ COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
+COPY packages/erc8183/package.json           packages/erc8183/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
@@ -76,6 +77,7 @@ COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
+COPY packages/erc8183/package.json           packages/erc8183/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
@@ -146,6 +148,7 @@ COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
+COPY packages/erc8183/package.json           packages/erc8183/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
