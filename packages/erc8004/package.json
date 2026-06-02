@@ -5,9 +5,13 @@
   "type": "module",
   "main": "src/index.ts",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src/__tests__"
   },
-  "dependencies": {},
+  "dependencies": {
+    "viem": "^2.30.0"
+  },
   "devDependencies": {
     "typescript": "^5.0.0"
   }
