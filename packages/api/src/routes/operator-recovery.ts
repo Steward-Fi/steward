@@ -166,6 +166,171 @@ const withdrawSchema = z.object({
   idempotencyKey: z.string().min(1).max(256).optional(),
 });
 
+// ── Deposit constants (Hyperliquid on Arbitrum) ────────────────────────────────
+// HL credits the SENDING address, so the deposit MUST originate from the agent's
+// own venue wallet. We sign an ERC-20 transfer(bridge, amount) from that wallet.
+const ARBITRUM_CHAIN_ID = 42161;
+// Native USDC on Arbitrum One (6 decimals).
+const ARBITRUM_USDC = "0xaf88d065e77c8cC2239327C5EDb3A432268e5831";
+// Hyperliquid mainnet deposit bridge on Arbitrum.
+const HYPERLIQUID_ARBITRUM_BRIDGE = "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7";
+// HL enforces a 5 USDC minimum deposit. Below this, funds are lost.
+const HL_MIN_DEPOSIT_USDC = 5;
+// Sane upper bound: a single deposit call may not exceed this. Defends against
+// a fat-finger/typo moving the whole reserve in one tx. Larger deposits must be
+// split into multiple deliberate calls. (Override per-tenant later if needed.)
+const HL_MAX_DEPOSIT_USDC = 2000;
+const USDC_DECIMALS = 6;
+const ERC20_TRANSFER_SELECTOR = "0xa9059cbb";
+
+/**
+ * Encode an ERC-20 `transfer(address,uint256)` call as calldata.
+ * selector (4 bytes) + padded address (32) + padded amount (32).
+ */
+function encodeErc20Transfer(to: string, amountBaseUnits: bigint): string {
+  const addr = to.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const amt = amountBaseUnits.toString(16).padStart(64, "0");
+  return `${ERC20_TRANSFER_SELECTOR}${addr}${amt}`;
+}
+
+const depositSchema = z.object({
+  agentId: z.string().min(1),
+  // USDC amount as a decimal string or number (e.g. "10" or 10). Converted to
+  // 6-decimal base units. Must be >= HL_MIN_DEPOSIT_USDC.
+  amount: z.union([z.string(), z.number()]),
+  idempotencyKey: z.string().min(1).max(256).optional(),
+});
+
+// ── POST /v1/trade/:venue/deposit ──────────────────────────────────────────────
+// Fund an agent's Hyperliquid account by signing an ERC-20 USDC transfer from
+// the agent's OWN venue wallet to the HL Arbitrum bridge. HL credits the sender,
+// so this correctly credits the policy-scoped venue wallet (NOT the operator).
+// The agent's wallet must already hold USDC + a little ETH for gas on Arbitrum.
+operatorRecoveryRoutes.post("/:venue/deposit", async (c) => {
+  const tenantId = c.get("tenantId");
+  const venue = c.req.param("venue");
+  if (venue !== "hyperliquid") {
+    return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
+  }
+
+  const raw = await safeJsonParse(c);
+  const parsed = depositSchema.safeParse(raw);
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const body = {
+    ...parsed.data,
+    idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+  };
+  const { agentId } = body;
+
+  // Parse + validate the USDC amount.
+  const amountNum = Number(body.amount);
+  if (!Number.isFinite(amountNum) || amountNum <= 0) {
+    return c.json<ApiResponse>({ ok: false, error: "amount must be a positive number" }, 400);
+  }
+  if (amountNum < HL_MIN_DEPOSIT_USDC) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `amount below Hyperliquid minimum deposit of ${HL_MIN_DEPOSIT_USDC} USDC`,
+      },
+      400,
+    );
+  }
+  if (amountNum > HL_MAX_DEPOSIT_USDC) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `amount exceeds the per-deposit maximum of ${HL_MAX_DEPOSIT_USDC} USDC; split into smaller deposits`,
+      },
+      400,
+    );
+  }
+  // Reject sub-cent precision the 6-decimal conversion can't represent exactly,
+  // so the on-chain amount always matches the requested amount.
+  const scaled = amountNum * 10 ** USDC_DECIMALS;
+  if (!Number.isInteger(scaled)) {
+    return c.json<ApiResponse>({ ok: false, error: "amount has more than 6 decimal places" }, 400);
+  }
+  // Convert to 6-decimal base units (exact: `scaled` is an integer here).
+  const amountBaseUnits = BigInt(scaled);
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const walletAddress = await resolveVenueWallet(tenantId, agentId, venue);
+  if (!walletAddress) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Hyperliquid venue wallet not found for agent" },
+      404,
+    );
+  }
+
+  // Idempotency keyed on (agent, amount). Computed BEFORE broadcast so a retried
+  // deposit with the same key returns the original result instead of double-sending.
+  const idempotency = getOperatorIdempotency(`${tenantId}:deposit`, body.idempotencyKey, {
+    agentId,
+    venue,
+    amount: amountBaseUnits.toString(),
+  });
+  if (idempotency.conflict) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
+  }
+  if (idempotency.response) {
+    return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+  }
+
+  // Build the ERC-20 transfer(bridge, amount) calldata and have the vault sign +
+  // broadcast it FROM the agent's venue wallet on Arbitrum. The raw key never
+  // leaves the vault. venue is set so the vault selects the hyperliquid-scoped key.
+  const data = encodeErc20Transfer(HYPERLIQUID_ARBITRUM_BRIDGE, amountBaseUnits);
+  let txHash: string;
+  try {
+    txHash = await vault.signTransaction({
+      agentId,
+      tenantId,
+      to: ARBITRUM_USDC,
+      value: "0",
+      data,
+      chainId: ARBITRUM_CHAIN_ID,
+      venue: "hyperliquid",
+      broadcast: true,
+    });
+  } catch (err) {
+    await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.deposit.failed", {
+      venue,
+      walletAddress,
+      bridge: HYPERLIQUID_ARBITRUM_BRIDGE,
+      amount: amountBaseUnits.toString(),
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json<ApiResponse>({ ok: false, error: "Failed to submit deposit" }, 502);
+  }
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.deposit.submitted", {
+    venue,
+    walletAddress,
+    bridge: HYPERLIQUID_ARBITRUM_BRIDGE,
+    amount: amountBaseUnits.toString(),
+    txHash,
+  });
+
+  const response = {
+    venue,
+    walletAddress,
+    bridge: HYPERLIQUID_ARBITRUM_BRIDGE,
+    amountUsdc: amountNum,
+    amountBaseUnits: amountBaseUnits.toString(),
+    txHash,
+  };
+  idempotency.store?.(response);
+  return c.json<ApiResponse>({ ok: true, data: response });
+});
+
 // ── POST /v1/trade/:venue/close-all ────────────────────────────────────────────
 operatorRecoveryRoutes.post("/:venue/close-all", async (c) => {
   const tenantId = c.get("tenantId");
