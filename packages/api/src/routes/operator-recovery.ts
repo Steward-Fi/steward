@@ -231,7 +231,10 @@ operatorRecoveryRoutes.post("/:venue/deposit", async (c) => {
   }
   if (amountNum < HL_MIN_DEPOSIT_USDC) {
     return c.json<ApiResponse>(
-      { ok: false, error: `amount below Hyperliquid minimum deposit of ${HL_MIN_DEPOSIT_USDC} USDC` },
+      {
+        ok: false,
+        error: `amount below Hyperliquid minimum deposit of ${HL_MIN_DEPOSIT_USDC} USDC`,
+      },
       400,
     );
   }
@@ -248,10 +251,7 @@ operatorRecoveryRoutes.post("/:venue/deposit", async (c) => {
   // so the on-chain amount always matches the requested amount.
   const scaled = amountNum * 10 ** USDC_DECIMALS;
   if (!Number.isInteger(scaled)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "amount has more than 6 decimal places" },
-      400,
-    );
+    return c.json<ApiResponse>({ ok: false, error: "amount has more than 6 decimal places" }, 400);
   }
   // Convert to 6-decimal base units (exact: `scaled` is an integer here).
   const amountBaseUnits = BigInt(scaled);
