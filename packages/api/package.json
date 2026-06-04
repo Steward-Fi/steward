@@ -11,7 +11,7 @@
     "openapi:generate": "bun scripts/generate-openapi.ts",
     "sdk:types": "bun scripts/generate-sdk-types.ts",
     "openapi": "bun scripts/generate-openapi.ts && bun scripts/generate-sdk-types.ts",
-    "openapi:check": "bun run openapi && git diff --exit-code -- openapi.json ../../docs/api-reference/openapi.json ../sdk/src/generated/api-types.ts",
+    "openapi:check": "bun run openapi && git diff --exit-code -- ../../docs/api-reference/openapi.json ../sdk/src/generated/api-types.ts",
     "test": "bun scripts/run-tests-isolated.ts",
     "test:single": "bun test --timeout 30000 src/__tests__/",
     "wrangler:dev": "wrangler dev",

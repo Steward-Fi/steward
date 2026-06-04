@@ -44,22 +44,13 @@ const { OPENAPI_DOC } = await import("../src/openapi");
 const document = app.getOpenAPI31Document(OPENAPI_DOC);
 const json = `${JSON.stringify(document, null, 2)}\n`;
 
-const apiArtifact = join(import.meta.dir, "..", "openapi.json");
-const docsArtifact = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "docs",
-  "api-reference",
-  "openapi.json",
-);
-
-for (const target of [apiArtifact, docsArtifact]) {
-  mkdirSync(dirname(target), { recursive: true });
-  writeFileSync(target, json);
-  console.log(`[openapi] wrote ${target}`);
-}
+// Single canonical artifact. The route definitions in packages/api are the source
+// of truth; this emitted spec is the one committed copy, consumed by both Mintlify
+// (docs site) and the SDK type generator. No second copy to drift.
+const specPath = join(import.meta.dir, "..", "..", "..", "docs", "api-reference", "openapi.json");
+mkdirSync(dirname(specPath), { recursive: true });
+writeFileSync(specPath, json);
+console.log(`[openapi] wrote ${specPath}`);
 
 const pathCount = Object.keys(document.paths ?? {}).length;
 console.log(`[openapi] ${pathCount} documented path(s)`);

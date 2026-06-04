@@ -15,7 +15,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import openapiTS, { astToString } from "openapi-typescript";
 
-const specPath = join(import.meta.dir, "..", "openapi.json");
+const specPath = join(import.meta.dir, "..", "..", "..", "docs", "api-reference", "openapi.json");
 const outPath = join(import.meta.dir, "..", "..", "sdk", "src", "generated", "api-types.ts");
 
 const ast = await openapiTS(new URL(`file://${specPath}`), {
