@@ -1,0 +1,192 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Steward API",
+    "version": "0.4.4",
+    "description": "Open-source agent & application wallet infrastructure. This document is generated from the route definitions and is the single source of truth for the SDK types and reference docs."
+  },
+  "servers": [
+    {
+      "url": "https://api.steward.fi",
+      "description": "Production"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "TradeTokenStatus": {
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "observed"
+            ]
+          },
+          "exp": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "observedAt": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "expiresInSeconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agentId",
+          "status",
+          "exp",
+          "observedAt",
+          "expiresInSeconds"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "error"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/trade/token-status": {
+      "get": {
+        "tags": [
+          "trade"
+        ],
+        "summary": "Agent trade-token expiry status",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "example": "agt_123"
+            },
+            "required": false,
+            "name": "agentId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Observed or unknown token status for the agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradeTokenStatus"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "agentId is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/trade/token-status": {
+      "get": {
+        "tags": [
+          "trade"
+        ],
+        "summary": "Agent trade-token expiry status",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "example": "agt_123"
+            },
+            "required": false,
+            "name": "agentId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Observed or unknown token status for the agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradeTokenStatus"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "agentId is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}

@@ -86,6 +86,14 @@ export type {
   WalletActionOptions,
 } from "./client.ts";
 export { StewardApiError, StewardClient } from "./client.ts";
+// Generated from the API's OpenAPI document (single source of truth). Run
+// `bun run openapi` in @stwd/api to regenerate. Exposed under explicit aliases so
+// downstream code can derive request/response types from the live API contract.
+export type {
+  components as ApiComponents,
+  operations as ApiOperations,
+  paths as ApiPaths,
+} from "./generated/api-types.ts";
 // v0.4.0 - Tenant config, dashboard, approvals, webhooks
 export type {
   AgentAccountCapability,
