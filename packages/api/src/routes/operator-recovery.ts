@@ -180,6 +180,11 @@ const HL_MIN_DEPOSIT_USDC = 5;
 // a fat-finger/typo moving the whole reserve in one tx. Larger deposits must be
 // split into multiple deliberate calls. (Override per-tenant later if needed.)
 const HL_MAX_DEPOSIT_USDC = 2000;
+// Sane upper bound for a single OPERATOR withdraw. Mirrors HL_MAX_DEPOSIT_USDC:
+// defends against a fat-finger/typo (or a compromised operator client) draining
+// the whole venue balance in one call. Larger withdraws must be split into
+// multiple deliberate calls. (Override per-tenant later if needed.)
+const HL_MAX_WITHDRAW_USDC = 2000;
 const USDC_DECIMALS = 6;
 const ERC20_TRANSFER_SELECTOR = "0xa9059cbb";
 
@@ -452,6 +457,32 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Invalid destination address" }, 400);
   }
 
+  // Validate the EXPLICIT withdraw amount the same way /deposit validates its
+  // amount: reject non-finite/NaN/<=0, enforce a per-call max cap, and reject
+  // sub-cent/over-precision values the 6-decimal conversion can't represent.
+  // (The no-amount path resolves the full withdrawable balance below.)
+  if (body.amount !== undefined) {
+    const amountNum = Number(body.amount);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      return c.json<ApiResponse>({ ok: false, error: "amount must be a positive number" }, 400);
+    }
+    if (amountNum > HL_MAX_WITHDRAW_USDC) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `amount exceeds the per-withdraw maximum of ${HL_MAX_WITHDRAW_USDC} USDC; split into smaller withdraws`,
+        },
+        400,
+      );
+    }
+    if (!Number.isInteger(amountNum * 10 ** USDC_DECIMALS)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "amount has more than 6 decimal places" },
+        400,
+      );
+    }
+  }
+
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
 
@@ -463,17 +494,44 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
     );
   }
 
-  // ── Approved-addresses policy gate (BEFORE signing) ──────────────────────────
-  // The withdraw destination must be on the agent's approved list. We evaluate
-  // the full policy set the same way POST /vault/sign does; the policy engine's
-  // approved-addresses evaluator reads `request.to`.
+  // Resolve amount BEFORE the policy gate so the real notional is policy-checked:
+  // explicit (already validated above), or the full withdrawable balance.
+  // `amount` stays human-readable for signing; `amountBaseUnits` (USDC 6-decimal
+  // base units, a uint256 integer string) is what the policy spend-cap sees.
+  let amount = body.amount;
+  if (amount === undefined) {
+    const withdrawable = await fetchWithdrawable(walletAddress);
+    if (!withdrawable || Number(withdrawable) <= 0) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "No withdrawable balance and no amount specified" },
+        400,
+      );
+    }
+    amount = withdrawable;
+  }
+  // Convert the resolved amount to USDC base units for the policy gate. The
+  // explicit path is exact (validated to <= 6 decimals above); the fallback
+  // (venue's own decimal string) is floored — used only for the policy `value`,
+  // never for signing.
+  const amountBaseUnits = (() => {
+    const n = Number(amount);
+    if (!Number.isFinite(n) || n <= 0) return 0n;
+    return BigInt(Math.floor(n * 10 ** USDC_DECIMALS));
+  })();
+
+  // ── Policy gate (BEFORE signing) ─────────────────────────────────────────────
+  // The withdraw destination must be on the agent's approved list AND the amount
+  // must satisfy the spend-cap. We evaluate the full policy set the same way POST
+  // /vault/sign does; the approved-addresses evaluator reads `request.to`, and the
+  // spending-limit evaluator reads `request.value` (the real USDC base-unit
+  // notional, NOT the previous hardcoded "0" which bypassed the spend-cap).
   const policySet = await getPolicySet(tenantId, agentId);
   const evaluation = await policyEngine.evaluate(policySet, {
     request: {
       agentId,
       tenantId,
       to: destination,
-      value: "0",
+      value: amountBaseUnits.toString(),
       chainId: 42161, // Arbitrum — HL withdraw destination chain
     },
     // `venue` must be top-level on the evaluation context: the engine reads
@@ -514,19 +572,6 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
   }
   if (idempotency.response) {
     return c.json<ApiResponse>({ ok: true, data: idempotency.response });
-  }
-
-  // Resolve amount: explicit, or full withdrawable balance.
-  let amount = body.amount;
-  if (amount === undefined) {
-    const withdrawable = await fetchWithdrawable(walletAddress);
-    if (!withdrawable || Number(withdrawable) <= 0) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "No withdrawable balance and no amount specified" },
-        400,
-      );
-    }
-    amount = withdrawable;
   }
 
   const adapter = buildAdapter(tenantId, agentId, walletAddress);
