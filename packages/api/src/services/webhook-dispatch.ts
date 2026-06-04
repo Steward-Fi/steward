@@ -39,7 +39,8 @@ function isSensitiveWebhookPayloadKey(key: string): boolean {
     normalized === "refreshtoken" ||
     normalized === "idtoken" ||
     normalized === "sessiontoken" ||
-    normalized === "authtoken"
+    normalized === "authtoken" ||
+    (normalized !== "token" && normalized.endsWith("token"))
   );
 }
 

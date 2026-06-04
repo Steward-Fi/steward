@@ -5,6 +5,7 @@ import type { TenantAuthAbuseConfig } from "@stwd/shared";
 import {
   normalizeAuthAbuseConfig,
   validatePhoneAbusePolicy,
+  validateUserAbusePolicy,
   validateWalletAbusePolicy,
 } from "../services/auth-abuse";
 
@@ -20,7 +21,7 @@ beforeAll(async () => {
     await client.close();
   });
   ({ authRoutes } = await import("../routes/auth"));
-});
+}, 120_000);
 
 afterAll(async () => {
   await closeDb();
@@ -287,5 +288,37 @@ describe("auth abuse controls", () => {
         phone: { allowedPhoneNumbers: ["555-555-0123"] },
       }),
     ).toBe("phone.allowedPhoneNumbers must contain E.164 phone numbers");
+  });
+
+  it("normalizes and enforces exact user id allowlist and denylist controls", () => {
+    const allowed = "123e4567-e89b-12d3-a456-426614174000";
+    const blocked = "123e4567-e89b-12d3-a456-426614174001";
+    const config = normalizeAuthAbuseConfig({
+      user: {
+        allowedUserIds: [` ${allowed.toUpperCase()} `, allowed],
+        blockedUserIds: [blocked],
+      },
+    });
+    expect(config).toMatchObject({
+      user: {
+        allowedUserIds: [allowed],
+        blockedUserIds: [blocked],
+      },
+    });
+
+    expect(
+      validateUserAbusePolicy(
+        "123e4567-e89b-12d3-a456-426614174099",
+        config as TenantAuthAbuseConfig,
+      ),
+    ).toBe("user id is not allowed");
+    expect(validateUserAbusePolicy(blocked, config as TenantAuthAbuseConfig)).toBe(
+      "user id is blocked",
+    );
+    expect(
+      normalizeAuthAbuseConfig({
+        user: { allowedUserIds: ["not-a-user-id"] },
+      }),
+    ).toBe("user.allowedUserIds must contain UUID user ids");
   });
 });

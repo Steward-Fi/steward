@@ -103,6 +103,29 @@ describe("user membership hardening", () => {
     );
   });
 
+  it("restores tenant member removal when the completed audit write fails", () => {
+    const removeRoute = userSource.slice(
+      userSource.indexOf('user.delete("/me/tenants/:tenantId/users/:targetUserId"'),
+      userSource.indexOf('user.post("/me/tenants/:tenantId/invitations/accept"', 1),
+    );
+    const deleteMembership = removeRoute.indexOf(".delete(userTenants)");
+    const completedAudit = removeRoute.indexOf('action: "tenant.member.remove"', deleteMembership);
+    const rollback = removeRoute.indexOf(".insert(userTenants)", completedAudit);
+
+    expect(deleteMembership).toBeGreaterThanOrEqual(0);
+    expect(completedAudit).toBeGreaterThan(deleteMembership);
+    expect(rollback).toBeGreaterThan(completedAudit);
+    expect(removeRoute).toContain("customMetadata: userTenants.customMetadata");
+    expect(removeRoute).toContain("createdAt: userTenants.createdAt");
+    expect(removeRoute).toContain(".select({");
+    expect(removeRoute).toContain(".from(refreshTokens)");
+    expect(removeRoute).toContain(".insert(refreshTokens)");
+    expect(removeRoute).toContain(
+      "onConflictDoNothing({ target: [userTenants.userId, userTenants.tenantId] })",
+    );
+    expect(removeRoute).toContain("onConflictDoNothing({ target: refreshTokens.tokenHash })");
+  });
+
   it("does not make tenants publicly self-joinable by default", () => {
     expect(dbSchemaSource).toContain(
       'joinMode: varchar("join_mode", { length: 16 }).notNull().default("invite")',
@@ -216,6 +239,12 @@ describe("user membership hardening", () => {
     expect(
       userInviteRevokeRoute.indexOf('action: "tenant.invitation.revoke.authorized"'),
     ).toBeLessThan(userInviteRevokeRoute.indexOf(".update(tenantInvitations)"));
+    expect(userInviteRevokeRoute.indexOf('action: "tenant.invitation.revoke"')).toBeGreaterThan(
+      userInviteRevokeRoute.indexOf(".update(tenantInvitations)"),
+    );
+    expect(userInviteRevokeRoute).toContain("catch (error)");
+    expect(userInviteRevokeRoute).toContain("status: candidate.status");
+    expect(userInviteRevokeRoute).toContain("revokedAt: candidate.revokedAt");
   });
 
   it("requires matching token-backed pending invites through the self-join route for invite-mode tenants", () => {

@@ -1,0 +1,34 @@
+# Cloudflare Workers deploy config for the Steward web app (OpenNext adapter).
+# Account: Shadowverse (a510aa563bac39bd19f16438206e97f2).
+# Build with `bun run cf:build`, then `bun run cf:deploy` (or via CI).
+name = "steward-web"
+main = ".open-next/worker.js"
+compatibility_date = "2025-05-05"
+compatibility_flags = ["nodejs_compat"]
+account_id = "a510aa563bac39bd19f16438206e97f2"
+
+# OpenNext emits a static asset directory the Worker serves directly.
+[assets]
+directory = ".open-next/assets"
+binding = "ASSETS"
+
+# Custom domain routes. steward.fi zone lives on the Shadowverse account.
+# The apex + www are cut over from Vercel to this Worker.
+[[routes]]
+pattern = "steward.fi"
+custom_domain = true
+
+[[routes]]
+pattern = "www.steward.fi"
+custom_domain = true
+
+[observability]
+enabled = true
+
+# Public build-time vars. The API origin is a separate service (Steward API on
+# Railway). eliza.steward.fi is the live, proven origin ({"name":"steward"}).
+# Note: api.steward.fi has no DNS record yet, so it is NOT used (the in-code
+# default of https://api.steward.fi is currently dead). Follow-up: add
+# api.steward.fi -> Railway and switch this to the vanity hostname.
+[vars]
+NEXT_PUBLIC_STEWARD_API_URL = "https://eliza.steward.fi"

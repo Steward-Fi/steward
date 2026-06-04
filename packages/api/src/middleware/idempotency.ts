@@ -581,6 +581,30 @@ function isAuthTokenResponseReplaySuppressedPath(pathname: string): boolean {
   return pathname === "/auth" || pathname.startsWith("/auth/");
 }
 
+function isOneTimeCredentialResponseReplaySuppressedPath(pathname: string): boolean {
+  return (
+    pathname === "/webhooks" ||
+    pathname === "/user/me/tenants" ||
+    pathname === "/user/me/tenants/switch" ||
+    /^\/tenant-config\/[^/]+\/request-signing-keys$/.test(pathname) ||
+    /^\/tenant-config\/[^/]+\/app-clients\/[^/]+\/secrets$/.test(pathname) ||
+    /^\/platform\/tenants$/.test(pathname) ||
+    /^\/platform\/tenants\/[^/]+\/agents\/[^/]+\/token$/.test(pathname) ||
+    /^\/platform\/tenants\/[^/]+\/invitations$/.test(pathname) ||
+    /^\/(?:v1\/)?agents\/pregenerated$/.test(pathname) ||
+    /^\/(?:v1\/)?agents\/pregenerated\/[^/]+\/claim-token\/rotate$/.test(pathname) ||
+    /^\/(?:v1\/)?agents\/[^/]+\/token$/.test(pathname) ||
+    /^\/agents\/[^/]+\/session-signers$/.test(pathname)
+  );
+}
+
+function isReplaySuppressedResponsePath(pathname: string): boolean {
+  return (
+    isAuthTokenResponseReplaySuppressedPath(pathname) ||
+    isOneTimeCredentialResponseReplaySuppressedPath(pathname)
+  );
+}
+
 function hasReplaySafeAuthenticatedContext(c: { get: (key: keyof AppVariables) => unknown }) {
   if (c.get("requestSignatureVerified")) return true;
   const authType = c.get("authType");
@@ -682,7 +706,7 @@ export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlM
     try {
       await next();
       try {
-        if (isAuthTokenResponseReplaySuppressedPath(c.req.path)) {
+        if (isReplaySuppressedResponsePath(c.req.path)) {
           await store.setCompleted(storageKey);
           recordIdempotencyMetric(metricsTenantId, "suppressedAuthResponses");
         } else {

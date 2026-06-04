@@ -1291,6 +1291,87 @@ describe("HTTP request building", () => {
     expect(result.recovery.type).toBe("bip39");
   });
 
+  it("authenticated user wallet helpers cover provision, balance, policies, and history", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        agentId: "user-wallet-user-1",
+        walletAddress: "0x1234567890123456789012345678901234567890",
+      },
+    });
+    const created = await makeClient({ bearerToken: "user-token" }).createUserWallet();
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/user/me/wallet");
+    expect(created.agentId).toBe("user-wallet-user-1");
+
+    installMockFetch({
+      ok: true,
+      data: {
+        agentId: "user-wallet-user-1",
+        walletAddress: "0x1234567890123456789012345678901234567890",
+        balances: {
+          native: "1000000000000000000",
+          nativeFormatted: "1.0",
+          chainId: 8453,
+          symbol: "ETH",
+        },
+      },
+    });
+    const balance = await makeClient({ bearerToken: "user-token" }).getUserWalletBalance(8453);
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe("https://api.steward.example/user/me/wallet?chainId=8453");
+    expect(balance.balances.chainId).toBe(8453);
+
+    installMockFetch({
+      ok: true,
+      data: [
+        {
+          id: "policy-1",
+          type: "spending-limit",
+          enabled: true,
+          config: { maxPerTx: "1000" },
+        },
+      ],
+    });
+    const policies = await makeClient({ bearerToken: "user-token" }).getUserWalletPolicies();
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe("https://api.steward.example/user/me/wallet/policies");
+    expect(policies[0]?.type).toBe("spending-limit");
+
+    installMockFetch({
+      ok: true,
+      data: {
+        transactions: [
+          {
+            id: "tx-1",
+            agentId: "user-wallet-user-1",
+            status: "signed",
+            request: {
+              agentId: "user-wallet-user-1",
+              tenantId: "personal-user-1",
+              to: "0x1111111111111111111111111111111111111111",
+              value: "1000",
+              chainId: 8453,
+            },
+            policyResults: [],
+            createdAt: "2026-06-01T00:00:00.000Z",
+          },
+        ],
+        limit: 10,
+        offset: 20,
+      },
+    });
+    const history = await makeClient({ bearerToken: "user-token" }).getUserWalletHistory({
+      limit: 10,
+      offset: 20,
+    });
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/user/me/wallet/history?limit=10&offset=20",
+    );
+    expect(history.transactions[0]?.createdAt).toBeInstanceOf(Date);
+  });
+
   it("user wallet recovery restore sends the mnemonic once and does not expect it back", async () => {
     installMockFetch({
       ok: true,
@@ -1318,6 +1399,44 @@ describe("HTTP request building", () => {
     expect(result.wallet.restoredExisting).toBe(true);
     expect(result.recovery).toEqual({ type: "bip39", restored: true });
     expect("mnemonic" in result.recovery).toBe(false);
+  });
+
+  it("authenticated user wallet signing helpers use user-wallet routes", async () => {
+    const transfer = {
+      to: "0x1111111111111111111111111111111111111111",
+      value: "1000",
+      chainId: 8453,
+      broadcast: true,
+    };
+    installMockFetch({
+      ok: true,
+      data: {
+        txId: "tx-1",
+        txHash: "0xabc",
+      },
+    });
+    const signed = await makeClient({ bearerToken: "user-token" }).signUserWalletTransaction(
+      transfer,
+      { idempotencyKey: "idem-user-transfer-1" },
+    );
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/user/me/wallet/sign");
+    expect(lastCapture?.headers["idempotency-key"]).toBe("idem-user-transfer-1");
+    expect(lastCapture?.body).toEqual(transfer);
+    expect(signed.txHash).toBe("0xabc");
+
+    installMockFetch({
+      ok: true,
+      data: {
+        signature: "0xsig",
+        address: "0x1234567890123456789012345678901234567890",
+      },
+    });
+    const message = await makeClient({ bearerToken: "user-token" }).signUserWalletMessage("hello");
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe("https://api.steward.example/user/me/wallet/sign-message");
+    expect(lastCapture?.body).toEqual({ message: "hello" });
+    expect(message.signature).toBe("0xsig");
   });
 
   it("user pregenerated wallet claim posts tenant id and one-time claim token", async () => {
@@ -1819,6 +1938,7 @@ describe("HTTP request building", () => {
       { type: "email", value: "person@example.com" },
       { type: "wallet", value: "0x1111111111111111111111111111111111111111" },
       { type: "phone", value: "+15555550123" },
+      { type: "user_id", value: "123e4567-e89b-12d3-a456-426614174000" },
     ]);
     expect(lastCapture?.method).toBe("POST");
     expect(lastCapture?.body).toEqual({
@@ -1826,6 +1946,7 @@ describe("HTTP request building", () => {
         { type: "email", value: "person@example.com" },
         { type: "wallet", value: "0x1111111111111111111111111111111111111111" },
         { type: "phone", value: "+15555550123" },
+        { type: "user_id", value: "123e4567-e89b-12d3-a456-426614174000" },
       ],
     });
 
@@ -3145,23 +3266,80 @@ describe("HTTP request building", () => {
     installMockFetch({
       ok: true,
       data: {
-        wallets: [{ agent: mockAgent, claimToken: "stwd_claim_secret" }],
+        wallets: [
+          {
+            agent: mockAgent,
+            claimToken: "stwd_claim_secret",
+            claimExpiresAt: "2026-06-01T00:00:00.000Z",
+          },
+        ],
         warning: "shown once",
       },
     });
     const result = await makeClient().createPregeneratedUserWallets({
       count: 1,
       namePrefix: "Invite wallet",
+      claimExpiresInSeconds: 3600,
     });
     expect(lastCapture?.method).toBe("POST");
     expect(lastCapture?.url).toBe("https://api.steward.example/agents/pregenerated");
     expect(lastCapture?.body).toEqual({
       count: 1,
       namePrefix: "Invite wallet",
+      claimExpiresInSeconds: 3600,
       applyPolicies: undefined,
     });
     expect(result.wallets[0]?.agent.createdAt).toBeInstanceOf(Date);
     expect(result.wallets[0]?.claimToken).toBe("stwd_claim_secret");
+    expect(result.wallets[0]?.claimExpiresAt).toBe("2026-06-01T00:00:00.000Z");
+  });
+
+  it("listPregeneratedUserWallets → GET /agents/pregenerated", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        wallets: [
+          {
+            agent: mockAgent,
+            status: "claimable",
+            claimExpiresAt: "2026-06-01T00:00:00.000Z",
+          },
+        ],
+        limit: 10,
+        offset: 5,
+      },
+    });
+    const result = await makeClient().listPregeneratedUserWallets({ limit: 10, offset: 5 });
+    expect(lastCapture?.method).toBe("GET");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/agents/pregenerated?limit=10&offset=5",
+    );
+    expect(result.wallets[0]?.agent.createdAt).toBeInstanceOf(Date);
+    expect(result.wallets[0]?.status).toBe("claimable");
+    expect(result.wallets[0]?.claimExpiresAt).toBe("2026-06-01T00:00:00.000Z");
+  });
+
+  it("rotatePregeneratedUserWalletClaimToken → POST /agents/pregenerated/:id/claim-token/rotate", async () => {
+    installMockFetch({
+      ok: true,
+      data: {
+        agent: mockAgent,
+        claimToken: "stwd_claim_rotated",
+        claimExpiresAt: "2026-06-01T00:00:00.000Z",
+        warning: "shown once",
+      },
+    });
+    const result = await makeClient().rotatePregeneratedUserWalletClaimToken("agt invite", {
+      claimExpiresInSeconds: 7200,
+    });
+    expect(lastCapture?.method).toBe("POST");
+    expect(lastCapture?.url).toBe(
+      "https://api.steward.example/agents/pregenerated/agt%20invite/claim-token/rotate",
+    );
+    expect(lastCapture?.body).toEqual({ claimExpiresInSeconds: 7200 });
+    expect(result.agent.createdAt).toBeInstanceOf(Date);
+    expect(result.claimToken).toBe("stwd_claim_rotated");
+    expect(result.claimExpiresAt).toBe("2026-06-01T00:00:00.000Z");
   });
 });
 

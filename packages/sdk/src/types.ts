@@ -484,10 +484,19 @@ export interface TenantAuthAbuseConfig {
     allowedCountryCodes?: string[];
     blockedCountryCodes?: string[];
   };
+  user?: {
+    allowedUserIds?: string[];
+    blockedUserIds?: string[];
+  };
   mfa?: TenantMfaPolicyConfig;
 }
 
-export type TenantAccessAllowlistEntryType = "email" | "email_domain" | "wallet" | "phone";
+export type TenantAccessAllowlistEntryType =
+  | "email"
+  | "email_domain"
+  | "wallet"
+  | "phone"
+  | "user_id";
 
 export interface TenantAccessAllowlistEntry {
   id: string;
@@ -1332,11 +1341,52 @@ export interface UserWalletRecoveryRestoreResult {
   };
 }
 
+export interface UserWalletCreateResult {
+  agentId: string;
+  walletAddress: string;
+}
+
+export interface UserWalletSignResult {
+  txId: string;
+  txHash: string;
+}
+
+export interface UserWalletSignMessageResult {
+  signature: string;
+  address: string;
+}
+
+export interface UserWalletHistoryResult {
+  transactions: TxRecord[];
+  limit: number;
+  offset: number;
+}
+
 export interface PregeneratedUserWalletCreateResult {
   wallets: Array<{
     agent: AgentIdentity;
     claimToken: string;
+    claimExpiresAt: string;
   }>;
+  warning: string;
+}
+
+export type PregeneratedUserWalletStatus = "claimable" | "claimed" | "expired" | "unknown";
+
+export interface PregeneratedUserWalletInventoryResult {
+  wallets: Array<{
+    agent: AgentIdentity;
+    status: PregeneratedUserWalletStatus;
+    claimExpiresAt: string | null;
+  }>;
+  limit: number;
+  offset: number;
+}
+
+export interface PregeneratedUserWalletClaimTokenRotateResult {
+  agent: AgentIdentity;
+  claimToken: string;
+  claimExpiresAt: string;
   warning: string;
 }
 

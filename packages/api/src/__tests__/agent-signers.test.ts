@@ -200,7 +200,7 @@ describe("agent signer API", () => {
     expect(body.error).toContain("server-generated");
   });
 
-  it("requires recent MFA for signer credential issuance and reserved metadata is not writable", async () => {
+  it("requires recent MFA for signer creation and reserved metadata is not writable", async () => {
     const noMfaApp = await makeApp("admin-no-mfa");
     const noMfaResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers`, {
       method: "POST",
@@ -216,6 +216,24 @@ describe("agent signer API", () => {
     expect(noMfaResponse.status).toBe(403);
     expect(noMfa.ok).toBe(false);
     expect(noMfa.error).toContain("recent MFA");
+
+    const noMfaNoCredentialResponse = await noMfaApp.request(`/agents/${AGENT_ID}/signers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "no-mfa-no-credential",
+        permissions: ["*"],
+      }),
+    });
+    const noMfaNoCredential = (await noMfaNoCredentialResponse.json()) as {
+      ok: boolean;
+      error?: string;
+    };
+    expect(noMfaNoCredentialResponse.status).toBe(403);
+    expect(noMfaNoCredential.ok).toBe(false);
+    expect(noMfaNoCredential.error).toContain("recent MFA");
 
     const reservedResponse = await app.request(`/agents/${AGENT_ID}/signers`, {
       method: "POST",

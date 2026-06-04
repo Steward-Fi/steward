@@ -107,7 +107,13 @@ const THEME_ASSET_EXTENSIONS: Record<(typeof THEME_ASSET_URL_KEYS)[number], stri
   logoUrl: [".png"],
   faviconUrl: [".ico", ".png"],
 };
-const ACCESS_ALLOWLIST_TYPES = new Set(["email", "email_domain", "wallet", "phone"] as const);
+const ACCESS_ALLOWLIST_TYPES = new Set([
+  "email",
+  "email_domain",
+  "wallet",
+  "phone",
+  "user_id",
+] as const);
 const APP_CLIENT_ENVIRONMENTS = new Set<TenantAppClientEnvironment>([
   "development",
   "preview",
@@ -1220,6 +1226,7 @@ function toAccessAllowlistEntries(
   append("email_domain", config.email?.allowedDomains);
   append("wallet", config.wallet?.allowedWallets);
   append("phone", config.phone?.allowedPhoneNumbers);
+  append("user_id", config.user?.allowedUserIds);
   return entries;
 }
 
@@ -1232,7 +1239,7 @@ function normalizeAccessAllowlistEntry(value: unknown): AccessAllowlistEntry | s
     typeof raw.type !== "string" ||
     !ACCESS_ALLOWLIST_TYPES.has(raw.type as AccessAllowlistEntryType)
   ) {
-    return "allowlist entry type must be email, email_domain, wallet, or phone";
+    return "allowlist entry type must be email, email_domain, wallet, phone, or user_id";
   }
   if (typeof raw.value !== "string" || !raw.value.trim()) {
     return "allowlist entry value must be a non-empty string";
@@ -1246,7 +1253,9 @@ function normalizeAccessAllowlistEntry(value: unknown): AccessAllowlistEntry | s
         ? { email: { allowedDomains: [raw.value] } }
         : type === "wallet"
           ? { wallet: { allowedWallets: [raw.value] } }
-          : { phone: { allowedPhoneNumbers: [raw.value] } };
+          : type === "phone"
+            ? { phone: { allowedPhoneNumbers: [raw.value] } }
+            : { user: { allowedUserIds: [raw.value] } };
   const normalized = normalizeAuthAbuseConfig(candidate);
   if (typeof normalized === "string") return normalized;
   const normalizedValue =
@@ -1256,7 +1265,9 @@ function normalizeAccessAllowlistEntry(value: unknown): AccessAllowlistEntry | s
         ? normalized.email?.allowedDomains?.[0]
         : type === "wallet"
           ? normalized.wallet?.allowedWallets?.[0]
-          : normalized.phone?.allowedPhoneNumbers?.[0];
+          : type === "phone"
+            ? normalized.phone?.allowedPhoneNumbers?.[0]
+            : normalized.user?.allowedUserIds?.[0];
   if (!normalizedValue) return "allowlist entry value is invalid";
   return {
     id: accessAllowlistEntryId(type, normalizedValue),
@@ -1285,6 +1296,7 @@ function addAccessAllowlistEntriesToConfig(
   const email = { ...config.email };
   const wallet = { ...config.wallet };
   const phone = { ...config.phone };
+  const user = { ...config.user };
   for (const entry of entries) {
     if (entry.type === "email") {
       email.allowedEmails = [...(email.allowedEmails ?? []), entry.value];
@@ -1292,11 +1304,13 @@ function addAccessAllowlistEntriesToConfig(
       email.allowedDomains = [...(email.allowedDomains ?? []), entry.value];
     } else if (entry.type === "wallet") {
       wallet.allowedWallets = [...(wallet.allowedWallets ?? []), entry.value];
-    } else {
+    } else if (entry.type === "phone") {
       phone.allowedPhoneNumbers = [...(phone.allowedPhoneNumbers ?? []), entry.value];
+    } else {
+      user.allowedUserIds = [...(user.allowedUserIds ?? []), entry.value];
     }
   }
-  return normalizeAuthAbuseConfig({ ...config, email, wallet, phone });
+  return normalizeAuthAbuseConfig({ ...config, email, wallet, phone, user });
 }
 
 function removeAccessAllowlistEntriesFromConfig(
@@ -1328,7 +1342,13 @@ function removeAccessAllowlistEntriesFromConfig(
       shouldKeep("phone", value),
     ),
   };
-  const next = normalizeAuthAbuseConfig({ ...config, email, wallet, phone });
+  const user = {
+    ...config.user,
+    allowedUserIds: (config.user?.allowedUserIds ?? []).filter((value) =>
+      shouldKeep("user_id", value),
+    ),
+  };
+  const next = normalizeAuthAbuseConfig({ ...config, email, wallet, phone, user });
   if (typeof next === "string") return next;
   const currentIds = new Set(toAccessAllowlistEntries(tenantId, config).map((entry) => entry.id));
   for (const id of removals.ids) {

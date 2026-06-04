@@ -142,7 +142,20 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Signing requires owner/admin MFA or signer-bound");
+    expect(body.error).toContain("owner or admin session with recent MFA");
+  });
+
+  it("rejects missing signer auth before transaction body parsing", async () => {
+    const response = await app.request(`/vault/${AGENT_ID}/sign`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "not-json",
+    });
+    const body = (await response.json()) as { ok: boolean; error?: string };
+
+    expect(response.status).toBe(403);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("owner or admin session with recent MFA");
   });
 
   it("rejects bare delegated signer ids even when the id exists", async () => {
@@ -158,7 +171,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Signing requires owner/admin MFA or signer-bound");
+    expect(body.error).toContain("owner or admin session with recent MFA");
   });
 
   it("rejects invalid signer credentials before policy evaluation", async () => {

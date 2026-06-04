@@ -212,7 +212,7 @@ type SamlSsoForm = {
   allowJitProvisioning: boolean;
 };
 
-type AccessAllowlistEntryType = "email" | "email_domain" | "wallet" | "phone";
+type AccessAllowlistEntryType = "email" | "email_domain" | "wallet" | "phone" | "user_id";
 
 type AccessAllowlistEntry = {
   id: string;
@@ -231,6 +231,7 @@ const ACCESS_ALLOWLIST_TYPES: Array<{
   { value: "email_domain", label: "Email Domain", placeholder: "example.com" },
   { value: "wallet", label: "Wallet", placeholder: "0x... or solana:..." },
   { value: "phone", label: "Phone", placeholder: "+14155550100" },
+  { value: "user_id", label: "User ID", placeholder: "123e4567-e89b-12d3-a456-426614174000" },
 ];
 
 const GAS_SPONSORSHIP_PROVIDERS: Array<{ value: GasSponsorshipProvider; label: string }> = [
@@ -530,7 +531,7 @@ function parseAccessAllowlistBulkEntries(
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const typed = line.match(/^(email_domain|email|wallet|phone)\s*[:,]\s*(.+)$/i);
+      const typed = line.match(/^(email_domain|email|wallet|phone|user_id)\s*[:,]\s*(.+)$/i);
       if (!typed) return { type: fallbackType, value: line };
       const type = typed[1].toLowerCase() as AccessAllowlistEntryType;
       return {
@@ -1146,7 +1147,7 @@ export default function SettingsPage() {
     );
     const entries = [...(value ? [{ type: accessAllowlistType, value }] : []), ...bulkEntries];
     if (entries.length === 0) {
-      setAccessAllowlistError("Enter an email, domain, wallet, or phone number");
+      setAccessAllowlistError("Enter an email, domain, wallet, phone number, or user ID");
       return;
     }
 
@@ -2723,8 +2724,8 @@ const policies = await steward.getPolicies("my-agent")`;
               App Access Allowlist
             </h2>
             <p className="text-xs text-text-tertiary max-w-2xl mt-1">
-              Restrict who can authenticate by exact email, email domain, wallet address, or E.164
-              phone number.
+              Restrict who can authenticate by exact email, email domain, wallet address, E.164
+              phone number, or Steward user ID.
             </p>
           </div>
           <button
@@ -2774,13 +2775,13 @@ const policies = await steward.getPolicies("my-agent")`;
                 onChange={(event) => setAccessAllowlistBulkValue(event.target.value)}
                 rows={4}
                 placeholder={
-                  "email: alice@example.com\nemail_domain: example.com\nwallet: 0x...\nphone: +14155550100"
+                  "email: alice@example.com\nemail_domain: example.com\nwallet: 0x...\nphone: +14155550100\nuser_id: 123e4567-e89b-12d3-a456-426614174000"
                 }
                 className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
               />
               <span className="text-xs text-text-tertiary block">
-                Use one entry per line. Start with email, email_domain, wallet, or phone; unprefixed
-                lines use the selected category.
+                Use one entry per line. Start with email, email_domain, wallet, phone, or user_id;
+                unprefixed lines use the selected category.
               </span>
             </label>
           </div>

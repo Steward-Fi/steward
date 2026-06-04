@@ -39,6 +39,7 @@ import { z } from "zod";
 import { checkAgentSpendLimit } from "../middleware/redis";
 import { type ActorType, writeAuditEvent } from "../services/audit";
 import {
+  type AgentIdentity,
   type ApiResponse,
   type AppVariables,
   ensureAgentForTenant,
@@ -48,6 +49,11 @@ import {
 } from "../services/context";
 
 export const adapterRoutes = new Hono<{ Variables: AppVariables }>();
+
+adapterRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 // ─── Auth / actor helpers ─────────────────────────────────────────────────────
 
@@ -74,7 +80,9 @@ function callerAgentId(c: Context<{ Variables: AppVariables }>): string | null {
 async function resolveAgentId(
   c: Context<{ Variables: AppVariables }>,
   requested?: string,
-): Promise<{ ok: true; agentId: string } | { ok: false; response: Response }> {
+): Promise<
+  { ok: true; agentId: string; agent: AgentIdentity } | { ok: false; response: Response }
+> {
   const scoped = callerAgentId(c);
   if (scoped) {
     // Agent-token callers may only act as themselves.
@@ -87,7 +95,14 @@ async function resolveAgentId(
         ),
       };
     }
-    return { ok: true, agentId: scoped };
+    const owned = await ensureAgentForTenant(c.get("tenantId"), scoped);
+    if (!owned) {
+      return {
+        ok: false,
+        response: c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404),
+      };
+    }
+    return { ok: true, agentId: scoped, agent: owned };
   }
   // Tenant-level callers must name the agent explicitly.
   if (!requireTenantLevel(c)) {
@@ -110,7 +125,11 @@ async function resolveAgentId(
       response: c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404),
     };
   }
-  return { ok: true, agentId: requested };
+  return { ok: true, agentId: requested, agent: owned };
+}
+
+function agentEvmAddress(agent: AgentIdentity): string {
+  return agent.walletAddresses?.evm ?? agent.walletAddress;
 }
 
 async function tenantHasUser(tenantId: string, userId: string): Promise<boolean> {
@@ -546,7 +565,7 @@ adapterRoutes.post("/swap/build", async (c) => {
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
   const agentId = resolution.agentId;
-  const walletAddress = typeof raw.agentAddress === "string" ? raw.agentAddress : "";
+  const walletAddress = agentEvmAddress(resolution.agent);
 
   try {
     const swap = adapterRegistry.swap();
@@ -621,10 +640,7 @@ adapterRoutes.post("/earn/deposit", async (c) => {
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
   const agentId = resolution.agentId;
-  const owner =
-    typeof (raw as Record<string, unknown>).owner === "string"
-      ? ((raw as Record<string, unknown>).owner as string)
-      : "";
+  const owner = agentEvmAddress(resolution.agent);
 
   try {
     const earn = adapterRegistry.earn();
@@ -670,10 +686,7 @@ adapterRoutes.post("/earn/withdraw", async (c) => {
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
   const agentId = resolution.agentId;
-  const owner =
-    typeof (raw as Record<string, unknown>).owner === "string"
-      ? ((raw as Record<string, unknown>).owner as string)
-      : "";
+  const owner = agentEvmAddress(resolution.agent);
 
   try {
     const earn = adapterRegistry.earn();
@@ -744,12 +757,13 @@ adapterRoutes.post("/bridge/build", async (c) => {
   const resolution = await resolveAgentId(c, parsed.data.agentId);
   if (!resolution.ok) return resolution.response;
   const agentId = resolution.agentId;
+  const owner = agentEvmAddress(resolution.agent);
 
   try {
     const bridge = adapterRegistry.bridge();
     const intent = await bridge.buildBridge({
       quote: parsed.data.quote as unknown as BridgeQuote,
-      owner: parsed.data.owner,
+      owner,
     });
     assertUnsigned(intent);
 

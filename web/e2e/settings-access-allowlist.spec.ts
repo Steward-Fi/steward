@@ -6,7 +6,7 @@ const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
 type AccessAllowlistEntry = {
   id: string;
   tenantId: string;
-  type: "email" | "email_domain" | "wallet" | "phone";
+  type: "email" | "email_domain" | "wallet" | "phone" | "user_id";
   value: string;
   acceptedAt: string | null;
 };
@@ -91,10 +91,16 @@ test.describe("Dashboard access allowlist controls", () => {
 
     await allowlist
       .getByRole("textbox", { name: /^Bulk Entries/ })
-      .fill("email_domain: customer.test\nwallet: 0x0000000000000000000000000000000000000001");
+      .fill(
+        "email_domain: customer.test\nwallet: 0x0000000000000000000000000000000000000001\nuser_id: 123e4567-e89b-12d3-a456-426614174000",
+      );
     await allowlist.getByRole("button", { name: "Add Entry" }).click();
     await expect(allowlist.getByText("customer.test")).toBeVisible();
     await expect(allowlist.getByText("0x0000000000000000000000000000000000000001")).toBeVisible();
+    await expect(allowlist.getByText("123e4567-e89b-12d3-a456-426614174000")).toBeVisible();
+    await expect(
+      allowlist.getByRole("row", { name: /123e4567-e89b-12d3-a456-426614174000/ }),
+    ).toContainText("User ID");
 
     await allowlist
       .getByRole("row", { name: /alice@example\.test/ })

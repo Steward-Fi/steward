@@ -40,6 +40,7 @@ import {
 } from "viem/chains";
 import { deriveEvmKey, deriveSolanaKey } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
+import { backendFromKeyStore, type KeystoreBackend } from "./keystore-backend";
 import {
   assertSolanaTransferTransactionMatches,
   generateSolanaKeypair,
@@ -61,6 +62,7 @@ export interface VaultConfig {
   masterPassword: string;
   rpcUrl?: string;
   chainId?: number;
+  keystoreBackend?: KeystoreBackend;
 }
 
 /**
@@ -173,7 +175,7 @@ export interface RestoreAgentFromMnemonicResult extends AgentIdentity {
  * of a signing operation and never exposed to agent containers.
  */
 export class Vault {
-  private keyStore: KeyStore;
+  private keyStore: KeystoreBackend;
   private config: VaultConfig;
 
   constructor(config: VaultConfig) {
@@ -181,7 +183,8 @@ export class Vault {
     // Signing-vault keeps the legacy (undomain) root so existing wallet ciphertext
     // stays decryptable; the SecretVault uses a distinct domain-separated root, so
     // the two roots are cryptographically independent despite sharing masterPassword.
-    this.keyStore = new KeyStore(config.masterPassword);
+    this.keyStore =
+      config.keystoreBackend ?? backendFromKeyStore(new KeyStore(config.masterPassword));
   }
 
   /**
@@ -220,13 +223,13 @@ export class Vault {
     const solanaAddress = solKp.publicKey;
 
     // ── Encrypt both keys ────────────────────────────────────────────────
-    const evmEncrypted = this.keyStore.encrypt(evmPrivateKey, {
+    const evmEncrypted = await this.keyStore.encrypt(evmPrivateKey, {
       tenantId,
       agentId,
       chainFamily: "evm",
       venue: null,
     });
-    const solEncrypted = this.keyStore.encrypt(solKp.secretKey, {
+    const solEncrypted = await this.keyStore.encrypt(solKp.secretKey, {
       tenantId,
       agentId,
       chainFamily: "solana",
@@ -321,13 +324,13 @@ export class Vault {
 
     const material = await this.deriveMnemonicWalletMaterial(mnemonic, options.passphrase);
 
-    const evmEncrypted = this.keyStore.encrypt(material.evmPrivateKey, {
+    const evmEncrypted = await this.keyStore.encrypt(material.evmPrivateKey, {
       tenantId,
       agentId,
       chainFamily: "evm",
       venue: null,
     });
-    const solEncrypted = this.keyStore.encrypt(material.solanaSecretHex, {
+    const solEncrypted = await this.keyStore.encrypt(material.solanaSecretHex, {
       tenantId,
       agentId,
       chainFamily: "solana",
@@ -468,13 +471,13 @@ export class Vault {
       throw new Error("Mnemonic does not match the existing wallet identity");
     }
 
-    const evmEncrypted = this.keyStore.encrypt(material.evmPrivateKey, {
+    const evmEncrypted = await this.keyStore.encrypt(material.evmPrivateKey, {
       tenantId,
       agentId,
       chainFamily: "evm",
       venue: null,
     });
-    const solEncrypted = this.keyStore.encrypt(material.solanaSecretHex, {
+    const solEncrypted = await this.keyStore.encrypt(material.solanaSecretHex, {
       tenantId,
       agentId,
       chainFamily: "solana",
@@ -737,7 +740,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt(
+      secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
           iv: chainKey.iv,
@@ -763,7 +766,7 @@ export class Vault {
       if (!legacyKey) {
         throw missingSigningKeyError(request.agentId, chainFamilyToUse);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
         tenantId: request.tenantId,
         agentId: request.agentId,
         chainFamily: chainFamilyToUse,
@@ -1027,7 +1030,7 @@ export class Vault {
       keyToStore = normalizedKey;
     }
 
-    const encryptedKey = this.keyStore.encrypt(keyToStore, {
+    const encryptedKey = await this.keyStore.encrypt(keyToStore, {
       tenantId,
       agentId,
       chainFamily: chainType,
@@ -1161,7 +1164,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt(
+      secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
           iv: chainKey.iv,
@@ -1179,7 +1182,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No signing key found for agent ${agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
         tenantId,
         agentId,
         chainFamily: chainFamilyToUse,
@@ -1236,7 +1239,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt(
+      secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
           iv: chainKey.iv,
@@ -1253,7 +1256,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No EVM signing key for agent ${agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
         tenantId,
         agentId,
         chainFamily: "evm",
@@ -1337,7 +1340,7 @@ export class Vault {
         ),
       );
     if (chainKey) {
-      secretKey = this.keyStore.decrypt(
+      secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
           iv: chainKey.iv,
@@ -1357,7 +1360,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No evm signing key for agent ${agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
         tenantId,
         agentId,
         chainFamily: "evm",
@@ -1393,7 +1396,7 @@ export class Vault {
    * Returns { contractAddress, chainId, nonce, r, s, yParity, v } which the
    * caller attaches to the `authorizationList` of a type-4 transaction.
    *
-   * Per EIP-7702, signing chainId=0 designates "any chain" — useful when the
+   * Per EIP-7702, signing chainId=0 designates "any chain" - useful when the
    * delegation target is chain-agnostic. The vault accepts 0 explicitly so
    * callers can opt in; default is the chainId on the request.
    */
@@ -1441,7 +1444,7 @@ export class Vault {
         ),
       );
     if (chainKey) {
-      secretKey = this.keyStore.decrypt(
+      secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
           iv: chainKey.iv,
@@ -1456,7 +1459,7 @@ export class Vault {
         .from(encryptedKeys)
         .where(eq(encryptedKeys.agentId, agentId));
       if (!legacyKey) throw new Error(`No EVM signing key for agent ${agentId}`);
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
         tenantId,
         agentId,
         chainFamily: "evm",
@@ -1519,7 +1522,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt(
+      secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
           iv: chainKey.iv,
@@ -1547,7 +1550,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No signing key found for agent ${request.agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
         tenantId: request.tenantId,
         agentId: request.agentId,
         chainFamily: "evm",
@@ -1617,7 +1620,7 @@ export class Vault {
 
     let secretKey: string;
     if (chainKey) {
-      secretKey = this.keyStore.decrypt(
+      secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
           iv: chainKey.iv,
@@ -1634,7 +1637,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No signing key found for agent ${request.agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
         tenantId: request.tenantId,
         agentId: request.agentId,
         chainFamily: "evm",
@@ -1696,7 +1699,7 @@ export class Vault {
       );
 
     if (chainKey) {
-      secretKey = this.keyStore.decrypt(
+      secretKey = await this.keyStore.decrypt(
         {
           ciphertext: chainKey.ciphertext,
           iv: chainKey.iv,
@@ -1724,7 +1727,7 @@ export class Vault {
       if (!legacyKey) {
         throw new Error(`No Solana signing key found for agent ${request.agentId}`);
       }
-      secretKey = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
         tenantId: request.tenantId,
         agentId: request.agentId,
         chainFamily: "solana",
@@ -1843,7 +1846,7 @@ export class Vault {
       );
 
     if (evmChainKey) {
-      const pk = this.keyStore.decrypt(
+      const pk = await this.keyStore.decrypt(
         {
           ciphertext: evmChainKey.ciphertext,
           iv: evmChainKey.iv,
@@ -1873,7 +1876,7 @@ export class Vault {
         .from(encryptedKeys)
         .where(eq(encryptedKeys.agentId, agentId));
       if (legacyKey) {
-        const pk = this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        const pk = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
           tenantId,
           agentId,
           chainFamily: "evm",
@@ -1899,7 +1902,7 @@ export class Vault {
       );
 
     if (solChainKey) {
-      const pk = this.keyStore.decrypt(
+      const pk = await this.keyStore.decrypt(
         {
           ciphertext: solChainKey.ciphertext,
           iv: solChainKey.iv,
@@ -2116,7 +2119,7 @@ export class Vault {
       secret = kp.secretKey;
     }
 
-    const encrypted = this.keyStore.encrypt(secret, {
+    const encrypted = await this.keyStore.encrypt(secret, {
       tenantId: agentRow.tenantId,
       agentId,
       chainFamily: chainType,

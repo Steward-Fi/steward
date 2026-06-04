@@ -19,6 +19,8 @@ let apiKey = "";
 let createSessionToken: typeof import("../routes/auth").createSessionToken;
 let tenantAuth: typeof import("../services/context").tenantAuth;
 let vaultRoutes: typeof import("../routes/vault").vaultRoutes;
+let previousJwtSecret: string | undefined;
+let previousAuditHmacKey: string | undefined;
 
 async function makeApp() {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -38,6 +40,11 @@ describe("vault MFA-sensitive actions", () => {
   let app: Awaited<ReturnType<typeof makeApp>>;
 
   beforeAll(async () => {
+    previousJwtSecret = process.env.STEWARD_JWT_SECRET;
+    previousAuditHmacKey = process.env.STEWARD_AUDIT_HMAC_KEY;
+    process.env.STEWARD_JWT_SECRET = "vault-mfa-sensitive-actions-jwt-secret-with-enough-entropy";
+    process.env.STEWARD_AUDIT_HMAC_KEY =
+      "vault-mfa-sensitive-actions-audit-hmac-key-with-enough-entropy";
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "vault-mfa-master-password";
     process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT = "true";
@@ -91,6 +98,16 @@ describe("vault MFA-sensitive actions", () => {
     delete process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT;
     delete process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT;
     delete process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT;
+    if (previousJwtSecret === undefined) {
+      delete process.env.STEWARD_JWT_SECRET;
+    } else {
+      process.env.STEWARD_JWT_SECRET = previousJwtSecret;
+    }
+    if (previousAuditHmacKey === undefined) {
+      delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    } else {
+      process.env.STEWARD_AUDIT_HMAC_KEY = previousAuditHmacKey;
+    }
   });
 
   it("rejects API-key auth for vault private-key export even when export flags are enabled", async () => {

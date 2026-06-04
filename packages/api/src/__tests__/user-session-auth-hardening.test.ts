@@ -50,6 +50,23 @@ describe("user session auth hardening", () => {
     expect(switchRoute).toContain("mfaMethod: _mfaMethod");
   });
 
+  it("marks user API-key and tenant-switch token responses as non-cacheable", () => {
+    const createStart = userRouteSource.indexOf('user.post("/me/tenants"');
+    const switchStart = userRouteSource.indexOf('user.post("/me/tenants/switch"');
+    expect(createStart).toBeGreaterThanOrEqual(0);
+    expect(switchStart).toBeGreaterThan(createStart);
+    const createRoute = userRouteSource.slice(createStart, switchStart);
+    const switchRoute = userRouteSource.slice(
+      switchStart,
+      userRouteSource.indexOf('user.post("/me/tenants/:tenantId/join"', switchStart),
+    );
+
+    expect(createRoute.indexOf("setNoStoreHeaders(c)")).toBeLessThan(
+      createRoute.indexOf("apiKey: apiKeyPair.key"),
+    );
+    expect(switchRoute.indexOf("setNoStoreHeaders(c)")).toBeLessThan(switchRoute.indexOf("token,"));
+  });
+
   it("requires personal user sessions for global personal user routes", () => {
     expect(userRouteSource).toContain("function requirePersonalUserSession");
     expect(userRouteSource).toContain("session.tenantId === personalTenantId(userId)");

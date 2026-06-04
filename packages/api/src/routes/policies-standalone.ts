@@ -26,6 +26,7 @@ import {
   priceOracle,
   requireTenantLevel,
   safeJsonParse,
+  setNoStoreHeaders,
 } from "../services/context";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 
@@ -389,6 +390,11 @@ function normalizeSimulationRequest(body: SimulateBody): SimRequest | null {
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
 export const policiesStandaloneRoutes = new Hono<{ Variables: AppVariables }>();
+
+policiesStandaloneRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]): boolean {
   const role = c.get("tenantRole");

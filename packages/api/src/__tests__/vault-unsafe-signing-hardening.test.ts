@@ -146,11 +146,17 @@ describe("vault unsafe signing hardening", () => {
     const routeBody = vaultSource.slice(routeStart, routeEnd);
     const signCall = routeBody.indexOf("vault.signTransaction(signRequest");
     const completedResult = routeBody.indexOf("completedResult = result", signCall);
+    const initialStatus = routeBody.indexOf(
+      'status: transfer.broadcast ? "broadcast" : "signed"',
+      signCall,
+    );
     const catchStart = routeBody.indexOf("} catch (e: unknown)", completedResult);
     const guard = routeBody.indexOf("if (completedResult && completedStatus)", catchStart);
     const failedInsert = routeBody.indexOf('status: "failed"', catchStart);
 
     expect(completedResult).toBeGreaterThan(signCall);
+    expect(initialStatus).toBeGreaterThan(signCall);
+    expect(initialStatus).toBeLessThan(completedResult);
     expect(guard).toBeGreaterThan(catchStart);
     expect(failedInsert).toBeGreaterThan(guard);
     expect(routeBody.slice(guard, failedInsert)).toContain("ok: true");

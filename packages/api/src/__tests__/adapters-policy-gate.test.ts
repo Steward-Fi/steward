@@ -29,6 +29,7 @@ afterAll(async () => {
 });
 
 const AGENT_WALLET = "0x1111111111111111111111111111111111111111";
+const SPOOFED_OWNER = "0x2222222222222222222222222222222222222222";
 const USER_1 = "00000000-0000-4000-8000-000000000001";
 const USER_EXCHANGE = "00000000-0000-4000-8000-000000000002";
 const FOREIGN_USER = "00000000-0000-4000-8000-000000000003";
@@ -99,6 +100,27 @@ async function makeApp(tenantId: string, options?: { userId?: string }) {
 }
 
 describe("adapter fund-moving policy gate", () => {
+  it("marks adapter financial/session responses as non-cacheable", async () => {
+    const { app, agentId } = await makeApp(`tenant-adapter-cache-${Date.now()}`);
+
+    const quoteRes = await app.request("/adapters/swap/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        fromToken: USDC,
+        toToken: WETH,
+        amount: "1000000",
+        chainId: 8453,
+      }),
+    });
+
+    expect(quoteRes.status).toBe(200);
+    expect(quoteRes.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(quoteRes.headers.get("Pragma")).toBe("no-cache");
+    expect(quoteRes.headers.get("Expires")).toBe("0");
+  });
+
   it("DENIES a swap build when the estimated notional exceeds the per-op cap", async () => {
     process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "100";
     process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000";
@@ -160,7 +182,7 @@ describe("adapter fund-moving policy gate", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         agentId,
-        agentAddress: AGENT_WALLET,
+        agentAddress: SPOOFED_OWNER,
         quote: data.quote,
         estimatedUsd: 250,
       }),
@@ -168,11 +190,13 @@ describe("adapter fund-moving policy gate", () => {
     expect(buildRes.status).toBe(200);
     const body = (await buildRes.json()) as {
       ok: boolean;
-      data: { unsignedIntent: { signed: boolean; category: string } };
+      data: { unsignedIntent: { signed: boolean; category: string; owner: string } };
     };
     expect(body.ok).toBe(true);
     expect(body.data.unsignedIntent.signed).toBe(false);
     expect(body.data.unsignedIntent.category).toBe("swap");
+    expect(body.data.unsignedIntent.owner).toBe(AGENT_WALLET);
+    expect(body.data.unsignedIntent.owner).not.toBe(SPOOFED_OWNER);
   });
 
   it("DENIES an earn deposit above cap (gate applies to all fund-moving ops)", async () => {
@@ -238,6 +262,60 @@ describe("adapter fund-moving policy gate", () => {
     expect(body.data.unsignedIntent.signed).toBe(false);
     expect(body.data.unsignedIntent.category).toBe("bridge");
     expect(body.data.unsignedIntent.metadata.toChainId).toBe(42161);
+  });
+
+  it("binds bridge and earn unsigned intents to the resolved agent wallet, not caller-supplied owner", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "100000";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000000";
+    const { app, agentId } = await makeApp(`tenant-adapter-owner-bind-${Date.now()}`);
+
+    const quoteRes = await app.request("/adapters/bridge/quote", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        fromChainId: 8453,
+        toChainId: 42161,
+        fromToken: USDC,
+        toToken: WETH,
+        amount: "1000000",
+        recipient: AGENT_WALLET,
+      }),
+    });
+    const { data } = (await quoteRes.json()) as { data: { quote: unknown } };
+
+    const bridgeRes = await app.request("/adapters/bridge/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        owner: SPOOFED_OWNER,
+        quote: data.quote,
+        estimatedUsd: 250,
+      }),
+    });
+    expect(bridgeRes.status).toBe(200);
+    const bridgeBody = (await bridgeRes.json()) as {
+      data: { unsignedIntent: { owner: string } };
+    };
+    expect(bridgeBody.data.unsignedIntent.owner).toBe(AGENT_WALLET);
+
+    const earnRes = await app.request("/adapters/earn/deposit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        vault: "0x4626000000000000000000000000000000000001",
+        assets: "1050",
+        owner: SPOOFED_OWNER,
+        estimatedUsd: 250,
+      }),
+    });
+    expect(earnRes.status).toBe(200);
+    const earnBody = (await earnRes.json()) as {
+      data: { unsignedIntent: { owner: string } };
+    };
+    expect(earnBody.data.unsignedIntent.owner).toBe(AGENT_WALLET);
   });
 
   it("DENIES a bridge build above cap before returning a signable artifact", async () => {

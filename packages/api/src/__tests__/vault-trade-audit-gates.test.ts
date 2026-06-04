@@ -80,6 +80,16 @@ describe("vault and trade audit-ordering structural backstops", () => {
     expect(vaultSource.indexOf('action: "vault.sign.authorization.authorized"')).toBeLessThan(
       vaultSource.indexOf("vault.signAuthorization"),
     );
+    const typedDataStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign-typed-data"');
+    expect(typedDataStart).toBeGreaterThanOrEqual(0);
+    const typedDataRoute = vaultSource.slice(
+      typedDataStart,
+      vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"', typedDataStart),
+    );
+    expect(typedDataRoute.indexOf('action: "vault.sign.typed_data.authorized"')).toBeLessThan(
+      typedDataRoute.indexOf("vault.signTypedData"),
+    );
+    expect(typedDataRoute).toContain("signerAuthAuditMetadata(signerAuthorization.auth)");
 
     // Session revoke-authorization before the manager revoke (control-plane). The
     // venue-submit ordering that used to live here is now behavioral — see

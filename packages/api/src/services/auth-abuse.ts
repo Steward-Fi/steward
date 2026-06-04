@@ -148,6 +148,23 @@ function normalizePhoneNumberList(value: unknown, field: string): string[] | str
   return [...new Set(phones)];
 }
 
+function normalizeUserIdList(value: unknown, field: string): string[] | string {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return `${field} must be an array`;
+  const ids = value
+    .map((entry) => (typeof entry === "string" ? entry.trim().toLowerCase() : ""))
+    .filter(Boolean);
+  if (ids.length > 5000) return `${field} can include at most 5000 user ids`;
+  if (
+    !ids.every((id) =>
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id),
+    )
+  ) {
+    return `${field} must contain UUID user ids`;
+  }
+  return [...new Set(ids)];
+}
+
 function normalizeBooleanRecord(value: unknown, field: string): Record<string, boolean> | string {
   if (value === undefined) return {};
   if (!isPlainObject(value)) return `${field} must be an object`;
@@ -333,6 +350,15 @@ export function normalizeAuthAbuseConfig(value: unknown): TenantAuthAbuseConfigW
     };
   }
 
+  if (value.user !== undefined) {
+    if (!isPlainObject(value.user)) return "user abuse config must be an object";
+    const allowedUserIds = normalizeUserIdList(value.user.allowedUserIds, "user.allowedUserIds");
+    if (typeof allowedUserIds === "string") return allowedUserIds;
+    const blockedUserIds = normalizeUserIdList(value.user.blockedUserIds, "user.blockedUserIds");
+    if (typeof blockedUserIds === "string") return blockedUserIds;
+    config.user = { allowedUserIds, blockedUserIds };
+  }
+
   if (value.mfa !== undefined) {
     const mfa = normalizeMfaPolicy(value.mfa);
     if (typeof mfa === "string") return mfa;
@@ -453,6 +479,22 @@ export function validatePhoneAbusePolicy(
     if (blockedPrefixes.length && blockedPrefixes.some((prefix) => phone.startsWith(prefix))) {
       return "VOIP phone numbers are not allowed";
     }
+  }
+  return null;
+}
+
+export function validateUserAbusePolicy(
+  userId: string,
+  config: TenantAuthAbuseConfig,
+): string | null {
+  const userConfig = config.user;
+  if (!userConfig) return null;
+  const normalized = userId.trim().toLowerCase();
+  if (userConfig.blockedUserIds?.includes(normalized)) {
+    return "user id is blocked";
+  }
+  if (userConfig.allowedUserIds?.length && !userConfig.allowedUserIds.includes(normalized)) {
+    return "user id is not allowed";
   }
   return null;
 }

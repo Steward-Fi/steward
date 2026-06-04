@@ -99,9 +99,13 @@ describe("webhook audit ordering", () => {
       const start = routeSource.indexOf(marker);
       expect(start).toBeGreaterThanOrEqual(0);
       const route = routeSource.slice(start, routeSource.indexOf("\nwebhookRoutes.", start + 1));
-      const dispatch = route.indexOf(marker.includes("/:id/test") ? "dispatchTestWebhook" : "dispatchReplayWebhook");
+      const dispatch = route.indexOf(
+        marker.includes("/:id/test") ? "dispatchTestWebhook" : "dispatchReplayWebhook",
+      );
       const finalAudit = route.indexOf(
-        marker.includes("/:id/test") ? 'action: "webhook.test_send"' : 'action: "webhook_delivery.replay"',
+        marker.includes("/:id/test")
+          ? 'action: "webhook.test_send"'
+          : 'action: "webhook_delivery.replay"',
         dispatch,
       );
       const failure = route.indexOf(error, finalAudit);

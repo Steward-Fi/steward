@@ -14,6 +14,12 @@ const hyperliquidSource = readFileSync(
 );
 
 describe("trade session revocation fence", () => {
+  it("marks trade responses as non-cacheable", () => {
+    expect(tradeRouteSource).toContain("setNoStoreHeaders");
+    expect(tradeRouteSource).toContain('tradeRoutes.use("*"');
+    expect(tradeRouteSource).toContain("setNoStoreHeaders(c)");
+  });
+
   it("serializes revocation with the final order sign and submit phase", () => {
     expect(tradeSessionSource).toContain("function sessionFenceKey");
     expect(tradeSessionSource).toContain("pg_advisory_xact_lock");
@@ -69,7 +75,7 @@ describe("trade session revocation fence", () => {
     expect(hyperliquidSource).toContain("async updateLeverage");
   });
 
-  it("does not turn completed venue submissions into retryable route failures", () => {
+  it("does not return clean venue results when final trade audits fail", () => {
     const submitStart = tradeRouteSource.indexOf('tradeRoutes.post("/hyperliquid/order"');
     expect(submitStart).toBeGreaterThanOrEqual(0);
     const route = tradeRouteSource.slice(submitStart);
@@ -77,21 +83,50 @@ describe("trade session revocation fence", () => {
     const response = route.indexOf("const response = {", submitOrder);
     const envelope = route.indexOf("const envelope: TradeIdempotencyResponse", response);
     const auditTry = route.indexOf("try {", envelope);
-    const completeBestEffort = route.indexOf(
-      "completeTradeIdempotencyBestEffort(idempotency, envelope)",
+    const auditFailureEnvelope = route.indexOf(
+      "Trade order submitted but audit record failed to persist",
       auditTry,
     );
-    const returnSuccess = route.indexOf(
-      "return c.json(responseData(response))",
+    const completeBestEffort = route.indexOf(
+      "completeTradeIdempotencyBestEffort(idempotency, auditFailureEnvelope)",
+      auditFailureEnvelope,
+    );
+    const returnFailure = route.indexOf(
+      "return c.json<ApiResponse>(auditFailureEnvelope.body as ApiResponse, 500)",
       completeBestEffort,
     );
+    const cleanSuccess = route.indexOf("return c.json(responseData(response))", returnFailure);
 
     expect(tradeRouteSource).toContain("async function completeTradeIdempotencyBestEffort");
     expect(submitOrder).toBeGreaterThanOrEqual(0);
     expect(response).toBeGreaterThan(submitOrder);
     expect(envelope).toBeGreaterThan(response);
     expect(auditTry).toBeGreaterThan(envelope);
-    expect(completeBestEffort).toBeGreaterThan(auditTry);
-    expect(returnSuccess).toBeGreaterThan(completeBestEffort);
+    expect(auditFailureEnvelope).toBeGreaterThan(auditTry);
+    expect(completeBestEffort).toBeGreaterThan(auditFailureEnvelope);
+    expect(returnFailure).toBeGreaterThan(completeBestEffort);
+    expect(cleanSuccess).toBeGreaterThan(returnFailure);
+
+    expect(route).toContain("Trade order rejected by venue but audit record failed to persist");
+  });
+
+  it("does not let idempotency completion failures mask unknown venue-submit outcomes", () => {
+    const submitStart = tradeRouteSource.indexOf('tradeRoutes.post("/hyperliquid/order"');
+    expect(submitStart).toBeGreaterThanOrEqual(0);
+    const route = tradeRouteSource.slice(submitStart);
+    const unknownResponse = route.indexOf('status: "submit_unknown"');
+    const completeBestEffort = route.indexOf(
+      "completeTradeIdempotencyBestEffort(idempotency, envelope)",
+      unknownResponse,
+    );
+    const returnUnknown = route.indexOf(
+      "return c.json<ApiResponse>(envelope.body as ApiResponse, 502)",
+      completeBestEffort,
+    );
+
+    expect(unknownResponse).toBeGreaterThanOrEqual(0);
+    expect(completeBestEffort).toBeGreaterThan(unknownResponse);
+    expect(returnUnknown).toBeGreaterThan(completeBestEffort);
+    expect(route).not.toContain("await idempotency.complete(envelope)");
   });
 });

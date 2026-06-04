@@ -1,4 +1,4 @@
-import { proxyAuditLog } from "@stwd/db";
+import { agentPolicies, proxyAuditLog } from "@stwd/db";
 import { evaluateTradeOrder } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
 import { TradeSessionManager } from "@stwd/trade-sessions";
@@ -8,6 +8,7 @@ import {
   hyperliquidAssetSchema,
   hyperliquidOrderSchema,
 } from "@stwd/venue-hyperliquid";
+import { and, eq } from "drizzle-orm";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -19,10 +20,16 @@ import {
   db,
   ensureAgentForTenant,
   safeJsonParse,
+  setNoStoreHeaders,
   vault,
 } from "../services/context";
 
 export const tradeRoutes = new Hono<{ Variables: AppVariables }>();
+
+tradeRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 const createSessionSchema = z.object({
   agentId: z.string().min(1).optional(),
@@ -196,6 +203,14 @@ function tradeAuditActor(
 
 function hashBody(body: unknown): string {
   return JSON.stringify(body);
+}
+
+function hasOwnBodyValue(body: unknown, key: string): boolean {
+  return typeof body === "object" && body !== null && Object.hasOwn(body, key);
+}
+
+function policyViolation(message: string) {
+  return { code: "policy-violation", message };
 }
 
 function tradeReplayResponse(response: TradeIdempotencyResponse): Response {
@@ -454,6 +469,61 @@ tradeRoutes.post("/sessions", async (c) => {
 
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const [agentPolicy] = await db
+    .select()
+    .from(agentPolicies)
+    .where(and(eq(agentPolicies.agentId, agentId), eq(agentPolicies.tenantId, tenantId)));
+
+  let sessionDailyCap = dailyCap;
+  let sessionPerOrderCap = perOrderCap;
+  let sessionLeverageCap = leverageCap;
+  let sessionAllowedAssets = allowedAssets;
+
+  if (agentPolicy) {
+    const policyDailyCap = Number(agentPolicy.dailyCapUsd);
+    const policyPerOrderCap = Number(agentPolicy.perOrderCapUsd);
+    const policyLeverageCap = Number(agentPolicy.leverageCap);
+
+    if (hasOwnBodyValue(raw, "dailyCap") && dailyCap > policyDailyCap) {
+      return c.json(
+        policyViolation(`session cap ${dailyCap} exceeds agent policy cap ${policyDailyCap}`),
+        400,
+      );
+    }
+    if (hasOwnBodyValue(raw, "perOrderCap") && perOrderCap > policyPerOrderCap) {
+      return c.json(
+        policyViolation(`session cap ${perOrderCap} exceeds agent policy cap ${policyPerOrderCap}`),
+        400,
+      );
+    }
+    if (hasOwnBodyValue(raw, "leverageCap") && leverageCap > policyLeverageCap) {
+      return c.json(
+        policyViolation(`session cap ${leverageCap} exceeds agent policy cap ${policyLeverageCap}`),
+        400,
+      );
+    }
+    if (!agentPolicy.allowedVenues.includes(venue)) {
+      return c.json(policyViolation(`venue ${venue} is not allowed by agent policy`), 400);
+    }
+    const disallowedAsset = allowedAssets.find(
+      (asset) => !agentPolicy.allowedAssets.includes(asset),
+    );
+    if (disallowedAsset) {
+      return c.json(
+        policyViolation(`asset ${disallowedAsset} is not allowed by agent policy`),
+        400,
+      );
+    }
+
+    sessionDailyCap = Math.min(dailyCap, policyDailyCap);
+    sessionPerOrderCap = Math.min(perOrderCap, policyPerOrderCap);
+    sessionLeverageCap = Math.min(leverageCap, policyLeverageCap);
+    sessionAllowedAssets = allowedAssets.filter((asset) =>
+      agentPolicy.allowedAssets.includes(asset),
+    );
+  }
+
   // Bind the session to the agent's own resolved venue wallet. Caller-supplied
   // walletAddress is intentionally ignored — honoring it would let an owner bind
   // a trade session to an arbitrary wallet (funds-routing spoof).
@@ -472,10 +542,10 @@ tradeRoutes.post("/sessions", async (c) => {
   await auditTradeEvent(tenantId, agentId, actor, "trade.session.create.authorized", {
     venue,
     walletId: walletAddress,
-    dailyCapUsd: dailyCap,
-    perOrderCapUsd: perOrderCap,
-    leverageCap,
-    allowedAssets,
+    dailyCapUsd: sessionDailyCap,
+    perOrderCapUsd: sessionPerOrderCap,
+    leverageCap: sessionLeverageCap,
+    allowedAssets: sessionAllowedAssets,
     ttlSeconds,
   });
 
@@ -485,10 +555,10 @@ tradeRoutes.post("/sessions", async (c) => {
     tenantId,
     venue,
     walletId: walletAddress,
-    dailyCapUsd: dailyCap,
-    perOrderCapUsd: perOrderCap,
-    leverageCap,
-    allowedAssets,
+    dailyCapUsd: sessionDailyCap,
+    perOrderCapUsd: sessionPerOrderCap,
+    leverageCap: sessionLeverageCap,
+    allowedAssets: sessionAllowedAssets,
     ttlSeconds,
   });
 
@@ -840,7 +910,7 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
           data: unknownResponse,
         },
       };
-      if (idempotency.status === "claimed") await idempotency.complete(envelope);
+      await completeTradeIdempotencyBestEffort(idempotency, envelope);
       return c.json<ApiResponse>(envelope.body as ApiResponse, 502);
     }
     await getSessionManager()
@@ -883,6 +953,16 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
       });
     } catch (error) {
       console.error("[trade] Post-submit rejection audit failed:", error);
+      const auditFailureEnvelope: TradeIdempotencyResponse = {
+        status: 500,
+        body: {
+          ok: false,
+          error: "Trade order rejected by venue but audit record failed to persist",
+          data: rejectedResponse,
+        },
+      };
+      await completeTradeIdempotencyBestEffort(idempotency, auditFailureEnvelope);
+      return c.json<ApiResponse>(auditFailureEnvelope.body as ApiResponse, 500);
     }
     await completeTradeIdempotencyBestEffort(idempotency, envelope);
     return c.json<ApiResponse>(envelope.body as ApiResponse, 400);
@@ -902,6 +982,16 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     });
   } catch (error) {
     console.error("[trade] Post-submit success audit failed:", error);
+    const auditFailureEnvelope: TradeIdempotencyResponse = {
+      status: 500,
+      body: {
+        ok: false,
+        error: "Trade order submitted but audit record failed to persist",
+        data: response,
+      },
+    };
+    await completeTradeIdempotencyBestEffort(idempotency, auditFailureEnvelope);
+    return c.json<ApiResponse>(auditFailureEnvelope.body as ApiResponse, 500);
   }
   await completeTradeIdempotencyBestEffort(idempotency, envelope);
   return c.json(responseData(response));

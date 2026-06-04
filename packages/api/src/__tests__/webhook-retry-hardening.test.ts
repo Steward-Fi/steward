@@ -204,7 +204,7 @@ describe("webhook retry hardening", () => {
     expect(route).toContain('requireRecentTenantAdminMfa(c, "Webhook delivery export")');
     expect(route).toContain("deliveryCsv(deliveries)");
     expect(route).toContain('"Content-Type": "text/csv; charset=utf-8"');
-    expect(route).toContain('"Cache-Control": "no-store"');
+    expect(route).toContain('"Cache-Control": "no-store, max-age=0"');
     expect(route).not.toContain("payload:");
     expect(route).not.toContain("url:");
     expect(route).not.toContain("lastError:");

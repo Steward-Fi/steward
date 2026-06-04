@@ -279,6 +279,220 @@ describe("idempotencyMiddleware", () => {
     expect(getCount()).toBe(1);
   });
 
+  it("suppresses duplicate one-time credential responses and does not store raw secret bodies", async () => {
+    const app = new Hono<{ Variables: AppVariables }>();
+    const store = new MemoryIdempotencyStore(100);
+    let count = 0;
+
+    app.use("*", async (c, next) => {
+      c.set("authType", "api-key");
+      await next();
+    });
+    app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
+    app.post("/webhooks", (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { secret: `whsec-one-time-${count}` } }, 201);
+    });
+
+    const init = {
+      method: "POST",
+      headers: {
+        Authorization: AUTHORIZATION,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "idem-key-webhook-secret",
+      },
+      body: JSON.stringify({ url: "https://example.test/hook" }),
+    };
+
+    const first = await app.request("/webhooks", init);
+    const second = await app.request("/webhooks", init);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(409);
+    expect(first.headers.get("Idempotency-Replayed")).toBe("false");
+    expect(second.headers.get("Idempotency-Replayed")).toBeNull();
+    expect(await first.json()).toEqual({ ok: true, data: { secret: "whsec-one-time-1" } });
+    expect(await second.json()).toEqual({
+      ok: false,
+      error: "Idempotency key has already been used",
+    });
+    expect(count).toBe(1);
+    const serializedStore = JSON.stringify([
+      ...(store as unknown as { entries: Map<string, unknown> }).entries.values(),
+    ]);
+    expect(serializedStore).not.toContain("whsec-one-time-1");
+  });
+
+  it("suppresses duplicate agent-token minting responses and does not store raw JWT bodies", async () => {
+    const app = new Hono<{ Variables: AppVariables }>();
+    const store = new MemoryIdempotencyStore(100);
+    let count = 0;
+
+    app.use("*", async (c, next) => {
+      c.set("authType", "api-key");
+      await next();
+    });
+    app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
+    app.post("/agents/:agentId/token", (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `agent-jwt-one-time-${count}` } }, 201);
+    });
+    app.post("/v1/agents/:agentId/token", (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { token: `agent-v1-jwt-one-time-${count}` } }, 201);
+    });
+
+    const init = {
+      method: "POST",
+      headers: {
+        Authorization: AUTHORIZATION,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "idem-key-agent-token",
+      },
+      body: JSON.stringify({ expiresIn: "1h" }),
+    };
+    const v1Init = {
+      ...init,
+      headers: {
+        ...init.headers,
+        "Idempotency-Key": "idem-key-v1-agent-token",
+      },
+    };
+
+    const first = await app.request("/agents/agent-1/token", init);
+    const second = await app.request("/agents/agent-1/token", init);
+    const v1First = await app.request("/v1/agents/agent-1/token", v1Init);
+    const v1Second = await app.request("/v1/agents/agent-1/token", v1Init);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(409);
+    expect(v1First.status).toBe(201);
+    expect(v1Second.status).toBe(409);
+    expect(first.headers.get("Idempotency-Replayed")).toBe("false");
+    expect(second.headers.get("Idempotency-Replayed")).toBeNull();
+    expect(v1First.headers.get("Idempotency-Replayed")).toBe("false");
+    expect(v1Second.headers.get("Idempotency-Replayed")).toBeNull();
+    expect(await first.json()).toEqual({ ok: true, data: { token: "agent-jwt-one-time-1" } });
+    expect(await second.json()).toEqual({
+      ok: false,
+      error: "Idempotency key has already been used",
+    });
+    expect(await v1First.json()).toEqual({
+      ok: true,
+      data: { token: "agent-v1-jwt-one-time-2" },
+    });
+    expect(await v1Second.json()).toEqual({
+      ok: false,
+      error: "Idempotency key has already been used",
+    });
+    expect(count).toBe(2);
+    const serializedStore = JSON.stringify([
+      ...(store as unknown as { entries: Map<string, unknown> }).entries.values(),
+    ]);
+    expect(serializedStore).not.toContain("agent-jwt-one-time-1");
+    expect(serializedStore).not.toContain("agent-v1-jwt-one-time-2");
+  });
+
+  it("suppresses duplicate pregenerated claim-token responses and does not store raw claim tokens", async () => {
+    const app = new Hono<{ Variables: AppVariables }>();
+    const store = new MemoryIdempotencyStore(100);
+    let count = 0;
+
+    app.use("*", async (c, next) => {
+      c.set("authType", "api-key");
+      await next();
+    });
+    app.use("*", idempotencyMiddleware({ store, ttlMs: 60_000 }));
+    app.post("/agents/pregenerated", (c) => {
+      count += 1;
+      return c.json(
+        { ok: true, data: { wallets: [{ claimToken: `claim-token-one-time-${count}` }] } },
+        201,
+      );
+    });
+    app.post("/v1/agents/pregenerated", (c) => {
+      count += 1;
+      return c.json(
+        { ok: true, data: { wallets: [{ claimToken: `claim-token-v1-one-time-${count}` }] } },
+        201,
+      );
+    });
+    app.post("/agents/pregenerated/:agentId/claim-token/rotate", (c) => {
+      count += 1;
+      return c.json({ ok: true, data: { claimToken: `claim-token-rotated-${count}` } });
+    });
+
+    const init = {
+      method: "POST",
+      headers: {
+        Authorization: AUTHORIZATION,
+        "Content-Type": "application/json",
+        "Idempotency-Key": "idem-key-pregen-token",
+      },
+      body: JSON.stringify({ count: 1 }),
+    };
+    const v1Init = {
+      ...init,
+      headers: { ...init.headers, "Idempotency-Key": "idem-key-v1-pregen-token" },
+    };
+    const rotateInit = {
+      ...init,
+      headers: { ...init.headers, "Idempotency-Key": "idem-key-pregen-token-rotate" },
+      body: "{}",
+    };
+
+    const first = await app.request("/agents/pregenerated", init);
+    const second = await app.request("/agents/pregenerated", init);
+    const v1First = await app.request("/v1/agents/pregenerated", v1Init);
+    const v1Second = await app.request("/v1/agents/pregenerated", v1Init);
+    const rotateFirst = await app.request(
+      "/agents/pregenerated/agent-1/claim-token/rotate",
+      rotateInit,
+    );
+    const rotateSecond = await app.request(
+      "/agents/pregenerated/agent-1/claim-token/rotate",
+      rotateInit,
+    );
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(409);
+    expect(v1First.status).toBe(201);
+    expect(v1Second.status).toBe(409);
+    expect(rotateFirst.status).toBe(200);
+    expect(rotateSecond.status).toBe(409);
+    expect(await first.json()).toEqual({
+      ok: true,
+      data: { wallets: [{ claimToken: "claim-token-one-time-1" }] },
+    });
+    expect(await second.json()).toEqual({
+      ok: false,
+      error: "Idempotency key has already been used",
+    });
+    expect(await v1First.json()).toEqual({
+      ok: true,
+      data: { wallets: [{ claimToken: "claim-token-v1-one-time-2" }] },
+    });
+    expect(await v1Second.json()).toEqual({
+      ok: false,
+      error: "Idempotency key has already been used",
+    });
+    expect(await rotateFirst.json()).toEqual({
+      ok: true,
+      data: { claimToken: "claim-token-rotated-3" },
+    });
+    expect(await rotateSecond.json()).toEqual({
+      ok: false,
+      error: "Idempotency key has already been used",
+    });
+    expect(count).toBe(3);
+    const serializedStore = JSON.stringify([
+      ...(store as unknown as { entries: Map<string, unknown> }).entries.values(),
+    ]);
+    expect(serializedStore).not.toContain("claim-token-one-time-1");
+    expect(serializedStore).not.toContain("claim-token-v1-one-time-2");
+    expect(serializedStore).not.toContain("claim-token-rotated-3");
+  });
+
   it("uses a verified request signature as replay-safe auth material", async () => {
     const app = new Hono<{ Variables: AppVariables }>();
     const store = new MemoryIdempotencyStore(100);

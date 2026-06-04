@@ -103,6 +103,8 @@ app.use("/agents", (c, next) => tenantAuth(c, next));
 app.use("/agents/*", (c, next) => tenantAuth(c, next));
 app.use("/adapters", (c, next) => tenantAuth(c, next));
 app.use("/adapters/*", (c, next) => tenantAuth(c, next));
+app.use("/v1/agents", (c, next) => tenantAuth(c, next));
+app.use("/v1/agents/*", (c, next) => tenantAuth(c, next));
 app.use("/vault/*", (c, next) => tenantAuth(c, next));
 app.use("/secrets", (c, next) => tenantAuth(c, next));
 app.use("/secrets/*", (c, next) => tenantAuth(c, next));
@@ -180,6 +182,7 @@ app.route("/agents", agentRoutes);
 // so the path is /agents/:agentId/session-signers. The "/agents/*" tenantAuth
 // middleware (above) already gates it.
 app.route("/agents/:agentId/session-signers", sessionSignerRoutes);
+app.route("/v1/agents", agentRoutes);
 app.route("/vault", vaultRoutes);
 app.route("/secrets", secretsRoutes);
 // tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler

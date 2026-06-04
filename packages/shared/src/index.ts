@@ -839,6 +839,10 @@ export interface TenantAuthAbuseConfig {
     allowedCountryCodes?: string[];
     blockedCountryCodes?: string[];
   };
+  user?: {
+    allowedUserIds?: string[];
+    blockedUserIds?: string[];
+  };
   mfa?: TenantMfaPolicyConfig;
 }
 

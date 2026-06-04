@@ -423,6 +423,11 @@ export const defaultTenantReady = db
 
 // ─── App variable types ───────────────────────────────────────────────────────
 
+export type AuthenticatedPrincipal = {
+  type: "tenant" | "user" | "agent";
+  id: string;
+};
+
 export type AppVariables = {
   tenant: Tenant;
   tenantConfig: TenantConfig;
@@ -433,6 +438,7 @@ export type AppVariables = {
   sessionMfaMethod?: string;
   agentScope?: string;
   agentScopes?: string[];
+  agentSubject?: string;
   authType?: "api-key" | "app-secret" | "session-jwt" | "agent-token" | "dashboard-jwt";
   requestSignatureVerified?: boolean;
   requestId?: string;
@@ -785,6 +791,11 @@ export async function tenantAuth(
         if (isAgentToken) {
           c.set("agentScope", payload.agentId);
           c.set("agentScopes", normalizeAgentTokenScopes(payload.scopes));
+          const tokenSubject = (payload as { sub?: unknown }).sub;
+          c.set(
+            "agentSubject",
+            typeof tokenSubject === "string" ? tokenSubject : `agent:${payload.agentId}`,
+          );
           c.set("authType", "agent-token");
         } else {
           if (typeof payload.mfaVerifiedAt === "number") {
@@ -911,6 +922,33 @@ export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next:
   );
 
   await next();
+}
+
+export function getAuthenticatedPrincipal(
+  c: Context<{ Variables: AppVariables }>,
+): AuthenticatedPrincipal {
+  const authType = c.get("authType");
+  if (authType === "agent-token") {
+    return { type: "agent", id: c.get("agentScope") || c.req.param("agentId") || "unknown" };
+  }
+
+  const userId = c.get("userId");
+  if ((authType === "session-jwt" || authType === "dashboard-jwt") && userId) {
+    return { type: "user", id: userId };
+  }
+
+  return { type: "tenant", id: c.get("tenantId") || DEFAULT_TENANT_ID };
+}
+
+export function isSameAuthenticatedPrincipal(
+  left: { type: string; id: string },
+  right: { type: string; id: string },
+): boolean {
+  return left.type === right.type && left.id === right.id;
+}
+
+export function formatAuthenticatedPrincipal(principal: AuthenticatedPrincipal): string {
+  return `${principal.type}:${principal.id}`;
 }
 
 export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boolean {

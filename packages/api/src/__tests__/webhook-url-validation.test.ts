@@ -36,4 +36,21 @@ describe("webhook URL validation", () => {
       expect(validateWebhookUrl(url)).toBe("url host must be public");
     }
   });
+
+  it("rejects IPv4 special-use ranges that must not receive webhook traffic", () => {
+    for (const url of [
+      "https://0.0.0.0/hook",
+      "https://192.0.0.8/hook",
+      "https://192.0.2.10/hook",
+      "https://198.18.0.1/hook",
+      "https://198.19.255.254/hook",
+      "https://198.51.100.20/hook",
+      "https://203.0.113.30/hook",
+      "https://224.0.0.1/hook",
+      "https://240.0.0.1/hook",
+      "https://255.255.255.255/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+  });
 });

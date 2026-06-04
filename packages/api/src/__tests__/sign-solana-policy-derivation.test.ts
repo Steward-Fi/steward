@@ -24,6 +24,11 @@ function routeSlice(): string {
 }
 
 describe("sign-solana — parser-derived policy wiring", () => {
+  it("marks all vault route responses as non-cacheable", () => {
+    expect(vaultSource).toContain('vaultRoutes.use("*"');
+    expect(vaultSource).toContain("setNoStoreHeaders(c)");
+  });
+
   it("imports the byte-level parser and helpers from @stwd/vault", () => {
     expect(vaultSource).toContain("parseSolanaTransaction");
     expect(vaultSource).toContain("deriveSolanaPolicyFields");
@@ -105,10 +110,17 @@ describe("sign-solana — parser-derived policy wiring", () => {
 
   it("preserves the existing policy-evaluation, rate-limit, audit, and webhook gates", () => {
     const route = routeSlice();
+    const permissionGate = route.indexOf(
+      'requireSignerPermission(\n    c,\n    tenantId,\n    agentId,\n    "sign_transaction"',
+    );
+    const policySet = route.indexOf("getScopedPolicySet(tenantId, agentId");
+    expect(permissionGate).toBeGreaterThanOrEqual(0);
+    expect(policySet).toBeGreaterThan(permissionGate);
     expect(route).toContain("await enforceRateLimit(agentId, policySet)");
     expect(route).toContain("await policyEngine.evaluate(policySet, {");
     expect(route).toContain('action: "vault.sign.solana"');
     expect(route).toContain('dispatchWebhook(tenantId, agentId, "tx_signed"');
+    expect(route).toContain("signerAuthAuditMetadata(signerAuthorization.auth)");
     // Authoritative parser output is recorded in the success audit.
     expect(route).toContain("derivedFromTransaction: true");
   });
@@ -133,11 +145,13 @@ describe("sign-solana — parser-derived policy wiring", () => {
     const route = routeSlice();
     const completedMarker = route.indexOf("completedResult = { txId, ...result }");
     const retryFence = route.indexOf("returning completed result to prevent duplicate retry");
+    const broadcastStatus = route.indexOf('status: result.broadcast ? "broadcast" : "signed"');
     const failedWebhook = route.indexOf(
       'dispatchWebhook(tenantId, agentId, "tx_failed"',
       retryFence,
     );
     expect(completedMarker).toBeGreaterThanOrEqual(0);
+    expect(broadcastStatus).toBeGreaterThan(completedMarker);
     expect(retryFence).toBeGreaterThan(completedMarker);
     expect(failedWebhook).toBeGreaterThan(retryFence);
   });
@@ -149,11 +163,18 @@ describe("sign-solana — blind signing fallback", () => {
     const start = vaultSource.indexOf("async function signSolanaBlind(");
     const end = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign-solana"', start);
     const helper = vaultSource.slice(start, end);
+    const permissionGate = helper.indexOf(
+      'requireSignerPermission(\n    c,\n    tenantId,\n    agentId,\n    "sign_transaction"',
+    );
+    const policySet = helper.indexOf("getScopedPolicySet(tenantId, agentId");
+    expect(permissionGate).toBeGreaterThanOrEqual(0);
+    expect(policySet).toBeGreaterThan(permissionGate);
     expect(helper).toContain("await policyEngine.evaluate(policySet");
     expect(helper).toContain("await enforceRateLimit(agentId, policySet)");
     // Blind path is audited distinctly so it is reviewable.
     expect(helper).toContain('action: "vault.sign.solana.blind"');
     expect(helper).toContain("blindSigned: true");
+    expect(helper).toContain("signerAuthAuditMetadata(signerAuthorization.auth)");
   });
 
   it("applies the same broadcast idempotency and post-broadcast retry fence", () => {
@@ -162,6 +183,7 @@ describe("sign-solana — blind signing fallback", () => {
     const helper = vaultSource.slice(start, end);
     expect(helper).toContain("Broadcast Solana signing requests");
     expect(helper).toContain("completedResult = { txId, ...result }");
+    expect(helper).toContain('status: result.broadcast ? "broadcast" : "signed"');
     expect(helper).toContain("returning completed result to prevent duplicate retry");
   });
 });

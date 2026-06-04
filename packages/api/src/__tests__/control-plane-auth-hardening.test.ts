@@ -116,7 +116,6 @@ describe("control-plane auth hardening", () => {
     expect(finalAuditBody).not.toContain("actorId: tenantId");
   });
 
-
   it("does not allow tenant API keys or stale admin sessions to manage persistent webhooks", () => {
     expect(webhookSource).toContain("function requireRecentTenantAdminMfa");
     expect(webhookSource).toContain("readTenantMfaPolicy");

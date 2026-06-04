@@ -1,6 +1,6 @@
 # Steward
 
-Auth + wallet infrastructure for autonomous agents. Open source. Self-hostable. Policy-enforced at the signing layer.
+auth + wallet infrastructure for autonomous agents. open source. self-hostable. policy enforced at the signing layer.
 
 [![npm](https://img.shields.io/npm/v/@stwd/sdk)](https://www.npmjs.com/package/@stwd/sdk)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -9,40 +9,46 @@ Auth + wallet infrastructure for autonomous agents. Open source. Self-hostable. 
 
 ---
 
-## The Problem
+## the problem
 
-AI agents need wallet keys, API keys, database credentials. Today these live as plaintext environment variables, one prompt injection away from exfiltration. No spending controls, no audit trail, no kill switch.
+AI agents need wallet keys, API keys, database credentials. today these live as plaintext environment variables, one prompt injection away from exfiltration. no spending controls, no audit trail, no kill switch.
 
-Existing embedded-wallet platforms were built for consumer apps, not agents. They're closed source, can't be self-hosted, charge per-transaction fees, and have no concept of policy enforcement or autonomous operation.
+existing embedded-wallet platforms were built for consumer apps, not agents. they're closed source, can't be self-hosted, charge per-transaction fees, and have no concept of policy enforcement or autonomous operation.
 
-## The Solution
+## the solution
 
-Steward sits between agents and everything they access. Four pillars:
+Steward sits between agents and everything they access. four pillars:
 
-1. **Vault** — AES-256-GCM encrypted keys. EVM (7 chains) + Solana. Keys never exist in plaintext outside a signing operation.
-2. **Policy Engine** — 6 composable rule types evaluated before every action. Spending limits, rate limits, address whitelists, time windows, auto-approve thresholds.
-3. **Auth** — Passkeys, email magic links, SIWE, Google/Discord OAuth. JWT sessions with refresh token rotation.
-4. **Proxy Gateway** — Credential injection for any third-party API. Agents never see raw keys. Full audit trail.
+1. **vault.** AES-256-GCM encrypted keys. EVM (7 chains) + Solana. keys never exist in plaintext outside a signing operation.
+2. **policy engine.** 6 composable rule types evaluated before every action. spending limits, rate limits, address whitelists, time windows, auto-approve thresholds.
+3. **auth.** passkeys, email magic links, SIWE, Google/Discord OAuth. JWT sessions with refresh token rotation.
+4. **proxy gateway.** credential injection for any third-party API. agents never see raw keys. full audit trail.
+
+## who uses it
+
+Steward is the signing layer behind every agent on [waifu.fun](https://waifu.fun). Sol, the inaugural agent, trades Hyperliquid perps under a constrained Steward policy. her LLM never holds the key; the LLM sends signing requests, the policy engine evaluates, the vault signs (or refuses) and emits an audit event.
+
+read [how waifu.fun wires Steward](https://docs.waifu.fun/integrations/steward) for a concrete example.
 
 ---
 
-## Architecture
+## architecture
 
 ```
-Agent / App              Steward                        External
+agent / app              Steward                        third-party
 ┌─────────────┐    ┌──────────────────────┐    ┌──────────────────┐
-│ STEWARD_URL │───>│ Auth (JWT/passkey)   │    │ Chains (EVM/Sol) │
-│ STEWARD_JWT │    │ Policy Engine        │───>│ OpenAI/Anthropic  │
-│             │    │ Wallet Vault         │    │ Any API           │
-│ No API keys │    │ Secret Vault         │    └──────────────────┘
-│ No priv keys│    │ Proxy Gateway        │
-└─────────────┘    │ Audit Log            │
+│ STEWARD_URL │───>│ auth (JWT/passkey)   │    │ chains (EVM/Sol) │
+│ STEWARD_JWT │    │ policy engine        │───>│ OpenAI/Anthropic │
+│             │    │ wallet vault         │    │ any API          │
+│ no API keys │    │ secret vault         │    └──────────────────┘
+│ no priv keys│    │ proxy gateway        │
+└─────────────┘    │ audit log            │
                    └──────────────────────┘
 ```
 
 ---
 
-## Quick Start
+## quick start
 
 ```bash
 npm install @stwd/sdk
@@ -57,11 +63,11 @@ const steward = new StewardClient({
   tenantId: "my-app",
 });
 
-// Create an agent with EVM + Solana wallets
+// create an agent with EVM + Solana wallets
 const agent = await steward.createWallet("trading-bot", "Trading Bot");
 console.log(agent.walletAddresses); // { evm: "0x...", solana: "..." }
 
-// Sign a transaction (policy-enforced)
+// sign a transaction (policy-enforced)
 const result = await steward.signTransaction("trading-bot", {
   to: "0xRecipient",
   value: "10000000000000000", // 0.01 ETH
@@ -69,13 +75,13 @@ const result = await steward.signTransaction("trading-bot", {
 });
 ```
 
-See the full [Quickstart Guide](docs/quickstart.mdx) for auth setup and policies. See the [Deployment Guide](docs/deployment.md) for self-hosting.
+see the full [quickstart guide](docs/quickstart.mdx) for auth setup and policies. see the [deployment guide](docs/deployment.md) for self-hosting.
 
 ---
 
-## Auth Widget
+## auth widget
 
-Drop-in React components for login and wallet management:
+drop-in React components for login and wallet management:
 
 ```bash
 npm install @stwd/react @stwd/sdk
@@ -99,123 +105,128 @@ function App() {
 }
 ```
 
-Components: `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `StewardTenantPicker`, `WalletOverview`, `PolicyControls`, `ApprovalQueue`, `SpendDashboard`, `TransactionHistory`.
+components: `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `StewardTenantPicker`, `WalletOverview`, `PolicyControls`, `ApprovalQueue`, `SpendDashboard`, `TransactionHistory`.
 
 ---
 
-## Packages
+## packages
 
-| Package | Version | Description |
+| package | version | description |
 |---|---|---|
-| [`@stwd/sdk`](https://www.npmjs.com/package/@stwd/sdk) | ![npm](https://img.shields.io/npm/v/@stwd/sdk) | TypeScript client for browser + Node. Zero deps. |
-| [`@stwd/react`](https://www.npmjs.com/package/@stwd/react) | ![npm](https://img.shields.io/npm/v/@stwd/react) | Drop-in React components: login, wallet, policies, approvals. |
-| [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin) | ![npm](https://img.shields.io/npm/v/@stwd/eliza-plugin) | ElizaOS integration: sign, transfer, balance, approval evaluator. |
-| `@stwd/api` | — | Hono REST API. 30+ endpoints, multi-tenant, dual auth. |
-| `@stwd/vault` | — | Wallet + secret encryption. AES-256-GCM, EVM + Solana. |
-| `@stwd/policy-engine` | — | Composable policy evaluation. 6 rule types, 1000+ lines of tests. |
-| `@stwd/proxy` | — | API proxy with credential injection, alias system, audit trail. |
-| `@stwd/auth` | — | Passkeys (WebAuthn), email magic links, SIWE, OAuth. |
-| `@stwd/webhooks` | — | HMAC-signed event delivery with retries. |
-| `@stwd/db` | — | Drizzle ORM schema, migrations, PGLite adapter. |
-| `@stwd/shared` | — | Types, chain metadata, constants. |
+| [`@stwd/sdk`](https://www.npmjs.com/package/@stwd/sdk) | ![npm](https://img.shields.io/npm/v/@stwd/sdk) | TypeScript client for browser + Node. zero deps. |
+| [`@stwd/react`](https://www.npmjs.com/package/@stwd/react) | ![npm](https://img.shields.io/npm/v/@stwd/react) | drop-in React components: login, wallet, policies, approvals. |
+| [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin) | ![npm](https://img.shields.io/npm/v/@stwd/eliza-plugin) | ELIZA OS integration: sign, transfer, balance, approval evaluator. |
+| `@stwd/api` | internal | Hono REST API. 30+ endpoints, multi-tenant, dual auth. |
+| `@stwd/vault` | internal | wallet + secret encryption. AES-256-GCM, EVM + Solana. |
+| `@stwd/policy-engine` | internal | composable policy evaluation. 6 rule types, 1000+ lines of tests. |
+| `@stwd/proxy` | internal | API proxy with credential injection, alias system, audit trail. |
+| `@stwd/auth` | internal | passkeys (WebAuthn), email magic links, SIWE, OAuth. |
+| `@stwd/webhooks` | internal | HMAC-signed event delivery with retries. |
+| `@stwd/db` | internal | Drizzle ORM schema, migrations, PGLite adapter. |
+| `@stwd/shared` | internal | types, chain metadata, constants. |
 
 ---
 
-## Self-Hosting
+## self-hosting
 
-Steward runs anywhere. Two options:
+Steward runs anywhere. two options:
 
-**Docker (recommended for production):**
+**docker (recommended for production):**
 
 ```bash
 git clone https://github.com/Steward-Fi/steward.git && cd steward
 cp .env.example .env
-# Set STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_PLATFORM_KEYS,
+# set STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_PLATFORM_KEYS,
 # STEWARD_SESSION_SECRET, and STEWARD_JWT_SECRET in .env
 docker compose up -d
 curl http://127.0.0.1:3200/ready
 ```
 
-This starts the API (`:3200`), proxy (`:8080`), Postgres, and Redis. API migrations run automatically on startup unless `SKIP_MIGRATIONS` is set.
+starts the API (`:3200`), proxy (`:8080`), Postgres, and Redis. API migrations run automatically on startup unless `SKIP_MIGRATIONS` is set.
 
-**Embedded mode (no third-party dependencies):**
+**embedded mode (no third-party dependencies):**
 
 ```bash
 bun run start:local
 ```
 
-Uses PGLite (in-process Postgres via WASM). Data persists to `~/.steward/data/`. Good for local development, CLI agents, and desktop apps.
+uses PGLite (in-process Postgres via WASM). data persists to `~/.steward/data/`. good for local development, CLI agents, and desktop apps.
 
-**Required env vars:**
+**required env vars:**
 
-| Variable | Description |
+| variable | description |
 |---|---|
-| `STEWARD_MASTER_PASSWORD` | Derives all vault encryption keys. **No recovery if lost.** |
+| `STEWARD_MASTER_PASSWORD` | derives all vault encryption keys. **no recovery if lost.** |
 | `DATABASE_URL` | Postgres connection string (not needed in embedded mode) |
 | `STEWARD_SESSION_SECRET` | JWT signing secret (defaults to master password) |
 | `REDIS_URL` | Redis for rate limiting + token store (optional) |
-| `RESEND_API_KEY` | For email magic link auth (optional) |
+| `RESEND_API_KEY` | for email magic link auth (optional) |
 | `PASSKEY_RP_ID` | WebAuthn relying party domain (optional) |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth (optional) |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth (optional) |
 
-Full list in [`.env.example`](.env.example). See [Deployment Guide](docs/deployment.md) for production setup.
+full list in [`.env.example`](.env.example). see [deployment guide](docs/deployment.md) for production setup.
 
 ---
 
-## Features
+## features
 
-- [x] **Vault**: AES-256-GCM encrypted wallets, EVM (7 chains) + Solana
-- [x] **Policy Engine**: 6 composable types (spending-limit, approved-addresses, rate-limit, time-window, auto-approve-threshold, allowed-chains)
-- [x] **Auth**: Passkeys (WebAuthn), email magic links, SIWE, Google OAuth, Discord OAuth
-- [x] **JWT Sessions**: Access + refresh token rotation, revoke single/all sessions
-- [x] **Cross-Tenant Identity**: One user, one wallet, multiple apps
-- [x] **Multi-Tenant API**: Full tenant isolation at middleware + DB level
-- [x] **Proxy Gateway**: Credential injection, alias system, spend tracking, audit trail
-- [x] **React Components**: Login widget, wallet overview, policy controls, approval queue
-- [x] **TypeScript SDK**: Typed client, browser + Node, all wallet/policy/auth ops
-- [x] **ElizaOS Plugin**: Sign, transfer, balance, approval evaluator
-- [x] **Embedded Mode**: PGLite, zero third-party dependencies, same API surface
-- [x] **Docker**: Multi-stage Dockerfile, docker-compose with Postgres + Redis
-- [x] **Webhooks**: HMAC-signed events (tx.signed, tx.pending, policy.violation, etc.)
-- [x] **Per-Tenant CORS**: Configurable allowed origins per tenant
-
----
-
-## What Steward Offers
-
-- **Open Source** — MIT licensed, full source available.
-- **Self-Hostable** — Docker, embedded PGLite, or hosted.
-- **Full Auth Surface** — Passkey / email / SIWE / OAuth.
-- **Policy Enforcement at the Vault Layer** — 6 composable rule types evaluated before any signature is produced; compromised app code cannot bypass.
-- **Agent-Native** — Built from day one for autonomous operation: approval queues, audit log, kill-switch.
-- **Credential Proxy** — Inject keys for any third-party API; agents never see raw secrets.
+- [x] **vault**: AES-256-GCM encrypted wallets, EVM (7 chains) + Solana
+- [x] **policy engine**: 6 composable types (spending-limit, approved-addresses, rate-limit, time-window, auto-approve-threshold, allowed-chains)
+- [x] **auth**: passkeys (WebAuthn), email magic links, SIWE, Google OAuth, Discord OAuth
+- [x] **JWT sessions**: access + refresh token rotation, revoke single/all sessions
+- [x] **cross-tenant identity**: one user, one wallet, multiple apps
+- [x] **multi-tenant API**: full tenant isolation at middleware + DB level
+- [x] **proxy gateway**: credential injection, alias system, spend tracking, audit trail
+- [x] **React components**: login widget, wallet overview, policy controls, approval queue
+- [x] **TypeScript SDK**: typed client, browser + Node, all wallet/policy/auth ops
+- [x] **ELIZA OS plugin**: sign, transfer, balance, approval evaluator
+- [x] **embedded mode**: PGLite, zero third-party dependencies, same API surface
+- [x] **docker**: multi-stage Dockerfile, docker-compose with Postgres + Redis
+- [x] **webhooks**: HMAC-signed events (tx.signed, tx.pending, policy.violation, etc.)
+- [x] **per-tenant CORS**: configurable allowed origins per tenant
 
 ---
 
-## Supported Chains
+## what Steward offers
 
-Ethereum · Base · Polygon · Arbitrum · BSC · Base Sepolia · BSC Testnet · Solana
+- **open source.** MIT licensed, full source available.
+- **self-hostable.** docker, embedded PGLite, or hosted.
+- **full auth surface.** passkey / email / SIWE / OAuth.
+- **policy enforcement at the vault layer.** 6 composable rule types evaluated before any signature is produced. compromised app code cannot bypass.
+- **agent-native.** built from day one for autonomous operation: approval queues, audit log, kill-switch.
+- **credential proxy.** inject keys for any third-party API. agents never see raw secrets.
 
 ---
 
-## Building With
+## supported chains
 
-[ElizaOS](https://elizaos.ai) · [Milady](https://milady.gg) · [Babylon](https://babylon.market) · [Hyperscape](https://hyperscape.ai) · [Strata Reserve](https://stratareserve.co)
+Ethereum, Base, Polygon, Arbitrum, BSC, Base Sepolia, BSC Testnet, Solana
 
 ---
 
-## Contributing
+## building with
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and PR guidelines.
+- [waifu.fun](https://waifu.fun) (inaugural agent runtime; Sol signs through Steward)
+- [ELIZA OS](https://elizaos.ai)
+- [Milady](https://milady.gg)
+- [Babylon](https://babylon.market)
+- [Hyperscape](https://hyperscape.ai)
+- [Strata Reserve](https://stratareserve.co)
 
-## Links
+---
 
-- **Website:** [steward.fi](https://steward.fi)
-- **Docs:** [docs.steward.fi](https://docs.steward.fi)
-- **API:** [api.steward.fi](https://api.steward.fi)
-- **npm:** [@stwd/sdk](https://www.npmjs.com/package/@stwd/sdk) · [@stwd/react](https://www.npmjs.com/package/@stwd/react) · [@stwd/eliza-plugin](https://www.npmjs.com/package/@stwd/eliza-plugin)
+## contributing
 
-## License
+see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and PR guidelines.
+
+## links
+
+- website: [steward.fi](https://steward.fi)
+- docs: [docs.steward.fi](https://docs.steward.fi)
+- API: [api.steward.fi](https://api.steward.fi)
+- npm: [@stwd/sdk](https://www.npmjs.com/package/@stwd/sdk), [@stwd/react](https://www.npmjs.com/package/@stwd/react), [@stwd/eliza-plugin](https://www.npmjs.com/package/@stwd/eliza-plugin)
+
+## license
 
 [MIT](LICENSE)

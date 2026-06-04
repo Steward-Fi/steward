@@ -13,6 +13,12 @@ function expectBefore(first: string, second: string) {
 }
 
 describe("agent route audit ordering", () => {
+  it("marks agent control-plane and signer inventory responses as non-cacheable", () => {
+    expect(routeSource).toContain("setNoStoreHeaders");
+    expect(routeSource).toContain('agentRoutes.use("*"');
+    expect(routeSource).toContain("setNoStoreHeaders(c)");
+  });
+
   it("writes authorization audit events before sensitive agent mutations", () => {
     expectBefore('action: "agent.create.authorized"', "vault.createAgent");
     expectBefore('action: "agent.token.create.authorized"', "createAgentToken");
@@ -45,7 +51,7 @@ describe("agent route audit ordering", () => {
 
     const signerCreateStart = routeSource.indexOf('agentRoutes.post("/:agentId/signers"');
     expect(signerCreateStart).toBeGreaterThanOrEqual(0);
-    expect(routeSource.indexOf("Signer credential issuance", signerCreateStart)).toBeGreaterThan(
+    expect(routeSource.indexOf("Signer creation", signerCreateStart)).toBeGreaterThan(
       signerCreateStart,
     );
 

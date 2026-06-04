@@ -5,10 +5,10 @@
  */
 
 import { hashSha256Hex, revocationStore } from "@stwd/auth";
-import { toPersistedPolicyRule } from "@stwd/db";
+import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
 import { and, eq, gte, sql } from "drizzle-orm";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
 import { writeAuditEvent } from "../services/audit";
 import {
@@ -52,6 +52,11 @@ import { createSignerCredentialHash } from "../services/signer-credentials";
 
 export const agentRoutes = new Hono<{ Variables: AppVariables }>();
 
+agentRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
+
 const MAX_BATCH_AGENTS = 25;
 const MAX_POLICIES_PER_AGENT = 100;
 const MAX_AGENT_LIST_LIMIT = 200;
@@ -67,6 +72,11 @@ const AGENT_SIGNER_STATUSES = new Set(["active", "paused", "revoked"]);
 const AGENT_KEY_QUORUM_STATUSES = new Set(["active", "paused", "revoked"]);
 const PREGENERATED_USER_WALLET_TYPE = "pregenerated_user";
 const PREGENERATED_CLAIM_PREFIX = "pregenerated:";
+const CLAIMED_PREGENERATED_CLAIM_PREFIX = "claimed:";
+const EXPIRED_PREGENERATED_CLAIM_PREFIX = "expired:";
+const DEFAULT_PREGENERATED_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MIN_PREGENERATED_CLAIM_TTL_MS = 5 * 60 * 1000;
+const MAX_PREGENERATED_CLAIM_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const RESERVED_SIGNER_METADATA_KEYS = new Set([
   "credentialHash",
   "credentialCreatedAt",
@@ -256,6 +266,65 @@ function generateAgentId(): string {
 
 function generatePregeneratedWalletClaimToken(): string {
   return `stwd_claim_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
+}
+
+function pregeneratedClaimPlatformId(claimTokenHash: string, expiresAt: Date): string {
+  return `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}:${expiresAt.getTime()}`;
+}
+
+function isPregeneratedClaimPlatformId(platformId: string | null | undefined): boolean {
+  return (
+    platformId?.startsWith(PREGENERATED_CLAIM_PREFIX) ||
+    platformId?.startsWith(CLAIMED_PREGENERATED_CLAIM_PREFIX) ||
+    platformId?.startsWith(EXPIRED_PREGENERATED_CLAIM_PREFIX) ||
+    false
+  );
+}
+
+function redactPregeneratedClaimPlatformId(agent: AgentIdentity): AgentIdentity {
+  if (!isPregeneratedClaimPlatformId(agent.platformId)) return agent;
+  const { platformId: _platformId, ...redacted } = agent;
+  return redacted;
+}
+
+function pregeneratedClaimStatus(platformId: string | null): {
+  status: "claimable" | "claimed" | "expired" | "unknown";
+  claimExpiresAt: string | null;
+} {
+  if (!platformId) return { status: "unknown", claimExpiresAt: null };
+  if (platformId.startsWith(CLAIMED_PREGENERATED_CLAIM_PREFIX)) {
+    return { status: "claimed", claimExpiresAt: null };
+  }
+  if (platformId.startsWith(EXPIRED_PREGENERATED_CLAIM_PREFIX)) {
+    return { status: "expired", claimExpiresAt: null };
+  }
+  if (!platformId.startsWith(PREGENERATED_CLAIM_PREFIX)) {
+    return { status: "unknown", claimExpiresAt: null };
+  }
+  const [, expiresAtRaw] = platformId.slice(PREGENERATED_CLAIM_PREFIX.length).split(":");
+  const expiresAtMs = Number(expiresAtRaw);
+  if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) {
+    return { status: "claimable", claimExpiresAt: null };
+  }
+  return {
+    status: expiresAtMs <= Date.now() ? "expired" : "claimable",
+    claimExpiresAt: new Date(expiresAtMs).toISOString(),
+  };
+}
+
+function normalizePregeneratedClaimExpiry(value: unknown): Date | string {
+  if (value === undefined || value === null) {
+    return new Date(Date.now() + DEFAULT_PREGENERATED_CLAIM_TTL_MS);
+  }
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds)) {
+    return "claimExpiresInSeconds must be an integer number of seconds";
+  }
+  const ttlMs = seconds * 1000;
+  if (ttlMs < MIN_PREGENERATED_CLAIM_TTL_MS || ttlMs > MAX_PREGENERATED_CLAIM_TTL_MS) {
+    return "claimExpiresInSeconds must be between 300 and 2592000 seconds";
+  }
+  return new Date(Date.now() + ttlMs);
 }
 
 async function deleteAgentRows(agentId: string, tenantId: string): Promise<void> {
@@ -598,6 +667,110 @@ function toAgentSignerResponse(row: typeof agentSigners.$inferSelect) {
   };
 }
 
+const TRADE_POLICY_DEFAULTS = {
+  dailyCap: 1000,
+  perOrderCap: 500,
+  leverageCap: 10,
+  allowedAssets: ["BTC", "ETH", "BNB"],
+  allowedVenues: ["hyperliquid"],
+} as const;
+
+const TRADE_POLICY_LAYER_1_MAX = {
+  dailyCap: 50_000,
+  perOrderCap: 10_000,
+  leverageCap: 50,
+} as const;
+
+type AgentTradePolicyResponse = {
+  agentId: string;
+  dailyCap: number;
+  perOrderCap: number;
+  leverageCap: number;
+  allowedAssets: string[];
+  allowedVenues: string[];
+  updatedAt: string;
+  updatedBy: string;
+  updatedReason: string | null;
+};
+
+type AgentTradePolicySnapshot = Omit<
+  AgentTradePolicyResponse,
+  "updatedAt" | "updatedBy" | "updatedReason"
+>;
+
+type AgentTradePolicyPatch = {
+  dailyCap?: unknown;
+  perOrderCap?: unknown;
+  leverageCap?: unknown;
+  allowedAssets?: unknown;
+  allowedVenues?: unknown;
+  reason?: unknown;
+  multisigApproval?: unknown;
+};
+
+function parseNumericPolicyValue(value: string | number): number {
+  return typeof value === "number" ? value : Number(value);
+}
+
+function policyRowToResponse(row: typeof agentPolicies.$inferSelect): AgentTradePolicyResponse {
+  return {
+    agentId: row.agentId,
+    dailyCap: parseNumericPolicyValue(row.dailyCapUsd),
+    perOrderCap: parseNumericPolicyValue(row.perOrderCapUsd),
+    leverageCap: parseNumericPolicyValue(row.leverageCap),
+    allowedAssets: row.allowedAssets,
+    allowedVenues: row.allowedVenues,
+    updatedAt: row.updatedAt.toISOString(),
+    updatedBy: row.updatedBy,
+    updatedReason: row.updatedReason ?? null,
+  };
+}
+
+function defaultPolicySnapshot(agentId: string): AgentTradePolicySnapshot {
+  return {
+    agentId,
+    dailyCap: TRADE_POLICY_DEFAULTS.dailyCap,
+    perOrderCap: TRADE_POLICY_DEFAULTS.perOrderCap,
+    leverageCap: TRADE_POLICY_DEFAULTS.leverageCap,
+    allowedAssets: [...TRADE_POLICY_DEFAULTS.allowedAssets],
+    allowedVenues: [...TRADE_POLICY_DEFAULTS.allowedVenues],
+  };
+}
+
+function policyDiff(before: AgentTradePolicySnapshot, after: AgentTradePolicyResponse) {
+  return {
+    dailyCap: { before: before.dailyCap, after: after.dailyCap },
+    perOrderCap: { before: before.perOrderCap, after: after.perOrderCap },
+    leverageCap: { before: before.leverageCap, after: after.leverageCap },
+    allowedAssets: { before: before.allowedAssets, after: after.allowedAssets },
+    allowedVenues: { before: before.allowedVenues, after: after.allowedVenues },
+  };
+}
+
+function validatePolicyNumber(
+  name: "dailyCap" | "perOrderCap" | "leverageCap",
+  value: unknown,
+): number | string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return `${name} must be a positive number`;
+  }
+  if (value > TRADE_POLICY_LAYER_1_MAX[name]) {
+    return `${name} exceeds platform ceiling ${TRADE_POLICY_LAYER_1_MAX[name]}`;
+  }
+  return value;
+}
+
+function validatePolicyStringArray(name: string, value: unknown): string[] | string {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((item) => typeof item !== "string" || item.length === 0)
+  ) {
+    return `${name} must be a non-empty string array`;
+  }
+  return [...new Set(value)];
+}
+
 // ─── Create agent ─────────────────────────────────────────────────────────────
 
 agentRoutes.post("/", async (c) => {
@@ -614,6 +787,9 @@ agentRoutes.post("/", async (c) => {
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
+  if (!tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant id required" }, 400);
+  }
   const body = await safeJsonParse<{
     id?: string;
     name: string;
@@ -697,6 +873,7 @@ agentRoutes.post("/pregenerated", async (c) => {
   const body = await safeJsonParse<{
     count?: unknown;
     namePrefix?: unknown;
+    claimExpiresInSeconds?: unknown;
     applyPolicies?: PolicyRule[];
   }>(c);
 
@@ -725,6 +902,11 @@ agentRoutes.post("/pregenerated", async (c) => {
     );
   }
 
+  const claimExpiresAt = normalizePregeneratedClaimExpiry(body.claimExpiresInSeconds);
+  if (typeof claimExpiresAt === "string") {
+    return c.json<ApiResponse>({ ok: false, error: claimExpiresAt }, 400);
+  }
+
   if (body.applyPolicies !== undefined) {
     if (!Array.isArray(body.applyPolicies)) {
       return c.json<ApiResponse>({ ok: false, error: "applyPolicies must be an array" }, 400);
@@ -751,7 +933,7 @@ agentRoutes.post("/pregenerated", async (c) => {
     }
   }
 
-  const wallets: Array<{ agent: AgentIdentity; claimToken: string }> = [];
+  const wallets: Array<{ agent: AgentIdentity; claimToken: string; claimExpiresAt: string }> = [];
   const persistedPolicies = body.applyPolicies?.map(toPersistedPolicyRule);
 
   try {
@@ -759,7 +941,7 @@ agentRoutes.post("/pregenerated", async (c) => {
       const agentId = generateAgentId();
       const claimToken = generatePregeneratedWalletClaimToken();
       const claimTokenHash = hashSha256Hex(claimToken);
-      const platformId = `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+      const platformId = pregeneratedClaimPlatformId(claimTokenHash, claimExpiresAt);
       const name = count === 1 ? namePrefix : `${namePrefix} ${index + 1}`;
 
       await writeAgentAudit(c, {
@@ -767,7 +949,7 @@ agentRoutes.post("/pregenerated", async (c) => {
         action: "agent.pregenerated_user_wallet.create.authorized",
         resourceType: "agent",
         resourceId: agentId,
-        metadata: { batch: count > 1, claimTokenHash },
+        metadata: { batch: count > 1, claimExpiresAt: claimExpiresAt.toISOString() },
       });
 
       const identity = await vault.createAgent(tenantId, agentId, name, platformId);
@@ -800,7 +982,7 @@ agentRoutes.post("/pregenerated", async (c) => {
           metadata: {
             batch: count > 1,
             appliedPolicyCount: persistedPolicies?.length ?? 0,
-            claimTokenHash,
+            claimExpiresAt: claimExpiresAt.toISOString(),
           },
         });
       } catch (error) {
@@ -808,7 +990,11 @@ agentRoutes.post("/pregenerated", async (c) => {
         throw error;
       }
 
-      wallets.push({ agent: identity, claimToken });
+      wallets.push({
+        agent: redactPregeneratedClaimPlatformId(identity),
+        claimToken,
+        claimExpiresAt: claimExpiresAt.toISOString(),
+      });
     }
   } catch (error) {
     return c.json<ApiResponse>(
@@ -826,7 +1012,7 @@ agentRoutes.post("/pregenerated", async (c) => {
   setNoStoreHeaders(c);
   return c.json<
     ApiResponse<{
-      wallets: Array<{ agent: AgentIdentity; claimToken: string }>;
+      wallets: Array<{ agent: AgentIdentity; claimToken: string; claimExpiresAt: string }>;
       warning: string;
     }>
   >(
@@ -864,7 +1050,162 @@ agentRoutes.get("/", async (c) => {
   });
   return c.json<ApiResponse<{ agents: AgentIdentity[]; limit: number; offset: number }>>({
     ok: true,
-    data: { agents: tenantAgents, limit, offset },
+    data: { agents: tenantAgents.map(redactPregeneratedClaimPlatformId), limit, offset },
+  });
+});
+
+// ─── Pregenerated wallet inventory and claim-token rotation ──────────────────
+
+agentRoutes.get("/pregenerated", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Pregenerated wallet inventory requires tenant-level authentication",
+      },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const limit = parseListLimit(c.req.query("limit"));
+  const offset = parseListOffset(c.req.query("offset"));
+  const rows = await db
+    .select()
+    .from(agents)
+    .where(and(eq(agents.tenantId, tenantId), eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE)))
+    .limit(limit)
+    .offset(offset);
+
+  return c.json<
+    ApiResponse<{
+      wallets: Array<{
+        agent: AgentIdentity;
+        status: "claimable" | "claimed" | "expired" | "unknown";
+        claimExpiresAt: string | null;
+      }>;
+      limit: number;
+      offset: number;
+    }>
+  >({
+    ok: true,
+    data: {
+      wallets: rows.map((row) => ({
+        agent: redactPregeneratedClaimPlatformId({
+          id: row.id,
+          tenantId: row.tenantId,
+          name: row.name,
+          walletAddress: row.walletAddress,
+          erc8004TokenId: row.erc8004TokenId ?? undefined,
+          platformId: row.platformId ?? undefined,
+          createdAt: row.createdAt,
+        }),
+        ...pregeneratedClaimStatus(row.platformId),
+      })),
+      limit,
+      offset,
+    },
+  });
+});
+
+agentRoutes.post("/pregenerated/:agentId/claim-token/rotate", async (c) => {
+  setNoStoreHeaders(c);
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Pregenerated wallet claim-token rotation requires owner or admin session",
+      },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Pregenerated wallet claim-token rotation");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const body = await safeJsonParse<{ claimExpiresInSeconds?: unknown }>(c);
+  const claimExpiresAt = normalizePregeneratedClaimExpiry(body?.claimExpiresInSeconds);
+  if (typeof claimExpiresAt === "string") {
+    return c.json<ApiResponse>({ ok: false, error: claimExpiresAt }, 400);
+  }
+
+  const [existing] = await db
+    .select()
+    .from(agents)
+    .where(
+      and(
+        eq(agents.id, agentId),
+        eq(agents.tenantId, tenantId),
+        eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+      ),
+    );
+  if (!existing) {
+    return c.json<ApiResponse>({ ok: false, error: "Pregenerated wallet not found" }, 404);
+  }
+  if (existing.platformId?.startsWith(CLAIMED_PREGENERATED_CLAIM_PREFIX)) {
+    return c.json<ApiResponse>({ ok: false, error: "Pregenerated wallet is already claimed" }, 409);
+  }
+
+  const claimToken = generatePregeneratedWalletClaimToken();
+  const claimTokenHash = hashSha256Hex(claimToken);
+  const platformId = pregeneratedClaimPlatformId(claimTokenHash, claimExpiresAt);
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.pregenerated_user_wallet.claim_token.rotate.authorized",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { claimExpiresAt: claimExpiresAt.toISOString() },
+  });
+
+  const [updated] = await db
+    .update(agents)
+    .set({ platformId, updatedAt: new Date() })
+    .where(
+      and(
+        eq(agents.id, agentId),
+        eq(agents.tenantId, tenantId),
+        eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+      ),
+    )
+    .returning();
+  if (!updated) {
+    return c.json<ApiResponse>({ ok: false, error: "Pregenerated wallet not found" }, 404);
+  }
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.pregenerated_user_wallet.claim_token.rotate",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { claimExpiresAt: claimExpiresAt.toISOString() },
+  });
+
+  return c.json<
+    ApiResponse<{
+      agent: AgentIdentity;
+      claimToken: string;
+      claimExpiresAt: string;
+      warning: string;
+    }>
+  >({
+    ok: true,
+    data: {
+      agent: redactPregeneratedClaimPlatformId({
+        id: updated.id,
+        tenantId: updated.tenantId,
+        name: updated.name,
+        walletAddress: updated.walletAddress,
+        erc8004TokenId: updated.erc8004TokenId ?? undefined,
+        platformId: updated.platformId ?? undefined,
+        createdAt: updated.createdAt,
+      }),
+      claimToken,
+      claimExpiresAt: claimExpiresAt.toISOString(),
+      warning:
+        "Claim tokens are shown once. Steward stores only SHA-256 hashes and cannot recover lost claim tokens.",
+    },
   });
 });
 
@@ -1054,6 +1395,178 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
   }
 });
 
+// ─── Agent trade policy ──────────────────────────────────────────────────────
+
+agentRoutes.get("/:agentId/policy", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const [policy] = await db
+    .select()
+    .from(agentPolicies)
+    .where(and(eq(agentPolicies.agentId, agentId), eq(agentPolicies.tenantId, tenantId)));
+
+  if (!policy) {
+    return c.json<ApiResponse<{ defaults: typeof TRADE_POLICY_DEFAULTS; message: string }>>(
+      {
+        ok: false,
+        error: "Agent policy not found",
+        data: {
+          defaults: TRADE_POLICY_DEFAULTS,
+          message: "No agent policy row exists. Defaults apply until PUT creates one.",
+        },
+      },
+      404,
+    );
+  }
+
+  return c.json<ApiResponse<AgentTradePolicyResponse>>({
+    ok: true,
+    data: policyRowToResponse(policy),
+  });
+});
+
+agentRoutes.put("/:agentId/policy", async (c) => {
+  if (c.get("authType") !== "agent-token") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Agent policy updates require agent JWT authentication" },
+      403,
+    );
+  }
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const body = await safeJsonParse<AgentTradePolicyPatch>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  if (typeof body.reason !== "string" || body.reason.trim().length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "reason is required" }, 400);
+  }
+
+  const [existing] = await db
+    .select()
+    .from(agentPolicies)
+    .where(and(eq(agentPolicies.agentId, agentId), eq(agentPolicies.tenantId, tenantId)));
+  const before = existing ? policyRowToResponse(existing) : defaultPolicySnapshot(agentId);
+
+  const nextDailyCap =
+    body.dailyCap === undefined ? before.dailyCap : validatePolicyNumber("dailyCap", body.dailyCap);
+  const nextPerOrderCap =
+    body.perOrderCap === undefined
+      ? before.perOrderCap
+      : validatePolicyNumber("perOrderCap", body.perOrderCap);
+  const nextLeverageCap =
+    body.leverageCap === undefined
+      ? before.leverageCap
+      : validatePolicyNumber("leverageCap", body.leverageCap);
+  const nextAllowedAssets =
+    body.allowedAssets === undefined
+      ? before.allowedAssets
+      : validatePolicyStringArray("allowedAssets", body.allowedAssets);
+  const nextAllowedVenues =
+    body.allowedVenues === undefined
+      ? before.allowedVenues
+      : validatePolicyStringArray("allowedVenues", body.allowedVenues);
+
+  const validationError = [
+    nextDailyCap,
+    nextPerOrderCap,
+    nextLeverageCap,
+    nextAllowedAssets,
+    nextAllowedVenues,
+  ].find((value) => typeof value === "string");
+  if (typeof validationError === "string") {
+    return c.json<ApiResponse>({ ok: false, error: validationError }, 400);
+  }
+
+  const dailyCapValue = nextDailyCap as number;
+  const perOrderCapValue = nextPerOrderCap as number;
+  const leverageCapValue = nextLeverageCap as number;
+  const allowedAssetsValue = nextAllowedAssets as string[];
+  const allowedVenuesValue = nextAllowedVenues as string[];
+
+  if (perOrderCapValue > dailyCapValue) {
+    return c.json<ApiResponse>({ ok: false, error: "perOrderCap cannot exceed dailyCap" }, 400);
+  }
+
+  const updatedBy = c.get("agentSubject") ?? `agent:${agentId}`;
+  const updatedReason = body.reason.trim();
+  const [upserted] = await db
+    .insert(agentPolicies)
+    .values({
+      agentId,
+      tenantId,
+      dailyCapUsd: String(dailyCapValue),
+      perOrderCapUsd: String(perOrderCapValue),
+      leverageCap: String(leverageCapValue),
+      allowedAssets: allowedAssetsValue,
+      allowedVenues: allowedVenuesValue,
+      updatedAt: new Date(),
+      updatedBy,
+      updatedReason,
+    })
+    .onConflictDoUpdate({
+      target: agentPolicies.agentId,
+      set: {
+        dailyCapUsd: String(dailyCapValue),
+        perOrderCapUsd: String(perOrderCapValue),
+        leverageCap: String(leverageCapValue),
+        allowedAssets: allowedAssetsValue,
+        allowedVenues: allowedVenuesValue,
+        updatedAt: new Date(),
+        updatedBy,
+        updatedReason,
+      },
+    })
+    .returning();
+
+  const after = policyRowToResponse(upserted);
+  const diff = policyDiff(before, after);
+  await writeAuditEvent({
+    tenantId,
+    actorType: "agent",
+    actorId: updatedBy,
+    action: "agent.policy.updated",
+    resourceType: "agent_policy",
+    resourceId: agentId,
+    metadata: {
+      agentId,
+      reason: updatedReason,
+      diff,
+      before,
+      after,
+      multisigApprovalProvided: body.multisigApproval !== undefined,
+    },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
+  return c.json<
+    ApiResponse<{ policy: AgentTradePolicyResponse; diff: ReturnType<typeof policyDiff> }>
+  >({
+    ok: true,
+    data: { policy: after, diff },
+  });
+});
+
 // ─── Get agent ────────────────────────────────────────────────────────────────
 
 agentRoutes.get("/:agentId", async (c) => {
@@ -1069,7 +1582,10 @@ agentRoutes.get("/:agentId", async (c) => {
   if (!agent) {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
-  return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: agent });
+  return c.json<ApiResponse<AgentIdentity>>({
+    ok: true,
+    data: redactPregeneratedClaimPlatformId(agent),
+  });
 });
 
 // ─── Delete agent ─────────────────────────────────────────────────────────────
@@ -1240,6 +1756,9 @@ agentRoutes.get("/:agentId/tokens", async (c) => {
   }
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
+  if (!agentId) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent id required" }, 400);
+  }
   const agent = await ensureAgentForTenant(tenantId, agentId);
 
   if (!agent) {
@@ -1353,7 +1872,7 @@ agentRoutes.get("/:agentId/spend", async (c) => {
 
 // ─── Agent account aggregation ───────────────────────────────────────────────
 
-agentRoutes.get("/:agentId/account", async (c) => {
+async function getAgentAccountAggregation(c: Context<{ Variables: AppVariables }>) {
   if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Forbidden: token scope does not match agent" },
@@ -1361,7 +1880,14 @@ agentRoutes.get("/:agentId/account", async (c) => {
     );
   }
   const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId");
+  if (!tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant id required" }, 400);
+  }
+  const requestedAgentId = c.req.param("agentId");
+  if (!requestedAgentId) {
+    return c.json<ApiResponse>({ ok: false, error: "agentId is required" }, 400);
+  }
+  const agentId: string = requestedAgentId;
   const agent = await ensureAgentForTenant(tenantId, agentId);
 
   if (!agent) {
@@ -1540,15 +2066,11 @@ agentRoutes.get("/:agentId/account", async (c) => {
       createdAt: agent.createdAt,
     },
   });
-});
+}
 
-agentRoutes.get("/:agentId/aggregation", (c) => {
-  const query = new URL(c.req.url).search;
-  return agentRoutes.request(`/${encodeURIComponent(c.req.param("agentId"))}/account${query}`, {
-    method: "GET",
-    headers: c.req.raw.headers,
-  });
-});
+agentRoutes.get("/:agentId/account", getAgentAccountAggregation);
+
+agentRoutes.get("/:agentId/aggregation", getAgentAccountAggregation);
 
 // ─── Agent owners and delegated signers ──────────────────────────────────────
 
@@ -1617,11 +2139,8 @@ agentRoutes.post("/:agentId/signers", async (c) => {
     );
   }
 
-  const credentialRequested = body.issueCredential === true;
-  if (credentialRequested) {
-    const mfaResponse = requireRecentAdminMfa(c, "Signer credential issuance");
-    if (mfaResponse) return mfaResponse;
-  }
+  const mfaResponse = requireRecentAdminMfa(c, "Signer creation");
+  if (mfaResponse) return mfaResponse;
 
   let signerType: string;
   let subjectType: string;

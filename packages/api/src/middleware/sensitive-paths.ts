@@ -21,6 +21,7 @@
 const SENSITIVE_PATH_PREFIXES: readonly string[] = [
   "/vault",
   "/agents",
+  "/v1/agents",
   "/adapters",
   "/policies",
   "/secrets",

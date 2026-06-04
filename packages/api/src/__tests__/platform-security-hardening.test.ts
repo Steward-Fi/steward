@@ -25,8 +25,11 @@ function expectBefore(first: string, second: string) {
 describe("platform security hardening", () => {
   it("marks platform responses as non-cacheable because many contain credentials or identity state", () => {
     expect(platformSource).toContain("setNoStoreHeaders");
-    const authMiddleware = platformSource.indexOf("platform.use(\"*\", platformAuthMiddleware())");
-    const noStoreMiddleware = platformSource.indexOf('platform.use("*", async (c, next)', authMiddleware);
+    const authMiddleware = platformSource.indexOf('platform.use("*", platformAuthMiddleware())');
+    const noStoreMiddleware = platformSource.indexOf(
+      'platform.use("*", async (c, next)',
+      authMiddleware,
+    );
     const readWriteGuard = platformSource.indexOf("function requirePlatformRouteScope");
     expect(authMiddleware).toBeGreaterThanOrEqual(0);
     expect(noStoreMiddleware).toBeGreaterThan(authMiddleware);
@@ -191,7 +194,6 @@ describe("platform security hardening", () => {
     expect(lookupHelper).toContain("linkedAccounts: []");
   });
 
-
   it("requires fine-grained platform scopes for destructive and credential-bearing routes", () => {
     expectBefore(
       'requirePlatformRouteScope(c, "platform:tenant-email-config:read")',
@@ -344,11 +346,16 @@ describe("platform security hardening", () => {
     const createStart = platformSource.indexOf('platform.post("/tenants/:id/invitations"');
     const createRoute = platformSource.slice(
       createStart,
-      platformSource.indexOf('platform.delete("/tenants/:id/invitations/:invitationId"', createStart),
+      platformSource.indexOf(
+        'platform.delete("/tenants/:id/invitations/:invitationId"',
+        createStart,
+      ),
     );
     expect(createRoute).toContain("previousPendingInvitations");
     expect(createRoute).toContain('action: "tenant.invitation.create"');
-    expect(createRoute).toContain("delete(tenantInvitations).where(eq(tenantInvitations.id, invitation.id))");
+    expect(createRoute).toContain(
+      "delete(tenantInvitations).where(eq(tenantInvitations.id, invitation.id))",
+    );
     expect(createRoute).toContain("status: previous.status");
 
     const revokeStart = platformSource.indexOf(
@@ -365,7 +372,6 @@ describe("platform security hardening", () => {
     expect(revokeRoute).toContain("status: candidate.status");
     expect(revokeRoute).toContain("revokedAt: candidate.revokedAt");
   });
-
 
   it("locks account unlink and transfer last-login checks through mutation", () => {
     expect(platformSource).toContain("platform_user_account_");

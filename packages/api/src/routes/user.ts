@@ -174,6 +174,24 @@ const PUSH_PLATFORMS = ["ios", "android"] as const;
 const MAX_PUSH_METADATA_BYTES = 8_192;
 const PREGENERATED_USER_WALLET_TYPE = "pregenerated_user";
 const PREGENERATED_CLAIM_PREFIX = "pregenerated:";
+const CLAIMED_PREGENERATED_CLAIM_PREFIX = "claimed:";
+const EXPIRED_PREGENERATED_CLAIM_PREFIX = "expired:";
+
+function pregeneratedClaimPlatformIdPrefix(claimTokenHash: string): string {
+  return `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+}
+
+function parsePregeneratedClaimPlatformId(
+  platformId: string | null,
+  claimTokenHash: string,
+): { hash: string; expiresAt: Date | null } | null {
+  const prefix = pregeneratedClaimPlatformIdPrefix(claimTokenHash);
+  if (platformId === prefix) return { hash: claimTokenHash, expiresAt: null };
+  if (!platformId?.startsWith(`${prefix}:`)) return null;
+  const expiresAtMs = Number(platformId.slice(prefix.length + 1));
+  if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) return null;
+  return { hash: claimTokenHash, expiresAt: new Date(expiresAtMs) };
+}
 
 type PushProvider = (typeof PUSH_PROVIDERS)[number];
 type PushPlatform = (typeof PUSH_PLATFORMS)[number];
@@ -3021,7 +3039,7 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
   }
 
   const claimTokenHash = hashSha256Hex(claimToken);
-  const platformId = `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+  const platformIdPrefix = pregeneratedClaimPlatformIdPrefix(claimTokenHash);
   const db = getDb();
   const [claimable] = await db
     .select()
@@ -3030,7 +3048,10 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       and(
         eq(agents.tenantId, sourceTenantId),
         eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
-        eq(agents.platformId, platformId),
+        or(
+          eq(agents.platformId, platformIdPrefix),
+          sql`${agents.platformId} like ${`${platformIdPrefix}:%`}`,
+        ),
       ),
     );
   if (!claimable) {
@@ -3039,30 +3060,59 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       404,
     );
   }
+  const claimablePlatformId = claimable.platformId;
+  const claimRecord = parsePregeneratedClaimPlatformId(claimablePlatformId, claimTokenHash);
+  if (!claimablePlatformId || !claimRecord) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or already claimed wallet token" },
+      404,
+    );
+  }
+  if (claimRecord.expiresAt && claimRecord.expiresAt.getTime() <= Date.now()) {
+    await db
+      .update(agents)
+      .set({
+        platformId: `${EXPIRED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(agents.id, claimable.id),
+          eq(agents.tenantId, sourceTenantId),
+          eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+          eq(agents.platformId, claimablePlatformId),
+        ),
+      );
+    return c.json<ApiResponse>({ ok: false, error: "Wallet claim token expired" }, 410);
+  }
 
   const displayName = (session.address as string | undefined) ?? session.email ?? userId;
   const personalTenant = await ensurePersonalTenant(userId, displayName);
   const targetAgentId = `user-wallet-${userId}`;
 
   try {
-    const keys = await vault.exportPrivateKey(sourceTenantId, claimable.id, {
-      breakGlass: true,
+    await writeUserAudit(c, {
+      tenantId: personalTenant,
+      actorType: "user",
       actorId: userId,
-      reason: "claim pregenerated user wallet",
+      action: "user.wallet.pregenerated_claim.authorized",
+      resourceType: "wallet",
+      resourceId: targetAgentId,
+      metadata: { sourceTenantId, sourceAgentId: claimable.id, claimTokenHash },
     });
-    if (!keys.evm?.privateKey) {
-      throw new Error("Pregenerated wallet is missing an EVM key");
-    }
 
     const [claimed] = await db
       .update(agents)
-      .set({ platformId: `claimed:${claimTokenHash}`, updatedAt: new Date() })
+      .set({
+        platformId: `${CLAIMED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(agents.id, claimable.id),
           eq(agents.tenantId, sourceTenantId),
           eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
-          eq(agents.platformId, platformId),
+          eq(agents.platformId, claimablePlatformId),
         ),
       )
       .returning({ id: agents.id });
@@ -3074,15 +3124,14 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
     }
 
     try {
-      await writeUserAudit(c, {
-        tenantId: personalTenant,
-        actorType: "user",
+      const keys = await vault.exportPrivateKey(sourceTenantId, claimable.id, {
+        breakGlass: true,
         actorId: userId,
-        action: "user.wallet.pregenerated_claim.authorized",
-        resourceType: "wallet",
-        resourceId: targetAgentId,
-        metadata: { sourceTenantId, sourceAgentId: claimable.id, claimTokenHash },
+        reason: "claim pregenerated user wallet",
       });
+      if (!keys.evm?.privateKey) {
+        throw new Error("Pregenerated wallet is missing an EVM key");
+      }
 
       if (keys.solana?.privateKey) {
         await vault.importKey(personalTenant, targetAgentId, keys.solana.privateKey, "solana");
@@ -3104,12 +3153,12 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
     } catch (claimError) {
       await db
         .update(agents)
-        .set({ platformId, updatedAt: new Date() })
+        .set({ platformId: claimablePlatformId, updatedAt: new Date() })
         .where(
           and(
             eq(agents.id, claimable.id),
             eq(agents.tenantId, sourceTenantId),
-            eq(agents.platformId, `claimed:${claimTokenHash}`),
+            eq(agents.platformId, `${CLAIMED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`),
           ),
         );
       throw claimError;
@@ -3224,6 +3273,7 @@ user.post("/me/wallet/recovery/setup", async (c) => {
       method: "bip39",
     });
 
+    setNoStoreHeaders(c);
     setNoStoreHeaders(c);
     return c.json<
       ApiResponse<{
@@ -4181,6 +4231,7 @@ user.post("/me/tenants/switch", async (c) => {
     authMethod: "tenant_switch",
   });
 
+  setNoStoreHeaders(c);
   return c.json<
     ApiResponse<{ token: string; tenantId: string; activeTenantId: string; role: string }>
   >({
@@ -4525,6 +4576,9 @@ user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
       id: tenantInvitations.id,
       email: tenantInvitations.email,
       role: tenantInvitations.role,
+      status: tenantInvitations.status,
+      revokedAt: tenantInvitations.revokedAt,
+      updatedAt: tenantInvitations.updatedAt,
     })
     .from(tenantInvitations)
     .where(
@@ -4562,6 +4616,28 @@ user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
     .returning(tenantAdminInvitationSelection());
   if (!invitation) {
     return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
+  }
+
+  try {
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: admin.userId,
+      action: "tenant.invitation.revoke",
+      resourceType: "tenant_invitation",
+      resourceId: invitation.id,
+      metadata: { email: invitation.email, role: invitation.role },
+    });
+  } catch (error) {
+    await db
+      .update(tenantInvitations)
+      .set({
+        status: candidate.status,
+        revokedAt: candidate.revokedAt,
+        updatedAt: candidate.updatedAt,
+      })
+      .where(and(eq(tenantInvitations.tenantId, tenantId), eq(tenantInvitations.id, invitationId)));
+    throw error;
   }
 
   return c.json<ApiResponse>({ ok: true });
@@ -5220,12 +5296,36 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
     metadata: { role: member.role },
   });
 
-  let deleted: { role: string } | null = null;
+  let deleted: {
+    membership: {
+      id: string;
+      userId: string;
+      tenantId: string;
+      role: string;
+      customMetadata: Record<string, unknown>;
+      createdAt: Date;
+    };
+    refreshTokens: Array<{
+      id: string;
+      userId: string;
+      tenantId: string;
+      tokenHash: string;
+      expiresAt: Date;
+      createdAt: Date;
+    }>;
+  } | null = null;
   try {
     deleted = await db.transaction(async (tx) => {
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
-        .select({ role: userTenants.role })
+        .select({
+          id: userTenants.id,
+          userId: userTenants.userId,
+          tenantId: userTenants.tenantId,
+          role: userTenants.role,
+          customMetadata: userTenants.customMetadata,
+          createdAt: userTenants.createdAt,
+        })
         .from(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
       if (!current) return null;
@@ -5234,14 +5334,25 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
           throw new Error("Cannot remove the sole owner");
         }
       }
-      const [row] = await tx
+      const tokenSnapshot = await tx
+        .select({
+          id: refreshTokens.id,
+          userId: refreshTokens.userId,
+          tenantId: refreshTokens.tenantId,
+          tokenHash: refreshTokens.tokenHash,
+          expiresAt: refreshTokens.expiresAt,
+          createdAt: refreshTokens.createdAt,
+        })
+        .from(refreshTokens)
+        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
+      await tx
         .delete(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
         .returning({ role: userTenants.role });
       await tx
         .delete(refreshTokens)
         .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
-      return row ?? null;
+      return { membership: current, refreshTokens: tokenSnapshot };
     });
   } catch (err) {
     if (err instanceof Error && err.message === "Cannot remove the sole owner") {
@@ -5252,15 +5363,31 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   if (!deleted) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
 
   const revokedBefore = await revocationStore.revokeUserTokens(targetUserId);
-  await writeUserAudit(c, {
-    tenantId,
-    actorType: "user",
-    actorId: admin.userId,
-    action: "tenant.member.remove",
-    resourceType: "user",
-    resourceId: targetUserId,
-    metadata: { role: deleted.role, revokedUserTokensIssuedBefore: revokedBefore },
-  });
+  try {
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: admin.userId,
+      action: "tenant.member.remove",
+      resourceType: "user",
+      resourceId: targetUserId,
+      metadata: { role: deleted.membership.role, revokedUserTokensIssuedBefore: revokedBefore },
+    });
+  } catch (error) {
+    await db.transaction(async (tx) => {
+      await tx
+        .insert(userTenants)
+        .values(deleted.membership)
+        .onConflictDoNothing({ target: [userTenants.userId, userTenants.tenantId] });
+      if (deleted.refreshTokens.length > 0) {
+        await tx
+          .insert(refreshTokens)
+          .values(deleted.refreshTokens)
+          .onConflictDoNothing({ target: refreshTokens.tokenHash });
+      }
+    });
+    throw error;
+  }
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,

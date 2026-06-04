@@ -180,278 +180,292 @@
     {
       "idx": 25,
       "version": "7",
+      "when": 1780119600000,
+      "tag": "0025_approval_queue_principals",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
       "when": 1779672900000,
       "tag": "0025_user_identity_metadata",
       "breakpoints": true
     },
     {
-      "idx": 26,
+      "idx": 27,
+      "version": "7",
+      "when": 1780120200000,
+      "tag": "0026_agent_policies",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
       "version": "7",
       "when": 1779673500000,
       "tag": "0026_condition_sets",
       "breakpoints": true
     },
     {
-      "idx": 27,
+      "idx": 29,
       "version": "7",
       "when": 1779674100000,
       "tag": "0027_secret_route_agent_scope",
       "breakpoints": true
     },
     {
-      "idx": 28,
+      "idx": 30,
       "version": "7",
       "when": 1779674700000,
       "tag": "0028_wallet_action_metadata",
       "breakpoints": true
     },
     {
-      "idx": 29,
+      "idx": 31,
       "version": "7",
       "when": 1779675300000,
       "tag": "0029_tenant_oidc_providers",
       "breakpoints": true
     },
     {
-      "idx": 30,
+      "idx": 32,
       "version": "7",
       "when": 1779680100000,
       "tag": "0030_auth_abuse_config",
       "breakpoints": true
     },
     {
-      "idx": 31,
+      "idx": 33,
       "version": "7",
       "when": 1779680700000,
       "tag": "0031_user_deactivated_at",
       "breakpoints": true
     },
     {
-      "idx": 32,
+      "idx": 34,
       "version": "7",
       "when": 1779681300000,
       "tag": "0032_webhook_config_tenant_url_unique",
       "breakpoints": true
     },
     {
-      "idx": 33,
+      "idx": 35,
       "version": "7",
       "when": 1779681900000,
       "tag": "0033_tenant_test_account",
       "breakpoints": true
     },
     {
-      "idx": 34,
+      "idx": 36,
       "version": "7",
       "when": 1779682500000,
       "tag": "0034_harden_tenant_join_default",
       "breakpoints": true
     },
     {
-      "idx": 35,
+      "idx": 37,
       "version": "7",
       "when": 1779683100000,
       "tag": "0035_tenant_owner_address_unique",
       "breakpoints": true
     },
     {
-      "idx": 36,
+      "idx": 38,
       "version": "7",
       "when": 1779747300000,
       "tag": "0036_agent_signers",
       "breakpoints": true
     },
     {
-      "idx": 37,
+      "idx": 39,
       "version": "7",
       "when": 1779750900000,
       "tag": "0037_agent_key_quorums",
       "breakpoints": true
     },
     {
-      "idx": 38,
+      "idx": 40,
       "version": "7",
       "when": 1779754500000,
       "tag": "0038_intents",
       "breakpoints": true
     },
     {
-      "idx": 39,
+      "idx": 41,
       "version": "7",
       "when": 1779797700000,
       "tag": "0039_contract_allowlist_policy",
       "breakpoints": true
     },
     {
-      "idx": 40,
+      "idx": 42,
       "version": "7",
       "when": 1779798300000,
       "tag": "0040_webhook_delivery_config_snapshot",
       "breakpoints": true
     },
     {
-      "idx": 41,
+      "idx": 43,
       "version": "7",
       "when": 1779798900000,
       "tag": "0041_webhook_delivery_processing_status",
       "breakpoints": true
     },
     {
-      "idx": 42,
+      "idx": 44,
       "version": "7",
       "when": 1779799500000,
       "tag": "0042_user_wallet_identity_unique",
       "breakpoints": true
     },
     {
-      "idx": 43,
+      "idx": 45,
       "version": "7",
       "when": 1779800100000,
       "tag": "0043_tenant_allowed_redirect_urls",
       "breakpoints": true
     },
     {
-      "idx": 44,
+      "idx": 46,
       "version": "7",
       "when": 1779800700000,
       "tag": "0044_tenant_gas_sponsorship_config",
       "breakpoints": true
     },
     {
-      "idx": 45,
+      "idx": 47,
       "version": "7",
       "when": 1779801300000,
       "tag": "0045_sponsored_gas_events",
       "breakpoints": true
     },
     {
-      "idx": 46,
+      "idx": 48,
       "version": "7",
       "when": 1779801900000,
       "tag": "0046_tenant_app_clients",
       "breakpoints": true
     },
     {
-      "idx": 47,
+      "idx": 49,
       "version": "7",
       "when": 1779802500000,
       "tag": "0047_tenant_app_client_secrets",
       "breakpoints": true
     },
     {
-      "idx": 48,
+      "idx": 50,
       "version": "7",
       "when": 1779803100000,
       "tag": "0048_tenant_sso_domains",
       "breakpoints": true
     },
     {
-      "idx": 49,
+      "idx": 51,
       "version": "7",
       "when": 1779803700000,
       "tag": "0049_security_invariant_constraints",
       "breakpoints": true
     },
     {
-      "idx": 50,
+      "idx": 52,
       "version": "7",
       "when": 1779804300000,
       "tag": "0050_tenant_saml_sso_configs",
       "breakpoints": true
     },
     {
-      "idx": 51,
+      "idx": 53,
       "version": "7",
       "when": 1779804900000,
       "tag": "0051_audit_integrity_constraints",
       "breakpoints": true
     },
     {
-      "idx": 52,
+      "idx": 54,
       "version": "7",
       "when": 1779805500000,
       "tag": "0052_saml_request_replay_storage",
       "breakpoints": true
     },
     {
-      "idx": 53,
+      "idx": 55,
       "version": "7",
       "when": 1779806100000,
       "tag": "0053_saml_group_role_mappings",
       "breakpoints": true
     },
     {
-      "idx": 54,
+      "idx": 56,
       "version": "7",
       "when": 1779806700000,
       "tag": "0054_tenant_invitations",
       "breakpoints": true
     },
     {
-      "idx": 55,
+      "idx": 57,
       "version": "7",
       "when": 1779807300000,
       "tag": "0055_webhook_replay_lineage",
       "breakpoints": true
     },
     {
-      "idx": 56,
+      "idx": 58,
       "version": "7",
       "when": 1779807900000,
       "tag": "0056_tenant_request_signing_keys",
       "breakpoints": true
     },
     {
-      "idx": 57,
+      "idx": 59,
       "version": "7",
       "when": 1779808500000,
       "tag": "0057_global_wallet_consents",
       "breakpoints": true
     },
     {
-      "idx": 58,
+      "idx": 60,
       "version": "7",
       "when": 1779810300000,
       "tag": "0060_authorization_keys",
       "breakpoints": true
     },
     {
-      "idx": 59,
+      "idx": 61,
       "version": "7",
       "when": 1779812100000,
       "tag": "0061_aggregation_policy_type",
       "breakpoints": true
     },
     {
-      "idx": 60,
+      "idx": 62,
       "version": "7",
       "when": 1779813900000,
       "tag": "0062_session_signers",
       "breakpoints": true
     },
     {
-      "idx": 61,
+      "idx": 63,
       "version": "7",
       "when": 1779815700000,
       "tag": "0063_guest_accounts",
       "breakpoints": true
     },
     {
-      "idx": 62,
+      "idx": 64,
       "version": "7",
       "when": 1779817500000,
       "tag": "0064_typed_data_policy_type",
       "breakpoints": true
     },
     {
-      "idx": 63,
+      "idx": 65,
       "version": "7",
       "when": 1779819300000,
       "tag": "0065_user_push_subscriptions",
       "breakpoints": true
     },
     {
-      "idx": 64,
+      "idx": 66,
       "version": "7",
       "when": 1779821100000,
       "tag": "0066_raw_signing_chain_policy_type",

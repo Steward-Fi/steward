@@ -132,6 +132,7 @@ import {
   publicAuthAbuseConfig,
   validateEmailAbusePolicy,
   validatePhoneAbusePolicy,
+  validateUserAbusePolicy,
   validateWalletAbusePolicy,
   verifyCaptchaToken,
 } from "../services/auth-abuse";
@@ -847,6 +848,7 @@ let _nonceBackend: import("@stwd/auth").StoreBackend | null = null;
 
 type SiweNonceRecord = {
   allowedDomains: string[];
+  chainId?: string;
   originHost?: string;
   tenantId?: string;
 };
@@ -878,6 +880,16 @@ function requiredOriginHostFromRequest(c: Context): string | null {
   return getAllowedSiweDomains(c).includes(originHost) ? originHost : null;
 }
 
+function normalizeNonceContextValue(value: string | number | undefined): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const normalized = String(value).trim();
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function getNonceChainId(c: Context): string | undefined {
+  return normalizeNonceContextValue(c.req.query("chainId"));
+}
+
 async function setSiweNonce(nonce: string, record: SiweNonceRecord): Promise<void> {
   await getNonceBackend().set(nonce, JSON.stringify(record), SIWE_NONCE_TTL_MS);
 }
@@ -896,6 +908,7 @@ async function consumeSiweNonce(nonce: string): Promise<SiweNonceRecord | null> 
     const parsed = JSON.parse(raw) as SiweNonceRecord;
     return {
       allowedDomains: Array.isArray(parsed.allowedDomains) ? parsed.allowedDomains : [],
+      chainId: normalizeNonceContextValue(parsed.chainId),
       originHost: typeof parsed.originHost === "string" ? parsed.originHost : undefined,
       tenantId: typeof parsed.tenantId === "string" ? parsed.tenantId : undefined,
     };
@@ -906,7 +919,7 @@ async function consumeSiweNonce(nonce: string): Promise<SiweNonceRecord | null> 
 
 function validateConsumedSiweNonce(
   record: SiweNonceRecord | null,
-  input: { domain: string; tenantId?: string },
+  input: { chainId?: string; domain: string; tenantId?: string },
 ): string | null {
   if (!record) return "Invalid or expired nonce";
   const domain = input.domain.toLowerCase();
@@ -921,6 +934,9 @@ function validateConsumedSiweNonce(
   }
   if (record.tenantId && record.tenantId !== input.tenantId) {
     return "Nonce tenant does not match verification tenant";
+  }
+  if (record.chainId && input.chainId && record.chainId !== input.chainId) {
+    return "Nonce chainId does not match signed chainId";
   }
   return null;
 }
@@ -2505,6 +2521,11 @@ async function buildAuthOrMfaResponse(
     .where(eq(users.id, userId));
   if (activeUser?.deactivatedAt) {
     return { ok: false, status: 403, error: "User is deactivated" };
+  }
+  const authAbuseConfig = await getTenantAuthAbuseConfig(tenantId);
+  const userPolicyError = validateUserAbusePolicy(userId, authAbuseConfig);
+  if (userPolicyError) {
+    return { ok: false, status: 403, error: userPolicyError };
   }
 
   if (await hasTotpEnabled(userId)) {
@@ -4864,6 +4885,7 @@ auth.get("/nonce", async (c) => {
   }
   await setSiweNonce(nonce, {
     allowedDomains: getAllowedSiweDomains(c),
+    chainId: getNonceChainId(c),
     originHost,
     tenantId: tenantId || undefined,
   });
@@ -4967,6 +4989,7 @@ auth.post("/verify", async (c) => {
   const methodResponse = await requireTenantLoginMethodAllowed(c, requestedTenantId, "siwe");
   if (methodResponse) return methodResponse;
   const nonceError = validateConsumedSiweNonce(await consumeSiweNonce(siweMessage.nonce), {
+    chainId: String(siweMessage.chainId),
     domain: siweMessage.domain,
     tenantId: requestedTenantId,
   });
@@ -5186,6 +5209,7 @@ auth.post("/verify/solana", async (c) => {
   const methodResponse = await requireTenantLoginMethodAllowed(c, requestedTenantId, "siws");
   if (methodResponse) return methodResponse;
   const nonceError = validateConsumedSiweNonce(await consumeSiweNonce(parsed.nonce), {
+    chainId: parsed.chainId ?? "mainnet",
     domain: parsed.domain,
     tenantId: requestedTenantId,
   });

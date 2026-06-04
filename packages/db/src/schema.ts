@@ -736,8 +736,12 @@ export const approvalQueue = pgTable(
       .references(() => agents.id, { onDelete: "cascade" }),
     status: approvalQueueStatusEnum("status").notNull().default("pending"),
     requestedAt: timestamp("requested_at", { withTimezone: true }).notNull().defaultNow(),
+    requestedByType: varchar("requested_by_type", { length: 32 }),
+    requestedById: varchar("requested_by_id", { length: 255 }),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
     resolvedBy: varchar("resolved_by", { length: 255 }),
+    resolvedByType: varchar("resolved_by_type", { length: 32 }),
+    resolvedById: varchar("resolved_by_id", { length: 255 }),
   },
   (table) => ({
     txIdUniqueIdx: uniqueIndex("approval_queue_tx_id_idx").on(table.txId),
@@ -1437,6 +1441,30 @@ export const tradeSessions = pgTable(
 
 export type TradeSessionRow = typeof tradeSessions.$inferSelect;
 export type NewTradeSessionRow = typeof tradeSessions.$inferInsert;
+
+export const agentPolicies = pgTable(
+  "agent_policies",
+  {
+    agentId: text("agent_id")
+      .primaryKey()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    tenantId: text("tenant_id").notNull(),
+    dailyCapUsd: numeric("daily_cap_usd").notNull().default("1000"),
+    perOrderCapUsd: numeric("per_order_cap_usd").notNull().default("500"),
+    leverageCap: numeric("leverage_cap").notNull().default("10"),
+    allowedAssets: text("allowed_assets").array().notNull().default(["BTC", "ETH", "BNB"]),
+    allowedVenues: text("allowed_venues").array().notNull().default(["hyperliquid"]),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedBy: text("updated_by").notNull(),
+    updatedReason: text("updated_reason"),
+  },
+  (table) => ({
+    tenantIdx: index("agent_policies_tenant_idx").on(table.tenantId),
+  }),
+);
+
+export type AgentPolicyRow = typeof agentPolicies.$inferSelect;
+export type NewAgentPolicyRow = typeof agentPolicies.$inferInsert;
 
 // ─── Tamper-evident audit log ────────────────────────────────────────────────
 //

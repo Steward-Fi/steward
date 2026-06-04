@@ -93,6 +93,10 @@ async function userSessionAuth(
   return undefined;
 }
 
+globalWalletRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 globalWalletRoutes.use("*", userSessionAuth);
 
 function getVault(): Vault {
@@ -898,29 +902,74 @@ globalWalletRoutes.post("/rpc/confirm", async (c) => {
     params: body.params,
     walletAddress: wallet.walletAddress,
   });
-  const [confirmation] = await getDb()
-    .insert(globalWalletActionConfirmations)
-    .values({
-      consentId: consent.id,
-      tenantId: parsed.tenantId,
-      clientId: parsed.clientId,
-      userId: c.get("userId"),
-      origin: origin!,
-      method,
-      requestHash,
-      status: "approved",
-      expiresAt,
-      approvedAt: now,
-      updatedAt: now,
-    })
-    .returning();
-
-  await writeGlobalWalletAudit(c, {
-    tenantId: parsed.tenantId,
-    action: "global_wallet.rpc.action_confirmed",
-    resourceId: consent.id,
-    metadata: { clientId: parsed.clientId, origin, method, confirmationId: confirmation.id },
+  const confirmation = await getDb().transaction(async (tx) => {
+    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${`global-wallet-confirmation:${consent.id}:${method}:${requestHash}`}))`,
+      );
+    }
+    const [existing] = await tx
+      .select({ id: globalWalletActionConfirmations.id })
+      .from(globalWalletActionConfirmations)
+      .where(
+        and(
+          eq(globalWalletActionConfirmations.consentId, consent.id),
+          eq(globalWalletActionConfirmations.userId, c.get("userId")),
+          eq(globalWalletActionConfirmations.tenantId, parsed.tenantId),
+          eq(globalWalletActionConfirmations.clientId, parsed.clientId),
+          eq(globalWalletActionConfirmations.origin, origin!),
+          eq(globalWalletActionConfirmations.method, method),
+          eq(globalWalletActionConfirmations.requestHash, requestHash),
+          eq(globalWalletActionConfirmations.status, "approved"),
+          sql`${globalWalletActionConfirmations.expiresAt} > now()`,
+        ),
+      )
+      .limit(1);
+    if (existing) return null;
+    const [row] = await tx
+      .insert(globalWalletActionConfirmations)
+      .values({
+        consentId: consent.id,
+        tenantId: parsed.tenantId,
+        clientId: parsed.clientId,
+        userId: c.get("userId"),
+        origin: origin!,
+        method,
+        requestHash,
+        status: "approved",
+        expiresAt,
+        approvedAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    return row;
   });
+
+  if (!confirmation) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Global wallet action confirmation is already pending" },
+      409,
+    );
+  }
+
+  try {
+    await writeGlobalWalletAudit(c, {
+      tenantId: parsed.tenantId,
+      action: "global_wallet.rpc.action_confirmed",
+      resourceId: consent.id,
+      metadata: { clientId: parsed.clientId, origin, method, confirmationId: confirmation.id },
+    });
+  } catch (error) {
+    await getDb()
+      .delete(globalWalletActionConfirmations)
+      .where(
+        and(
+          eq(globalWalletActionConfirmations.id, confirmation.id),
+          eq(globalWalletActionConfirmations.userId, c.get("userId")),
+        ),
+      );
+    throw error;
+  }
 
   setNoStoreHeaders(c);
   return c.json<ApiResponse>({

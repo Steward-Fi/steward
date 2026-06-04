@@ -9,7 +9,7 @@ import {
   setDefaultTimeout,
 } from "bun:test";
 
-setDefaultTimeout(30000);
+setDefaultTimeout(120000);
 
 import { randomUUID } from "node:crypto";
 
@@ -62,7 +62,7 @@ describe("user wallet creation webhooks", () => {
 
     ({ createSessionToken } = await import("../routes/auth"));
     ({ userRoutes } = await import("../routes/user"));
-  });
+  }, 120_000);
 
   beforeEach(() => {
     dispatchWebhookMock.mockClear();

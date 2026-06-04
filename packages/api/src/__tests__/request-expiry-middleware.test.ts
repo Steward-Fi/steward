@@ -29,6 +29,7 @@ function makeApp(required = false) {
   app.put("/tenants/:id/config", (c) => c.json({ ok: true }));
   app.post("/platform/tenants", (c) => c.json({ ok: true }));
   app.post("/agents", (c) => c.json({ ok: true }));
+  app.post("/v1/agents", (c) => c.json({ ok: true }));
   app.post("/health", (c) => c.json({ ok: true }));
   return app;
 }
@@ -102,6 +103,7 @@ describe("requestExpiry", () => {
     const tenantConfig = await app.request("/tenants/tenant-1/config", { method: "PUT" });
     const platformTenant = await app.request("/platform/tenants", { method: "POST" });
     const agent = await app.request("/agents", { method: "POST" });
+    const versionedAgent = await app.request("/v1/agents", { method: "POST" });
     const nonSensitive = await app.request("/health", { method: "POST" });
 
     expect(sensitive.status).toBe(400);
@@ -122,6 +124,7 @@ describe("requestExpiry", () => {
     expect(tenantConfig.status).toBe(400);
     expect(platformTenant.status).toBe(400);
     expect(agent.status).toBe(400);
+    expect(versionedAgent.status).toBe(400);
     expect(nonSensitive.status).toBe(200);
   });
 

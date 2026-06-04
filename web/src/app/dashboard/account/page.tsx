@@ -2,6 +2,7 @@
 
 import { useAuth as useStewardAuth } from "@stwd/react";
 import type {
+  AgentIdentity,
   GlobalWalletConsent,
   StewardRecoveryCodeStatus,
   UserAccountSummary,
@@ -11,6 +12,7 @@ import type {
 } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { CopyButton } from "@/components/copy-button";
 import { steward } from "@/lib/api";
 import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
@@ -18,6 +20,7 @@ type LoadState = {
   accounts: UserAccountsResult | null;
   summary: UserAccountSummary | null;
   globalWalletConsents: GlobalWalletConsent[];
+  agents: AgentIdentity[];
 };
 
 type PortfolioAsset = NonNullable<UserAccountSummary["portfolio"]["native"]>;
@@ -39,6 +42,31 @@ type RecoveryAuditEvent = {
   created_at: string;
 };
 
+type PregeneratedInventoryStatus = "unclaimed" | "claimed" | "expired";
+
+type PregeneratedInventoryItem = {
+  agent: AgentIdentity;
+  status: PregeneratedInventoryStatus;
+  tokenHashPrefix: string;
+  claimExpiresAt: Date | null;
+};
+
+type PregeneratedDistribution = {
+  wallets: Array<{
+    agent: AgentIdentity;
+    claimToken: string;
+    claimExpiresAt: string;
+  }>;
+  warning: string;
+  createdAt: string;
+};
+
+type PregeneratedBatchForm = {
+  count: string;
+  namePrefix: string;
+  expiresInDays: string;
+};
+
 const RECOVERY_EVENT_ACTIONS = [
   "user.wallet.recovery_setup",
   "mfa.recovery_codes.regenerate",
@@ -46,6 +74,10 @@ const RECOVERY_EVENT_ACTIONS = [
   "mfa.disabled",
   "auth.logout",
 ] as const;
+
+const PREGENERATED_PREFIX = "pregenerated:";
+const CLAIMED_PREGENERATED_PREFIX = "claimed:";
+const EXPIRED_PREGENERATED_PREFIX = "expired:";
 
 const providerLabels: Record<string, string> = {
   discord: "Discord",
@@ -125,6 +157,83 @@ function formatPortfolioAssetValue(asset: PortfolioAsset): string {
   if (asset.usdValueText) return formatUsd(asset.usdValueText);
   if (asset.usdValue !== null) return formatUsd(asset.usdValue);
   return "No USD price";
+}
+
+function formatDurationFromNow(date: Date | null): string {
+  if (!date) return "Legacy token without expiry";
+  const ms = date.getTime() - Date.now();
+  if (ms <= 0) return "Expired";
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes < 60) return `${minutes}m remaining`;
+  const hours = Math.ceil(minutes / 60);
+  if (hours < 48) return `${hours}h remaining`;
+  return `${Math.ceil(hours / 24)}d remaining`;
+}
+
+function parsePregeneratedInventoryItem(agent: AgentIdentity): PregeneratedInventoryItem | null {
+  const platformId = agent.platformId ?? "";
+
+  if (platformId.startsWith(PREGENERATED_PREFIX)) {
+    const [tokenHash = "", expiresAtMs] = platformId.slice(PREGENERATED_PREFIX.length).split(":");
+    const expiresAt =
+      expiresAtMs && Number.isSafeInteger(Number(expiresAtMs))
+        ? new Date(Number(expiresAtMs))
+        : null;
+    return {
+      agent,
+      status: expiresAt && expiresAt.getTime() <= Date.now() ? "expired" : "unclaimed",
+      tokenHashPrefix: tokenHash.slice(0, 12),
+      claimExpiresAt: expiresAt,
+    };
+  }
+
+  if (platformId.startsWith(CLAIMED_PREGENERATED_PREFIX)) {
+    return {
+      agent,
+      status: "claimed",
+      tokenHashPrefix: platformId.slice(
+        CLAIMED_PREGENERATED_PREFIX.length,
+        CLAIMED_PREGENERATED_PREFIX.length + 12,
+      ),
+      claimExpiresAt: null,
+    };
+  }
+
+  if (platformId.startsWith(EXPIRED_PREGENERATED_PREFIX)) {
+    return {
+      agent,
+      status: "expired",
+      tokenHashPrefix: platformId.slice(
+        EXPIRED_PREGENERATED_PREFIX.length,
+        EXPIRED_PREGENERATED_PREFIX.length + 12,
+      ),
+      claimExpiresAt: null,
+    };
+  }
+
+  return null;
+}
+
+function pregeneratedStatusTone(status: PregeneratedInventoryStatus): string {
+  switch (status) {
+    case "unclaimed":
+      return "border-info/30 text-info";
+    case "claimed":
+      return "border-success/30 text-success";
+    case "expired":
+      return "border-warning/30 text-warning";
+  }
+}
+
+function pregeneratedStatusLabel(status: PregeneratedInventoryStatus): string {
+  switch (status) {
+    case "unclaimed":
+      return "Unclaimed";
+    case "claimed":
+      return "Claimed";
+    case "expired":
+      return "Expired";
+  }
 }
 
 function recoveryEventLabel(action: string): string {
@@ -321,6 +430,7 @@ export default function DashboardAccountPage() {
     accounts: null,
     summary: null,
     globalWalletConsents: [],
+    agents: [],
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -333,6 +443,16 @@ export default function DashboardAccountPage() {
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
   const [totpCode, setTotpCode] = useState("");
   const [recoverySetupConfirmed, setRecoverySetupConfirmed] = useState(false);
+  const [pregeneratedForm, setPregeneratedForm] = useState<PregeneratedBatchForm>({
+    count: "3",
+    namePrefix: "Pregenerated user wallet",
+    expiresInDays: "7",
+  });
+  const [pregeneratedBusy, setPregeneratedBusy] = useState<string | null>(null);
+  const [pregeneratedMessage, setPregeneratedMessage] = useState<string | null>(null);
+  const [pregeneratedError, setPregeneratedError] = useState<string | null>(null);
+  const [pregeneratedDistribution, setPregeneratedDistribution] =
+    useState<PregeneratedDistribution | null>(null);
 
   const loadRecoveryControls = useCallback(
     async (userId?: string | null) => {
@@ -363,11 +483,13 @@ export default function DashboardAccountPage() {
     try {
       setLoading(true);
       setError(null);
-      const [accounts, summaryResult, globalWalletConsents] = await Promise.allSettled([
-        steward.listUserAccounts(),
-        steward.getUserAccount(),
-        steward.listGlobalWalletConsents(),
-      ]);
+      const [accounts, summaryResult, globalWalletConsents, agentsResult] =
+        await Promise.allSettled([
+          steward.listUserAccounts(),
+          steward.getUserAccount(),
+          steward.listGlobalWalletConsents(),
+          steward.listAgents(),
+        ]);
 
       if (accounts.status === "rejected") throw accounts.reason;
 
@@ -377,6 +499,7 @@ export default function DashboardAccountPage() {
         summary: nextSummary,
         globalWalletConsents:
           globalWalletConsents.status === "fulfilled" ? globalWalletConsents.value.consents : [],
+        agents: agentsResult.status === "fulfilled" ? agentsResult.value : [],
       });
       void loadRecoveryControls(nextSummary?.userId ?? null);
     } catch (err) {
@@ -405,6 +528,38 @@ export default function DashboardAccountPage() {
   const hasEmbeddedWallet = userWallets.length > 0 || Boolean(state.summary?.wallet);
   const activeGlobalWalletConsents = state.globalWalletConsents.filter(
     (consent) => consent.status === "active",
+  );
+  const pregeneratedInventory = useMemo(
+    () =>
+      state.agents
+        .map(parsePregeneratedInventoryItem)
+        .filter((item): item is PregeneratedInventoryItem => item !== null)
+        .sort((a, b) => {
+          if (a.status !== b.status) {
+            const order: Record<PregeneratedInventoryStatus, number> = {
+              unclaimed: 0,
+              expired: 1,
+              claimed: 2,
+            };
+            return order[a.status] - order[b.status];
+          }
+          return new Date(b.agent.createdAt).getTime() - new Date(a.agent.createdAt).getTime();
+        }),
+    [state.agents],
+  );
+  const pregeneratedCounts = useMemo(
+    () =>
+      pregeneratedInventory.reduce(
+        (acc, item) => {
+          acc[item.status] += 1;
+          return acc;
+        },
+        { unclaimed: 0, claimed: 0, expired: 0 } satisfies Record<
+          PregeneratedInventoryStatus,
+          number
+        >,
+      ),
+    [pregeneratedInventory],
   );
 
   const groupedLinkedAccounts = useMemo(() => {
@@ -440,6 +595,80 @@ export default function DashboardAccountPage() {
       setError(err instanceof Error ? err.message : "Failed to revoke global wallet grant");
     } finally {
       setRevokingConsent(null);
+    }
+  }
+
+  async function copyPregeneratedDistribution() {
+    if (!pregeneratedDistribution) return;
+    const lines = pregeneratedDistribution.wallets.map((wallet) =>
+      [wallet.agent.id, wallet.agent.walletAddress, wallet.claimToken, wallet.claimExpiresAt].join(
+        "\t",
+      ),
+    );
+    const text = ["agentId\twalletAddress\tclaimToken\tclaimExpiresAt", ...lines].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.setAttribute("readonly", "true");
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    setPregeneratedMessage("Copied distribution table to clipboard");
+  }
+
+  async function createPregeneratedBatch(reason: "create" | "rotate" = "create") {
+    const count = Number(pregeneratedForm.count);
+    const expiresInDays = Number(pregeneratedForm.expiresInDays);
+    const rotationCount = Math.max(1, pregeneratedCounts.unclaimed + pregeneratedCounts.expired);
+    const requestedCount = reason === "rotate" ? rotationCount : count;
+
+    if (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > 100) {
+      setPregeneratedError("Batch count must be between 1 and 100");
+      return;
+    }
+    if (!Number.isFinite(expiresInDays) || expiresInDays <= 0 || expiresInDays > 30) {
+      setPregeneratedError("Expiry must be between 1 and 30 days");
+      return;
+    }
+
+    try {
+      setPregeneratedBusy(reason);
+      setPregeneratedError(null);
+      setPregeneratedMessage(null);
+      const result = await steward.createPregeneratedUserWallets({
+        count: requestedCount,
+        namePrefix:
+          pregeneratedForm.namePrefix.trim() ||
+          (reason === "rotate" ? "Replacement pregenerated wallet" : "Pregenerated user wallet"),
+        claimExpiresInSeconds: Math.round(expiresInDays * 24 * 60 * 60),
+      });
+      setPregeneratedDistribution({
+        wallets: result.wallets,
+        warning: result.warning,
+        createdAt: new Date().toISOString(),
+      });
+      setPregeneratedMessage(
+        reason === "rotate"
+          ? `Created ${result.wallets.length} replacement claim token${
+              result.wallets.length === 1 ? "" : "s"
+            }`
+          : `Created ${result.wallets.length} pregenerated wallet${
+              result.wallets.length === 1 ? "" : "s"
+            }`,
+      );
+      await loadAccount();
+    } catch (err) {
+      setPregeneratedError(
+        err instanceof Error ? err.message : "Failed to create pregenerated wallets",
+      );
+    } finally {
+      setPregeneratedBusy(null);
     }
   }
 
@@ -624,6 +853,276 @@ export default function DashboardAccountPage() {
             ))
           )}
         </div>
+      </section>
+
+      <section>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-5">
+          <h2 className="font-display text-lg font-600">Pregenerated User Wallets</h2>
+          <span className="text-xs text-text-tertiary">
+            One-time claim tokens with expiring distribution
+          </span>
+        </div>
+
+        {pregeneratedError && (
+          <div role="alert" className="border border-error/30 bg-error/5 px-4 py-3 text-sm mb-5">
+            <div className="text-error">Pregenerated wallet action failed</div>
+            <div className="text-text-tertiary mt-1">{pregeneratedError}</div>
+          </div>
+        )}
+
+        {pregeneratedMessage && (
+          <div
+            role="status"
+            className="border border-success/30 bg-success/5 px-4 py-3 text-sm mb-5"
+          >
+            <div className="text-success">Pregenerated wallet action completed</div>
+            <div className="text-text-tertiary mt-1">{pregeneratedMessage}</div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-px bg-border mb-5">
+          <div className="bg-bg p-5">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-px bg-border mb-5">
+              <Stat label="Inventory" value={pregeneratedInventory.length} detail="Total batches" />
+              <Stat
+                label="Unclaimed"
+                value={pregeneratedCounts.unclaimed}
+                detail="Ready to distribute"
+              />
+              <Stat label="Expired" value={pregeneratedCounts.expired} detail="Needs replacement" />
+              <Stat label="Claimed" value={pregeneratedCounts.claimed} detail="Already consumed" />
+            </div>
+
+            <div className="border-t border-border-subtle" data-testid="pregenerated-inventory">
+              {pregeneratedInventory.length === 0 ? (
+                <div className="py-10 text-sm text-text-tertiary">
+                  No pregenerated user wallets found for this tenant
+                </div>
+              ) : (
+                pregeneratedInventory.slice(0, 12).map((item) => (
+                  <div
+                    key={item.agent.id}
+                    className="grid grid-cols-1 md:grid-cols-[1fr_160px_180px] gap-3 py-4 border-b border-border-subtle last:border-b-0"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`border px-2 py-0.5 text-[11px] uppercase tracking-wider ${pregeneratedStatusTone(
+                            item.status,
+                          )}`}
+                        >
+                          {pregeneratedStatusLabel(item.status)}
+                        </span>
+                        <span className="font-mono text-xs text-text-tertiary">
+                          hash {item.tokenHashPrefix || "legacy"}
+                        </span>
+                      </div>
+                      <div className="font-mono text-sm text-text mt-2 break-all">
+                        {item.agent.id}
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-1">
+                        {item.agent.name} / {shortenAddress(item.agent.walletAddress, 6)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                        Expires
+                      </div>
+                      <div className="text-sm text-text-secondary mt-1">
+                        {item.claimExpiresAt ? formatDate(item.claimExpiresAt) : "Legacy"}
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-1">
+                        {formatDurationFromNow(item.claimExpiresAt)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                        Created
+                      </div>
+                      <div className="text-sm text-text-secondary mt-1">
+                        {item.agent.createdAt ? formatDate(item.agent.createdAt) : "Unknown"}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="bg-bg p-5">
+            <h3 className="font-display text-base font-600">Create Distribution Batch</h3>
+            <p className="text-xs text-text-tertiary mt-1">
+              Claim tokens are displayed once. Store them in your delivery system before leaving
+              this page.
+            </p>
+
+            <form
+              className="mt-5 space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createPregeneratedBatch("create");
+              }}
+            >
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">Count</span>
+                <input
+                  value={pregeneratedForm.count}
+                  onChange={(event) =>
+                    setPregeneratedForm((prev) => ({
+                      ...prev,
+                      count: event.currentTarget.value,
+                    }))
+                  }
+                  inputMode="numeric"
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Name Prefix
+                </span>
+                <input
+                  value={pregeneratedForm.namePrefix}
+                  onChange={(event) =>
+                    setPregeneratedForm((prev) => ({
+                      ...prev,
+                      namePrefix: event.currentTarget.value,
+                    }))
+                  }
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Claim Expiry Days
+                </span>
+                <input
+                  value={pregeneratedForm.expiresInDays}
+                  onChange={(event) =>
+                    setPregeneratedForm((prev) => ({
+                      ...prev,
+                      expiresInDays: event.currentTarget.value,
+                    }))
+                  }
+                  inputMode="decimal"
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {[1, 7, 30].map((days) => (
+                  <button
+                    key={days}
+                    type="button"
+                    onClick={() =>
+                      setPregeneratedForm((prev) => ({
+                        ...prev,
+                        expiresInDays: String(days),
+                      }))
+                    }
+                    className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-text hover:border-text-tertiary transition-colors"
+                  >
+                    {days}d
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => void createPregeneratedBatch("rotate")}
+                  disabled={pregeneratedBusy !== null}
+                  className="px-3 py-2 text-xs border border-warning/40 text-warning hover:border-warning transition-colors disabled:opacity-40"
+                >
+                  {pregeneratedBusy === "rotate" ? "Replacing..." : "Replace stale"}
+                </button>
+              </div>
+              <button
+                type="submit"
+                disabled={pregeneratedBusy !== null}
+                className="w-full px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover disabled:opacity-40 disabled:hover:bg-accent transition-colors"
+              >
+                {pregeneratedBusy === "create" ? "Creating..." : "Create Claim Tokens"}
+              </button>
+            </form>
+          </div>
+        </div>
+
+        {pregeneratedDistribution && (
+          <div
+            role="status"
+            data-testid="pregenerated-distribution"
+            className="border border-warning/40 bg-warning/5 p-4 space-y-4"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-display font-600 text-text">
+                  One-time claim-token distribution
+                </div>
+                <div className="text-xs text-text-tertiary mt-1">
+                  Created {formatDate(pregeneratedDistribution.createdAt)}.{" "}
+                  {pregeneratedDistribution.warning}
+                </div>
+                <div className="text-xs text-warning mt-2">
+                  Tokens below are not recoverable after refresh. Only distribute them over a secure
+                  channel and never paste them into logs or tickets.
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => void copyPregeneratedDistribution()}
+                  className="px-3 py-2 text-xs border border-border text-text-secondary hover:text-text hover:border-text-tertiary transition-colors"
+                >
+                  Copy TSV
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPregeneratedDistribution(null)}
+                  className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-text transition-colors"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {pregeneratedDistribution.wallets.map((wallet) => (
+                <div
+                  key={wallet.agent.id}
+                  className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_180px] gap-3 border border-border-subtle bg-bg px-3 py-3"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs text-text-tertiary uppercase tracking-wider">Agent</div>
+                    <div className="font-mono text-xs text-text mt-1 break-all">
+                      {wallet.agent.id}
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-1">
+                      {shortenAddress(wallet.agent.walletAddress, 6)}
+                    </div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                        Claim Token
+                      </div>
+                      <CopyButton text={wallet.claimToken} />
+                    </div>
+                    <div className="font-mono text-xs text-text mt-1 break-all">
+                      {wallet.claimToken}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                      Expires
+                    </div>
+                    <div className="text-sm text-text-secondary mt-1">
+                      {formatDate(wallet.claimExpiresAt)}
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-1">
+                      {formatDurationFromNow(new Date(wallet.claimExpiresAt))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       <section>

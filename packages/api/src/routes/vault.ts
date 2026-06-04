@@ -72,6 +72,11 @@ import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const vaultRoutes = new Hono<{ Variables: AppVariables }>();
 
+vaultRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
+
 async function writeVaultAudit(
   c: Context<{ Variables: AppVariables }>,
   event: Omit<AuditEventInput, "ipAddress" | "userAgent" | "requestId">,
@@ -1202,7 +1207,7 @@ async function requireSignerPermission(
         {
           ok: false,
           error:
-            "Signing requires owner/admin MFA or signer-bound X-Steward-Signer-Id and X-Steward-Signer-Secret headers",
+            "Signing requires owner or admin session with recent MFA, or signer-bound X-Steward-Signer-Id and X-Steward-Signer-Secret headers",
         },
         403,
       ),
@@ -1360,6 +1365,14 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
   const request = await safeJsonParse<Omit<SignRequest, "agentId" | "tenantId">>(c);
   if (!request) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
@@ -1417,13 +1430,6 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       428,
     );
   }
-  const signerAuthorization = await requireSignerPermission(
-    c,
-    tenantId,
-    agentId,
-    "sign_transaction",
-  );
-  if (!signerAuthorization.ok) return signerAuthorization.response;
 
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
@@ -2413,7 +2419,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       const result = await vault.signTransaction(signRequest, {
         txId: actionId,
         policyResults: evaluation.results,
-        status: "signed",
+        status: transfer.broadcast ? "broadcast" : "signed",
       });
       const txStatus = transfer.broadcast ? "broadcast" : "signed";
       completedResult = result;
@@ -3896,7 +3902,7 @@ vaultRoutes.post("/:agentId/sign-message", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Message signing requires owner/admin session with recent MFA verification",
+        error: "Message signing requires owner or admin session with recent MFA verification",
       },
       403,
     );
@@ -4417,6 +4423,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
         metadata: {
           chainId: signRequest.chainId,
           primaryType: body.primaryType,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           policyResults: evaluation.results,
         },
       });
@@ -4465,6 +4472,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       metadata: {
         chainId: signRequest.chainId,
         primaryType: body.primaryType,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
         policyResults: evaluation.results,
       },
     });
@@ -4487,6 +4495,21 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   const txId = crypto.randomUUID();
 
   try {
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign.typed_data.authorized",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: {
+        chainId: signRequest.chainId,
+        primaryType: body.primaryType,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
+        policyResults: evaluation.results,
+      },
+    });
+
     const signature = await vault.signTypedData({
       agentId,
       tenantId,
@@ -4517,6 +4540,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       metadata: {
         chainId: signRequest.chainId,
         primaryType: body.primaryType,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
       },
     });
 
@@ -5213,6 +5237,14 @@ async function signSolanaBlind(
   if (idempotencyResponse) return idempotencyResponse;
 
   const signRequest = { agentId, tenantId, to: toAddress, value: txValue, chainId };
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
@@ -5274,6 +5306,7 @@ async function signSolanaBlind(
           value: txValue,
           blindSigned: true,
           unparsedReason: args.unparsedReason,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           policyResults: evaluation.results,
         },
       });
@@ -5313,7 +5346,7 @@ async function signSolanaBlind(
       await db.insert(transactions).values({
         id: txId,
         agentId,
-        status: "signed",
+        status: result.broadcast ? "broadcast" : "signed",
         toAddress,
         value: txValue,
         chainId,
@@ -5338,6 +5371,7 @@ async function signSolanaBlind(
           blindSigned: true,
           unparsedReason: args.unparsedReason,
           broadcast: result.broadcast,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           signature: result.broadcast ? result.signature : undefined,
         },
       });
@@ -5580,6 +5614,13 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     value: txValue,
     chainId,
   };
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
 
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
@@ -5651,6 +5692,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
             chainId,
             to: toAddress,
             value: txValue,
+            ...signerAuthAuditMetadata(signerAuthorization.auth),
             policyResults: evaluation.results,
           },
         });
@@ -5700,6 +5742,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           chainId,
           to: toAddress,
           value: txValue,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           policyResults: evaluation.results,
         },
       });
@@ -5754,7 +5797,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       await db.insert(transactions).values({
         id: txId,
         agentId,
-        status: "signed",
+        status: result.broadcast ? "broadcast" : "signed",
         toAddress,
         value: txValue,
         chainId,
@@ -5780,6 +5823,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           to: toAddress,
           value: txValue,
           broadcast: result.broadcast,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           signature: result.broadcast ? result.signature : undefined,
           // Authoritative, parser-derived effects (not caller-supplied).
           derivedFromTransaction: true,

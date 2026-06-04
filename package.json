@@ -40,7 +40,7 @@
     "axios": "^1.16.1",
     "langsmith": "^0.7.1",
     "lodash": "^4.17.23",
-    "brace-expansion": "^5.0.6",
+    "brace-expansion": "^2.0.2",
     "postcss": "^8.5.15",
     "protobufjs": "^7.6.0",
     "ws": "^8.20.1",

@@ -29,6 +29,8 @@ const SECURITY_HEADERS = [
 
 const config: NextConfig = {
   reactStrictMode: true,
+  // OpenNext (Cloudflare adapter) consumes the standalone server output.
+  output: "standalone",
   outputFileTracingRoot: path.resolve(configDir, ".."),
   transpilePackages: ["@stwd/sdk", "@stwd/shared", "@stwd/react", "@simplewebauthn/browser"],
   async headers() {

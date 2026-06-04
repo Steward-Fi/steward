@@ -51,7 +51,9 @@ import type {
   PolicyTemplateCreate,
   PolicyTemplateUpdate,
   PregeneratedUserWalletClaimResult,
+  PregeneratedUserWalletClaimTokenRotateResult,
   PregeneratedUserWalletCreateResult,
+  PregeneratedUserWalletInventoryResult,
   RouteRecord,
   RpcResponse,
   SecretRecord,
@@ -87,8 +89,12 @@ import type {
   UserPushSubscriptionInput,
   UserPushSubscriptionListResult,
   UserPushSubscriptionResult,
+  UserWalletCreateResult,
+  UserWalletHistoryResult,
   UserWalletRecoveryRestoreResult,
   UserWalletRecoverySetupResult,
+  UserWalletSignMessageResult,
+  UserWalletSignResult,
   WebhookConfig,
   WebhookDelivery,
 } from "./types.ts";
@@ -1917,6 +1923,50 @@ export class StewardClient {
   }
 
   /**
+   * Get the authenticated user's embedded wallet native balance.
+   * Requires a personal user session token (Bearer JWT).
+   */
+  async getUserWallet(chainId?: number): Promise<GetBalanceResult> {
+    const params = chainId ? `?chainId=${chainId}` : "";
+    const response = await this.request<AgentBalance, StewardErrorResponse>(
+      `/user/me/wallet${params}`,
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /** Privy-style alias for the authenticated user's embedded wallet balance. */
+  async getUserWalletBalance(chainId?: number): Promise<GetBalanceResult> {
+    return this.getUserWallet(chainId);
+  }
+
+  /**
+   * Provision the authenticated user's embedded wallet if needed.
+   * Requires a personal user session token (Bearer JWT).
+   */
+  async createUserWallet(): Promise<UserWalletCreateResult> {
+    const response = await this.request<UserWalletCreateResult, StewardErrorResponse>(
+      "/user/me/wallet",
+      { method: "POST" },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /** Privy-style alias for authenticated user-wallet provisioning. */
+  async provisionUserWallet(): Promise<UserWalletCreateResult> {
+    return this.createUserWallet();
+  }
+
+  /**
    * Provision the authenticated user's wallet from a one-time BIP-39 recovery
    * phrase. Requires a user session token with recent MFA and only works before
    * a user wallet already exists.
@@ -1970,6 +2020,85 @@ export class StewardClient {
         method: "POST",
         body: JSON.stringify(input),
       },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Sign a native transfer with the authenticated user's embedded wallet.
+   * Broadcast requests require an idempotency key server-side.
+   */
+  async signUserWalletTransaction(
+    input: SignTransactionInput,
+    options?: { idempotencyKey?: string },
+  ): Promise<UserWalletSignResult> {
+    const response = await this.request<UserWalletSignResult, StewardErrorResponse>(
+      "/user/me/wallet/sign",
+      {
+        method: "POST",
+        headers: options?.idempotencyKey
+          ? { "Idempotency-Key": options.idempotencyKey }
+          : undefined,
+        body: JSON.stringify(input),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /** Sign a message with the authenticated user's embedded wallet when server-side unsafe signing is enabled. */
+  async signUserWalletMessage(message: string): Promise<UserWalletSignMessageResult> {
+    const response = await this.request<UserWalletSignMessageResult, StewardErrorResponse>(
+      "/user/me/wallet/sign-message",
+      {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /** List the authenticated user's embedded-wallet transaction history. */
+  async getUserWalletHistory(opts?: {
+    limit?: number;
+    offset?: number;
+  }): Promise<UserWalletHistoryResult> {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.offset) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    const response = await this.request<UserWalletHistoryResult, StewardErrorResponse>(
+      `/user/me/wallet/history${qs ? `?${qs}` : ""}`,
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return {
+      ...response.data,
+      transactions: response.data.transactions.map(parseTxRecord),
+    };
+  }
+
+  /** Get active/default policy rules for the authenticated user's embedded wallet. */
+  async getUserWalletPolicies(): Promise<PolicyRule[]> {
+    const response = await this.request<PolicyRule[], StewardErrorResponse>(
+      "/user/me/wallet/policies",
     );
 
     if (!response.ok) {
@@ -4031,6 +4160,7 @@ export class StewardClient {
   async createPregeneratedUserWallets(input: {
     count?: number;
     namePrefix?: string;
+    claimExpiresInSeconds?: number;
     policies?: PolicyRule[];
   }): Promise<PregeneratedUserWalletCreateResult> {
     const response = await this.request<PregeneratedUserWalletCreateResult, StewardErrorResponse>(
@@ -4040,6 +4170,7 @@ export class StewardClient {
         body: JSON.stringify({
           count: input.count,
           namePrefix: input.namePrefix,
+          claimExpiresInSeconds: input.claimExpiresInSeconds,
           applyPolicies: input.policies,
         }),
       },
@@ -4055,6 +4186,60 @@ export class StewardClient {
         ...wallet,
         agent: parseAgentIdentity(wallet.agent),
       })),
+    };
+  }
+
+  /**
+   * List tenant pregenerated wallets and their claim status without exposing
+   * stored claim-token hashes.
+   */
+  async listPregeneratedUserWallets(
+    input: { limit?: number; offset?: number } = {},
+  ): Promise<PregeneratedUserWalletInventoryResult> {
+    const params = new URLSearchParams();
+    if (input.limit !== undefined) params.set("limit", String(input.limit));
+    if (input.offset !== undefined) params.set("offset", String(input.offset));
+    const response = await this.request<
+      PregeneratedUserWalletInventoryResult,
+      StewardErrorResponse
+    >(`/agents/pregenerated${params.size ? `?${params.toString()}` : ""}`);
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return {
+      ...response.data,
+      wallets: response.data.wallets.map((wallet) => ({
+        ...wallet,
+        agent: parseAgentIdentity(wallet.agent),
+      })),
+    };
+  }
+
+  /**
+   * Rotate the one-time claim token for an unclaimed pregenerated wallet.
+   * The returned claim token is shown once.
+   */
+  async rotatePregeneratedUserWalletClaimToken(
+    agentId: string,
+    input: { claimExpiresInSeconds?: number } = {},
+  ): Promise<PregeneratedUserWalletClaimTokenRotateResult> {
+    const response = await this.request<
+      PregeneratedUserWalletClaimTokenRotateResult,
+      StewardErrorResponse
+    >(`/agents/pregenerated/${encodeURIComponent(agentId)}/claim-token/rotate`, {
+      method: "POST",
+      body: JSON.stringify({ claimExpiresInSeconds: input.claimExpiresInSeconds }),
+    });
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return {
+      ...response.data,
+      agent: parseAgentIdentity(response.data.agent),
     };
   }
 
