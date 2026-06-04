@@ -147,6 +147,14 @@ describe("#111 deploy/provision-steward-node.sh does not leak secrets", () => {
     expect(/<\s*"?\$\{LOCAL_ENV_FILE\}"?/.test(script)).toBe(true);
   });
 
+  test("rsync does not delete an existing remote deploy/.env before secret reuse", () => {
+    expect(/--delete/.test(script)).toBe(true);
+    expect(/--exclude=['"]deploy\/\.env['"]/.test(script)).toBe(true);
+    expect(script.indexOf("--exclude='deploy/.env'")).toBeLessThan(
+      script.indexOf('"${REPO_ROOT}/" "root@${NODE_IP}:${REMOTE_DIR}/"'),
+    );
+  });
+
   test("rendered .env includes the keys the production image requires", () => {
     for (const key of [
       "STEWARD_MASTER_PASSWORD",

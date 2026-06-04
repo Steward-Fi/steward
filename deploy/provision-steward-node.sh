@@ -59,6 +59,7 @@ rsync -az --delete \
   --exclude='.next' \
   --exclude='web' \
   --exclude='.turbo' \
+  --exclude='deploy/.env' \
   -e "ssh ${SSH_OPTS}" \
   "${REPO_ROOT}/" "root@${NODE_IP}:${REMOTE_DIR}/"
 echo "  ✓ Source synced"
