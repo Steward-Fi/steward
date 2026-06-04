@@ -44,6 +44,16 @@ export interface OAuthProvider {
    */
   clientIdParam?: string;
   /**
+   * Asserts that this provider only ever returns a confirmed/verified account
+   * email, even though its userinfo response carries no per-response
+   * verification flag (and it has no emailUrl fallback). Spotify is the
+   * canonical case: /v1/me returns the account's confirmed email but no
+   * `verified`/`email_verified` field, so without this the account-takeover
+   * gate in provisionOAuthUser() would reject every Spotify login. When true
+   * and a non-empty email is returned, getUserInfo() marks verified_email.
+   */
+  assertsEmailVerified?: boolean;
+  /**
    * Marks the provider as OIDC: the user's identity is derived from the
    * `id_token` returned by the token endpoint (verified against `oidcJwksUri`),
    * not from a userinfo endpoint. Used for "Sign in with Apple", which exposes
@@ -404,6 +414,11 @@ export function getProviderConfig(provider: string): OAuthProvider {
         tokenUrl: "https://accounts.spotify.com/api/token",
         userInfoUrl: "https://api.spotify.com/v1/me",
         scopes: ["user-read-email"],
+        // Spotify requires the account email to be confirmed before the account
+        // can be used, but /v1/me returns no per-response verification flag.
+        // Trust the returned email as verified so the OAuth sign-in gate can be
+        // satisfied (otherwise Spotify login fails closed with 403 forever).
+        assertsEmailVerified: true,
         profileMap: {
           id: "id",
           email: "email",
@@ -721,6 +736,13 @@ export class OAuthClient {
         userInfo.email = emailInfo.email;
         userInfo.verified_email = emailInfo.verified ?? userInfo.verified_email;
       }
+    }
+
+    // Providers that only ever return a confirmed account email (e.g. Spotify)
+    // expose no per-response verification flag. Treat a non-empty email from
+    // such a provider as verified so the OAuth sign-in gate is satisfiable.
+    if (this.provider.assertsEmailVerified && userInfo.email) {
+      userInfo.verified_email = true;
     }
 
     return userInfo;

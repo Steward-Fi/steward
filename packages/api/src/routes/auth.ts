@@ -1903,6 +1903,8 @@ type ParsedSiwsMessage = {
   publicKey: string;
   nonce: string;
   issuedAt?: string;
+  expirationTime?: string;
+  notBefore?: string;
   uri?: string;
   version?: string;
   chainId?: string;
@@ -1972,6 +1974,8 @@ function parseSiwsMessage(message: string): ParsedSiwsMessage | null {
     publicKey,
     nonce,
     issuedAt: fields.get("issuedat"),
+    expirationTime: fields.get("expirationtime"),
+    notBefore: fields.get("notbefore"),
     uri: fields.get("uri"),
     version: fields.get("version"),
     chainId: fields.get("chainid"),
@@ -5182,6 +5186,29 @@ auth.post("/verify/solana", async (c) => {
       },
       401,
     );
+  }
+
+  // Honor the signed message's own temporal bounds, mirroring the EVM SIWE
+  // path. Reject an already-expired or not-yet-valid message BEFORE consuming
+  // the single-use nonce, so a stale message cannot burn a fresh nonce.
+  const now = new Date();
+  if (parsed.expirationTime) {
+    const exp = new Date(parsed.expirationTime);
+    if (Number.isNaN(exp.getTime())) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid expirationTime" }, 401);
+    }
+    if (now >= exp) {
+      return c.json<ApiResponse>({ ok: false, error: "Message expired" }, 401);
+    }
+  }
+  if (parsed.notBefore) {
+    const nb = new Date(parsed.notBefore);
+    if (Number.isNaN(nb.getTime())) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid notBefore" }, 401);
+    }
+    if (now < nb) {
+      return c.json<ApiResponse>({ ok: false, error: "Message not yet valid" }, 401);
+    }
   }
 
   const requestedTenantId = c.req.header("X-Steward-Tenant")?.trim();
