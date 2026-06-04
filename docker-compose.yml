@@ -36,7 +36,7 @@ services:
     environment:
       PORT: "${PORT:-3200}"
       STEWARD_BIND_HOST: "0.0.0.0"
-      NODE_ENV: "production"
+      NODE_ENV: "${NODE_ENV:-production}"
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
@@ -96,7 +96,7 @@ services:
     command: ["bun", "run", "packages/proxy/src/index.ts"]
     environment:
       STEWARD_PROXY_PORT: "${STEWARD_PROXY_PORT:-8080}"
-      NODE_ENV: "production"
+      NODE_ENV: "${NODE_ENV:-production}"
       DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
