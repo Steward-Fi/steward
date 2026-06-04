@@ -813,20 +813,21 @@ describe("Allowed Chains Policy", () => {
     expect(result.reason).toContain("not a recognised chain");
   });
 
-  it("passes when chainId is 0 (absent/unset) — defers check to vault", async () => {
-    // Design decision: chainId=0 means the caller hasn't specified a chain yet.
-    // The vault will resolve it to DEFAULT_CHAIN_ID before signing, so we must not block here.
+  it("fails closed when chainId is 0 (absent/unset) — cannot verify against allowed chains", async () => {
+    // Fail-closed design: chainId=0/absent cannot be verified against the allowed-chains
+    // policy, so the engine rejects rather than deferring. An unverifiable chain is not a
+    // permitted chain.
     const rule = makeAllowedChainsRule(["eip155:1"]); // Ethereum only — would fail for Base
     const ctx = makeContext({
       request: { ...makeContext().request, chainId: 0 },
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
-    expect(result.reason).toContain("deferring chain check");
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("chainId is required");
   });
 
-  it("passes when chainId is undefined — defers check to vault", async () => {
+  it("fails closed when chainId is undefined — cannot verify against allowed chains", async () => {
     const rule = makeAllowedChainsRule(["eip155:1"]);
     // Force undefined at runtime (type cast to exercise the JS falsy guard)
     const ctx = makeContext({
@@ -837,8 +838,8 @@ describe("Allowed Chains Policy", () => {
     });
     const result = await evaluatePolicy(rule, ctx);
 
-    expect(result.passed).toBe(true);
-    expect(result.reason).toContain("deferring chain check");
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("chainId is required");
   });
 
   it("fails all requests when allowed chains array is empty (nothing is permitted)", async () => {
@@ -930,10 +931,12 @@ describe("PolicyEngine.evaluate()", () => {
     };
   }
 
-  it("no policies → auto-approved (approved=true, requiresManualApproval=false)", async () => {
+  it("no policies → fail closed (approved=false, no auto-approval)", async () => {
+    // Fail-closed default: an agent with no policy configured is NOT auto-approved.
+    // Absence of an explicit allow rule means the action is not permitted.
     const result = await engine.evaluate([], makeEngineCtx());
 
-    expect(result.approved).toBe(true);
+    expect(result.approved).toBe(false);
     expect(result.requiresManualApproval).toBe(false);
     expect(result.results).toHaveLength(0);
   });

@@ -5,6 +5,8 @@
  */
 
 import { hashApiKey, platformAuthMiddleware } from "@stwd/auth";
+import { encryptWebhookSecret } from "@stwd/webhooks";
+import { and, eq, ne } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { trackAuditEvent } from "../services/audit";
 import {
@@ -22,9 +24,53 @@ import {
   tenantAuth,
   tenantConfigs,
   tenants,
+  webhookConfigs,
 } from "../services/context";
 
 export const tenantRoutes = new Hono<{ Variables: AppVariables }>();
+
+const LEGACY_TENANT_WEBHOOK_DESCRIPTION = "legacy:tenant-webhook";
+
+function generateWebhookSecret(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return `whsec_${Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function upsertLegacyTenantWebhook(tenantId: string, url: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx
+      .update(webhookConfigs)
+      .set({ enabled: false, updatedAt: new Date() })
+      .where(
+        and(
+          eq(webhookConfigs.tenantId, tenantId),
+          eq(webhookConfigs.description, LEGACY_TENANT_WEBHOOK_DESCRIPTION),
+          ne(webhookConfigs.url, url),
+        ),
+      );
+
+    await tx
+      .insert(webhookConfigs)
+      .values({
+        tenantId,
+        url,
+        secret: encryptWebhookSecret(generateWebhookSecret()),
+        events: [],
+        enabled: true,
+        description: LEGACY_TENANT_WEBHOOK_DESCRIPTION,
+      })
+      .onConflictDoUpdate({
+        target: [webhookConfigs.tenantId, webhookConfigs.url],
+        set: {
+          events: [],
+          enabled: true,
+          description: LEGACY_TENANT_WEBHOOK_DESCRIPTION,
+          updatedAt: new Date(),
+        },
+      });
+  });
+}
 
 // Per-route auth that pins the JWT's tenantId to the URL :id path param.
 // Applied directly on handlers below so the "public discovery" route in
@@ -159,6 +205,9 @@ tenantRoutes.put("/:id/webhook", requireTenantId, async (c) => {
   };
 
   tenantConfigs.set(tenant.id, updatedConfig);
+  if (body.webhookUrl !== undefined && body.webhookUrl) {
+    await upsertLegacyTenantWebhook(tenant.id, body.webhookUrl);
+  }
 
   trackAuditEvent({
     tenantId: tenant.id,

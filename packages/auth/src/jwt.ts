@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { type JWTPayload, jwtVerify, SignJWT } from "jose";
+import {
+  calculateJwkThumbprint,
+  exportJWK,
+  importJWK,
+  importPKCS8,
+  type JWK,
+  type JWTPayload,
+  jwtVerify,
+  SignJWT,
+} from "jose";
 
 export const JWT_ISSUER = "steward";
 export const JWT_AUDIENCE = "steward-api";
@@ -7,6 +16,9 @@ export const ACCESS_TOKEN_EXPIRY = "15m";
 export const ACCESS_TOKEN_EXPIRY_SECONDS = 900;
 export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 export const REFRESH_TOKEN_EXPIRY = "30d";
+export const IDENTITY_TOKEN_EXPIRY = ACCESS_TOKEN_EXPIRY;
+
+export type IdentityJwtAlgorithm = "RS256" | "ES256";
 
 export interface StewardJwtPayload extends JWTPayload {
   tenantId?: string;
@@ -43,6 +55,13 @@ export interface JwtSecretOptions {
   nodeEnv?: string;
   /** Defaults to console.warn. Pass null to silence warnings. */
   warn?: ((message: string) => void) | null;
+}
+
+export interface IdentityJwtConfig {
+  alg: IdentityJwtAlgorithm;
+  kid: string;
+  issuer: string;
+  audience: string;
 }
 
 let warnedDeprecatedSessionSecret = false;
@@ -143,6 +162,103 @@ export function getJwtSecretKey(options?: JwtSecretOptions): Uint8Array {
   return new TextEncoder().encode(getJwtSecret(options));
 }
 
+function normalizePrivateKeyInput(value: string): string {
+  return value.trim().replace(/\\n/g, "\n");
+}
+
+function getIdentityJwtAlgorithm(): IdentityJwtAlgorithm {
+  const alg = process.env.STEWARD_IDENTITY_JWT_ALG?.trim() || "RS256";
+  if (alg !== "RS256" && alg !== "ES256") {
+    throw new Error("STEWARD_IDENTITY_JWT_ALG must be RS256 or ES256");
+  }
+  return alg;
+}
+
+function getIdentityJwtPrivateKeyInput(): string | undefined {
+  return process.env.STEWARD_IDENTITY_JWT_PRIVATE_KEY?.trim() || undefined;
+}
+
+export function isAsymmetricIdentityJwtConfigured(): boolean {
+  return Boolean(getIdentityJwtPrivateKeyInput());
+}
+
+export function getIdentityJwtIssuer(requestOrigin?: string): string {
+  return (
+    process.env.STEWARD_IDENTITY_JWT_ISSUER?.trim().replace(/\/$/, "") ||
+    process.env.APP_URL?.trim().replace(/\/$/, "") ||
+    requestOrigin?.trim().replace(/\/$/, "") ||
+    JWT_ISSUER
+  );
+}
+
+export function getIdentityJwtAudience(): string {
+  return process.env.STEWARD_IDENTITY_JWT_AUDIENCE?.trim() || JWT_AUDIENCE;
+}
+
+async function importIdentityPrivateKey(alg: IdentityJwtAlgorithm) {
+  const input = getIdentityJwtPrivateKeyInput();
+  if (!input) return null;
+
+  const normalized = normalizePrivateKeyInput(input);
+  if (normalized.startsWith("{")) {
+    return importJWK(JSON.parse(normalized) as JWK, alg, { extractable: true });
+  }
+
+  return importPKCS8(normalized, alg, { extractable: true });
+}
+
+async function identityPublicJwk(alg: IdentityJwtAlgorithm): Promise<JWK | null> {
+  const privateKey = await importIdentityPrivateKey(alg);
+  if (!privateKey) return null;
+
+  const publicJwk = await exportJWK(privateKey);
+  publicJwk.alg = alg;
+  publicJwk.use = "sig";
+  publicJwk.kid =
+    process.env.STEWARD_IDENTITY_JWT_KID?.trim() ||
+    publicJwk.kid ||
+    (await calculateJwkThumbprint(publicJwk));
+  delete publicJwk.d;
+  delete publicJwk.dp;
+  delete publicJwk.dq;
+  delete publicJwk.p;
+  delete publicJwk.q;
+  delete publicJwk.qi;
+  return publicJwk;
+}
+
+export async function getIdentityJwks(): Promise<{ keys: JWK[] }> {
+  const alg = getIdentityJwtAlgorithm();
+  const publicJwk = await identityPublicJwk(alg);
+  return { keys: publicJwk ? [publicJwk] : [] };
+}
+
+export async function getIdentityJwtConfig(
+  requestOrigin?: string,
+): Promise<IdentityJwtConfig | null> {
+  if (!isAsymmetricIdentityJwtConfigured()) return null;
+  const alg = getIdentityJwtAlgorithm();
+  const jwks = await getIdentityJwks();
+  const kid = jwks.keys[0]?.kid;
+  if (typeof kid !== "string" || !kid) {
+    throw new Error("Unable to derive identity JWT key id");
+  }
+  return {
+    alg,
+    kid,
+    issuer: getIdentityJwtIssuer(requestOrigin),
+    audience: getIdentityJwtAudience(),
+  };
+}
+
+async function getIdentityJwtSigningConfig(
+  issuer: string,
+  audience: string,
+): Promise<IdentityJwtConfig | null> {
+  const config = await getIdentityJwtConfig(issuer);
+  return config ? { ...config, issuer, audience } : null;
+}
+
 /** Validate JWT env at service startup; throws clear errors for invalid production config. */
 export function validateJwtSecretEnv(options?: JwtSecretOptions): void {
   getJwtSecret(options);
@@ -166,6 +282,33 @@ export async function signJwtPayload(
     .setJti(jti)
     .setExpirationTime(expiresIn as Parameters<SignJWT["setExpirationTime"]>[0])
     .sign(secretKey);
+}
+
+export async function signIdentityJwtPayload(
+  payload: JWTPayload,
+  expiresIn: string = IDENTITY_TOKEN_EXPIRY,
+  issuer: string = getIdentityJwtIssuer(),
+  audience: string = getIdentityJwtAudience(),
+): Promise<string> {
+  const config = await getIdentityJwtSigningConfig(issuer, audience);
+  if (!config) {
+    return signJwtPayload(payload, expiresIn);
+  }
+
+  const privateKey = await importIdentityPrivateKey(config.alg);
+  if (!privateKey) {
+    throw new Error("Identity JWT private key is not configured");
+  }
+
+  const jti = (typeof payload.jti === "string" && payload.jti) || randomUUID();
+  return new SignJWT({ ...payload, jti })
+    .setProtectedHeader({ alg: config.alg, kid: config.kid })
+    .setIssuedAt()
+    .setIssuer(config.issuer)
+    .setAudience(config.audience)
+    .setJti(jti)
+    .setExpirationTime(expiresIn as Parameters<SignJWT["setExpirationTime"]>[0])
+    .sign(privateKey);
 }
 
 export async function verifyJwtPayload(

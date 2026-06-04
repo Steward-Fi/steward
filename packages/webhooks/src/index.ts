@@ -5,6 +5,11 @@ export type {
 } from "./persistent-queue";
 export { PersistentQueue } from "./persistent-queue";
 export { RetryQueue } from "./queue";
+export {
+  decryptWebhookSecret,
+  encryptWebhookSecret,
+  isEncryptedWebhookSecret,
+} from "./secret-codec";
 export type {
   QueuedWebhookDelivery,
   RetryQueueOptions,

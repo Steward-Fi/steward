@@ -19,9 +19,15 @@ describe("webhook event routing", () => {
     expect(toConfiguredWebhookEventType("tx_rejected")).toBe("policy.violation");
   });
 
-  it("does not invent configured events for unsupported vault states", () => {
-    expect(toConfiguredWebhookEventType("tx_failed")).toBeNull();
-    expect(toConfiguredWebhookEventType("tx_confirmed")).toBeNull();
+  it("maps tx_failed and tx_confirmed to their configured webhook events", () => {
+    // Wave D added explicit mappings for these vault states.
+    expect(toConfiguredWebhookEventType("tx_failed")).toBe("transaction.failed");
+    expect(toConfiguredWebhookEventType("tx_confirmed")).toBe("transaction.confirmed");
+  });
+
+  it("returns null for genuinely unsupported vault states", () => {
+    expect(toConfiguredWebhookEventType("tx_unknown_state")).toBeNull();
+    expect(toConfiguredWebhookEventType("")).toBeNull();
   });
 
   it("treats an empty subscription list as all events", () => {

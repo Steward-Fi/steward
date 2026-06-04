@@ -190,6 +190,125 @@
       "when": 1780120200000,
       "tag": "0026_agent_policies",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1780120800000,
+      "tag": "0027_user_identity_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1780121400000,
+      "tag": "0028_tenant_oidc_providers",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1780122000000,
+      "tag": "0029_tenant_sso_domains",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1780122600000,
+      "tag": "0030_tenant_saml_sso_configs",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1780123200000,
+      "tag": "0031_saml_request_replay_storage",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1780123800000,
+      "tag": "0032_user_wallet_identity_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1780124400000,
+      "tag": "0033_agent_signers",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1780125000000,
+      "tag": "0034_agent_key_quorums",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1780125600000,
+      "tag": "0036_condition_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1780126200000,
+      "tag": "0037_intents",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1780126800000,
+      "tag": "0038_contract_allowlist_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1780127400000,
+      "tag": "0040_tenant_gas_sponsorship_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1780128000000,
+      "tag": "0041_sponsored_gas_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1780128600000,
+      "tag": "0042_webhook_config_tenant_url_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1780129200000,
+      "tag": "0043_webhook_delivery_config_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1780129800000,
+      "tag": "0044_webhook_delivery_processing_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "7",
+      "when": 1780130400000,
+      "tag": "0045_wallet_action_metadata",
+      "breakpoints": true
     }
   ]
 }

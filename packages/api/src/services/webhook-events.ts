@@ -1,4 +1,8 @@
-import type { WebhookEventType } from "@stwd/shared";
+import {
+  type LegacyWebhookEventType,
+  type WebhookCatalogEventType,
+  type WebhookEventType,
+} from "@stwd/shared";
 
 export const CONFIGURED_WEBHOOK_EVENT_TYPES = [
   "tx.pending",
@@ -7,13 +11,64 @@ export const CONFIGURED_WEBHOOK_EVENT_TYPES = [
   "tx.signed",
   "spend.threshold",
   "policy.violation",
-] as const satisfies readonly WebhookEventType[];
+  "user.created",
+  "user.authenticated",
+  "user.linked_account",
+  "user.unlinked_account",
+  "user.updated_account",
+  "user.transferred_account",
+  "user.wallet_created",
+  "mfa.enabled",
+  "mfa.disabled",
+  "private_key.exported",
+  "wallet.recovery_setup",
+  "wallet.recovered",
+  "wallet.funds_deposited",
+  "wallet.funds_withdrawn",
+  "transaction.broadcasted",
+  "transaction.confirmed",
+  "transaction.execution_reverted",
+  "transaction.replaced",
+  "transaction.failed",
+  "transaction.provider_error",
+  "transaction.still_pending",
+  "user_operation.completed",
+  "user_operation.failed",
+  "intent.created",
+  "intent.authorized",
+  "intent.executed",
+  "intent.failed",
+  "intent.rejected",
+  "intent.canceled",
+  "intent.expired",
+  "wallet_action.transfer.created",
+  "wallet_action.transfer.succeeded",
+  "wallet_action.transfer.rejected",
+  "wallet_action.transfer.failed",
+  "wallet_action.swap.created",
+  "wallet_action.swap.succeeded",
+  "wallet_action.swap.rejected",
+  "wallet_action.swap.failed",
+  "wallet_action.send_calls.created",
+  "wallet_action.send_calls.succeeded",
+  "wallet_action.send_calls.rejected",
+  "wallet_action.send_calls.failed",
+  "wallet_action.earn_deposit.created",
+  "wallet_action.earn_deposit.succeeded",
+  "wallet_action.earn_deposit.rejected",
+  "wallet_action.earn_deposit.failed",
+  "wallet_action.earn_withdraw.created",
+  "wallet_action.earn_withdraw.succeeded",
+  "wallet_action.earn_withdraw.rejected",
+  "wallet_action.earn_withdraw.failed",
+  "wallet_action.earn_incentive_claim.created",
+  "wallet_action.earn_incentive_claim.succeeded",
+  "wallet_action.earn_incentive_claim.rejected",
+  "wallet_action.earn_incentive_claim.failed",
+] as const satisfies readonly WebhookCatalogEventType[];
 
 export type ConfiguredWebhookEventType = (typeof CONFIGURED_WEBHOOK_EVENT_TYPES)[number];
-type VaultWebhookEventAlias = Extract<
-  WebhookEventType,
-  "approval_required" | "tx_signed" | "tx_confirmed" | "tx_failed" | "tx_rejected"
->;
+type VaultWebhookEventAlias = LegacyWebhookEventType;
 
 export type DispatchableWebhookEventType = WebhookEventType;
 
@@ -21,6 +76,8 @@ const CONFIGURED_EVENT_SET = new Set<string>(CONFIGURED_WEBHOOK_EVENT_TYPES);
 const VAULT_EVENT_ALIAS_MAP: Partial<Record<VaultWebhookEventAlias, ConfiguredWebhookEventType>> = {
   approval_required: "tx.pending",
   tx_signed: "tx.signed",
+  tx_confirmed: "transaction.confirmed",
+  tx_failed: "transaction.failed",
   tx_rejected: "policy.violation",
 };
 

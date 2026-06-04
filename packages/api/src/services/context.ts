@@ -13,7 +13,17 @@ import {
   validateApiKey,
   verifyToken,
 } from "@stwd/auth";
-import { getDb, policies, tenants, toPolicyRule, transactions, userTenants } from "@stwd/db";
+import {
+  conditionSetItems,
+  conditionSets,
+  getDb,
+  inArray,
+  policies,
+  tenants,
+  toPolicyRule,
+  transactions,
+  userTenants,
+} from "@stwd/db";
 import { PolicyEngine } from "@stwd/policy-engine";
 import {
   type AgentIdentity,
@@ -223,10 +233,13 @@ function requireEnv(name: string): string {
   return value;
 }
 
-export const DATABASE_URL = requireEnv("DATABASE_URL");
+export const DATABASE_URL =
+  process.env.STEWARD_PGLITE_MEMORY === "true" ? "pglite://memory" : requireEnv("DATABASE_URL");
 export const MASTER_PASSWORD = requireEnv("STEWARD_MASTER_PASSWORD");
 
-process.env.DATABASE_URL = DATABASE_URL;
+if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+  process.env.DATABASE_URL = DATABASE_URL;
+}
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 
@@ -277,9 +290,18 @@ export type AppVariables = {
   tenantId: string;
   userId?: string;
   tenantRole?: string;
+  sessionMfaVerifiedAt?: number;
+  sessionMfaMethod?: string;
   agentScope?: string;
   agentSubject?: string;
-  authType?: "api-key" | "session-jwt" | "agent-token" | "dashboard-jwt" | "platform";
+  authType?:
+    | "api-key"
+    | "app-secret"
+    | "session-jwt"
+    | "agent-token"
+    | "dashboard-jwt"
+    | "platform";
+  requestId?: string;
 };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
@@ -319,6 +341,73 @@ export async function getPolicySet(tenantId: string, agentId: string): Promise<P
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
   return tenantConfigs.get(tenantId)?.defaultPolicies || [];
+}
+
+export async function loadConditionSetsForPolicies(
+  tenantId: string,
+  policySet: PolicyRule[],
+): Promise<Record<string, string[]>> {
+  const ids = getConditionSetIdsFromPolicies(policySet);
+
+  if (ids.length === 0) return {};
+
+  const existingSets = await db
+    .select({ id: conditionSets.id })
+    .from(conditionSets)
+    .where(and(eq(conditionSets.tenantId, tenantId), inArray(conditionSets.id, ids)));
+  const existingIds = existingSets.map((row) => row.id);
+
+  if (existingIds.length === 0) return {};
+
+  const rows = await db
+    .select({
+      conditionSetId: conditionSetItems.conditionSetId,
+      value: conditionSetItems.value,
+    })
+    .from(conditionSetItems)
+    .where(
+      and(
+        eq(conditionSetItems.tenantId, tenantId),
+        inArray(conditionSetItems.conditionSetId, existingIds),
+      ),
+    );
+
+  const loaded: Record<string, string[]> = {};
+  for (const id of existingIds) loaded[id] = [];
+  for (const row of rows) loaded[row.conditionSetId].push(row.value);
+  return loaded;
+}
+
+export function getConditionSetIdsFromPolicies(policySet: PolicyRule[]): string[] {
+  return Array.from(
+    new Set(
+      policySet
+        .filter((policy) => policy.type === "condition-set")
+        .map((policy) => policy.config.conditionSetId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+}
+
+export async function getConditionSetReferenceValidationError(
+  tenantId: string,
+  policySet: PolicyRule[],
+): Promise<string | null> {
+  const ids = getConditionSetIdsFromPolicies(policySet);
+  if (ids.length === 0) return null;
+
+  const existingRows = await db
+    .select({ id: conditionSets.id })
+    .from(conditionSets)
+    .where(and(eq(conditionSets.tenantId, tenantId), inArray(conditionSets.id, ids)));
+  const existingIds = new Set(existingRows.map((row) => row.id));
+  const missingIds = ids.filter((id) => !existingIds.has(id));
+
+  if (missingIds.length > 0) {
+    return `condition-set.conditionSetId not found for tenant: ${missingIds.join(", ")}`;
+  }
+
+  return null;
 }
 
 export async function getTransactionStats(agentId: string) {
@@ -411,6 +500,12 @@ export async function tenantAuth(
         );
 
         if (payload.userId) c.set("userId", payload.userId);
+        if (typeof (payload as { mfaVerifiedAt?: unknown }).mfaVerifiedAt === "number") {
+          c.set(
+            "sessionMfaVerifiedAt",
+            (payload as unknown as { mfaVerifiedAt: number }).mfaVerifiedAt,
+          );
+        }
         if (isAgentToken) {
           c.set("agentScope", payload.agentId);
           const tokenSubject = (payload as { sub?: unknown }).sub;
@@ -476,6 +571,9 @@ export async function sessionAuth(c: Context<{ Variables: AppVariables }>, next:
     "tenantConfig",
     tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name },
   );
+  if (typeof (payload as { mfaVerifiedAt?: unknown }).mfaVerifiedAt === "number") {
+    c.set("sessionMfaVerifiedAt", (payload as unknown as { mfaVerifiedAt: number }).mfaVerifiedAt);
+  }
 
   await next();
 }
@@ -571,18 +669,26 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
   );
   c.set("authType", "dashboard-jwt");
   if (payload.userId) c.set("userId", payload.userId);
+  if (typeof (payload as { mfaVerifiedAt?: unknown }).mfaVerifiedAt === "number") {
+    c.set("sessionMfaVerifiedAt", (payload as unknown as { mfaVerifiedAt: number }).mfaVerifiedAt);
+  }
 
   return next();
 }
 
 // Re-export drizzle schemas used in route modules
 export {
+  agentKeyQuorums,
+  agentSigners,
   agents,
   agentWallets,
   approvalQueue,
   autoApprovalRules,
+  conditionSetItems,
+  conditionSets,
   encryptedChainKeys,
   encryptedKeys,
+  intents,
   policies,
   tenants,
   toPolicyRule,
@@ -592,7 +698,6 @@ export {
   webhookConfigs,
   webhookDeliveries,
 } from "@stwd/db";
-
 export type {
   AgentBalance,
   AgentIdentity,

@@ -27,6 +27,8 @@ import {
   RATE_LIMIT_WINDOW_MS,
 } from "./services/context";
 import { startRetentionScheduler } from "./services/retention";
+import { startTransactionReceiptPollingScheduler } from "./services/transaction-receipt-poller";
+import { startWebhookRetryScheduler } from "./services/webhook-retry-scheduler";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -47,6 +49,8 @@ validateJwtSecretEnv();
 const requestLog = new Map<string, { count: number; resetAt: number }>();
 let isShuttingDown = false;
 let cancelRetention: (() => void) | undefined;
+let cancelTransactionReceiptPolling: (() => void) | undefined;
+let cancelWebhookRetryScheduler: (() => void) | undefined;
 
 app.use("*", async (c, next) => {
   if (c.req.path === "/health" || c.req.path === "/ready") return next();
@@ -157,6 +161,8 @@ if (shouldUsePGLite()) {
 
 if (migrationsRan) {
   cancelRetention = startRetentionScheduler();
+  cancelTransactionReceiptPolling = startTransactionReceiptPollingScheduler();
+  cancelWebhookRetryScheduler = startWebhookRetryScheduler();
 }
 
 // ─── Redis + auth store initialization (non-blocking) ───────────────────────
@@ -194,6 +200,8 @@ const shutdown = async (signal: string) => {
   clearInterval(requestLogCleanupTimer);
   if (nonceCleanupTimer) clearInterval(nonceCleanupTimer);
   if (cancelRetention) cancelRetention();
+  if (cancelTransactionReceiptPolling) cancelTransactionReceiptPolling();
+  if (cancelWebhookRetryScheduler) cancelWebhookRetryScheduler();
   requestLog.clear();
 
   try {
