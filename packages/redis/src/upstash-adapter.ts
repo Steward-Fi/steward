@@ -37,6 +37,7 @@ export interface IoredisLike {
     condition: "NX",
   ): Promise<string | null>;
   get(key: string): Promise<string | null>;
+  getdel(key: string): Promise<string | null>;
   del(...keys: string[]): Promise<number>;
   setex(key: string, ttlSeconds: number, value: string): Promise<string>;
   expire(key: string, ttlSeconds: number): Promise<number>;
@@ -190,6 +191,26 @@ export function createUpstashIoredisAdapter(upstash: UpstashRedis): IoredisLike 
       // policy-cache double-parses, treats the value as corrupted, and deletes
       // the entry, defeating the cache under the Upstash driver.
       const raw = (await upstash.get<unknown>(key)) as unknown;
+      if (raw === null || raw === undefined) return null;
+      if (typeof raw === "string") return raw;
+      try {
+        return JSON.stringify(raw);
+      } catch {
+        return null;
+      }
+    },
+
+    async getdel(key: string): Promise<string | null> {
+      // Upstash supports GETDEL natively, preserving the atomic
+      // read-and-delete that one-time-token consumption relies on.
+      //
+      // Apply the same normalization as get(): Upstash auto-deserializes any
+      // value that looks like JSON, but our callers store values as strings
+      // and JSON.parse them themselves (e.g. consumeSiweNonce does
+      // JSON.parse(raw)). If we returned the deserialized object, the caller's
+      // JSON.parse would coerce it to "[object Object]" and silently lose the
+      // record. Normalizing back to a string keeps the round-trip intact.
+      const raw = (await upstash.getdel<unknown>(key)) as unknown;
       if (raw === null || raw === undefined) return null;
       if (typeof raw === "string") return raw;
       try {
