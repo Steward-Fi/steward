@@ -52,6 +52,10 @@ import {
   signSolanaMessage,
   signSolanaTransaction,
 } from "./solana";
+import {
+  assertParsedSolanaTransferMatches,
+  isVersionedTransactionBytes,
+} from "./solana-instructions";
 import { getTokenBalances as fetchTokenBalances, type TokenBalance } from "./tokens";
 import {
   ENTRY_POINT_V07,
@@ -1742,28 +1746,55 @@ export class Vault {
     const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(chainId);
     const shouldBroadcast = request.broadcast !== false;
 
-    // Deserialize the transaction from base64
-    const { Transaction: SolTransaction, Connection } = await import("@solana/web3.js");
+    // Deserialize the transaction (legacy OR v0/versioned). A versioned message
+    // sets the high bit of its first byte; legacy Transaction.from() throws on it
+    // ("Versioned messages must be deserialized with VersionedMessage..."), so
+    // every v0 tx — the modern default, mandatory for address-lookup-table DeFi
+    // like Jupiter — would 500 at signing after passing the (version-aware)
+    // policy gate. Branch on the version byte so both shapes sign.
+    const {
+      Transaction: SolTransaction,
+      VersionedTransaction,
+      Connection,
+    } = await import("@solana/web3.js");
     const txBytes = Uint8Array.from(atob(request.transaction), (c) => c.charCodeAt(0));
-    const tx = SolTransaction.from(txBytes);
-    if (request.expectedTo !== undefined || request.expectedValue !== undefined) {
+
+    const requireEnvelope = (): { to: string; lamports: bigint } | null => {
+      if (request.expectedTo === undefined && request.expectedValue === undefined) return null;
       if (request.expectedTo === undefined || request.expectedValue === undefined) {
         throw new Error("Solana transaction policy envelope requires expectedTo and expectedValue");
       }
-      assertSolanaTransferTransactionMatches(tx, {
-        from: keypair.publicKey,
-        to: request.expectedTo,
-        lamports: BigInt(request.expectedValue),
-      });
-    }
+      return { to: request.expectedTo, lamports: BigInt(request.expectedValue) };
+    };
 
-    // Sign the transaction
-    tx.partialSign(keypair);
+    let signedBytes: Uint8Array;
+    if (isVersionedTransactionBytes(txBytes)) {
+      const vtx = VersionedTransaction.deserialize(txBytes);
+      const envelope = requireEnvelope();
+      if (envelope) {
+        // The byte-level legacy assertion can't read a v0 message; verify the
+        // envelope via the version-aware parser instead.
+        assertParsedSolanaTransferMatches(request.transaction, envelope);
+      }
+      vtx.sign([keypair]);
+      signedBytes = vtx.serialize();
+    } else {
+      const tx = SolTransaction.from(txBytes);
+      const envelope = requireEnvelope();
+      if (envelope) {
+        assertSolanaTransferTransactionMatches(tx, {
+          from: keypair.publicKey,
+          to: envelope.to,
+          lamports: envelope.lamports,
+        });
+      }
+      tx.partialSign(keypair);
+      signedBytes = tx.serialize();
+    }
 
     if (shouldBroadcast) {
       const connection = new Connection(rpcUrl, "confirmed");
-      const rawTx = tx.serialize();
-      const sig = await connection.sendRawTransaction(rawTx, {
+      const sig = await connection.sendRawTransaction(signedBytes, {
         skipPreflight: false,
         preflightCommitment: "confirmed",
       });
@@ -1783,8 +1814,7 @@ export class Vault {
     }
 
     // Return serialized signed transaction as base64
-    const rawBytes = tx.serialize();
-    const serialized = btoa(Array.from(rawBytes, (b) => String.fromCharCode(b)).join(""));
+    const serialized = btoa(Array.from(signedBytes, (b) => String.fromCharCode(b)).join(""));
     return {
       signature: serialized,
       broadcast: false,

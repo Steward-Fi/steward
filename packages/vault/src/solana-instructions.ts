@@ -877,3 +877,62 @@ export function detectSolanaPolicyConflicts(
 
   return conflicts;
 }
+
+/**
+ * Version-agnostic transfer-envelope assertion (works for legacy AND v0/versioned
+ * transactions, since the parser deserializes both). Throws unless the serialized
+ * transaction fully parses and its derived (to, value) match the expected policy
+ * envelope. Used by the vault's sign path for v0 transactions, where the legacy
+ * byte-level `assertSolanaTransferTransactionMatches` cannot apply.
+ */
+export function assertParsedSolanaTransferMatches(
+  serialized: string,
+  expected: { to: string; lamports: bigint },
+): void {
+  if (expected.lamports < 0n) {
+    throw new Error("expected Solana transfer lamports must be non-negative");
+  }
+  const summary = parseSolanaTransaction(serialized);
+  if (!summary.fullyParsed) {
+    throw new Error(
+      "Solana transaction is not fully parseable; cannot verify it against the policy envelope",
+    );
+  }
+  const derived = deriveSolanaPolicyFields(summary);
+  const conflicts = detectSolanaPolicyConflicts(derived, {
+    to: expected.to,
+    value: expected.lamports.toString(),
+  });
+  if (conflicts.length > 0) {
+    throw new Error(`Solana transfer does not match the policy envelope: ${conflicts.join("; ")}`);
+  }
+}
+
+/** Read a shortvec / compact-u16 length prefix. Returns the value + bytes consumed. */
+function readCompactU16(bytes: Uint8Array, offset: number): { value: number; bytesRead: number } {
+  let value = 0;
+  let bytesRead = 0;
+  for (;;) {
+    const byte = bytes[offset + bytesRead];
+    if (byte === undefined) break;
+    value |= (byte & 0x7f) << (7 * bytesRead);
+    bytesRead += 1;
+    if ((byte & 0x80) === 0) break;
+  }
+  return { value, bytesRead };
+}
+
+/**
+ * True if a serialized transaction carries a versioned (v0+) message. The wire
+ * format is `[sig_count (shortvec)][sig_count × 64 bytes][message]`, and a
+ * versioned message sets the high bit of its first byte while a legacy message's
+ * first byte (numRequiredSignatures) is < 128. The signature array MUST be skipped
+ * first — the transaction's own leading byte is the signature COUNT, not the
+ * version — so naive `bytes[0] & 0x80` is wrong.
+ */
+export function isVersionedTransactionBytes(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false;
+  const { value: sigCount, bytesRead } = readCompactU16(bytes, 0);
+  const firstMessageByte = bytes[bytesRead + sigCount * 64];
+  return firstMessageByte !== undefined && (firstMessageByte & 0x80) !== 0;
+}
