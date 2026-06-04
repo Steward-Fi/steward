@@ -681,6 +681,22 @@ export function idempotencyMiddleware(options?: { store?: IdempotencyStore; ttlM
 
     try {
       await next();
+      // Never cache transient server errors (5xx). A handler that *returns* a
+      // 500/502/503 as a normal Response is a retryable outcome, not a settled
+      // one — caching it as "completed" for the full TTL would replay the error
+      // and poison every legitimate retry of this Idempotency-Key. Release the
+      // reservation so a retry re-executes the handler.
+      if (c.res.status >= 500) {
+        try {
+          await store.delete(storageKey);
+          recordIdempotencyMetric(metricsTenantId, "releasedOnError");
+        } catch {
+          recordIdempotencyMetric(metricsTenantId, "storeErrors");
+          console.error("[steward:idempotency] Failed to release reservation after 5xx");
+        }
+        c.header("Idempotency-Replayed", "false");
+        return;
+      }
       try {
         if (isAuthTokenResponseReplaySuppressedPath(c.req.path)) {
           await store.setCompleted(storageKey);

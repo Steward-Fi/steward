@@ -408,12 +408,23 @@ export class WebhookDispatcher {
     while (attempts <= this.maxRetries) {
       attempts += 1;
 
+      // `X-Steward-Timestamp` (signed) + `X-Steward-Delivery-Id` are fixed across
+      // retries so receivers can verify the byte-stable signature and dedup a
+      // retry against the original event. But the signed timestamp also drives
+      // the SDK verifier's freshness window (default 300s); reusing it on a slow
+      // retry would be rejected as stale. So we additionally emit an unsigned,
+      // per-attempt `X-Steward-Sent-At` (unix seconds) with the actual send time.
+      // Freshness-checking receivers should check `X-Steward-Sent-At` for
+      // transport recency and dedup on `X-Steward-Delivery-Id`.
+      const sentAt = Math.floor(Date.now() / 1000).toString();
+
       try {
         const response = await postWebhook(config.url, {
           headers: {
             "Content-Type": "application/json",
             "X-Steward-Event": event.type,
             "X-Steward-Timestamp": timestamp,
+            "X-Steward-Sent-At": sentAt,
             "X-Steward-Signature": signature,
             "X-Steward-Delivery-Id": deliveryId,
           },
