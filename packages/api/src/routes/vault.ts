@@ -5576,6 +5576,33 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     });
   }
 
+  // ── Fail-closed gate: more than one value recipient / mint ──────────────────
+  // The policy engine evaluates a single (to, value) envelope. A fully-parsed tx
+  // that pays MULTIPLE distinct recipients, or moves MULTIPLE token mints, cannot
+  // be fully policy-checked — only the first recipient/mint would be enforced, so
+  // the approved-address allowlist (and per-mint accounting) would be bypassed for
+  // the rest. Reject unless an audited blind-signing opt-in is set.
+  const distinctValueRecipients = new Set<string>([
+    ...derived.summary.lamportRecipients,
+    ...derived.summary.tokenTransfers.map((t) => t.destination),
+  ]);
+  if (distinctValueRecipients.size > 1 || derived.mints.length > 1) {
+    if (!allowUnsafeSolanaBlindSigning()) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Solana transaction pays multiple recipients or moves multiple token mints; the policy engine can only enforce a single recipient/mint, so it was rejected (fail-closed). Set STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING=true only for audited multi-recipient flows.",
+          data: {
+            recipients: [...distinctValueRecipients],
+            mints: derived.mints,
+          },
+        },
+        422,
+      );
+    }
+  }
+
   // ── Spoof check: caller hints must not CONFLICT with the parsed truth ───────
   const conflicts = detectSolanaPolicyConflicts(derived, { to: body.to, value: body.value });
   if (conflicts.length > 0) {

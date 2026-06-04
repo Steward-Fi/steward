@@ -375,3 +375,92 @@ describe("recognised value-neutral programs", () => {
     expect(summary.totalLamports).toBe("0");
   });
 });
+
+// ─── Fund-safety: CreateAccount counting + multi-recipient/multi-mint exposure ──
+
+describe("parseSolanaTransaction — CreateAccount funding is counted", () => {
+  test("system:CreateAccount funding lamports count toward totalLamports + recipient", () => {
+    const from = Keypair.generate().publicKey;
+    const newAccount = Keypair.generate().publicKey;
+    const lamports = 100_000_000n; // 0.1 SOL
+    const ix = SystemProgram.createAccount({
+      fromPubkey: from,
+      newAccountPubkey: newAccount,
+      lamports: Number(lamports),
+      space: 0,
+      programId: SystemProgram.programId,
+    });
+    const tx = new Transaction({ feePayer: from, recentBlockhash: RECENT_BLOCKHASH }).add(ix);
+
+    const summary = parseSolanaTransaction(legacyToBase64(tx));
+    expect(summary.fullyParsed).toBe(true);
+    // Before the fix this was "0" (CreateAccount lamports were parsed but never summed).
+    expect(summary.totalLamports).toBe(lamports.toString());
+    expect(summary.lamportRecipients).toContain(newAccount.toBase58());
+
+    const derived = deriveSolanaPolicyFields(summary);
+    expect(derived.value).toBe(lamports.toString());
+    expect(derived.movesNativeSol).toBe(true);
+  });
+
+  test("system:CreateAccountWithSeed is fail-closed (lamports not decodable)", () => {
+    // disc 3 = CreateAccountWithSeed; accounts [from, newAccount]. Its funding
+    // lamports sit at a variable offset after the seed, so the parser must NOT
+    // mark it fully parsed.
+    const from = Keypair.generate().publicKey;
+    const newAccount = Keypair.generate().publicKey;
+    const data = new Uint8Array(4 + 32 + 8);
+    data[0] = 3;
+    const ix = rawIx(SystemProgram.programId, [from, newAccount], data);
+    const tx = new Transaction({ feePayer: from, recentBlockhash: RECENT_BLOCKHASH }).add(ix);
+
+    const summary = parseSolanaTransaction(legacyToBase64(tx));
+    expect(summary.fullyParsed).toBe(false);
+  });
+});
+
+describe("parseSolanaTransaction — multi-recipient / multi-mint are exposed", () => {
+  test("a 2-recipient SOL transfer exposes BOTH recipients", () => {
+    const from = Keypair.generate().publicKey;
+    const r1 = Keypair.generate().publicKey;
+    const r2 = Keypair.generate().publicKey;
+    const tx = new Transaction({ feePayer: from, recentBlockhash: RECENT_BLOCKHASH })
+      .add(SystemProgram.transfer({ fromPubkey: from, toPubkey: r1, lamports: 1000 }))
+      .add(SystemProgram.transfer({ fromPubkey: from, toPubkey: r2, lamports: 2000 }));
+
+    const summary = parseSolanaTransaction(legacyToBase64(tx));
+    expect([...summary.lamportRecipients].sort()).toEqual([r1.toBase58(), r2.toBase58()].sort());
+    // The single (to,value) envelope only carries the first recipient — which is
+    // exactly why the route fails closed when there is more than one.
+    const derived = deriveSolanaPolicyFields(summary);
+    expect(derived.to).toBe(summary.lamportRecipients[0]);
+  });
+
+  test("a 2-mint token transfer exposes BOTH mints", () => {
+    const from = Keypair.generate().publicKey;
+    const mintA = Keypair.generate().publicKey;
+    const mintB = Keypair.generate().publicKey;
+    const acc = () => Keypair.generate().publicKey;
+    const ixs = [
+      tokenTransferCheckedIx({
+        source: acc(),
+        mint: mintA,
+        destination: acc(),
+        owner: from,
+        amount: 10n,
+        decimals: 6,
+      }),
+      tokenTransferCheckedIx({
+        source: acc(),
+        mint: mintB,
+        destination: acc(),
+        owner: from,
+        amount: 20n,
+        decimals: 6,
+      }),
+    ];
+    const summary = parseSolanaTransaction(v0ToBase64(ixs, from));
+    const derived = deriveSolanaPolicyFields(summary);
+    expect([...derived.mints].sort()).toEqual([mintA.toBase58(), mintB.toBase58()].sort());
+  });
+});
