@@ -374,18 +374,14 @@ function decodeSystemInstruction(
       });
     }
     case SYSTEM_IX.CreateAccountWithSeed: {
-      if (accounts.length < 2) return unparsed("system CreateAccountWithSeed missing accounts");
-      // lamports sits after disc(4) + base pubkey(32) + seed(u64 len + bytes).
-      // Seed length is variable; only decode lamports when layout is unambiguous.
-      // To stay fail-safe we decode just the funder/new-account + flag lamports
-      // as unknown rather than risk a wrong offset.
-      return base({
-        instructionType: "system:CreateAccountWithSeed",
-        fields: {
-          from: accounts[0].toBase58(),
-          newAccount: accounts[1].toBase58(),
-        },
-      });
+      // The funding lamports sit after a variable-length seed (disc + base pubkey
+      // + u64 seed-len + seed bytes), so the amount is at an offset we cannot
+      // decode safely. A "fully parsed" CreateAccountWithSeed would move SOL the
+      // policy never accounts for — fail closed so it requires an audited
+      // blind-sign opt-in rather than silently passing with value=0.
+      return unparsed(
+        "system CreateAccountWithSeed funds an account by a non-decodable (variable-offset) lamport amount",
+      );
     }
     case SYSTEM_IX.Assign: {
       if (accounts.length < 1) return unparsed("system Assign missing account");
@@ -704,10 +700,13 @@ function summarize(
     }
     if (
       ix.instructionType === "system:Transfer" ||
-      ix.instructionType === "system:TransferWithSeed"
+      ix.instructionType === "system:TransferWithSeed" ||
+      ix.instructionType === "system:CreateAccount"
     ) {
       const lamports = ix.fields.lamports;
-      const to = ix.fields.to;
+      // A Transfer sends to `to`; a CreateAccount funds a NEW account (`newAccount`).
+      // Both move native SOL and must be counted toward the spend cap / recipients.
+      const to = ix.fields.to ?? ix.fields.newAccount;
       if (typeof lamports === "string") totalLamports += BigInt(lamports);
       if (typeof to === "string" && !lamportRecipients.includes(to)) {
         lamportRecipients.push(to);
