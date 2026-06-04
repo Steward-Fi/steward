@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { closeDb, getDb, secrets, tenants } from "@stwd/db";
+import { agents, closeDb, getDb, secrets, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 import { SecretVault } from "../secret-vault";
@@ -25,7 +25,19 @@ afterAll(async () => {
 async function ensureTenant(tenantId: string) {
   await getDb()
     .insert(tenants)
-    .values({ id: tenantId, name: tenantId, apiKeyHash: "hash" })
+    .values({ id: tenantId, name: tenantId, apiKeyHash: `hash-${tenantId}` })
+    .onConflictDoNothing();
+}
+
+async function ensureAgent(tenantId: string, agentId: string) {
+  await getDb()
+    .insert(agents)
+    .values({
+      id: agentId,
+      tenantId,
+      name: agentId,
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    })
     .onConflictDoNothing();
 }
 
@@ -33,9 +45,11 @@ describe("SecretVault lifecycle semantics", () => {
   it("moves existing routes to the new secret version on rotation", async () => {
     const tenantId = `tenant-rotate-${crypto.randomUUID()}`;
     await ensureTenant(tenantId);
+    await ensureAgent(tenantId, "agent-openai");
 
     const secret = await vault.createSecret(tenantId, "openai", "sk-old");
     const route = await vault.createRoute(tenantId, secret.id, {
+      agentId: "agent-openai",
       hostPattern: "api.openai.com",
       injectAs: "header",
       injectKey: "authorization",
@@ -58,9 +72,11 @@ describe("SecretVault lifecycle semantics", () => {
   it("deletes all dependent routes when deleting a secret family", async () => {
     const tenantId = `tenant-delete-${crypto.randomUUID()}`;
     await ensureTenant(tenantId);
+    await ensureAgent(tenantId, "agent-anthropic");
 
     const secret = await vault.createSecret(tenantId, "anthropic", "sk-live");
     const route = await vault.createRoute(tenantId, secret.id, {
+      agentId: "agent-anthropic",
       hostPattern: "api.anthropic.com",
       injectAs: "header",
       injectKey: "x-api-key",
@@ -76,6 +92,7 @@ describe("SecretVault lifecycle semantics", () => {
   it("rejects creating routes for expired secrets", async () => {
     const tenantId = `tenant-expired-${crypto.randomUUID()}`;
     await ensureTenant(tenantId);
+    await ensureAgent(tenantId, "agent-expired");
 
     const expiredSecret = await vault.createSecret(tenantId, "expired", "sk-expired", {
       expiresAt: new Date(Date.now() - 60_000),
@@ -83,10 +100,40 @@ describe("SecretVault lifecycle semantics", () => {
 
     await expect(
       vault.createRoute(tenantId, expiredSecret.id, {
-        hostPattern: "api.example.com",
+        agentId: "agent-expired",
+        hostPattern: "api.openai.com",
         injectAs: "header",
         injectKey: "authorization",
       }),
     ).rejects.toThrow(/expired/);
+  });
+
+  it("rejects unsafe route configs at the vault boundary", async () => {
+    const tenantId = `tenant-route-hardening-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, "agent-route-hardening");
+    const secret = await vault.createSecret(tenantId, "openai-hardening", "sk-hardening");
+
+    await expect(
+      vault.createRoute(tenantId, secret.id, {
+        agentId: "agent-route-hardening",
+        hostPattern: "*",
+        pathPattern: "/v1/chat/completions",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "authorization",
+      }),
+    ).rejects.toThrow(/hostPattern must be an explicit allowed host/);
+
+    await expect(
+      vault.createRoute(tenantId, secret.id, {
+        agentId: "missing-agent",
+        hostPattern: "api.openai.com",
+        pathPattern: "/v1/chat/completions",
+        method: "POST",
+        injectAs: "header",
+        injectKey: "authorization",
+      }),
+    ).rejects.toThrow(/Agent missing-agent not found/);
   });
 });

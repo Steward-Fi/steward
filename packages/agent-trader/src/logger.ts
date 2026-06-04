@@ -60,8 +60,45 @@ export function logSubmission(entry: Omit<SubmissionLog, "timestamp">): void {
   emit(level, "submission", { timestamp: new Date().toISOString(), ...entry });
 }
 
+/**
+ * Field names whose values are masked before a webhook payload is logged.
+ * Tx hashes/ids (txHash, txId, blockNumber, etc.) are intentionally NOT listed
+ * so they remain greppable; this only scrubs obviously-sensitive material that
+ * could leak keys/credentials if an upstream event ever carried them.
+ */
+const SENSITIVE_WEBHOOK_FIELDS = [
+  "privatekey",
+  "secret",
+  "mnemonic",
+  "seed",
+  "password",
+  "apikey",
+  "token",
+  "authorization",
+  "signature",
+];
+
+function redactWebhookData(data: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(data)) {
+    const normalized = key.toLowerCase().replace(/[_-]/g, "");
+    if (SENSITIVE_WEBHOOK_FIELDS.some((f) => normalized.includes(f))) {
+      out[key] = "[redacted]";
+    } else if (value && typeof value === "object" && !Array.isArray(value)) {
+      out[key] = redactWebhookData(value as Record<string, unknown>);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 export function logWebhook(entry: Omit<WebhookLog, "timestamp">): void {
-  emit("info", "webhook", { timestamp: new Date().toISOString(), ...entry });
+  emit("info", "webhook", {
+    timestamp: new Date().toISOString(),
+    ...entry,
+    data: redactWebhookData(entry.data),
+  });
 }
 
 export function logInfo(message: string, meta?: Record<string, unknown>): void {

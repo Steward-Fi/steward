@@ -20,6 +20,7 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
+import { APPLE_ISSUER, APPLE_JWKS_URI, verifyAppleIdToken } from "./apple";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -30,9 +31,41 @@ export interface OAuthProvider {
   tokenUrl: string;
   userInfoUrl: string;
   scopes: string[];
+  scopeDelimiter?: " " | ",";
   /** If true, PKCE (S256) is added to the auth URL and required in code exchange. */
   requiresPkce?: boolean;
   emailUrl?: string;
+  profileMap?: OAuthProfileMap;
+  /**
+   * Overrides the OAuth `client_id` parameter name on the authorize and token
+   * requests. TikTok, for example, names the parameter `client_key` rather than
+   * `client_id`. The internal config field stays `clientId`; only the wire
+   * parameter name changes. Defaults to "client_id".
+   */
+  clientIdParam?: string;
+  /**
+   * Marks the provider as OIDC: the user's identity is derived from the
+   * `id_token` returned by the token endpoint (verified against `oidcJwksUri`),
+   * not from a userinfo endpoint. Used for "Sign in with Apple", which exposes
+   * no userinfo endpoint. When set, getUserInfo() verifies the id_token from the
+   * preceding exchangeCode() call instead of calling userInfoUrl.
+   */
+  oidc?: OAuthOidcConfig;
+}
+
+export interface OAuthOidcConfig {
+  /** Expected issuer (`iss`) of the id_token. */
+  issuer: string;
+  /** JWKS endpoint used to verify the id_token signature. */
+  jwksUri: string;
+}
+
+export interface OAuthProfileMap {
+  id?: string;
+  email?: string;
+  name?: string;
+  picture?: string;
+  emailVerified?: string;
 }
 
 export interface OAuthTokenResponse {
@@ -41,6 +74,8 @@ export interface OAuthTokenResponse {
   expires_in?: number;
   refresh_token?: string;
   scope?: string;
+  /** Present for OIDC providers (e.g. Apple). A JWT carrying the user identity. */
+  id_token?: string;
 }
 
 export interface OAuthUserInfo {
@@ -65,14 +100,38 @@ export interface AuthUrlResult {
 
 // ─── Built-in Provider Configs ───────────────────────────────────────────────
 
-const BUILT_IN_PROVIDERS = ["google", "discord", "twitter", "github"] as const;
+const BUILT_IN_PROVIDERS = [
+  "google",
+  "discord",
+  "twitter",
+  "github",
+  "linkedin",
+  "spotify",
+  "twitch",
+  "instagram",
+  "line",
+  "apple",
+  "tiktok",
+] as const;
 type BuiltInProvider = (typeof BUILT_IN_PROVIDERS)[number];
+const CUSTOM_PROVIDER_PREFIX = "custom:";
+
+function normalizeCustomProviderId(id: string): string {
+  return id.startsWith(CUSTOM_PROVIDER_PREFIX) ? id.slice(CUSTOM_PROVIDER_PREFIX.length) : id;
+}
+
+function customProviderName(id: string): string {
+  return `${CUSTOM_PROVIDER_PREFIX}${normalizeCustomProviderId(id)}`;
+}
 
 /**
  * Returns true if the given provider name is a known built-in OAuth provider.
  */
-export function isBuiltInProvider(provider: string): provider is BuiltInProvider {
-  return (BUILT_IN_PROVIDERS as readonly string[]).includes(provider);
+export function isBuiltInProvider(provider: string): provider is BuiltInProvider | string {
+  return (
+    (BUILT_IN_PROVIDERS as readonly string[]).includes(provider) ||
+    Boolean(getCustomProviderConfig(provider))
+  );
 }
 
 /**
@@ -80,18 +139,10 @@ export function isBuiltInProvider(provider: string): provider is BuiltInProvider
  */
 export function getEnabledProviders(): string[] {
   const enabled: string[] = [];
-  if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-    enabled.push("google");
+  for (const provider of BUILT_IN_PROVIDERS) {
+    if (hasProviderCredentials(provider)) enabled.push(provider);
   }
-  if (process.env.DISCORD_CLIENT_ID && process.env.DISCORD_CLIENT_SECRET) {
-    enabled.push("discord");
-  }
-  if (process.env.TWITTER_CLIENT_ID && process.env.TWITTER_CLIENT_SECRET) {
-    enabled.push("twitter");
-  }
-  if (process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET) {
-    enabled.push("github");
-  }
+  enabled.push(...getCustomProviderConfigs().map((provider) => customProviderName(provider.id)));
   return enabled;
 }
 
@@ -114,16 +165,169 @@ function overrideUrl(
   return value && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function envPrefix(provider: string): string {
+  return provider.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+}
+
+function envCredential(provider: string, kind: "CLIENT_ID" | "CLIENT_SECRET"): string | undefined {
+  const value = process.env[`${envPrefix(provider)}_${kind}`];
+  return value && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function hasProviderCredentials(provider: string): boolean {
+  return Boolean(envCredential(provider, "CLIENT_ID") && envCredential(provider, "CLIENT_SECRET"));
+}
+
+function requireCredentials(
+  provider: string,
+  label: string,
+): { clientId: string; clientSecret: string } {
+  const clientId = envCredential(provider, "CLIENT_ID");
+  const clientSecret = envCredential(provider, "CLIENT_SECRET");
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      `${label} OAuth not configured: ${envPrefix(provider)}_CLIENT_ID and ${envPrefix(provider)}_CLIENT_SECRET are required`,
+    );
+  }
+  return { clientId, clientSecret };
+}
+
+function isHttpsUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function allowInsecureProviderUrls(): boolean {
+  return (
+    process.env.NODE_ENV !== "production" &&
+    process.env.STEWARD_ALLOW_INSECURE_OAUTH_PROVIDER_URLS === "true"
+  );
+}
+
+function assertProviderUrl(name: string, value: string): void {
+  if (isHttpsUrl(value)) return;
+  if (allowInsecureProviderUrls()) {
+    try {
+      new URL(value);
+      return;
+    } catch {
+      // Fall through to the uniform error below.
+    }
+  }
+  throw new Error(`${name} must be an https URL`);
+}
+
+function readMappedValue(source: Record<string, unknown>, path: string): unknown {
+  const parts = path.split(".").filter(Boolean);
+  if (parts.length === 0 || parts.length > 10) return undefined;
+
+  let current: unknown = source;
+  for (const part of parts) {
+    if (part === "__proto__" || part === "prototype" || part === "constructor") {
+      return undefined;
+    }
+    if (Array.isArray(current) && /^\d+$/.test(part)) {
+      current = current[Number(part)];
+      continue;
+    }
+    if (typeof current !== "object" || current === null || Array.isArray(current)) {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+type CustomOAuthProviderInput = OAuthProvider & { id: string };
+
+function getCustomProviderConfigs(): CustomOAuthProviderInput[] {
+  const raw = process.env.STEWARD_CUSTOM_OAUTH_PROVIDERS?.trim();
+  if (!raw) return [];
+  const parsed = JSON.parse(raw) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("STEWARD_CUSTOM_OAUTH_PROVIDERS must be a JSON array");
+  }
+  return parsed.map((entry, index): CustomOAuthProviderInput => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error(`Custom OAuth provider at index ${index} must be an object`);
+    }
+    const candidate = entry as Record<string, unknown>;
+    const id =
+      typeof candidate.id === "string" ? normalizeCustomProviderId(candidate.id.trim()) : "";
+    const clientId = typeof candidate.clientId === "string" ? candidate.clientId.trim() : "";
+    const clientSecret =
+      typeof candidate.clientSecret === "string" ? candidate.clientSecret.trim() : "";
+    const authorizationUrl =
+      typeof candidate.authorizationUrl === "string" ? candidate.authorizationUrl.trim() : "";
+    const tokenUrl = typeof candidate.tokenUrl === "string" ? candidate.tokenUrl.trim() : "";
+    const userInfoUrl =
+      typeof candidate.userInfoUrl === "string" ? candidate.userInfoUrl.trim() : "";
+    const scopes = Array.isArray(candidate.scopes)
+      ? candidate.scopes.filter(
+          (scope): scope is string => typeof scope === "string" && scope.trim().length > 0,
+        )
+      : [];
+    if (!/^[a-zA-Z0-9_.:-]{1,64}$/.test(id)) {
+      throw new Error(`Custom OAuth provider at index ${index} has an invalid id`);
+    }
+    for (const [name, url] of [
+      ["authorizationUrl", authorizationUrl],
+      ["tokenUrl", tokenUrl],
+      ["userInfoUrl", userInfoUrl],
+    ] as const) {
+      if (!isHttpsUrl(url)) {
+        throw new Error(`Custom OAuth provider ${id} ${name} must be an https URL`);
+      }
+    }
+    const emailUrl =
+      typeof candidate.emailUrl === "string" && candidate.emailUrl.trim()
+        ? candidate.emailUrl.trim()
+        : undefined;
+    if (emailUrl && !isHttpsUrl(emailUrl)) {
+      throw new Error(`Custom OAuth provider ${id} emailUrl must be an https URL`);
+    }
+    if (!clientId || !clientSecret) {
+      throw new Error(`Custom OAuth provider ${id} requires clientId and clientSecret`);
+    }
+    return {
+      id,
+      clientId,
+      clientSecret,
+      authorizationUrl,
+      tokenUrl,
+      userInfoUrl,
+      scopes,
+      scopeDelimiter: candidate.scopeDelimiter === "," ? "," : " ",
+      requiresPkce: candidate.requiresPkce === true,
+      emailUrl,
+      profileMap:
+        typeof candidate.profileMap === "object" &&
+        candidate.profileMap !== null &&
+        !Array.isArray(candidate.profileMap)
+          ? (candidate.profileMap as OAuthProfileMap)
+          : undefined,
+    };
+  });
+}
+
+function getCustomProviderConfig(provider: string): OAuthProvider | undefined {
+  const id = normalizeCustomProviderId(provider);
+  const found = getCustomProviderConfigs().find((candidate) => candidate.id === id);
+  if (!found) return undefined;
+  const { id: _id, ...config } = found;
+  return config;
+}
+
 export function getProviderConfig(provider: string): OAuthProvider {
+  const customProvider = getCustomProviderConfig(provider);
+  if (customProvider) return customProvider;
+
   switch (provider) {
     case "google": {
-      const clientId = process.env.GOOGLE_CLIENT_ID;
-      const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
-      if (!clientId || !clientSecret) {
-        throw new Error(
-          "Google OAuth not configured: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are required",
-        );
-      }
+      const { clientId, clientSecret } = requireCredentials("google", "Google");
       return {
         clientId,
         clientSecret,
@@ -137,13 +341,7 @@ export function getProviderConfig(provider: string): OAuthProvider {
     }
 
     case "discord": {
-      const clientId = process.env.DISCORD_CLIENT_ID;
-      const clientSecret = process.env.DISCORD_CLIENT_SECRET;
-      if (!clientId || !clientSecret) {
-        throw new Error(
-          "Discord OAuth not configured: DISCORD_CLIENT_ID and DISCORD_CLIENT_SECRET are required",
-        );
-      }
+      const { clientId, clientSecret } = requireCredentials("discord", "Discord");
       return {
         clientId,
         clientSecret,
@@ -156,13 +354,7 @@ export function getProviderConfig(provider: string): OAuthProvider {
     }
 
     case "twitter": {
-      const clientId = process.env.TWITTER_CLIENT_ID;
-      const clientSecret = process.env.TWITTER_CLIENT_SECRET;
-      if (!clientId || !clientSecret) {
-        throw new Error(
-          "Twitter OAuth not configured: TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET are required",
-        );
-      }
+      const { clientId, clientSecret } = requireCredentials("twitter", "Twitter");
       return {
         clientId,
         clientSecret,
@@ -179,13 +371,7 @@ export function getProviderConfig(provider: string): OAuthProvider {
     }
 
     case "github": {
-      const clientId = process.env.GITHUB_CLIENT_ID;
-      const clientSecret = process.env.GITHUB_CLIENT_SECRET;
-      if (!clientId || !clientSecret) {
-        throw new Error(
-          "GitHub OAuth not configured: GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET are required",
-        );
-      }
+      const { clientId, clientSecret } = requireCredentials("github", "GitHub");
       return {
         clientId,
         clientSecret,
@@ -194,6 +380,125 @@ export function getProviderConfig(provider: string): OAuthProvider {
         userInfoUrl: "https://api.github.com/user",
         emailUrl: "https://api.github.com/user/emails",
         scopes: ["read:user", "user:email"],
+      };
+    }
+
+    case "linkedin": {
+      const { clientId, clientSecret } = requireCredentials("linkedin", "LinkedIn");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl: "https://www.linkedin.com/oauth/v2/authorization",
+        tokenUrl: "https://www.linkedin.com/oauth/v2/accessToken",
+        userInfoUrl: "https://api.linkedin.com/v2/userinfo",
+        scopes: ["openid", "profile", "email"],
+      };
+    }
+
+    case "spotify": {
+      const { clientId, clientSecret } = requireCredentials("spotify", "Spotify");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl: "https://accounts.spotify.com/authorize",
+        tokenUrl: "https://accounts.spotify.com/api/token",
+        userInfoUrl: "https://api.spotify.com/v1/me",
+        scopes: ["user-read-email"],
+        profileMap: {
+          id: "id",
+          email: "email",
+          name: "display_name",
+          picture: "images.0.url",
+        },
+      };
+    }
+
+    case "twitch": {
+      const { clientId, clientSecret } = requireCredentials("twitch", "Twitch");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl: "https://id.twitch.tv/oauth2/authorize",
+        tokenUrl: "https://id.twitch.tv/oauth2/token",
+        userInfoUrl: "https://id.twitch.tv/oauth2/userinfo",
+        scopes: ["openid", "user:read:email"],
+      };
+    }
+
+    case "instagram": {
+      const { clientId, clientSecret } = requireCredentials("instagram", "Instagram");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl: "https://api.instagram.com/oauth/authorize",
+        tokenUrl: "https://api.instagram.com/oauth/access_token",
+        userInfoUrl: "https://graph.instagram.com/me?fields=id,username,account_type,media_count",
+        scopes: ["user_profile"],
+        profileMap: { id: "id", name: "username" },
+      };
+    }
+
+    case "line": {
+      const { clientId, clientSecret } = requireCredentials("line", "LINE");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl: "https://access.line.me/oauth2/v2.1/authorize",
+        tokenUrl: "https://api.line.me/oauth2/v2.1/token",
+        userInfoUrl: "https://api.line.me/v2/profile",
+        scopes: ["profile", "openid", "email"],
+        profileMap: {
+          id: "userId",
+          name: "displayName",
+          picture: "pictureUrl",
+        },
+      };
+    }
+
+    case "apple": {
+      // "Sign in with Apple" is OIDC: the token endpoint returns an id_token
+      // (JWT) and there is NO userinfo endpoint — the identity lives in the
+      // verified id_token. APPLE_CLIENT_ID is the Services ID (the `aud`).
+      // APPLE_CLIENT_SECRET is itself a short-lived ES256 JWT the developer
+      // pre-generates with their private key; this OSS adapter takes it from
+      // config rather than performing Apple key management. See verifyAppleIdToken.
+      const { clientId, clientSecret } = requireCredentials("apple", "Apple");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl: "https://appleid.apple.com/auth/authorize",
+        tokenUrl: "https://appleid.apple.com/auth/token",
+        // No userinfo endpoint exists; getUserInfo() verifies the id_token
+        // instead. Point this at the JWKS URL only to satisfy the https check.
+        userInfoUrl: APPLE_JWKS_URI,
+        scopes: ["name", "email"],
+        oidc: { issuer: APPLE_ISSUER, jwksUri: APPLE_JWKS_URI },
+      };
+    }
+
+    case "tiktok": {
+      // TikTok is a standard OAuth2 authorization-code provider, but it names
+      // the client-id parameter `client_key` (not `client_id`) on both the
+      // authorize and token requests. The userinfo response wraps the profile
+      // in { data: { user: {...} } }; the stable id is open_id (union_id is an
+      // app-group-stable alternative). Display name and avatar are optional.
+      const { clientId, clientSecret } = requireCredentials("tiktok", "TikTok");
+      return {
+        clientId,
+        clientSecret,
+        authorizationUrl:
+          overrideUrl("tiktok", "AUTHORIZATION") ?? "https://www.tiktok.com/v2/auth/authorize/",
+        tokenUrl: overrideUrl("tiktok", "TOKEN") ?? "https://open.tiktokapis.com/v2/oauth/token/",
+        userInfoUrl:
+          overrideUrl("tiktok", "USERINFO") ??
+          "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,display_name,avatar_url",
+        scopes: ["user.info.basic"],
+        clientIdParam: "client_key",
+        profileMap: {
+          id: "user.open_id",
+          name: "user.display_name",
+          picture: "user.avatar_url",
+        },
       };
     }
 
@@ -227,8 +532,25 @@ function deriveCodeChallenge(verifier: string): string {
  */
 export class OAuthClient {
   private readonly provider: OAuthProvider;
+  /**
+   * For OIDC providers (e.g. Apple), the id_token captured from the most recent
+   * exchangeCode() call. getUserInfo() verifies this rather than fetching a
+   * userinfo endpoint. A fresh OAuthClient is constructed per request, so this
+   * per-instance state never leaks across login attempts.
+   */
+  private lastIdToken: string | undefined;
+  /**
+   * Optional login-request nonce that an OIDC id_token must echo back. When the
+   * caller issued a nonce for the authorize request, it sets this before
+   * getUserInfo() so verification binds the token to this login attempt.
+   */
+  private expectedNonce: string | undefined;
 
   constructor(provider: OAuthProvider) {
+    assertProviderUrl("authorizationUrl", provider.authorizationUrl);
+    assertProviderUrl("tokenUrl", provider.tokenUrl);
+    assertProviderUrl("userInfoUrl", provider.userInfoUrl);
+    if (provider.emailUrl) assertProviderUrl("emailUrl", provider.emailUrl);
     this.provider = provider;
   }
 
@@ -240,11 +562,13 @@ export class OAuthClient {
    * @returns url and, when PKCE is required, a codeVerifier to store server-side
    */
   generateAuthUrl(state: string, redirectUri: string): AuthUrlResult {
+    // Most providers use `client_id`; some (e.g. TikTok) name it `client_key`.
+    const clientIdParam = this.provider.clientIdParam ?? "client_id";
     const params = new URLSearchParams({
-      client_id: this.provider.clientId,
+      [clientIdParam]: this.provider.clientId,
       redirect_uri: redirectUri,
       response_type: "code",
-      scope: this.provider.scopes.join(" "),
+      scope: this.provider.scopes.join(this.provider.scopeDelimiter ?? " "),
       state,
     });
 
@@ -273,9 +597,11 @@ export class OAuthClient {
     redirectUri: string,
     codeVerifier?: string,
   ): Promise<OAuthTokenResponse> {
+    // Most providers use `client_id`; some (e.g. TikTok) name it `client_key`.
+    const clientIdParam = this.provider.clientIdParam ?? "client_id";
     const body = new URLSearchParams({
       grant_type: "authorization_code",
-      client_id: this.provider.clientId,
+      [clientIdParam]: this.provider.clientId,
       client_secret: this.provider.clientSecret,
       code,
       redirect_uri: redirectUri,
@@ -302,7 +628,30 @@ export class OAuthClient {
       throw new Error(`Token exchange failed (${res.status}): ${text}`);
     }
 
-    return res.json() as Promise<OAuthTokenResponse>;
+    const tokenResponse = (await res.json()) as OAuthTokenResponse;
+
+    // For OIDC providers the identity is carried by the id_token, which has no
+    // userinfo equivalent. Capture it here so getUserInfo() can verify it. Fail
+    // closed: a missing id_token from an OIDC provider is an error.
+    if (this.provider.oidc) {
+      const idToken = tokenResponse.id_token;
+      if (typeof idToken !== "string" || idToken.trim().length === 0) {
+        throw new Error("OIDC provider token response is missing an id_token");
+      }
+      this.lastIdToken = idToken;
+    }
+
+    return tokenResponse;
+  }
+
+  /**
+   * Binds the next getUserInfo() call (OIDC providers only) to a login-request
+   * nonce. Apple echoes the authorize-request `nonce` back into the id_token;
+   * setting it here makes verification reject a token minted for a different
+   * login attempt. No-op for non-OIDC providers.
+   */
+  setExpectedNonce(nonce: string | undefined): void {
+    this.expectedNonce = nonce;
   }
 
   /**
@@ -318,6 +667,14 @@ export class OAuthClient {
    * @param accessToken - The access token from exchangeCode
    */
   async getUserInfo(accessToken: string): Promise<OAuthUserInfo> {
+    // OIDC providers (e.g. Apple) have no userinfo endpoint: the identity is the
+    // verified id_token captured during exchangeCode(). Verify it and return the
+    // normalized profile. Fail closed — any verification failure throws and no
+    // identity is established.
+    if (this.provider.oidc) {
+      return this.getOidcUserInfo();
+    }
+
     const res = await fetch(this.provider.userInfoUrl, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -338,27 +695,24 @@ export class OAuthClient {
         ? (raw.data as Record<string, unknown>)
         : raw;
 
+    const mapped = this.provider.profileMap;
+    const id = mapped?.id ? readMappedValue(data, mapped.id) : (data.id ?? data.sub);
+    const email = mapped?.email ? readMappedValue(data, mapped.email) : data.email;
+    const name = mapped?.name ? readMappedValue(data, mapped.name) : (data.name ?? data.username);
+    const picture = mapped?.picture
+      ? readMappedValue(data, mapped.picture)
+      : (data.profile_image_url ?? data.picture ?? data.avatar_url ?? data.avatar);
+    const verifiedEmail = mapped?.emailVerified
+      ? readMappedValue(data, mapped.emailVerified)
+      : (data.verified_email ?? data.email_verified ?? data.verified);
+
     const userInfo = {
-      id: String(data.id ?? data.sub ?? ""),
+      id: String(id ?? ""),
       // Twitter does not expose email — leave as empty string; caller must handle
-      email: String(data.email ?? ""),
-      name:
-        data.name != null
-          ? String(data.name)
-          : data.username != null
-            ? String(data.username)
-            : undefined,
-      picture:
-        data.profile_image_url != null
-          ? String(data.profile_image_url)
-          : data.picture != null
-            ? String(data.picture)
-            : data.avatar_url != null
-              ? String(data.avatar_url)
-              : data.avatar != null
-                ? String(data.avatar)
-                : undefined,
-      verified_email: Boolean(data.verified_email ?? data.email_verified ?? data.verified ?? false),
+      email: String(email ?? ""),
+      name: name != null ? String(name) : undefined,
+      picture: picture != null ? String(picture) : undefined,
+      verified_email: Boolean(verifiedEmail ?? false),
     } satisfies OAuthUserInfo;
 
     if (!userInfo.email && this.provider.emailUrl) {
@@ -370,6 +724,38 @@ export class OAuthClient {
     }
 
     return userInfo;
+  }
+
+  /**
+   * Verifies the OIDC id_token captured during exchangeCode() and normalizes it
+   * into the common profile shape. Currently the only built-in OIDC provider is
+   * Apple, whose issuer/JWKS are pinned; the verifier checks signature, issuer,
+   * audience (=clientId), expiry, and — when set — the login-request nonce.
+   */
+  private async getOidcUserInfo(): Promise<OAuthUserInfo> {
+    const oidc = this.provider.oidc;
+    if (!oidc) throw new Error("getOidcUserInfo called for a non-OIDC provider");
+    const idToken = this.lastIdToken;
+    if (!idToken) {
+      throw new Error("OIDC id_token unavailable; exchangeCode() must run first");
+    }
+
+    if (oidc.issuer === APPLE_ISSUER && oidc.jwksUri === APPLE_JWKS_URI) {
+      const verified = await verifyAppleIdToken(idToken, {
+        clientId: this.provider.clientId,
+        expectedNonce: this.expectedNonce,
+      });
+      return {
+        id: verified.subject,
+        // Apple may return a @privaterelay.appleid.com address; store as-is.
+        email: verified.email ?? "",
+        // Only trust an explicit `true`; undefined/false ⇒ not verified.
+        verified_email: verified.emailVerified === true,
+      } satisfies OAuthUserInfo;
+    }
+
+    // No other OIDC provider is wired; refuse rather than guess (fail closed).
+    throw new Error("Unsupported OIDC provider configuration");
   }
 
   private async getPrimaryEmail(accessToken: string): Promise<OAuthEmailAddress | null> {

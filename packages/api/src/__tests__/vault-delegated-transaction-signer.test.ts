@@ -142,7 +142,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Signing requires owner/admin MFA or signer-bound");
   });
 
   it("rejects bare delegated signer ids even when the id exists", async () => {
@@ -158,7 +158,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Signing requires owner/admin MFA or signer-bound");
   });
 
   it("rejects invalid signer credentials before policy evaluation", async () => {
@@ -175,7 +175,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Invalid or inactive delegated signer credential");
   });
 
   it("rejects signer credentials without sign_transaction permission", async () => {
@@ -192,7 +192,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Delegated signer lacks sign_transaction permission");
   });
 
   it("allows signer-bound credentials with sign_transaction permission to reach policy evaluation", async () => {
@@ -209,7 +209,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Transaction rejected by policy");
   });
 
   it("rejects key quorum credentials that do not meet threshold", async () => {
@@ -228,7 +228,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Key quorum threshold was not met");
   });
 
   it("rejects key quorum credentials from non-member signers", async () => {
@@ -248,7 +248,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Key quorum credentials include non-member signer");
   });
 
   it("rejects key quorums without the requested permission", async () => {
@@ -267,7 +267,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Key quorum lacks sign_transaction permission");
   });
 
   it("rejects key quorum members that lack the requested permission", async () => {
@@ -298,7 +298,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Key quorum member lacks sign_transaction permission");
   });
 
   it("allows key quorum threshold credentials to reach policy evaluation", async () => {
@@ -318,6 +318,6 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
+    expect(body.error).toContain("Transaction rejected by policy");
   });
 });

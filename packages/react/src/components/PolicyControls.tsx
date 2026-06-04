@@ -11,8 +11,12 @@ const DEFAULT_LABELS: Record<PolicyType, string> = {
   "time-window": "Time Window",
   "rate-limit": "Rate Limit",
   "allowed-chains": "Allowed Chains",
+  "condition-set": "Condition Set",
+  "contract-allowlist": "Contract Allowlist",
   "reputation-threshold": "Reputation Threshold",
   "reputation-scaling": "Reputation Scaling",
+  "venue-allowlist": "Venue Allowlist",
+  "leverage-cap": "Leverage Cap",
 };
 
 const POLICY_DESCRIPTIONS: Record<PolicyType, string> = {
@@ -22,8 +26,12 @@ const POLICY_DESCRIPTIONS: Record<PolicyType, string> = {
   "time-window": "Restrict transactions to specific hours and days.",
   "rate-limit": "Limit the number of transactions per hour and per day.",
   "allowed-chains": "Restrict which blockchain networks can be used.",
+  "condition-set": "Reference a tenant-managed allowlist or blocklist.",
+  "contract-allowlist": "Allow calldata only for approved contracts and function selectors.",
   "reputation-threshold": "Require a minimum reputation score before an action can proceed.",
   "reputation-scaling": "Scale the allowed transaction size based on the current reputation score.",
+  "venue-allowlist": "Restrict actions to approved trading venues.",
+  "leverage-cap": "Cap requested leverage for trading actions.",
 };
 
 const ALL_POLICY_TYPES = Object.keys(DEFAULT_LABELS) as PolicyType[];
@@ -255,6 +263,10 @@ function PolicyConfigEditor({ type, config, readOnly, onConfigChange }: PolicyCo
       return <RateLimitEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
     case "allowed-chains":
       return <AllowedChainsEditor config={config} readOnly={readOnly} onChange={onConfigChange} />;
+    case "contract-allowlist":
+      return (
+        <ContractAllowlistEditor config={config} readOnly={readOnly} onChange={onConfigChange} />
+      );
     default:
       return null;
   }
@@ -611,6 +623,132 @@ function AllowedChainsEditor({
           </label>
         ))}
       </div>
+    </div>
+  );
+}
+
+// ─── Contract Allowlist ───
+function ContractAllowlistEditor({
+  config,
+  readOnly,
+  onChange,
+}: {
+  config: Record<string, unknown>;
+  readOnly: boolean;
+  onChange: (key: string, value: unknown) => void;
+}) {
+  const contracts = Array.isArray(config.contracts)
+    ? (config.contracts as Array<{
+        address?: string;
+        selectors?: string[];
+        constraints?: Record<string, unknown>;
+      }>)
+    : [];
+  const [address, setAddress] = useState("");
+  const [selectors, setSelectors] = useState("");
+  const [constraintsJson, setConstraintsJson] = useState("");
+
+  const normalizedSelectors = selectors
+    .split(/[\s,]+/)
+    .map((selector) => selector.trim())
+    .filter(Boolean);
+
+  let parsedConstraints: Record<string, unknown> | undefined;
+  let constraintsValid = true;
+  if (constraintsJson.trim()) {
+    try {
+      const parsed = JSON.parse(constraintsJson) as unknown;
+      constraintsValid = Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed));
+      if (constraintsValid) parsedConstraints = parsed as Record<string, unknown>;
+    } catch {
+      constraintsValid = false;
+    }
+  }
+
+  const canAdd =
+    /^0x[0-9a-fA-F]{40}$/.test(address) &&
+    normalizedSelectors.length > 0 &&
+    normalizedSelectors.every((selector) => /^0x[0-9a-fA-F]{8}$/.test(selector)) &&
+    constraintsValid;
+
+  const addContract = () => {
+    if (!canAdd) return;
+    onChange("contracts", [
+      ...contracts,
+      {
+        address,
+        selectors: normalizedSelectors,
+        ...(parsedConstraints ? { constraints: parsedConstraints } : {}),
+      },
+    ]);
+    setAddress("");
+    setSelectors("");
+    setConstraintsJson("");
+  };
+
+  const removeContract = (idx: number) => {
+    onChange(
+      "contracts",
+      contracts.filter((_, i) => i !== idx),
+    );
+  };
+
+  return (
+    <div className="stwd-config-stack">
+      <div className="stwd-address-list">
+        {contracts.map((contract, i) => (
+          <div key={`${contract.address}-${i}`} className="stwd-address-item">
+            <code>{contract.address}</code>
+            <span className="stwd-muted-text">{(contract.selectors || []).join(", ")}</span>
+            {contract.constraints && <span className="stwd-muted-text">constrained</span>}
+            {!readOnly && (
+              <button
+                className="stwd-btn stwd-btn-ghost stwd-btn-sm"
+                onClick={() => removeContract(i)}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      {!readOnly && (
+        <div className="stwd-config-stack">
+          <div className="stwd-config-field">
+            <label>Contract address</label>
+            <input
+              type="text"
+              className="stwd-input"
+              placeholder="0x..."
+              value={address}
+              onChange={(e) => setAddress(e.target.value)}
+            />
+          </div>
+          <div className="stwd-config-field">
+            <label>Function selectors</label>
+            <input
+              type="text"
+              className="stwd-input"
+              placeholder="0xa9059cbb, 0x095ea7b3"
+              value={selectors}
+              onChange={(e) => setSelectors(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && addContract()}
+            />
+          </div>
+          <div className="stwd-config-field">
+            <label>Selector constraints JSON</label>
+            <textarea
+              className="stwd-input"
+              value={constraintsJson}
+              onChange={(e) => setConstraintsJson(e.target.value)}
+              rows={4}
+            />
+          </div>
+          <button className="stwd-btn stwd-btn-secondary" disabled={!canAdd} onClick={addContract}>
+            Add
+          </button>
+        </div>
+      )}
     </div>
   );
 }

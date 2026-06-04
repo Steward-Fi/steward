@@ -8,6 +8,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
@@ -17,6 +19,10 @@ const { StewardLogin, composeWalletSuccess, composeWalletError } = await import(
 const { StewardAuthContext } = await import("../provider.js");
 const { registerEvmWalletPanel, registerSolanaWalletPanel, _resetWalletPanelRegistry } =
   await import("../internal/walletPanelRegistry.js");
+const oauthCallbackSource = readFileSync(
+  join(import.meta.dir, "..", "components", "StewardOAuthCallback.tsx"),
+  "utf8",
+);
 
 // Register dummy panel loaders. The registry isolates root entry from
 // wallet peer deps; tests just need a pair of registered loaders so the
@@ -39,6 +45,10 @@ type AuthCtx = {
     discord?: boolean;
     github?: boolean;
     twitter?: boolean;
+    telegram?: boolean;
+    farcaster?: boolean;
+    sms?: boolean;
+    whatsapp?: boolean;
     siwe?: boolean;
     siws?: boolean;
   };
@@ -47,10 +57,16 @@ type AuthCtx = {
   getToken: () => null;
   signInWithPasskey: (email: string) => Promise<unknown>;
   signInWithEmail: (email: string) => Promise<unknown>;
+  sendSmsOtp: (phone: string) => Promise<unknown>;
+  verifySmsOtp: (phone: string, code: string) => Promise<unknown>;
+  sendWhatsAppOtp: (phone: string) => Promise<unknown>;
+  verifyWhatsAppOtp: (phone: string, code: string) => Promise<unknown>;
   verifyEmailCallback: () => Promise<unknown>;
   signInWithSIWE: () => Promise<unknown>;
   signInWithSolana?: () => Promise<unknown>;
   signInWithOAuth?: (p: string, c?: unknown) => Promise<unknown>;
+  signInWithTelegram: (payload: unknown, config?: unknown) => Promise<unknown>;
+  signInWithFarcaster: (payload: unknown, config?: unknown) => Promise<unknown>;
   activeTenantId: null;
   tenants: null;
   isTenantsLoading: boolean;
@@ -72,10 +88,16 @@ function baseCtx(overrides: Partial<AuthCtx> = {}): AuthCtx {
     getToken: () => null,
     signInWithPasskey: async () => ({}),
     signInWithEmail: async () => ({}),
+    sendSmsOtp: async () => ({}),
+    verifySmsOtp: async () => ({}),
+    sendWhatsAppOtp: async () => ({}),
+    verifyWhatsAppOtp: async () => ({}),
     verifyEmailCallback: async () => ({}),
     signInWithSIWE: async () => ({}),
     signInWithSolana: async () => ({}),
     signInWithOAuth: async () => ({}),
+    signInWithTelegram: async () => ({}),
+    signInWithFarcaster: async () => ({}),
     activeTenantId: null,
     tenants: null,
     isTenantsLoading: false,
@@ -98,6 +120,15 @@ function wrap(value: AuthCtx | null, node: React.ReactNode) {
 }
 
 describe("<StewardLogin /> rules-of-hooks branch coverage", () => {
+  test("OAuth callback refuses token-in-URL storage", () => {
+    expect(oauthCallbackSource).toContain("Token-in-URL OAuth callbacks are disabled");
+    expect(oauthCallbackSource).toContain("callbackParamsFromLocation(window.location)");
+    expect(oauthCallbackSource).toContain("location.hash");
+    expect(oauthCallbackSource).toContain("steward-oauth-callback");
+    expect(oauthCallbackSource).not.toContain('localStorage.setItem("steward_session_token"');
+    expect(oauthCallbackSource).not.toContain('localStorage.setItem("steward_refresh_token"');
+  });
+
   test("mounts when no auth context is present (renders inline error)", () => {
     // Provider missing → ctx is null → component shows error message.
     // Critically, this path must still call all hooks unconditionally before
@@ -115,6 +146,70 @@ describe("<StewardLogin /> rules-of-hooks branch coverage", () => {
     );
     expect(html).toContain("welcome");
     expect(html).toContain("passkey");
+  });
+
+  test("renders SMS OTP fields when backend reports sms enabled", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: { google: true, discord: true, github: true, twitter: true, sms: true },
+        }),
+        React.createElement(StewardLogin, { title: "welcome" }),
+      ),
+    );
+    expect(html).toContain('aria-label="phone"');
+    expect(html).toContain("text me a code");
+  });
+
+  test("showSms={false} hides SMS OTP even when backend reports sms enabled", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: { google: true, discord: true, github: true, twitter: true, sms: true },
+        }),
+        React.createElement(StewardLogin, { showSms: false }),
+      ),
+    );
+    expect(html).not.toContain('aria-label="phone"');
+    expect(html).not.toContain("text me a code");
+  });
+
+  test("renders WhatsApp OTP when backend reports whatsapp enabled", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: true,
+            whatsapp: true,
+          },
+        }),
+        React.createElement(StewardLogin, { showSms: false }),
+      ),
+    );
+    expect(html).toContain('aria-label="phone"');
+    expect(html).toContain("WhatsApp code");
+    expect(html).toContain("stwd-login__btn--whatsapp");
+  });
+
+  test("showWhatsApp={false} hides WhatsApp OTP even when backend enabled it", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: true,
+            whatsapp: true,
+          },
+        }),
+        React.createElement(StewardLogin, { showWhatsApp: false }),
+      ),
+    );
+    expect(html).not.toContain("stwd-login__btn--whatsapp");
   });
 
   test("mounts in signed-in branch (renders nothing)", () => {
@@ -381,6 +476,154 @@ describe("<StewardLogin /> OAuth providers (google + discord + github + twitter)
     expect(html).toContain("stwd-login__btn--google");
     expect(html).toContain("stwd-login__btn--discord");
     expect(html).not.toContain("stwd-login__oauth--grid");
+  });
+
+  test("renders Telegram when backend enables it and a payload callback is configured", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: false,
+            discord: false,
+            github: false,
+            twitter: false,
+            telegram: true,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {
+          getTelegramLoginPayload: () => ({
+            id: 424242,
+            auth_date: 1_778_200_000,
+            hash: "a".repeat(64),
+          }),
+        }),
+      ),
+    );
+    expect(html).toContain("stwd-login__btn--telegram");
+    expect(html).toContain("Telegram");
+  });
+
+  test("hides Telegram when no payload callback is configured", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: false,
+            discord: false,
+            github: false,
+            twitter: false,
+            telegram: true,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {}),
+      ),
+    );
+    expect(html).not.toContain("stwd-login__btn--telegram");
+  });
+
+  test("showTelegram={false} hides Telegram even if backend enabled it", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: false,
+            discord: false,
+            github: false,
+            twitter: false,
+            telegram: true,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {
+          showTelegram: false,
+          getTelegramLoginPayload: () => ({
+            id: 424242,
+            auth_date: 1_778_200_000,
+            hash: "a".repeat(64),
+          }),
+        }),
+      ),
+    );
+    expect(html).not.toContain("stwd-login__btn--telegram");
+  });
+
+  test("renders Farcaster when backend enables it and a payload callback is configured", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: false,
+            discord: false,
+            github: false,
+            twitter: false,
+            farcaster: true,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {
+          getFarcasterLoginPayload: () => ({
+            message: "siwf-message",
+            signature: `0x${"a".repeat(130)}`,
+            fid: "4242",
+          }),
+        }),
+      ),
+    );
+    expect(html).toContain("stwd-login__btn--farcaster");
+    expect(html).toContain("Farcaster");
+  });
+
+  test("hides Farcaster when no payload callback is configured", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: false,
+            discord: false,
+            github: false,
+            twitter: false,
+            farcaster: true,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {}),
+      ),
+    );
+    expect(html).not.toContain("stwd-login__btn--farcaster");
+  });
+
+  test("showFarcaster={false} hides Farcaster even if backend enabled it", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          providers: {
+            google: false,
+            discord: false,
+            github: false,
+            twitter: false,
+            farcaster: true,
+            siwe: true,
+            siws: true,
+          },
+        }),
+        React.createElement(StewardLogin, {
+          showFarcaster: false,
+          getFarcasterLoginPayload: () => ({
+            message: "siwf-message",
+            signature: `0x${"a".repeat(130)}`,
+            fid: "4242",
+          }),
+        }),
+      ),
+    );
+    expect(html).not.toContain("stwd-login__btn--farcaster");
   });
 });
 

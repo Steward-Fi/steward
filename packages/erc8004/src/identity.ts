@@ -1,5 +1,10 @@
 /**
  * ERC-8004 identity registry client.
+ *
+ * When a real, deployed registry is configured this client performs genuine
+ * on-chain calls. When no real registry is configured, mutating/lookup methods
+ * refuse to operate rather than fabricating data that callers could mistake for
+ * verified on-chain state.
  */
 
 import {
@@ -14,6 +19,7 @@ import {
   type PublicClient,
   parseAbi,
 } from "viem";
+import { isRegistryConfigured } from "./chains";
 import type {
   AgentCard,
   AgentRegistrationPayload,
@@ -144,7 +150,16 @@ export class IdentityRegistryClient {
     this.publicClient = publicClient ?? makePublicClient(this.config);
   }
 
-  /** Build an AgentCard from partial inputs. */
+  /**
+   * True only when this client points at a real, deployed registry. While this
+   * is false, no method will produce data that may be treated as on-chain
+   * verified.
+   */
+  isConfigured(): boolean {
+    return isRegistryConfigured(this.config);
+  }
+
+  /** Build an AgentCard from partial inputs. Pure — safe regardless of config. */
   buildAgentCard(params: {
     name: string;
     description: string;
@@ -173,7 +188,18 @@ export class IdentityRegistryClient {
     return buildAgentURI(agentCard);
   }
 
+  /**
+   * Register an agent on-chain. Refuses to operate when no real registry is
+   * configured — returning a fabricated registration would let callers believe
+   * an on-chain registration occurred when none did.
+   */
   async register(agentCard: AgentCard, signer: Eip8004Signer): Promise<RegistrationResult> {
+    if (!this.isConfigured()) {
+      throw new Error(
+        "ERC8004 registry not configured — refusing to fabricate registration. " +
+          `chainId=${this.config.chainId} registryAddress=${this.config.registryAddress}`,
+      );
+    }
     const { agentURI, payload } = this.buildAgentURI(agentCard);
     const data = encodeRegisterCalldata(agentURI);
     const txHash = await signer.sendTransaction({
@@ -200,13 +226,20 @@ export class IdentityRegistryClient {
         agentCardUri: decoded.args.agentURI,
         agentURI: decoded.args.agentURI,
         payload,
+        verified: true,
       };
     }
 
     throw new Error(`ERC-8004 register: Registered event not found in receipt (tx=${txHash})`);
   }
 
+  /**
+   * Look up a registration. Returns null when the registry is not configured
+   * (unknown / not verified on-chain) or when the token does not exist.
+   * Callers must treat null as unverified, never as "confirmed registered".
+   */
   async getRegistration(tokenId: string | bigint): Promise<AgentCard | null> {
+    if (!this.isConfigured()) return null;
     const agentId = typeof tokenId === "bigint" ? tokenId : BigInt(tokenId);
     try {
       const [owner, tokenURI] = await Promise.all([

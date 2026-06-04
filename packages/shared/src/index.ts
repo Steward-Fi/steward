@@ -47,6 +47,7 @@ export const WEBHOOK_EVENT_TYPES = [
   "private_key.exported",
   "wallet.recovery_setup",
   "wallet.recovered",
+  "wallet.raw_signature.created",
   "wallet.funds_deposited",
   "wallet.funds_withdrawn",
   "transaction.broadcasted",
@@ -92,6 +93,7 @@ export const WEBHOOK_EVENT_TYPES = [
 ] as const;
 
 export type WebhookCatalogEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
+export type DiagnosticWebhookEventType = "webhook.test";
 
 // Legacy event types kept for backwards-compatible dispatch inputs.
 export type LegacyWebhookEventType =
@@ -101,7 +103,10 @@ export type LegacyWebhookEventType =
   | "tx_failed"
   | "tx_rejected";
 
-export type WebhookEventType = WebhookCatalogEventType | LegacyWebhookEventType;
+export type WebhookEventType =
+  | WebhookCatalogEventType
+  | DiagnosticWebhookEventType
+  | LegacyWebhookEventType;
 
 export interface WebhookEvent {
   type: WebhookEventType;
@@ -241,7 +246,10 @@ export type PolicyType =
   | "rate-limit"
   | "allowed-chains"
   | "condition-set"
+  | "aggregation"
   | "contract-allowlist"
+  | "typed-data"
+  | "raw-signing-chain"
   | "reputation-threshold"
   | "reputation-scaling"
   | "venue-allowlist"
@@ -310,6 +318,75 @@ export interface ConditionSetConfig {
   caseSensitive?: boolean;
 }
 
+/**
+ * Metric an {@link AggregationConditionConfig} rolls up over its window.
+ * Extensible union — add new metrics here and teach the provider/evaluator
+ * how to source them.
+ */
+export type AggregationMetric = "value_sum" | "tx_count" | "unique_recipients";
+
+/** Named rolling windows accepted by an aggregation condition. */
+export type AggregationNamedWindow = "1h" | "24h" | "7d" | "30d";
+
+/**
+ * Rolling window for an aggregation. Either a named bucket (`"24h"`) or an
+ * explicit positive integer number of seconds. Seconds win when both are set.
+ */
+export interface AggregationWindow {
+  named?: AggregationNamedWindow;
+  seconds?: number;
+}
+
+/**
+ * How the aggregate is grouped before comparison:
+ *  - `agent`         → one bucket spanning all of the agent's activity
+ *  - `per_recipient` → bucket keyed by the request's `to` address
+ *  - `per_chain`     → bucket keyed by the request's `chainId`
+ */
+export type AggregationScope = "agent" | "per_recipient" | "per_chain";
+
+/** Comparator applied as `aggregate <cmp> threshold`. Deny when it holds. */
+export type AggregationComparator = "lte" | "lt" | "gte" | "gt" | "eq";
+
+/**
+ * How the threshold (and the underlying aggregate) is denominated:
+ *  - `raw`  → native base units (wei/lamports), integer/bigint-safe
+ *  - `usd`  → US dollars; evaluation REQUIRES a price oracle and MUST fail
+ *             closed (deny) when the oracle or a conversion is unavailable.
+ *
+ * USD aggregates are expressed in integer cents to stay bigint-safe; the
+ * threshold for a USD condition is therefore also interpreted as cents.
+ */
+export type AggregationDenomination = "raw" | "usd";
+
+/**
+ * Privy-style stateful aggregation condition (parity with Privy "aggregations").
+ *
+ * Gates a request on a rolling server-side aggregate of the agent's activity,
+ * e.g. "deny if total value transferred in the last 24h exceeds X" or "deny if
+ * the count of transactions in the last 1h exceeds N". The aggregate is ALWAYS
+ * sourced from the authoritative provider (Redis rolling counters / tx history)
+ * — never from caller-supplied request fields.
+ *
+ * Semantics: the condition DENIES (policy NACK) when
+ *   `(currentAggregate + thisRequestContribution) <cmp> threshold`
+ * holds. The contribution of the current request is included so the cap is
+ * enforced *before* it is breached (matching the spending-limit "would exceed"
+ * behaviour). The evaluator FAILS CLOSED: a missing provider value, a missing
+ * oracle for USD, or a malformed/negative threshold all DENY.
+ */
+export interface AggregationConditionConfig {
+  metric: AggregationMetric;
+  window: AggregationWindow;
+  /** Defaults to `agent`. */
+  scope?: AggregationScope;
+  comparator: AggregationComparator;
+  /** Decimal string; bigint-safe (raw base units, or USD cents when denomination=usd). */
+  threshold: string;
+  /** Defaults to `raw`. When `usd`, a price oracle is required or evaluation denies. */
+  denomination?: AggregationDenomination;
+}
+
 export interface ContractAllowlistConfig {
   contracts: Array<{
     address: string;
@@ -323,10 +400,72 @@ export interface ContractAllowlistConfig {
         spenderBlocklist?: string[];
         fromAllowlist?: string[];
         fromBlocklist?: string[];
+        /** Decimal uint256 token ids permitted (ERC721/1155). */
+        tokenIdAllowlist?: string[];
+        /** Decimal uint256 token ids blocked (ERC721/1155). */
+        tokenIdBlocklist?: string[];
         maxAmount?: string;
       }
     >;
   }>;
+}
+
+/**
+ * Per-field condition applied to an EIP-712 message `value` by a
+ * {@link TypedDataConditionConfig}. `field` is a dot-path into the decoded
+ * message object (e.g. `"spender"`, `"details.token"`, `"permitted.token"`).
+ *
+ * Operators:
+ *  - `address_in` / `address_not_in` — the field is read as a 20-byte hex
+ *    address and compared case-insensitively against `values`.
+ *  - `eq`            — strict string equality against `value`.
+ *  - `in` / `not_in` — string membership against `values`.
+ *  - `uint_max`      — the field is parsed as a uint256 (decimal or 0x-hex) and
+ *                      must be `<= value`.
+ *
+ * Every operator FAILS CLOSED: a missing field, an undecodable address, or a
+ * non-numeric value DENIES the signature rather than skipping the check.
+ */
+export interface TypedDataMessageCondition {
+  field: string;
+  operator: "address_in" | "address_not_in" | "eq" | "in" | "not_in" | "uint_max";
+  value?: string;
+  values?: string[];
+}
+
+/**
+ * Privy-style EIP-712 typed-data condition (parity with Privy's
+ * `eth_signTypedData_v4` domain/message conditions).
+ *
+ * Constrains an `eth_signTypedData_v4` request. Every constraint that is set
+ * must hold or the signature is DENIED (fail-closed). When `ctx.typedData` is
+ * absent (i.e. the request is an ordinary transaction sign, not a typed-data
+ * sign) the policy is not applicable and passes — the typed-data signing route
+ * is the only caller that populates `ctx.typedData`, so this cannot be used to
+ * bypass the constraint on a real typed-data sign.
+ */
+export interface TypedDataConditionConfig {
+  /** domain.verifyingContract must be one of these (case-insensitive). */
+  verifyingContractAllowlist?: string[];
+  /** domain.verifyingContract must NOT be one of these (case-insensitive). */
+  verifyingContractBlocklist?: string[];
+  /** domain.chainId must be one of these. */
+  allowedChainIds?: number[];
+  /** domain.name must be one of these (case-sensitive). */
+  allowedDomainNames?: string[];
+  /** primaryType must be one of these (case-sensitive). */
+  allowedPrimaryTypes?: string[];
+  /** Per-field constraints applied to the message `value`. */
+  messageConditions?: TypedDataMessageCondition[];
+}
+
+export interface RawSigningChainConditionConfig {
+  /** Lowercase chain slugs from RAW_SIGNING_CHAIN_SUPPORT, e.g. "sui", "tron", "tempo". */
+  allowedChains?: string[];
+  blockedChains?: string[];
+  allowedCurves?: string[];
+  /** Defaults true: unsupported chains/curves deny raw signing. */
+  requireSupported?: boolean;
 }
 
 /**
@@ -428,6 +567,8 @@ export interface SignSolanaTransactionRequest {
   transaction: string; // base64-encoded serialized transaction
   chainId?: number; // 101 = mainnet, 102 = devnet
   broadcast?: boolean; // default true
+  expectedTo?: string; // policy-evaluated recipient for serialized transfer validation
+  expectedValue?: string; // policy-evaluated lamports for serialized transfer validation
 }
 
 /**
@@ -566,6 +707,8 @@ export interface TenantTheme {
   borderRadius?: number;
   fontFamily?: string;
   colorScheme?: "light" | "dark" | "system";
+  logoUrl?: string;
+  faviconUrl?: string;
 }
 
 export interface TenantOidcProviderConfig {
@@ -589,6 +732,12 @@ export interface TenantOidcProviderConfig {
 }
 
 export type TenantSamlSsoStatus = "pending" | "active" | "error";
+export type TenantSamlGroupRole = "admin" | "developer" | "billing" | "viewer" | "member";
+
+export interface TenantSamlGroupRoleMapping {
+  group: string;
+  role: TenantSamlGroupRole;
+}
 
 export interface TenantSamlSsoConfig {
   tenantId: string;
@@ -602,6 +751,7 @@ export interface TenantSamlSsoConfig {
   nameIdFormat?: string;
   emailAttribute: string;
   groupsAttribute?: string;
+  groupRoleMappings: TenantSamlGroupRoleMapping[];
   allowJitProvisioning: boolean;
   jitDefaultRole: "viewer";
   lastTestedAt?: Date | string | null;
@@ -617,7 +767,115 @@ export interface TenantSamlSsoUpdate {
   nameIdFormat?: string;
   emailAttribute?: string;
   groupsAttribute?: string;
+  groupRoleMappings?: TenantSamlGroupRoleMapping[];
   allowJitProvisioning?: boolean;
+}
+
+export type TenantCaptchaProvider = "turnstile" | "hcaptcha";
+export type TenantCaptchaAction = "email_otp" | "sms_otp";
+
+export interface TenantMfaPolicyConfig {
+  /**
+   * Maximum age for step-up MFA on sensitive tenant-admin actions.
+   * Defaults to 300 seconds and is bounded by the API normalizer.
+   */
+  maxAgeSeconds?: number;
+  requireFor?: {
+    vaultSigning?: boolean;
+    keyImport?: boolean;
+    keyExport?: boolean;
+    recoveryCodes?: boolean;
+    tenantAdmin?: boolean;
+  };
+  allowDelegatedSignerAutomation?: boolean;
+  allowKeyQuorumAutomation?: boolean;
+}
+
+export interface TenantAuthAbuseConfig {
+  loginMethods?: {
+    passkey?: boolean;
+    email?: boolean;
+    sms?: boolean;
+    whatsapp?: boolean;
+    totp?: boolean;
+    siwe?: boolean;
+    siws?: boolean;
+    telegram?: boolean;
+    farcaster?: boolean;
+    oauth?: Record<string, boolean>;
+    oidc?: Record<string, boolean>;
+  };
+  captcha?: {
+    enabled?: boolean;
+    provider?: TenantCaptchaProvider;
+    siteKey?: string;
+    /**
+     * Name of the environment variable containing the provider secret.
+     * Defaults to STEWARD_TURNSTILE_SECRET_KEY or STEWARD_HCAPTCHA_SECRET_KEY.
+     */
+    secretKeyEnv?: string;
+    requiredFor?: TenantCaptchaAction[];
+  };
+  email?: {
+    blockDisposable?: boolean;
+    blockPlusAliases?: boolean;
+    allowedEmails?: string[];
+    blockedEmails?: string[];
+    allowedDomains?: string[];
+    blockedDomains?: string[];
+  };
+  wallet?: {
+    allowedWallets?: string[];
+    blockedWallets?: string[];
+  };
+  phone?: {
+    /**
+     * OSS-friendly VOIP hook: block known VOIP prefixes supplied by deployment
+     * config without depending on a proprietary carrier lookup relationship.
+     */
+    blockVoip?: boolean;
+    allowedPhoneNumbers?: string[];
+    blockedPhoneNumbers?: string[];
+    allowedCountryCodes?: string[];
+    blockedCountryCodes?: string[];
+  };
+  mfa?: TenantMfaPolicyConfig;
+}
+
+export type TenantAppClientEnvironment = "development" | "preview" | "staging" | "production";
+
+export interface TenantAppClient {
+  id: string;
+  name: string;
+  environment: TenantAppClientEnvironment;
+  enabled?: boolean;
+  isDefault?: boolean;
+  allowedOrigins?: string[];
+  allowedRedirectUrls?: string[];
+  loginMethods?: TenantAuthAbuseConfig["loginMethods"];
+  globalWalletEnabled?: boolean;
+  globalWalletAllowedScopes?: string[];
+  createdAt?: Date | string;
+  updatedAt?: Date | string;
+}
+
+export interface TenantAppClientSecret {
+  id: string;
+  tenantId: string;
+  clientId: string;
+  appId: string;
+  secretPrefix: string;
+  status: "active" | "retiring" | "revoked";
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  expiresAt?: Date | string | null;
+  revokedAt?: Date | string | null;
+}
+
+export interface TenantAppClientSecretCreateResult {
+  secret: TenantAppClientSecret;
+  appId: string;
+  appSecret: string;
 }
 
 export interface TenantSsoDomain {
@@ -628,6 +886,25 @@ export interface TenantSsoDomain {
   status: "pending" | "verified";
   ssoRequired: boolean;
   verifiedAt?: Date | string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+}
+
+export interface SsoDiscoveryResult {
+  domain: string;
+  tenantId: string | null;
+  ssoRequired: boolean;
+  available: boolean;
+}
+
+export interface TenantTestAccountConfig {
+  enabled?: boolean;
+  email?: string;
+  phone?: string;
+  otp?: string;
+  otpHash?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export type GasSponsorshipProvider =
@@ -678,13 +955,6 @@ export interface SponsoredGasSpendEntry {
   updatedAt: Date | string;
 }
 
-export interface SsoDiscoveryResult {
-  domain: string;
-  tenantId: string | null;
-  ssoRequired: boolean;
-  available: boolean;
-}
-
 export interface SponsoredGasSpendSummary {
   currency: "USD";
   reservedUsd: string;
@@ -702,11 +972,79 @@ export interface TenantControlPlaneConfig {
   approvalConfig: ApprovalConfig;
   featureFlags: TenantFeatureFlags;
   theme?: TenantTheme;
+  oidcProviders?: TenantOidcProviderConfig[];
+  samlSso?: TenantSamlSsoConfig;
+  authAbuseConfig?: TenantAuthAbuseConfig;
+  appClients?: TenantAppClient[];
+  testAccount?: TenantTestAccountConfig;
   gasSponsorshipConfig?: TenantGasSponsorshipConfig;
   /** Allowed CORS origins for this tenant. Empty array = wildcard (*) in dev mode. */
   allowedOrigins?: string[];
+  /** Allowed OAuth/email redirect URLs for this tenant. */
+  allowedRedirectUrls?: string[];
   createdAt?: Date;
   updatedAt?: Date;
+}
+
+export type TenantSecurityChecklistStatus = "pass" | "warning" | "fail";
+
+export interface TenantSecurityChecklistItem {
+  id: string;
+  label: string;
+  status: TenantSecurityChecklistStatus;
+  description: string;
+  remediation?: string;
+}
+
+export interface TenantSecurityChecklist {
+  tenantId: string;
+  generatedAt: Date | string;
+  summary: {
+    pass: number;
+    warning: number;
+    fail: number;
+  };
+  items: TenantSecurityChecklistItem[];
+}
+
+export interface IdempotencyMetricCounters {
+  observed: number;
+  reserved: number;
+  completed: number;
+  replayed: number;
+  conflicts: number;
+  inFlightConflicts: number;
+  suppressedAuthResponses: number;
+  invalidKeys: number;
+  storeErrors: number;
+  skippedUnsafeContext: number;
+  releasedOnError: number;
+}
+
+export interface TenantIdempotencyMetrics {
+  tenantId: string;
+  generatedAt: Date | string;
+  windowStartedAt: Date | string;
+  lastSeenAt: Date | string | null;
+  ttlMs: number;
+  counters: IdempotencyMetricCounters;
+}
+
+export interface TenantRequestSigningKey {
+  id: string;
+  tenantId: string;
+  name: string;
+  secretPrefix: string;
+  status: "active" | "retiring" | "revoked";
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  expiresAt?: Date | string | null;
+  revokedAt?: Date | string | null;
+}
+
+export interface TenantRequestSigningKeyCreateResult {
+  key: TenantRequestSigningKey;
+  signingSecret: string;
 }
 
 export const DEFAULT_FEATURE_FLAGS: TenantFeatureFlags = {

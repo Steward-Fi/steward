@@ -555,12 +555,23 @@ async function executeTransferIntent(row: typeof intents.$inferSelect) {
     }
 
     const txId = row.id;
+    let completedResult: Record<string, unknown> | null = null;
     try {
       const signed = await vault.signTransaction(request, {
         txId,
         policyResults: evaluation.results,
         status: request.broadcast === false ? "signed" : "broadcast",
       });
+      completedResult = {
+        handler: row.intentType === "wallet_action" ? "wallet_action.transfer" : "transfer",
+        actionId: txId,
+        status: request.broadcast === false ? "signed" : "broadcast",
+        chainId: request.chainId,
+        to: request.to,
+        value: request.value,
+        policyResults: evaluation.results,
+        ...(request.broadcast === false ? { signedTx: signed } : { txHash: signed }),
+      };
       await db
         .update(transactions)
         .set({
@@ -579,17 +590,12 @@ async function executeTransferIntent(row: typeof intents.$inferSelect) {
           (error) => console.error("[intents] Failed to record transfer intent spend:", error),
         );
       }
-      return {
-        handler: row.intentType === "wallet_action" ? "wallet_action.transfer" : "transfer",
-        actionId: txId,
-        status: request.broadcast === false ? "signed" : "broadcast",
-        chainId: request.chainId,
-        to: request.to,
-        value: request.value,
-        policyResults: evaluation.results,
-        ...(request.broadcast === false ? { signedTx: signed } : { txHash: signed }),
-      };
+      return completedResult;
     } catch (error) {
+      if (completedResult) {
+        console.error("[intents] Post-transfer intent bookkeeping failed after signing:", error);
+        return completedResult;
+      }
       const message = error instanceof Error ? error.message : "Transfer execution failed";
       dispatchWebhook(row.tenantId, request.agentId, "wallet_action.transfer.failed", {
         actionId: txId,

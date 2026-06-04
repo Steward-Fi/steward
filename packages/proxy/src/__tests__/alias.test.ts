@@ -33,8 +33,10 @@ describe("resolveTarget", () => {
 
   test("resolves alias with no trailing path", () => {
     const result = resolveTarget("/openai");
+    // resolveTarget normalizes an empty remainder to "/", and url is built as
+    // `https://${host}${path}`, so the url carries the trailing slash too.
     expect(result).toEqual({
-      url: "https://api.openai.com",
+      url: "https://api.openai.com/",
       host: "api.openai.com",
       path: "/",
     });
@@ -42,22 +44,32 @@ describe("resolveTarget", () => {
 
   // ─── Direct proxy ──────────────────────────────────────────────────────────
 
-  test("resolves direct proxy path", () => {
-    const result = resolveTarget("/proxy/custom.api.com/v2/data");
+  test("resolves direct proxy path for an allowlisted host", () => {
+    const result = resolveTarget("/proxy/api.openai.com/v2/data");
     expect(result).toEqual({
-      url: "https://custom.api.com/v2/data",
-      host: "custom.api.com",
+      url: "https://api.openai.com/v2/data",
+      host: "api.openai.com",
       path: "/v2/data",
     });
   });
 
-  test("resolves direct proxy with host only", () => {
-    const result = resolveTarget("/proxy/example.com");
+  test("resolves direct proxy with host only for an allowlisted host", () => {
+    const result = resolveTarget("/proxy/api.anthropic.com");
     expect(result).toEqual({
-      url: "https://example.com/",
-      host: "example.com",
+      url: "https://api.anthropic.com/",
+      host: "api.anthropic.com",
       path: "/",
     });
+  });
+
+  test("rejects direct proxy with unallowlisted hostname", () => {
+    const result = resolveTarget("/proxy/attacker.example/collect");
+    expect(result).toBeNull();
+  });
+
+  test("rejects direct proxy with IP literal", () => {
+    expect(resolveTarget("/proxy/127.0.0.1/admin")).toBeNull();
+    expect(resolveTarget("/proxy/169.254.169.254/latest/meta-data")).toBeNull();
   });
 
   test("rejects direct proxy with invalid hostname (no dot)", () => {

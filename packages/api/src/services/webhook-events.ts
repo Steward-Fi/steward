@@ -23,6 +23,7 @@ export const CONFIGURED_WEBHOOK_EVENT_TYPES = [
   "private_key.exported",
   "wallet.recovery_setup",
   "wallet.recovered",
+  "wallet.raw_signature.created",
   "wallet.funds_deposited",
   "wallet.funds_withdrawn",
   "transaction.broadcasted",

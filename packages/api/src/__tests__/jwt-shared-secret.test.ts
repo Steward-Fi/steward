@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { signAccessToken, signAgentToken, verifyToken } from "@stwd/auth";
+import { ACCESS_TOKEN_EXPIRY, signAccessToken, signAgentToken, verifyToken } from "@stwd/auth";
+import { decodeJwt } from "jose";
 
 const ORIGINAL_ENV = {
   STEWARD_JWT_SECRET: process.env.STEWARD_JWT_SECRET,
@@ -47,5 +48,22 @@ describe("shared JWT signing and verification", () => {
 
     expect(payload.address).toBe("0x0000000000000000000000000000000000000000");
     expect(payload.tenantId).toBe("tenant-1");
+  });
+
+  it("mints user access tokens with the shared short-lived TTL", async () => {
+    process.env.STEWARD_JWT_SECRET = "short-lived-access-token-secret-for-tests";
+    delete process.env.STEWARD_SESSION_SECRET;
+    delete process.env.STEWARD_MASTER_PASSWORD;
+
+    expect(ACCESS_TOKEN_EXPIRY).toBe("15m");
+    const token = await signAccessToken({
+      address: "0x0000000000000000000000000000000000000000",
+      tenantId: "tenant-1",
+    });
+    const payload = decodeJwt(token);
+
+    expect(typeof payload.iat).toBe("number");
+    expect(typeof payload.exp).toBe("number");
+    expect(Number(payload.exp) - Number(payload.iat)).toBe(900);
   });
 });

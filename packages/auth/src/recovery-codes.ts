@@ -42,8 +42,8 @@ export interface RecoveryCodeStore {
   replaceForUser(userId: string, codes: Array<{ hash: string; salt: string }>): Promise<void>;
   /** List all stored (active + used) codes for a user. */
   listForUser(userId: string): Promise<StoredRecoveryCode[]>;
-  /** Mark a single code as consumed. Must be idempotent. */
-  markUsed(id: string, usedAt: Date): Promise<void>;
+  /** Mark a single code as consumed. Returns false when it was already used or missing. */
+  markUsed(id: string, usedAt: Date): Promise<boolean>;
 }
 
 function generateOne(): string {
@@ -131,8 +131,7 @@ export async function verifyRecoveryCode(
   for (const row of stored) {
     if (row.usedAt) continue;
     if (digest(row.salt, normalized) === row.hash) {
-      await store.markUsed(row.id, new Date());
-      return { valid: true };
+      return { valid: await store.markUsed(row.id, new Date()) };
     }
   }
   return { valid: false };
@@ -169,13 +168,15 @@ export class InMemoryRecoveryCodeStore implements RecoveryCodeStore {
     return [...(this.byUser.get(userId) ?? [])];
   }
 
-  async markUsed(id: string, usedAt: Date): Promise<void> {
+  async markUsed(id: string, usedAt: Date): Promise<boolean> {
     for (const list of this.byUser.values()) {
       const row = list.find((r) => r.id === id);
       if (row) {
+        if (row.usedAt) return false;
         row.usedAt = usedAt;
-        return;
+        return true;
       }
     }
+    return false;
   }
 }

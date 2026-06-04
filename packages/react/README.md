@@ -141,6 +141,44 @@ export function EvmLogin() {
 }
 ```
 
+To expose a self-hosted or partner global-wallet provider in RainbowKit, wrap
+its wagmi connector with `createStewardGlobalWallet` and pass it as an extra
+wallet entry:
+
+```tsx
+import {
+  createDefaultWagmiConfig,
+  createStewardGlobalWallet,
+} from "@stwd/react/wallet/evm";
+
+const stewardGlobalWallet = createStewardGlobalWallet({
+  id: "my-global-wallet",
+  name: "My Global Wallet",
+  iconUrl: "https://example.com/wallet-icon.svg",
+  connector: myWagmiConnector,
+});
+
+const wagmiConfig = createDefaultWagmiConfig({
+  appName: "My App",
+  projectId: walletConnectProjectId,
+  chains: [mainnet, base],
+  wallets: [stewardGlobalWallet],
+});
+```
+
+For connector libraries such as ConnectKit that want a wagmi connector directly,
+use the EIP-1193 helper:
+
+```tsx
+import { createStewardGlobalWalletConnector } from "@stwd/react/wallet/global";
+
+const connector = createStewardGlobalWalletConnector({
+  id: "my-global-wallet",
+  name: "My Global Wallet",
+  provider: () => myGlobalWalletProvider,
+});
+```
+
 If you render `WalletLogin` directly, it is already the wallet UI. To enable wallet sign-in inside the broader `<StewardLogin>` modal (alongside passkey, email, OAuth), pass the `showWallets` prop on `<StewardLogin>` instead.
 
 ### Drop-in: `<StewardLoginWithWallets>`
@@ -163,9 +201,9 @@ export default function Login() {
         showEmail
         showGoogle
         showDiscord
-        evm={{ appName: "My App" }}
+        evm={{ appName: "My App", wallets: [stewardGlobalWallet] }}
         solana={{ endpoint: "https://api.mainnet-beta.solana.com" }}
-        onSuccess={({ token }) => console.log("signed in:", token)}
+        onSuccess={() => console.log("signed in")}
       />
     </StewardProvider>
   );
@@ -231,7 +269,7 @@ export function SolanaLogin() {
 <StewardProvider client={client} agentId="agent_abc" auth={{ baseUrl: "https://api.steward.fi" }}>
   <EVMWalletProvider config={wagmiConfig}>
     <SolanaWalletProvider endpoint="https://api.mainnet-beta.solana.com">
-      <WalletLogin chains="both" onSuccess={(res, kind) => console.log(kind, res.token)} />
+      <WalletLogin chains="both" onSuccess={(res, kind) => console.log("signed in via", kind)} />
     </SolanaWalletProvider>
   </EVMWalletProvider>
 </StewardProvider>

@@ -4,19 +4,32 @@
  * Covers the new `response_type=code` flow: a one-time code is bound to
  * {redirectUri, tenantId} at issue time and consumed atomically by the
  * exchange route. Tests focus on the validation contract — single-use,
- * redirect/tenant binding, TTL — without standing up a real provider.
+ * redirect/tenant/PKCE binding, TTL — without standing up a real provider.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { Hono } from "hono";
 import {
-  _clearOAuthCodeStoreForTests,
-  _seedOAuthExchangeCodeForTests,
-  authRoutes,
-} from "../routes/auth";
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  setDefaultTimeout,
+} from "bun:test";
+import { readFileSync } from "node:fs";
+import { closeDb } from "@stwd/db";
+import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { Hono } from "hono";
+
+setDefaultTimeout(30000);
 
 const REDIRECT_URI = "https://app.example.test/checkout";
 const TENANT_ID = "elizacloud";
+
+let authRoutes: typeof import("../routes/auth").authRoutes;
+let _clearOAuthCodeStoreForTests: typeof import("../routes/auth")._clearOAuthCodeStoreForTests;
+let _seedOAuthExchangeCodeForTests: typeof import("../routes/auth")._seedOAuthExchangeCodeForTests;
 
 function makeApp(): Hono {
   const app = new Hono();
@@ -37,12 +50,66 @@ async function postExchange(
 }
 
 describe("POST /auth/oauth/exchange", () => {
+  beforeAll(async () => {
+    process.env.STEWARD_MASTER_PASSWORD ??= "dev-secret";
+    process.env.STEWARD_PGLITE_MEMORY = "true";
+    const { db, client } = await createPGLiteDb("memory://");
+    setPGLiteOverride(db, async () => {
+      await client.close();
+    });
+    const auth = await import("../routes/auth");
+    authRoutes = auth.authRoutes;
+    _clearOAuthCodeStoreForTests = auth._clearOAuthCodeStoreForTests;
+    _seedOAuthExchangeCodeForTests = auth._seedOAuthExchangeCodeForTests;
+  });
+
+  afterAll(async () => {
+    await closeDb();
+    delete process.env.STEWARD_PGLITE_MEMORY;
+  });
+
   beforeEach(() => {
     _clearOAuthCodeStoreForTests();
+    delete process.env.STEWARD_ALLOW_OAUTH_TOKEN_REDIRECTS;
   });
 
   afterEach(() => {
     _clearOAuthCodeStoreForTests();
+    delete process.env.APP_URL;
+    delete process.env.GOOGLE_CLIENT_ID;
+    delete process.env.GOOGLE_CLIENT_SECRET;
+    delete process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS;
+    delete process.env.STEWARD_ALLOW_OAUTH_TOKEN_REDIRECTS;
+  });
+
+  it("rejects token-in-query OAuth redirects even when the legacy env flag is enabled", async () => {
+    process.env.APP_URL = "https://api.example.test";
+    process.env.GOOGLE_CLIENT_ID = "google-client";
+    process.env.GOOGLE_CLIENT_SECRET = "google-secret";
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
+    process.env.STEWARD_ALLOW_OAUTH_TOKEN_REDIRECTS = "true";
+
+    const app = makeApp();
+    const res = await app.request(
+      `/auth/oauth/google/authorize?redirect_uri=${encodeURIComponent(
+        REDIRECT_URI,
+      )}&response_type=token`,
+    );
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(400);
+    expect(json.ok).toBe(false);
+    expect(json.error).toContain("response_type=token is disabled");
+  });
+
+  it("does not retain token-in-query redirect branches in OAuth or email callbacks", () => {
+    const source = readFileSync(new URL("../routes/auth.ts", import.meta.url), "utf8");
+
+    expect(source).not.toContain("STEWARD_ALLOW_OAUTH_TOKEN_REDIRECTS");
+    expect(source).not.toContain("STEWARD_ALLOW_EMAIL_TOKEN_REDIRECTS");
+    expect(source).not.toContain('searchParams.set("token"');
+    expect(source).not.toContain('searchParams.set("refreshToken"');
+    expect(source).not.toContain("buildEmailAuthRedirectUrl({\n      token:");
   });
 
   it("returns the bound tokens when code + redirect_uri + tenant_id all match", async () => {
@@ -65,7 +132,7 @@ describe("POST /auth/oauth/exchange", () => {
     expect(json.token).toBe("access-jwt");
     expect(json.refreshToken).toBe("refresh-raw");
     expect(typeof json.expiresAt).toBe("number");
-    expect(json.expiresIn).toBe(86400);
+    expect(json.expiresIn).toBe(900);
   });
 
   it("rejects unknown / already-consumed codes with code_invalid", async () => {
@@ -103,7 +170,7 @@ describe("POST /auth/oauth/exchange", () => {
     expect(second.json.code).toBe("code_invalid");
   });
 
-  it("rejects a redirect_uri mismatch with code_redirect_mismatch and still burns the nonce", async () => {
+  it("rejects a redirect_uri mismatch with code_redirect_mismatch without burning the nonce", async () => {
     const app = makeApp();
     _seedOAuthExchangeCodeForTests("nonce-bad-redirect", {
       token: "t",
@@ -120,15 +187,42 @@ describe("POST /auth/oauth/exchange", () => {
     expect(bad.status).toBe(401);
     expect(bad.json.code).toBe("code_redirect_mismatch");
 
-    // Defense in depth: even the correct redirect_uri cannot retry — the
-    // first lookup consumed (deleted) the code.
     const retry = await postExchange(app, {
       code: "nonce-bad-redirect",
       redirect_uri: REDIRECT_URI,
       tenant_id: TENANT_ID,
     });
-    expect(retry.status).toBe(401);
-    expect(retry.json.code).toBe("code_invalid");
+    expect(retry.status).toBe(200);
+    expect(retry.json.ok).toBe(true);
+  });
+
+  it("rejects a bad PKCE verifier without burning the nonce", async () => {
+    const app = makeApp();
+    _seedOAuthExchangeCodeForTests("nonce-bad-pkce", {
+      token: "t",
+      refreshToken: "r",
+      redirectUri: REDIRECT_URI,
+      tenantId: TENANT_ID,
+      codeChallenge: "expected-challenge",
+      codeChallengeMethod: "S256",
+    });
+
+    const bad = await postExchange(app, {
+      code: "nonce-bad-pkce",
+      redirect_uri: REDIRECT_URI,
+      tenant_id: TENANT_ID,
+      code_verifier: "invalid-invalid-invalid-invalid-invalid-invalid",
+    });
+    expect(bad.status).toBe(401);
+    expect(bad.json.code).toBe("code_verifier_mismatch");
+
+    const retryWithoutVerifier = await postExchange(app, {
+      code: "nonce-bad-pkce",
+      redirect_uri: REDIRECT_URI,
+      tenant_id: TENANT_ID,
+    });
+    expect(retryWithoutVerifier.status).toBe(401);
+    expect(retryWithoutVerifier.json.code).toBe("code_verifier_invalid");
   });
 
   it("rejects a tenant_id mismatch with code_tenant_mismatch", async () => {
@@ -147,6 +241,32 @@ describe("POST /auth/oauth/exchange", () => {
     });
     expect(bad.status).toBe(401);
     expect(bad.json.code).toBe("code_tenant_mismatch");
+  });
+
+  it("rejects provider-token redemption when the path provider differs from the issued provider", async () => {
+    process.env.STEWARD_OAUTH_ALLOWED_REDIRECTS = REDIRECT_URI;
+    const app = makeApp();
+    _seedOAuthExchangeCodeForTests("nonce-bad-provider", {
+      token: "t",
+      refreshToken: "r",
+      redirectUri: REDIRECT_URI,
+      tenantId: null,
+      providerName: "google",
+    });
+
+    const res = await app.request("/auth/oauth/discord/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: "nonce-bad-provider",
+        redirectUri: REDIRECT_URI,
+      }),
+    });
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(401);
+    expect(json.ok).toBe(false);
+    expect(json.error).toBe("OAuth code provider mismatch");
   });
 
   it("rejects an expired code with code_expired", async () => {

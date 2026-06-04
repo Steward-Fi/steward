@@ -93,6 +93,11 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     const { trackAuditEvent } = await import("./services/audit");
     const { isHstsEnabled } = await import("./middleware/security-headers");
     const dbUrl = (env.DATABASE_URL || "").toLowerCase();
+    // Best-effort boot telemetry (a one-time observability breadcrumb of the
+    // TLS/HSTS posture at cold start) — NOT a security mutation or a tamper-
+    // evident control event, and there is no client action to deny. So this
+    // intentionally stays fire-and-forget: a write failure here must not abort
+    // worker init. Security/compliance events use awaited writeAuditEvent.
     trackAuditEvent({
       tenantId: "system",
       actorType: "system",

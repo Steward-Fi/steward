@@ -18,9 +18,23 @@ declare module "hono" {
   }
 }
 
+// A client-supplied X-Request-Id is reflected into the response header and into
+// log lines / error bodies keyed by it. To prevent log injection / log forging
+// (attacker-chosen text — including CR/LF or control chars — landing in logs)
+// and unbounded-length values, we accept the client value ONLY if it matches a
+// conservative allowlist: URL/UUID-safe chars, 1–128 long. Anything else is
+// discarded and a fresh UUID is generated instead.
+const REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+function sanitizeRequestId(value: string | undefined): string {
+  if (value && REQUEST_ID_RE.test(value)) return value;
+  return crypto.randomUUID();
+}
+
 export const correlationId = createMiddleware(async (c, next) => {
-  // Accept client-provided request ID or generate a new one
-  const requestId = c.req.header("X-Request-Id") || crypto.randomUUID();
+  // Accept a VALID client-provided request ID or generate a new one. Never
+  // reflect an unvalidated client value into the response header or logs.
+  const requestId = sanitizeRequestId(c.req.header("X-Request-Id"));
 
   // Set on context for downstream handlers
   c.set("requestId", requestId);

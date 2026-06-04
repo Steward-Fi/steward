@@ -17,14 +17,19 @@
  * Node-only APIs) belongs in `index.ts`, not here.
  */
 
+import { platformAuthMiddleware } from "@stwd/auth";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { requireAgentJwt } from "./middleware/agent-jwt";
+import { authorizationSignature } from "./middleware/authorization-signature";
 import { correlationId } from "./middleware/correlation";
+import { idempotencyMiddleware } from "./middleware/idempotency";
 import { operatorAuth } from "./middleware/operator-auth";
+import { requestExpiry } from "./middleware/request-expiry";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
+import { adapterRoutes } from "./routes/adapters";
 import { agentRoutes } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
@@ -33,15 +38,17 @@ import { conditionSetRoutes } from "./routes/condition-sets";
 import { dashboardRoutes } from "./routes/dashboard";
 import { identityDiscoveryRoutes } from "./routes/discovery";
 import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
+import { globalWalletRoutes } from "./routes/global-wallet";
 import { intentRoutes } from "./routes/intents";
 import { operatorRecoveryRoutes } from "./routes/operator-recovery";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { secretsRoutes } from "./routes/secrets";
+import { sessionSignerRoutes } from "./routes/session-signers";
 import { tenantConfigRoutes } from "./routes/tenant-config";
 import { tenantRoutes } from "./routes/tenants";
 import { tradeRoutes } from "./routes/trade";
-import { userRoutes } from "./routes/user";
+import { userRoutes, userSessionAuth } from "./routes/user";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
 import {
@@ -81,7 +88,6 @@ app.use("*", securityHeaders);
 app.use("*", tenantCors);
 app.use("*", logger());
 app.use("*", correlationId);
-
 app.use(
   "*",
   bodyLimit({
@@ -90,6 +96,8 @@ app.use(
       c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
   }),
 );
+app.use("*", requestExpiry());
+app.use("*", authorizationSignature());
 
 // ─── Auth middleware per route group ──────────────────────────────────────────
 
@@ -97,6 +105,8 @@ app.use("/agents", (c, next) => tenantAuth(c, next));
 app.use("/agents/*", (c, next) => tenantAuth(c, next));
 app.use("/v1/agents", (c, next) => tenantAuth(c, next));
 app.use("/v1/agents/*", (c, next) => tenantAuth(c, next));
+app.use("/adapters", (c, next) => tenantAuth(c, next));
+app.use("/adapters/*", (c, next) => tenantAuth(c, next));
 app.use("/vault/*", (c, next) => tenantAuth(c, next));
 app.use("/secrets", (c, next) => tenantAuth(c, next));
 app.use("/secrets/*", (c, next) => tenantAuth(c, next));
@@ -154,6 +164,12 @@ app.use("/v1/trade/*", (c, next) => {
   if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
   return tenantAuth(c, next);
 });
+app.use("/platform", platformAuthMiddleware());
+app.use("/platform/*", platformAuthMiddleware());
+app.use("/user", (c, next) => userSessionAuth(c as never, next));
+app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
+
+app.use("*", idempotencyMiddleware());
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
@@ -170,10 +186,15 @@ app.get("/health", (c) =>
 
 app.route("/", identityDiscoveryRoutes);
 app.route("/auth", authRoutes);
+app.route("/", identityDiscoveryRoutes);
 app.route("/platform", platformRoutes);
 app.route("/user", userRoutes);
 app.route("/agents", agentRoutes);
 app.route("/v1/agents", agentRoutes);
+// Session signers are nested under a specific agent; mounted as its own sub-app
+// so the path is /agents/:agentId/session-signers. The "/agents/*" tenantAuth
+// middleware (above) already gates it.
+app.route("/agents/:agentId/session-signers", sessionSignerRoutes);
 app.route("/vault", vaultRoutes);
 app.route("/secrets", secretsRoutes);
 // tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler
@@ -181,7 +202,9 @@ app.route("/secrets", secretsRoutes);
 app.route("/tenants", tenantConfigRoutes);
 app.route("/tenants", tenantRoutes);
 app.route("/dashboard", dashboardRoutes);
+app.route("/global-wallet", globalWalletRoutes);
 app.route("/webhooks", webhookRoutes);
+app.route("/adapters", adapterRoutes);
 app.route("/approvals", approvalRoutes);
 app.route("/intents", intentRoutes);
 app.route("/audit", auditRoutes);

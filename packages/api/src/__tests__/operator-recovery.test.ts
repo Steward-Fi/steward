@@ -77,12 +77,19 @@ async function seedAgent(opts: {
   agentId: string;
   approvedAddresses?: string[];
 }) {
-  await getDb().insert(tenants).values({
-    id: opts.tenantId,
-    name: "Operator Recovery Tenant",
-    apiKeyHash: "test-hash",
-    ownerAddress: "0x0000000000000000000000000000000000000000",
-  });
+  // api_key_hash and owner_address are unique per tenant (PR #79 constraints),
+  // so derive them from the tenant id rather than reusing fixed values.
+  await getDb()
+    .insert(tenants)
+    .values({
+      id: opts.tenantId,
+      name: "Operator Recovery Tenant",
+      apiKeyHash: `test-hash-${opts.tenantId}`,
+      ownerAddress: `0x${opts.tenantId
+        .replace(/[^a-fA-F0-9]/g, "")
+        .padEnd(40, "0")
+        .slice(0, 40)}`,
+    });
   await getDb().insert(agents).values({
     id: opts.agentId,
     tenantId: opts.tenantId,

@@ -22,30 +22,36 @@ const PERSONAL_TENANT_ID = `personal-${WALLET_USER_ID}`;
 
 let app: typeof import("../app")["app"];
 let previousAllowKeyExport: string | undefined;
+let previousAllowPrivateKeyExport: string | undefined;
+let previousAllowVaultPrivateKeyExport: string | undefined;
+let previousAllowUserPrivateKeyExport: string | undefined;
 
+// Recent MFA is carried by a numeric `mfaVerifiedAt` (epoch ms) claim, which the
+// session middleware reads into sessionMfaVerifiedAt and the user session reads
+// via hasRecentMfaStepUp. ISO-string claims are NOT honored by these checks.
 function freshMfa() {
-  return new Date().toISOString();
+  return Date.now();
 }
 
-async function tenantToken(mfaVerifiedAt?: string) {
+async function tenantToken(mfaVerifiedAt?: number) {
   return signAccessToken(
     {
       address: `0x${"1".repeat(40)}`,
       tenantId: TENANT_ID,
       userId: ADMIN_USER_ID,
-      ...(mfaVerifiedAt ? { sessionMfaVerifiedAt: mfaVerifiedAt } : {}),
+      ...(mfaVerifiedAt !== undefined ? { mfaVerifiedAt, mfaMethod: "totp" } : {}),
     },
     "1h",
   );
 }
 
-async function userToken(mfaVerifiedAt?: string) {
+async function userToken(mfaVerifiedAt?: number) {
   return signAccessToken(
     {
       address: `0x${"2".repeat(40)}`,
       tenantId: PERSONAL_TENANT_ID,
       userId: WALLET_USER_ID,
-      ...(mfaVerifiedAt ? { sessionMfaVerifiedAt: mfaVerifiedAt } : {}),
+      ...(mfaVerifiedAt !== undefined ? { mfaVerifiedAt, mfaMethod: "totp" } : {}),
     },
     "1h",
   );
@@ -62,15 +68,29 @@ beforeAll(async () => {
   if (!hasDatabaseUrl) return;
 
   previousAllowKeyExport = process.env.STEWARD_ALLOW_KEY_EXPORT;
+  previousAllowPrivateKeyExport = process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT;
+  previousAllowVaultPrivateKeyExport = process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT;
+  previousAllowUserPrivateKeyExport = process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT;
+
+  // Enable the hardened export feature flags. The user route captures
+  // STEWARD_ALLOW_PRIVATE_KEY_EXPORT / STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT at
+  // module-load time, so they must be set before importing ../app.
   process.env.STEWARD_ALLOW_KEY_EXPORT = "true";
+  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT = "true";
+  process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT = "true";
+  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT = "true";
 
   ({ app } = await import("../app"));
 
   const db = getDb();
-  const { hash } = generateApiKey();
+  // api_key_hash is unique per tenant (PR #79 constraint) — use distinct hashes.
   await db.insert(tenants).values([
-    { id: TENANT_ID, name: "Key Export Guard Tenant", apiKeyHash: hash },
-    { id: PERSONAL_TENANT_ID, name: "Key Export Personal Tenant", apiKeyHash: hash },
+    { id: TENANT_ID, name: "Key Export Guard Tenant", apiKeyHash: generateApiKey().hash },
+    {
+      id: PERSONAL_TENANT_ID,
+      name: "Key Export Personal Tenant",
+      apiKeyHash: generateApiKey().hash,
+    },
   ]);
   await db.insert(users).values([
     { id: ADMIN_USER_ID, email: `admin-${RUN_ID}@example.test` },
@@ -93,11 +113,14 @@ beforeAll(async () => {
 afterAll(async () => {
   if (!hasDatabaseUrl) return;
 
-  if (previousAllowKeyExport === undefined) {
-    delete process.env.STEWARD_ALLOW_KEY_EXPORT;
-  } else {
-    process.env.STEWARD_ALLOW_KEY_EXPORT = previousAllowKeyExport;
-  }
+  const restoreEnv = (name: string, prev: string | undefined) => {
+    if (prev === undefined) delete process.env[name];
+    else process.env[name] = prev;
+  };
+  restoreEnv("STEWARD_ALLOW_KEY_EXPORT", previousAllowKeyExport);
+  restoreEnv("STEWARD_ALLOW_PRIVATE_KEY_EXPORT", previousAllowPrivateKeyExport);
+  restoreEnv("STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT", previousAllowVaultPrivateKeyExport);
+  restoreEnv("STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT", previousAllowUserPrivateKeyExport);
 
   const db = getDb();
   await db.execute(
@@ -130,7 +153,7 @@ describeWithDatabase("key export guards", () => {
   it("allows tenant vault export with recent MFA and writes a blocking HIGH audit event", async () => {
     process.env.STEWARD_ALLOW_KEY_EXPORT = "true";
     const token = await tenantToken(freshMfa());
-    const before = await auditCount(TENANT_ID, "vault.key_export");
+    const before = await auditCount(TENANT_ID, "vault.private_key_export.succeeded");
 
     const res = await app.request(`/vault/${AGENT_ID}/export`, {
       method: "POST",
@@ -142,7 +165,7 @@ describeWithDatabase("key export guards", () => {
     const body = (await res.json()) as { ok: boolean; data?: { evm?: { privateKey: string } } };
     expect(body.ok).toBe(true);
     expect(body.data?.evm?.privateKey).toStartWith("0x");
-    expect(await auditCount(TENANT_ID, "vault.key_export")).toBe(before + 1);
+    expect(await auditCount(TENANT_ID, "vault.private_key_export.succeeded")).toBe(before + 1);
   });
 
   it("rejects tenant vault export when the env kill switch is disabled", async () => {
@@ -181,7 +204,7 @@ describeWithDatabase("key export guards", () => {
   it("allows user wallet export with recent MFA and writes a blocking HIGH audit event", async () => {
     process.env.STEWARD_ALLOW_KEY_EXPORT = "true";
     const token = await userToken(freshMfa());
-    const before = await auditCount(PERSONAL_TENANT_ID, "user.wallet_key_export");
+    const before = await auditCount(PERSONAL_TENANT_ID, "user.wallet.private_key_export.succeeded");
 
     const res = await app.request("/user/me/wallet/export", {
       method: "POST",
@@ -193,7 +216,9 @@ describeWithDatabase("key export guards", () => {
     const body = (await res.json()) as { ok: boolean; data?: { evm?: { privateKey: string } } };
     expect(body.ok).toBe(true);
     expect(body.data?.evm?.privateKey).toStartWith("0x");
-    expect(await auditCount(PERSONAL_TENANT_ID, "user.wallet_key_export")).toBe(before + 1);
+    expect(await auditCount(PERSONAL_TENANT_ID, "user.wallet.private_key_export.succeeded")).toBe(
+      before + 1,
+    );
   });
 
   it("rejects user wallet export when the env kill switch is disabled", async () => {

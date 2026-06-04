@@ -78,6 +78,8 @@ export interface IncrementSpendInput extends GetSessionInput {
   amountUsd: number;
 }
 
+export interface SessionFenceInput extends GetSessionInput {}
+
 export interface ListForAgentInput {
   agentId: string;
   tenantId: string;
@@ -93,6 +95,10 @@ function sessionKey(tenantId: string, id: string): string {
 
 function agentIndexKey(tenantId: string, agentId: string): string {
   return `trade:session:index:${tenantId}:${agentId}`;
+}
+
+function sessionFenceKey(tenantId: string, id: string): string {
+  return `trade_session_fence_${tenantId}:${id}`;
 }
 
 function asNumber(value: unknown): number {
@@ -236,22 +242,30 @@ export class TradeSessionManager {
   }
 
   async revokeSession(input: RevokeSessionInput): Promise<TradeSession | null> {
-    const existing = await this.readDb(input.tenantId, input.id);
-    if (!existing) return null;
-    if (existing.status === "revoked") return existing;
+    const revoked = await getDb().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${sessionFenceKey(input.tenantId, input.id)}, 0))`,
+      );
+      const [row] = await tx
+        .select()
+        .from(tradeSessions)
+        .where(and(eq(tradeSessions.id, input.id), eq(tradeSessions.tenantId, input.tenantId)));
+      if (!row) return null;
+      const existing = rowToSession(row);
+      if (existing.status === "revoked") return existing;
 
-    const revokedAt = this.now();
-    const revoked: TradeSession = {
-      ...existing,
-      status: "revoked",
-      revokedAt,
-      revokedBy: input.revokedBy ?? null,
-    };
-
-    await getDb()
-      .update(tradeSessions)
-      .set({ status: "revoked", revokedAt, revokedBy: revoked.revokedBy })
-      .where(and(eq(tradeSessions.id, input.id), eq(tradeSessions.tenantId, input.tenantId)));
+      const revokedAt = this.now();
+      const revokedBy = input.revokedBy ?? null;
+      const [revokedRow] = await tx
+        .update(tradeSessions)
+        .set({ status: "revoked", revokedAt, revokedBy })
+        .where(and(eq(tradeSessions.id, input.id), eq(tradeSessions.tenantId, input.tenantId)))
+        .returning();
+      return revokedRow
+        ? rowToSession(revokedRow)
+        : { ...existing, status: "revoked" as const, revokedAt, revokedBy };
+    });
+    if (!revoked) return null;
     await this.deleteRedis(input.tenantId, input.id);
     return revoked;
   }
@@ -260,19 +274,76 @@ export class TradeSessionManager {
     return this.revokeSession(input);
   }
 
+  async deleteSession(input: GetSessionInput): Promise<void> {
+    await getDb()
+      .delete(tradeSessions)
+      .where(and(eq(tradeSessions.id, input.id), eq(tradeSessions.tenantId, input.tenantId)));
+    await this.deleteRedis(input.tenantId, input.id);
+  }
+
   async incrementSpend(input: IncrementSpendInput): Promise<TradeSession | null> {
+    return this.reserveSpend(input);
+  }
+
+  async reserveSpend(input: IncrementSpendInput): Promise<TradeSession | null> {
     if (!Number.isFinite(input.amountUsd) || input.amountUsd <= 0) {
       throw new Error("amountUsd must be positive");
     }
-
-    const existing = await this.getSession(input);
-    if (!existing) return null;
-    if (existing.status !== "active") return existing;
 
     const [row] = await getDb()
       .update(tradeSessions)
       .set({
         dailySpendUsd: sql`${tradeSessions.dailySpendUsd} + ${String(input.amountUsd)}::numeric`,
+      })
+      .where(
+        and(
+          eq(tradeSessions.id, input.id),
+          eq(tradeSessions.tenantId, input.tenantId),
+          eq(tradeSessions.status, "active"),
+          sql`${tradeSessions.expiresAt} > ${this.now()}`,
+          sql`${tradeSessions.dailySpendUsd} + ${String(input.amountUsd)}::numeric <= ${tradeSessions.dailyCapUsd}`,
+        ),
+      )
+      .returning();
+    if (!row) return null;
+    const updated = await this.refreshExpiry(rowToSession(row));
+    await this.writeRedis(updated);
+    return updated;
+  }
+
+  async withActiveSubmissionFence<T>(
+    input: SessionFenceInput,
+    callback: (session: TradeSession) => Promise<T>,
+  ): Promise<T | null> {
+    return getDb().transaction(async (tx) => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtextextended(${sessionFenceKey(input.tenantId, input.id)}, 0))`,
+      );
+      const [row] = await tx
+        .select()
+        .from(tradeSessions)
+        .where(
+          and(
+            eq(tradeSessions.id, input.id),
+            eq(tradeSessions.tenantId, input.tenantId),
+            eq(tradeSessions.status, "active"),
+            sql`${tradeSessions.expiresAt} > ${this.now()}`,
+          ),
+        );
+      if (!row) return null;
+      return callback(rowToSession(row));
+    });
+  }
+
+  async releaseSpend(input: IncrementSpendInput): Promise<TradeSession | null> {
+    if (!Number.isFinite(input.amountUsd) || input.amountUsd <= 0) {
+      throw new Error("amountUsd must be positive");
+    }
+
+    const [row] = await getDb()
+      .update(tradeSessions)
+      .set({
+        dailySpendUsd: sql`greatest(${tradeSessions.dailySpendUsd} - ${String(input.amountUsd)}::numeric, 0)`,
       })
       .where(and(eq(tradeSessions.id, input.id), eq(tradeSessions.tenantId, input.tenantId)))
       .returning();

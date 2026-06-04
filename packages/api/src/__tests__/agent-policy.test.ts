@@ -14,11 +14,16 @@ let app: Awaited<typeof import("../app")>["app"];
 let apiKey = "";
 let agentToken = "";
 
-async function putPolicy(body: Record<string, unknown>, token = agentToken) {
+// PR #94: policy/cap mutations are PATRON/OWNER-only. Authenticate PUTs with
+// tenant-level API-key headers (X-Steward-Tenant / X-Steward-Key), which
+// requireTenantLevel() accepts (authType === "api-key"). Agent-token PUTs are
+// rejected with 403 — see the dedicated test below.
+async function putPolicy(body: Record<string, unknown>) {
   return app.request(`/v1/agents/${agentId}/policy`, {
     method: "PUT",
     headers: {
-      Authorization: `Bearer ${token}`,
+      "X-Steward-Tenant": tenantId,
+      "X-Steward-Key": apiKey,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
@@ -117,6 +122,22 @@ describe("agent trade policy", () => {
       .from(agentPolicies)
       .where(eq(agentPolicies.agentId, agentId));
     expect(row?.updatedBy).toBe(`agent:${agentId}`);
+  });
+
+  it("rejects an agent-token PUT (agents cannot modify their own policy) — PR #94", async () => {
+    const res = await app.request(`/v1/agents/${agentId}/policy`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ dailyCap: 999, reason: "agent self-raise attempt" }),
+    });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("agents cannot modify their own policy");
   });
 
   it("GET returns an existing policy row", async () => {

@@ -309,6 +309,27 @@
       "when": 1780130400000,
       "tag": "0045_wallet_action_metadata",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1780131000000,
+      "tag": "0046_pr79_union_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1780131600000,
+      "tag": "0047_pr79_security_invariants",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1780132200000,
+      "tag": "0048_harden_tenant_join_default",
+      "breakpoints": true
     }
   ]
 }

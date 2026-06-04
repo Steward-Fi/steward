@@ -1,6 +1,6 @@
 {
   "name": "@stwd/react",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Embeddable React components for Steward agent wallet management",
   "type": "module",
   "main": "dist/index.js",
@@ -26,6 +26,11 @@
       "types": "./dist/wallet/solana.d.ts",
       "import": "./dist/wallet/solana.js",
       "default": "./dist/wallet/solana.js"
+    },
+    "./wallet/global": {
+      "types": "./dist/wallet/global.d.ts",
+      "import": "./dist/wallet/global.js",
+      "default": "./dist/wallet/global.js"
     }
   },
   "files": [

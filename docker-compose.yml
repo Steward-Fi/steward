@@ -23,7 +23,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: steward:latest
+    # Pinned, overridable tag for reproducible deploys. Override with
+    # STEWARD_IMAGE_TAG to deploy a specific build; defaults to the current release.
+    image: steward:${STEWARD_IMAGE_TAG:-0.4.2}
     container_name: steward-api
     restart: unless-stopped
     depends_on:
@@ -35,7 +37,7 @@ services:
       PORT: "${PORT:-3200}"
       STEWARD_BIND_HOST: "0.0.0.0"
       NODE_ENV: "production"
-      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-steward}}"
+      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
@@ -55,7 +57,7 @@ services:
       DISCORD_CLIENT_ID: "${DISCORD_CLIENT_ID:-}"
       DISCORD_CLIENT_SECRET: "${DISCORD_CLIENT_SECRET:-}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
-      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:-}"
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
     ports:
@@ -80,7 +82,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: steward:latest
+    # Same pinned image as steward-api (built from the same Dockerfile).
+    image: steward:${STEWARD_IMAGE_TAG:-0.4.2}
     container_name: steward-proxy
     restart: unless-stopped
     # Proxy only needs the API to be healthy (for JWT verification + DB access)
@@ -91,7 +94,7 @@ services:
     environment:
       STEWARD_PROXY_PORT: "${STEWARD_PROXY_PORT:-8080}"
       NODE_ENV: "production"
-      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-steward}}"
+      DATABASE_URL: "${DATABASE_URL:-postgresql://${POSTGRES_USER:-steward}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-steward}}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
@@ -122,7 +125,8 @@ services:
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-steward}"
       POSTGRES_USER: "${POSTGRES_USER:-steward}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changeme}"
+      # Required: no insecure default. Set POSTGRES_PASSWORD in .env.
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres-data:/var/lib/postgresql/data

@@ -2,8 +2,8 @@
  * Audit logging for proxied requests.
  *
  * Logs every proxied request to the proxy_audit_log table in the database.
- * Designed for append-only, high-throughput logging with async writes
- * so audit never blocks the response path.
+ * Designed for append-only request accounting. Callers should await writes
+ * before returning whenever the audit event is part of the security trail.
  */
 
 import { getDb, proxyAuditLog } from "@stwd/db";
@@ -21,23 +21,36 @@ export interface AuditEntry {
 
 /**
  * Record a proxy audit log entry.
- * Fires and forgets — audit failures are logged to stderr but never block the response.
+ * Audit failures are logged to stderr but never throw to the response path.
  */
 export async function recordAudit(entry: AuditEntry): Promise<void> {
   try {
-    const db = getDb();
-    await db.insert(proxyAuditLog).values({
-      agentId: entry.agentId,
-      tenantId: entry.tenantId,
-      targetHost: entry.targetHost,
-      targetPath: entry.targetPath,
-      method: entry.method,
-      statusCode: entry.statusCode,
-      latencyMs: entry.latencyMs,
-      reason: entry.reason,
-    });
+    await insertAuditEntry(entry);
   } catch (err) {
-    // Never let audit logging break the proxy
+    // Best-effort audit is used only after the security-critical pre-forward
+    // audit has already been persisted.
     console.error("[audit] Failed to record audit entry:", err);
   }
+}
+
+/**
+ * Record a security-required audit event. Call this before decrypting or
+ * forwarding credentials so audit storage outages fail closed.
+ */
+export async function recordRequiredAudit(entry: AuditEntry): Promise<void> {
+  await insertAuditEntry(entry);
+}
+
+async function insertAuditEntry(entry: AuditEntry): Promise<void> {
+  const db = getDb();
+  await db.insert(proxyAuditLog).values({
+    agentId: entry.agentId,
+    tenantId: entry.tenantId,
+    targetHost: entry.targetHost,
+    targetPath: entry.targetPath,
+    method: entry.method,
+    statusCode: entry.statusCode,
+    latencyMs: entry.latencyMs,
+    reason: entry.reason,
+  });
 }

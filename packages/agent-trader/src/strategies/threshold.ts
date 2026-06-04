@@ -39,6 +39,8 @@ const HOLD: TradeDecision = {
 
 export class ThresholdStrategy implements Strategy {
   readonly name = "threshold";
+  /** Threshold decisions are entirely price-driven. */
+  readonly requiresPriceConfidence = true;
 
   private readonly buyBelowPrice: bigint | null;
   private readonly buyAmount: bigint | null;
@@ -61,13 +63,26 @@ export class ThresholdStrategy implements Strategy {
   }
 
   async evaluate(state: AgentState): Promise<TradeDecision> {
-    const { tokenPrice, nativeBalance, tokenBalance } = state;
+    const { tokenPrice, nativeBalance, tokenBalance, priceConfidence } = state;
 
-    if (tokenPrice === 0n) {
+    if (tokenPrice === 0n || priceConfidence === "none") {
       return {
         action: "hold",
         amount: "0",
         reason: "Token price is zero — cannot evaluate thresholds",
+        confidence: 0,
+      };
+    }
+
+    // Defense-in-depth: a low-confidence (single-pair/spot) price is trivially
+    // manipulable and must not, on its own, trigger a threshold trade. The loop
+    // also enforces this, but we refuse here too so the strategy never emits a
+    // buy/sell from an untrustworthy price.
+    if (priceConfidence !== "high") {
+      return {
+        action: "hold",
+        amount: "0",
+        reason: `Token price is low-confidence (${priceConfidence}) — refusing to act on a manipulable single-pair/spot price`,
         confidence: 0,
       };
     }

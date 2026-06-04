@@ -51,8 +51,11 @@ export interface KeystoreBackend {
 export interface KeystoreContext {
   tenantId?: string;
   agentId?: string;
+  chainFamily?: string;
+  name?: string;
   /** Trading venue or other scope label, see VenueId in @stwd/shared. */
   venue?: string | null;
+  version?: number | string;
 }
 
 /**
@@ -61,16 +64,16 @@ export interface KeystoreContext {
  * the AES-256-GCM default unless an operator swaps it.
  */
 export function backendFromKeyStore(ks: {
-  encrypt(pk: string): EncryptedKey;
-  decrypt(e: EncryptedKey): string;
+  encrypt(pk: string, context?: KeystoreContext): EncryptedKey;
+  decrypt(e: EncryptedKey, context?: KeystoreContext): string;
 }): KeystoreBackend {
   return {
     id: "aes-256-gcm@scrypt",
-    encrypt(privateKey: string) {
-      return ks.encrypt(privateKey);
+    encrypt(privateKey: string, context?: KeystoreContext) {
+      return ks.encrypt(privateKey, context);
     },
-    decrypt(encrypted: EncryptedKey) {
-      return ks.decrypt(encrypted);
+    decrypt(encrypted: EncryptedKey, context?: KeystoreContext) {
+      return ks.decrypt(encrypted, context);
     },
   };
 }

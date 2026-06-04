@@ -77,6 +77,27 @@ function isEmbeddedMode(): boolean {
   );
 }
 
+/**
+ * Whether the insecure built-in "dev-secret" fallbacks may be used.
+ *
+ * Hardened opt-in: a dev-secret is only permitted when the deployment is NOT
+ * production AND the operator has explicitly set STEWARD_ALLOW_DEV_SECRETS=true.
+ * This prevents a staging/preview deploy that forgot NODE_ENV=production from
+ * silently signing/verifying with a well-known, predictable secret.
+ *
+ * Exported so other packages (vault, webhooks, api key stores) can apply the
+ * same consistent guard.
+ */
+export function isDevSecretAllowed(nodeEnv: string | undefined = process.env.NODE_ENV): boolean {
+  if (nodeEnv === "production") return false;
+  // Canonical var is STEWARD_ALLOW_DEV_SECRETS; the singular
+  // STEWARD_ALLOW_DEV_SECRET is accepted for backwards compatibility.
+  return (
+    process.env.STEWARD_ALLOW_DEV_SECRETS === "true" ||
+    process.env.STEWARD_ALLOW_DEV_SECRET === "true"
+  );
+}
+
 function warnOnce(kind: "session" | "master" | "dev", warn: ((message: string) => void) | null) {
   if (!warn) return;
   if (kind === "session") {
@@ -151,6 +172,13 @@ export function getJwtSecret(options: JwtSecretOptions = {}): string {
   }
 
   if (!secret) {
+    if (!isDevSecretAllowed(nodeEnv)) {
+      throw new Error(
+        "⛔ No JWT secret configured. Set STEWARD_JWT_SECRET, or for local development " +
+          "explicitly opt in to the insecure dev fallback with STEWARD_ALLOW_DEV_SECRETS=true " +
+          "(never set that in a shared or production environment).",
+      );
+    }
     warnOnce("dev", warn);
     return "dev-secret";
   }
@@ -292,7 +320,7 @@ export async function signIdentityJwtPayload(
 ): Promise<string> {
   const config = await getIdentityJwtSigningConfig(issuer, audience);
   if (!config) {
-    return signJwtPayload(payload, expiresIn);
+    throw new Error("Identity JWT private key is not configured");
   }
 
   const privateKey = await importIdentityPrivateKey(config.alg);

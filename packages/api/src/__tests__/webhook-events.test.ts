@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   acceptsConfiguredWebhookEvent,
+  CONFIGURED_WEBHOOK_EVENT_TYPES,
   toConfiguredWebhookEventType,
 } from "../services/webhook-events";
 
@@ -13,9 +14,31 @@ describe("webhook event routing", () => {
     expect(toConfiguredWebhookEventType("policy.violation")).toBe("policy.violation");
   });
 
+  it("exposes Privy-like event categories as configurable subscriptions", () => {
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("user.created");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("mfa.enabled");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("private_key.exported");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.recovery_setup");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.recovered");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.raw_signature.created");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.funds_deposited");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet.funds_withdrawn");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("transaction.broadcasted");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("transaction.still_pending");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("user_operation.completed");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("user_operation.failed");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("intent.authorized");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet_action.transfer.succeeded");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet_action.send_calls.created");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet_action.swap.failed");
+    expect(CONFIGURED_WEBHOOK_EVENT_TYPES).toContain("wallet_action.earn_deposit.rejected");
+  });
+
   it("maps vault event aliases to the configured webhook contract", () => {
     expect(toConfiguredWebhookEventType("approval_required")).toBe("tx.pending");
     expect(toConfiguredWebhookEventType("tx_signed")).toBe("tx.signed");
+    expect(toConfiguredWebhookEventType("tx_confirmed")).toBe("transaction.confirmed");
+    expect(toConfiguredWebhookEventType("tx_failed")).toBe("transaction.failed");
     expect(toConfiguredWebhookEventType("tx_rejected")).toBe("policy.violation");
   });
 

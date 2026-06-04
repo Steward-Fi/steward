@@ -39,6 +39,7 @@ const WITHDRAW_CHAIN_ID = 42161;
 const WITHDRAW_SIGNATURE_CHAIN_ID = "0xa4b1";
 const withdrawActionType = ["with", "draw3"].join("");
 const withdrawPrimaryType = ["HyperliquidTransaction:", "With", "draw"].join("");
+const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
 
 export const hyperliquidOrderSchema = z.object({
   coin: hyperliquidAssetSchema.optional(),
@@ -58,6 +59,13 @@ export const hyperliquidOrderSchema = z.object({
 });
 export type HyperliquidOrder = z.input<typeof hyperliquidOrderSchema>;
 export type CancelOrderInput = { coin: HyperliquidAsset; orderId: number | string; nonce?: number };
+export type LeverageUpdateInput = {
+  coin?: HyperliquidAsset;
+  asset?: HyperliquidAsset;
+  leverage: number;
+  isCross?: boolean;
+  nonce?: number;
+};
 export type SignOptions = {
   nonce?: number;
   isMainnet?: boolean;
@@ -123,6 +131,11 @@ export const positionSchema = z.object({
   leverage: z.number().optional(),
 });
 export type Position = z.infer<typeof positionSchema>;
+export const leverageUpdateResultSchema = z.object({
+  status: z.string(),
+  raw: z.unknown().optional(),
+});
+export type LeverageUpdateResult = z.infer<typeof leverageUpdateResultSchema>;
 
 export interface VaultSignTypedDataInput {
   agentId: string;
@@ -150,6 +163,20 @@ export interface HyperliquidAdapterOptions {
   isMainnet?: boolean;
   vaultAddress?: string;
   expiresAfter?: number;
+}
+
+// Monotonic nonce source. Date.now() alone collides for two orders in the same
+// millisecond and is not guaranteed monotonic; HL rejects non-increasing nonces.
+// Always strictly greater than the previous and >= Date.now().
+let lastNonce = 0;
+function nextNonce(): number {
+  lastNonce = Math.max(Date.now(), lastNonce + 1);
+  return lastNonce;
+}
+
+function withTimeoutSignal(init: RequestInit): RequestInit {
+  if (init.signal || DEFAULT_FETCH_TIMEOUT_MS <= 0) return init;
+  return { ...init, signal: AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS) };
 }
 
 function dec(v: unknown, fallback?: string) {
@@ -225,6 +252,25 @@ function normalized(order: HyperliquidOrder) {
     nonce: p.nonce,
   };
 }
+function normalizedLeverageUpdate(input: LeverageUpdateInput) {
+  const p = z
+    .object({
+      coin: hyperliquidAssetSchema.optional(),
+      asset: hyperliquidAssetSchema.optional(),
+      leverage: z.number().int().positive().max(100),
+      isCross: z.boolean().default(true),
+      nonce: z.number().int().positive().optional(),
+    })
+    .parse(input);
+  const coin = p.coin ?? p.asset;
+  if (!coin) throw new Error("coin is required");
+  return {
+    coin,
+    leverage: p.leverage,
+    isCross: p.isCross,
+    nonce: p.nonce,
+  };
+}
 export function toExchangeAction(order: HyperliquidOrder): Record<string, unknown> {
   const o = normalized(order);
   return {
@@ -240,6 +286,15 @@ export function toExchangeAction(order: HyperliquidOrder): Record<string, unknow
       },
     ],
     grouping: "na",
+  };
+}
+export function toUpdateLeverageAction(input: LeverageUpdateInput): Record<string, unknown> {
+  const o = normalizedLeverageUpdate(input);
+  return {
+    type: "updateLeverage",
+    asset: ASSET_INDEX[o.coin],
+    isCross: o.isCross,
+    leverage: o.leverage,
   };
 }
 function toCancelAction(input: CancelOrderInput): Record<string, unknown> {
@@ -393,7 +448,7 @@ async function signAction(
   action: Record<string, unknown>,
   opts: SignOptions = {},
 ): Promise<SignedOrder> {
-  const nonce = opts.nonce ?? Date.now();
+  const nonce = opts.nonce ?? nextNonce();
   const td = createL1TypedData(
     action,
     nonce,
@@ -428,11 +483,14 @@ export const signOrder = async (
   });
 };
 async function postExchange(signed: SignedOrder, transport: HyperliquidTransport, baseUrl: string) {
-  const r = await transport.fetch(`${baseUrl}/exchange`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(signedOrderSchema.parse(signed)),
-  });
+  const r = await transport.fetch(
+    `${baseUrl}/exchange`,
+    withTimeoutSignal({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(signedOrderSchema.parse(signed)),
+    }),
+  );
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error(`Hyperliquid exchange returned ${r.status}: ${JSON.stringify(j)}`);
   return j;
@@ -455,11 +513,11 @@ export async function getOpenOrders(
 ): Promise<Order[]> {
   const r = await (options.transport ?? { fetch }).fetch(
     `${options.baseUrl ?? DEFAULT_BASE_URL}/info`,
-    {
+    withTimeoutSignal({
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ type: "openOrders", user: userAddress }),
-    },
+    }),
   );
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
@@ -498,7 +556,7 @@ export class HyperliquidAdapter {
     this.isMainnet = options.isMainnet ?? !/testnet/i.test(this.baseUrl);
   }
   async signOrder(order: HyperliquidOrder): Promise<SignedOrder> {
-    const nonce = order.nonce ?? Date.now();
+    const nonce = order.nonce ?? nextNonce();
     const resolved = await withMarketableLimitPx(order, {
       transport: this.transport,
       baseUrl: this.baseUrl,
@@ -524,11 +582,37 @@ export class HyperliquidAdapter {
   submitOrder(signed: SignedOrder) {
     return submitOrder(signed, { transport: this.transport, baseUrl: this.baseUrl });
   }
+  async updateLeverage(input: LeverageUpdateInput): Promise<LeverageUpdateResult> {
+    const parsed = normalizedLeverageUpdate(input);
+    const nonce = parsed.nonce ?? nextNonce();
+    const action = toUpdateLeverageAction(parsed);
+    const td = createL1TypedData(
+      action,
+      nonce,
+      this.isMainnet,
+      this.options.vaultAddress,
+      this.options.expiresAfter,
+    );
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
+    const raw = await postExchange(
+      signedOrderSchema.parse({
+        action,
+        nonce,
+        signature: { r: s.r, s: s.s, v: Number(s.v) },
+        vaultAddress: this.options.vaultAddress,
+        expiresAfter: this.options.expiresAfter,
+      }),
+      this.transport,
+      this.baseUrl,
+    );
+    return leverageUpdateResultSchema.parse({ status: "ok", raw });
+  }
   getOpenOrders(userAddress = this.walletAddress) {
     return getOpenOrders(userAddress, { transport: this.transport, baseUrl: this.baseUrl });
   }
   async cancelOrder(input: CancelOrderInput) {
-    const nonce = input.nonce ?? Date.now();
+    const nonce = input.nonce ?? nextNonce();
     const action = toCancelAction(input);
     const td = createL1TypedData(
       action,
@@ -559,11 +643,14 @@ export class HyperliquidAdapter {
     return normalizePositions(j);
   }
   private async clearinghouseState(): Promise<unknown> {
-    const r = await this.transport.fetch(`${this.baseUrl}/info`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "clearinghouseState", user: this.walletAddress }),
-    });
+    const r = await this.transport.fetch(
+      `${this.baseUrl}/info`,
+      withTimeoutSignal({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "clearinghouseState", user: this.walletAddress }),
+      }),
+    );
     const j = await r.json().catch(() => null);
     if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
     return j;

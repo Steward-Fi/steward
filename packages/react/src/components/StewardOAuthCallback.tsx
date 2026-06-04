@@ -4,19 +4,24 @@ import type { StewardOAuthCallbackProps } from "../types.js";
 
 type CallbackStep = "loading" | "success" | "error";
 
+function callbackParamsFromLocation(location: Location): URLSearchParams {
+  const params = new URLSearchParams(location.search);
+  const fragment = location.hash.startsWith("#") ? location.hash.slice(1) : location.hash;
+  if (fragment) {
+    const hashParams = new URLSearchParams(fragment);
+    for (const [key, value] of hashParams) {
+      if (!params.has(key)) params.set(key, value);
+    }
+  }
+  return params;
+}
+
 /**
  * StewardOAuthCallback — Mount on your OAuth redirect URI route.
  *
- * Handles two server-redirect flows:
- *
- * 1. **Token-in-URL flow:** Server completes the OAuth exchange and puts
- *    `token` and `refreshToken` directly in the redirect URL query params.
- *    The component stores them and transitions to success.
- *
- * 2. **Code-in-URL flow:** Server redirects with `code` and `state` params.
- *    Since `handleOAuthCallback` may not exist in the auth context yet,
- *    the component calls `onSuccess` with the raw params so the consumer
- *    can handle the exchange.
+ * Handles the code-in-URL flow: the server redirects with `code` and `state`
+ * params, and the component calls `onSuccess` with the raw params so the
+ * consumer can handle the exchange.
  *
  * @example
  * <Route path="/auth/oauth/callback" element={
@@ -51,7 +56,7 @@ export function StewardOAuthCallback({
       return;
     }
 
-    const params = new URLSearchParams(window.location.search);
+    const params = callbackParamsFromLocation(window.location);
     const token = params.get("token");
     const refreshToken = params.get("refreshToken");
     const code = params.get("code");
@@ -61,6 +66,10 @@ export function StewardOAuthCallback({
     // Server returned an error
     if (errorParam) {
       const description = params.get("error_description") ?? errorParam;
+      window.opener?.postMessage(
+        { type: "steward-oauth-callback", error: errorParam },
+        window.location.origin,
+      );
       const err = new Error(description);
       setErrorMsg(description);
       setStep("error");
@@ -68,40 +77,21 @@ export function StewardOAuthCallback({
       return;
     }
 
-    // Flow 1: Token-in-URL (server already exchanged the code)
-    if (token) {
-      // Store the token via the auth context's storage mechanism.
-      // We use verifyEmailCallback's storage side-effect by constructing
-      // a synthetic auth result. The StewardAuth.storeAndReturn is private,
-      // so we store directly and reload the session.
-      try {
-        if (typeof window !== "undefined" && window.localStorage) {
-          window.localStorage.setItem("steward_session_token", token);
-          if (refreshToken) {
-            window.localStorage.setItem("steward_refresh_token", refreshToken);
-          }
-        }
-      } catch {
-        // Storage unavailable, session will be in-memory only
-      }
-
-      setStep("success");
-
-      // Build a minimal result for onSuccess
-      const user = auth.user ?? { id: "", email: "", walletAddress: "" };
-      onSuccess?.({ token, user });
-
-      if (redirectTo && typeof window !== "undefined") {
-        // Small delay to let storage persist
-        setTimeout(() => {
-          window.location.href = redirectTo;
-        }, 100);
-      }
+    if (token || refreshToken) {
+      const msg =
+        "Token-in-URL OAuth callbacks are disabled. Use the PKCE code/state callback flow.";
+      setErrorMsg(msg);
+      setStep("error");
+      onError?.(new Error(msg));
       return;
     }
 
-    // Flow 2: Code-in-URL (consumer handles the exchange)
+    // Code-in-URL (consumer handles the exchange)
     if (code) {
+      window.opener?.postMessage(
+        { type: "steward-oauth-callback", code, state: state ?? "" },
+        window.location.origin,
+      );
       setStep("success");
       onSuccess?.({ code, state: state ?? "" } as {
         code: string;

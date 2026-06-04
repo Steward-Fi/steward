@@ -97,7 +97,13 @@ beforeAll(async () => {
     })
     .onConflictDoNothing();
 
-  // NO_CONFIG_TENANT intentionally has no config row (defaults to open)
+  await db
+    .insert(tenantConfigs)
+    .values({
+      tenantId: NO_CONFIG_TENANT,
+      joinMode: "open",
+    })
+    .onConflictDoNothing();
 
   // Create test user
   const [user] = await db
@@ -115,8 +121,20 @@ beforeAll(async () => {
 
   // Link test user to open tenant
   await db
+    .insert(tenants)
+    .values({
+      id: `personal-${testUserId}`,
+      name: "Personal Tenant",
+      apiKeyHash: generateApiKey().hash,
+    })
+    .onConflictDoNothing();
+
+  await db
     .insert(userTenants)
-    .values({ userId: testUserId, tenantId: OPEN_TENANT, role: "member" })
+    .values([
+      { userId: testUserId, tenantId: `personal-${testUserId}`, role: "owner" },
+      { userId: testUserId, tenantId: OPEN_TENANT, role: "member" },
+    ])
     .onConflictDoNothing();
 });
 
@@ -130,6 +148,8 @@ afterAll(async () => {
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, OPEN_TENANT));
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, INVITE_TENANT));
   await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, CLOSED_TENANT));
+  await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, NO_CONFIG_TENANT));
+  await db.delete(tenants).where(eq(tenants.id, `personal-${testUserId}`));
   await db.delete(tenants).where(eq(tenants.id, OPEN_TENANT));
   await db.delete(tenants).where(eq(tenants.id, INVITE_TENANT));
   await db.delete(tenants).where(eq(tenants.id, CLOSED_TENANT));
@@ -139,11 +159,20 @@ afterAll(async () => {
 
 // ─── Helper: get a JWT for the test user ──────────────────────────────────
 
+function testUserAddress(): `0x${string}` {
+  return `0x${testUserId.replace(/-/g, "").padEnd(40, "0").slice(0, 40)}` as `0x${string}`;
+}
+
 async function getTestUserToken(tenantId?: string): Promise<string> {
   const { createSessionToken } = await import("../routes/auth");
-  return createSessionToken("0x0000000000000000000000000000000000000000", tenantId ?? OPEN_TENANT, {
+  const sessionTenantId = tenantId ?? `personal-${testUserId}`;
+  return createSessionToken(testUserAddress(), sessionTenantId, {
     userId: testUserId,
     email: TEST_USER_EMAIL,
+    tenantId: sessionTenantId,
+    activeTenantId: sessionTenantId,
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
   });
 }
 
@@ -204,6 +233,21 @@ describeWithDatabase("Cross-Tenant Identity", () => {
 
       await db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
       await db.delete(tenants).where(eq(tenants.id, tenantId));
+    });
+
+    it("rejects reserved personal wallet tenant slugs", async () => {
+      const token = await getTestUserToken();
+
+      const res = await fetch(`${BASE_URL}/user/me/tenants`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Reserved Tenant", slug: `personal-${testUserId}` }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { ok: boolean; error: string };
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("reserved");
     });
   });
 
@@ -270,7 +314,7 @@ describeWithDatabase("Cross-Tenant Identity", () => {
   });
 
   describe("POST /user/me/tenants/:tenantId/join", () => {
-    it("allows joining an open tenant (no config row = default open)", async () => {
+    it("allows joining an open tenant", async () => {
       const token = await getTestUserToken();
 
       const res = await fetch(`${BASE_URL}/user/me/tenants/${NO_CONFIG_TENANT}/join`, {
@@ -332,9 +376,11 @@ describeWithDatabase("Cross-Tenant Identity", () => {
         headers: { Authorization: `Bearer ${token}` },
       });
 
+      const targetTenantToken = await getTestUserToken(NO_CONFIG_TENANT);
+
       const res = await fetch(`${BASE_URL}/user/me/tenants/${NO_CONFIG_TENANT}/leave`, {
         method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${targetTenantToken}` },
       });
 
       expect(res.status).toBe(200);
@@ -397,7 +443,7 @@ describeWithDatabase("Cross-Tenant Identity", () => {
             "X-Steward-Platform-Key": platformKey,
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ role: "owner" }),
+          body: JSON.stringify({ role: "admin" }),
         },
       );
 
@@ -407,7 +453,7 @@ describeWithDatabase("Cross-Tenant Identity", () => {
         data: { role: string };
       };
       expect(body.ok).toBe(true);
-      expect(body.data.role).toBe("owner");
+      expect(body.data.role).toBe("admin");
     });
 
     it("DELETE /platform/tenants/:id/members/:userId removes member", async () => {

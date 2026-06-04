@@ -77,4 +77,14 @@ describe("mergeTheme", () => {
     mergeTheme(DEFAULT_THEME, { primaryColor: "#123456" });
     expect(DEFAULT_THEME).toEqual(baseClone);
   });
+
+  test("mergeTheme preserves tenant appearance asset URLs", () => {
+    const theme = mergeTheme(DEFAULT_THEME, {
+      logoUrl: "https://assets.example.test/logo.png",
+      faviconUrl: "https://assets.example.test/favicon.ico",
+    });
+
+    expect(theme.logoUrl).toBe("https://assets.example.test/logo.png");
+    expect(theme.faviconUrl).toBe("https://assets.example.test/favicon.ico");
+  });
 });

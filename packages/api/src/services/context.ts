@@ -7,6 +7,7 @@
  */
 
 import {
+  ACCESS_TOKEN_EXPIRY,
   assertTokenNotRevoked,
   signAccessToken,
   signAgentToken,
@@ -19,18 +20,30 @@ import {
   getDb,
   inArray,
   policies,
+  sessionSigners,
+  tenantAppClientSecrets,
+  tenantAppClients,
   tenants,
   toPolicyRule,
   transactions,
+  users,
   userTenants,
 } from "@stwd/db";
-import { PolicyEngine } from "@stwd/policy-engine";
+import {
+  type AggregationLookup,
+  aggregationLookupFromMap,
+  aggregationQueriesForPolicies,
+  aggregationQueryKey,
+  PolicyEngine,
+} from "@stwd/policy-engine";
+import { getAggregationSnapshot } from "@stwd/redis";
 import {
   type AgentIdentity,
   type ApiResponse,
   createPriceOracle,
   type PolicyRule,
   type PriceOracle,
+  type SignRequest,
   type Tenant,
   type TenantConfig,
 } from "@stwd/shared";
@@ -43,8 +56,27 @@ import type { Context, Next } from "hono";
 
 export const API_VERSION = process.env.API_VERSION || "0.3.0";
 export const DEFAULT_TENANT_ID = "default";
-export const RATE_LIMIT_WINDOW_MS = 60_000;
-export const RATE_LIMIT_MAX_REQUESTS = 100;
+
+/**
+ * Read a positive-integer env override, falling back to a safe default when the
+ * variable is unset or malformed. Used for operator-tunable limits so a bad
+ * value can never silently disable a guard — it just reverts to the default.
+ */
+function positiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+// Global in-memory request rate limit (Bun entry only). Operator-tunable via env
+// so load tests and local e2e suites — which hammer a single socket IP far harder
+// than any real client — can raise the ceiling without changing the production
+// default (100 requests / 60s per client IP). A missing or invalid override
+// falls back to that default, so this can never weaken the guard unintentionally.
+export const RATE_LIMIT_WINDOW_MS = positiveIntEnv("STEWARD_RATE_LIMIT_WINDOW_MS", 60_000);
+export const RATE_LIMIT_MAX_REQUESTS = positiveIntEnv("STEWARD_RATE_LIMIT_MAX_REQUESTS", 100);
 export const AGENT_TOKEN_EXPIRY = process.env.AGENT_TOKEN_EXPIRY || "30d";
 export const isWorkersRuntime =
   process.env.STEWARD_RUNTIME === "workers" ||
@@ -55,18 +87,19 @@ export const isWorkersRuntime =
 /**
  * User access token TTL. Refresh tokens (30d) handle long-lived sessions.
  */
-export const JWT_EXPIRY = "24h";
+export const JWT_EXPIRY = ACCESS_TOKEN_EXPIRY;
 export const AGENT_SCOPE = "agent";
 export const PROXY_SCOPE = "api:proxy";
 
 export function normalizeAgentTokenScopes(scopes?: string[]): string[] {
-  const normalized = new Set([AGENT_SCOPE]);
+  if (!scopes || scopes.length === 0) return [AGENT_SCOPE];
+  const normalized = new Set<string>();
   for (const scope of scopes ?? []) {
     if (typeof scope === "string" && scope.trim()) {
       normalized.add(scope.trim());
     }
   }
-  return [...normalized];
+  return normalized.size > 0 ? [...normalized] : [AGENT_SCOPE];
 }
 
 export function parseAgentTokenScopes(value: unknown): string[] | null {
@@ -83,10 +116,20 @@ export function parseAgentTokenScopes(value: unknown): string[] | null {
   if (!requested || !requested.every((scope) => typeof scope === "string")) return null;
 
   const scopes = normalizeAgentTokenScopes(requested.map((scope) => scope.trim()).filter(Boolean));
-
-  // Agent tokens always include the legacy/base agent scope. The only opt-in
-  // privilege exposed by token minting endpoints today is proxy gateway access.
   return scopes.every((scope) => scope === AGENT_SCOPE || scope === PROXY_SCOPE) ? scopes : null;
+}
+
+export function hasAgentTokenScope(
+  scopes: readonly string[] | undefined,
+  required = AGENT_SCOPE,
+): boolean {
+  return Boolean(scopes?.includes(required));
+}
+
+export function setNoStoreHeaders(c: Pick<Context, "header">): void {
+  c.header("Cache-Control", "no-store, max-age=0");
+  c.header("Pragma", "no-cache");
+  c.header("Expires", "0");
 }
 
 export async function createSessionToken(address: string, tenantId: string): Promise<string> {
@@ -114,10 +157,43 @@ export async function verifySessionToken(token: string) {
       agentId?: string;
       scope?: string;
       scopes?: string[];
+      typ?: string;
       userId?: string;
       email?: string;
+      mfaVerifiedAt?: number;
+      mfaMethod?: string;
+      jti?: string;
+      exp?: number;
     };
+    if (payload.typ === "identity") return null;
     await assertTokenNotRevoked(payload);
+    if (payload.userId) {
+      const [user] = await getDb()
+        .select({
+          deactivatedAt: users.deactivatedAt,
+          isGuest: users.isGuest,
+          guestExpiresAt: users.guestExpiresAt,
+        })
+        .from(users)
+        .where(eq(users.id, payload.userId));
+      if (!user || user.deactivatedAt) return null;
+      // Fail-closed guest expiry: enforce the guest's hard expiry against the
+      // authoritative DB column, not just the access-token `exp`. A refreshed
+      // access token (or one minted with a longer TTL) is still rejected once
+      // the guest window has elapsed. Full accounts have guestExpiresAt = null.
+      if (user.isGuest && user.guestExpiresAt && user.guestExpiresAt.getTime() <= Date.now()) {
+        return null;
+      }
+      if (payload.tenantId) {
+        const [membership] = await getDb()
+          .select({ role: userTenants.role })
+          .from(userTenants)
+          .where(
+            and(eq(userTenants.userId, payload.userId), eq(userTenants.tenantId, payload.tenantId)),
+          );
+        if (!membership) return null;
+      }
+    }
     return payload;
   } catch {
     return null;
@@ -233,22 +309,90 @@ function requireEnv(name: string): string {
   return value;
 }
 
+const isPGLiteRuntime =
+  process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true";
+
 export const DATABASE_URL =
-  process.env.STEWARD_PGLITE_MEMORY === "true" ? "pglite://memory" : requireEnv("DATABASE_URL");
+  process.env.DATABASE_URL?.trim() || (isPGLiteRuntime ? "" : requireEnv("DATABASE_URL"));
 export const MASTER_PASSWORD = requireEnv("STEWARD_MASTER_PASSWORD");
 
-if (process.env.STEWARD_PGLITE_MEMORY !== "true") {
+if (process.env.DATABASE_URL) {
   process.env.DATABASE_URL = DATABASE_URL;
 }
 
 // ─── Singletons ───────────────────────────────────────────────────────────────
 
-export const db = getDb();
+// `db` is a late-bound Proxy over getDb() rather than a captured handle.
+//
+// In production this is behaviorally identical to `const db = getDb()`:
+// getDb() memoizes a single `globalDb` connection on first call and returns
+// that same handle on every subsequent call, so each property access resolves
+// to the one real connection.
+//
+// The reason for the Proxy is the test harness: the api suite runs all ~135
+// test files in ONE `bun test` process, and Bun shares the module registry, so
+// context.ts evaluates exactly once — a captured `const db = getDb()` would
+// freeze whichever file imported a route first and route every later file's
+// writes to that stale db. Resolving getDb() per access instead picks up each
+// file's own setPGLiteOverride(). Methods are bound to the live handle so
+// Drizzle's internal `this` (private session/dialect fields) stays intact.
+type DbHandle = ReturnType<typeof getDb>;
+export const db: DbHandle = new Proxy({} as DbHandle, {
+  get(_target, property) {
+    const active = getDb() as unknown as Record<PropertyKey, unknown>;
+    const value = active[property];
+    return typeof value === "function"
+      ? (value as (...args: unknown[]) => unknown).bind(active)
+      : value;
+  },
+});
 
-export const vault = new Vault({
-  masterPassword: MASTER_PASSWORD,
-  rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-  chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
+// `vault` is a late-bound Proxy resolving the Vault for the CURRENT master
+// password, memoized per password. In production STEWARD_MASTER_PASSWORD is
+// fixed before this module loads, so exactly one Vault is ever built and every
+// access returns it — behaviorally identical to `const vault = new Vault(...)`.
+//
+// In the single-process api test suite, individual files set their own
+// STEWARD_MASTER_PASSWORD in beforeAll, and a few construct their OWN Vault with
+// that password to seal keys directly into their per-file PGLite db. A captured
+// singleton would have frozen the first (preload) password, so the route-level
+// vault could not decrypt keys those files sealed under a different password —
+// surfacing as AES-GCM "Unsupported state or unable to authenticate data". A
+// per-password memo keeps the route vault in lockstep with whatever password
+// sealed each key. MASTER_PASSWORD (captured at import) is the fallback when the
+// env var is transiently unset (e.g. another file's afterAll deleted it).
+const vaultsByPassword = new Map<string, Vault>();
+function activeVault(): Vault {
+  const masterPassword = process.env.STEWARD_MASTER_PASSWORD?.trim() || MASTER_PASSWORD;
+  let resolved = vaultsByPassword.get(masterPassword);
+  if (!resolved) {
+    resolved = new Vault({
+      masterPassword,
+      rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
+      chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
+    });
+    vaultsByPassword.set(masterPassword, resolved);
+  }
+  return resolved;
+}
+export const vault: Vault = new Proxy({} as Vault, {
+  get(_target, property) {
+    const active = activeVault() as unknown as Record<PropertyKey, unknown>;
+    const value = active[property];
+    return typeof value === "function"
+      ? (value as (...args: unknown[]) => unknown).bind(active)
+      : value;
+  },
+  // Forward assignments to the live instance. Production never mutates the
+  // vault; this exists so tests that monkeypatch a method (e.g.
+  // `context.vault.getBalance = mock`) and restore it in a `finally` land on
+  // the same per-password instance the get trap resolves — without a set trap
+  // the assignment would silently write to the empty Proxy target and the get
+  // trap would keep returning the real method.
+  set(_target, property, value) {
+    (activeVault() as unknown as Record<PropertyKey, unknown>)[property] = value;
+    return true;
+  },
 });
 
 export const policyEngine = new PolicyEngine();
@@ -294,6 +438,7 @@ export type AppVariables = {
   sessionMfaMethod?: string;
   agentScope?: string;
   agentSubject?: string;
+  agentScopes?: string[];
   authType?:
     | "api-key"
     | "app-secret"
@@ -301,18 +446,53 @@ export type AppVariables = {
     | "agent-token"
     | "dashboard-jwt"
     | "platform";
+  requestSignatureVerified?: boolean;
   requestId?: string;
+  platformKeyHash?: string;
+  platformScopes?: string[];
+  agentPolicyIds?: string[];
 };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
 
-export function getTenantPayload(tenant: Tenant): Tenant & TenantConfig {
+export function getTenantPayload(tenant: Tenant): Omit<Tenant, "apiKeyHash"> & TenantConfig {
   const config = tenantConfigs.get(tenant.id);
+  const { apiKeyHash: _apiKeyHash, ...safeTenant } = tenant;
   return {
-    ...tenant,
+    ...safeTenant,
     name: config?.name || tenant.name,
     webhookUrl: config?.webhookUrl,
     defaultPolicies: config?.defaultPolicies,
+  };
+}
+
+function parseAppId(
+  value: string | undefined | null,
+): { tenantId: string; clientId: string } | null {
+  if (!value) return null;
+  const index = value.lastIndexOf("/");
+  if (index <= 0 || index >= value.length - 1) return null;
+  const tenantId = value.slice(0, index);
+  const clientId = value.slice(index + 1);
+  if (!isValidTenantId(tenantId) || !/^[a-z0-9][a-z0-9_-]{2,63}$/.test(clientId)) return null;
+  return { tenantId, clientId };
+}
+
+function parseBasicAuth(
+  value: string | undefined | null,
+): { username: string; password: string } | null {
+  if (!value?.startsWith("Basic ")) return null;
+  let decoded = "";
+  try {
+    decoded = atob(value.slice(6));
+  } catch {
+    return null;
+  }
+  const separator = decoded.indexOf(":");
+  if (separator <= 0) return null;
+  return {
+    username: decoded.slice(0, separator),
+    password: decoded.slice(separator + 1),
   };
 }
 
@@ -341,6 +521,24 @@ export async function getPolicySet(tenantId: string, agentId: string): Promise<P
 
   if (storedPolicies.length > 0) return storedPolicies.map(toPolicyRule);
   return tenantConfigs.get(tenantId)?.defaultPolicies || [];
+}
+
+export async function getScopedPolicySet(
+  tenantId: string,
+  agentId: string,
+  policyIds: readonly string[] | undefined,
+): Promise<PolicyRule[]> {
+  if (!policyIds || policyIds.length === 0) return getPolicySet(tenantId, agentId);
+
+  const uniquePolicyIds = [...new Set(policyIds.filter((id) => typeof id === "string" && id))];
+  if (uniquePolicyIds.length === 0) return [];
+
+  const storedPolicies = await db
+    .select()
+    .from(policies)
+    .where(and(eq(policies.agentId, agentId), inArray(policies.id, uniquePolicyIds)));
+
+  return storedPolicies.map(toPolicyRule);
 }
 
 export async function loadConditionSetsForPolicies(
@@ -410,6 +608,48 @@ export async function getConditionSetReferenceValidationError(
   return null;
 }
 
+/**
+ * Materialise the rolling-aggregate lookup for a policy set's `aggregation`
+ * conditions. Snapshots are computed from the authoritative Redis tracker —
+ * never from caller-supplied request fields — and exposed to the engine as a
+ * synchronous lookup. Any snapshot that cannot be sourced is simply omitted
+ * from the map, which makes the evaluator fail closed (deny) for that
+ * condition.
+ *
+ * Callers wire the returned lookup onto the `aggregations` field of the
+ * evaluation context. The recording side (recordAggregationEvent) must be
+ * driven on transaction commit, inside the same per-agent serialization window
+ * used for spend caps, so the aggregate cannot be raced.
+ */
+export async function loadAggregationsForPolicies(
+  policySet: PolicyRule[],
+  request: SignRequest,
+  now: number = Date.now(),
+): Promise<AggregationLookup> {
+  const queries = aggregationQueriesForPolicies(policySet, request);
+  if (queries.length === 0) return aggregationLookupFromMap(new Map());
+
+  const snapshots = new Map<string, bigint>();
+  await Promise.all(
+    queries.map(async (query) => {
+      const value = await getAggregationSnapshot(
+        {
+          agentId: query.agentId,
+          metric: query.metric,
+          windowSeconds: query.windowSeconds,
+          scope: query.scope,
+          scopeKey: query.scopeKey,
+        },
+        now,
+      );
+      // null → unavailable; leave it out so the evaluator denies that condition.
+      if (value !== null) snapshots.set(aggregationQueryKey(query), value);
+    }),
+  );
+
+  return aggregationLookupFromMap(snapshots);
+}
+
 export async function getTransactionStats(agentId: string) {
   const now = new Date();
   const oneHourAgo = new Date(now.getTime() - 3600_000);
@@ -467,6 +707,10 @@ export async function tenantAuth(
     const token = authHeader.slice(7);
     const payload = await verifySessionToken(token);
     if (payload?.tenantId) {
+      const headerTenant = c.req.header("X-Steward-Tenant");
+      if (headerTenant && headerTenant !== payload.tenantId) {
+        return c.json<ApiResponse>({ ok: false, error: "Tenant header does not match token" }, 403);
+      }
       const jwtTenant = await findTenant(payload.tenantId);
       if (jwtTenant) {
         if (options?.requireTenantMatch && payload.tenantId !== options.requireTenantMatch) {
@@ -474,7 +718,57 @@ export async function tenantAuth(
         }
 
         const isAgentToken = payload.scope === "agent" && typeof payload.agentId === "string";
-        if (!isAgentToken) {
+        if (isAgentToken) {
+          const agent = await ensureAgentForTenant(payload.tenantId, payload.agentId as string);
+          if (!agent) {
+            return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 403);
+          }
+          if (typeof payload.jti === "string" && payload.jti) {
+            const [sessionSigner] = await db
+              .select({
+                id: sessionSigners.id,
+                tenantId: sessionSigners.tenantId,
+                agentId: sessionSigners.agentId,
+                policyIds: sessionSigners.policyIds,
+                expiresAt: sessionSigners.expiresAt,
+                revokedAt: sessionSigners.revokedAt,
+              })
+              .from(sessionSigners)
+              .where(eq(sessionSigners.jti, payload.jti));
+
+            if (sessionSigner) {
+              if (
+                sessionSigner.tenantId !== payload.tenantId ||
+                sessionSigner.agentId !== payload.agentId
+              ) {
+                return c.json<ApiResponse>(
+                  { ok: false, error: "Session signer does not match token subject" },
+                  403,
+                );
+              }
+              if (sessionSigner.revokedAt || sessionSigner.expiresAt.getTime() <= Date.now()) {
+                return c.json<ApiResponse>(
+                  { ok: false, error: "Session signer is revoked or expired" },
+                  401,
+                );
+              }
+              if (sessionSigner.policyIds.length > 0) {
+                c.set("agentPolicyIds", sessionSigner.policyIds);
+              }
+              try {
+                await db
+                  .update(sessionSigners)
+                  .set({ lastUsedAt: new Date() })
+                  .where(eq(sessionSigners.id, sessionSigner.id));
+              } catch (err) {
+                console.error(
+                  `[session-signer] failed to update lastUsedAt for ${sessionSigner.id}:`,
+                  err,
+                );
+              }
+            }
+          }
+        } else {
           if (!payload.userId) {
             return c.json<ApiResponse>(
               { ok: false, error: "User session token is missing userId" },
@@ -513,8 +807,15 @@ export async function tenantAuth(
             "agentSubject",
             typeof tokenSubject === "string" ? tokenSubject : `agent:${payload.agentId}`,
           );
+          c.set("agentScopes", normalizeAgentTokenScopes(payload.scopes));
           c.set("authType", "agent-token");
         } else {
+          if (typeof payload.mfaVerifiedAt === "number") {
+            c.set("sessionMfaVerifiedAt", payload.mfaVerifiedAt);
+          }
+          if (typeof payload.mfaMethod === "string") {
+            c.set("sessionMfaMethod", payload.mfaMethod);
+          }
           c.set("authType", "session-jwt");
         }
         return next();
@@ -523,9 +824,74 @@ export async function tenantAuth(
   }
 
   const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
+  const appId = c.req.header("X-Steward-App-Id");
+  const basic = parseBasicAuth(authHeader);
+  if (appId || basic) {
+    if (!appId || !basic) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "App secret auth requires Basic auth and X-Steward-App-Id" },
+        401,
+      );
+    }
+    if (basic.username !== appId) {
+      return c.json<ApiResponse>({ ok: false, error: "App id mismatch" }, 403);
+    }
+    const parsedAppId = parseAppId(appId);
+    if (!parsedAppId) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid app id" }, 400);
+    }
+    if (options?.requireTenantMatch && parsedAppId.tenantId !== options.requireTenantMatch) {
+      return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+    }
+    const appTenant = await findTenant(parsedAppId.tenantId);
+    if (!appTenant) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+    const now = new Date();
+    const rows = await getDb()
+      .select({
+        secretHash: tenantAppClientSecrets.secretHash,
+        status: tenantAppClientSecrets.status,
+        expiresAt: tenantAppClientSecrets.expiresAt,
+        revokedAt: tenantAppClientSecrets.revokedAt,
+        clientEnabled: tenantAppClients.enabled,
+      })
+      .from(tenantAppClientSecrets)
+      .innerJoin(
+        tenantAppClients,
+        and(
+          eq(tenantAppClients.tenantId, tenantAppClientSecrets.tenantId),
+          eq(tenantAppClients.id, tenantAppClientSecrets.clientId),
+        ),
+      )
+      .where(
+        and(
+          eq(tenantAppClientSecrets.tenantId, parsedAppId.tenantId),
+          eq(tenantAppClientSecrets.clientId, parsedAppId.clientId),
+          inArray(tenantAppClientSecrets.status, ["active", "retiring"]),
+          eq(tenantAppClients.enabled, true),
+        ),
+      );
+
+    const match = rows.some((row) => {
+      if (!row.clientEnabled || row.revokedAt) return false;
+      if (row.expiresAt && row.expiresAt <= now) return false;
+      return validateApiKey(basic.password, row.secretHash);
+    });
+    if (!match) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
+
+    c.set("tenantId", parsedAppId.tenantId);
+    c.set("tenant", appTenant);
+    c.set(
+      "tenantConfig",
+      tenantConfigs.get(parsedAppId.tenantId) || { id: appTenant.id, name: appTenant.name },
+    );
+    c.set("authType", "app-secret");
+    await next();
+    return;
+  }
+
   const tenant = await findTenant(tenantId);
 
-  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
 
   if (options?.requireTenantMatch && tenantId !== options.requireTenantMatch) {
     return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
@@ -533,13 +899,8 @@ export async function tenantAuth(
 
   const apiKey = c.req.header("X-Steward-Key") || "";
 
-  if (tenant.apiKeyHash) {
-    if (!validateApiKey(apiKey, tenant.apiKeyHash)) {
-      return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
-    }
-  } else {
-    if (!apiKey) return c.json<ApiResponse>({ ok: false, error: "API key required" }, 401);
-    return c.json<ApiResponse>({ ok: false, error: "Tenant not configured for API key auth" }, 403);
+  if (!tenant.apiKeyHash || !validateApiKey(apiKey, tenant.apiKeyHash)) {
+    return c.json<ApiResponse>({ ok: false, error: "Forbidden" }, 403);
   }
 
   c.set("tenantId", tenantId);
@@ -607,8 +968,10 @@ export function formatAuthenticatedPrincipal(principal: AuthenticatedPrincipal):
 
 export function requireAgentAccess(c: Context<{ Variables: AppVariables }>): boolean {
   const agentScope = c.get("agentScope");
-  if (!agentScope) return true;
-  return agentScope === c.req.param("agentId");
+  if (agentScope) {
+    return agentScope === c.req.param("agentId") && hasAgentTokenScope(c.get("agentScopes"));
+  }
+  return requireTenantLevel(c);
 }
 
 export function requireTenantLevel(c: Context<{ Variables: AppVariables }>): boolean {
@@ -641,6 +1004,10 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
   if (!payload?.tenantId) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid or expired session token" }, 401);
   }
+  const headerTenant = c.req.header("X-Steward-Tenant");
+  if (headerTenant && headerTenant !== payload.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant header does not match token" }, 403);
+  }
 
   if (payload.scope === "agent" || payload.agentId) {
     return c.json<ApiResponse>(
@@ -661,6 +1028,11 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
     return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
   }
 
+  const membership = await findUserTenantMembership(payload.userId, payload.tenantId);
+  if (!membership) {
+    return c.json<ApiResponse>({ ok: false, error: "Not a member of this tenant" }, 403);
+  }
+
   c.set("tenantId", payload.tenantId);
   c.set("tenant", tenant);
   c.set(
@@ -668,9 +1040,13 @@ export async function dashboardAuthMiddleware(c: Context<{ Variables: AppVariabl
     tenantConfigs.get(payload.tenantId) || { id: tenant.id, name: tenant.name },
   );
   c.set("authType", "dashboard-jwt");
+  c.set("tenantRole", membership.role);
   if (payload.userId) c.set("userId", payload.userId);
-  if (typeof (payload as { mfaVerifiedAt?: unknown }).mfaVerifiedAt === "number") {
-    c.set("sessionMfaVerifiedAt", (payload as unknown as { mfaVerifiedAt: number }).mfaVerifiedAt);
+  if (typeof payload.mfaVerifiedAt === "number") {
+    c.set("sessionMfaVerifiedAt", payload.mfaVerifiedAt);
+  }
+  if (typeof payload.mfaMethod === "string") {
+    c.set("sessionMfaMethod", payload.mfaMethod);
   }
 
   return next();

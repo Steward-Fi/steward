@@ -10,6 +10,8 @@ import { estimateCost, isKnownHost } from "@stwd/redis";
 import {
   checkProxyRateLimit,
   checkProxySpendLimit,
+  estimateProxyLlmReservationUsd,
+  extractProxySpendLimits,
   isProxyRedisAvailable,
   trackProxySpend,
 } from "../middleware/redis-enforcement";
@@ -43,9 +45,10 @@ describe("proxy Redis enforcement (no Redis)", () => {
     expect(cost).toBe(0);
   });
 
-  it("checkProxySpendLimit allows all requests", async () => {
+  it("checkProxySpendLimit fails closed for configured limits without Redis", async () => {
     const result = await checkProxySpendLimit("agent-1", 100);
-    expect(result.allowed).toBe(true);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain("Redis unavailable");
   });
 
   it("checkProxySpendLimit allows when limit is 0 (no limit)", async () => {
@@ -131,5 +134,67 @@ describe("cost estimator (used by proxy)", () => {
       { model: "gpt-4o" }, // no usage field
     );
     expect(cost).toBe(0);
+  });
+
+  it("requires a bounded max token cap for spend reservations", () => {
+    expect(
+      estimateProxyLlmReservationUsd("api.openai.com", {
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "hello" }],
+      }),
+    ).toBe(null);
+  });
+
+  it("rejects metered multimodal input for spend reservations", () => {
+    expect(
+      estimateProxyLlmReservationUsd("api.openai.com", {
+        model: "gpt-4o",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image_url", image_url: { url: "https://example.com/a.png" } }],
+          },
+        ],
+        max_tokens: 100,
+      }),
+    ).toBe(null);
+  });
+
+  it("rejects multi-choice requests for spend reservations", () => {
+    expect(
+      estimateProxyLlmReservationUsd("api.openai.com", {
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "hello" }],
+        max_tokens: 100,
+        n: 10,
+      }),
+    ).toBe(null);
+  });
+
+  it("estimates a conservative request reservation for known models", () => {
+    const reserve = estimateProxyLlmReservationUsd("api.openai.com", {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hello" }],
+      max_tokens: 100,
+    });
+
+    expect(reserve).not.toBe(null);
+    expect(reserve!).toBeGreaterThan(0.001);
+  });
+
+  it("extracts canonical per-request and weekly USD proxy spend limits", () => {
+    expect(
+      extractProxySpendLimits({
+        maxPerTxUsd: 0.25,
+        maxPerDayUsd: 1,
+        maxPerWeekUsd: 5,
+        maxPerMonthUsd: 20,
+      }),
+    ).toEqual({
+      perRequest: 0.25,
+      day: 1,
+      week: 5,
+      month: 20,
+    });
   });
 });

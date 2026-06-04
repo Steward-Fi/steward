@@ -18,7 +18,7 @@ import { logDecision, logError, logInfo, logSubmission, logWarn } from "./logger
 import { fetchAgentState } from "./state.js";
 import { resolveStrategy } from "./strategies/index.js";
 import type { AgentState, Strategy, TradeDecision } from "./strategies/types.js";
-import { buildSwapTx, toSignInput } from "./trade-builder.js";
+import { buildSwapTx, computeExpectedOut, toSignInput, UnsafeSwapError } from "./trade-builder.js";
 
 // ─── Loop handle ─────────────────────────────────────────────────────────────
 
@@ -47,14 +47,29 @@ async function resolveWallet(steward: StewardClient, agentId: string): Promise<s
 
 // ─── Single tick ──────────────────────────────────────────────────────────────
 
-async function runTick(
+/**
+ * Injectable dependencies for {@link runTick}. Production passes nothing and the
+ * real implementations are used; tests substitute a deterministic state fetcher
+ * to exercise the build/sign chokepoint without live RPC/oracle calls.
+ */
+export interface RunTickDeps {
+  fetchState?: (
+    agentConfig: AgentTraderConfig,
+    walletAddress: string,
+    steward: StewardClient,
+  ) => Promise<AgentState>;
+}
+
+export async function runTick(
   agentConfig: AgentTraderConfig,
   strategy: Strategy,
   steward: StewardClient,
   globalConfig: TraderConfig,
+  deps: RunTickDeps = {},
 ): Promise<void> {
-  const { agentId, tokenAddress, chainId = 8453, portalAddress } = agentConfig;
+  const { agentId, tokenAddress, chainId = 8453, portalAddress, slippageBps } = agentConfig;
   const dryRun = globalConfig.dryRun ?? false;
+  const fetchState = deps.fetchState ?? fetchAgentState;
 
   // 1. Wallet address
   const walletAddress = await resolveWallet(steward, agentId);
@@ -63,7 +78,7 @@ async function runTick(
   // 2. Fetch state
   let state: AgentState;
   try {
-    state = await fetchAgentState(agentConfig, walletAddress, steward);
+    state = await fetchState(agentConfig, walletAddress, steward);
   } catch (err) {
     logError("Failed to fetch agent state — skipping tick", err, { agentId });
     return;
@@ -93,6 +108,20 @@ async function runTick(
 
   if (decision.action === "hold") return;
 
+  // 3b. Low-confidence price gate. For price-driven strategies, a single-pair/
+  //     spot price (priceConfidence !== "high") is trivially manipulable, so it
+  //     must not, on its own, trigger a trade. Suppress to hold. (The strategies
+  //     also self-guard; this is the authoritative chokepoint.)
+  if (strategy.requiresPriceConfidence && state.priceConfidence !== "high") {
+    logWarn("Suppressing trade — price confidence too low to act on", {
+      agentId,
+      strategy: strategy.name,
+      action: decision.action,
+      priceConfidence: state.priceConfidence,
+    });
+    return;
+  }
+
   // 4. Build transaction
   if (!portalAddress) {
     logWarn("Agent has no portalAddress configured — cannot build swap tx", {
@@ -101,14 +130,52 @@ async function runTick(
     return;
   }
 
-  const builtTx = buildSwapTx(
-    decision.action,
-    tokenAddress,
-    decision.amount,
-    portalAddress,
-    walletAddress,
-    chainId,
-  );
+  // Derive a real expected-output quote from the current token price (native-wei
+  // per token-unit). buildSwapTx turns this into a slippage-protected
+  // amountOutMin and FAILS CLOSED (UnsafeSwapError) if no safe floor can be
+  // computed — we never submit an unprotected swap.
+  let amountInBig: bigint;
+  try {
+    amountInBig = BigInt(decision.amount);
+  } catch {
+    logWarn("Strategy produced a non-integer trade amount — skipping tick", {
+      agentId,
+      strategy: strategy.name,
+      amount: decision.amount,
+    });
+    return;
+  }
+
+  const expectedOut = computeExpectedOut(decision.action, amountInBig, state.tokenPrice);
+
+  let builtTx: ReturnType<typeof buildSwapTx>;
+  try {
+    builtTx = buildSwapTx(
+      decision.action,
+      tokenAddress,
+      decision.amount,
+      portalAddress,
+      walletAddress,
+      chainId,
+      expectedOut,
+      slippageBps,
+    );
+  } catch (err) {
+    if (err instanceof UnsafeSwapError) {
+      // Fail-closed: refuse to submit a swap without slippage protection.
+      logWarn("Refusing to build swap — no safe slippage bound; skipping trade", {
+        agentId,
+        strategy: strategy.name,
+        action: decision.action,
+        amount: decision.amount,
+        slippageBps: slippageBps ?? 100,
+        priceConfidence: state.priceConfidence,
+        reason: err.message,
+      });
+      return;
+    }
+    throw err;
+  }
 
   if (dryRun) {
     logInfo("DRY RUN — transaction not submitted", {

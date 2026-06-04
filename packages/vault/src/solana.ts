@@ -133,17 +133,20 @@ export function restoreSolanaKeypair(secretKey: string): Keypair {
 // ─── Transactions ──────────────────────────────────────────────────────────
 
 /**
- * Build, sign, and send a SOL transfer transaction.
- * Returns the transaction signature (base58).
+ * Build and sign a SOL transfer transaction. When broadcast is true, sends the
+ * transaction and returns the signature. Otherwise returns the signed serialized
+ * transaction as base64 without submitting it to RPC.
  */
 export async function signSolanaTransaction(
   secretKeyHex: string,
   to: string,
   lamports: bigint,
   rpcUrl: string,
+  options: { broadcast?: boolean } = {},
 ): Promise<string> {
   const keypair = restoreSolanaKeypair(secretKeyHex);
   const connection = new Connection(rpcUrl, "confirmed");
+  const shouldBroadcast = options.broadcast !== false;
 
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
 
@@ -157,6 +160,11 @@ export async function signSolanaTransaction(
       lamports: Number(lamports),
     }),
   );
+
+  if (!shouldBroadcast) {
+    tx.sign(keypair);
+    return btoa(Array.from(tx.serialize(), (b) => String.fromCharCode(b)).join(""));
+  }
 
   const signature = await connection.sendTransaction(tx, [keypair], {
     skipPreflight: false,
@@ -215,4 +223,78 @@ export function signSolanaMessage(secretKeyHex: string, message: string): string
   // cryptoSign returns a Buffer — call .toString("hex") directly (no Buffer.from wrapper).
   const signature = cryptoSign(null, messageBytes, keyObject);
   return signature.toString("hex");
+}
+
+/**
+ * Sign a raw byte payload with Ed25519 using Node.js built-in crypto
+ * (no tweetnacl required). Returns the detached signature as a hex string and
+ * the signing public key in base58.
+ *
+ * Unlike secp256k1 (which signs a pre-computed 32-byte digest), Ed25519 signs
+ * the message bytes directly (it hashes internally with SHA-512). The vault
+ * intentionally restricts the payload to a fixed 32-byte digest before calling
+ * this helper so the raw-sign edge cannot be abused to blind-sign a full Solana
+ * transaction message; this helper enforces that floor defensively.
+ */
+export function signEd25519Digest(
+  secretKeyHex: string,
+  payload: Uint8Array,
+): { signature: string; publicKey: string } {
+  if (payload.length !== 32) {
+    throw new Error("Ed25519 raw digest payload must be exactly 32 bytes");
+  }
+  const keypair = restoreSolanaKeypair(secretKeyHex);
+
+  // keypair.secretKey is 64 bytes: [0..31] = 32-byte seed, [32..63] = public key
+  const seed = keypair.secretKey.slice(0, 32);
+
+  const keyObject = createPrivateKey({
+    key: {
+      kty: "OKP",
+      crv: "Ed25519",
+      d: uint8ArrayToBase64url(seed),
+      x: uint8ArrayToBase64url(keypair.publicKey.toBytes()),
+    },
+    format: "jwk",
+  });
+
+  const signature = cryptoSign(null, payload, keyObject);
+  return {
+    signature: signature.toString("hex"),
+    publicKey: keypair.publicKey.toBase58(),
+  };
+}
+
+export function assertSolanaTransferTransactionMatches(
+  tx: Transaction,
+  expected: { from: PublicKey; to: string; lamports: bigint },
+): void {
+  if (expected.lamports < 0n) {
+    throw new Error("expected Solana transfer lamports must be non-negative");
+  }
+  if (tx.instructions.length !== 1) {
+    throw new Error("Solana signing only supports a single policy-checked transfer instruction");
+  }
+
+  const [instruction] = tx.instructions;
+  if (!instruction.programId.equals(SystemProgram.programId)) {
+    throw new Error("Solana transaction instruction must be a SystemProgram transfer");
+  }
+  const [fromKey, toKey] = instruction.keys;
+  if (!fromKey?.pubkey.equals(expected.from) || fromKey.isSigner !== true) {
+    throw new Error("Solana transfer source does not match the vault wallet");
+  }
+  if (!toKey?.pubkey.equals(new PublicKey(expected.to))) {
+    throw new Error("Solana transfer recipient does not match the policy envelope");
+  }
+
+  const data = instruction.data;
+  const dataView = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  if (data.byteLength !== 12 || dataView.getUint32(0, true) !== 2) {
+    throw new Error("Solana transaction instruction must be a native transfer");
+  }
+  const lamports = dataView.getBigUint64(4, true);
+  if (lamports !== expected.lamports) {
+    throw new Error("Solana transfer amount does not match the policy envelope");
+  }
 }

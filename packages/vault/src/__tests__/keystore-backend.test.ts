@@ -68,6 +68,49 @@ describe("KeystoreBackend interface", () => {
     const out2 = await backend.encrypt("k");
     expect(out2.salt).toBe("");
   });
+
+  test("production NEVER takes the no-AAD legacy fallback, even with the env flag set", () => {
+    const previousEnv = process.env.NODE_ENV;
+    const previousFallback = process.env.STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK;
+
+      const ks = new KeyStore(
+        "legacy-context-binding-test",
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+      );
+      const legacyCiphertext = ks.encrypt("0x" + "2".repeat(64));
+
+      expect(() =>
+        ks.decrypt(legacyCiphertext, {
+          tenantId: "tenant-b",
+          agentId: "agent-b",
+          chainFamily: "evm",
+          venue: null,
+        }),
+      ).toThrow();
+
+      // Hardened: the env flag MUST NOT enable the no-AAD path in production.
+      process.env.STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK = "true";
+      expect(() =>
+        ks.decrypt(legacyCiphertext, {
+          tenantId: "tenant-b",
+          agentId: "agent-b",
+          chainFamily: "evm",
+          venue: null,
+        }),
+      ).toThrow();
+    } finally {
+      if (previousEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousEnv;
+      if (previousFallback === undefined) {
+        delete process.env.STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK;
+      } else {
+        process.env.STEWARD_ALLOW_LEGACY_KEYSTORE_DECRYPT_FALLBACK = previousFallback;
+      }
+    }
+  });
 });
 
 if (env !== undefined) process.env.NODE_ENV = env;

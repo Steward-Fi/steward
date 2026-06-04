@@ -66,15 +66,6 @@ interface StaggerContainerProps {
   once?: boolean;
 }
 
-const _containerVariants: Variants = {
-  hidden: {},
-  visible: {
-    transition: {
-      staggerChildren: 0.1,
-    },
-  },
-};
-
 const itemVariants: Variants = {
   hidden: { opacity: 0, y: 20 },
   visible: {
@@ -114,33 +105,6 @@ export function StaggerContainer({
 export function StaggerItem({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <motion.div variants={itemVariants} className={className}>
-      {children as any}
-    </motion.div>
-  );
-}
-
-export function FadeIn({
-  children,
-  className,
-  delay = 0,
-  duration = 0.5,
-}: {
-  children: ReactNode;
-  className?: string;
-  delay?: number;
-  duration?: number;
-}) {
-  return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{
-        duration,
-        delay,
-        ease: easeOutQuart,
-      }}
-      className={className}
-    >
       {children as any}
     </motion.div>
   );

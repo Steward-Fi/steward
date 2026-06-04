@@ -63,7 +63,8 @@ beforeAll(async () => {
   ({ requireAgentJwt, clearAgentJwksCacheForTests } = await import("../middleware/agent-jwt"));
   ({ clearAgentTokenStatusForTests } = await import("../services/agent-token-status"));
   ({ tradeRoutes } = await import("../routes/trade"));
-  ({ tenantAuth } = await import("../services/context"));
+  const contextModule = await import("../services/context");
+  ({ tenantAuth } = contextModule);
 
   const apiKeyPair = generateApiKey();
   apiKey = apiKeyPair.key;
@@ -82,6 +83,10 @@ beforeAll(async () => {
       },
     ])
     .onConflictDoNothing();
+
+  // PR #79 hardening: requireAgentJwt rejects tokens for agents that are not
+  // registered for the tenant, so provision the agent (and its signing key).
+  await contextModule.vault.createAgent(TENANT_ID, AGENT_ID, "Token Watch Agent");
 });
 
 afterAll(async () => {
@@ -96,7 +101,13 @@ beforeEach(() => {
 
 async function signTradeToken(expiresAt: number): Promise<string> {
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ agent_id: AGENT_ID })
+  // PR #79 hardening: requireAgentJwt now enforces the trade:order scope and a
+  // tenant_id claim that matches the X-Steward-Tenant header.
+  return new SignJWT({
+    agent_id: AGENT_ID,
+    tenant_id: TENANT_ID,
+    scopes: ["trade:order"],
+  })
     .setProtectedHeader({ alg: "RS256", typ: "JWT", kid: KID })
     .setSubject(`agent:${AGENT_ID}`)
     .setIssuer("eliza-cloud")
@@ -172,7 +183,9 @@ describe("agent trade token expiry monitoring", () => {
       `/v1/trade/token-status?agentId=${encodeURIComponent(AGENT_ID)}`,
       { headers: { "X-Steward-Tenant": TENANT_NO_KEY_ID } },
     );
-    expect(unauthenticated.status).toBe(401);
+    // PR #79 hardening: tenantAuth rejects a tenant with no/invalid API key with
+    // 403 Forbidden (previously 401).
+    expect(unauthenticated.status).toBe(403);
 
     const unknown = await app.request("/v1/trade/token-status?agentId=missing-agent", {
       headers: {

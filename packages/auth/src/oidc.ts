@@ -157,6 +157,38 @@ export async function assertPublicJwksDestination(jwksUri: string): Promise<void
   }
 }
 
+/**
+ * Builds (or returns a cached) remote JWKS set whose key fetches are routed
+ * through the SSRF-guarded {@link fetchPublicJwks} transport. The set is
+ * rebuilt once it exceeds {@link JWKS_MAX_AGE_MS} so rotated or emergency-
+ * revoked IdP keys stop verifying within the window.
+ *
+ * Reused by both the tenant OIDC path ({@link verifyOidcJwt}) and the
+ * built-in "Sign in with Apple" id_token verifier so there is a single,
+ * hardened JWKS transport in the codebase.
+ *
+ * @param jwksUri  - The IdP JWKS endpoint (must be a public https URL).
+ * @param cacheKey - Stable cache key the caller controls (e.g. issuer:jwksUri).
+ */
+export async function getPublicRemoteJWKSet(
+  jwksUri: string,
+  cacheKey: string,
+): Promise<ReturnType<typeof createRemoteJWKSet>> {
+  const cached = JWKS_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.createdAt <= JWKS_MAX_AGE_MS) {
+    return cached.jwks;
+  }
+  const url = assertSafeJwksUri(jwksUri);
+  if (!ALLOW_TEST_JWKS_FETCH) {
+    await assertPublicJwksDestination(url.toString());
+  }
+  const jwks = createRemoteJWKSet(url, {
+    [customFetch]: (fetchUrl, init) => fetchPublicJwks(fetchUrl, init),
+  });
+  JWKS_CACHE.set(cacheKey, { jwks, createdAt: Date.now() });
+  return jwks;
+}
+
 async function fetchPublicJwks(url: string | URL, init?: RequestInit): Promise<Response> {
   const jwksUrl = assertSafeJwksUri(url.toString());
   if (ALLOW_TEST_JWKS_FETCH) {
@@ -238,21 +270,7 @@ export async function verifyOidcJwt(
     throw new Error("Unsupported OIDC token algorithm");
   }
 
-  const key = cacheKey(tenantId, provider);
-  const cached = JWKS_CACHE.get(key);
-  let jwks = cached?.jwks;
-  // Rebuild the remote JWKS set once it exceeds the max-age TTL so rotated or
-  // emergency-revoked IdP keys stop verifying within JWKS_MAX_AGE_MS.
-  if (!jwks || Date.now() - (cached?.createdAt ?? 0) > JWKS_MAX_AGE_MS) {
-    const jwksUri = assertSafeJwksUri(provider.jwksUri);
-    if (!ALLOW_TEST_JWKS_FETCH) {
-      await assertPublicJwksDestination(jwksUri.toString());
-    }
-    jwks = createRemoteJWKSet(jwksUri, {
-      [customFetch]: (url, init) => fetchPublicJwks(url, init),
-    });
-    JWKS_CACHE.set(key, { jwks, createdAt: Date.now() });
-  }
+  const jwks = await getPublicRemoteJWKSet(provider.jwksUri, cacheKey(tenantId, provider));
 
   const { payload } = await jwtVerify(token, jwks, {
     issuer: provider.issuer,
@@ -275,6 +293,8 @@ export async function verifyOidcJwt(
     if (!clientId || azp !== clientId) {
       throw new Error("OIDC token azp does not match the configured client_id");
     }
+  } else if (clientId && !audiences.includes(clientId)) {
+    throw new Error("OIDC token audience does not include the configured client_id");
   } else if (audiences.length > 1) {
     throw new Error("OIDC token with multiple audiences must include an azp claim");
   }

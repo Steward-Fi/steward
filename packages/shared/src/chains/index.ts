@@ -17,6 +17,20 @@ import { polygon } from "./polygon.js";
 import { solana, solanaDevnet } from "./solana.js";
 import type { ChainProvider } from "./types.js";
 
+export {
+  isSigningCurve,
+  isSigningCurveSupported,
+  RAW_SIGNING_CHAIN_SUPPORT,
+  type RawSigningChain,
+  type RawSigningChainSupport,
+  rawSigningChainSupport,
+  SIGNING_CURVE_SUPPORT,
+  type SigningCurve,
+  type SigningCurveSupport,
+  STARK_UNSUPPORTED_REASON,
+  SUPPORTED_SIGNING_CURVES,
+  signingCurveSupport,
+} from "./signing.js";
 export type { ChainProvider } from "./types.js";
 
 /** All registered chain providers. Add new entries here. */

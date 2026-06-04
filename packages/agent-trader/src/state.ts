@@ -4,22 +4,46 @@
  * Gathers the current on-chain + off-chain state needed by strategies:
  *   - Native balance (ETH/BNB)     ← viem publicClient
  *   - Token balance (ERC-20)       ← viem publicClient
- *   - Token price                  ← price oracle or DEX reserve ratio
+ *   - Token price                  ← hardened price oracle, else env oracle / DEX reserve ratio
  *   - Last trade age + daily vol   ← Steward history
  *
- * Token price resolution order:
- *   1. priceOracleUrl env var (simple JSON API returning { price: "1234" })
- *   2. DEX reserve ratio (reads getReserves on a Uniswap V2-style pair)
- *   3. Fallback: 0n (strategies should handle this gracefully)
+ * Token price resolution order (each tick is tagged with a confidence level):
+ *   1. Hardened @stwd/shared price oracle — liquidity-weighted, multi-pair,
+ *      fails to null. Tagged "high"; this is the only source that may, on its
+ *      own, trigger a trade.
+ *   2. priceOracleUrl env var (simple JSON API returning { price: "1234" }).
+ *      Tagged "low" — an arbitrary single endpoint with no corroboration.
+ *   3. DEX reserve ratio (single Uniswap-V2 pair getReserves). Tagged "low" —
+ *      a single-pair spot ratio is trivially manipulable (flash-loan/imbalance).
+ *   4. Fallback: 0n / "none" (strategies hold).
+ *
+ * Low-confidence ticks feed treasury/threshold math but are gated by the
+ * strategy layer so a manipulable price cannot, by itself, trigger a swap.
  */
 
 import type { StewardClient } from "@stwd/sdk";
+import { createPriceOracle, type PriceOracle } from "@stwd/shared";
 import type { PublicClient } from "viem";
 import { createPublicClient, http } from "viem";
 import { base } from "viem/chains";
 import type { AgentTraderConfig } from "./config.js";
 import { logWarn } from "./logger.js";
 import type { AgentState } from "./strategies/types.js";
+
+// ─── Price confidence ───────────────────────────────────────────────────────
+
+export type PriceConfidence = "high" | "low" | "none";
+
+export interface PricedQuote {
+  /** native-wei per single token-unit (scaled to 1e18) */
+  price: bigint;
+  confidence: PriceConfidence;
+}
+
+const NO_PRICE: PricedQuote = { price: 0n, confidence: "none" };
+
+// Shared, liquidity-weighted price oracle (cached internally; safe to reuse).
+const sharedOracle: PriceOracle = createPriceOracle();
 
 // ─── Minimal ABIs ─────────────────────────────────────────────────────────────
 
@@ -99,8 +123,16 @@ async function getTokenBalance(
 
 // ─── Token price ──────────────────────────────────────────────────────────────
 
-async function getTokenPrice(tokenAddress: string, chainId: number): Promise<bigint> {
-  // 1. External price oracle (env: PRICE_ORACLE_URL or per-token override)
+async function getTokenPrice(tokenAddress: string, chainId: number): Promise<PricedQuote> {
+  // 1. Hardened, liquidity-weighted, multi-pair oracle (fails to null). This is
+  //    the only HIGH-confidence source — the only one allowed to trigger a trade
+  //    on its own. It quotes USD; convert to native-wei/token via the native USD
+  //    price so strategy thresholds (expressed in native-wei) stay comparable.
+  const oracleQuote = await getHardenedOracleQuote(tokenAddress, chainId);
+  if (oracleQuote) return { price: oracleQuote, confidence: "high" };
+
+  // 2. External price oracle (env: PRICE_ORACLE_URL or per-token override).
+  //    A single unauthenticated endpoint with no corroboration → LOW confidence.
   const oracleUrl =
     process.env[`PRICE_ORACLE_${tokenAddress.toLowerCase()}`] ?? process.env.PRICE_ORACLE_URL;
 
@@ -110,16 +142,21 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<big
       const resp = await fetch(url, { signal: AbortSignal.timeout(5000) });
       if (resp.ok) {
         const json = (await resp.json()) as { price?: string };
-        if (json.price) return BigInt(json.price);
+        if (json.price) {
+          const price = BigInt(json.price);
+          if (price > 0n) return { price, confidence: "low" };
+        }
       }
     } catch {
-      logWarn("Price oracle request failed, falling back to DEX reserves", {
+      logWarn("Env price oracle request failed, falling back to DEX reserves", {
         tokenAddress,
       });
     }
   }
 
-  // 2. DEX pair reserve ratio
+  // 3. DEX pair reserve ratio — a single-pair spot price is trivially
+  //    manipulable (flash-loan/reserve imbalance), so it is LOW confidence and
+  //    cannot, by itself, trigger a trade (gated in the strategy layer).
   const pairAddress =
     process.env[`DEX_PAIR_${tokenAddress.toLowerCase()}`] ?? process.env.DEX_PAIR_ADDRESS;
 
@@ -147,7 +184,8 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<big
       const nativeReserve = isToken0 ? reserve1 : reserve0;
 
       if (tokenReserve > 0n) {
-        return (BigInt(nativeReserve) * BigInt(1e18)) / BigInt(tokenReserve);
+        const price = (BigInt(nativeReserve) * BigInt(1e18)) / BigInt(tokenReserve);
+        if (price > 0n) return { price, confidence: "low" };
       }
     } catch (err) {
       logWarn("DEX reserve price lookup failed", {
@@ -157,9 +195,41 @@ async function getTokenPrice(tokenAddress: string, chainId: number): Promise<big
     }
   }
 
-  // 3. Fallback — strategies must handle tokenPrice === 0n
+  // 4. Fallback — strategies must handle tokenPrice === 0n
   logWarn("Could not determine token price — returning 0", { tokenAddress });
-  return 0n;
+  return NO_PRICE;
+}
+
+/**
+ * Quote native-wei per token-unit (scaled to 1e18) from the hardened oracle.
+ * Returns null if either the token or native USD price is unavailable — the
+ * oracle fails closed, and we never synthesise a price from a partial read.
+ */
+async function getHardenedOracleQuote(
+  tokenAddress: string,
+  chainId: number,
+): Promise<bigint | null> {
+  try {
+    const [tokenUsd, nativeUsd] = await Promise.all([
+      sharedOracle.getTokenUsdPrice(chainId, tokenAddress),
+      sharedOracle.getNativeUsdPrice(chainId),
+    ]);
+
+    if (tokenUsd === null || nativeUsd === null || tokenUsd <= 0 || nativeUsd <= 0) {
+      return null;
+    }
+
+    // price[native-wei/token] = (tokenUsd / nativeUsd) * 1e18
+    // (tokenUsd/nativeUsd is the token's value in native units; *1e18 scales to wei)
+    const price = BigInt(Math.round((tokenUsd / nativeUsd) * 1e18));
+    return price > 0n ? price : null;
+  } catch (err) {
+    logWarn("Hardened price oracle lookup failed, falling back", {
+      tokenAddress,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
 }
 
 // ─── Steward history helpers ──────────────────────────────────────────────────
@@ -184,7 +254,7 @@ export async function fetchAgentState(
 ): Promise<AgentState> {
   const chainId = agentConfig.chainId ?? 8453;
 
-  const [nativeBalance, tokenBalance, tokenPrice, history] = await Promise.all([
+  const [nativeBalance, tokenBalance, quote, history] = await Promise.all([
     getNativeBalance(walletAddress, chainId).catch((err) => {
       logWarn("Failed to fetch native balance", {
         agentId: agentConfig.agentId,
@@ -199,12 +269,12 @@ export async function fetchAgentState(
       });
       return 0n;
     }),
-    getTokenPrice(agentConfig.tokenAddress, chainId).catch((err) => {
+    getTokenPrice(agentConfig.tokenAddress, chainId).catch((err): PricedQuote => {
       logWarn("Failed to fetch token price", {
         agentId: agentConfig.agentId,
         error: String(err),
       });
-      return 0n;
+      return NO_PRICE;
     }),
     steward.getHistory(agentConfig.agentId).catch((err) => {
       logWarn("Failed to fetch Steward history", {
@@ -215,6 +285,7 @@ export async function fetchAgentState(
     }),
   ]);
 
+  const tokenPrice = quote.price;
   const tokenValueInNative = tokenPrice > 0n ? (tokenBalance * tokenPrice) / BigInt(1e18) : 0n;
   const treasuryValue = nativeBalance + tokenValueInNative;
 
@@ -222,6 +293,7 @@ export async function fetchAgentState(
     nativeBalance,
     tokenBalance,
     tokenPrice,
+    priceConfidence: quote.confidence,
     lastTradeAge: secondsSinceLastTrade(history),
     dailyVolume: dailyVolume(history),
     treasuryValue,

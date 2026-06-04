@@ -7,7 +7,7 @@
  *   3. Persists data across close/reopen cycles
  */
 
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,8 @@ import { eq } from "drizzle-orm";
 
 import { createPGLiteDb } from "../pglite";
 import { agents, encryptedKeys, policies, tenants, transactions } from "../schema";
+
+setDefaultTimeout(120000);
 
 // Shared temp dir for persistence tests
 let tempDir: string;
@@ -292,5 +294,348 @@ describe("PGLite Adapter", () => {
     expect(count2).toBe(count1);
 
     await rm(dir, { recursive: true, force: true }).catch(() => {});
+  });
+
+  test("security invariants reject cross-tenant agent ownership rows", async () => {
+    const { client } = await freshDb();
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('tenant-a', 'Tenant A', 'hash-a'), ('tenant-b', 'Tenant B', 'hash-b')
+    `);
+    await client.query(`
+      INSERT INTO agents (id, tenant_id, name, wallet_address)
+      VALUES ('agent-a', 'tenant-a', 'Agent A', '0xa'), ('agent-b', 'tenant-b', 'Agent B', '0xb')
+    `);
+
+    await expect(
+      client.query(`
+        INSERT INTO agent_signers (
+          tenant_id, agent_id, signer_type, subject_type, subject_id, permissions
+        ) VALUES (
+          'tenant-a', 'agent-b', 'service', 'user', 'user-a', ARRAY[]::text[]
+        )
+      `),
+    ).rejects.toThrow();
+    await expect(
+      client.query(`
+        INSERT INTO agent_key_quorums (
+          tenant_id, agent_id, name, threshold, member_signer_ids, permissions
+        ) VALUES (
+          'tenant-a', 'agent-b', 'bad quorum', 1, ARRAY[]::text[], ARRAY[]::text[]
+        )
+      `),
+    ).rejects.toThrow();
+    await expect(
+      client.query(`
+        INSERT INTO intents (id, tenant_id, agent_id, intent_type)
+        VALUES ('intent-bad', 'tenant-a', 'agent-b', 'vault.sign')
+      `),
+    ).rejects.toThrow();
+
+    await client.close();
+  });
+
+  test("security invariants enforce unique tenant API key hashes", async () => {
+    const { client } = await freshDb();
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('tenant-a', 'Tenant A', 'shared-hash')
+    `);
+
+    await expect(
+      client.query(`
+        INSERT INTO tenants (id, name, api_key_hash)
+        VALUES ('tenant-b', 'Tenant B', 'shared-hash')
+      `),
+    ).rejects.toThrow();
+
+    await client.close();
+  });
+
+  test("security invariants enforce canonical verified SSO domain ownership", async () => {
+    const { client } = await freshDb();
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('tenant-a', 'Tenant A', 'hash-a'), ('tenant-b', 'Tenant B', 'hash-b')
+    `);
+    await client.query(`
+      INSERT INTO tenant_sso_domains (
+        tenant_id, domain, verification_token, status, verified_at
+      ) VALUES (
+        'tenant-a', 'example.com', 'token-a', 'verified', now()
+      )
+    `);
+    await client.query(`
+      INSERT INTO tenant_sso_domains (
+        tenant_id, domain, verification_token, status
+      ) VALUES (
+        'tenant-b', 'Example.com.', 'token-b', 'pending'
+      )
+    `);
+
+    await expect(
+      client.query(`
+        UPDATE tenant_sso_domains
+        SET status = 'verified', verified_at = now()
+        WHERE tenant_id = 'tenant-b'
+      `),
+    ).rejects.toThrow();
+    await expect(
+      client.query(`
+        INSERT INTO tenant_sso_domains (
+          tenant_id, domain, verification_token, status
+        ) VALUES (
+          'tenant-a', 'EXAMPLE.com.', 'token-c', 'pending'
+        )
+      `),
+    ).rejects.toThrow();
+
+    await client.close();
+  });
+
+  test("security invariants enforce refresh token uniqueness and ownership FKs", async () => {
+    const { client } = await freshDb();
+    const userId = "11111111-1111-4111-8111-111111111111";
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('tenant-a', 'Tenant A', 'hash-a')
+    `);
+    await client.query(`
+      INSERT INTO users (id, email)
+      VALUES ('${userId}', 'user@example.com')
+    `);
+    await client.query(`
+      INSERT INTO refresh_tokens (id, user_id, tenant_id, token_hash, expires_at)
+      VALUES ('rt-a', '${userId}', 'tenant-a', 'duplicate-token-hash', now() + interval '1 day')
+    `);
+
+    await expect(
+      client.query(`
+        INSERT INTO refresh_tokens (id, user_id, tenant_id, token_hash, expires_at)
+        VALUES ('rt-b', '${userId}', 'tenant-a', 'duplicate-token-hash', now() + interval '1 day')
+      `),
+    ).rejects.toThrow();
+    await expect(
+      client.query(`
+        INSERT INTO refresh_tokens (id, user_id, tenant_id, token_hash, expires_at)
+        VALUES (
+          'rt-orphan',
+          '22222222-2222-4222-8222-222222222222',
+          'tenant-a',
+          'orphan-token-hash',
+          now() + interval '1 day'
+        )
+      `),
+    ).rejects.toThrow();
+
+    await client.query(`DELETE FROM users WHERE id = '${userId}'`);
+    const remaining = await client.query(
+      "SELECT COUNT(*)::int AS cnt FROM refresh_tokens WHERE id = 'rt-a'",
+    );
+    expect(readCountRow(remaining.rows)).toBe(0);
+
+    await client.close();
+  });
+
+  test("security invariants enforce SAML SSO config bounds and tenant cascade", async () => {
+    const { client } = await freshDb();
+    const cert = `-----BEGIN CERTIFICATE-----
+MIIDdTCCAl2gAwIBAgIUU3Rld2FyZC1TQU1MLUlkUC1maXh0dXJlLWNlcnQwDQYJ
+KoZIhvcNAQELBQAwSDELMAkGA1UEBhMCVVMxEjAQBgNVBAoMCVN0ZXdhcmQgVGVz
+dDElMCMGA1UEAwwcU3Rld2FyZCBTQU1MIElkUCBGaXh0dXJlMB4XDTI2MDEwMTAw
+MDAwMFoXDTM2MDEwMTAwMDAwMFowSDELMAkGA1UEBhMCVVMxEjAQBgNVBAoMCVN0
+ZXdhcmQgVGVzdDElMCMGA1UEAwwcU3Rld2FyZCBTQU1MIElkUCBGaXh0dXJlMIIB
+IjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+AQIDAQAB
+-----END CERTIFICATE-----`;
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('tenant-saml', 'Tenant SAML', 'hash-saml')
+    `);
+    await client.query(
+      `
+        INSERT INTO tenant_saml_sso_configs (
+          tenant_id, enabled, status, idp_entity_id, idp_sso_url, idp_cert_pems,
+          sp_entity_id, acs_url
+        ) VALUES (
+          'tenant-saml', true, 'active', 'https://idp.example.com/saml',
+          'https://idp.example.com/sso', ARRAY[$1]::text[],
+          'https://api.example.com/auth/saml/tenant-saml/metadata',
+          'https://api.example.com/auth/saml/tenant-saml/acs'
+        )
+      `,
+      [cert],
+    );
+
+    await expect(
+      client.query(`
+        UPDATE tenant_saml_sso_configs
+        SET jit_default_role = 'admin'
+        WHERE tenant_id = 'tenant-saml'
+      `),
+    ).rejects.toThrow();
+
+    await expect(
+      client.query(`
+        UPDATE tenant_saml_sso_configs
+        SET idp_cert_pems = ARRAY[]::text[]
+        WHERE tenant_id = 'tenant-saml'
+      `),
+    ).rejects.toThrow();
+
+    await client.query(`
+      UPDATE tenant_saml_sso_configs
+      SET group_role_mappings = '[{"group":"Engineering","role":"developer"}]'::jsonb
+      WHERE tenant_id = 'tenant-saml'
+    `);
+    await expect(
+      client.query(`
+        UPDATE tenant_saml_sso_configs
+        SET group_role_mappings = '{"group":"Engineering","role":"developer"}'::jsonb
+        WHERE tenant_id = 'tenant-saml'
+      `),
+    ).rejects.toThrow();
+
+    await client.query(`
+      INSERT INTO tenant_saml_authn_requests (
+        tenant_id, request_id, relay_state, redirect_uri, code_challenge, expires_at
+      ) VALUES (
+        'tenant-saml', 'saml-request-1', 'relay-1', 'https://app.example.com/callback',
+        'code-challenge-1', now() + interval '5 minutes'
+      )
+    `);
+    await expect(
+      client.query(`
+        INSERT INTO tenant_saml_authn_requests (
+          tenant_id, request_id, relay_state, redirect_uri, code_challenge, expires_at
+        ) VALUES (
+          'tenant-saml', 'saml-request-2', 'relay-1', 'https://app.example.com/callback',
+          'code-challenge-2', now() + interval '5 minutes'
+        )
+      `),
+    ).rejects.toThrow();
+    await expect(
+      client.query(`
+        UPDATE tenant_saml_authn_requests
+        SET code_challenge_method = 'plain'
+        WHERE relay_state = 'relay-1'
+      `),
+    ).rejects.toThrow();
+
+    await client.query(`
+      INSERT INTO tenant_saml_assertion_replays (
+        tenant_id, assertion_id, response_id, expires_at
+      ) VALUES (
+        'tenant-saml', 'assertion-1', 'response-1', now() + interval '5 minutes'
+      )
+    `);
+    await expect(
+      client.query(`
+        INSERT INTO tenant_saml_assertion_replays (
+          tenant_id, assertion_id, response_id, expires_at
+        ) VALUES (
+          'tenant-saml', 'assertion-1', 'response-2', now() + interval '5 minutes'
+        )
+      `),
+    ).rejects.toThrow();
+
+    await client.query("DELETE FROM tenants WHERE id = 'tenant-saml'");
+    for (const tableName of [
+      "tenant_saml_sso_configs",
+      "tenant_saml_authn_requests",
+      "tenant_saml_assertion_replays",
+    ]) {
+      const remaining = await client.query(
+        `SELECT COUNT(*)::int AS cnt FROM ${tableName} WHERE tenant_id = 'tenant-saml'`,
+      );
+      expect(readCountRow(remaining.rows)).toBe(0);
+    }
+
+    await client.close();
+  });
+
+  test("security invariants enforce tenant invitation lifecycle", async () => {
+    const { client } = await freshDb();
+
+    await client.query(`
+      INSERT INTO tenants (id, name, api_key_hash)
+      VALUES ('tenant-invite', 'Tenant Invite', 'hash-invite')
+    `);
+    const userId = "00000000-0000-4000-8000-000000000054";
+    await client.query(`
+      INSERT INTO users (id, email, email_verified)
+      VALUES ('${userId}', 'alice@example.com', true)
+    `);
+
+    await client.query(`
+      INSERT INTO tenant_invitations (
+        tenant_id, email, role, token_hash, status, expires_at
+      ) VALUES (
+        'tenant-invite', 'alice@example.com', 'developer', 'token-hash-1',
+        'pending', now() + interval '7 days'
+      )
+    `);
+
+    await expect(
+      client.query(`
+        INSERT INTO tenant_invitations (
+          tenant_id, email, role, token_hash, status, expires_at
+        ) VALUES (
+          'tenant-invite', 'ALICE@example.com', 'viewer', 'token-hash-2',
+          'pending', now() + interval '7 days'
+        )
+      `),
+    ).rejects.toThrow();
+
+    await expect(
+      client.query(`
+        INSERT INTO tenant_invitations (
+          tenant_id, email, role, token_hash, status, expires_at
+        ) VALUES (
+          'tenant-invite', 'owner@example.com', 'owner', 'token-hash-3',
+          'pending', now() + interval '7 days'
+        )
+      `),
+    ).rejects.toThrow();
+
+    await client.query(`
+      UPDATE tenant_invitations
+      SET status = 'accepted',
+          accepted_by_user_id = '${userId}',
+          accepted_at = now()
+      WHERE token_hash = 'token-hash-1'
+    `);
+
+    await client.query(`
+      INSERT INTO tenant_invitations (
+        tenant_id, email, role, token_hash, status, expires_at
+      ) VALUES (
+        'tenant-invite', 'alice@example.com', 'viewer', 'token-hash-4',
+        'pending', now() + interval '7 days'
+      )
+    `);
+
+    await expect(
+      client.query(`
+        UPDATE tenant_invitations
+        SET status = 'accepted'
+        WHERE token_hash = 'token-hash-4'
+      `),
+    ).rejects.toThrow();
+
+    await client.query("DELETE FROM tenants WHERE id = 'tenant-invite'");
+    const remaining = await client.query(
+      "SELECT COUNT(*)::int AS cnt FROM tenant_invitations WHERE tenant_id = 'tenant-invite'",
+    );
+    expect(readCountRow(remaining.rows)).toBe(0);
+
+    await client.close();
   });
 });

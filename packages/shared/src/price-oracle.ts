@@ -35,6 +35,7 @@ export interface PriceOracle {
 // ─── DexScreener Response Shape ───────────────────────────────────────────────
 
 interface DexScreenerPair {
+  chainId?: string;
   priceUsd?: string;
   liquidity?: { usd?: number };
 }
@@ -74,12 +75,40 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
     cache.set(key, { price, fetchedAt: Date.now() });
   }
 
+  function dexScreenerChainId(chainId: number): string | null {
+    switch (chainId) {
+      case 1:
+        return "ethereum";
+      case 10:
+        return "optimism";
+      case 56:
+        return "bsc";
+      case 100:
+        return "gnosischain";
+      case 137:
+        return "polygon";
+      case 8453:
+        return "base";
+      case 42161:
+        return "arbitrum";
+      case 43114:
+        return "avalanche";
+      default:
+        return null;
+    }
+  }
+
   /**
    * Fetch price from DexScreener for a token address.
    * Picks the pair with highest liquidity for best accuracy.
    */
-  async function fetchPrice(tokenAddress: string): Promise<number | null> {
+  async function fetchPrice(chainId: number, tokenAddress: string): Promise<number | null> {
     try {
+      const expectedDexChainId = dexScreenerChainId(chainId);
+      if (!expectedDexChainId) {
+        console.warn(`[price-oracle] No DexScreener chain mapping for chainId ${chainId}`);
+        return null;
+      }
       const url = `https://api.dexscreener.com/latest/dex/tokens/${tokenAddress}`;
       const res = await fetch(url, {
         headers: { Accept: "application/json" },
@@ -99,7 +128,7 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
       // Sort by liquidity (descending) and pick the best one with a valid priceUsd
       const sorted = [...data.pairs]
-        .filter((p) => p.priceUsd && parseFloat(p.priceUsd) > 0)
+        .filter((p) => p.chainId === expectedDexChainId && p.priceUsd && parseFloat(p.priceUsd) > 0)
         .sort((a, b) => (b.liquidity?.usd ?? 0) - (a.liquidity?.usd ?? 0));
 
       if (sorted.length === 0) return null;
@@ -116,7 +145,7 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
     const cached = getCached(key);
     if (cached !== null) return cached;
 
-    const price = await fetchPrice(tokenAddress);
+    const price = await fetchPrice(chainId, tokenAddress);
     if (price !== null) {
       setCache(key, price);
     }

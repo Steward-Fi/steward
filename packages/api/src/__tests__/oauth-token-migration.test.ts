@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { accounts, encryptOAuthAccountPlaintextTokens, users } from "@stwd/db";
 import { createPGLiteDb } from "@stwd/db/pglite";
 import { KeyStore } from "@stwd/vault";
@@ -7,10 +7,6 @@ import { eq } from "drizzle-orm";
 const MASTER_PASSWORD = "oauth-migration-test-master";
 
 describe("OAuth account token encryption migration", () => {
-  afterAll(() => {
-    delete process.env.STEWARD_PGLITE_MEMORY;
-  });
-
   test("encrypts seeded plaintext values left by the column rename", async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     const { db, client } = await createPGLiteDb("memory://");

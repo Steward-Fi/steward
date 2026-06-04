@@ -4,94 +4,113 @@ import { eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
 
+const PLATFORM_KEY = "test-platform-key";
+const TENANT_ID = `tenant-create-${crypto.randomUUID()}`;
+const SSRF_TENANT_ID = `tenant-ssrf-${crypto.randomUUID()}`;
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
-const PLATFORM_KEY = "test-platform-tenant-create-key";
-const TENANT_PREFIX = `test-tenant-create-${process.pid}`;
-const UNAUTH_TENANT_ID = `${TENANT_PREFIX}-unauth`;
-const AUTH_TENANT_ID = `${TENANT_PREFIX}-auth`;
-
 let app: typeof import("../app")["app"];
-let previousPlatformKeys: string | undefined;
-
-function createBody(tenantId: string) {
-  return {
-    id: tenantId,
-    name: `Tenant Create Auth ${tenantId}`,
-    apiKeyHash: `tenant-create-key-${tenantId}`,
-    webhookUrl: "https://example.com/webhook",
-  };
-}
 
 beforeAll(async () => {
   if (!hasDatabaseUrl) return;
 
-  previousPlatformKeys = process.env.STEWARD_PLATFORM_KEYS;
   process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
-
+  process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+    [PLATFORM_KEY]: ["platform:write", "platform:tenant:create"],
+  });
   ({ app } = await import("../app"));
 });
 
 afterAll(async () => {
   if (!hasDatabaseUrl) return;
-
-  const db = getDb();
-  await db
+  await getDb()
     .delete(tenants)
-    .where(eq(tenants.id, UNAUTH_TENANT_ID))
+    .where(eq(tenants.id, TENANT_ID))
     .catch(() => {});
-  await db
+  await getDb()
     .delete(tenants)
-    .where(eq(tenants.id, AUTH_TENANT_ID))
+    .where(eq(tenants.id, SSRF_TENANT_ID))
     .catch(() => {});
-
-  if (previousPlatformKeys === undefined) {
-    delete process.env.STEWARD_PLATFORM_KEYS;
-  } else {
-    process.env.STEWARD_PLATFORM_KEYS = previousPlatformKeys;
-  }
+  delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
 });
 
-describeWithDatabase("POST /tenants platform authentication", () => {
+describeWithDatabase("POST /tenants legacy creation route", () => {
   it("rejects unauthenticated tenant creation", async () => {
     const res = await app.request("/tenants", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(createBody(UNAUTH_TENANT_ID)),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        id: TENANT_ID,
+        name: "Attacker Tenant",
+        apiKeyHash: `attacker-controlled-key-${TENANT_ID}`,
+      }),
     });
 
-    expect(res.status).toBe(403);
-    const body = (await res.json()) as { ok: boolean; error?: string };
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-
-    const rows = await getDb().select().from(tenants).where(eq(tenants.id, UNAUTH_TENANT_ID));
-    expect(rows).toHaveLength(0);
+    expect(body.error).toContain("X-Steward-Platform-Key");
   });
 
-  it("creates a tenant with a valid platform key", async () => {
+  it("rejects reserved identity tenant ids on the legacy creation route", async () => {
     const res = await app.request("/tenants", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "X-Steward-Platform-Key": PLATFORM_KEY,
       },
-      body: JSON.stringify(createBody(AUTH_TENANT_ID)),
+      body: JSON.stringify({
+        id: `personal-${crypto.randomUUID()}`,
+        name: "Reserved Tenant",
+        apiKeyHash: `platform-controlled-key-${TENANT_ID}`,
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("reserved");
+  });
+
+  it("allows tenant creation with a valid platform key", async () => {
+    const res = await app.request("/tenants", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        id: TENANT_ID,
+        name: "Platform Tenant",
+        apiKeyHash: `platform-controlled-key-${TENANT_ID}`,
+      }),
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as {
-      ok: boolean;
-      data?: { id: string; name: string; apiKeyHash: string };
-    };
+    const body = (await res.json()) as { ok: boolean; data: { id: string } };
     expect(body.ok).toBe(true);
-    expect(body.data?.id).toBe(AUTH_TENANT_ID);
-    expect(body.data?.name).toBe(`Tenant Create Auth ${AUTH_TENANT_ID}`);
-    expect(body.data?.apiKeyHash).not.toBe(`tenant-create-key-${AUTH_TENANT_ID}`);
+    expect(body.data.id).toBe(TENANT_ID);
+  });
 
-    const rows = await getDb().select().from(tenants).where(eq(tenants.id, AUTH_TENANT_ID));
-    expect(rows).toHaveLength(1);
+  it("rejects SSRF-prone legacy webhook URLs", async () => {
+    const res = await app.request("/tenants", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        id: SSRF_TENANT_ID,
+        name: "Platform Tenant SSRF",
+        apiKeyHash: `platform-controlled-key-${TENANT_ID}`,
+        webhookUrl: "https://169.254.169.254/latest/meta-data",
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("public");
   });
 });

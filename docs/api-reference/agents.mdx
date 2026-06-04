@@ -195,6 +195,57 @@ curl -X POST https://api.steward.fi/agents/my-agent/token \
 
 ---
 
+## Get Account
+
+Returns the agent's aggregated digital-asset account, including wallet rows,
+native balance, token portfolio assets, USD totals when pricing is configured,
+spend summary, signing capabilities, and gas sponsorship state.
+
+```
+GET /agents/:agentId/account?chainId=8453&tokens=0xUSDC,0xDAI
+```
+
+**Auth:** Agent JWT or tenant key
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "my-agent",
+    "type": "agent",
+    "agentId": "my-agent",
+    "walletAddress": "0x742d35Cc...",
+    "wallets": [{ "chainFamily": "evm", "address": "0x742d35Cc..." }],
+    "portfolio": {
+      "chainId": 8453,
+      "native": { "symbol": "ETH", "formatted": "1.0", "usdValueText": "3000" },
+      "tokens": [],
+      "totalUsdText": "3000"
+    },
+    "capabilities": ["sign_transaction", "sign_message", "transfer"],
+    "sponsorship": { "enabled": false }
+  }
+}
+```
+
+<CodeGroup>
+```typescript SDK
+const account = await steward.getAgentAccount("my-agent", {
+  chainId: 8453,
+  tokens: ["0xUSDC..."],
+});
+```
+
+```bash cURL
+curl "https://api.steward.fi/agents/my-agent/account?chainId=8453" \
+  -H "Authorization: Bearer agent-jwt"
+```
+</CodeGroup>
+
+---
+
 ## Get Balance
 
 Returns the native token balance for an agent's wallet.

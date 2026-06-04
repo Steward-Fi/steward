@@ -81,7 +81,11 @@ beforeAll(async () => {
   app = new Hono();
   app.use("*", async (c, next) => {
     c.set("tenantId", tenantId);
-    c.set("authType", "api-key");
+    // Trade-session management is owner/admin-session + recent-MFA gated
+    // (PR #79 hardening); authenticate as an owner session with fresh MFA.
+    c.set("authType", "session-jwt");
+    c.set("tenantRole", "owner");
+    c.set("sessionMfaVerifiedAt", Date.now());
     await next();
   });
   app.route("/v1/trade", tradeRoutes);

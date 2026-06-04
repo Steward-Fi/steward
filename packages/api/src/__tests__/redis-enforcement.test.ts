@@ -12,6 +12,7 @@ import {
   enforceRateLimit,
   extractRateLimitPolicy,
   extractSpendLimitPolicy,
+  formatRateLimitHeaders,
   recordVaultSpend,
 } from "../middleware/redis-enforcement";
 
@@ -143,18 +144,43 @@ describe("enforceRateLimit (no Redis)", () => {
         id: "p1",
         type: "rate-limit",
         enabled: true,
-        config: { maxTxPerHour: 1, maxTxPerDay: 1 },
+        config: { maxTxPerHour: 100, maxTxPerDay: 100 },
       },
     ];
 
-    const result = await enforceRateLimit("test-agent", policies);
-    expect(result.allowed).toBe(true);
+    const result = await enforceRateLimit(`test-agent-${crypto.randomUUID()}`, policies);
+    expect(result.allowed).toBe(!process.env.REDIS_URL);
   });
 
   it("allows requests when no rate-limit policy exists", async () => {
     const policies: PolicyRule[] = [];
     const result = await enforceRateLimit("test-agent", policies);
     expect(result.allowed).toBe(true);
+  });
+});
+
+describe("formatRateLimitHeaders", () => {
+  it("emits standard and legacy rate-limit headers", () => {
+    const headers = formatRateLimitHeaders({
+      limit: 10,
+      remaining: 2,
+      resetMs: 12_001,
+      retryAfterMs: 12_001,
+    });
+
+    expect(headers["RateLimit-Limit"]).toBe("10");
+    expect(headers["RateLimit-Remaining"]).toBe("2");
+    expect(headers["RateLimit-Reset"]).toBe("13");
+    expect(headers["Retry-After"]).toBe("13");
+    expect(headers["X-RateLimit-Limit"]).toBe("10");
+    expect(headers["X-RateLimit-Remaining"]).toBe("2");
+    expect(headers["X-RateLimit-Reset"]).toBe("13");
+  });
+
+  it("does not emit Retry-After for allowed responses", () => {
+    const headers = formatRateLimitHeaders({ limit: 5, remaining: 4, resetMs: 1_000 });
+    expect(headers["Retry-After"]).toBeUndefined();
+    expect(headers["RateLimit-Remaining"]).toBe("4");
   });
 });
 

@@ -26,6 +26,22 @@ function getValidPlatformKeys(): string[] {
     .filter(Boolean);
 }
 
+function parsePlatformKeyScopes(): Record<string, string[]> {
+  const raw = process.env.STEWARD_PLATFORM_KEY_SCOPES;
+  if (!raw?.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const scopes: Record<string, string[]> = {};
+    for (const [keyOrHash, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value)) continue;
+      scopes[keyOrHash] = value.filter((scope): scope is string => typeof scope === "string");
+    }
+    return scopes;
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Hash a key with SHA-256 so we always compare fixed-length 32-byte buffers.
  * This prevents length-based timing leaks when using timingSafeEqual.
@@ -64,6 +80,18 @@ export function isValidPlatformKey(key: string): boolean {
   return found;
 }
 
+export function getPlatformKeyScopes(key: string): string[] {
+  const configuredScopes = parsePlatformKeyScopes();
+  const keyHash = hashKey(key).toString("hex");
+  return configuredScopes[keyHash] ?? configuredScopes[key] ?? [];
+}
+
+export function hasPlatformScope(scopes: readonly string[] | undefined, required: string): boolean {
+  return Boolean(
+    scopes?.includes("*") || scopes?.includes("platform:*") || scopes?.includes(required),
+  );
+}
+
 /**
  * Hono middleware that enforces platform key authentication.
  * Mount this on any route group that requires platform-level access.
@@ -88,6 +116,9 @@ export function platformAuthMiddleware() {
     if (!isValidPlatformKey(key)) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid platform key" }, 403);
     }
+
+    c.set("platformKeyHash", hashKey(key).toString("hex"));
+    c.set("platformScopes", getPlatformKeyScopes(key));
 
     await next();
   });

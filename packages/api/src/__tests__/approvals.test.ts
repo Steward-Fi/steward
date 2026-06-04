@@ -4,19 +4,32 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 const SKIP = !process.env.DATABASE_URL;
 
 import { generateApiKey } from "@stwd/auth";
-import { agents, approvalQueue, autoApprovalRules, getDb, tenants, transactions } from "@stwd/db";
+import {
+  agents,
+  approvalQueue,
+  autoApprovalRules,
+  getDb,
+  tenants,
+  transactions,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { eq } from "drizzle-orm";
+import { createSessionToken } from "../routes/auth";
 
 const TEST_PORT = parseInt(process.env.PORT || "3200", 10);
 const BASE_URL = `http://localhost:${TEST_PORT}`;
-const TEST_TENANT = "test-approvals-tenant";
-const TEST_AGENT = "test-approvals-agent";
-const TEST_TX_APPROVE = "test-tx-approve";
-const TEST_TX_DENY = "test-tx-deny";
-const TEST_APPROVAL_APPROVE = "test-approval-approve";
-const TEST_APPROVAL_DENY = "test-approval-deny";
+const RUN_ID = Date.now();
+const TEST_TENANT = `test-approvals-tenant-${RUN_ID}`;
+const TEST_AGENT = `test-approvals-agent-${RUN_ID}`;
+const TEST_TX_APPROVE = `test-tx-approve-${RUN_ID}`;
+const TEST_TX_DENY = `test-tx-deny-${RUN_ID}`;
+const TEST_APPROVAL_APPROVE = `test-approval-approve-${RUN_ID}`;
+const TEST_APPROVAL_DENY = `test-approval-deny-${RUN_ID}`;
+const OWNER_USER_ID = crypto.randomUUID();
 
 let validApiKey: string;
+let adminToken: string;
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
@@ -34,6 +47,23 @@ beforeAll(async () => {
       apiKeyHash: apiKeyPair.hash,
     })
     .onConflictDoNothing();
+
+  await db.insert(users).values({
+    id: OWNER_USER_ID,
+    email: `approvals-${RUN_ID}@example.test`,
+    emailVerified: true,
+  });
+  await db.insert(userTenants).values({
+    userId: OWNER_USER_ID,
+    tenantId: TEST_TENANT,
+    role: "owner",
+  });
+  adminToken = await createSessionToken("0x0000000000000000000000000000000000000001", TEST_TENANT, {
+    userId: OWNER_USER_ID,
+    email: `approvals-${RUN_ID}@example.test`,
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: "totp",
+  });
 
   await db
     .insert(agents)
@@ -89,6 +119,8 @@ afterAll(async () => {
   await db.delete(transactions).where(eq(transactions.agentId, TEST_AGENT));
   await db.delete(autoApprovalRules).where(eq(autoApprovalRules.tenantId, TEST_TENANT));
   await db.delete(agents).where(eq(agents.id, TEST_AGENT));
+  await db.delete(userTenants).where(eq(userTenants.tenantId, TEST_TENANT));
+  await db.delete(users).where(eq(users.id, OWNER_USER_ID));
   await db.delete(tenants).where(eq(tenants.id, TEST_TENANT));
 });
 
@@ -100,13 +132,21 @@ function authHeaders() {
   };
 }
 
+function adminHeaders() {
+  return {
+    Authorization: `Bearer ${adminToken}`,
+    "X-Steward-Tenant": TEST_TENANT,
+    "Content-Type": "application/json",
+  };
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe.skipIf(SKIP)("Approval Workflow API", () => {
   describe("GET /approvals", () => {
     it("lists pending approvals for tenant", async () => {
       const res = await fetch(`${BASE_URL}/approvals`, {
-        headers: authHeaders(),
+        headers: adminHeaders(),
       });
 
       expect(res.status).toBe(200);
@@ -119,7 +159,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
 
     it("filters by status", async () => {
       const res = await fetch(`${BASE_URL}/approvals?status=approved`, {
-        headers: authHeaders(),
+        headers: adminHeaders(),
       });
 
       expect(res.status).toBe(200);
@@ -133,7 +173,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
   describe("GET /approvals/stats", () => {
     it("returns approval statistics", async () => {
       const res = await fetch(`${BASE_URL}/approvals/stats`, {
-        headers: authHeaders(),
+        headers: adminHeaders(),
       });
 
       expect(res.status).toBe(200);
@@ -147,18 +187,16 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
   });
 
   describe("POST /approvals/:txId/approve", () => {
-    it("approves a pending transaction", async () => {
+    it("rejects API-key approval of a pending transaction", async () => {
       const res = await fetch(`${BASE_URL}/approvals/${TEST_TX_APPROVE}/approve`, {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify({ comment: "Looks good" }),
       });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
       const body = await res.json();
-      expect(body.ok).toBe(true);
-      expect(body.data.status).toBe("approved");
-      expect(body.data.comment).toBe("Looks good");
+      expect(body.error).toContain("owner or admin user session");
     });
 
     it("rejects double-approval", async () => {
@@ -168,9 +206,9 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
         body: JSON.stringify({}),
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(403);
       const body = await res.json();
-      expect(body.error).toContain("already approved");
+      expect(body.error).toContain("owner or admin user session");
     });
   });
 
@@ -178,7 +216,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
     it("requires a reason", async () => {
       const res = await fetch(`${BASE_URL}/approvals/${TEST_TX_DENY}/deny`, {
         method: "POST",
-        headers: authHeaders(),
+        headers: adminHeaders(),
         body: JSON.stringify({}),
       });
 
@@ -190,7 +228,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
     it("denies a pending transaction with reason", async () => {
       const res = await fetch(`${BASE_URL}/approvals/${TEST_TX_DENY}/deny`, {
         method: "POST",
-        headers: authHeaders(),
+        headers: adminHeaders(),
         body: JSON.stringify({ reason: "Suspicious destination address" }),
       });
 
@@ -204,7 +242,7 @@ describe.skipIf(SKIP)("Approval Workflow API", () => {
     it("returns 404 for non-existent transaction", async () => {
       const res = await fetch(`${BASE_URL}/approvals/nonexistent-tx/deny`, {
         method: "POST",
-        headers: authHeaders(),
+        headers: adminHeaders(),
         body: JSON.stringify({ reason: "test" }),
       });
 
@@ -217,7 +255,7 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
   describe("GET /approvals/rules", () => {
     it("returns null when no rules configured", async () => {
       const res = await fetch(`${BASE_URL}/approvals/rules`, {
-        headers: authHeaders(),
+        headers: adminHeaders(),
       });
 
       expect(res.status).toBe(200);
@@ -228,7 +266,7 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
   });
 
   describe("PUT /approvals/rules", () => {
-    it("creates auto-approval rules", async () => {
+    it("rejects API-key creation of auto-approval rules", async () => {
       const res = await fetch(`${BASE_URL}/approvals/rules`, {
         method: "PUT",
         headers: authHeaders(),
@@ -239,16 +277,12 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
         }),
       });
 
-      expect(res.status).toBe(201);
+      expect(res.status).toBe(403);
       const body = await res.json();
-      expect(body.ok).toBe(true);
-      expect(body.data.maxAmountWei).toBe("1000000000000000000");
-      expect(body.data.autoDenyAfterHours).toBe(24);
-      expect(body.data.escalateAboveWei).toBe("10000000000000000000");
-      expect(body.data.enabled).toBe(true);
+      expect(body.error).toContain("owner or admin user session");
     });
 
-    it("updates existing rules", async () => {
+    it("rejects API-key updates to existing rules", async () => {
       const res = await fetch(`${BASE_URL}/approvals/rules`, {
         method: "PUT",
         headers: authHeaders(),
@@ -258,13 +292,9 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
         }),
       });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
       const body = await res.json();
-      expect(body.ok).toBe(true);
-      expect(body.data.autoDenyAfterHours).toBe(48);
-      expect(body.data.enabled).toBe(false);
-      // Previous values should be preserved
-      expect(body.data.maxAmountWei).toBe("1000000000000000000");
+      expect(body.error).toContain("owner or admin user session");
     });
 
     it("rejects invalid maxAmountWei", async () => {
@@ -274,7 +304,19 @@ describe.skipIf(SKIP)("Auto-Approval Rules API", () => {
         body: JSON.stringify({ maxAmountWei: "not-a-number" }),
       });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(403);
+    });
+
+    it("rejects invalid escalateAboveWei instead of persisting malformed rule state", async () => {
+      const res = await fetch(`${BASE_URL}/approvals/rules`, {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify({ escalateAboveWei: "not-a-number" }),
+      });
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.error).toContain("owner or admin user session");
     });
   });
 });

@@ -45,3 +45,10 @@ export {
   EVMWalletProvider,
   SolanaWalletProvider,
 } from "../providers/WalletProviders.js";
+export type {
+  StewardEip1193Provider,
+  StewardGlobalWalletConnectorOptions,
+  StewardGlobalWalletOptions,
+  StewardGlobalWalletProviderFactory,
+} from "./global.js";
+export { createStewardGlobalWallet, createStewardGlobalWalletConnector } from "./global.js";

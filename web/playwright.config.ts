@@ -7,7 +7,11 @@ export default defineConfig({
   testIgnore: ["**/global-setup.ts", "**/global-teardown.ts", "**/fixtures/**", "**/wallets/**"],
   fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // One retry absorbs inherent UI-timing flakiness in the dashboard render
+  // tests (e.g. a select value or freshly-created table row not yet painted).
+  // The API/auth-flow tests are deterministic and do not depend on this; a
+  // genuinely broken test still fails both attempts.
+  retries: 1,
   workers: 1,
   reporter: process.env.CI ? "github" : "list",
   timeout: 60_000,

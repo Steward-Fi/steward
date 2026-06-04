@@ -12,9 +12,18 @@ describe("platform tenant email config routes", () => {
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
-    process.env.DATABASE_URL = "postgres://test:test@localhost:5432/steward";
     process.env.STEWARD_MASTER_PASSWORD = "platform-email-config-master-password";
     process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
+    process.env.STEWARD_PLATFORM_KEY_SCOPES = JSON.stringify({
+      [PLATFORM_KEY]: [
+        "platform:read",
+        "platform:write",
+        "platform:tenant-email-config:read",
+        "platform:tenant-email-config:write",
+        "platform:tenant-oidc:read",
+        "platform:tenant-oidc:write",
+      ],
+    });
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
@@ -25,7 +34,7 @@ describe("platform tenant email config routes", () => {
     await dbHandle.insert(tenants).values({
       id: TENANT_ID,
       name: "Platform Email Config Tenant",
-      apiKeyHash: "hash",
+      apiKeyHash: "platform-email-config-hash",
     });
 
     ({ platformRoutes } = await import("../routes/platform"));
@@ -33,10 +42,9 @@ describe("platform tenant email config routes", () => {
 
   afterAll(async () => {
     await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
-    delete process.env.DATABASE_URL;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_PLATFORM_KEYS;
+    delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
   });
 
   it("patches, reads, and deletes tenant email config", async () => {
@@ -123,5 +131,156 @@ describe("platform tenant email config routes", () => {
       .from(tenantConfigs)
       .where(eq(tenantConfigs.tenantId, TENANT_ID));
     expect(afterDelete?.emailConfig ?? null).toBeNull();
+  });
+
+  it("puts and reads tenant OIDC provider config", async () => {
+    const putResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/oidc-providers`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        providers: [
+          {
+            id: "auth0-prod",
+            issuer: "https://tenant.example.com/",
+            audience: ["steward-api"],
+            jwksUri: "https://tenant.example.com/.well-known/jwks.json",
+            allowedAlgs: ["RS256"],
+            emailClaim: "email",
+            allowJitProvisioning: false,
+          },
+        ],
+      }),
+    });
+
+    expect(putResponse.status).toBe(200);
+    const putBody = (await putResponse.json()) as {
+      ok: boolean;
+      data: {
+        providers: Array<{
+          id: string;
+          enabled: boolean;
+          issuer: string;
+          audience: string[];
+          jwksUri: string;
+          subjectClaim: string;
+          emailClaim: string;
+          allowedAlgs: string[];
+          allowJitProvisioning: boolean;
+        }>;
+      };
+    };
+    expect(putBody.ok).toBe(true);
+    expect(putBody.data.providers).toEqual([
+      expect.objectContaining({
+        id: "auth0-prod",
+        enabled: true,
+        issuer: "https://tenant.example.com",
+        audience: ["steward-api"],
+        jwksUri: "https://tenant.example.com/.well-known/jwks.json",
+        subjectClaim: "sub",
+        emailClaim: "email",
+        allowedAlgs: ["RS256"],
+        allowJitProvisioning: false,
+      }),
+    ]);
+
+    const [storedConfig] = await getDb()
+      .select({ oidcProviders: tenantConfigs.oidcProviders })
+      .from(tenantConfigs)
+      .where(eq(tenantConfigs.tenantId, TENANT_ID));
+    expect(storedConfig?.oidcProviders).toHaveLength(1);
+    expect(storedConfig?.oidcProviders[0]?.issuer).toBe("https://tenant.example.com");
+
+    const getResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/oidc-providers`, {
+      headers: {
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+    });
+
+    expect(getResponse.status).toBe(200);
+    const getBody = (await getResponse.json()) as typeof putBody;
+    expect(getBody.data.providers[0]?.id).toBe("auth0-prod");
+  });
+
+  it("rejects unsafe tenant OIDC provider config", async () => {
+    const response = await platformRoutes.request(`/tenants/${TENANT_ID}/oidc-providers`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        providers: [
+          {
+            id: "auth0-prod",
+            issuer: "http://tenant.example.com",
+            audience: ["steward-api"],
+            jwksUri: "https://tenant.example.com/.well-known/jwks.json",
+            allowedAlgs: ["HS256"],
+          },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("issuer for provider auth0-prod must be a public https URL");
+  });
+
+  it("rejects private OIDC JWKS URLs and duplicate audiences", async () => {
+    const privateResponse = await platformRoutes.request(`/tenants/${TENANT_ID}/oidc-providers`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+      },
+      body: JSON.stringify({
+        providers: [
+          {
+            id: "private-jwks",
+            issuer: "https://tenant.example.com",
+            audience: ["steward-api"],
+            jwksUri: "https://127.0.0.1/.well-known/jwks.json",
+          },
+        ],
+      }),
+    });
+
+    expect(privateResponse.status).toBe(400);
+    const privateBody = (await privateResponse.json()) as { error: string };
+    expect(privateBody.error).toContain(
+      "jwksUri for provider private-jwks must be a public https URL",
+    );
+
+    const duplicateAudienceResponse = await platformRoutes.request(
+      `/tenants/${TENANT_ID}/oidc-providers`,
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Steward-Platform-Key": PLATFORM_KEY,
+        },
+        body: JSON.stringify({
+          providers: [
+            {
+              id: "duplicate-aud",
+              issuer: "https://tenant.example.com",
+              audience: ["steward-api", "steward-api"],
+              jwksUri: "https://tenant.example.com/.well-known/jwks.json",
+            },
+          ],
+        }),
+      },
+    );
+
+    expect(duplicateAudienceResponse.status).toBe(400);
+    const duplicateAudienceBody = (await duplicateAudienceResponse.json()) as { error: string };
+    expect(duplicateAudienceBody.error).toContain(
+      "duplicate audience for provider duplicate-aud: steward-api",
+    );
   });
 });

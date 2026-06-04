@@ -1,9 +1,10 @@
 "use client";
 
+import { useAuth } from "@stwd/react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { CopyButton } from "@/components/copy-button";
-import { API_URL, steward } from "@/lib/api";
+import { API_URL, setAuthToken, steward } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 
 interface TenantInfo {
@@ -19,17 +20,30 @@ interface CreatedTenant {
 }
 
 /**
- * FIXME (flag to Sol): the dashboard invokes `POST /user/me/tenants` to
- * create a tenant and `POST /user/me/tenants/switch` to switch, but neither
- * endpoint exists in `packages/api`. The actual create-tenant route lives at
- * `POST /platform/tenants` and there is no switch endpoint at all — switching
- * is a client-side concept today (localStorage only). Until the backend
- * catches up, keep these as direct `fetch` calls so the SDK only exposes
- * routes that actually exist.
+ * These call the user-scoped tenant routes in `packages/api`:
+ *   - `POST /user/me/tenants`        (create a self-serve tenant; user.ts:3324)
+ *   - `POST /user/me/tenants/switch` (mint a tenant-scoped session; user.ts:3475)
+ * Both are mounted under `/user` (app.ts) and require a recent MFA step-up — the
+ * switch route is server-enforced, NOT a client-side/localStorage concept: it
+ * verifies tenant membership and returns a fresh session token scoped to the
+ * target tenant, which the caller must adopt as the active credential.
+ *
+ * These remain direct `fetch` calls (rather than going through the SDK) because
+ * they are authenticated by the user JWT, not the HMAC-signed server-credential
+ * path the SDK's request-signing layer is built for.
  */
-async function createTenantViaApi(name: string, description?: string): Promise<CreatedTenant> {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("steward_session_token") || "" : "";
+interface SwitchedTenant {
+  token: string;
+  tenantId: string;
+  activeTenantId: string;
+  role: string;
+}
+
+async function createTenantViaApi(
+  token: string,
+  name: string,
+  description?: string,
+): Promise<CreatedTenant> {
   const res = await fetch(`${API_URL}/user/me/tenants`, {
     method: "POST",
     headers: {
@@ -43,9 +57,7 @@ async function createTenantViaApi(name: string, description?: string): Promise<C
   return json.data;
 }
 
-async function switchTenantViaApi(tenantId: string): Promise<void> {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("steward_session_token") || "" : "";
+async function switchTenantViaApi(token: string, tenantId: string): Promise<SwitchedTenant> {
   const res = await fetch(`${API_URL}/user/me/tenants/switch`, {
     method: "POST",
     headers: {
@@ -54,13 +66,15 @@ async function switchTenantViaApi(tenantId: string): Promise<void> {
     },
     body: JSON.stringify({ tenantId }),
   });
-  const json = (await res.json()) as { ok: boolean; error?: string };
-  if (!json.ok) throw new Error(json.error || `Request failed: ${res.status}`);
+  const json = (await res.json()) as { ok: boolean; data?: SwitchedTenant; error?: string };
+  if (!json.ok || !json.data) throw new Error(json.error || `Request failed: ${res.status}`);
+  return json.data;
 }
 
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
 export default function TenantsPage() {
+  const auth = useAuth();
   const [tenants, setTenants] = useState<TenantInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -78,13 +92,17 @@ export default function TenantsPage() {
     try {
       const stored = localStorage.getItem("steward_active_tenant");
       if (stored) setActiveTenantId(stored);
-    } catch {}
+    } catch {
+      /* localStorage unavailable (private mode / SSR) — fall back to server list */
+    }
   }, [loadTenants]);
 
   async function loadTenants() {
     try {
       setLoading(true);
       setError(null);
+      const token = auth.getToken();
+      if (token) setAuthToken(token);
       const list = await steward.listUserTenants();
       setTenants(list);
       // If no active tenant set but we have tenants, use first one
@@ -101,9 +119,20 @@ export default function TenantsPage() {
   async function switchTenant(tenantId: string) {
     try {
       setSwitching(tenantId);
-      await switchTenantViaApi(tenantId);
-      setActiveTenantId(tenantId);
-      localStorage.setItem("steward_active_tenant", tenantId);
+      const token = auth.getToken();
+      if (!token) throw new Error("Authentication token is required");
+      // The switch route mints a fresh session token scoped to the target tenant.
+      // Adopt it as the active SDK credential so subsequent requests actually run
+      // in the switched tenant's context — otherwise the client keeps operating
+      // against the previous tenant despite the UI showing the switch as active.
+      const switched = await switchTenantViaApi(token, tenantId);
+      setAuthToken(switched.token);
+      setActiveTenantId(switched.activeTenantId);
+      try {
+        localStorage.setItem("steward_active_tenant", switched.activeTenantId);
+      } catch {
+        /* localStorage unavailable (private mode / SSR) — in-memory state still updated */
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to switch tenant");
     } finally {
@@ -117,7 +146,9 @@ export default function TenantsPage() {
     setCreateError(null);
     try {
       setCreating(true);
-      const result = await createTenantViaApi(form.name, form.description || undefined);
+      const token = auth.getToken();
+      if (!token) throw new Error("Authentication token is required");
+      const result = await createTenantViaApi(token, form.name, form.description || undefined);
       setCreated(result);
       // Add to list
       setTenants((prev) => [

@@ -49,6 +49,13 @@ export class TokenStore {
   }
 
   /**
+   * Atomically retrieve and delete a token hash.
+   */
+  async consume(hash: string): Promise<string | null> {
+    return this.backend.consume(hash);
+  }
+
+  /**
    * Delete a hash from the store (called after one-time token consumption).
    */
   delete(hash: string): void {

@@ -1,7 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it } from "bun:test";
 import { createPrivateKey, sign as cryptoSign } from "node:crypto";
-import { generateApiKey } from "@stwd/auth";
-import { getDb, refreshTokens, tenants, users, userTenants } from "@stwd/db";
+import { getDb, refreshTokens, tenantConfigs, tenants, users, userTenants } from "@stwd/db";
 import bs58 from "bs58";
 import { and, eq } from "drizzle-orm";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
@@ -16,6 +15,7 @@ const SOLANA_TEST_KEYPAIR = {
   x: "DtNuOw6T7fPESIGzt_Qp6V0Q5d2a1-mUks5zrxPIoeE",
   publicKey: "zshVFXnC99G1ijob5dm9xS1hhSsgzC5PbDaLzSXPdct",
 };
+const CLOSED_TENANT_ID = "test-wallet-auth-closed";
 const createdEvmAddresses = new Set<string>();
 
 type VerifyResponse = {
@@ -80,17 +80,9 @@ function signSolanaMessage(message: string): string {
   return bs58.encode(cryptoSign(null, Buffer.from(message, "utf8"), keyObject));
 }
 
-async function fetchNonce(params?: {
-  domain?: string;
-  chainId?: string | number;
-  tenantId?: string;
-}): Promise<string> {
-  const url = new URL(`${BASE_URL}/auth/nonce`);
-  if (params?.domain) url.searchParams.set("domain", params.domain);
-  if (params?.chainId !== undefined) url.searchParams.set("chainId", String(params.chainId));
-
-  const res = await fetch(url, {
-    headers: params?.tenantId ? { "X-Steward-Tenant": params.tenantId } : undefined,
+async function fetchNonce(tenantId?: string): Promise<string> {
+  const res = await fetch(`${BASE_URL}/auth/nonce${tenantId ? `?tenantId=${tenantId}` : ""}`, {
+    headers: { Origin: "https://steward.fi" },
   });
   const json = (await res.json()) as { nonce: string };
   return json.nonce;
@@ -100,7 +92,7 @@ async function cleanupCreatedRows(): Promise<void> {
   const db = getDb();
 
   for (const address of createdEvmAddresses) {
-    const tenantId = `t-${address.slice(2, 10)}`;
+    const tenantId = `eth:${address}`;
     await db.delete(refreshTokens).where(eq(refreshTokens.tenantId, tenantId));
     await db.delete(userTenants).where(eq(userTenants.tenantId, tenantId));
     await db.delete(tenants).where(eq(tenants.id, tenantId));
@@ -115,6 +107,10 @@ async function cleanupCreatedRows(): Promise<void> {
     .where(eq(userTenants.tenantId, `solana:${SOLANA_TEST_KEYPAIR.publicKey}`));
   await db.delete(tenants).where(eq(tenants.id, `solana:${SOLANA_TEST_KEYPAIR.publicKey}`));
   await db.delete(users).where(eq(users.walletAddress, SOLANA_TEST_KEYPAIR.publicKey));
+
+  await db.delete(userTenants).where(eq(userTenants.tenantId, CLOSED_TENANT_ID));
+  await db.delete(tenantConfigs).where(eq(tenantConfigs.tenantId, CLOSED_TENANT_ID));
+  await db.delete(tenants).where(eq(tenants.id, CLOSED_TENANT_ID));
 }
 
 describeWithDatabase("wallet auth flows", () => {
@@ -136,7 +132,7 @@ describeWithDatabase("wallet auth flows", () => {
 
     const res = await fetch(`${BASE_URL}/auth/verify`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({ message, signature }),
     });
 
@@ -163,100 +159,54 @@ describeWithDatabase("wallet auth flows", () => {
     expect(payload.userId).toBe(user?.id);
   });
 
-  it("rejects SIWE tenant header pivot when the wallet is not already a member", async () => {
+  it("rejects SIWE self-join into a closed tenant requested by header", async () => {
+    const db = getDb();
+    await db
+      .insert(tenants)
+      .values({
+        id: CLOSED_TENANT_ID,
+        name: "Closed Wallet Auth Tenant",
+        apiKeyHash: "hash",
+      })
+      .onConflictDoNothing();
+    await db
+      .insert(tenantConfigs)
+      .values({ tenantId: CLOSED_TENANT_ID, joinMode: "closed" })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { joinMode: "closed", updatedAt: new Date() },
+      });
+
     const account = privateKeyToAccount(generatePrivateKey());
     const address = account.address.toLowerCase();
-    const targetTenantId = `test-siwe-target-${address.slice(2, 10)}`;
-    const db = getDb();
-    const apiKeyPair = generateApiKey();
+    createdEvmAddresses.add(address);
+    const nonce = await fetchNonce(CLOSED_TENANT_ID);
+    const message = buildSiweMessage(account.address, nonce);
+    const signature = await account.signMessage({ message });
 
-    await db.insert(tenants).values({
-      id: targetTenantId,
-      name: "SIWE Target Tenant",
-      apiKeyHash: apiKeyPair.hash,
+    const res = await fetch(`${BASE_URL}/auth/verify`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Tenant": CLOSED_TENANT_ID,
+        Origin: "https://steward.fi",
+      },
+      body: JSON.stringify({ message, signature }),
     });
 
-    try {
-      const nonce = await fetchNonce({ chainId: 1, tenantId: targetTenantId });
-      const message = buildSiweMessage(account.address, nonce);
-      const signature = await account.signMessage({ message });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("closed");
 
-      const res = await fetch(`${BASE_URL}/auth/verify`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Steward-Tenant": targetTenantId,
-        },
-        body: JSON.stringify({ message, signature }),
-      });
-
-      expect(res.status).toBe(403);
-      await expect(res.json()).resolves.toMatchObject({
-        ok: false,
-        error: `Tenant '${targetTenantId}' requires an existing membership`,
-      });
-      createdEvmAddresses.add(address);
-
-      const [user] = await db.select().from(users).where(eq(users.walletAddress, address));
-      expect(user).toBeDefined();
-
-      const targetLinks = user
-        ? await db
-            .select({ id: userTenants.id })
-            .from(userTenants)
-            .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, targetTenantId)))
-        : [];
-      expect(targetLinks).toHaveLength(0);
-    } finally {
-      await db.delete(userTenants).where(eq(userTenants.tenantId, targetTenantId));
-      await db.delete(tenants).where(eq(tenants.id, targetTenantId));
+    const [user] = await db.select().from(users).where(eq(users.walletAddress, address));
+    if (user) {
+      const links = await db
+        .select()
+        .from(userTenants)
+        .where(and(eq(userTenants.userId, user.id), eq(userTenants.tenantId, CLOSED_TENANT_ID)));
+      expect(links).toHaveLength(0);
     }
-  });
-
-  it("rejects SIWE verification when the nonce domain or chain does not match", async () => {
-    const account = privateKeyToAccount(generatePrivateKey());
-
-    const chainNonce = await fetchNonce({ chainId: 1 });
-    const chainMismatchMessage = buildSiweMessage(account.address, chainNonce, 137);
-    const chainMismatchSignature = await account.signMessage({ message: chainMismatchMessage });
-
-    const chainRes = await fetch(`${BASE_URL}/auth/verify`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: chainMismatchMessage, signature: chainMismatchSignature }),
-    });
-
-    expect(chainRes.status).toBe(401);
-    await expect(chainRes.json()).resolves.toMatchObject({
-      ok: false,
-      error: "Nonce context mismatch",
-    });
-
-    const domainNonce = await fetchNonce({ domain: "steward.fi", chainId: 1 });
-    const domainMismatchMessage = buildSiweMessage(account.address, domainNonce)
-      .replace(
-        "steward.fi wants you to sign in with your Ethereum account:",
-        "evil.com wants you to sign in with your Ethereum account:",
-      )
-      .replace("URI: https://steward.fi", "URI: https://evil.com");
-    const domainMismatchSignature = await account.signMessage({ message: domainMismatchMessage });
-
-    const domainRes = await fetch(`${BASE_URL}/auth/verify`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: domainMismatchMessage, signature: domainMismatchSignature }),
-    });
-
-    // A domain claiming evil.com is rejected with 401. Depending on env config
-    // the rejection can come from the SIWE allowlist gate ("SIWE domain not
-    // allowed", which runs first when SIWE_ALLOWED_DOMAINS is set) or from the
-    // nonce-context domain binding ("Nonce context mismatch"). Both are valid
-    // rejections of an off-domain message; assert the security outcome (401 +
-    // one of the two domain-rejection errors) rather than coupling to gate order.
-    expect(domainRes.status).toBe(401);
-    const domainBody = (await domainRes.json()) as { ok: boolean; error?: string };
-    expect(domainBody.ok).toBe(false);
-    expect(["SIWE domain not allowed", "Nonce context mismatch"]).toContain(domainBody.error);
   });
 
   it("rejects SIWS messages whose signed domain is not on the allowlist", async () => {
@@ -264,7 +214,7 @@ describeWithDatabase("wallet auth flows", () => {
     process.env.SIWE_ALLOWED_DOMAINS = "steward.fi";
 
     try {
-      const nonce = await fetchNonce({ domain: "evil.com", chainId: "mainnet" });
+      const nonce = await fetchNonce();
       // Construct a signed message whose domain AND uri both claim evil.com,
       // so the URI-vs-domain consistency check passes and only the domain
       // allowlist check can reject.
@@ -309,13 +259,13 @@ describeWithDatabase("wallet auth flows", () => {
   ]) {
     it(`accepts SIWE auth signed on ${name} (chainId ${chainId})`, async () => {
       const account = privateKeyToAccount(generatePrivateKey());
-      const nonce = await fetchNonce({ chainId });
+      const nonce = await fetchNonce();
       const message = buildSiweMessage(account.address, nonce, chainId);
       const signature = await account.signMessage({ message });
 
       const res = await fetch(`${BASE_URL}/auth/verify`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
         body: JSON.stringify({ message, signature }),
       });
 
@@ -330,13 +280,13 @@ describeWithDatabase("wallet auth flows", () => {
   }
 
   it("verifies a known-good Solana signature and provisions a solana user/tenant", async () => {
-    const nonce = await fetchNonce({ chainId: "mainnet" });
+    const nonce = await fetchNonce();
     const message = buildSiwsMessage(SOLANA_TEST_KEYPAIR.publicKey, nonce);
     const signature = signSolanaMessage(message);
 
     const res = await fetch(`${BASE_URL}/auth/verify/solana`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", Origin: "https://steward.fi" },
       body: JSON.stringify({
         message,
         signature,

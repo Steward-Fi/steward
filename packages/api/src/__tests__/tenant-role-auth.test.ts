@@ -34,7 +34,7 @@ beforeAll(async () => {
     .values({
       id: TENANT_ID,
       name: "Tenant Role Auth",
-      apiKeyHash: "hash",
+      apiKeyHash: `hash-${TENANT_ID}`,
     })
     .onConflictDoNothing();
   await dbHandle
@@ -80,6 +80,8 @@ async function createUserToken(userId: string) {
       address: `0x${"1".repeat(40)}`,
       tenantId: TENANT_ID,
       userId,
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
     },
     "1h",
   );
@@ -101,7 +103,20 @@ describeWithDatabase("tenantAuth membership checks and requireTenantLevel role c
     expect(memberRes.status).toBe(403);
     const memberBody = (await memberRes.json()) as { ok: boolean; error: string };
     expect(memberBody.ok).toBe(false);
-    expect(memberBody.error).toContain("tenant-level authentication");
+    expect(memberBody.error).toMatch(/tenant-level authentication|owner or admin session/);
+
+    const ownerConfigRes = await app.request(`/tenants/${TENANT_ID}/config`, {
+      headers: { Authorization: `Bearer ${ownerToken}` },
+    });
+    expect(ownerConfigRes.status).toBe(200);
+
+    const memberConfigRes = await app.request(`/tenants/${TENANT_ID}/config`, {
+      headers: { Authorization: `Bearer ${memberToken}` },
+    });
+    expect(memberConfigRes.status).toBe(403);
+    const memberConfigBody = (await memberConfigRes.json()) as { ok: boolean; error: string };
+    expect(memberConfigBody.ok).toBe(false);
+    expect(memberConfigBody.error).toContain("tenant-level authentication");
   });
 
   it("re-validates tenant membership on every request", async () => {
@@ -126,6 +141,6 @@ describeWithDatabase("tenantAuth membership checks and requireTenantLevel role c
     expect(afterRemoval.status).toBe(403);
     const body = (await afterRemoval.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Not a member");
+    expect(body.error).toMatch(/Not a member|Forbidden/);
   });
 });

@@ -33,6 +33,8 @@ const HOLD: TradeDecision = {
 
 export class RebalanceStrategy implements Strategy {
   readonly name = "rebalance";
+  /** Rebalance sizing depends on the token price to value the treasury. */
+  readonly requiresPriceConfidence = true;
 
   private readonly targetNative: number;
   private readonly targetToken: number;
@@ -56,14 +58,26 @@ export class RebalanceStrategy implements Strategy {
   }
 
   async evaluate(state: AgentState): Promise<TradeDecision> {
-    const { nativeBalance, tokenBalance, tokenPrice, treasuryValue } = state;
+    const { nativeBalance, tokenBalance, tokenPrice, treasuryValue, priceConfidence } = state;
 
     // Can't rebalance without price data or empty treasury
-    if (treasuryValue === 0n || tokenPrice === 0n) {
+    if (treasuryValue === 0n || tokenPrice === 0n || priceConfidence === "none") {
       return {
         action: "hold",
         amount: "0",
         reason: "Treasury value or token price is zero — cannot rebalance",
+        confidence: 0.9,
+      };
+    }
+
+    // Defense-in-depth: refuse to size a rebalance off a low-confidence
+    // (single-pair/spot) price — it both mis-values the treasury and would set
+    // a swap quote derived from a manipulable number. The loop enforces this too.
+    if (priceConfidence !== "high") {
+      return {
+        action: "hold",
+        amount: "0",
+        reason: `Token price is low-confidence (${priceConfidence}) — refusing to rebalance off a manipulable price`,
         confidence: 0.9,
       };
     }

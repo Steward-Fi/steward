@@ -110,8 +110,12 @@ PASSKEY_RP_NAME="My App"
 | `/auth/passkey/login/verify` | POST | Verify a WebAuthn authentication response |
 | `/auth/passkey/register/options` | POST | Get WebAuthn registration options for a new user |
 | `/auth/passkey/register/verify` | POST | Verify a WebAuthn registration response |
+| `/auth/mfa/passkey/options` | POST | Get session-bound passkey MFA options for the signed-in user |
+| `/auth/mfa/passkey/complete` | POST | Complete passkey MFA step-up and receive a refreshed recent-MFA session |
 
-All endpoints accept `{ email, tenantId? }` in the request body.
+Login and registration endpoints accept `{ email, tenantId? }` in the request body.
+MFA endpoints require the current bearer session; the options response includes
+`challengeId`, and completion sends `{ challengeId, response }`.
 
 ## Browser Support
 
@@ -122,7 +126,12 @@ Passkeys are supported in all modern browsers:
 - Firefox 60+
 - Edge 18+
 
-On mobile, passkeys integrate with the platform's credential manager (iCloud Keychain on iOS, Google Password Manager on Android).
+On mobile, passkeys integrate with the platform's credential manager (iCloud
+Keychain on iOS, Google Password Manager on Android). `@stwd/react-native`
+exposes native bridge helpers for passkey login, registration, and MFA step-up:
+your app supplies a platform credential-manager adapter with
+`startAuthentication()` and `startRegistration()`, and Steward handles the API
+challenge/verification/session exchange.
 
 ## Related
 

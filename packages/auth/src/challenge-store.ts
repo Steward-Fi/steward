@@ -42,8 +42,13 @@ export class ChallengeStore {
   }
 
   /** Store a challenge for a given key (userId or email). Overwrites any existing entry. */
-  set(key: string, challenge: string): void {
-    void this.backend.set(key, challenge, this.ttlMs);
+  async set(key: string, challenge: string): Promise<void> {
+    await this.backend.set(key, challenge, this.ttlMs);
+  }
+
+  /** Store a challenge only when the key is currently absent or expired. */
+  async setIfNotExists(key: string, challenge: string, ttlMs = this.ttlMs): Promise<boolean> {
+    return this.backend.setIfNotExists(key, challenge, ttlMs);
   }
 
   /**
@@ -55,10 +60,7 @@ export class ChallengeStore {
    * Code that needs the value should await it.
    */
   async consume(key: string): Promise<string | null> {
-    const value = await this.backend.get(key);
-    if (!value) return null;
-    await this.backend.delete(key);
-    return value;
+    return this.backend.consume(key);
   }
 
   /** Peek at a challenge without consuming it. Returns null if missing or expired. */

@@ -129,6 +129,41 @@ describe("TradeSessionManager", () => {
     expect(fetched?.dailySpendUsd).toBe(12.5);
   });
 
+  test("reserveSpend refuses to exceed the daily cap atomically", async () => {
+    const manager = await freshManager();
+    const session = await manager.createSession(baseInput());
+
+    const first = await manager.reserveSpend({
+      tenantId: TENANT_ID,
+      id: session.id,
+      amountUsd: 60,
+    });
+    const second = await manager.reserveSpend({
+      tenantId: TENANT_ID,
+      id: session.id,
+      amountUsd: 50,
+    });
+
+    expect(first?.dailySpendUsd).toBe(60);
+    expect(second).toBeNull();
+    const fetched = await manager.getSession({ tenantId: TENANT_ID, id: session.id });
+    expect(fetched?.dailySpendUsd).toBe(60);
+  });
+
+  test("releaseSpend removes a failed reservation without going below zero", async () => {
+    const manager = await freshManager();
+    const session = await manager.createSession(baseInput());
+
+    await manager.reserveSpend({ tenantId: TENANT_ID, id: session.id, amountUsd: 20 });
+    const released = await manager.releaseSpend({
+      tenantId: TENANT_ID,
+      id: session.id,
+      amountUsd: 30,
+    });
+
+    expect(released?.dailySpendUsd).toBe(0);
+  });
+
   test("listForAgent returns the agent's sessions", async () => {
     const manager = await freshManager();
     const one = await manager.createSession(baseInput());

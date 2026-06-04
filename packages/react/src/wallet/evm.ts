@@ -33,3 +33,10 @@ export {
   createDefaultWagmiConfig,
   EVMWalletProvider,
 } from "../providers/EVMProvider.js";
+export type {
+  StewardEip1193Provider,
+  StewardGlobalWalletConnectorOptions,
+  StewardGlobalWalletOptions,
+  StewardGlobalWalletProviderFactory,
+} from "./global.js";
+export { createStewardGlobalWallet, createStewardGlobalWalletConnector } from "./global.js";

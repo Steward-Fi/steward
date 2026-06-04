@@ -225,6 +225,34 @@ describe("StewardAuth multi-tenant", () => {
     });
   });
 
+  describe("acceptTenantInvitation", () => {
+    test("posts invite token to acceptance endpoint", async () => {
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/user/me/tenants/babylon/invitations/accept");
+        expect(request.bodyJson).toEqual({ token: "invite-token" });
+        return {
+          json: {
+            ok: true,
+            tenantId: "babylon",
+            role: "developer",
+            invitationId: "invite-1",
+          },
+        };
+      });
+
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        const result = await auth.acceptTenantInvitation("babylon", "invite-token");
+        expect(result.tenantId).toBe("babylon");
+        expect(result.role).toBe("developer");
+        expect(result.invitationId).toBe("invite-1");
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
   describe("leaveTenant", () => {
     test("sends DELETE to leave endpoint", async () => {
       const server = await startStewardServer((request) => {

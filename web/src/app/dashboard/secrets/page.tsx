@@ -52,6 +52,7 @@ export default function SecretsPage() {
   const [showAddRoute, setShowAddRoute] = useState(false);
   const [addingRoute, setAddingRoute] = useState(false);
   const [routeForm, setRouteForm] = useState<Omit<RouteCreatePayload, "secretId">>({
+    agentId: "",
     hostPattern: "",
     pathPattern: "",
     injectAs: "header",
@@ -166,7 +167,7 @@ export default function SecretsPage() {
 
   async function handleAddRoute(e: React.FormEvent) {
     e.preventDefault();
-    if (!selected || !routeForm.hostPattern) return;
+    if (!selected || !routeForm.agentId || !routeForm.hostPattern) return;
     setAddingRoute(true);
     try {
       const route = await steward.createRoute({
@@ -176,6 +177,7 @@ export default function SecretsPage() {
       setRoutes((p) => [...p, route]);
       setShowAddRoute(false);
       setRouteForm({
+        agentId: "",
         hostPattern: "",
         pathPattern: "",
         injectAs: "header",
@@ -595,6 +597,23 @@ export default function SecretsPage() {
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                             <div>
                               <label className="text-xs text-text-tertiary block mb-1">
+                                Agent ID <span className="text-accent">*</span>
+                              </label>
+                              <input
+                                type="text"
+                                value={routeForm.agentId}
+                                onChange={(e) =>
+                                  setRouteForm({
+                                    ...routeForm,
+                                    agentId: e.target.value,
+                                  })
+                                }
+                                placeholder="agent-id"
+                                className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="text-xs text-text-tertiary block mb-1">
                                 Host Pattern <span className="text-accent">*</span>
                               </label>
                               <input
@@ -711,7 +730,7 @@ export default function SecretsPage() {
                           <div className="flex gap-3">
                             <button
                               type="submit"
-                              disabled={addingRoute || !routeForm.hostPattern}
+                              disabled={addingRoute || !routeForm.agentId || !routeForm.hostPattern}
                               className="px-4 py-2 text-xs font-medium bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               {addingRoute ? "Adding..." : "Add Route"}

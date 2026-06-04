@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
-import { getDb, tenants } from "@stwd/db";
+import { agents, getDb, tenants } from "@stwd/db";
 import { eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
@@ -45,23 +45,23 @@ beforeAll(async () => {
     })
     .onConflictDoNothing();
 
+  // Agent creation now requires an owner/admin session (Shaw's hardening),
+  // not tenant API-key auth, so we seed the agents directly. This test is
+  // about agent-token scope on existing agents, not the creation path, so a
+  // direct insert is the correct fixture.
   for (const agentId of [AGENT_A, AGENT_B]) {
-    const res = await app.request("/agents", {
-      method: "POST",
-      headers: {
-        "X-Steward-Tenant": TENANT_ID,
-        "X-Steward-Key": apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ id: agentId, name: agentId }),
-    });
-    // The fixture POST is the canary for "tenant-level auth is wired up
-    // correctly", so a non-200 here is interesting and we surface the
-    // server's error message instead of just an opaque status mismatch.
-    if (res.status !== 200) {
-      const body = await res.text();
-      throw new Error(`Fixture POST /agents for ${agentId} returned ${res.status}: ${body}`);
-    }
+    await getDb()
+      .insert(agents)
+      .values({
+        id: agentId,
+        tenantId: TENANT_ID,
+        name: agentId,
+        walletAddress: `0x${agentId
+          .replace(/[^a-f0-9]/gi, "")
+          .padEnd(40, "0")
+          .slice(0, 40)}`,
+      })
+      .onConflictDoNothing();
   }
 });
 
@@ -77,6 +77,22 @@ afterAll(async () => {
 });
 
 describeWithDatabase("agent route scope enforcement", () => {
+  it("rejects agent tokens whose agent no longer exists before tenant route access", async () => {
+    const token = await signAgentToken(
+      { agentId: "test-ars-missing-agent", tenantId: TENANT_ID },
+      "1h",
+    );
+
+    const res = await app.request("/condition-sets", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Agent not found");
+  });
+
   it("blocks agent tokens from listing agents and creating new agents", async () => {
     const token = await signAgentToken({ agentId: AGENT_A, tenantId: TENANT_ID }, "1h");
 
@@ -113,6 +129,28 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(body.error).toContain("scope does not match");
   });
 
+  it("does not upgrade proxy-only tokens into agent metadata read tokens", async () => {
+    const token = await signAgentToken(
+      { agentId: AGENT_A, tenantId: TENANT_ID, scopes: ["api:proxy"] },
+      "1h",
+    );
+
+    const ownRecord = await app.request(`/agents/${AGENT_A}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(ownRecord.status).toBe(403);
+
+    const account = await app.request(`/agents/${AGENT_A}/account`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(account.status).toBe(403);
+
+    const policies = await app.request(`/agents/${AGENT_A}/policies`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(policies.status).toBe(403);
+  });
+
   it("keeps tenant-level agent listing working", async () => {
     const res = await app.request("/agents", {
       headers: {
@@ -122,9 +160,14 @@ describeWithDatabase("agent route scope enforcement", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; data: Array<{ id: string }> };
+    // The listing response is now { data: { agents, limit, offset } } rather
+    // than a bare data array.
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { agents: Array<{ id: string }> };
+    };
     expect(body.ok).toBe(true);
-    const ids = body.data.map((agent) => agent.id).sort();
+    const ids = body.data.agents.map((agent) => agent.id).sort();
     // Other tests may inject agents into this tenant in parallel, so we
     // assert containment rather than exact equality.
     expect(ids).toContain(AGENT_A);
@@ -147,7 +190,7 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("tenant-level authentication");
+    expect(body.error).toContain("owner or admin session");
   });
 
   it("only allows an agent token to read its own policies", async () => {
@@ -167,23 +210,40 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(otherBody.error).toContain("scope does not match");
   });
 
-  it("only allows an agent token to write its own policies", async () => {
+  it("blocks agent tokens from writing policies, including their own", async () => {
     const token = await signAgentToken({ agentId: AGENT_A, tenantId: TENANT_ID }, "1h");
 
-    // Cross-agent policy write was the most severe path of the three
-    // (compromised agent token could grant itself auto-approval on a
-    // sibling agent and drain its wallet). Verify the gate rejects it.
+    const writeOwnRes = await app.request(`/agents/${AGENT_A}/policies`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify([
+        { type: "auto-approve-threshold", enabled: true, config: { thresholdUsd: "10000" } },
+      ]),
+    });
+    expect(writeOwnRes.status).toBe(403);
+    const writeOwnBody = (await writeOwnRes.json()) as { ok: boolean; error: string };
+    expect(writeOwnBody.ok).toBe(false);
+    // PR #94: agent-token writes are rejected by the dedicated agent-token guard
+    // (checked before the tenant-admin-session check), so the error is the
+    // "agents cannot modify their own policies" message, not "owner or admin session".
+    expect(writeOwnBody.error).toContain("agents cannot modify their own policies");
+
     const writeOtherRes = await app.request(`/agents/${AGENT_B}/policies`, {
       method: "PUT",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify([{ type: "auto-approve-threshold", config: { thresholdUsd: "10000" } }]),
+      body: JSON.stringify([
+        { type: "auto-approve-threshold", enabled: true, config: { thresholdUsd: "10000" } },
+      ]),
     });
     expect(writeOtherRes.status).toBe(403);
     const writeOtherBody = (await writeOtherRes.json()) as { ok: boolean; error: string };
     expect(writeOtherBody.ok).toBe(false);
-    expect(writeOtherBody.error).toContain("scope does not match");
+    expect(writeOtherBody.error).toContain("agents cannot modify their own policies");
   });
 });

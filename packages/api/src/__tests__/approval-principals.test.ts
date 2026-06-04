@@ -35,12 +35,13 @@ beforeAll(async () => {
 
   process.env.STEWARD_MASTER_PASSWORD ||= "test-master-password-for-4eyes";
 
-  const [{ Hono }, { tenantAuth }, { approvalRoutes }, { vaultRoutes }] = await Promise.all([
+  const [{ Hono }, contextModule, { approvalRoutes }, { vaultRoutes }] = await Promise.all([
     import("hono"),
     import("../services/context"),
     import("../routes/approvals"),
     import("../routes/vault"),
   ]);
+  const { tenantAuth, vault } = contextModule;
   const testApp = new Hono();
   testApp.use("/vault/*", (c, next) => tenantAuth(c, next));
   testApp.use("/approvals", (c, next) => tenantAuth(c, next));
@@ -75,12 +76,11 @@ beforeAll(async () => {
     { userId: APPROVER_USER_ID, tenantId: TEST_TENANT, role: "admin" },
   ]);
 
-  await db.insert(agents).values({
-    id: TEST_AGENT,
-    tenantId: TEST_TENANT,
-    name: "4-eyes Test Agent",
-    walletAddress: "0x1234567890123456789012345678901234567890",
-  });
+  // Provision the agent with a real (encrypted) signing key. The hardened vault
+  // approve path actually signs the queued transaction, so the agent must have a
+  // signing key — unlike the old generic approvals route that merely flipped the
+  // queue status.
+  await vault.createAgent(TEST_TENANT, TEST_AGENT, "4-eyes Test Agent");
 
   await db.insert(policies).values({
     id: POLICY_ID,
@@ -90,16 +90,20 @@ beforeAll(async () => {
     config: { threshold: "0" },
   });
 
+  // Approval reads/decisions are recent-MFA gated (PR #79 hardening); mint
+  // session tokens carrying a fresh MFA verification timestamp.
   requesterToken = await signAccessToken({
     address: "0x0000000000000000000000000000000000000001",
     tenantId: TEST_TENANT,
     userId: REQUESTER_USER_ID,
-  });
+    mfaVerifiedAt: Date.now(),
+  } as never);
   approverToken = await signAccessToken({
     address: "0x0000000000000000000000000000000000000002",
     tenantId: TEST_TENANT,
     userId: APPROVER_USER_ID,
-  });
+    mfaVerifiedAt: Date.now(),
+  } as never);
 });
 
 afterAll(async () => {
@@ -119,6 +123,8 @@ function bearer(token: string) {
   return {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
+    // Broadcast signing requires an Idempotency-Key header (PR #79 hardening).
+    "Idempotency-Key": `test-${crypto.randomUUID()}`,
   };
 }
 
@@ -131,6 +137,9 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
         to: "0x0000000000000000000000000000000000000003",
         value: "1",
         chainId: 84532,
+        // Sign-only (no broadcast) so the approve path exercises real signing
+        // without requiring a live RPC endpoint in the test environment.
+        broadcast: false,
       }),
     });
 
@@ -150,7 +159,9 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
   });
 
   it("rejects approval by the same authenticated principal", async () => {
-    const res = await app.request(`/approvals/${queuedTxId}/approve`, {
+    // PR #79 hardening: vault-transaction approvals must go through the
+    // authoritative vault path, which enforces separation of duties.
+    const res = await app.request(`/vault/${TEST_AGENT}/approve/${queuedTxId}`, {
       method: "POST",
       headers: bearer(requesterToken),
       body: JSON.stringify({ approvedBy: APPROVER_USER_ID }),
@@ -162,7 +173,10 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
   });
 
   it("allows a different authenticated principal and ignores body-supplied approvedBy", async () => {
-    const res = await app.request(`/approvals/${queuedTxId}/approve`, {
+    // PR #79 hardening: approvals execute through the authoritative vault path,
+    // which derives the approver from the authenticated session (not the body)
+    // and re-evaluates policy before signing/broadcasting.
+    const res = await app.request(`/vault/${TEST_AGENT}/approve/${queuedTxId}`, {
       method: "POST",
       headers: bearer(approverToken),
       body: JSON.stringify({ approvedBy: "spoofed-approver", comment: "approved" }),
@@ -171,11 +185,7 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.ok).toBe(true);
-    expect(body.data.status).toBe("approved");
-    expect(body.data.resolvedByType).toBe("user");
-    expect(body.data.resolvedById).toBe(APPROVER_USER_ID);
-    expect(body.data.resolvedBy).toBe(`user:${APPROVER_USER_ID}`);
-    expect(body.data.resolvedBy).not.toBe("spoofed-approver");
+    expect(body.data.txId).toBe(queuedTxId);
 
     const db = getDb();
     const [approval] = await db
@@ -183,8 +193,10 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
       .from(approvalQueue)
       .where(eq(approvalQueue.txId, queuedTxId));
 
-    expect(approval.resolvedByType).toBe("user");
-    expect(approval.resolvedById).toBe(APPROVER_USER_ID);
-    expect(approval.resolvedBy).toBe(`user:${APPROVER_USER_ID}`);
+    // The vault route resolves the queue entry to "approved" and records the
+    // authenticated approver (the body-supplied "spoofed-approver" is ignored).
+    expect(approval.status).toBe("approved");
+    expect(approval.resolvedBy).toBe(APPROVER_USER_ID);
+    expect(approval.resolvedBy).not.toBe("spoofed-approver");
   });
 });

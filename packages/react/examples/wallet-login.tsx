@@ -56,7 +56,10 @@ export function PatternA() {
           <WalletLogin
             chains="both"
             onSuccess={(result, kind) => {
-              console.log("signed in via", kind, result.token);
+              // Do NOT log the session token. Store it securely (e.g. in memory
+              // or an httpOnly cookie set by your backend) instead.
+              console.log("signed in via", kind, "token: <redacted>");
+              void result;
             }}
             onError={(err, kind) => {
               console.error(kind, err);

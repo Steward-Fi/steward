@@ -11,6 +11,7 @@
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { MAX_SLIPPAGE_BPS } from "./trade-builder.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,6 +41,12 @@ export interface AgentTraderConfig {
   chainId?: number;
   /** DEX portal/router address for swap calldata encoding */
   portalAddress?: string;
+  /**
+   * Acceptable slippage for swaps, in basis points (default 100 = 1%).
+   * Bounded to [0, 5000) — the swap builder refuses to build outside this range
+   * and never emits an unprotected (amountOutMin = 0) swap.
+   */
+  slippageBps?: number;
   /** Strategy-specific parameters — typed per strategy in their own files */
   params: Record<string, unknown>;
 }
@@ -63,6 +70,21 @@ const CONFIG_DEFAULTS: Pick<TraderConfig, "webhookPort" | "dryRun"> = {
   webhookPort: 4210,
   dryRun: false,
 };
+/**
+ * Whether unsigned webhooks are permitted. Local-dev escape hatch only: the flag
+ * is hard-disabled in production (mirrors the proxy's `isRedisRequired` gate), so
+ * a stray env var cannot strip signature verification on a live deployment.
+ */
+function allowUnsignedWebhooks(): boolean {
+  if (process.env.STEWARD_AGENT_TRADER_ALLOW_UNSIGNED_WEBHOOKS !== "true") return false;
+  if (process.env.NODE_ENV === "production") {
+    console.error(
+      "[agent-trader] STEWARD_AGENT_TRADER_ALLOW_UNSIGNED_WEBHOOKS is set but ignored in production; webhookSecret stays required.",
+    );
+    return false;
+  }
+  return true;
+}
 
 // ─── Loader ──────────────────────────────────────────────────────────────────
 
@@ -113,6 +135,11 @@ function validate(config: TraderConfig): void {
   if (!config.steward.tenantId) {
     throw new Error("Config error: steward.tenantId is required");
   }
+  if (!config.webhookSecret && !allowUnsignedWebhooks()) {
+    throw new Error(
+      "Config error: webhookSecret is required. Set STEWARD_AGENT_TRADER_ALLOW_UNSIGNED_WEBHOOKS=true only for local development.",
+    );
+  }
 
   for (const agent of config.agents) {
     if (!agent.agentId) {
@@ -129,6 +156,17 @@ function validate(config: TraderConfig): void {
     }
     if (!agent.intervalSeconds || agent.intervalSeconds < 10) {
       throw new Error(`Config error: agent "${agent.agentId}" intervalSeconds must be ≥ 10`);
+    }
+    if (agent.slippageBps !== undefined) {
+      if (
+        !Number.isInteger(agent.slippageBps) ||
+        agent.slippageBps < 0 ||
+        agent.slippageBps >= MAX_SLIPPAGE_BPS
+      ) {
+        throw new Error(
+          `Config error: agent "${agent.agentId}" slippageBps must be an integer in [0, ${MAX_SLIPPAGE_BPS}) — got ${agent.slippageBps}`,
+        );
+      }
     }
   }
 }

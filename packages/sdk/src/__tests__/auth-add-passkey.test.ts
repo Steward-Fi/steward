@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { StewardAuth } from "../auth";
+import type { SessionStorage } from "../auth-types";
 import { StewardApiError } from "../client";
 
 // Track requests and responses to model an end-to-end addPasskey call.
@@ -77,10 +78,51 @@ mock.module("@simplewebauthn/browser", () => ({
     },
     type: "public-key",
   }),
-  startAuthentication: async () => {
-    throw new Error("not used in addPasskey");
-  },
+  startAuthentication: async () => ({
+    id: "credential-login",
+    rawId: "credential-login",
+    response: {
+      clientDataJSON: "client-data",
+      authenticatorData: "authenticator-data",
+      signature: "signature",
+      userHandle: "u-1",
+    },
+    type: "public-key",
+  }),
 }));
+
+function fakeJwt(claims: Record<string, unknown> = {}): string {
+  const header = btoa(JSON.stringify({ alg: "HS256" }))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  const payload = btoa(
+    JSON.stringify({
+      address: "0x1234",
+      tenantId: "tenant-passkey",
+      userId: "u-1",
+      exp: Math.floor(Date.now() / 1000) + 900,
+      ...claims,
+    }),
+  )
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `${header}.${payload}.sig`;
+}
+
+function memoryStorage(): SessionStorage {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key) => store.get(key) ?? null,
+    setItem: (key, value) => {
+      store.set(key, value);
+    },
+    removeItem: (key) => {
+      store.delete(key);
+    },
+  };
+}
 
 beforeEach(() => {
   captured = [];
@@ -135,5 +177,92 @@ describe("StewardAuth.addPasskey", () => {
     }) as typeof fetch;
     const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
     await expect(auth.addPasskey("shadow@shad0w.xyz")).rejects.toBeInstanceOf(StewardApiError);
+  });
+
+  it("forwards challengeId when completing passkey login", async () => {
+    global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const body = init?.body ? JSON.parse(init.body as string) : undefined;
+      captured.push({ url, body });
+      if (url.endsWith("/auth/passkey/login/options")) {
+        return new Response(
+          JSON.stringify({
+            challenge: "login-challenge",
+            challengeId: "login-challenge",
+            rpId: "api.example.test",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/auth/passkey/login/verify")) {
+        return new Response(JSON.stringify(VERIFY_RESPONSE), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: false, error: "unexpected" }), { status: 500 });
+    }) as typeof fetch;
+
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test" });
+    await auth.signInWithPasskey("shadow@shad0w.xyz");
+
+    expect(captured[1]?.url).toBe("https://api.example.test/auth/passkey/login/verify");
+    expect(captured[1]?.body).toMatchObject({
+      email: "shadow@shad0w.xyz",
+      challengeId: "login-challenge",
+      response: { id: "credential-login", type: "public-key" },
+    });
+  });
+
+  it("completes passkey MFA with bearer auth and stores the refreshed session", async () => {
+    const storage = memoryStorage();
+    const initialToken = fakeJwt();
+    const steppedUpToken = fakeJwt({ mfaVerifiedAt: Date.now(), mfaMethod: "passkey" });
+    storage.setItem("steward_session_token", initialToken);
+
+    global.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const body = init?.body ? JSON.parse(init.body as string) : undefined;
+      captured.push({ url, body });
+      if (url.endsWith("/auth/mfa/passkey/options")) {
+        expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${initialToken}`);
+        return new Response(
+          JSON.stringify({
+            challenge: "mfa-challenge",
+            challengeId: "mfa-challenge",
+            rpId: "api.example.test",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      if (url.endsWith("/auth/mfa/passkey/complete")) {
+        expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${initialToken}`);
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            token: steppedUpToken,
+            refreshToken: "refresh-passkey-mfa",
+            expiresIn: 900,
+            user: { id: "u-1", email: "shadow@shad0w.xyz", walletAddress: "0x1234" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response(JSON.stringify({ ok: false, error: "unexpected" }), { status: 500 });
+    }) as typeof fetch;
+
+    const auth = new StewardAuth({ baseUrl: "https://api.example.test", storage });
+    const result = await auth.completePasskeyMfa();
+
+    expect(captured.map((entry) => entry.url.replace("https://api.example.test", ""))).toEqual([
+      "/auth/mfa/passkey/options",
+      "/auth/mfa/passkey/complete",
+    ]);
+    expect(captured[1]?.body).toMatchObject({
+      challengeId: "mfa-challenge",
+      response: { id: "credential-login", type: "public-key" },
+    });
+    expect(result.token).toBe(steppedUpToken);
+    expect(storage.getItem("steward_session_token")).toBe(steppedUpToken);
   });
 });

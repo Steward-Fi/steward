@@ -4,9 +4,12 @@ import type {
   PolicyResult,
   PolicyTemplate,
   SecretRoutePreset,
+  TenantAppClient,
+  TenantAuthAbuseConfig,
   TenantFeatureFlags,
   TenantGasSponsorshipConfig,
   TenantOidcProviderConfig,
+  TenantTestAccountConfig,
   TenantTheme,
 } from "@stwd/shared";
 import { relations, sql } from "drizzle-orm";
@@ -14,6 +17,7 @@ import {
   bigint,
   bigserial,
   boolean,
+  check,
   customType,
   foreignKey,
   index,
@@ -81,7 +85,10 @@ export const policyTypeEnum = pgEnum("policy_type", [
   "rate-limit",
   "allowed-chains",
   "condition-set",
+  "aggregation",
   "contract-allowlist",
+  "typed-data",
+  "raw-signing-chain",
   "reputation-threshold",
   "reputation-scaling",
   "venue-allowlist",
@@ -112,13 +119,22 @@ const timestamps = {
     .$onUpdateFn(() => sql`now()`),
 };
 
-export const tenants = pgTable("tenants", {
-  id: varchar("id", { length: 64 }).primaryKey(),
-  name: varchar("name", { length: 255 }).notNull(),
-  apiKeyHash: text("api_key_hash").notNull(),
-  ownerAddress: varchar("owner_address", { length: 128 }),
-  ...timestamps,
-});
+export const tenants = pgTable(
+  "tenants",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    name: varchar("name", { length: 255 }).notNull(),
+    apiKeyHash: text("api_key_hash").notNull(),
+    ownerAddress: varchar("owner_address", { length: 128 }),
+    ...timestamps,
+  },
+  (table) => ({
+    apiKeyHashUnique: uniqueIndex("tenants_api_key_hash_unique_idx").on(table.apiKeyHash),
+    ownerAddressUnique: uniqueIndex("tenants_owner_address_unique")
+      .on(table.ownerAddress)
+      .where(sql`${table.ownerAddress} is not null`),
+  }),
+);
 
 export const tenantConfigs = pgTable("tenant_configs", {
   tenantId: varchar("tenant_id", { length: 64 })
@@ -136,16 +152,103 @@ export const tenantConfigs = pgTable("tenant_configs", {
   featureFlags: jsonb("feature_flags").$type<TenantFeatureFlags>().notNull().default({}),
   theme: jsonb("theme").$type<TenantTheme>(),
   oidcProviders: jsonb("oidc_providers").$type<TenantOidcProviderConfig[]>().notNull().default([]),
+  authAbuseConfig: jsonb("auth_abuse_config").$type<TenantAuthAbuseConfig>().notNull().default({}),
+  testAccount: jsonb("test_account").$type<TenantTestAccountConfig>().notNull().default({}),
   gasSponsorshipConfig: jsonb("gas_sponsorship_config")
     .$type<TenantGasSponsorshipConfig>()
     .notNull()
     .default({}),
   /** Allowed CORS origins for this tenant. Empty = fall back to wildcard (*). */
   allowedOrigins: text("allowed_origins").array().notNull().default([]),
-  /** Controls how users can join: 'open' | 'invite' | 'closed'. Default 'open' for backward compat. */
-  joinMode: varchar("join_mode", { length: 16 }).notNull().default("open"),
+  /** OAuth/email redirect URLs for this tenant. Empty = legacy fallback to allowedOrigins. */
+  allowedRedirectUrls: text("allowed_redirect_urls").array().notNull().default([]),
+  /** Controls how users can join: 'open' | 'invite' | 'closed'. Default invite requires explicit opt-in for public join. */
+  joinMode: varchar("join_mode", { length: 16 }).notNull().default("invite"),
   ...timestamps,
 });
+
+export const tenantAppClients = pgTable(
+  "tenant_app_clients",
+  {
+    id: varchar("id", { length: 64 }).notNull(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 255 }).notNull(),
+    environment: varchar("environment", { length: 32 }).notNull().default("production"),
+    enabled: boolean("enabled").notNull().default(true),
+    isDefault: boolean("is_default").notNull().default(false),
+    allowedOrigins: text("allowed_origins").array().notNull().default([]),
+    allowedRedirectUrls: text("allowed_redirect_urls").array().notNull().default([]),
+    loginMethods: jsonb("login_methods").$type<TenantAppClient["loginMethods"]>(),
+    globalWalletEnabled: boolean("global_wallet_enabled").notNull().default(false),
+    globalWalletAllowedScopes: text("global_wallet_allowed_scopes")
+      .array()
+      .notNull()
+      .default(["eth_accounts", "personal_sign"]),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantClientPk: uniqueIndex("tenant_app_clients_tenant_id_id_idx").on(table.tenantId, table.id),
+    tenantIdx: index("tenant_app_clients_tenant_id_idx").on(table.tenantId),
+  }),
+);
+
+export const tenantAppClientSecrets = pgTable(
+  "tenant_app_client_secrets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    clientId: varchar("client_id", { length: 64 }).notNull(),
+    secretHash: text("secret_hash").notNull(),
+    secretPrefix: varchar("secret_prefix", { length: 32 }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantClientIdx: index("tenant_app_client_secrets_tenant_client_idx").on(
+      table.tenantId,
+      table.clientId,
+    ),
+    statusIdx: index("tenant_app_client_secrets_status_idx").on(table.status),
+    appClientFk: foreignKey({
+      columns: [table.tenantId, table.clientId],
+      foreignColumns: [tenantAppClients.tenantId, tenantAppClients.id],
+      name: "tenant_app_client_secrets_client_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const tenantRequestSigningKeys = pgTable(
+  "tenant_request_signing_keys",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    name: varchar("name", { length: 120 }).notNull(),
+    secretCiphertext: text("secret_ciphertext").notNull(),
+    secretIv: text("secret_iv").notNull(),
+    secretAuthTag: text("secret_auth_tag").notNull(),
+    secretSalt: text("secret_salt").notNull(),
+    secretPrefix: varchar("secret_prefix", { length: 32 }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("active"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: index("tenant_request_signing_keys_tenant_idx").on(table.tenantId),
+    tenantStatusIdx: index("tenant_request_signing_keys_tenant_status_idx").on(
+      table.tenantId,
+      table.status,
+    ),
+  }),
+);
 
 export const tenantSsoDomains = pgTable(
   "tenant_sso_domains",
@@ -193,6 +296,10 @@ export const tenantSamlSsoConfigs = pgTable(
     nameIdFormat: text("name_id_format"),
     emailAttribute: varchar("email_attribute", { length: 128 }).notNull().default("email"),
     groupsAttribute: varchar("groups_attribute", { length: 128 }),
+    groupRoleMappings: jsonb("group_role_mappings")
+      .$type<Array<{ group: string; role: string }>>()
+      .notNull()
+      .default([]),
     allowJitProvisioning: boolean("allow_jit_provisioning").notNull().default(false),
     jitDefaultRole: varchar("jit_default_role", { length: 32 }).notNull().default("viewer"),
     lastTestedAt: timestamp("last_tested_at", { withTimezone: true }),
@@ -278,6 +385,7 @@ export const agents = pgTable(
   },
   (table) => ({
     tenantIdIdx: index("agents_tenant_id_idx").on(table.tenantId),
+    tenantAgentUniqueIdx: uniqueIndex("agents_tenant_id_id_idx").on(table.tenantId, table.id),
   }),
 );
 
@@ -340,6 +448,12 @@ export const agentWallets = pgTable(
   }),
 );
 
+/**
+ * Wallet ownership and delegated signer metadata for an agent wallet/account.
+ * This is an authorization graph, not private-key material: signing routes can
+ * use it to expose owners, service signers, quorum members, and scoped
+ * delegation policies without changing custody storage.
+ */
 export const agentSigners = pgTable(
   "agent_signers",
   {
@@ -354,6 +468,20 @@ export const agentSigners = pgTable(
     subjectType: varchar("subject_type", { length: 32 }).notNull(),
     subjectId: varchar("subject_id", { length: 255 }).notNull(),
     address: varchar("address", { length: 128 }),
+    /**
+     * Authorization-key scheme for this signer's *request* signatures:
+     *   "hmac" (default) — symmetric request signing (legacy/interchangeable).
+     *   "p256"           — asymmetric ECDSA over secp256r1; `publicKey` holds
+     *                      the registered key (Privy authorization-keys parity).
+     * The middleware selects the verification path from this column.
+     */
+    keyType: varchar("key_type", { length: 16 }).notNull().default("hmac"),
+    /**
+     * Registered P-256 public key when `keyType="p256"`. Accepts base64 SPKI,
+     * raw uncompressed `04||X||Y`, or a JWK string (see
+     * `@stwd/auth` importP256PublicKey). NULL for HMAC signers.
+     */
+    publicKey: text("public_key"),
     chainFamily: chainFamilyEnum("chain_family"),
     label: varchar("label", { length: 255 }),
     permissions: text("permissions").array().notNull().default([]),
@@ -396,6 +524,15 @@ export const agentKeyQuorums = pgTable(
     name: varchar("name", { length: 255 }).notNull(),
     threshold: integer("threshold").notNull(),
     memberSignerIds: text("member_signer_ids").array().notNull().default([]),
+    /**
+     * Nested-quorum children: ordered `agent_key_quorums.id` values that are
+     * themselves quorums. A parent quorum is satisfied iff the number of
+     * satisfied members (a verified leaf signer in `memberSignerIds` OR a
+     * satisfied child quorum in `memberQuorumIds`) is ≥ `threshold`. Recursion
+     * is bounded by a hard depth limit with cycle detection (see the
+     * authorization-signature middleware); both violations fail closed.
+     */
+    memberQuorumIds: text("member_quorum_ids").array().notNull().default([]),
     permissions: text("permissions").array().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     status: varchar("status", { length: 32 }).notNull().default("active"),
@@ -409,6 +546,51 @@ export const agentKeyQuorums = pgTable(
       columns: [table.tenantId, table.agentId],
       foreignColumns: [agents.tenantId, agents.id],
       name: "agent_key_quorums_tenant_agent_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+/**
+ * Session signers — labeled, scoped, revocable delegated signing tokens
+ * (Privy "session signers" parity). Each row pins a single minted agent JWT
+ * (by its `jti`) to an operator-facing label, an optional policy subset, and a
+ * bounded expiry. Revocation flips `revokedAt` AND records the jti in the
+ * auth revocation store, so the token is rejected even before it expires.
+ *
+ * Rows are append-only except for `revokedAt`/`lastUsedAt`; there is no
+ * `updatedAt` because a session signer is never re-issued in place.
+ */
+export const sessionSigners = pgTable(
+  "session_signers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    /** Unique JWT id of the minted agent token; mirrored into the revocation store. */
+    jti: varchar("jti", { length: 64 }).notNull(),
+    label: varchar("label", { length: 128 }).notNull(),
+    scopes: jsonb("scopes").$type<string[]>().notNull().default([]),
+    /** Subset of the agent's policy ids enforced when this token signs. */
+    policyIds: jsonb("policy_ids").$type<string[]>().notNull().default([]),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
+  },
+  (table) => ({
+    jtiUniqueIdx: uniqueIndex("session_signers_jti_idx").on(table.jti),
+    tenantAgentIdx: index("session_signers_tenant_agent_idx").on(table.tenantId, table.agentId),
+    activeIdx: index("session_signers_active_idx")
+      .on(table.agentId)
+      .where(sql`${table.revokedAt} IS NULL`),
+    tenantAgentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "session_signers_tenant_agent_fk",
     }).onDelete("cascade"),
   }),
 );
@@ -488,6 +670,8 @@ export const transactions = pgTable(
   },
   (table) => ({
     agentIdIdx: index("transactions_agent_id_idx").on(table.agentId),
+    // `value` is a wei amount: must be a non-empty decimal digit string.
+    valueIsWei: check("transactions_value_wei_chk", sql`${table.value} ~ '^[0-9]+$'`),
   }),
 );
 
@@ -818,6 +1002,15 @@ export const autoApprovalRules = pgTable(
   },
   (table) => ({
     tenantIdx: uniqueIndex("auto_approval_rules_tenant_idx").on(table.tenantId),
+    // wei thresholds must be non-empty decimal digit strings (escalate is nullable).
+    maxAmountIsWei: check(
+      "auto_approval_rules_max_amount_wei_chk",
+      sql`${table.maxAmountWei} ~ '^[0-9]+$'`,
+    ),
+    escalateIsWei: check(
+      "auto_approval_rules_escalate_above_wei_chk",
+      sql`${table.escalateAboveWei} IS NULL OR ${table.escalateAboveWei} ~ '^[0-9]+$'`,
+    ),
   }),
 );
 
@@ -837,12 +1030,15 @@ export const webhookDeliveries = pgTable(
   "webhook_deliveries",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    // No tenant FK: isolation is enforced at the app layer (every query scopes by
+    // tenant_id) and deliveries may reference platform/system principals.
     tenantId: text("tenant_id").notNull(),
     webhookConfigId: uuid("webhook_config_id").references(() => webhookConfigs.id, {
       onDelete: "set null",
     }),
     agentId: text("agent_id"),
     eventType: text("event_type").notNull(),
+    replayedFromDeliveryId: uuid("replayed_from_delivery_id"),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
     url: text("url").notNull(),
     secret: text("secret"),
@@ -860,6 +1056,7 @@ export const webhookDeliveries = pgTable(
     nextRetryIdx: index("webhook_deliveries_next_retry_idx").on(table.nextRetryAt),
     tenantIdx: index("webhook_deliveries_tenant_idx").on(table.tenantId),
     webhookConfigIdx: index("webhook_deliveries_webhook_config_idx").on(table.webhookConfigId),
+    replayedFromIdx: index("webhook_deliveries_replayed_from_idx").on(table.replayedFromDeliveryId),
   }),
 );
 
@@ -911,10 +1108,38 @@ export const tenantRelations = relations(tenants, ({ many, one }) => ({
   policyTemplates: many(policyTemplates),
   agentRegistrations: many(agentRegistrations),
   webhookConfigs: many(webhookConfigs),
+  appClients: many(tenantAppClients),
+  appClientSecrets: many(tenantAppClientSecrets),
+  requestSigningKeys: many(tenantRequestSigningKeys),
   ssoDomains: many(tenantSsoDomains),
   autoApprovalRule: one(autoApprovalRules, {
     fields: [tenants.id],
     references: [autoApprovalRules.tenantId],
+  }),
+}));
+
+export const tenantAppClientRelations = relations(tenantAppClients, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [tenantAppClients.tenantId],
+    references: [tenants.id],
+  }),
+}));
+
+export const tenantAppClientSecretRelations = relations(tenantAppClientSecrets, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [tenantAppClientSecrets.tenantId],
+    references: [tenants.id],
+  }),
+  appClient: one(tenantAppClients, {
+    fields: [tenantAppClientSecrets.tenantId, tenantAppClientSecrets.clientId],
+    references: [tenantAppClients.tenantId, tenantAppClients.id],
+  }),
+}));
+
+export const tenantRequestSigningKeyRelations = relations(tenantRequestSigningKeys, ({ one }) => ({
+  tenant: one(tenants, {
+    fields: [tenantRequestSigningKeys.tenantId],
+    references: [tenants.id],
   }),
 }));
 
@@ -1040,6 +1265,12 @@ export type Tenant = typeof tenants.$inferSelect;
 export type NewTenant = typeof tenants.$inferInsert;
 export type TenantConfigRow = typeof tenantConfigs.$inferSelect;
 export type NewTenantConfigRow = typeof tenantConfigs.$inferInsert;
+export type TenantAppClientRow = typeof tenantAppClients.$inferSelect;
+export type NewTenantAppClientRow = typeof tenantAppClients.$inferInsert;
+export type TenantAppClientSecretRow = typeof tenantAppClientSecrets.$inferSelect;
+export type NewTenantAppClientSecretRow = typeof tenantAppClientSecrets.$inferInsert;
+export type TenantRequestSigningKeyRow = typeof tenantRequestSigningKeys.$inferSelect;
+export type NewTenantRequestSigningKeyRow = typeof tenantRequestSigningKeys.$inferInsert;
 export type Agent = typeof agents.$inferSelect;
 export type NewAgent = typeof agents.$inferInsert;
 export type EncryptedKey = typeof encryptedKeys.$inferSelect;
@@ -1083,6 +1314,8 @@ export const secrets = pgTable(
   "secrets",
   {
     id: uuid("id").defaultRandom().primaryKey(),
+    // No tenant FK: secrets are app-layer scoped by tenant_id; platform-scoped
+    // secrets may use non-tenant principals not present in `tenants`.
     tenantId: text("tenant_id").notNull(),
     name: varchar("name", { length: 255 }).notNull(),
     description: text("description"),
@@ -1112,6 +1345,7 @@ export const secretRoutes = pgTable(
   {
     id: uuid("id").defaultRandom().primaryKey(),
     tenantId: text("tenant_id").notNull(),
+    agentId: varchar("agent_id", { length: 64 }),
     secretId: uuid("secret_id").notNull(),
     hostPattern: varchar("host_pattern", { length: 512 }).notNull(),
     pathPattern: varchar("path_pattern", { length: 512 }).default("/*"),
@@ -1125,6 +1359,7 @@ export const secretRoutes = pgTable(
   },
   (table) => ({
     tenantIdx: index("secret_routes_tenant_idx").on(table.tenantId),
+    agentIdx: index("secret_routes_agent_idx").on(table.agentId),
     secretIdx: index("secret_routes_secret_idx").on(table.secretId),
     hostIdx: index("secret_routes_host_idx").on(table.hostPattern),
   }),
@@ -1153,6 +1388,8 @@ export const proxyAuditLog = pgTable(
   {
     id: uuid("id").defaultRandom().primaryKey(),
     agentId: text("agent_id").notNull(),
+    // No tenant FK: proxy logs are app-layer scoped by tenant_id and may record
+    // platform/system principals not present in `tenants`.
     tenantId: text("tenant_id").notNull(),
     targetHost: varchar("target_host", { length: 512 }).notNull(),
     targetPath: varchar("target_path", { length: 512 }).notNull(),
@@ -1245,6 +1482,9 @@ export const auditEvents = pgTable(
   "audit_events",
   {
     id: bigserial("id", { mode: "number" }).primaryKey(),
+    // No tenant FK: audit events also record platform/system principals whose ids
+    // are not rows in `tenants`. Isolation is app-layer; tamper-evidence comes from
+    // the HMAC chain + audit_chain_heads high-water-mark.
     tenantId: varchar("tenant_id", { length: 64 }).notNull(),
     seq: bigint("seq", { mode: "number" }).notNull(),
     prevHash: bytea("prev_hash").notNull(),
@@ -1270,3 +1510,25 @@ export const auditEvents = pgTable(
 
 export type AuditEventRow = typeof auditEvents.$inferSelect;
 export type NewAuditEventRow = typeof auditEvents.$inferInsert;
+
+// Out-of-band high-water-mark for each tenant's audit chain. Updated atomically
+// inside the advisory-locked append transaction. Lets verification detect
+// tail-truncation / whole-chain deletion that an in-band walk alone cannot:
+// if rows are missing or the table is unexpectedly empty, the stored
+// expected_seq / expected_count / head_hmac will not match what's on disk.
+// `floor_seq`/`floor_hmac` anchor the chain after a legitimate retention sweep
+// archives+drops a prefix (verification then starts from floor_seq, not seq=1).
+// No FK ON DELETE: this mirrors audit_events (RESTRICT) — heads are never
+// silently dropped while audit rows exist.
+export const auditChainHeads = pgTable("audit_chain_heads", {
+  tenantId: varchar("tenant_id", { length: 64 }).primaryKey(),
+  expectedSeq: bigint("expected_seq", { mode: "number" }).notNull(),
+  expectedCount: bigint("expected_count", { mode: "number" }).notNull(),
+  headHmac: bytea("head_hmac").notNull(),
+  floorSeq: bigint("floor_seq", { mode: "number" }).notNull().default(0),
+  floorHmac: bytea("floor_hmac"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export type AuditChainHead = typeof auditChainHeads.$inferSelect;
+export type NewAuditChainHead = typeof auditChainHeads.$inferInsert;

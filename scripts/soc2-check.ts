@@ -19,6 +19,7 @@
  */
 
 import { execSync } from "node:child_process";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 type Status = "pass" | "fail" | "warn" | "skip";
 
@@ -27,12 +28,13 @@ interface Check {
   control: string;
   status: Status;
   reason: string;
+  evidence?: string;
 }
 
 const checks: Check[] = [];
 
-function record(id: string, control: string, status: Status, reason: string) {
-  checks.push({ id, control, status, reason });
+function record(id: string, control: string, status: Status, reason: string, evidence?: string) {
+  checks.push({ id, control, status, reason, ...(evidence ? { evidence } : {}) });
 }
 
 function isProd(): boolean {
@@ -191,6 +193,26 @@ function checkBindHost() {
 // ─── CC7.1 / CC8.1 — change management + monitoring ──────────────────────────
 
 function checkBunAudit() {
+  if (process.argv.includes("--skip-dependency-checks")) {
+    if (isProd() && process.env.STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP !== "true") {
+      record(
+        "bun_audit",
+        "CC7.1",
+        "fail",
+        "--skip-dependency-checks is not allowed in production unless STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP=true",
+        "operator override denied",
+      );
+      return;
+    }
+    record(
+      "bun_audit",
+      "CC7.1",
+      "skip",
+      "Dependency checks skipped by --skip-dependency-checks",
+      "operator override",
+    );
+    return;
+  }
   try {
     execSync("bun audit --audit-level=critical", { stdio: "pipe" });
     record("bun_audit_critical", "CC7.1", "pass", "No critical CVEs in dependency tree");
@@ -216,6 +238,26 @@ function checkBunAudit() {
 }
 
 function checkFrozenLockfile() {
+  if (process.argv.includes("--skip-dependency-checks")) {
+    if (isProd() && process.env.STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP !== "true") {
+      record(
+        "lockfile_frozen",
+        "CC8.1",
+        "fail",
+        "--skip-dependency-checks is not allowed in production unless STEWARD_SOC2_ALLOW_DEPENDENCY_SKIP=true",
+        "operator override denied",
+      );
+      return;
+    }
+    record(
+      "lockfile_frozen",
+      "CC8.1",
+      "skip",
+      "Lockfile check skipped by --skip-dependency-checks",
+      "operator override",
+    );
+    return;
+  }
   try {
     execSync("bun install --frozen-lockfile --dry-run", { stdio: "pipe" });
     record("lockfile_frozen", "CC8.1", "pass", "Lockfile passes --frozen-lockfile check");
@@ -229,6 +271,156 @@ function checkFrozenLockfile() {
   }
 }
 
+// ─── Source-backed controls — repo evidence, no runtime mutation ──────────────
+
+function readSource(path: string): string | null {
+  if (!existsSync(path)) return null;
+  return readFileSync(path, "utf8");
+}
+
+function checkSecurityHeadersSource() {
+  const path = "packages/api/src/middleware/security-headers.ts";
+  const source = readSource(path);
+  if (!source) {
+    return record(
+      "security_headers_source",
+      "CC6.7",
+      "fail",
+      "Security headers middleware missing",
+      path,
+    );
+  }
+  const required = [
+    "Strict-Transport-Security",
+    "Content-Security-Policy",
+    "X-Content-Type-Options",
+    "Referrer-Policy",
+  ];
+  const missing = required.filter((header) => !source.includes(header));
+  if (missing.length > 0) {
+    return record(
+      "security_headers_source",
+      "CC6.7",
+      "fail",
+      `Security headers middleware is missing: ${missing.join(", ")}`,
+      path,
+    );
+  }
+  record(
+    "security_headers_source",
+    "CC6.7",
+    "pass",
+    "Security headers middleware defines transport/browser hardening headers",
+    path,
+  );
+}
+
+function checkAuditIntegritySource() {
+  const migration = "packages/db/drizzle/0051_audit_integrity_constraints.sql";
+  const service = "packages/api/src/services/audit.ts";
+  const migrationSource = readSource(migration);
+  const serviceSource = readSource(service);
+  if (!migrationSource || !serviceSource) {
+    return record(
+      "audit_integrity_source",
+      "CC7.2",
+      "fail",
+      "Audit integrity migration or service source is missing",
+      `${migration}, ${service}`,
+    );
+  }
+  const hasDbConstraints =
+    migrationSource.includes("audit_chain_heads") &&
+    migrationSource.toLowerCase().includes("hmac") &&
+    migrationSource.includes("tenant_id") &&
+    migrationSource.includes("floor_seq") &&
+    migrationSource.includes("head_hmac");
+  const hasServiceSigning =
+    serviceSource.includes("STEWARD_AUDIT_HMAC_KEY") &&
+    serviceSource.includes("computeHmac") &&
+    serviceSource.includes("prevHash") &&
+    serviceSource.includes("verifyAuditChain") &&
+    serviceSource.includes("audit_chain_heads") &&
+    serviceSource.includes("pg_advisory_xact_lock");
+  if (!hasDbConstraints || !hasServiceSigning) {
+    return record(
+      "audit_integrity_source",
+      "CC7.2",
+      "fail",
+      "Audit tamper-evidence source checks did not find expected HMAC/hash-chain controls",
+      `${migration}, ${service}`,
+    );
+  }
+  record(
+    "audit_integrity_source",
+    "CC7.2",
+    "pass",
+    "Audit log has source-level tamper-evidence controls and tenant-scoped integrity constraints",
+    `${migration}, ${service}`,
+  );
+}
+
+function checkRetentionSource() {
+  const path = "packages/api/src/services/retention.ts";
+  const source = readSource(path);
+  if (!source) {
+    return record("retention_source", "CC2.3", "fail", "Retention service source is missing", path);
+  }
+  const required = [
+    "DEFAULT_AUDIT_EVENTS_DAYS",
+    "STEWARD_RETENTION_AUDIT_ARCHIVE_CONFIRMED",
+    "STEWARD_RETENTION_DEACTIVATED_USERS_DELETE_CONFIRMED",
+    "writeAuditEvent",
+    "SOC2",
+  ];
+  const missing = required.filter((needle) => !source.includes(needle));
+  if (missing.length > 0) {
+    return record(
+      "retention_source",
+      "CC2.3",
+      "fail",
+      `Retention service is missing expected deletion/evidence controls: ${missing.join(", ")}`,
+      path,
+    );
+  }
+  record(
+    "retention_source",
+    "CC2.3",
+    "pass",
+    "Retention service documents SOC2 floor, requires explicit delete confirmation, and writes audit evidence",
+    path,
+  );
+}
+
+function gitRevision(): string | undefined {
+  try {
+    return execSync("git rev-parse HEAD", { stdio: "pipe" }).toString().trim();
+  } catch {
+    return undefined;
+  }
+}
+
+function argValue(name: string): string | undefined {
+  const idx = process.argv.indexOf(name);
+  if (idx === -1) return undefined;
+  return process.argv[idx + 1];
+}
+
+function report(strict: boolean) {
+  const counts = checks.reduce(
+    (acc, c) => ((acc[c.status] = (acc[c.status] ?? 0) + 1), acc),
+    {} as Record<Status, number>,
+  );
+  return {
+    generatedAt: new Date().toISOString(),
+    gitRevision: gitRevision(),
+    nodeEnv: process.env.NODE_ENV ?? "development",
+    strict,
+    counts,
+    checks,
+  };
+}
+
 // ─── Output ──────────────────────────────────────────────────────────────────
 
 function main() {
@@ -238,14 +430,19 @@ function main() {
   checkAuditHmacKey();
   checkDatabaseTls();
   checkBindHost();
+  checkSecurityHeadersSource();
+  checkAuditIntegritySource();
+  checkRetentionSource();
   checkBunAudit();
   checkFrozenLockfile();
 
   const strict = process.argv.includes("--strict");
   const json = process.argv.includes("--json");
+  const out = argValue("--out");
+  const evidenceReport = report(strict);
 
   if (json) {
-    console.log(JSON.stringify({ checks }, null, 2));
+    console.log(JSON.stringify(evidenceReport, null, 2));
   } else {
     const icon = { pass: "✓", fail: "✗", warn: "!", skip: "·" } as const;
     for (const c of checks) {
@@ -259,10 +456,14 @@ function main() {
       `\n${counts.pass ?? 0} pass · ${counts.warn ?? 0} warn · ${counts.fail ?? 0} fail · ${counts.skip ?? 0} skip`,
     );
   }
+  if (out) {
+    writeFileSync(out, `${JSON.stringify(evidenceReport, null, 2)}\n`);
+  }
 
   const failed = checks.some((c) => c.status === "fail");
   const warned = checks.some((c) => c.status === "warn");
-  process.exit(failed || (strict && warned) ? 1 : 0);
+  const skipped = checks.some((c) => c.status === "skip");
+  process.exit(failed || (strict && (warned || skipped)) ? 1 : 0);
 }
 
 main();

@@ -11,6 +11,28 @@ export const ERC8004_IDENTITY_REGISTRY_ADDRESS: Address =
 export const ERC8004_REPUTATION_REGISTRY_ADDRESS: Address =
   "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63";
 
+/**
+ * Sentinel address used for chains where real registry contracts are not
+ * deployed. Any config still carrying this address is NOT a live registry and
+ * must never be used to fabricate on-chain data.
+ */
+export const PLACEHOLDER_REGISTRY = "0x0000000000000000000000000000000000008004";
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Returns true only when the config points at a real, deployed registry — i.e.
+ * a non-placeholder, non-zero EVM address. This is the single source of truth
+ * for whether on-chain calls can be trusted.
+ */
+export function isRegistryConfigured(config: Pick<RegistryConfig, "registryAddress">): boolean {
+  const addr = config.registryAddress?.trim().toLowerCase();
+  if (!addr || !/^0x[0-9a-f]{40}$/.test(addr)) return false;
+  if (addr === PLACEHOLDER_REGISTRY.toLowerCase()) return false;
+  if (addr === ZERO_ADDRESS.toLowerCase()) return false;
+  return true;
+}
+
 function registryConfig(
   params: Omit<RegistryConfig, "registryAddress" | "identityRegistry" | "reputationRegistry">,
 ): RegistryConfig {

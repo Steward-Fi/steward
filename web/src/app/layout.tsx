@@ -5,6 +5,8 @@ import "@rainbow-me/rainbowkit/styles.css";
 import "@solana/wallet-adapter-react-ui/styles.css";
 import { Providers } from "@/components/providers";
 
+export const dynamic = "force-dynamic";
+
 const metadataBase = (() => {
   const url = process.env.NEXT_PUBLIC_STEWARD_WEB_URL ?? "https://steward.fi";
   try {

@@ -8,15 +8,23 @@ import {
   type PolicyRule,
   type PriceOracle,
   type RateLimitConfig,
+  type RawSigningChainConditionConfig,
+  rawSigningChainSupport,
   type SignRequest,
   type SpendingLimitConfig,
   type TimeWindowConfig,
+  type TypedDataConditionConfig,
+  type TypedDataDomain,
+  type TypedDataField,
+  type TypedDataMessageCondition,
   toCaip2,
 } from "@stwd/shared";
+import { type AggregationLookup, evaluateAggregation } from "./evaluators/aggregation";
 import { evaluateLeverageCap } from "./evaluators/leverage-cap";
 import { evaluateReputationScaling } from "./evaluators/reputation-scaling";
 import { evaluateReputationThreshold } from "./evaluators/reputation-threshold";
 import { evaluateVenueAllowlist } from "./evaluators/venue-allowlist";
+import type { ManualApprovalSignal } from "./manual-approval";
 
 const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
@@ -50,6 +58,28 @@ export interface EvaluatorContext {
    */
   valueUsd?: number;
   conditionSets?: Record<string, string[]>;
+  /**
+   * Authoritative rolling-aggregate lookup for `aggregation` policies. Callers
+   * wire this from a server-side provider (Redis rolling counters / tx
+   * history). When absent, aggregation policies fail closed (deny).
+   */
+  aggregations?: AggregationLookup;
+  /**
+   * Decoded EIP-712 typed-data payload for `typed-data` policies. Populated
+   * ONLY by the typed-data signing route; absent on ordinary transaction
+   * signs. A `typed-data` policy is "not applicable" (passes) when this is
+   * undefined, so it cannot interfere with normal tx signing.
+   */
+  typedData?: {
+    domain: TypedDataDomain;
+    types: Record<string, TypedDataField[]>;
+    primaryType: string;
+    value: Record<string, unknown>;
+  };
+  rawSigning?: {
+    chain: string;
+    curve: string;
+  };
 }
 
 function parseUint256Decimal(value: unknown): bigint | null {
@@ -64,14 +94,18 @@ function parseUint256Decimal(value: unknown): bigint | null {
 
 /**
  * Evaluate a single policy rule against a transaction request.
- * Returns pass/fail with reason.
+ * Returns pass/fail with reason, plus an optional `requiresManualApproval`
+ * signal (see `./manual-approval`) that the engine honours to route a
+ * non-passing "hard" policy to the manual-approval queue instead of a hard
+ * deny. The signal is optional, so the return value is structurally still a
+ * `PolicyResult`; evaluators that never set it behave exactly as before.
  *
  * Now async to support USD-based evaluations that need price lookups.
  */
 export async function evaluatePolicy(
   rule: PolicyRule,
   ctx: EvaluatorContext,
-): Promise<PolicyResult> {
+): Promise<PolicyResult & ManualApprovalSignal> {
   if (!rule.enabled) {
     return {
       policyId: rule.id,
@@ -96,8 +130,18 @@ export async function evaluatePolicy(
       return evaluateAllowedChains(rule, ctx);
     case "condition-set":
       return evaluateConditionSet(rule, ctx);
+    case "aggregation":
+      return evaluateAggregation(rule, {
+        request: ctx.request,
+        aggregations: ctx.aggregations,
+        priceOracle: ctx.priceOracle,
+      });
     case "contract-allowlist":
       return evaluateContractAllowlist(rule, ctx);
+    case "typed-data":
+      return evaluateTypedData(rule, ctx);
+    case "raw-signing-chain":
+      return evaluateRawSigningChain(rule, ctx);
     case "reputation-threshold":
       return evaluateReputationThreshold(rule, {
         reputationScore: ctx.reputationScore,
@@ -129,6 +173,68 @@ export async function evaluatePolicy(
         reason: `Unknown policy type: ${rule.type}`,
       };
   }
+}
+
+function normalizePolicyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim().toLowerCase() : null;
+}
+
+function evaluateRawSigningChain(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+  const base = { policyId: rule.id, type: rule.type } as const;
+  if (!ctx.rawSigning) {
+    return { ...base, passed: true, reason: "Not a raw-digest signing request" };
+  }
+  const config = rule.config as unknown as RawSigningChainConditionConfig;
+  const chain = normalizePolicyString(ctx.rawSigning.chain);
+  const curve = normalizePolicyString(ctx.rawSigning.curve);
+  if (!chain || !curve) {
+    return { ...base, passed: false, reason: "Raw signing chain and curve are required" };
+  }
+  const support = rawSigningChainSupport(chain);
+  const requireSupported = config.requireSupported !== false;
+  if (requireSupported && (!support || !support.supported)) {
+    return {
+      ...base,
+      passed: false,
+      reason: `Raw signing chain ${chain} is not supported`,
+    };
+  }
+  if (support && support.curve !== curve) {
+    return {
+      ...base,
+      passed: false,
+      reason: `Raw signing chain ${chain} requires ${support.curve}, not ${curve}`,
+    };
+  }
+  const allowedChains = (config.allowedChains ?? []).map(normalizePolicyString).filter(Boolean);
+  if (allowedChains.length > 0 && !allowedChains.includes(chain)) {
+    return {
+      ...base,
+      passed: false,
+      reason: `Raw signing chain ${chain} is not in the allowed list`,
+    };
+  }
+  const blockedChains = (config.blockedChains ?? []).map(normalizePolicyString).filter(Boolean);
+  if (blockedChains.includes(chain)) {
+    return {
+      ...base,
+      passed: false,
+      reason: `Raw signing chain ${chain} is blocked`,
+    };
+  }
+  const allowedCurves = (config.allowedCurves ?? []).map(normalizePolicyString).filter(Boolean);
+  if (allowedCurves.length > 0 && !allowedCurves.includes(curve)) {
+    return {
+      ...base,
+      passed: false,
+      reason: `Raw signing curve ${curve} is not in the allowed list`,
+    };
+  }
+  return {
+    ...base,
+    passed: true,
+    reason: `Raw signing chain ${chain} on ${curve} is allowed`,
+  };
 }
 
 /**
@@ -552,7 +658,10 @@ function evaluateAllowedChains(rule: PolicyRule, ctx: EvaluatorContext): PolicyR
   return { ...base, passed: true };
 }
 
-function extractConditionSetField(config: ConditionSetConfig, ctx: EvaluatorContext): string {
+function extractConditionSetField(
+  config: ConditionSetConfig,
+  ctx: EvaluatorContext,
+): string | null {
   switch (config.field ?? "ethereum_transaction.to") {
     case "to":
     case "ethereum_transaction.to":
@@ -568,7 +677,7 @@ function extractConditionSetField(config: ConditionSetConfig, ctx: EvaluatorCont
     case "ethereum_transaction.data":
       return ctx.request.data ?? "";
     default:
-      return "";
+      return null;
   }
 }
 
@@ -593,13 +702,27 @@ function evaluateConditionSet(rule: PolicyRule, ctx: EvaluatorContext): PolicyRe
     };
   }
 
-  const target = normalizeConditionValue(
-    extractConditionSetField(config, ctx),
-    config.caseSensitive,
-  );
+  const operator = config.operator ?? "in_condition_set";
+  if (operator !== "in_condition_set" && operator !== "not_in_condition_set") {
+    return {
+      ...base,
+      passed: false,
+      reason: `Unsupported condition set operator: ${String(operator)}`,
+    };
+  }
+
+  const extracted = extractConditionSetField(config, ctx);
+  if (extracted === null) {
+    return {
+      ...base,
+      passed: false,
+      reason: `Unsupported condition set field: ${String(config.field)}`,
+    };
+  }
+
+  const target = normalizeConditionValue(extracted, config.caseSensitive);
   const listed = values.map((value) => normalizeConditionValue(value, config.caseSensitive));
   const contains = listed.includes(target);
-  const operator = config.operator ?? "in_condition_set";
 
   if (operator === "not_in_condition_set") {
     return contains
@@ -761,6 +884,70 @@ function checkAmountConstraint(
   return null;
 }
 
+function checkTokenIdConstraint(
+  base: { policyId: string; type: PolicyRule["type"] },
+  tokenId: bigint | null,
+  allowlist: string[] | undefined,
+  blocklist: string[] | undefined,
+): PolicyResult | null {
+  const hasAllow = (allowlist?.length ?? 0) > 0;
+  const hasBlock = (blocklist?.length ?? 0) > 0;
+  if (!hasAllow && !hasBlock) return null;
+  if (tokenId === null) {
+    return { ...base, passed: false, reason: "Unable to decode tokenId from calldata" };
+  }
+  const id = tokenId.toString();
+  if (hasAllow) {
+    const allowed = (allowlist ?? []).map((value) => value.trim());
+    if (!allowed.includes(id)) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Token id ${id} is not in the selector tokenId allowlist`,
+      };
+    }
+  }
+  if (hasBlock) {
+    const blocked = (blocklist ?? []).map((value) => value.trim());
+    if (blocked.includes(id)) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Token id ${id} is in the selector tokenId blocklist`,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Decode a dynamic `uint256[]` ABI argument whose offset word sits at
+ * `headWordIndex` (relative to the start of the argument data, after the
+ * 4-byte selector). Returns null on any malformed/out-of-range encoding so
+ * callers can fail closed. Length is bounded to avoid pathological inputs.
+ */
+function decodeAbiUint256Array(data: string, headWordIndex: number): bigint[] | null {
+  const offsetWord = calldataWord(data, headWordIndex);
+  if (!offsetWord) return null;
+  const offset = decodeAbiUint256(offsetWord);
+  if (offset === null || offset % 32n !== 0n) return null;
+  const offsetWords = Number(offset / 32n);
+  const lengthWord = calldataWord(data, offsetWords);
+  if (!lengthWord) return null;
+  const length = decodeAbiUint256(lengthWord);
+  if (length === null || length > 1024n) return null;
+  const count = Number(length);
+  const out: bigint[] = [];
+  for (let i = 0; i < count; i++) {
+    const word = calldataWord(data, offsetWords + 1 + i);
+    if (!word) return null;
+    const value = decodeAbiUint256(word);
+    if (value === null) return null;
+    out.push(value);
+  }
+  return out;
+}
+
 function evaluateEvmSelectorConstraint(
   rule: PolicyRule,
   ctx: EvaluatorContext,
@@ -821,7 +1008,353 @@ function evaluateEvmSelectorConstraint(
         checkAmountConstraint(base, amount, constraint.maxAmount) ?? { ...base, passed: true }
       );
     }
+    // ERC721 safeTransferFrom(address from, address to, uint256 tokenId)
+    case "0x42842e0e":
+    // ERC721 safeTransferFrom(address from, address to, uint256 tokenId, bytes data)
+    case "0xb88d4fde": {
+      const from = decodeAbiAddress(calldataWord(data, 0) ?? "");
+      const recipient = decodeAbiAddress(calldataWord(data, 1) ?? "");
+      const tokenId = decodeAbiUint256(calldataWord(data, 2) ?? "");
+      return (
+        checkAddressConstraint(
+          base,
+          "from",
+          from,
+          constraint.fromAllowlist,
+          constraint.fromBlocklist,
+        ) ??
+        checkAddressConstraint(
+          base,
+          "recipient",
+          recipient,
+          constraint.recipientAllowlist,
+          constraint.recipientBlocklist,
+        ) ??
+        checkTokenIdConstraint(
+          base,
+          tokenId,
+          constraint.tokenIdAllowlist,
+          constraint.tokenIdBlocklist,
+        ) ?? { ...base, passed: true }
+      );
+    }
+    // ERC721/ERC1155 setApprovalForAll(address operator, bool approved)
+    case "0xa22cb465": {
+      const operator = decodeAbiAddress(calldataWord(data, 0) ?? "");
+      const approved = decodeAbiUint256(calldataWord(data, 1) ?? "");
+      // Revoking approval (approved == 0) is always safe — allow it regardless
+      // of the operator allowlist so agents can always pull back access.
+      if (approved !== null && approved === 0n) {
+        return { ...base, passed: true };
+      }
+      // Granting blanket approval: treat the operator as a spender.
+      return (
+        checkAddressConstraint(
+          base,
+          "operator",
+          operator,
+          constraint.spenderAllowlist,
+          constraint.spenderBlocklist,
+        ) ?? { ...base, passed: true }
+      );
+    }
+    // ERC1155 safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes data)
+    case "0xf242432a": {
+      const from = decodeAbiAddress(calldataWord(data, 0) ?? "");
+      const recipient = decodeAbiAddress(calldataWord(data, 1) ?? "");
+      const tokenId = decodeAbiUint256(calldataWord(data, 2) ?? "");
+      const amount = decodeAbiUint256(calldataWord(data, 3) ?? "");
+      return (
+        checkAddressConstraint(
+          base,
+          "from",
+          from,
+          constraint.fromAllowlist,
+          constraint.fromBlocklist,
+        ) ??
+        checkAddressConstraint(
+          base,
+          "recipient",
+          recipient,
+          constraint.recipientAllowlist,
+          constraint.recipientBlocklist,
+        ) ??
+        checkTokenIdConstraint(
+          base,
+          tokenId,
+          constraint.tokenIdAllowlist,
+          constraint.tokenIdBlocklist,
+        ) ??
+        checkAmountConstraint(base, amount, constraint.maxAmount) ?? { ...base, passed: true }
+      );
+    }
+    // ERC1155 safeBatchTransferFrom(address from, address to, uint256[] ids, uint256[] amounts, bytes data)
+    case "0x2eb2c2d6": {
+      const from = decodeAbiAddress(calldataWord(data, 0) ?? "");
+      const recipient = decodeAbiAddress(calldataWord(data, 1) ?? "");
+      const addressCheck =
+        checkAddressConstraint(
+          base,
+          "from",
+          from,
+          constraint.fromAllowlist,
+          constraint.fromBlocklist,
+        ) ??
+        checkAddressConstraint(
+          base,
+          "recipient",
+          recipient,
+          constraint.recipientAllowlist,
+          constraint.recipientBlocklist,
+        );
+      if (addressCheck) return addressCheck;
+
+      const needTokenIds =
+        (constraint.tokenIdAllowlist?.length ?? 0) > 0 ||
+        (constraint.tokenIdBlocklist?.length ?? 0) > 0;
+      if (needTokenIds) {
+        const ids = decodeAbiUint256Array(data, 2);
+        if (ids === null) {
+          return {
+            ...base,
+            passed: false,
+            reason: "Unable to decode tokenId array from batch calldata",
+          };
+        }
+        for (const id of ids) {
+          const result = checkTokenIdConstraint(
+            base,
+            id,
+            constraint.tokenIdAllowlist,
+            constraint.tokenIdBlocklist,
+          );
+          if (result) return result;
+        }
+      }
+
+      if (constraint.maxAmount !== undefined) {
+        const amounts = decodeAbiUint256Array(data, 3);
+        if (amounts === null) {
+          return {
+            ...base,
+            passed: false,
+            reason: "Unable to decode amount array from batch calldata",
+          };
+        }
+        for (const amount of amounts) {
+          const result = checkAmountConstraint(base, amount, constraint.maxAmount);
+          if (result) return result;
+        }
+      }
+
+      return { ...base, passed: true };
+    }
     default:
       return { ...base, passed: true };
   }
+}
+
+// ─── EIP-712 typed-data condition ───────────────────────────────────────────
+
+const MAX_UINT256_BIGINT = BigInt(MAX_UINT256_DECIMAL);
+
+/** Normalize a plain EVM address string, or null if it is not one. */
+function normalizeEvmAddress(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim().toLowerCase();
+  return /^0x[0-9a-f]{40}$/.test(trimmed) ? trimmed : null;
+}
+
+/**
+ * Parse an EIP-712 uint field. Accepts a non-negative JS number/bigint, a
+ * decimal string, or a `0x`-hex string. Returns null (→ fail closed) for
+ * anything else or any value exceeding uint256.
+ */
+function parseTypedDataUint(raw: unknown): bigint | null {
+  let parsed: bigint | null = null;
+  if (typeof raw === "bigint") {
+    parsed = raw;
+  } else if (typeof raw === "number") {
+    if (!Number.isInteger(raw) || raw < 0) return null;
+    parsed = BigInt(raw);
+  } else if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (/^0x[0-9a-fA-F]+$/.test(trimmed)) {
+      parsed = BigInt(trimmed);
+    } else {
+      parsed = parseUint256Decimal(trimmed);
+    }
+  }
+  if (parsed === null || parsed < 0n || parsed > MAX_UINT256_BIGINT) return null;
+  return parsed;
+}
+
+/** Walk a dot-path (e.g. `"details.token"`) into the decoded message object. */
+function getTypedDataField(value: Record<string, unknown>, path: string): unknown {
+  const parts = path.split(".");
+  let current: unknown = value;
+  for (const part of parts) {
+    if (current === null || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function evaluateTypedDataMessageCondition(
+  base: { policyId: string; type: PolicyRule["type"] },
+  condition: TypedDataMessageCondition,
+  message: Record<string, unknown>,
+): PolicyResult | null {
+  const raw = getTypedDataField(message, condition.field);
+  const fail = (reason: string): PolicyResult => ({ ...base, passed: false, reason });
+
+  switch (condition.operator) {
+    case "address_in":
+    case "address_not_in": {
+      const addr = normalizeEvmAddress(raw);
+      if (!addr) return fail(`Typed-data field ${condition.field} is not a valid address`);
+      const list = (condition.values ?? []).map((value) => value.toLowerCase());
+      const present = list.includes(addr);
+      if (condition.operator === "address_in" && !present) {
+        return fail(`Typed-data field ${condition.field} (${addr}) is not in the allowed list`);
+      }
+      if (condition.operator === "address_not_in" && present) {
+        return fail(`Typed-data field ${condition.field} (${addr}) is in the blocked list`);
+      }
+      return null;
+    }
+    case "eq": {
+      if (raw === undefined || raw === null) {
+        return fail(`Typed-data field ${condition.field} is missing`);
+      }
+      if (String(raw) !== String(condition.value ?? "")) {
+        return fail(`Typed-data field ${condition.field} must equal ${String(condition.value)}`);
+      }
+      return null;
+    }
+    case "in":
+    case "not_in": {
+      if (raw === undefined || raw === null) {
+        return fail(`Typed-data field ${condition.field} is missing`);
+      }
+      const target = String(raw);
+      const present = (condition.values ?? []).includes(target);
+      if (condition.operator === "in" && !present) {
+        return fail(`Typed-data field ${condition.field} (${target}) is not in the allowed list`);
+      }
+      if (condition.operator === "not_in" && present) {
+        return fail(`Typed-data field ${condition.field} (${target}) is in the blocked list`);
+      }
+      return null;
+    }
+    case "uint_max": {
+      const max = parseTypedDataUint(condition.value);
+      if (max === null) {
+        return fail(`Typed-data condition for ${condition.field} has an invalid uint_max bound`);
+      }
+      const amount = parseTypedDataUint(raw);
+      if (amount === null) {
+        return fail(`Typed-data field ${condition.field} is not a uint256 value`);
+      }
+      if (amount > max) {
+        return fail(
+          `Typed-data field ${condition.field} (${amount}) exceeds max ${String(condition.value)}`,
+        );
+      }
+      return null;
+    }
+    default:
+      return fail(
+        `Unsupported typed-data message operator: ${String(
+          (condition as { operator?: unknown }).operator,
+        )}`,
+      );
+  }
+}
+
+/**
+ * Evaluate a Privy-style EIP-712 `typed-data` condition. Fails closed: any
+ * constraint that is configured must hold, or the signature is denied. When
+ * the request is not a typed-data sign (no `ctx.typedData`) the policy is not
+ * applicable and passes.
+ */
+function evaluateTypedData(rule: PolicyRule, ctx: EvaluatorContext): PolicyResult {
+  const config = rule.config as unknown as TypedDataConditionConfig;
+  const base = { policyId: rule.id, type: rule.type } as const;
+
+  if (!ctx.typedData) {
+    return { ...base, passed: true, reason: "Not a typed-data signing request" };
+  }
+
+  const { domain, primaryType, value } = ctx.typedData;
+  const verifyingContract = normalizeEvmAddress(domain.verifyingContract);
+
+  if ((config.verifyingContractAllowlist?.length ?? 0) > 0) {
+    const allowed = (config.verifyingContractAllowlist ?? []).map((a) => a.toLowerCase());
+    if (!verifyingContract || !allowed.includes(verifyingContract)) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Typed-data domain verifyingContract ${String(
+          domain.verifyingContract,
+        )} is not in the allowlist`,
+      };
+    }
+  }
+
+  if ((config.verifyingContractBlocklist?.length ?? 0) > 0) {
+    const blocked = (config.verifyingContractBlocklist ?? []).map((a) => a.toLowerCase());
+    if (verifyingContract && blocked.includes(verifyingContract)) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Typed-data domain verifyingContract ${String(
+          domain.verifyingContract,
+        )} is in the blocklist`,
+      };
+    }
+  }
+
+  if ((config.allowedChainIds?.length ?? 0) > 0) {
+    if (
+      typeof domain.chainId !== "number" ||
+      !(config.allowedChainIds ?? []).includes(domain.chainId)
+    ) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Typed-data domain chainId ${String(domain.chainId)} is not in the allowed list`,
+      };
+    }
+  }
+
+  if ((config.allowedDomainNames?.length ?? 0) > 0) {
+    if (
+      typeof domain.name !== "string" ||
+      !(config.allowedDomainNames ?? []).includes(domain.name)
+    ) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Typed-data domain name ${String(domain.name)} is not in the allowed list`,
+      };
+    }
+  }
+
+  if ((config.allowedPrimaryTypes?.length ?? 0) > 0) {
+    if (!(config.allowedPrimaryTypes ?? []).includes(primaryType)) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Typed-data primaryType ${primaryType} is not in the allowed list`,
+      };
+    }
+  }
+
+  for (const condition of config.messageConditions ?? []) {
+    const result = evaluateTypedDataMessageCondition(base, condition, value);
+    if (result) return result;
+  }
+
+  return { ...base, passed: true };
 }

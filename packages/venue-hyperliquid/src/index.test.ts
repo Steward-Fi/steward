@@ -171,6 +171,31 @@ describe("Hyperliquid L1 signing", () => {
     });
     expect(result).toMatchObject({ orderId: "77738308", status: "resting" });
   });
+
+  test("default nonce is strictly monotonic and >= Date.now() (no same-ms collisions)", async () => {
+    // No explicit nonce → uses the monotonic source. Many rapid signs in the
+    // same millisecond must produce strictly-increasing nonces.
+    const before = Date.now();
+    const order = { coin: "BTC", side: "buy", size: 0.01, limitPx: "30000" } as const;
+    const nonces: number[] = [];
+    for (let i = 0; i < 50; i++) {
+      const signed = await signOrder(PRIVATE_KEY, order, { isMainnet: false });
+      nonces.push(signed.nonce);
+    }
+    for (let i = 1; i < nonces.length; i++) {
+      expect(nonces[i]).toBeGreaterThan(nonces[i - 1]);
+    }
+    expect(nonces[0]).toBeGreaterThanOrEqual(before);
+  });
+
+  test("explicit caller-supplied nonce is still honored", async () => {
+    const signed = await signOrder(
+      PRIVATE_KEY,
+      { coin: "BTC", side: "buy", size: 0.01, limitPx: "30000" },
+      { nonce: NONCE, isMainnet: false },
+    );
+    expect(signed.nonce).toBe(NONCE);
+  });
 });
 
 describe("Hyperliquid withdraw (user-signed action)", () => {

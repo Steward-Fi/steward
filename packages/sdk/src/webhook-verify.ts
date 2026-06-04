@@ -1,14 +1,19 @@
 /**
  * Webhook signature verification — for consumers receiving HMAC-signed events.
  *
- * Server side (packages/webhooks/dispatcher.ts) signs the JSON body with
- * HMAC-SHA-256 over the raw request bytes and ships the hex digest in the
- * `X-Steward-Signature` header. Consumers verify by re-computing the HMAC
- * with their shared secret and comparing in constant time.
+ * Server side (packages/webhooks/dispatcher.ts) signs with HMAC-SHA-256 over a
+ * versioned canonical string and ships the digest in `X-Steward-Signature`.
  *
- * Optionally, an `X-Steward-Timestamp` header records the dispatch time as
- * seconds-since-epoch. Callers can reject messages whose timestamp drifts
- * past a tolerance window (default 5 minutes) to limit replay value.
+ * Scheme v2 (current): the header value is `v2=<hex>` and the signed material is
+ *   `v2:${timestamp}.${deliveryId}.${eventType}.${body}`
+ * binding the dispatch timestamp, a stable per-delivery nonce (`X-Steward-Delivery-Id`)
+ * and the event type (`X-Steward-Event`) into the HMAC. This prevents replaying a
+ * captured/persisted event with a tampered event type, and the deliveryId + timestamp
+ * are stable across retries so consumers can dedup replays within the tolerance window.
+ *
+ * Legacy (backward-compat, opt-in): a bare hex digest over `${timestamp}.${body}`
+ * or — with `allowLegacyBodySignature` — the raw body. Body-only signatures have no
+ * replay protection. Retained only for receivers still on the old scheme.
  *
  * Both sign and verify paths use only the Web Crypto / Subtle Crypto APIs
  * so the helper works in browsers, Workers, and Node 20+ without any
@@ -16,6 +21,7 @@
  */
 
 const encoder = new TextEncoder();
+const SIGNATURE_SCHEME = "v2";
 
 function hexToBytes(hex: string): Uint8Array {
   const normalized = hex.toLowerCase().replace(/^0x/, "");
@@ -82,12 +88,32 @@ export interface VerifyWebhookOptions {
   toleranceSec?: number;
   /** Defaults to Date.now()/1000 — injectable for deterministic testing. */
   nowSec?: number;
+  /**
+   * Accept legacy signatures computed over the raw body when no timestamp is
+   * present. Body-only signatures have no replay protection.
+   */
+  allowLegacyBodySignature?: boolean;
+  /**
+   * Accept the pre-v2 `${timestamp}.${body}` scheme (no nonce/event binding).
+   * Defaults to FALSE: the legacy scheme has no nonce/event binding and is a pure
+   * downgrade risk now that the dispatcher only emits v2. Set to `true` only for a
+   * documented external sender that has not yet migrated to v2.
+   */
+  allowLegacyTimestampSignature?: boolean;
+  /** Event type from `X-Steward-Event`. Required to verify a v2 signature. */
+  eventType?: string | null;
+  /** Stable delivery id (nonce) from `X-Steward-Delivery-Id`. Required for v2. */
+  deliveryId?: string | null;
 }
 
 export interface VerifyWebhookResult {
   valid: boolean;
   /** Set when `valid` is false. Coarse enum so callers can log without leaking detail. */
   reason?: "missing-signature" | "bad-signature" | "stale-timestamp" | "bad-timestamp";
+  /** Signature scheme that verified (when valid). */
+  scheme?: "v2" | "legacy-timestamp" | "legacy-body";
+  /** Stable delivery id (nonce); use to dedup replays. Present for v2. */
+  deliveryId?: string;
 }
 
 /**
@@ -122,25 +148,46 @@ export async function verifyWebhookSignature(
     }
   }
 
-  // When a timestamp is present, the canonical signed string is
-  // `<timestamp>.<body>` — matching Stripe's convention and what newer
-  // releases of the server dispatcher emit. The verifier accepts EITHER
-  // shape so older dispatchers (signing the body alone) continue to work
-  // until the rollout completes.
-  const candidates: string[] = [];
-  if (timestamp !== undefined && timestamp !== null) {
-    candidates.push(`${timestamp}.${body}`);
+  // A `v2=` prefix selects the versioned, nonce/event-bound scheme exclusively.
+  const schemePrefix = `${SIGNATURE_SCHEME}=`;
+  if (signature.startsWith(schemePrefix)) {
+    const provided = hexToBytes(signature.slice(schemePrefix.length));
+    if (provided.length === 0) return { valid: false, reason: "bad-signature" };
+    if (timestamp === undefined || timestamp === null) {
+      return { valid: false, reason: "bad-timestamp" };
+    }
+    const deliveryId = options.deliveryId;
+    const eventType = options.eventType;
+    if (!deliveryId || !eventType) return { valid: false, reason: "bad-signature" };
+    // Length-prefix deliveryId/eventType so field boundaries cannot be shifted
+    // (event types and bodies contain '.'); must match dispatcher.canonicalSignedPayload.
+    const canonical = `${SIGNATURE_SCHEME}:${timestamp}.${deliveryId.length}:${deliveryId}.${eventType.length}:${eventType}.${body}`;
+    const expected = hexToBytes(await signWebhookPayload(canonical, secret));
+    if (constantTimeEqual(provided, expected)) {
+      return { valid: true, scheme: "v2", deliveryId };
+    }
+    return { valid: false, reason: "bad-signature" };
   }
-  candidates.push(body);
+
+  // Legacy bare-hex paths (no scheme prefix).
+  const candidates: { material: string; scheme: VerifyWebhookResult["scheme"] }[] = [];
+  if (timestamp !== undefined && timestamp !== null) {
+    if (options.allowLegacyTimestampSignature === true) {
+      candidates.push({ material: `${timestamp}.${body}`, scheme: "legacy-timestamp" });
+    }
+  } else if (options.allowLegacyBodySignature === true) {
+    candidates.push({ material: body, scheme: "legacy-body" });
+  }
 
   const provided = hexToBytes(signature);
   if (provided.length === 0) return { valid: false, reason: "bad-signature" };
+  if (candidates.length === 0) return { valid: false, reason: "bad-timestamp" };
 
   for (const candidate of candidates) {
-    const expectedHex = await signWebhookPayload(candidate, secret);
+    const expectedHex = await signWebhookPayload(candidate.material, secret);
     const expected = hexToBytes(expectedHex);
     if (constantTimeEqual(provided, expected)) {
-      return { valid: true };
+      return { valid: true, scheme: candidate.scheme };
     }
   }
   return { valid: false, reason: "bad-signature" };
