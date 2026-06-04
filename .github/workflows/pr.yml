@@ -228,6 +228,9 @@ jobs:
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
+          # The whole api suite drives this one server from a single IP; the
+          # default 100-req/60s per-IP gate 429s the sharded test flood.
+          STEWARD_RATE_LIMIT_MAX_REQUESTS: "1000000"
         run: |
           bun run packages/api/src/index.ts > /tmp/steward-api-integration.log 2>&1 &
           echo $! > /tmp/steward-api-integration.pid
