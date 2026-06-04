@@ -187,22 +187,20 @@ jobs:
           exit 1
 
       - name: Integration tests (API)
-        # ~60 of the api test files force an in-memory PGLite (a WASM Postgres)
-        # in their own beforeAll even though DATABASE_URL points at real Postgres.
+        # ~57 of the api test files force an in-memory PGLite (a WASM Postgres) in
+        # their own beforeAll even though DATABASE_URL points at real Postgres.
         # `bun test --isolate` runs every file in ONE process (it only gives each
         # file a fresh global object, not a fresh process), so those WASM heaps
-        # accumulate and OOM the 7GB runner (exit 137) around file ~140. Running
-        # the suite as sequential --shard processes caps peak memory at one
-        # shard's worth: each shard is a separate `bun test` process that frees
-        # its WASM heap on exit before the next starts. --shard requires bun
-        # >= 1.3.13. --timeout=30000 absorbs per-file PGLite migration latency.
-        run: |
-          shards=6
-          for i in $(seq 1 "$shards"); do
-            echo "::group::API integration tests — shard $i/$shards"
-            bun test --isolate --timeout=30000 --shard="$i/$shards" packages/api
-            echo "::endgroup::"
-          done
+        # accumulate and SIGKILL the 7GB runner (exit 137) around file ~140.
+        # run-tests-isolated.ts spawns a fresh `bun test` process PER FILE, so
+        # peak memory is bounded by TEST_JOBS concurrent files (not the suite
+        # size) and each process frees its WASM heap on exit. Reproduced in a
+        # 6GB-capped Linux container: the single `--isolate` process is killed
+        # at exit 137; a 6-way --shard split still OOMs (25 files/shard is too
+        # much); this runner at TEST_JOBS=2 finishes the full suite with zero
+        # OOM in ~2.3min. TEST_TIMEOUT=30000 absorbs per-file PGLite migration
+        # latency.
+        run: TEST_JOBS=2 TEST_TIMEOUT=30000 bun packages/api/scripts/run-tests-isolated.ts
         env:
           DATABASE_URL: "postgres://steward:steward_ci@localhost:5432/steward_test"
           PORT: "3299"
