@@ -18,7 +18,6 @@
  */
 
 import { platformAuthMiddleware } from "@stwd/auth";
-import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { requireAgentJwt } from "./middleware/agent-jwt";
@@ -29,6 +28,7 @@ import { operatorAuth } from "./middleware/operator-auth";
 import { requestExpiry } from "./middleware/request-expiry";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
+import { createOpenAPIApp, isOpenApiHttpEnabled, OPENAPI_DOC } from "./openapi";
 import { adapterRoutes } from "./routes/adapters";
 import { agentRoutes } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
@@ -54,14 +54,13 @@ import { webhookRoutes } from "./routes/webhooks";
 import {
   API_VERSION,
   type ApiResponse,
-  type AppVariables,
   dashboardAuthMiddleware,
   tenantAuth,
 } from "./services/context";
 
 const startTime = Date.now();
 
-const app = new Hono<{ Variables: AppVariables }>();
+const app = createOpenAPIApp();
 
 // ─── Global error handler ─────────────────────────────────────────────────────
 
@@ -181,6 +180,16 @@ app.get("/health", (c) =>
     uptime: Math.floor((Date.now() - startTime) / 1000),
   }),
 );
+
+// ─── OpenAPI spec (opt-in) ────────────────────────────────────────────────────
+// The spec is generated from the route definitions (the single source of truth)
+// and is always emitted at build time for the SDK and docs. The *live* endpoint is
+// gated and fails closed by default — a custody API should not expose its surface
+// publicly. Human-readable docs are served by the Mintlify site (which consumes the
+// generated openapi.json), not an in-app reference UI. See isOpenApiHttpEnabled.
+if (isOpenApiHttpEnabled()) {
+  app.get("/openapi.json", (c) => c.json(app.getOpenAPI31Document(OPENAPI_DOC)));
+}
 
 // ─── Route modules ────────────────────────────────────────────────────────────
 

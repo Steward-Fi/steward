@@ -1,0 +1,390 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Steward API",
+    "version": "0.4.4",
+    "description": "Open-source agent & application wallet infrastructure. This document is generated from the route definitions and is the single source of truth for the SDK types and reference docs."
+  },
+  "servers": [
+    {
+      "url": "https://api.steward.fi",
+      "description": "Production"
+    }
+  ],
+  "components": {
+    "schemas": {
+      "AgentDashboard": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "$ref": "#/components/schemas/AgentIdentitySummary"
+          },
+          "balances": {
+            "type": "object",
+            "properties": {
+              "evm": {
+                "type": "object",
+                "properties": {
+                  "native": {
+                    "type": "string"
+                  },
+                  "nativeFormatted": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "number"
+                  },
+                  "symbol": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "native",
+                  "nativeFormatted",
+                  "chainId",
+                  "symbol"
+                ]
+              },
+              "solana": {
+                "type": "object",
+                "properties": {
+                  "native": {
+                    "type": "string"
+                  },
+                  "nativeFormatted": {
+                    "type": "string"
+                  },
+                  "chainId": {
+                    "type": "number"
+                  },
+                  "symbol": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "native",
+                  "nativeFormatted",
+                  "chainId",
+                  "symbol"
+                ]
+              }
+            }
+          },
+          "spend": {
+            "type": "object",
+            "properties": {
+              "today": {
+                "type": "string"
+              },
+              "thisWeek": {
+                "type": "string"
+              },
+              "thisMonth": {
+                "type": "string"
+              },
+              "todayFormatted": {
+                "type": "string"
+              },
+              "thisWeekFormatted": {
+                "type": "string"
+              },
+              "thisMonthFormatted": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "today",
+              "thisWeek",
+              "thisMonth",
+              "todayFormatted",
+              "thisWeekFormatted",
+              "thisMonthFormatted"
+            ]
+          },
+          "policies": {
+            "type": "array",
+            "items": {}
+          },
+          "pendingApprovals": {
+            "type": "number"
+          },
+          "recentTransactions": {
+            "type": "array",
+            "items": {}
+          }
+        },
+        "required": [
+          "agent",
+          "balances",
+          "spend",
+          "policies",
+          "pendingApprovals",
+          "recentTransactions"
+        ]
+      },
+      "AgentIdentitySummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "tenantId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "walletAddress": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tenantId",
+          "name",
+          "walletAddress"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ok",
+          "error"
+        ]
+      },
+      "TradeTokenStatus": {
+        "type": "object",
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "observed"
+            ]
+          },
+          "exp": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "observedAt": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "expiresInSeconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "agentId",
+          "status",
+          "exp",
+          "observedAt",
+          "expiresInSeconds"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/dashboard/{agentId}": {
+      "get": {
+        "tags": [
+          "dashboard"
+        ],
+        "summary": "Aggregated agent dashboard (identity, balances, spend, policies, approvals, recent txs)",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "example": "agt_123"
+            },
+            "required": true,
+            "name": "agentId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregated dashboard for the agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AgentDashboard"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Tenant-level auth or recent MFA required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/trade/token-status": {
+      "get": {
+        "tags": [
+          "trade"
+        ],
+        "summary": "Agent trade-token expiry status",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "example": "agt_123"
+            },
+            "required": false,
+            "name": "agentId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Observed or unknown token status for the agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradeTokenStatus"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "agentId is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/trade/token-status": {
+      "get": {
+        "tags": [
+          "trade"
+        ],
+        "summary": "Agent trade-token expiry status",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "example": "agt_123"
+            },
+            "required": false,
+            "name": "agentId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Observed or unknown token status for the agent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradeTokenStatus"
+                    }
+                  },
+                  "required": [
+                    "ok",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "agentId is required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}

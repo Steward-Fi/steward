@@ -9,9 +9,17 @@ import {
   hyperliquidOrderSchema,
 } from "@stwd/venue-hyperliquid";
 import type { Context } from "hono";
-import { Hono } from "hono";
-import { z } from "zod";
 import { getRedisClient } from "../middleware/redis";
+import {
+  createOpenAPIApp,
+  createRoute,
+  err,
+  errorEnvelope,
+  jsonContent,
+  ok,
+  okEnvelope,
+  z,
+} from "../openapi";
 import { getAgentTokenStatus } from "../services/agent-token-status";
 import { writeAuditEvent } from "../services/audit";
 import {
@@ -23,35 +31,75 @@ import {
   vault,
 } from "../services/context";
 
-export const tradeRoutes = new Hono<{ Variables: AppVariables }>();
+export const tradeRoutes = createOpenAPIApp();
 
-tradeRoutes.get("/token-status", async (c) => {
+// ─── GET /token-status ────────────────────────────────────────────────────────
+// Reference migration: the route is declared once with `createRoute`; the schemas
+// drive both the OpenAPI document and the handler's response typing. agentId is
+// declared optional at the schema level so the handler keeps emitting its exact
+// "agentId is required" 400, byte-for-byte with the pre-migration behaviour.
+
+const tokenStatusData = z
+  .object({
+    agentId: z.string(),
+    status: z.enum(["unknown", "observed"]),
+    exp: z.number().nullable(),
+    observedAt: z.number().nullable(),
+    expiresInSeconds: z.number().nullable(),
+  })
+  .openapi("TradeTokenStatus");
+
+const tokenStatusRoute = createRoute({
+  method: "get",
+  path: "/token-status",
+  // No operationId: tradeRoutes is mounted at both /trade and /v1/trade, so a
+  // static id would collide across the alias (openapi-typescript requires unique
+  // operationIds). Revisit if the versioned alias is split or dropped.
+  tags: ["trade"],
+  summary: "Agent trade-token expiry status",
+  request: {
+    query: z.object({
+      agentId: z
+        .string()
+        .optional()
+        .openapi({ param: { name: "agentId", in: "query" }, example: "agt_123" }),
+    }),
+  },
+  responses: {
+    200: jsonContent(okEnvelope(tokenStatusData), "Observed or unknown token status for the agent"),
+    400: jsonContent(errorEnvelope, "agentId is required"),
+  },
+});
+
+tradeRoutes.openapi(tokenStatusRoute, async (c) => {
   const agentId = c.req.query("agentId")?.trim();
   if (!agentId) {
-    return c.json<ApiResponse>({ ok: false, error: "agentId is required" }, 400);
+    return c.json(err("agentId is required"), 400);
   }
 
   const status = await getAgentTokenStatus(agentId);
   if (!status) {
     return c.json(
-      responseData({
+      ok({
         agentId,
         status: "unknown" as const,
         exp: null,
         observedAt: null,
         expiresInSeconds: null,
       }),
+      200,
     );
   }
 
   return c.json(
-    responseData({
+    ok({
       agentId,
       status: "observed" as const,
       exp: status.exp,
       observedAt: status.observedAt,
       expiresInSeconds: status.exp - Math.floor(Date.now() / 1000),
     }),
+    200,
   );
 });
 

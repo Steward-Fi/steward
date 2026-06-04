@@ -15,7 +15,9 @@
       "!**/build",
       "!**/dist",
       "!**/next-env.d.ts",
-      "!**/*.html"
+      "!**/*.html",
+      "!**/generated",
+      "!**/openapi.json"
     ]
   },
   "assist": {

@@ -26,7 +26,15 @@ export {
 } from "./route-matcher";
 export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
 export { SecretVault } from "./secret-vault";
+export type {
+  ComputeBudgetEstimate,
+  ComputeBudgetOptions,
+} from "./solana";
 export {
+  assertSolanaTransferTransactionMatches,
+  buildComputeBudgetInstructions,
+  COMPUTE_BUDGET_BOUNDS,
+  estimateSolanaComputeBudget,
   generateSolanaKeypair,
   getSolanaBalance,
   restoreSolanaKeypair,

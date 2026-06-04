@@ -6,10 +6,17 @@
 
 import type { AgentDashboardResponse } from "@stwd/shared";
 import { and, desc, eq, gte, sql } from "drizzle-orm";
-import { Hono } from "hono";
 import {
-  type ApiResponse,
-  type AppVariables,
+  createOpenAPIApp,
+  createRoute,
+  err,
+  errorEnvelope,
+  jsonContent,
+  ok,
+  okEnvelope,
+  z,
+} from "../openapi";
+import {
   approvalQueue,
   db,
   ensureAgentForTenant,
@@ -22,7 +29,64 @@ import {
   vault,
 } from "../services/context";
 
-export const dashboardRoutes = new Hono<{ Variables: AppVariables }>();
+export const dashboardRoutes = createOpenAPIApp();
+
+// Top-level dashboard shape is documented precisely; the deeply-nested shared
+// types (PolicyRule, TxRecord) are referenced as opaque arrays rather than
+// hand-mirrored — mirroring them here would duplicate @stwd/shared and create a
+// second source of truth. The authoritative source for those nested shapes
+// remains the shared TS types until @stwd/shared is made zod-first (z.infer).
+const balanceLegSchema = z.object({
+  native: z.string(),
+  nativeFormatted: z.string(),
+  chainId: z.number(),
+  symbol: z.string(),
+});
+
+const dashboardData = z
+  .object({
+    agent: z
+      .object({
+        id: z.string(),
+        tenantId: z.string(),
+        name: z.string(),
+        walletAddress: z.string(),
+      })
+      .openapi("AgentIdentitySummary"),
+    balances: z.object({ evm: balanceLegSchema.optional(), solana: balanceLegSchema.optional() }),
+    spend: z.object({
+      today: z.string(),
+      thisWeek: z.string(),
+      thisMonth: z.string(),
+      todayFormatted: z.string(),
+      thisWeekFormatted: z.string(),
+      thisMonthFormatted: z.string(),
+    }),
+    policies: z.array(z.unknown()),
+    pendingApprovals: z.number(),
+    recentTransactions: z.array(z.unknown()),
+  })
+  .openapi("AgentDashboard");
+
+const dashboardRoute = createRoute({
+  method: "get",
+  // OpenAPI path templating uses {param}; @hono/zod-openapi maps it to Hono's
+  // :param for routing, so GET /dashboard/:agentId still matches at runtime.
+  path: "/{agentId}",
+  tags: ["dashboard"],
+  summary:
+    "Aggregated agent dashboard (identity, balances, spend, policies, approvals, recent txs)",
+  request: {
+    params: z.object({
+      agentId: z.string().openapi({ param: { name: "agentId", in: "path" }, example: "agt_123" }),
+    }),
+  },
+  responses: {
+    200: jsonContent(okEnvelope(dashboardData), "Aggregated dashboard for the agent"),
+    403: jsonContent(errorEnvelope, "Tenant-level auth or recent MFA required"),
+    404: jsonContent(errorEnvelope, "Agent not found"),
+  },
+});
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
   const verifiedAt = c.get("sessionMfaVerifiedAt");
@@ -35,25 +99,22 @@ function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAge
 
 // ─── GET /dashboard/:agentId — aggregated agent dashboard ─────────────────────
 
-dashboardRoutes.get("/:agentId", async (c) => {
+dashboardRoutes.openapi(dashboardRoute, async (c) => {
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
 
   if (!requireTenantLevel(c)) {
-    return c.json<ApiResponse>({ ok: false, error: "Tenant-level auth required" }, 403);
+    return c.json(err("Tenant-level auth required"), 403);
   }
   if (!hasRecentSessionMfa(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Dashboard data requires recent MFA verification" },
-      403,
-    );
+    return c.json(err("Dashboard data requires recent MFA verification"), 403);
   }
   setNoStoreHeaders(c);
 
   // Get agent identity
   const agent = await ensureAgentForTenant(tenantId, agentId);
   if (!agent) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+    return c.json(err("Agent not found"), 404);
   }
 
   // Run queries in parallel
@@ -132,8 +193,5 @@ dashboardRoutes.get("/:agentId", async (c) => {
     recentTransactions: recentTxRows.map(toTxRecord),
   };
 
-  return c.json<ApiResponse<AgentDashboardResponse>>({
-    ok: true,
-    data: dashboard,
-  });
+  return c.json(ok(dashboard), 200);
 });
