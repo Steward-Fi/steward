@@ -366,6 +366,9 @@ jobs:
           STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
           STEWARD_ALLOW_INSECURE_DB: "true"
+          # E2E scripts don't sign request-expiry headers; the feature stays on
+          # in real production and is unit-tested separately.
+          STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS: "true"
           SIWE_ALLOWED_DOMAINS: "steward.fi,localhost"
           PORT: "3200"
           STEWARD_PROXY_PORT: "8080"
