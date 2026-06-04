@@ -967,7 +967,9 @@ policiesStandaloneRoutes.post("/simulate", async (c) => {
 
   try {
     const conditionSets = await loadConditionSetsForPolicies(tenantId, rules);
-    const liveStats = hasAgentSelector ? await getTransactionStats(body.agentId as string) : null;
+    const liveStats = hasAgentSelector
+      ? await getTransactionStats(body.agentId as string, (request as { chainId?: number }).chainId)
+      : null;
     const result = await policyEngine.simulate(rules, {
       request: request as any,
       recentTxCount24h: liveStats?.recentTxCount24h ?? 0,

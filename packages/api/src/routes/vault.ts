@@ -1467,7 +1467,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   }
 
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId);
+    const stats = await getTransactionStats(agentId, signRequest.chainId);
 
     // Authoritative cumulative aggregates (Redis-sourced) for any aggregation
     // policies on this agent. Loaded INSIDE the per-agent spend lock so the
@@ -1897,7 +1897,7 @@ vaultRoutes.post("/:agentId/actions/send-calls", async (c) => {
       );
     }
 
-    const stats = await getTransactionStats(agentId);
+    const stats = await getTransactionStats(agentId, parsed.chainId);
     let runningSpentToday = stats.spentToday;
     let runningSpentThisWeek = stats.spentThisWeek;
     const evaluations = [];
@@ -2257,7 +2257,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       });
     }
 
-    const stats = await getTransactionStats(agentId);
+    const stats = await getTransactionStats(agentId, signRequest.chainId);
     const erc20PrecheckFailure = isTokenTransfer
       ? erc20TransferPolicyPrecheck(policySet, transfer.token)
       : null;
@@ -2838,7 +2838,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         }
       }
       const currentConditionSets = await loadConditionSetsForPolicies(tenantId, currentPolicySet);
-      const stats = await getTransactionStats(agentId);
+      const stats = await getTransactionStats(agentId, approvalSignRequest.chainId);
       const currentEvaluation = await policyEngine.evaluate(currentPolicySet, {
         request: approvalSignRequest,
         recentTxCount1h: stats.recentTxCount1h,
@@ -4222,7 +4222,7 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
   if (rateLimitResult.headers) {
     for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
   }
-  const stats = await getTransactionStats(agentId);
+  const stats = await getTransactionStats(agentId, 0);
   const evaluation = await policyEngine.evaluate(policySet, {
     request: {
       agentId,
@@ -4424,7 +4424,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: rlResult.reason || "Rate limit exceeded" }, 429);
   }
 
-  const stats = await getTransactionStats(agentId);
+  const stats = await getTransactionStats(agentId, signRequest.chainId);
 
   const evaluation = await policyEngine.evaluate(policySet, {
     request: signRequest,
@@ -4726,7 +4726,7 @@ vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
   }
 
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId);
+    const stats = await getTransactionStats(agentId, signRequest.chainId);
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,
       recentTxCount1h: stats.recentTxCount1h,
@@ -5048,7 +5048,7 @@ vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
   }
 
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId);
+    const stats = await getTransactionStats(agentId, signRequest.chainId);
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,
       recentTxCount1h: stats.recentTxCount1h,
@@ -5281,7 +5281,7 @@ async function signSolanaBlind(
   // Same per-agent advisory spend lock as the parsed path: serialize eval+sign+
   // commit so concurrent blind-sign requests cannot race the spend cap.
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId);
+    const stats = await getTransactionStats(agentId, signRequest.chainId);
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,
       recentTxCount1h: stats.recentTxCount1h,
@@ -5687,7 +5687,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   // both sign — overspending the cap. This mirrors the EVM sign/transfer/
   // user-operation/authorization paths, which all wrap eval+sign under the lock.
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId);
+    const stats = await getTransactionStats(agentId, signRequest.chainId);
 
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,

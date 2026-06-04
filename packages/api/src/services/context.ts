@@ -650,7 +650,7 @@ export async function loadAggregationsForPolicies(
   return aggregationLookupFromMap(snapshots);
 }
 
-export async function getTransactionStats(agentId: string) {
+export async function getTransactionStats(agentId: string, chainId?: number) {
   const now = new Date();
   const oneHourAgo = new Date(now.getTime() - 3600_000);
   const oneDayAgo = new Date(now.getTime() - 86400_000);
@@ -658,6 +658,16 @@ export async function getTransactionStats(agentId: string) {
 
   const oneHourAgoStr = oneHourAgo.toISOString();
   const oneDayAgoStr = oneDayAgo.toISOString();
+
+  // Spend caps for native value are denominated in a single chain's base unit
+  // (wei for EVM, lamports/SPL base units for Solana). The `value` column holds
+  // raw per-chain base units, so summing across chains and re-pricing the total
+  // at one chain's native price corrupts the cap (issue #110). When a chainId is
+  // supplied, scope the spend aggregates to that chain so the counters stay in a
+  // single consistent unit. When omitted, the fragment is empty and the result
+  // is byte-for-byte the prior cross-chain sum (used by display-only callers).
+  const chainFilter =
+    chainId === undefined ? sql`` : sql` and ${transactions.chainId} = ${chainId}`;
 
   const [stats] = await db
     .select({
@@ -667,14 +677,14 @@ export async function getTransactionStats(agentId: string) {
         coalesce(
           sum(
             case
-              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz then (${transactions.value})::numeric
+              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz${chainFilter} then (${transactions.value})::numeric
               else 0
             end
           ),
           0
         )::text
       `,
-      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
+      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric) filter (where true${chainFilter}), 0)::text`,
     })
     .from(transactions)
     .where(
