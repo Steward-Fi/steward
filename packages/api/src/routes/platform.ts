@@ -1835,6 +1835,66 @@ platform.get("/tenants/:id/agents", async (c) => {
 });
 
 /**
+ * DELETE /tenants/:id/agents/:agentId
+ *
+ * Permanently deletes a single agent within the specified tenant, cascading to
+ * its wallets, encrypted keys, policies, transactions, and queued approvals.
+ *
+ * Mirrors the tenant-scoped (owner/admin-session-only) DELETE /agents/:agentId
+ * route, but authorized via a scoped platform key (platform:agent:delete) so
+ * platform operators can deprovision agents without a tenant session JWT.
+ */
+platform.delete("/tenants/:id/agents/:agentId", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:agent:delete");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  const agentId = c.req.param("agentId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidAgentId(agentId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid agent id format" }, 400);
+  }
+
+  // Ensure the agent exists and belongs to this tenant before deleting.
+  const [agent] = await db
+    .select({ id: agents.id })
+    .from(agents)
+    .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found in tenant" }, 404);
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "agent.delete.authorized",
+    resourceType: "agent",
+    resourceId: agentId,
+    ...auditCtx(c),
+  });
+
+  // Revoke outstanding agent tokens before tearing down the agent's rows.
+  const issuedBefore = await revocationStore.revokeAgentTokens(agentId);
+  await deletePlatformCreatedAgent(agentId, tenantId);
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "agent.delete",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
+    ...auditCtx(c),
+  });
+
+  return c.json<ApiResponse<{ deleted: string }>>({ ok: true, data: { deleted: agentId } });
+});
+
+/**
  * POST /tenants/:id/agents/:agentId/token
  * Body: { expiresIn?: string, scopes?: string[] | string }
  *
