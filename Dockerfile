@@ -42,6 +42,7 @@ RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web
 # Package manifests for every workspace package. ALL package.json files declared
 # by the `workspaces` glob in the root package.json must be present, or
 # --frozen-lockfile rejects the install (CC8.1 supply-chain integrity).
+COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
@@ -71,6 +72,7 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 
 # Copy package.json files for workspace resolution — every workspace declared
 # in the root package.json must be present for --frozen-lockfile to succeed.
+COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
@@ -98,6 +100,7 @@ RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web
 RUN BUN_FROZEN_LOCKFILE=0 bun install --no-frozen-lockfile --ignore-scripts
 
 # Copy full source for all packages needed by api + proxy
+COPY packages/adapters    packages/adapters
 COPY packages/api         packages/api
 COPY packages/auth        packages/auth
 COPY packages/db          packages/db
@@ -113,6 +116,7 @@ COPY packages/webhooks    packages/webhooks
 
 # Create workspace symlinks (Bun 1.3 doesn't auto-link in Docker)
 RUN mkdir -p node_modules/@stwd && \
+    ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
     ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
     ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
     ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
@@ -142,6 +146,7 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 # Create stub for excluded workspaces
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
+COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
@@ -166,6 +171,7 @@ COPY --from=deps /app/bun.lock ./bun.lock
 RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile --ignore-scripts
 
 # Copy compiled output from build stage
+COPY --from=build /app/packages/adapters    packages/adapters
 COPY --from=build /app/packages/api         packages/api
 COPY --from=build /app/packages/auth        packages/auth
 COPY --from=build /app/packages/db          packages/db
@@ -181,6 +187,7 @@ COPY --from=build /app/packages/webhooks    packages/webhooks
 
 # Create workspace symlinks manually — bun 1.3 doesn't auto-link workspace packages
 RUN mkdir -p node_modules/@stwd && \
+    ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
     ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
     ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
     ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
