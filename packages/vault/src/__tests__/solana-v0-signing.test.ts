@@ -25,11 +25,19 @@ import {
 const RECENT_BLOCKHASH = new PublicKey(new Uint8Array(32).fill(7)).toBase58();
 
 function v0TransferBytes(from: Keypair, to: PublicKey, lamports: number): Uint8Array {
-  const ix = SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports });
+  return v0TransferSetBytes(from, [{ to, lamports }]);
+}
+
+function v0TransferSetBytes(
+  from: Keypair,
+  transfers: Array<{ to: PublicKey; lamports: number }>,
+): Uint8Array {
   const msg = new TransactionMessage({
     payerKey: from.publicKey,
     recentBlockhash: RECENT_BLOCKHASH,
-    instructions: [ix],
+    instructions: transfers.map(({ to, lamports }) =>
+      SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports }),
+    ),
   }).compileToV0Message();
   return new VersionedTransaction(msg).serialize();
 }
@@ -63,17 +71,43 @@ describe("v0 (versioned) Solana signing", () => {
     ).not.toThrow();
   });
 
-  test("assertParsedSolanaTransferMatches rejects a mismatched recipient or amount (v0)", () => {
+  test("assertParsedSolanaTransferMatches rejects a mismatched source, recipient, or amount (v0)", () => {
     const from = Keypair.generate();
     const to = Keypair.generate().publicKey;
     const attacker = Keypair.generate().publicKey;
     const b64 = toBase64(v0TransferBytes(from, to, 5000));
+    expect(() =>
+      assertParsedSolanaTransferMatches(b64, {
+        from: attacker.toBase58(),
+        to: to.toBase58(),
+        lamports: 5000n,
+      }),
+    ).toThrow(/source does not match/i);
     expect(() =>
       assertParsedSolanaTransferMatches(b64, { to: attacker.toBase58(), lamports: 5000n }),
     ).toThrow(/does not match/i);
     expect(() =>
       assertParsedSolanaTransferMatches(b64, { to: to.toBase58(), lamports: 9999n }),
     ).toThrow(/does not match/i);
+  });
+
+  test("assertParsedSolanaTransferMatches rejects v0 transactions with extra recipients", () => {
+    const from = Keypair.generate();
+    const approved = Keypair.generate().publicKey;
+    const attacker = Keypair.generate().publicKey;
+    const b64 = toBase64(
+      v0TransferSetBytes(from, [
+        { to: approved, lamports: 1 },
+        { to: attacker, lamports: 99 },
+      ]),
+    );
+    expect(() =>
+      assertParsedSolanaTransferMatches(b64, {
+        from: from.publicKey.toBase58(),
+        to: approved.toBase58(),
+        lamports: 100n,
+      }),
+    ).toThrow(/single policy-checked transfer/i);
   });
 
   test("the envelope helper also verifies legacy transfers", () => {

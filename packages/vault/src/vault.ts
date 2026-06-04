@@ -1759,12 +1759,16 @@ export class Vault {
     } = await import("@solana/web3.js");
     const txBytes = Uint8Array.from(atob(request.transaction), (c) => c.charCodeAt(0));
 
-    const requireEnvelope = (): { to: string; lamports: bigint } | null => {
+    const requireEnvelope = (): { from: string; to: string; lamports: bigint } | null => {
       if (request.expectedTo === undefined && request.expectedValue === undefined) return null;
       if (request.expectedTo === undefined || request.expectedValue === undefined) {
         throw new Error("Solana transaction policy envelope requires expectedTo and expectedValue");
       }
-      return { to: request.expectedTo, lamports: BigInt(request.expectedValue) };
+      return {
+        from: keypair.publicKey.toBase58(),
+        to: request.expectedTo,
+        lamports: BigInt(request.expectedValue),
+      };
     };
 
     let signedBytes: Uint8Array;

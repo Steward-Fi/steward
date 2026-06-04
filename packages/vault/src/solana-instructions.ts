@@ -887,7 +887,7 @@ export function detectSolanaPolicyConflicts(
  */
 export function assertParsedSolanaTransferMatches(
   serialized: string,
-  expected: { to: string; lamports: bigint },
+  expected: { from?: string; to: string; lamports: bigint },
 ): void {
   if (expected.lamports < 0n) {
     throw new Error("expected Solana transfer lamports must be non-negative");
@@ -898,13 +898,22 @@ export function assertParsedSolanaTransferMatches(
       "Solana transaction is not fully parseable; cannot verify it against the policy envelope",
     );
   }
-  const derived = deriveSolanaPolicyFields(summary);
-  const conflicts = detectSolanaPolicyConflicts(derived, {
-    to: expected.to,
-    value: expected.lamports.toString(),
-  });
-  if (conflicts.length > 0) {
-    throw new Error(`Solana transfer does not match the policy envelope: ${conflicts.join("; ")}`);
+  if (summary.instructions.length !== 1) {
+    throw new Error("Solana signing only supports a single policy-checked transfer instruction");
+  }
+
+  const [instruction] = summary.instructions;
+  if (instruction.instructionType !== "system:Transfer") {
+    throw new Error("Solana transaction instruction must be a SystemProgram transfer");
+  }
+  if (expected.from && instruction.fields.from !== expected.from) {
+    throw new Error("Solana transfer source does not match the vault wallet");
+  }
+  if (instruction.fields.to !== expected.to) {
+    throw new Error("Solana transfer recipient does not match the policy envelope");
+  }
+  if (BigInt(String(instruction.fields.lamports ?? "0")) !== expected.lamports) {
+    throw new Error("Solana transfer amount does not match the policy envelope");
   }
 }
 
