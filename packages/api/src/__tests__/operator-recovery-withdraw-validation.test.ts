@@ -59,6 +59,7 @@ beforeAll(async () => {
   process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
   process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
+  process.env.STEWARD_AUDIT_HMAC_KEY ??= "test-audit-hmac-key-operator-withdraw-validation";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
