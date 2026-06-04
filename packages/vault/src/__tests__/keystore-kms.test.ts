@@ -174,12 +174,24 @@ describe("KMS envelope keystore", () => {
       .from(encryptedKeys)
       .where(eq(encryptedKeys.agentId, "fallback-agent"));
 
-    const decrypted = new KeyStore(MASTER_PASSWORD).decrypt({
-      ciphertext: row.ciphertext,
-      iv: row.iv,
-      tag: row.tag,
-      salt: row.salt,
-    });
+    // The vault binds each ciphertext to its (tenant, agent, chainFamily, venue)
+    // via AES-GCM AAD. The legacy encrypted_keys row holds the EVM key, so we
+    // must supply the same context the vault encrypted with — exactly as the
+    // real read path does — to authenticate and decrypt it.
+    const decrypted = new KeyStore(MASTER_PASSWORD).decrypt(
+      {
+        ciphertext: row.ciphertext,
+        iv: row.iv,
+        tag: row.tag,
+        salt: row.salt,
+      },
+      {
+        tenantId: TENANT_ID,
+        agentId: "fallback-agent",
+        chainFamily: "evm",
+        venue: null,
+      },
+    );
 
     expect(decrypted.startsWith("0x")).toBe(true);
   });

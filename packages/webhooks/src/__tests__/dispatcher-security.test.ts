@@ -69,16 +69,42 @@ function hmac(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload).digest("hex");
 }
 
+// v2 signature scheme: HMAC over length-prefixed timestamp + deliveryId + event
+// type + body, with a `v2=` prefix on the header value.
+function canonicalSignedPayload(
+  timestamp: string,
+  deliveryId: string,
+  eventType: string,
+  body: string,
+): string {
+  return `v2:${timestamp}.${deliveryId.length}:${deliveryId}.${eventType.length}:${eventType}.${body}`;
+}
+
+function expectedSignature(request: CapturedRequest, secret: string): string {
+  const timestamp = String(request.headers["x-steward-timestamp"]);
+  const deliveryId = String(request.headers["x-steward-delivery-id"]);
+  const eventType = String(request.headers["x-steward-event"]);
+  return `v2=${hmac(
+    canonicalSignedPayload(timestamp, deliveryId, eventType, request.bodyText),
+    secret,
+  )}`;
+}
+
 describe("WebhookDispatcher HMAC signing", () => {
   it("sends an HMAC-SHA256 signature that verifies against the exact request body", async () => {
     const server = await withWebhookServer((request) => {
       const signature = String(request.headers["x-steward-signature"]);
-      const expected = hmac(request.bodyText, SECRET);
+      const expected = expectedSignature(request, SECRET);
       return { status: signature === expected ? 200 : 401 };
     });
 
     try {
-      const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1_000 });
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
       const result = await dispatcher.dispatch(makeEvent(), { url: server.url, secret: SECRET });
 
       expect(result.success).toBe(true);
@@ -93,14 +119,23 @@ describe("WebhookDispatcher HMAC signing", () => {
   it("proves the signature rejects a tampered payload and a wrong secret", async () => {
     const server = await withWebhookServer((request) => {
       const signature = String(request.headers["x-steward-signature"]);
+      const timestamp = String(request.headers["x-steward-timestamp"]);
+      const deliveryId = String(request.headers["x-steward-delivery-id"]);
       const tamperedBody = request.bodyText.replace("0xabc", "0xdef");
-      expect(signature).not.toBe(hmac(tamperedBody, SECRET));
-      expect(signature).not.toBe(hmac(request.bodyText, "wrong-secret"));
-      return { status: signature === hmac(request.bodyText, SECRET) ? 200 : 401 };
+      expect(signature).not.toBe(
+        `v2=${hmac(canonicalSignedPayload(timestamp, deliveryId, "tx_signed", tamperedBody), SECRET)}`,
+      );
+      expect(signature).not.toBe(expectedSignature(request, "wrong-secret"));
+      return { status: signature === expectedSignature(request, SECRET) ? 200 : 401 };
     });
 
     try {
-      const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1_000 });
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
       const result = await dispatcher.dispatch(makeEvent(), { url: server.url, secret: SECRET });
 
       expect(result.success).toBe(true);
@@ -118,6 +153,8 @@ describe("WebhookDispatcher HMAC signing", () => {
         maxRetries: 3,
         retryDelayMs: 5,
         timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
       });
       const result = await dispatcher.dispatch(makeEvent(), { url: server.url, secret: SECRET });
 
@@ -139,6 +176,8 @@ describe("WebhookDispatcher HMAC signing", () => {
         maxRetries: 3,
         retryDelayMs: 10,
         timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
       });
       const started = Date.now();
       const result = await dispatcher.dispatch(makeEvent(), { url: server.url, secret: SECRET });
@@ -176,7 +215,12 @@ describe("RetryQueue delivery invariants", () => {
     const server = await withWebhookServer(() => ({ status: 200 }));
 
     try {
-      const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1_000 });
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
       const queue = new RetryQueue(dispatcher, { maxRetries: 2, retryDelayMs: 1 });
       queue.enqueue(makeEvent(), { url: server.url, secret: SECRET });
 
@@ -193,7 +237,12 @@ describe("RetryQueue delivery invariants", () => {
     const server = await withWebhookServer(() => ({ status: 500, body: "down" }));
 
     try {
-      const dispatcher = new WebhookDispatcher({ maxRetries: 0, timeoutMs: 1_000 });
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
       const queue = new RetryQueue(dispatcher, { maxRetries: 2, retryDelayMs: 1 });
       queue.enqueue(makeEvent(), { url: server.url, secret: SECRET });
 

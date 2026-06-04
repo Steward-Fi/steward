@@ -100,6 +100,23 @@ function rawIx(programId: PublicKey, keys: PublicKey[], data: Uint8Array): Trans
   } as unknown as TransactionInstruction;
 }
 
+// Local base58 (Bitcoin alphabet) encoder so the test doesn't depend on the
+// `bs58` package, which is not a declared dependency of @stwd/vault. Mirrors the
+// decoder the parser ships in solana-instructions.ts.
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function encodeBase58(bytes: Uint8Array): string {
+  let leadingZeros = 0;
+  while (leadingZeros < bytes.length && bytes[leadingZeros] === 0) leadingZeros++;
+  let num = 0n;
+  for (const b of bytes) num = num * 256n + BigInt(b);
+  let out = "";
+  while (num > 0n) {
+    out = BASE58_ALPHABET[Number(num % 58n)] + out;
+    num /= 58n;
+  }
+  return "1".repeat(leadingZeros) + out;
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("parseSolanaTransaction — System transfer (legacy)", () => {
@@ -136,8 +153,7 @@ describe("parseSolanaTransaction — System transfer (legacy)", () => {
       SystemProgram.transfer({ fromPubkey: from, toPubkey: to, lamports: 42 }),
     );
     const bytes = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
-    const bs58 = require("bs58");
-    const base58Payload = bs58.default ? bs58.default.encode(bytes) : bs58.encode(bytes);
+    const base58Payload = encodeBase58(bytes);
 
     const summary = parseSolanaTransaction(base58Payload);
     expect(summary.fullyParsed).toBe(true);
