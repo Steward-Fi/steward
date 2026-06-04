@@ -105,7 +105,8 @@ chmod 600 /opt/steward/.env"
 | `STEWARD_JWT_SECRET` | JWT signing secret (separate from master password!) | Yes |
 | `STEWARD_PLATFORM_KEYS` | Platform admin API key for tenant management | Yes |
 | `STEWARD_BIND_HOST` | Must be `0.0.0.0` for Docker containers to reach it | Yes |
-| `REDIS_URL` | Redis connection string for rate limiting + spend tracking | No |
+| `REDIS_URL` | Redis connection string for rate limiting + spend tracking | Yes (production) |
+| `STEWARD_PROXY_REQUEST_SIGNING_SECRETS` | Shared secret(s) the proxy uses to verify every request signature | Yes (production) |
 | `RPC_URL` | EVM RPC endpoint (default: Base mainnet) | No |
 
 ### Step 4: Create systemd services
@@ -546,9 +547,9 @@ curl -H "Authorization: Bearer $TOKEN" localhost:8080/openai/v1/models
 
 ---
 
-## Redis Setup (Optional)
+## Redis Setup (required in production)
 
-Redis enables persistent rate limiting and spend tracking that survives API restarts. Without Redis, rate limits and spend counters are in-memory only (reset on restart).
+Redis enables persistent rate limiting and spend tracking that survives API restarts. The Docker Compose deploy ships a `redis` service and sets `REDIS_URL` on `steward-proxy`; **in production the proxy fails closed without Redis** (see below). Redis is only optional in non-production or when `STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL=true` is set, in which case rate-limit/spend counters are in-memory only and reset on restart.
 
 ### Install Redis on a node
 
@@ -582,7 +583,7 @@ Redis is used for:
 - **Spend tracking** — daily/weekly spend totals survive restarts
 - **Webhook delivery queue** — retries are queued in Redis
 
-Without Redis, these features still work using in-memory fallbacks, but counters reset on restart.
+In **production** (`NODE_ENV=production`) the proxy treats Redis as **required** and fails **closed** without it: `checkProxyRateLimit`/`checkProxySpendLimit` reject requests (429/402/503) unless you explicitly set `STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL=true`. The compose deploy therefore ships a `redis` service and sets `REDIS_URL`. Only in non-production (or with the soft-fail override) do rate-limit/spend counters fall back to in-memory and reset on restart.
 
 ---
 
