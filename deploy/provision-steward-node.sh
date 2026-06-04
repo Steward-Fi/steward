@@ -59,6 +59,7 @@ rsync -az --delete \
   --exclude='.next' \
   --exclude='web' \
   --exclude='.turbo' \
+  --exclude='deploy/.env' \
   -e "ssh ${SSH_OPTS}" \
   "${REPO_ROOT}/" "root@${NODE_IP}:${REMOTE_DIR}/"
 echo "  ✓ Source synced"
@@ -66,14 +67,48 @@ echo "  ✓ Source synced"
 # ── Step 3: Write .env file on node ─────────────────────────────────────────
 echo ""
 echo "▸ Step 3: Writing environment config..."
-${SSH_CMD} "cat > ${REMOTE_DIR}/deploy/.env << 'ENVEOF'
+
+# Read the existing remote .env (if any) so re-runs are idempotent and do NOT
+# rotate generated secrets (rotating STEWARD_KDF_SALT/STEWARD_JWT_SECRET would
+# brick an existing vault / invalidate sessions).
+EXISTING_ENV="$(${SSH_CMD} "cat ${REMOTE_DIR}/deploy/.env 2>/dev/null || true")"
+
+# env_get <KEY>: echo the value of KEY from the existing remote .env, else empty.
+env_get() {
+  printf '%s\n' "${EXISTING_ENV}" | sed -n "s/^$1=//p" | head -n1
+}
+
+# Reuse already-generated secrets if present, otherwise generate fresh ones.
+STEWARD_JWT_SECRET="${STEWARD_JWT_SECRET:-$(env_get STEWARD_JWT_SECRET)}"
+[[ -n "${STEWARD_JWT_SECRET}" ]] || STEWARD_JWT_SECRET="$(openssl rand -hex 32)"
+STEWARD_KDF_SALT="${STEWARD_KDF_SALT:-$(env_get STEWARD_KDF_SALT)}"
+[[ -n "${STEWARD_KDF_SALT}" ]] || STEWARD_KDF_SALT="$(openssl rand -hex 32)"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-$(env_get POSTGRES_PASSWORD)}"
+[[ -n "${POSTGRES_PASSWORD}" ]] || POSTGRES_PASSWORD="$(openssl rand -hex 32)"
+STEWARD_PROXY_REQUEST_SIGNING_SECRETS="${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:-$(env_get STEWARD_PROXY_REQUEST_SIGNING_SECRETS)}"
+[[ -n "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}" ]] || STEWARD_PROXY_REQUEST_SIGNING_SECRETS="$(openssl rand -hex 32)"
+PLATFORM_KEY="${STEWARD_PLATFORM_KEY:-$(env_get STEWARD_PLATFORM_KEY)}"
+[[ -n "${PLATFORM_KEY}" ]] || PLATFORM_KEY="$(openssl rand -hex 32)"
+
+# Render the .env LOCALLY into a mode-0600 temp file, then stream it to the node
+# over ssh stdin. Secrets never appear on any command line (local or remote).
+LOCAL_ENV_FILE="$(umask 077 && mktemp)"
+trap 'rm -f "${LOCAL_ENV_FILE}"' EXIT
+cat > "${LOCAL_ENV_FILE}" << ENVEOF
 STEWARD_MASTER_PASSWORD=${STEWARD_MASTER_PASSWORD}
+STEWARD_JWT_SECRET=${STEWARD_JWT_SECRET}
+STEWARD_KDF_SALT=${STEWARD_KDF_SALT}
+STEWARD_PLATFORM_KEY=${PLATFORM_KEY}
+STEWARD_PROXY_REQUEST_SIGNING_SECRETS=${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 DATABASE_URL=${DATABASE_URL:-}
+REDIS_URL=${REDIS_URL:-redis://redis:6379}
 RPC_URL=${RPC_URL:-https://mainnet.base.org}
 CHAIN_ID=${CHAIN_ID:-8453}
 SOLANA_RPC_URL=${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
 ENVEOF
-chmod 600 ${REMOTE_DIR}/deploy/.env"
+
+${SSH_CMD} "umask 077; cat > ${REMOTE_DIR}/deploy/.env" < "${LOCAL_ENV_FILE}"
 echo "  ✓ Environment configured"
 
 # ── Step 4: Build and start services ────────────────────────────────────────
@@ -107,22 +142,14 @@ done
 echo ""
 echo "▸ Step 7: Creating milady-cloud tenant..."
 
-# Read the platform key from the running container
-PLATFORM_KEY=$(${SSH_CMD} "docker exec steward printenv STEWARD_PLATFORM_KEY 2>/dev/null || echo ''")
-
-if [[ -z "${PLATFORM_KEY}" ]]; then
-  echo "  ⚠  No STEWARD_PLATFORM_KEY set — generating one..."
-  PLATFORM_KEY=$(openssl rand -hex 32)
-  # Update .env and restart
-  ${SSH_CMD} "echo 'STEWARD_PLATFORM_KEY=${PLATFORM_KEY}' >> ${REMOTE_DIR}/deploy/.env"
-  ${SSH_CMD} "cd ${REMOTE_DIR} && docker compose -f deploy/docker-compose.yml up -d steward"
-  sleep 5
-fi
-
-# Create tenant (ignore 409 conflict = already exists)
-TENANT_RESP=$(${SSH_CMD} "curl -sf -X POST http://localhost:3200/platform/tenants \
+# The platform key was written to deploy/.env in Step 3 and picked up by the
+# container at boot. Create the tenant by reading the key on the REMOTE side
+# (PK=$(...)) so the secret is never placed on the local->remote command line
+# nor printed to this script's stdout / CI logs.
+TENANT_RESP=$(${SSH_CMD} "set -e; PK=\$(sed -n 's/^STEWARD_PLATFORM_KEY=//p' ${REMOTE_DIR}/deploy/.env | head -n1); \
+curl -sf -X POST http://localhost:3200/platform/tenants \
   -H 'Content-Type: application/json' \
-  -H 'X-Steward-Platform-Key: ${PLATFORM_KEY}' \
+  -H \"X-Steward-Platform-Key: \${PK}\" \
   -d '{\"id\": \"milady-cloud\", \"name\": \"Milady Cloud\"}'" 2>&1 || true)
 
 if echo "${TENANT_RESP}" | grep -q '"ok":true'; then
@@ -140,7 +167,7 @@ echo "  ✅ Steward deployed successfully!"
 echo ""
 echo "  Steward URL:    http://${NODE_IP}:3200"
 echo "  Health check:   http://${NODE_IP}:3200/health"
-echo "  Platform Key:   ${PLATFORM_KEY}"
+echo "  Platform Key:   (written to ${REMOTE_DIR}/deploy/.env, mode 0600, on the node — retrieve it there; not printed here)"
 echo ""
 echo "  Agent config (add to container env):"
 echo "    STEWARD_API_URL=http://steward:3200"

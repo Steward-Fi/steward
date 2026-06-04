@@ -59,11 +59,19 @@ services:
       STEWARD_PROXY_PORT: "8080"
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@steward-db:5432/steward}"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?Set STEWARD_MASTER_PASSWORD in .env}"
-      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:-}"
+      # JWT secret is required in production (auth verifyToken refuses dev fallback).
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?Set STEWARD_JWT_SECRET in .env}"
+      # NODE_ENV=production makes request signing + Redis enforcement fail CLOSED,
+      # so both REDIS_URL and a request-signing secret are REQUIRED here. Without
+      # them the proxy returns 500/429 on 100% of traffic. See deploy/DEPLOYMENT.md.
+      REDIS_URL: "${REDIS_URL:-redis://redis:6379}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?Set STEWARD_PROXY_REQUEST_SIGNING_SECRETS in .env (proxy signs/verifies every request in production)}"
       NODE_ENV: production
     command: ["bun", "run", "packages/proxy/src/index.ts"]
     depends_on:
       steward:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:8080/health');process.exit(r.ok?0:1)"]
@@ -71,6 +79,22 @@ services:
       timeout: 5s
       start_period: 10s
       retries: 3
+
+  # ── Redis (rate-limit + spend enforcement) ───────────────────────────────────
+  # Required by steward-proxy in production: with NODE_ENV=production and no
+  # STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL=true, the proxy fails CLOSED without Redis.
+  redis:
+    image: redis:7-alpine
+    container_name: steward-redis
+    restart: unless-stopped
+    networks:
+      - milady-isolated
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ── PostgreSQL (managed) ─────────────────────────────────────────────────────
   steward-db:
