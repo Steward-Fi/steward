@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 
 import { createPGLiteDb } from "../pglite";
-import { agents, encryptedKeys, policies, tenants, transactions } from "../schema";
+import { agents, encryptedKeys, policies, policyTypeEnum, tenants, transactions } from "../schema";
 
 setDefaultTimeout(120000);
 
@@ -32,6 +32,17 @@ function readCountRow(rows: unknown[]): number {
   }
 
   return Number(firstRow.cnt);
+}
+
+function readStringRows(rows: unknown[], key: string): string[] {
+  return rows
+    .map((row) => {
+      if (!row || typeof row !== "object" || !(key in row)) {
+        throw new Error(`Expected ${key} row`);
+      }
+      return String(row[key as keyof typeof row]);
+    })
+    .sort();
 }
 
 describe("PGLite Adapter", () => {
@@ -94,6 +105,162 @@ describe("PGLite Adapter", () => {
     );
 
     expect(result.rows.map((row) => row.table_name).sort()).toEqual(expectedTables.sort());
+
+    await client.close();
+  });
+
+  test("migrations match Drizzle schema for Privy-parity auth and app tables", async () => {
+    const { client } = await freshDb();
+
+    const tableResult = await client.query<{ table_name: string }>(
+      `SELECT table_name
+       FROM information_schema.tables
+       WHERE table_schema = 'public'
+         AND table_name IN (
+           'tenant_app_clients',
+           'tenant_app_client_secrets',
+           'tenant_request_signing_keys',
+           'tenant_invitations',
+           'user_push_subscriptions',
+           'user_wallet_app_consents',
+           'global_wallet_action_confirmations'
+         )
+       ORDER BY table_name`,
+    );
+    expect(readStringRows(tableResult.rows, "table_name")).toEqual([
+      "global_wallet_action_confirmations",
+      "tenant_app_client_secrets",
+      "tenant_app_clients",
+      "tenant_invitations",
+      "tenant_request_signing_keys",
+      "user_push_subscriptions",
+      "user_wallet_app_consents",
+    ]);
+
+    const columnResult = await client.query<{ table_name: string; column_name: string }>(
+      `SELECT table_name, column_name
+       FROM information_schema.columns
+       WHERE table_schema = 'public'
+         AND (
+           (table_name = 'tenant_app_clients' AND column_name IN (
+             'id', 'tenant_id', 'allowed_origins', 'allowed_redirect_urls',
+             'login_methods', 'global_wallet_enabled', 'global_wallet_allowed_scopes'
+           ))
+           OR (table_name = 'tenant_app_client_secrets' AND column_name IN (
+             'tenant_id', 'client_id', 'secret_hash', 'secret_prefix', 'status',
+             'expires_at', 'revoked_at'
+           ))
+           OR (table_name = 'tenant_request_signing_keys' AND column_name IN (
+             'tenant_id', 'name', 'secret_ciphertext', 'secret_iv', 'secret_auth_tag',
+             'secret_salt', 'secret_prefix', 'status', 'expires_at', 'revoked_at'
+           ))
+           OR (table_name = 'tenant_invitations' AND column_name IN (
+             'tenant_id', 'email', 'role', 'token_hash', 'status', 'invited_by_user_id',
+             'accepted_by_user_id', 'accepted_at', 'revoked_at', 'expires_at'
+           ))
+           OR (table_name = 'users' AND column_name IN ('is_guest', 'guest_expires_at'))
+           OR (table_name = 'user_push_subscriptions' AND column_name IN (
+             'user_id', 'tenant_id', 'provider', 'token', 'platform', 'device_id',
+             'app_id', 'locale', 'timezone', 'metadata', 'status', 'last_seen_at',
+             'revoked_at'
+           ))
+           OR (table_name = 'user_wallet_app_consents' AND column_name IN (
+             'tenant_id', 'client_id', 'user_id', 'wallet_agent_id', 'wallet_address',
+             'origin', 'redirect_uri', 'scopes', 'status', 'granted_at', 'last_used_at',
+             'expires_at', 'revoked_at'
+           ))
+           OR (table_name = 'global_wallet_action_confirmations' AND column_name IN (
+             'consent_id', 'tenant_id', 'client_id', 'user_id', 'origin', 'method',
+             'request_hash', 'status', 'expires_at', 'approved_at', 'consumed_at'
+           ))
+         )
+       ORDER BY table_name, column_name`,
+    );
+    const columns = new Set(columnResult.rows.map((row) => `${row.table_name}.${row.column_name}`));
+    for (const expected of [
+      "tenant_app_clients.global_wallet_enabled",
+      "tenant_app_clients.global_wallet_allowed_scopes",
+      "tenant_app_client_secrets.secret_hash",
+      "tenant_request_signing_keys.secret_ciphertext",
+      "tenant_invitations.accepted_by_user_id",
+      "users.is_guest",
+      "users.guest_expires_at",
+      "user_push_subscriptions.revoked_at",
+      "user_wallet_app_consents.scopes",
+      "global_wallet_action_confirmations.request_hash",
+    ]) {
+      expect(columns.has(expected)).toBe(true);
+    }
+
+    const constraintResult = await client.query<{ conname: string }>(
+      `SELECT conname
+       FROM pg_constraint
+       WHERE conname IN (
+         'tenant_app_client_secrets_client_fk',
+         'user_wallet_app_consents_app_client_fk',
+         'tenant_invitations_status_check',
+         'tenant_invitations_role_check',
+         'tenant_invitations_terminal_state_check',
+         'user_push_subscriptions_provider_check',
+         'user_push_subscriptions_platform_check',
+         'user_push_subscriptions_status_check',
+         'user_push_subscriptions_revoked_state_check'
+       )
+       ORDER BY conname`,
+    );
+    expect(readStringRows(constraintResult.rows, "conname")).toEqual([
+      "tenant_app_client_secrets_client_fk",
+      "tenant_invitations_role_check",
+      "tenant_invitations_status_check",
+      "tenant_invitations_terminal_state_check",
+      "user_push_subscriptions_platform_check",
+      "user_push_subscriptions_provider_check",
+      "user_push_subscriptions_revoked_state_check",
+      "user_push_subscriptions_status_check",
+      "user_wallet_app_consents_app_client_fk",
+    ]);
+
+    const indexResult = await client.query<{ indexname: string }>(
+      `SELECT indexname
+       FROM pg_indexes
+       WHERE schemaname = 'public'
+         AND indexname IN (
+           'tenant_app_clients_tenant_id_id_idx',
+           'tenant_app_client_secrets_tenant_client_idx',
+           'tenant_request_signing_keys_tenant_status_idx',
+           'tenant_invitations_pending_email_idx',
+           'users_guest_expires_at_idx',
+           'user_push_subscriptions_active_token_idx',
+           'user_wallet_app_consents_active_unique_idx',
+           'global_wallet_action_confirmations_user_status_idx'
+         )
+       ORDER BY indexname`,
+    );
+    expect(readStringRows(indexResult.rows, "indexname")).toEqual([
+      "global_wallet_action_confirmations_user_status_idx",
+      "tenant_app_client_secrets_tenant_client_idx",
+      "tenant_app_clients_tenant_id_id_idx",
+      "tenant_invitations_pending_email_idx",
+      "tenant_request_signing_keys_tenant_status_idx",
+      "user_push_subscriptions_active_token_idx",
+      "user_wallet_app_consents_active_unique_idx",
+      "users_guest_expires_at_idx",
+    ]);
+
+    await client.close();
+  });
+
+  test("migrations include all policy enum values modeled by Drizzle schema", async () => {
+    const { client } = await freshDb();
+
+    const result = await client.query<{ enumlabel: string }>(
+      `SELECT enumlabel
+       FROM pg_enum
+       WHERE enumtypid = 'policy_type'::regtype
+       ORDER BY enumlabel`,
+    );
+
+    expect(readStringRows(result.rows, "enumlabel")).toEqual([...policyTypeEnum.enumValues].sort());
 
     await client.close();
   });

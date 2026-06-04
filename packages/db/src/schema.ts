@@ -4,7 +4,6 @@ import type {
   PolicyResult,
   PolicyTemplate,
   SecretRoutePreset,
-  TenantAppClient,
   TenantAuthAbuseConfig,
   TenantFeatureFlags,
   TenantGasSponsorshipConfig,
@@ -180,7 +179,7 @@ export const tenantAppClients = pgTable(
     isDefault: boolean("is_default").notNull().default(false),
     allowedOrigins: text("allowed_origins").array().notNull().default([]),
     allowedRedirectUrls: text("allowed_redirect_urls").array().notNull().default([]),
-    loginMethods: jsonb("login_methods").$type<TenantAppClient["loginMethods"]>(),
+    loginMethods: jsonb("login_methods").$type<TenantAuthAbuseConfig["loginMethods"]>(),
     globalWalletEnabled: boolean("global_wallet_enabled").notNull().default(false),
     globalWalletAllowedScopes: text("global_wallet_allowed_scopes")
       .array()

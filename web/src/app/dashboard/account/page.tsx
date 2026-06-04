@@ -8,6 +8,7 @@ import type {
   UserAccountSummary,
   UserAccountsResult,
   UserLinkedAccount,
+  UserWalletRecoveryRestoreResult,
   UserWalletRecoverySetupResult,
 } from "@stwd/sdk";
 import { motion } from "framer-motion";
@@ -441,8 +442,11 @@ export default function DashboardAccountPage() {
   const [recoverySecret, setRecoverySecret] = useState<RecoverySecret | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState<string | null>(null);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [totpCode, setTotpCode] = useState("");
   const [recoverySetupConfirmed, setRecoverySetupConfirmed] = useState(false);
+  const [recoveryRestoreMnemonic, setRecoveryRestoreMnemonic] = useState("");
+  const [recoveryRestoreConfirmed, setRecoveryRestoreConfirmed] = useState(false);
   const [pregeneratedForm, setPregeneratedForm] = useState<PregeneratedBatchForm>({
     count: "3",
     namePrefix: "Pregenerated user wallet",
@@ -676,6 +680,7 @@ export default function DashboardAccountPage() {
     try {
       setRecoveryBusy("wallet");
       setRecoveryMessage(null);
+      setRecoveryNotice(null);
       const result: UserWalletRecoverySetupResult = await steward.setupUserWalletRecovery();
       setRecoverySecret({
         kind: "wallet",
@@ -693,10 +698,35 @@ export default function DashboardAccountPage() {
     }
   }
 
+  async function restoreWalletRecovery() {
+    try {
+      setRecoveryBusy("restore");
+      setRecoveryMessage(null);
+      setRecoveryNotice(null);
+      const result: UserWalletRecoveryRestoreResult = await steward.restoreUserWalletRecovery({
+        mnemonic: recoveryRestoreMnemonic,
+      });
+      setRecoveryRestoreMnemonic("");
+      setRecoveryRestoreConfirmed(false);
+      setRecoveryNotice(
+        result.wallet.restoredExisting
+          ? "Wallet recovery phrase verified and existing wallet restored"
+          : "Wallet recovery phrase verified and wallet restored",
+      );
+      await loadAccount();
+      await loadRecoveryControls(state.summary?.userId ?? null);
+    } catch (err) {
+      setRecoveryMessage(err instanceof Error ? err.message : "Wallet recovery restore failed");
+    } finally {
+      setRecoveryBusy(null);
+    }
+  }
+
   async function regenerateRecoveryCodes() {
     try {
       setRecoveryBusy("mfa");
       setRecoveryMessage(null);
+      setRecoveryNotice(null);
       const result = await regenerateStewardRecoveryCodes(totpCode.trim());
       setRecoverySecret({
         kind: "mfa",
@@ -966,13 +996,16 @@ export default function DashboardAccountPage() {
               <label className="block">
                 <span className="text-xs text-text-tertiary uppercase tracking-wider">Count</span>
                 <input
+                  id="pregenerated-count"
+                  aria-label="Count"
                   value={pregeneratedForm.count}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const count = event.currentTarget.value;
                     setPregeneratedForm((prev) => ({
                       ...prev,
-                      count: event.currentTarget.value,
-                    }))
-                  }
+                      count,
+                    }));
+                  }}
                   inputMode="numeric"
                   className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
                 />
@@ -982,13 +1015,16 @@ export default function DashboardAccountPage() {
                   Name Prefix
                 </span>
                 <input
+                  id="pregenerated-name-prefix"
+                  aria-label="Name Prefix"
                   value={pregeneratedForm.namePrefix}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const namePrefix = event.currentTarget.value;
                     setPregeneratedForm((prev) => ({
                       ...prev,
-                      namePrefix: event.currentTarget.value,
-                    }))
-                  }
+                      namePrefix,
+                    }));
+                  }}
                   className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
                 />
               </label>
@@ -997,13 +1033,16 @@ export default function DashboardAccountPage() {
                   Claim Expiry Days
                 </span>
                 <input
+                  id="pregenerated-claim-expiry-days"
+                  aria-label="Claim Expiry Days"
                   value={pregeneratedForm.expiresInDays}
-                  onChange={(event) =>
+                  onChange={(event) => {
+                    const expiresInDays = event.currentTarget.value;
                     setPregeneratedForm((prev) => ({
                       ...prev,
-                      expiresInDays: event.currentTarget.value,
-                    }))
-                  }
+                      expiresInDays,
+                    }));
+                  }}
                   inputMode="decimal"
                   className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
                 />
@@ -1211,6 +1250,16 @@ export default function DashboardAccountPage() {
           </div>
         )}
 
+        {recoveryNotice && (
+          <div
+            role="status"
+            className="border border-success/30 bg-success/5 px-4 py-3 text-sm mb-5"
+          >
+            <div className="text-success">Recovery action completed</div>
+            <div className="text-text-tertiary mt-1">{recoveryNotice}</div>
+          </div>
+        )}
+
         {recoverySecret && (
           <div className="mb-5">
             <NoStoreSecretDisplay
@@ -1220,7 +1269,7 @@ export default function DashboardAccountPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-px bg-border mb-5">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-px bg-border mb-5">
           <div className="bg-bg p-5 min-h-[320px]">
             <div className="flex items-start justify-between gap-4">
               <div>
@@ -1280,6 +1329,70 @@ export default function DashboardAccountPage() {
                 </>
               )}
             </div>
+          </div>
+
+          <div className="bg-bg p-5 min-h-[320px]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-display text-base font-600">Wallet Recovery Restore</h3>
+                <p className="text-xs text-text-tertiary mt-1">
+                  Restore a mnemonic-backed wallet into the current personal account.
+                </p>
+              </div>
+              <span className="border border-info/30 px-2 py-0.5 text-[11px] uppercase tracking-wider text-info">
+                phrase
+              </span>
+            </div>
+
+            <form
+              className="mt-5 space-y-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void restoreWalletRecovery();
+              }}
+            >
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Recovery Phrase
+                </span>
+                <textarea
+                  value={recoveryRestoreMnemonic}
+                  onChange={(event) => setRecoveryRestoreMnemonic(event.currentTarget.value)}
+                  rows={4}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                  placeholder="twelve or twenty-four words"
+                />
+              </label>
+              <label className="flex items-start gap-3 border border-border-subtle p-4 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={recoveryRestoreConfirmed}
+                  onChange={(event) => setRecoveryRestoreConfirmed(event.currentTarget.checked)}
+                  className="mt-0.5"
+                />
+                <span className="text-xs text-text-secondary leading-relaxed">
+                  I understand this phrase is sent once over the current session and should not be
+                  stored in browser history, logs, or screenshots.
+                </span>
+              </label>
+              <button
+                type="submit"
+                disabled={
+                  recoveryBusy !== null ||
+                  !recoveryRestoreConfirmed ||
+                  recoveryRestoreMnemonic.trim().split(/\s+/g).length < 12
+                }
+                className="px-4 py-2 text-sm border border-border text-text-secondary hover:text-text hover:border-text-tertiary disabled:opacity-40 transition-colors"
+              >
+                {recoveryBusy === "restore" ? "Restoring..." : "Restore Wallet"}
+              </button>
+              <p className="text-xs text-text-tertiary">
+                Requires recent MFA. Steward sends the phrase to the API once and never displays it
+                back.
+              </p>
+            </form>
           </div>
 
           <div className="bg-bg p-5 min-h-[320px]">

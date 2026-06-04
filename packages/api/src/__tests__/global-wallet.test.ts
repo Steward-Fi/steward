@@ -3,16 +3,18 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   agentWallets,
+  auditEvents,
   closeDb,
   getDb,
   tenantAppClients,
   tenants,
   users,
   userTenants,
+  userWalletAppConsents,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Vault } from "@stwd/vault";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { verifyTypedData } from "viem";
 
 const APP_TENANT_ID = "global-wallet-app";
@@ -195,6 +197,28 @@ describe("global wallet routes", () => {
   });
 
   it("uses browser Origin as authoritative over explicit origin parameters", async () => {
+    const beforeConsents = await getDb()
+      .select()
+      .from(userWalletAppConsents)
+      .where(
+        and(
+          eq(userWalletAppConsents.userId, userId),
+          eq(userWalletAppConsents.tenantId, APP_TENANT_ID),
+          eq(userWalletAppConsents.clientId, CLIENT_ID),
+          eq(userWalletAppConsents.origin, "https://evil.example.test"),
+        ),
+      );
+    const beforeAudits = await getDb()
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, APP_TENANT_ID),
+          eq(auditEvents.action, "global_wallet.consent.approve.authorized"),
+          eq(auditEvents.actorId, userId),
+        ),
+      );
+
     const spoofed = await routes.request("/consent/approve", {
       method: "POST",
       headers: {
@@ -210,6 +234,30 @@ describe("global wallet routes", () => {
       }),
     });
     expect(spoofed.status).toBe(400);
+
+    const afterConsents = await getDb()
+      .select()
+      .from(userWalletAppConsents)
+      .where(
+        and(
+          eq(userWalletAppConsents.userId, userId),
+          eq(userWalletAppConsents.tenantId, APP_TENANT_ID),
+          eq(userWalletAppConsents.clientId, CLIENT_ID),
+          eq(userWalletAppConsents.origin, "https://evil.example.test"),
+        ),
+      );
+    const afterAudits = await getDb()
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, APP_TENANT_ID),
+          eq(auditEvents.action, "global_wallet.consent.approve.authorized"),
+          eq(auditEvents.actorId, userId),
+        ),
+      );
+    expect(afterConsents).toHaveLength(beforeConsents.length);
+    expect(afterAudits).toHaveLength(beforeAudits.length);
   });
 
   it("treats an empty app-client global wallet scope allowlist as deny-all", async () => {

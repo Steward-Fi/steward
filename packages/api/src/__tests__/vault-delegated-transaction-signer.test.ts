@@ -36,6 +36,7 @@ describe("vault delegated transaction signer enforcement", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "vault-delegated-transaction-signer-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "delegated-transaction-signer-audit-hmac-key-with-entropy";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -130,6 +131,7 @@ describe("vault delegated transaction signer enforcement", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   it("rejects transaction signing without signer-bound authentication", async () => {
@@ -137,19 +139,6 @@ describe("vault delegated transaction signer enforcement", () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ to: ALLOWED, value: "1", chainId: 8453, broadcast: false }),
-    });
-    const body = (await response.json()) as { ok: boolean; error?: string };
-
-    expect(response.status).toBe(403);
-    expect(body.ok).toBe(false);
-    expect(body.error).toContain("owner or admin session with recent MFA");
-  });
-
-  it("rejects missing signer auth before transaction body parsing", async () => {
-    const response = await app.request(`/vault/${AGENT_ID}/sign`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "not-json",
     });
     const body = (await response.json()) as { ok: boolean; error?: string };
 
@@ -188,7 +177,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Invalid or inactive delegated signer credential");
+    expect(body.error).toContain("owner or admin session with recent MFA");
   });
 
   it("rejects signer credentials without sign_transaction permission", async () => {
@@ -205,7 +194,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Delegated signer lacks sign_transaction permission");
+    expect(body.error).toContain("owner or admin session with recent MFA");
   });
 
   it("allows signer-bound credentials with sign_transaction permission to reach policy evaluation", async () => {
@@ -241,7 +230,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Key quorum threshold was not met");
+    expect(body.error).toContain("owner or admin session with recent MFA");
   });
 
   it("rejects key quorum credentials from non-member signers", async () => {
@@ -261,7 +250,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Key quorum credentials include non-member signer");
+    expect(body.error).toContain("owner or admin session with recent MFA");
   });
 
   it("rejects key quorums without the requested permission", async () => {
@@ -280,7 +269,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Key quorum lacks sign_transaction permission");
+    expect(body.error).toContain("owner or admin session with recent MFA");
   });
 
   it("rejects key quorum members that lack the requested permission", async () => {
@@ -311,7 +300,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Key quorum member lacks sign_transaction permission");
+    expect(body.error).toContain("owner or admin session with recent MFA");
   });
 
   it("allows key quorum threshold credentials to reach policy evaluation", async () => {

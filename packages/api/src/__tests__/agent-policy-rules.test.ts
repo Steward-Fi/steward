@@ -29,6 +29,7 @@ describe("agent policy rule CRUD", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-policy-rules-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "agent-policy-rules-audit-hmac-key-with-enough-entropy";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -60,6 +61,7 @@ describe("agent policy rule CRUD", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   it("creates, lists, gets, updates, and deletes nested policy rules", async () => {

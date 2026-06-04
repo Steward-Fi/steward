@@ -3098,7 +3098,7 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       action: "user.wallet.pregenerated_claim.authorized",
       resourceType: "wallet",
       resourceId: targetAgentId,
-      metadata: { sourceTenantId, sourceAgentId: claimable.id, claimTokenHash },
+      metadata: { sourceTenantId, sourceAgentId: claimable.id },
     });
 
     const [claimed] = await db

@@ -187,288 +187,407 @@
     {
       "idx": 26,
       "version": "7",
-      "when": 1779672900000,
-      "tag": "0025_user_identity_metadata",
-      "breakpoints": true
-    },
-    {
-      "idx": 27,
-      "version": "7",
       "when": 1780120200000,
       "tag": "0026_agent_policies",
       "breakpoints": true
     },
     {
+      "idx": 27,
+      "version": "7",
+      "when": 1780120800000,
+      "tag": "0027_user_identity_metadata",
+      "breakpoints": true
+    },
+    {
       "idx": 28,
       "version": "7",
-      "when": 1779673500000,
-      "tag": "0026_condition_sets",
+      "when": 1780121400000,
+      "tag": "0028_tenant_oidc_providers",
       "breakpoints": true
     },
     {
       "idx": 29,
       "version": "7",
-      "when": 1779674100000,
-      "tag": "0027_secret_route_agent_scope",
+      "when": 1780122000000,
+      "tag": "0029_tenant_sso_domains",
       "breakpoints": true
     },
     {
       "idx": 30,
       "version": "7",
-      "when": 1779674700000,
-      "tag": "0028_wallet_action_metadata",
+      "when": 1780122600000,
+      "tag": "0030_tenant_saml_sso_configs",
       "breakpoints": true
     },
     {
       "idx": 31,
       "version": "7",
-      "when": 1779675300000,
-      "tag": "0029_tenant_oidc_providers",
+      "when": 1780123200000,
+      "tag": "0031_saml_request_replay_storage",
       "breakpoints": true
     },
     {
       "idx": 32,
       "version": "7",
-      "when": 1779680100000,
-      "tag": "0030_auth_abuse_config",
+      "when": 1780123800000,
+      "tag": "0032_user_wallet_identity_unique",
       "breakpoints": true
     },
     {
       "idx": 33,
       "version": "7",
-      "when": 1779680700000,
-      "tag": "0031_user_deactivated_at",
+      "when": 1780124400000,
+      "tag": "0033_agent_signers",
       "breakpoints": true
     },
     {
       "idx": 34,
       "version": "7",
-      "when": 1779681300000,
-      "tag": "0032_webhook_config_tenant_url_unique",
-      "breakpoints": true
-    },
-    {
-      "idx": 35,
-      "version": "7",
-      "when": 1779681900000,
-      "tag": "0033_tenant_test_account",
+      "when": 1780125000000,
+      "tag": "0034_agent_key_quorums",
       "breakpoints": true
     },
     {
       "idx": 36,
       "version": "7",
-      "when": 1779682500000,
-      "tag": "0034_harden_tenant_join_default",
+      "when": 1780125600000,
+      "tag": "0036_condition_sets",
       "breakpoints": true
     },
     {
       "idx": 37,
       "version": "7",
-      "when": 1779683100000,
-      "tag": "0035_tenant_owner_address_unique",
+      "when": 1780126200000,
+      "tag": "0037_intents",
       "breakpoints": true
     },
     {
       "idx": 38,
       "version": "7",
-      "when": 1779747300000,
-      "tag": "0036_agent_signers",
-      "breakpoints": true
-    },
-    {
-      "idx": 39,
-      "version": "7",
-      "when": 1779750900000,
-      "tag": "0037_agent_key_quorums",
+      "when": 1780126800000,
+      "tag": "0038_contract_allowlist_policy",
       "breakpoints": true
     },
     {
       "idx": 40,
       "version": "7",
-      "when": 1779754500000,
-      "tag": "0038_intents",
+      "when": 1780127400000,
+      "tag": "0040_tenant_gas_sponsorship_config",
       "breakpoints": true
     },
     {
       "idx": 41,
       "version": "7",
-      "when": 1779797700000,
-      "tag": "0039_contract_allowlist_policy",
+      "when": 1780128000000,
+      "tag": "0041_sponsored_gas_events",
       "breakpoints": true
     },
     {
       "idx": 42,
       "version": "7",
-      "when": 1779798300000,
-      "tag": "0040_webhook_delivery_config_snapshot",
+      "when": 1780128600000,
+      "tag": "0042_webhook_config_tenant_url_unique",
       "breakpoints": true
     },
     {
       "idx": 43,
       "version": "7",
-      "when": 1779798900000,
-      "tag": "0041_webhook_delivery_processing_status",
+      "when": 1780129200000,
+      "tag": "0043_webhook_delivery_config_snapshot",
       "breakpoints": true
     },
     {
       "idx": 44,
       "version": "7",
-      "when": 1779799500000,
-      "tag": "0042_user_wallet_identity_unique",
+      "when": 1780129800000,
+      "tag": "0044_webhook_delivery_processing_status",
       "breakpoints": true
     },
     {
       "idx": 45,
       "version": "7",
-      "when": 1779800100000,
-      "tag": "0043_tenant_allowed_redirect_urls",
+      "when": 1780130400000,
+      "tag": "0045_wallet_action_metadata",
       "breakpoints": true
     },
     {
       "idx": 46,
       "version": "7",
-      "when": 1779800700000,
-      "tag": "0044_tenant_gas_sponsorship_config",
+      "when": 1780131000000,
+      "tag": "0046_tenant_app_clients",
       "breakpoints": true
     },
     {
       "idx": 47,
       "version": "7",
-      "when": 1779801300000,
-      "tag": "0045_sponsored_gas_events",
+      "when": 1780131600000,
+      "tag": "0047_tenant_app_client_secrets",
       "breakpoints": true
     },
     {
       "idx": 48,
       "version": "7",
-      "when": 1779801900000,
-      "tag": "0046_tenant_app_clients",
+      "when": 1780132200000,
+      "tag": "0048_tenant_sso_domains",
       "breakpoints": true
     },
     {
       "idx": 49,
       "version": "7",
-      "when": 1779802500000,
-      "tag": "0047_tenant_app_client_secrets",
+      "when": 1780132800000,
+      "tag": "0049_security_invariant_constraints",
       "breakpoints": true
     },
     {
       "idx": 50,
       "version": "7",
-      "when": 1779803100000,
-      "tag": "0048_tenant_sso_domains",
+      "when": 1780133400000,
+      "tag": "0050_tenant_saml_sso_configs",
       "breakpoints": true
     },
     {
       "idx": 51,
       "version": "7",
-      "when": 1779803700000,
-      "tag": "0049_security_invariant_constraints",
+      "when": 1780134000000,
+      "tag": "0051_audit_integrity_constraints",
       "breakpoints": true
     },
     {
       "idx": 52,
       "version": "7",
-      "when": 1779804300000,
-      "tag": "0050_tenant_saml_sso_configs",
+      "when": 1780134600000,
+      "tag": "0052_saml_request_replay_storage",
       "breakpoints": true
     },
     {
       "idx": 53,
       "version": "7",
-      "when": 1779804900000,
-      "tag": "0051_audit_integrity_constraints",
+      "when": 1780135200000,
+      "tag": "0053_saml_group_role_mappings",
       "breakpoints": true
     },
     {
       "idx": 54,
       "version": "7",
-      "when": 1779805500000,
-      "tag": "0052_saml_request_replay_storage",
+      "when": 1780135800000,
+      "tag": "0054_tenant_invitations",
       "breakpoints": true
     },
     {
       "idx": 55,
       "version": "7",
-      "when": 1779806100000,
-      "tag": "0053_saml_group_role_mappings",
+      "when": 1780136400000,
+      "tag": "0055_webhook_replay_lineage",
       "breakpoints": true
     },
     {
       "idx": 56,
       "version": "7",
-      "when": 1779806700000,
-      "tag": "0054_tenant_invitations",
+      "when": 1780137000000,
+      "tag": "0056_tenant_request_signing_keys",
       "breakpoints": true
     },
     {
       "idx": 57,
       "version": "7",
-      "when": 1779807300000,
-      "tag": "0055_webhook_replay_lineage",
-      "breakpoints": true
-    },
-    {
-      "idx": 58,
-      "version": "7",
-      "when": 1779807900000,
-      "tag": "0056_tenant_request_signing_keys",
-      "breakpoints": true
-    },
-    {
-      "idx": 59,
-      "version": "7",
-      "when": 1779808500000,
+      "when": 1780137600000,
       "tag": "0057_global_wallet_consents",
       "breakpoints": true
     },
     {
       "idx": 60,
       "version": "7",
-      "when": 1779810300000,
+      "when": 1780138200000,
       "tag": "0060_authorization_keys",
       "breakpoints": true
     },
     {
       "idx": 61,
       "version": "7",
-      "when": 1779812100000,
+      "when": 1780138800000,
       "tag": "0061_aggregation_policy_type",
       "breakpoints": true
     },
     {
       "idx": 62,
       "version": "7",
-      "when": 1779813900000,
+      "when": 1780139400000,
       "tag": "0062_session_signers",
       "breakpoints": true
     },
     {
       "idx": 63,
       "version": "7",
-      "when": 1779815700000,
+      "when": 1780140000000,
       "tag": "0063_guest_accounts",
       "breakpoints": true
     },
     {
       "idx": 64,
       "version": "7",
-      "when": 1779817500000,
+      "when": 1780140600000,
       "tag": "0064_typed_data_policy_type",
       "breakpoints": true
     },
     {
       "idx": 65,
       "version": "7",
-      "when": 1779819300000,
+      "when": 1780141200000,
       "tag": "0065_user_push_subscriptions",
       "breakpoints": true
     },
     {
       "idx": 66,
       "version": "7",
-      "when": 1779821100000,
+      "when": 1780141800000,
       "tag": "0066_raw_signing_chain_policy_type",
+      "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1780142400000,
+      "tag": "0025_user_identity_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1780143000000,
+      "tag": "0026_condition_sets",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1780143600000,
+      "tag": "0027_secret_route_agent_scope",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1780144200000,
+      "tag": "0028_wallet_action_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1780144800000,
+      "tag": "0029_tenant_oidc_providers",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1780145400000,
+      "tag": "0030_auth_abuse_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 73,
+      "version": "7",
+      "when": 1780146000000,
+      "tag": "0031_user_deactivated_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1780146600000,
+      "tag": "0032_webhook_config_tenant_url_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1780147200000,
+      "tag": "0033_tenant_test_account",
+      "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1780147800000,
+      "tag": "0034_harden_tenant_join_default",
+      "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1780148400000,
+      "tag": "0035_tenant_owner_address_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1780149000000,
+      "tag": "0036_agent_signers",
+      "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1780149600000,
+      "tag": "0037_agent_key_quorums",
+      "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1780150200000,
+      "tag": "0038_intents",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1780150800000,
+      "tag": "0039_contract_allowlist_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1780151400000,
+      "tag": "0040_webhook_delivery_config_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 83,
+      "version": "7",
+      "when": 1780152000000,
+      "tag": "0041_webhook_delivery_processing_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1780152600000,
+      "tag": "0042_user_wallet_identity_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 85,
+      "version": "7",
+      "when": 1780153200000,
+      "tag": "0043_tenant_allowed_redirect_urls",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1780153800000,
+      "tag": "0044_tenant_gas_sponsorship_config",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1780154400000,
+      "tag": "0045_sponsored_gas_events",
       "breakpoints": true
     }
   ]

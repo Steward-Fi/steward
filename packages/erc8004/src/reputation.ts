@@ -1,59 +1,95 @@
 /**
- * ERC-8004 reputation registry client.
- *
- * Real on-chain reputation reads/writes are not yet implemented. To avoid
- * presenting fabricated numbers as verified on-chain reputation, this client
- * refuses to write and returns an explicitly-unverified score (with no numeric
- * fields) when no real registry is configured.
+ * ERC-8004 reputation registry read-only client.
  */
 
-import { isRegistryConfigured } from "./chains";
+import { createPublicClient, getAddress, http, type PublicClient, parseAbi } from "viem";
+import { ERC8004_REPUTATION_REGISTRY_ADDRESS } from "./chains";
 import type { FeedbackSignal, RegistryConfig, ReputationScore } from "./types";
+
+export const REPUTATION_REGISTRY_ABI = parseAbi([
+  "function getReputation(uint256 agentId) view returns (uint256 score, uint256 feedbackCount, uint256 lastUpdated)",
+  "function reputationOf(uint256 agentId) view returns (uint256 score, uint256 feedbackCount, uint256 lastUpdated)",
+  "function feedbackCount(uint256 agentId) view returns (uint256)",
+]);
+
+function makePublicClient(config: RegistryConfig): PublicClient {
+  if (config.publicClient) return config.publicClient;
+  return createPublicClient({ transport: http(config.rpcUrl) });
+}
+
+function toIsoTimestamp(value: bigint): string {
+  if (value === 0n) return new Date(0).toISOString();
+  return new Date(Number(value) * 1000).toISOString();
+}
 
 export class ReputationRegistryClient {
   readonly config: RegistryConfig;
+  readonly publicClient: PublicClient;
 
-  constructor(config: RegistryConfig) {
-    this.config = config;
+  constructor(config: RegistryConfig, publicClient?: PublicClient) {
+    this.config = {
+      ...config,
+      registryAddress: getAddress(config.identityRegistry ?? config.registryAddress),
+      identityRegistry: getAddress(config.identityRegistry ?? config.registryAddress),
+      reputationRegistry: getAddress(
+        config.reputationRegistry ?? ERC8004_REPUTATION_REGISTRY_ADDRESS,
+      ),
+    };
+    this.publicClient = publicClient ?? makePublicClient(this.config);
   }
 
-  /** True only when this client points at a real, deployed registry. */
-  isConfigured(): boolean {
-    return isRegistryConfigured(this.config);
-  }
-
-  /**
-   * Submit feedback on-chain. Refuses to return a fake success hash when no
-   * real registry is configured — a zero hash would falsely signal that
-   * feedback was committed on-chain.
-   */
+  /** Writes are intentionally unsupported until Steward wires policy around feedback submission. */
   async postFeedback(_params: FeedbackSignal): Promise<string> {
-    if (!this.isConfigured()) {
-      throw new Error(
-        "ERC8004 reputation registry not configured — refusing to fabricate feedback submission. " +
-          `chainId=${this.config.chainId} registryAddress=${this.config.registryAddress}`,
-      );
-    }
-    throw new Error("ERC8004 on-chain feedback submission is not yet implemented");
+    throw new Error("ERC-8004 reputation writes are not implemented; this client is read-only");
   }
 
-  /**
-   * Read aggregated reputation. When no real registry is configured (or until
-   * on-chain reads are implemented), returns a result flagged `verified: false`
-   * with NO numeric score fields. Callers must not present this as an
-   * authoritative on-chain score — in particular it must never be shown as a
-   * real "score of 0".
-   */
-  async getReputation(agentTokenId: string): Promise<ReputationScore> {
+  /** Read an agent's reputation summary from the canonical reputation registry. */
+  async getReputation(agentTokenId: string | bigint): Promise<ReputationScore> {
+    const agentId = typeof agentTokenId === "bigint" ? agentTokenId : BigInt(agentTokenId);
+    const [score, feedbackCount, lastUpdated] = await this.readReputationTuple(agentId);
+    const normalizedScore = Number(score);
     return {
-      agentId: agentTokenId,
-      verified: false,
-      lastUpdated: new Date().toISOString(),
+      agentId: agentId.toString(),
+      scoreOnchain: normalizedScore,
+      scoreInternal: 0,
+      scoreCombined: normalizedScore,
+      feedbackCount: Number(feedbackCount),
+      lastUpdated: toIsoTimestamp(lastUpdated),
     };
   }
 
-  /** Return no history until on-chain feedback events are indexed. */
+  /** History requires an indexer. Keep the API stable but do not fake chain data. */
   async getFeedbackHistory(_agentTokenId: string, _limit?: number): Promise<FeedbackSignal[]> {
     return [];
+  }
+
+  private async readReputationTuple(agentId: bigint): Promise<readonly [bigint, bigint, bigint]> {
+    const reputationRegistry =
+      this.config.reputationRegistry ?? ERC8004_REPUTATION_REGISTRY_ADDRESS;
+    try {
+      return await this.publicClient.readContract({
+        address: reputationRegistry,
+        abi: REPUTATION_REGISTRY_ABI,
+        functionName: "getReputation",
+        args: [agentId],
+      });
+    } catch {
+      try {
+        return await this.publicClient.readContract({
+          address: reputationRegistry,
+          abi: REPUTATION_REGISTRY_ABI,
+          functionName: "reputationOf",
+          args: [agentId],
+        });
+      } catch {
+        const feedbackCount = await this.publicClient.readContract({
+          address: reputationRegistry,
+          abi: REPUTATION_REGISTRY_ABI,
+          functionName: "feedbackCount",
+          args: [agentId],
+        });
+        return [0n, feedbackCount, 0n];
+      }
+    }
   }
 }

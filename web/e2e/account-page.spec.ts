@@ -250,12 +250,19 @@ test.describe("Dashboard account management", () => {
     page,
     request,
   }, testInfo) => {
+    page.on("pageerror", (error) => {
+      console.log(`[pregenerated-wallets pageerror] ${error.message}`);
+    });
+    page.on("console", (message) => {
+      if (message.type() === "error") {
+        console.log(`[pregenerated-wallets console] ${message.text()}`);
+      }
+    });
     const email = `account-pregen-${Date.now()}@example.test`;
     const futureExpiry = Date.now() + 7 * 24 * 60 * 60 * 1000;
     const expiredAt = Date.now() - 60_000;
     const newExpiry = "2026-06-10T00:00:00.000Z";
-    let createPayload: { count?: number; namePrefix?: string; claimExpiresInSeconds?: number } =
-      {};
+    let createPayload: { count?: number; namePrefix?: string; claimExpiresInSeconds?: number } = {};
     const agents = [
       {
         id: "pregen-unclaimed",
@@ -407,12 +414,11 @@ test.describe("Dashboard account management", () => {
     await page.waitForURL(/\/dashboard/, { timeout: 30_000 });
 
     await page.goto(`${WEB}/dashboard/account`);
-    await expect(
-      page.getByRole("heading", { name: "Pregenerated User Wallets" }),
-    ).toBeVisible();
-    await expect(page.getByTestId("pregenerated-inventory").getByText("pregen-unclaimed")).toBeVisible();
-    await expect(page.getByTestId("pregenerated-inventory").getByText("pregen-expired")).toBeVisible();
-    await expect(page.getByTestId("pregenerated-inventory").getByText("pregen-claimed")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Pregenerated User Wallets" })).toBeVisible();
+    const inventory = page.getByTestId("pregenerated-inventory");
+    await expect(inventory.getByText("pregen-unclaimed")).toBeVisible();
+    await expect(inventory.getByText("pregen-expired")).toBeVisible();
+    await expect(inventory.getByText("pregen-claimed")).toBeVisible();
     await expect(page.getByText("Ready to distribute")).toBeVisible();
     await expect(page.getByText("Needs replacement")).toBeVisible();
 

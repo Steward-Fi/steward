@@ -43,14 +43,18 @@ RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web
 # by the `workspaces` glob in the root package.json must be present, or
 # --frozen-lockfile rejects the install (CC8.1 supply-chain integrity).
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
+COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
+COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/mcp/package.json               packages/mcp/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
+COPY packages/react-native/package.json      packages/react-native/package.json
 COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
@@ -71,14 +75,18 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 # Copy package.json files for workspace resolution — every workspace declared
 # in the root package.json must be present for --frozen-lockfile to succeed.
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
+COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
+COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/mcp/package.json               packages/mcp/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
+COPY packages/react-native/package.json      packages/react-native/package.json
 COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
@@ -97,6 +105,7 @@ RUN BUN_FROZEN_LOCKFILE=0 bun install --no-frozen-lockfile --ignore-scripts
 
 # Copy full source for all packages needed by api + proxy
 COPY packages/api         packages/api
+COPY packages/adapters    packages/adapters
 COPY packages/auth        packages/auth
 COPY packages/db          packages/db
 COPY packages/policy-engine packages/policy-engine
@@ -112,6 +121,7 @@ COPY packages/webhooks    packages/webhooks
 # Create workspace symlinks (Bun 1.3 doesn't auto-link in Docker)
 RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
+    ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
     ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
     ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
     ln -sf ../../../packages/db            node_modules/@stwd/db && \
@@ -141,14 +151,18 @@ COPY package.json bun.lock turbo.json tsconfig.json ./
 RUN mkdir -p web && echo '{"name":"web","version":"0.0.0","private":true}' > web/package.json
 
 COPY packages/agent-trader/package.json      packages/agent-trader/package.json
+COPY packages/adapters/package.json          packages/adapters/package.json
 COPY packages/api/package.json               packages/api/package.json
 COPY packages/auth/package.json              packages/auth/package.json
 COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
+COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/mcp/package.json               packages/mcp/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
+COPY packages/react-native/package.json      packages/react-native/package.json
 COPY packages/redis/package.json             packages/redis/package.json
 COPY packages/seed/package.json              packages/seed/package.json
 COPY packages/shared/package.json            packages/shared/package.json
@@ -164,6 +178,7 @@ RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile --ignore
 
 # Copy compiled output from build stage
 COPY --from=build /app/packages/api         packages/api
+COPY --from=build /app/packages/adapters    packages/adapters
 COPY --from=build /app/packages/auth        packages/auth
 COPY --from=build /app/packages/db          packages/db
 COPY --from=build /app/packages/policy-engine packages/policy-engine
@@ -179,6 +194,7 @@ COPY --from=build /app/packages/webhooks    packages/webhooks
 # Create workspace symlinks manually — bun 1.3 doesn't auto-link workspace packages
 RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/shared        node_modules/@stwd/shared && \
+    ln -sf ../../../packages/adapters      node_modules/@stwd/adapters && \
     ln -sf ../../../packages/sdk           node_modules/@stwd/sdk && \
     ln -sf ../../../packages/auth          node_modules/@stwd/auth && \
     ln -sf ../../../packages/db            node_modules/@stwd/db && \

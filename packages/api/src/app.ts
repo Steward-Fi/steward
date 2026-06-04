@@ -22,13 +22,11 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { requireAgentJwt } from "./middleware/agent-jwt";
-import { authorizationSignature } from "./middleware/authorization-signature";
 import { correlationId } from "./middleware/correlation";
 import { idempotencyMiddleware } from "./middleware/idempotency";
-import { requestExpiry } from "./middleware/request-expiry";
+import { operatorAuth } from "./middleware/operator-auth";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
-import { adapterRoutes } from "./routes/adapters";
 import { agentRoutes } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
@@ -39,10 +37,10 @@ import { identityDiscoveryRoutes } from "./routes/discovery";
 import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
 import { globalWalletRoutes } from "./routes/global-wallet";
 import { intentRoutes } from "./routes/intents";
+import { operatorRecoveryRoutes } from "./routes/operator-recovery";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { secretsRoutes } from "./routes/secrets";
-import { sessionSignerRoutes } from "./routes/session-signers";
 import { tenantConfigRoutes } from "./routes/tenant-config";
 import { tenantRoutes } from "./routes/tenants";
 import { tradeRoutes } from "./routes/trade";
@@ -86,6 +84,7 @@ app.use("*", securityHeaders);
 app.use("*", tenantCors);
 app.use("*", logger());
 app.use("*", correlationId);
+
 app.use(
   "*",
   bodyLimit({
@@ -94,21 +93,18 @@ app.use(
       c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
   }),
 );
-app.use("*", requestExpiry());
-app.use("*", authorizationSignature());
 
 // ─── Auth middleware per route group ──────────────────────────────────────────
 
 app.use("/agents", (c, next) => tenantAuth(c, next));
 app.use("/agents/*", (c, next) => tenantAuth(c, next));
-app.use("/adapters", (c, next) => tenantAuth(c, next));
-app.use("/adapters/*", (c, next) => tenantAuth(c, next));
 app.use("/v1/agents", (c, next) => tenantAuth(c, next));
 app.use("/v1/agents/*", (c, next) => tenantAuth(c, next));
 app.use("/vault/*", (c, next) => tenantAuth(c, next));
 app.use("/secrets", (c, next) => tenantAuth(c, next));
 app.use("/secrets/*", (c, next) => tenantAuth(c, next));
 app.use("/tenants/:id", (c, next) => {
+  if (c.req.method === "POST" && c.req.path === "/tenants") return next();
   // GET /tenants/config (no id) is a public discovery endpoint used by the
   // @stwd/sdk React provider to fetch default-tenant policy/theme/feature
   // flags before the user has authenticated. The :id wildcard would otherwise
@@ -127,6 +123,10 @@ app.use("/tenants/:id/config/*", (c, next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
 );
 app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
+app.use("/platform", platformAuthMiddleware());
+app.use("/platform/*", platformAuthMiddleware());
+app.use("/user", (c, next) => userSessionAuth(c as never, next));
+app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
 app.use("/webhooks", (c, next) => tenantAuth(c, next));
 app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
 app.use("/approvals", (c, next) => tenantAuth(c, next));
@@ -143,20 +143,25 @@ app.use("/condition_sets", (c, next) => tenantAuth(c, next));
 app.use("/condition_sets/*", (c, next) => tenantAuth(c, next));
 app.use("/v1/condition_sets", (c, next) => tenantAuth(c, next));
 app.use("/v1/condition_sets/*", (c, next) => tenantAuth(c, next));
+// Operator fund-recovery endpoints use the operator gate (platform key OR
+// tenant-admin), NOT requireAgentJwt. See middleware/operator-auth.ts.
+const isOperatorRecoveryPath = (path: string): boolean =>
+  path.endsWith("/close-all") || path.endsWith("/withdraw");
+
 app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/trade", (c, next) => tenantAuth(c, next));
-app.use("/trade/*", (c, next) =>
-  c.req.path.endsWith("/trade/hyperliquid/order") ? next() : tenantAuth(c, next),
-);
+app.use("/trade/*", (c, next) => {
+  if (c.req.path.endsWith("/trade/hyperliquid/order")) return next();
+  if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
+  return tenantAuth(c, next);
+});
 app.use("/v1/trade", (c, next) => tenantAuth(c, next));
-app.use("/v1/trade/*", (c, next) =>
-  c.req.path.endsWith("/v1/trade/hyperliquid/order") ? next() : tenantAuth(c, next),
-);
-app.use("/platform", platformAuthMiddleware());
-app.use("/platform/*", platformAuthMiddleware());
-app.use("/user", (c, next) => userSessionAuth(c as never, next));
-app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
+app.use("/v1/trade/*", (c, next) => {
+  if (c.req.path.endsWith("/v1/trade/hyperliquid/order")) return next();
+  if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
+  return tenantAuth(c, next);
+});
 
 app.use("*", idempotencyMiddleware());
 
@@ -173,15 +178,12 @@ app.get("/health", (c) =>
 
 // ─── Route modules ────────────────────────────────────────────────────────────
 
-app.route("/auth", authRoutes);
 app.route("/", identityDiscoveryRoutes);
+app.route("/auth", authRoutes);
 app.route("/platform", platformRoutes);
 app.route("/user", userRoutes);
+app.route("/global-wallet", globalWalletRoutes);
 app.route("/agents", agentRoutes);
-// Session signers are nested under a specific agent; mounted as its own sub-app
-// so the path is /agents/:agentId/session-signers. The "/agents/*" tenantAuth
-// middleware (above) already gates it.
-app.route("/agents/:agentId/session-signers", sessionSignerRoutes);
 app.route("/v1/agents", agentRoutes);
 app.route("/vault", vaultRoutes);
 app.route("/secrets", secretsRoutes);
@@ -190,9 +192,7 @@ app.route("/secrets", secretsRoutes);
 app.route("/tenants", tenantConfigRoutes);
 app.route("/tenants", tenantRoutes);
 app.route("/dashboard", dashboardRoutes);
-app.route("/global-wallet", globalWalletRoutes);
 app.route("/webhooks", webhookRoutes);
-app.route("/adapters", adapterRoutes);
 app.route("/approvals", approvalRoutes);
 app.route("/intents", intentRoutes);
 app.route("/audit", auditRoutes);
@@ -202,6 +202,8 @@ app.route("/condition_sets", conditionSetRoutes);
 app.route("/v1/condition_sets", conditionSetRoutes);
 app.route("/trade", tradeRoutes);
 app.route("/v1/trade", tradeRoutes);
+app.route("/trade", operatorRecoveryRoutes);
+app.route("/v1/trade", operatorRecoveryRoutes);
 app.route("/agents", erc8004Routes);
 app.route("/discovery", discoveryRoutes);
 

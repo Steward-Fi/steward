@@ -11,6 +11,7 @@ import { createMiddleware } from "hono/factory";
  *
  * Configuration
  * ─────────────
+ * STEWARD_PLATFORM_KEY — single valid raw platform key.
  * STEWARD_PLATFORM_KEYS — comma-separated list of valid raw platform key
  *   strings (e.g. "stw_platform_elizacloud_xxx,stw_platform_internal_yyy").
  *
@@ -20,10 +21,18 @@ import { createMiddleware } from "hono/factory";
  */
 
 function getValidPlatformKeys(): string[] {
-  return (process.env.STEWARD_PLATFORM_KEYS || "")
+  const keys = (process.env.STEWARD_PLATFORM_KEYS || "")
     .split(",")
     .map((k) => k.trim())
     .filter(Boolean);
+
+  return [process.env.STEWARD_PLATFORM_KEY, ...keys].filter(
+    (key, index, keys): key is string => Boolean(key) && keys.indexOf(key) === index,
+  );
+}
+
+export function isDevSecretAllowed(nodeEnv = process.env.NODE_ENV): boolean {
+  return process.env.STEWARD_ALLOW_DEV_SECRETS === "true" && nodeEnv !== "production";
 }
 
 function parsePlatformKeyScopes(): Record<string, string[]> {

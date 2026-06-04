@@ -439,7 +439,13 @@ export type AppVariables = {
   agentScope?: string;
   agentScopes?: string[];
   agentSubject?: string;
-  authType?: "api-key" | "app-secret" | "session-jwt" | "agent-token" | "dashboard-jwt";
+  authType?:
+    | "api-key"
+    | "app-secret"
+    | "session-jwt"
+    | "agent-token"
+    | "dashboard-jwt"
+    | "platform";
   requestSignatureVerified?: boolean;
   requestId?: string;
   platformKeyHash?: string;

@@ -6,6 +6,21 @@ import {
   StewardClient,
   type StewardClientConfig,
 } from "../client";
+import type {
+  PlatformLinkAccountResult as RootPlatformLinkAccountResult,
+  PlatformTenantInvitationCreateResult as RootPlatformTenantInvitationCreateResult,
+  PlatformTenantUser as RootPlatformTenantUser,
+  PlatformUserIdentity as RootPlatformUserIdentity,
+  PlatformUserLookupResult as RootPlatformUserLookupResult,
+  PregeneratedUserWalletClaimResult as RootPregeneratedUserWalletClaimResult,
+  PregeneratedUserWalletClaimTokenRotateResult as RootPregeneratedUserWalletClaimTokenRotateResult,
+  PregeneratedUserWalletCreateResult as RootPregeneratedUserWalletCreateResult,
+  PregeneratedUserWalletInventoryResult as RootPregeneratedUserWalletInventoryResult,
+  PregeneratedUserWalletStatus as RootPregeneratedUserWalletStatus,
+  TenantAdminUser as RootTenantAdminUser,
+  TenantAdminUserEventsResult as RootTenantAdminUserEventsResult,
+  TenantAdminUserSearchResult as RootTenantAdminUserSearchResult,
+} from "../index";
 import type { PolicyRule } from "../types";
 
 // ─── Fetch Mocking Helpers ────────────────────────────────────────────────
@@ -170,6 +185,29 @@ const mockPolicy: PolicyRule = {
   enabled: true,
   config: { maxPerTx: "1000000000000000000" },
 };
+
+describe("root SDK parity exports", () => {
+  it("exports platform admin and pregenerated wallet result types from the public entrypoint", () => {
+    type PublicParityTypes =
+      | RootPlatformLinkAccountResult
+      | RootPlatformTenantInvitationCreateResult
+      | RootPlatformTenantUser
+      | RootPlatformUserIdentity
+      | RootPlatformUserLookupResult
+      | RootPregeneratedUserWalletClaimResult
+      | RootPregeneratedUserWalletClaimTokenRotateResult
+      | RootPregeneratedUserWalletCreateResult
+      | RootPregeneratedUserWalletInventoryResult
+      | RootPregeneratedUserWalletStatus
+      | RootTenantAdminUser
+      | RootTenantAdminUserEventsResult
+      | RootTenantAdminUserSearchResult;
+
+    const exported = true satisfies boolean;
+    expect(exported).toBe(true);
+    void (null as PublicParityTypes | null);
+  });
+});
 
 // ─── Construction Tests ───────────────────────────────────────────────────
 

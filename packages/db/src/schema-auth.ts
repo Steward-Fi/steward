@@ -1,6 +1,7 @@
 import { relations, sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   foreignKey,
   index,
   integer,
@@ -29,25 +30,14 @@ export const users = pgTable(
     walletChain: varchar("wallet_chain", { length: 16 }).default("ethereum"),
     stewardWalletId: varchar("steward_wallet_id", { length: 64 }),
     customMetadata: jsonb("custom_metadata").$type<Record<string, unknown>>().notNull().default({}),
-    /**
-     * Guest (ephemeral / anonymous) marker — Privy parity. A guest has no login
-     * credential yet but gets a session + wallet immediately. Defaults to false
-     * so every existing/full user row is unaffected. Upgrading a guest flips
-     * this back to false (and clears `guestExpiresAt`) while preserving the id.
-     */
-    isGuest: boolean("is_guest").notNull().default(false),
-    /**
-     * Hard expiry for a guest session. NULL for full accounts. For guests this
-     * bounds the session lifetime and is enforced server-side in
-     * verifySessionToken (fail-closed), independent of the access-token `exp`.
-     */
-    guestExpiresAt: timestamp("guest_expires_at", { withTimezone: true }),
     deactivatedAt: timestamp("deactivated_at", { withTimezone: true }),
+    isGuest: boolean("is_guest").notNull().default(false),
+    guestExpiresAt: timestamp("guest_expires_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    walletIdentityUniqueIdx: uniqueIndex("users_wallet_identity_unique_idx")
+    walletIdentityUnique: uniqueIndex("users_wallet_identity_unique_idx")
       .on(table.walletChain, table.walletAddress)
       .where(sql`${table.walletAddress} is not null`),
     guestExpiresAtIdx: index("users_guest_expires_at_idx")
@@ -56,31 +46,10 @@ export const users = pgTable(
   }),
 );
 
-// ─── Authenticators (WebAuthn / passkeys) ────────────────────────────────────
-export const authenticators = pgTable(
-  "authenticators",
-  {
-    id: uuid("id").defaultRandom().primaryKey(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    credentialId: text("credential_id").notNull().unique(),
-    credentialPublicKey: text("credential_public_key").notNull(),
-    counter: integer("counter").notNull().default(0),
-    credentialDeviceType: varchar("credential_device_type", { length: 32 }),
-    credentialBackedUp: boolean("credential_backed_up").default(false),
-    transports: text("transports").array(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    userIdIdx: index("authenticators_user_id_idx").on(table.userId),
-  }),
-);
-
 export const userWalletAppConsents = pgTable(
   "user_wallet_app_consents",
   {
-    id: uuid("id").defaultRandom().primaryKey(),
+    id: uuid("id").primaryKey().defaultRandom(),
     tenantId: varchar("tenant_id", { length: 64 }).notNull(),
     clientId: varchar("client_id", { length: 64 }).notNull(),
     userId: uuid("user_id")
@@ -101,16 +70,16 @@ export const userWalletAppConsents = pgTable(
   },
   (table) => ({
     appClientFk: foreignKey({
+      name: "user_wallet_app_consents_app_client_fk",
       columns: [table.tenantId, table.clientId],
       foreignColumns: [tenantAppClients.tenantId, tenantAppClients.id],
-      name: "user_wallet_app_consents_app_client_fk",
     }).onDelete("cascade"),
     tenantClientUserIdx: index("user_wallet_app_consents_tenant_client_user_idx").on(
       table.tenantId,
       table.clientId,
       table.userId,
     ),
-    activeConsentUniqueIdx: uniqueIndex("user_wallet_app_consents_active_unique_idx")
+    activeUniqueIdx: uniqueIndex("user_wallet_app_consents_active_unique_idx")
       .on(table.tenantId, table.clientId, table.userId, table.origin)
       .where(sql`${table.status} = 'active'`),
   }),
@@ -119,7 +88,7 @@ export const userWalletAppConsents = pgTable(
 export const globalWalletActionConfirmations = pgTable(
   "global_wallet_action_confirmations",
   {
-    id: uuid("id").defaultRandom().primaryKey(),
+    id: uuid("id").primaryKey().defaultRandom(),
     consentId: uuid("consent_id")
       .notNull()
       .references(() => userWalletAppConsents.id, { onDelete: "cascade" }),
@@ -147,10 +116,59 @@ export const globalWalletActionConfirmations = pgTable(
   }),
 );
 
+export const tenantInvitations = pgTable(
+  "tenant_invitations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    email: varchar("email", { length: 255 }).notNull(),
+    role: varchar("role", { length: 32 }).notNull().default("member"),
+    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
+    status: varchar("status", { length: 16 }).notNull().default("pending"),
+    invitedByUserId: uuid("invited_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    acceptedByUserId: uuid("accepted_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tokenHashUnique: uniqueIndex("tenant_invitations_token_hash_idx").on(table.tokenHash),
+    tenantStatusIdx: index("tenant_invitations_tenant_status_idx").on(table.tenantId, table.status),
+    pendingEmailUnique: uniqueIndex("tenant_invitations_pending_email_idx")
+      .on(table.tenantId, sql`lower(${table.email})`)
+      .where(sql`${table.status} = 'pending'`),
+    statusCheck: check(
+      "tenant_invitations_status_check",
+      sql`${table.status} IN ('pending', 'accepted', 'revoked', 'expired')`,
+    ),
+    roleCheck: check(
+      "tenant_invitations_role_check",
+      sql`${table.role} IN ('admin', 'developer', 'billing', 'viewer', 'member')`,
+    ),
+    terminalStateCheck: check(
+      "tenant_invitations_terminal_state_check",
+      sql`(
+        (${table.status} = 'pending' AND ${table.acceptedAt} IS NULL AND ${table.revokedAt} IS NULL)
+        OR (${table.status} = 'accepted' AND ${table.acceptedAt} IS NOT NULL AND ${table.acceptedByUserId} IS NOT NULL)
+        OR (${table.status} = 'revoked' AND ${table.revokedAt} IS NOT NULL)
+        OR (${table.status} = 'expired')
+      )`,
+    ),
+  }),
+);
+
 export const userPushSubscriptions = pgTable(
   "user_push_subscriptions",
   {
-    id: uuid("id").defaultRandom().primaryKey(),
+    id: uuid("id").primaryKey().defaultRandom(),
     userId: uuid("user_id")
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
@@ -177,9 +195,46 @@ export const userPushSubscriptions = pgTable(
       table.tenantId,
       table.userId,
     ),
-    activeTokenUniqueIdx: uniqueIndex("user_push_subscriptions_active_token_idx")
+    activeTokenUnique: uniqueIndex("user_push_subscriptions_active_token_idx")
       .on(table.userId, table.provider, table.token)
       .where(sql`${table.status} = 'active'`),
+    providerCheck: check(
+      "user_push_subscriptions_provider_check",
+      sql`${table.provider} IN ('expo', 'apns', 'fcm')`,
+    ),
+    platformCheck: check(
+      "user_push_subscriptions_platform_check",
+      sql`${table.platform} IS NULL OR ${table.platform} IN ('ios', 'android')`,
+    ),
+    statusCheck: check(
+      "user_push_subscriptions_status_check",
+      sql`${table.status} IN ('active', 'revoked')`,
+    ),
+    revokedStateCheck: check(
+      "user_push_subscriptions_revoked_state_check",
+      sql`(${table.status} = 'revoked') = (${table.revokedAt} IS NOT NULL)`,
+    ),
+  }),
+);
+
+// ─── Authenticators (WebAuthn / passkeys) ────────────────────────────────────
+export const authenticators = pgTable(
+  "authenticators",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    credentialId: text("credential_id").notNull().unique(),
+    credentialPublicKey: text("credential_public_key").notNull(),
+    counter: integer("counter").notNull().default(0),
+    credentialDeviceType: varchar("credential_device_type", { length: 32 }),
+    credentialBackedUp: boolean("credential_backed_up").default(false),
+    transports: text("transports").array(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    userIdIdx: index("authenticators_user_id_idx").on(table.userId),
   }),
 );
 
@@ -239,18 +294,13 @@ export const refreshTokens = pgTable(
   "refresh_tokens",
   {
     id: text("id").primaryKey(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
-    tenantId: varchar("tenant_id", { length: 64 })
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
     tokenHash: text("token_hash").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
-    tokenHashUnique: uniqueIndex("refresh_tokens_token_hash_unique_idx").on(table.tokenHash),
     tokenHashIdx: index("refresh_tokens_token_hash_idx").on(table.tokenHash),
     userIdIdx: index("refresh_tokens_user_id_idx").on(table.userId),
   }),
@@ -277,38 +327,6 @@ export const userTenants = pgTable(
   }),
 );
 
-export const tenantInvitations = pgTable(
-  "tenant_invitations",
-  {
-    id: uuid("id").defaultRandom().primaryKey(),
-    tenantId: varchar("tenant_id", { length: 64 })
-      .notNull()
-      .references(() => tenants.id, { onDelete: "cascade" }),
-    email: varchar("email", { length: 255 }).notNull(),
-    role: varchar("role", { length: 32 }).notNull().default("member"),
-    tokenHash: varchar("token_hash", { length: 64 }).notNull(),
-    status: varchar("status", { length: 16 }).notNull().default("pending"),
-    invitedByUserId: uuid("invited_by_user_id").references(() => users.id, {
-      onDelete: "set null",
-    }),
-    acceptedByUserId: uuid("accepted_by_user_id").references(() => users.id, {
-      onDelete: "set null",
-    }),
-    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
-    revokedAt: timestamp("revoked_at", { withTimezone: true }),
-    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => ({
-    tokenHashUnique: uniqueIndex("tenant_invitations_token_hash_idx").on(table.tokenHash),
-    tenantStatusIdx: index("tenant_invitations_tenant_status_idx").on(table.tenantId, table.status),
-    pendingEmailUnique: uniqueIndex("tenant_invitations_pending_email_idx")
-      .on(table.tenantId, sql`lower(${table.email})`)
-      .where(sql`${table.status} = 'pending'`),
-  }),
-);
-
 // ─── Relations ────────────────────────────────────────────────────────────────
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -316,9 +334,6 @@ export const usersRelations = relations(users, ({ many }) => ({
   sessions: many(sessions),
   accounts: many(accounts),
   userTenants: many(userTenants),
-  pushSubscriptions: many(userPushSubscriptions),
-  acceptedInvitations: many(tenantInvitations, { relationName: "acceptedInvitations" }),
-  sentInvitations: many(tenantInvitations, { relationName: "sentInvitations" }),
 }));
 
 export const authenticatorsRelations = relations(authenticators, ({ one }) => ({
@@ -360,34 +375,6 @@ export const userTenantsRelations = relations(userTenants, ({ one }) => ({
   }),
 }));
 
-export const tenantInvitationsRelations = relations(tenantInvitations, ({ one }) => ({
-  tenant: one(tenants, {
-    fields: [tenantInvitations.tenantId],
-    references: [tenants.id],
-  }),
-  invitedBy: one(users, {
-    fields: [tenantInvitations.invitedByUserId],
-    references: [users.id],
-    relationName: "sentInvitations",
-  }),
-  acceptedBy: one(users, {
-    fields: [tenantInvitations.acceptedByUserId],
-    references: [users.id],
-    relationName: "acceptedInvitations",
-  }),
-}));
-
-export const userPushSubscriptionsRelations = relations(userPushSubscriptions, ({ one }) => ({
-  user: one(users, {
-    fields: [userPushSubscriptions.userId],
-    references: [users.id],
-  }),
-  tenant: one(tenants, {
-    fields: [userPushSubscriptions.tenantId],
-    references: [tenants.id],
-  }),
-}));
-
 // ─── Inferred Types ───────────────────────────────────────────────────────────
 
 export type User = typeof users.$inferSelect;
@@ -405,11 +392,5 @@ export type NewAccount = typeof accounts.$inferInsert;
 export type UserTenant = typeof userTenants.$inferSelect;
 export type NewUserTenant = typeof userTenants.$inferInsert;
 
-export type TenantInvitation = typeof tenantInvitations.$inferSelect;
-export type NewTenantInvitation = typeof tenantInvitations.$inferInsert;
-
 export type RefreshToken = typeof refreshTokens.$inferSelect;
 export type NewRefreshToken = typeof refreshTokens.$inferInsert;
-
-export type UserPushSubscription = typeof userPushSubscriptions.$inferSelect;
-export type NewUserPushSubscription = typeof userPushSubscriptions.$inferInsert;

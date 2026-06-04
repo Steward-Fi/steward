@@ -4,7 +4,7 @@
  * Mount: app.route("/intents", intentRoutes)
  */
 
-import { auditEvents, toPersistedPolicyRule } from "@stwd/db";
+import { toPersistedPolicyRule } from "@stwd/db";
 import type { PolicyRule } from "@stwd/shared";
 import { and, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
@@ -27,7 +27,6 @@ import {
   priceOracle,
   requireTenantLevel,
   safeJsonParse,
-  setNoStoreHeaders,
   toPolicyRule,
   transactions,
   vault,
@@ -37,23 +36,10 @@ import { dispatchWebhook } from "../services/webhook-dispatch";
 
 export const intentRoutes = new Hono<{ Variables: AppVariables }>();
 
-intentRoutes.use("*", async (c, next) => {
-  setNoStoreHeaders(c);
-  await next();
-});
-
 const INTENT_STATUSES = new Set([
   "pending",
   "authorized",
   "executing",
-  "executed",
-  "failed",
-  "rejected",
-  "canceled",
-  "expired",
-]);
-const FINAL_INTENT_STATUSES = new Set([
-  "authorized",
   "executed",
   "failed",
   "rejected",
@@ -569,23 +555,12 @@ async function executeTransferIntent(row: typeof intents.$inferSelect) {
     }
 
     const txId = row.id;
-    let completedResult: Record<string, unknown> | null = null;
     try {
       const signed = await vault.signTransaction(request, {
         txId,
         policyResults: evaluation.results,
         status: request.broadcast === false ? "signed" : "broadcast",
       });
-      completedResult = {
-        handler: row.intentType === "wallet_action" ? "wallet_action.transfer" : "transfer",
-        actionId: txId,
-        status: request.broadcast === false ? "signed" : "broadcast",
-        chainId: request.chainId,
-        to: request.to,
-        value: request.value,
-        policyResults: evaluation.results,
-        ...(request.broadcast === false ? { signedTx: signed } : { txHash: signed }),
-      };
       await db
         .update(transactions)
         .set({
@@ -604,12 +579,17 @@ async function executeTransferIntent(row: typeof intents.$inferSelect) {
           (error) => console.error("[intents] Failed to record transfer intent spend:", error),
         );
       }
-      return completedResult;
+      return {
+        handler: row.intentType === "wallet_action" ? "wallet_action.transfer" : "transfer",
+        actionId: txId,
+        status: request.broadcast === false ? "signed" : "broadcast",
+        chainId: request.chainId,
+        to: request.to,
+        value: request.value,
+        policyResults: evaluation.results,
+        ...(request.broadcast === false ? { signedTx: signed } : { txHash: signed }),
+      };
     } catch (error) {
-      if (completedResult) {
-        console.error("[intents] Post-transfer intent bookkeeping failed after signing:", error);
-        return completedResult;
-      }
       const message = error instanceof Error ? error.message : "Transfer execution failed";
       dispatchWebhook(row.tenantId, request.agentId, "wallet_action.transfer.failed", {
         actionId: txId,
@@ -1095,55 +1075,6 @@ async function writeIntentAudit(
     userAgent: c.req.header("user-agent") ?? null,
     requestId: c.get("requestId") ?? null,
   });
-}
-
-function finalIntentAuditAction(status: string): string | null {
-  return FINAL_INTENT_STATUSES.has(status) ? `intent.${status}` : null;
-}
-
-async function hasIntentAudit(
-  tenantId: string,
-  intentId: string,
-  action: string,
-): Promise<boolean> {
-  const [row] = await db
-    .select({ id: auditEvents.id })
-    .from(auditEvents)
-    .where(
-      and(
-        eq(auditEvents.tenantId, tenantId),
-        eq(auditEvents.resourceType, "intent"),
-        eq(auditEvents.resourceId, intentId),
-        eq(auditEvents.action, action),
-      ),
-    )
-    .limit(1);
-  return Boolean(row);
-}
-
-function dispatchFinalIntentWebhooks(
-  tenantId: string,
-  row: typeof intents.$inferSelect,
-  executionResult?: Record<string, unknown>,
-) {
-  if (row.status === "executed") {
-    const result =
-      executionResult ??
-      (row.executionResult && typeof row.executionResult === "object"
-        ? (row.executionResult as Record<string, unknown>)
-        : {});
-    dispatchWalletActionSuccessWebhook(tenantId, row.agentId, result);
-    dispatchIntentWebhook(tenantId, row.agentId, "intent.executed", row);
-    return;
-  }
-  if (row.status === "authorized")
-    dispatchIntentWebhook(tenantId, row.agentId, "intent.authorized", row);
-  if (row.status === "failed") dispatchIntentWebhook(tenantId, row.agentId, "intent.failed", row);
-  if (row.status === "rejected")
-    dispatchIntentWebhook(tenantId, row.agentId, "intent.rejected", row);
-  if (row.status === "canceled")
-    dispatchIntentWebhook(tenantId, row.agentId, "intent.canceled", row);
-  if (row.status === "expired") dispatchIntentWebhook(tenantId, row.agentId, "intent.expired", row);
 }
 
 function dispatchIntentWebhook(
@@ -1742,19 +1673,6 @@ async function updateIntentStatus(
       { ok: false, error: "Intent has expired", data: toIntentResponse(expired) },
       409,
     );
-  }
-
-  if (existing.status === status) {
-    const finalAuditAction = finalIntentAuditAction(status);
-    if (finalAuditAction && !(await hasIntentAudit(tenantId, existing.id, finalAuditAction))) {
-      await writeIntentAudit(c, finalAuditAction, existing.id, {
-        agentId: existing.agentId,
-        intentType: existing.intentType,
-        repaired: true,
-      });
-      dispatchFinalIntentWebhooks(tenantId, existing);
-      return c.json<ApiResponse>({ ok: true, data: toIntentResponse(existing) });
-    }
   }
 
   if ((status === "authorized" || status === "rejected") && existing.status !== "pending") {

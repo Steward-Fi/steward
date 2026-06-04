@@ -14,12 +14,13 @@ let app: Awaited<typeof import("../app")>["app"];
 let apiKey = "";
 let agentToken = "";
 
-async function putPolicy(body: Record<string, unknown>, token = agentToken) {
+async function putPolicy(body: Record<string, unknown>) {
   return app.request(`/v1/agents/${agentId}/policy`, {
     method: "PUT",
     headers: {
-      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
+      "X-Steward-Tenant": tenantId,
+      Authorization: `Bearer ${agentToken}`,
     },
     body: JSON.stringify(body),
   });
@@ -28,6 +29,8 @@ async function putPolicy(body: Record<string, unknown>, token = agentToken) {
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
+  process.env.STEWARD_JWT_SECRET = "agent-policy-test-jwt-secret-0123456789";
+  process.env.STEWARD_AUDIT_HMAC_KEY = "agent-policy-test-audit-hmac-key-with-enough-entropy";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -58,11 +61,13 @@ beforeAll(async () => {
         walletAddress: "0x0000000000000000000000000000000000000002",
       },
     ]);
-  agentToken = await signAgentToken({ agentId, tenantId, sub: `agent:${agentId}` } as never, "1h");
+  agentToken = await signAgentToken({ agentId, tenantId }, "30d");
 });
 
 afterAll(async () => {
   await closeDb().catch(() => undefined);
+  delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_AUDIT_HMAC_KEY;
 });
 
 describe("agent trade policy", () => {

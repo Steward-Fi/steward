@@ -157,35 +157,22 @@ export async function assertPublicJwksDestination(jwksUri: string): Promise<void
   }
 }
 
-/**
- * Builds (or returns a cached) remote JWKS set whose key fetches are routed
- * through the SSRF-guarded {@link fetchPublicJwks} transport. The set is
- * rebuilt once it exceeds {@link JWKS_MAX_AGE_MS} so rotated or emergency-
- * revoked IdP keys stop verifying within the window.
- *
- * Reused by both the tenant OIDC path ({@link verifyOidcJwt}) and the
- * built-in "Sign in with Apple" id_token verifier so there is a single,
- * hardened JWKS transport in the codebase.
- *
- * @param jwksUri  - The IdP JWKS endpoint (must be a public https URL).
- * @param cacheKey - Stable cache key the caller controls (e.g. issuer:jwksUri).
- */
 export async function getPublicRemoteJWKSet(
-  jwksUri: string,
-  cacheKey: string,
+  jwksUri: string | URL,
+  key: string,
 ): Promise<ReturnType<typeof createRemoteJWKSet>> {
-  const cached = JWKS_CACHE.get(cacheKey);
-  if (cached && Date.now() - cached.createdAt <= JWKS_MAX_AGE_MS) {
-    return cached.jwks;
+  const uri = assertSafeJwksUri(jwksUri.toString());
+  const cached = JWKS_CACHE.get(key);
+  let jwks = cached?.jwks;
+  if (!jwks || Date.now() - (cached?.createdAt ?? 0) > JWKS_MAX_AGE_MS) {
+    if (!ALLOW_TEST_JWKS_FETCH) {
+      await assertPublicJwksDestination(uri.toString());
+    }
+    jwks = createRemoteJWKSet(uri, {
+      [customFetch]: (url, init) => fetchPublicJwks(url, init),
+    });
+    JWKS_CACHE.set(key, { jwks, createdAt: Date.now() });
   }
-  const url = assertSafeJwksUri(jwksUri);
-  if (!ALLOW_TEST_JWKS_FETCH) {
-    await assertPublicJwksDestination(url.toString());
-  }
-  const jwks = createRemoteJWKSet(url, {
-    [customFetch]: (fetchUrl, init) => fetchPublicJwks(fetchUrl, init),
-  });
-  JWKS_CACHE.set(cacheKey, { jwks, createdAt: Date.now() });
   return jwks;
 }
 
@@ -270,7 +257,14 @@ export async function verifyOidcJwt(
     throw new Error("Unsupported OIDC token algorithm");
   }
 
-  const jwks = await getPublicRemoteJWKSet(provider.jwksUri, cacheKey(tenantId, provider));
+  const key = cacheKey(tenantId, provider);
+  const cached = JWKS_CACHE.get(key);
+  let jwks = cached?.jwks;
+  // Rebuild the remote JWKS set once it exceeds the max-age TTL so rotated or
+  // emergency-revoked IdP keys stop verifying within JWKS_MAX_AGE_MS.
+  if (!jwks || Date.now() - (cached?.createdAt ?? 0) > JWKS_MAX_AGE_MS) {
+    jwks = await getPublicRemoteJWKSet(provider.jwksUri, key);
+  }
 
   const { payload } = await jwtVerify(token, jwks, {
     issuer: provider.issuer,
@@ -279,13 +273,10 @@ export async function verifyOidcJwt(
   });
 
   // OIDC Core §3.1.3.7: the `azp` (authorized party) claim, when present, MUST
-  // equal the client_id. If the token carries more than one audience, `azp`
-  // MUST be present (and equal to client_id). Without this check a token minted
-  // for a different relying party but listing this provider's audience among
-  // several would be accepted (multi-audience token substitution). jose only
-  // verifies that *one* of the configured audiences matches, so we enforce azp
-  // here. Fail closed. clientId is optional config (id-token-only providers may
-  // omit it); when absent we cannot bind azp, so single-aud back-compat applies.
+  // equal the client_id. If a provider config supplies clientId and the token
+  // omits azp, bind the token to that client through aud instead; otherwise a
+  // token minted for another relying party can pass jose's provider-audience
+  // check. Multi-audience tokens still need azp.
   const audiences = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
   const azp = claimString(payload, "azp");
   const clientId = provider.clientId?.trim() || undefined;
@@ -293,10 +284,13 @@ export async function verifyOidcJwt(
     if (!clientId || azp !== clientId) {
       throw new Error("OIDC token azp does not match the configured client_id");
     }
-  } else if (clientId && !audiences.includes(clientId)) {
-    throw new Error("OIDC token audience does not include the configured client_id");
-  } else if (audiences.length > 1) {
-    throw new Error("OIDC token with multiple audiences must include an azp claim");
+  } else {
+    if (clientId && !audiences.includes(clientId)) {
+      throw new Error("OIDC token audience does not include the configured client_id");
+    }
+    if (audiences.length > 1) {
+      throw new Error("OIDC token with multiple audiences must include an azp claim");
+    }
   }
 
   const subjectClaim = provider.subjectClaim ?? "sub";

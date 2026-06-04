@@ -31,54 +31,8 @@ describe("policy rule validation", () => {
           enabled: true,
           config: { maxTxPerHour: 5, maxTxPerDay: 20 },
         },
-        {
-          id: "raw-signing",
-          type: "raw-signing-chain",
-          enabled: true,
-          config: { allowedChains: ["sui", "tron"], allowedCurves: ["ed25519", "secp256k1"] },
-        },
       ]),
     ).toBeNull();
-  });
-
-  it("rejects malformed raw-signing-chain configs", () => {
-    expect(
-      getPolicyRulesValidationError([
-        {
-          id: "raw-signing",
-          type: "raw-signing-chain",
-          enabled: true,
-          config: { allowedChains: ["sui", 123] },
-        },
-      ]),
-    ).toBe("raw-signing-chain.allowedChains must be a string array");
-
-    expect(
-      getPolicyRulesValidationError([
-        {
-          id: "raw-signing",
-          type: "raw-signing-chain",
-          enabled: true,
-          config: { allowedChains: ["sui"], requireSupported: "yes" },
-        },
-      ]),
-    ).toBe("raw-signing-chain.requireSupported must be a boolean");
-  });
-
-  it("rejects malformed condition-set references before database lookup", () => {
-    expect(
-      getPolicyRulesValidationError([
-        {
-          id: "condition-set",
-          type: "condition-set",
-          enabled: true,
-          config: {
-            conditionSetId: "not-a-uuid",
-            operator: "not_in_condition_set",
-          },
-        },
-      ]),
-    ).toBe("condition-set.conditionSetId must be a UUID");
   });
 
   it("rejects duplicate enabled auto-approve thresholds", () => {

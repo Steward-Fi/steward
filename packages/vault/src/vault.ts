@@ -1,9 +1,11 @@
+import { randomUUID } from "node:crypto";
 import {
   agents,
   agentWallets,
   encryptedChainKeys,
   encryptedKeys,
   getDb,
+  policies,
   toAgentIdentity,
   transactions,
 } from "@stwd/db";
@@ -2059,6 +2061,115 @@ export class Vault {
       purpose: row.purpose,
       address: row.address,
     };
+  }
+
+  /**
+   * Provision a fresh, venue-scoped wallet for an agent with default safety
+   * policies attached in the same DB transaction.
+   *
+   * This is the preferred onboarding path for venue wallets: the wallet is
+   * never born without its venue allowlist, leverage cap, spend limits, and
+   * withdrawal destination allowlist enabled.
+   */
+  async provisionVenueWallet(args: {
+    tenantId: string;
+    agentId: string;
+    venue: string;
+    chainFamily: "evm" | "solana";
+    approvedAddresses: string[];
+  }): Promise<{ address: string }> {
+    const { tenantId, agentId, venue, chainFamily, approvedAddresses } = args;
+    if (!tenantId) throw new Error("provisionVenueWallet requires a tenantId");
+    if (!agentId) throw new Error("provisionVenueWallet requires an agentId");
+    if (!venue) throw new Error("provisionVenueWallet requires a venue");
+    if (chainFamily !== "evm" && chainFamily !== "solana") {
+      throw new Error(`provisionVenueWallet: unsupported chainFamily ${chainFamily}`);
+    }
+    if (!Array.isArray(approvedAddresses)) {
+      throw new Error("provisionVenueWallet requires approvedAddresses");
+    }
+
+    const db = getDb();
+
+    const [agentRow] = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    if (!agentRow) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+
+    let address: string;
+    let secret: string;
+    if (chainFamily === "evm") {
+      const pk = generatePrivateKey();
+      const account = privateKeyToAccount(pk);
+      address = account.address;
+      secret = pk;
+    } else {
+      const kp = generateSolanaKeypair();
+      address = kp.publicKey;
+      secret = kp.secretKey;
+    }
+
+    const encrypted = await this.keyStore.encrypt(secret);
+    const createdAt = new Date();
+    const policyRows = [
+      {
+        id: randomUUID(),
+        agentId,
+        type: "leverage-cap" as const,
+        enabled: true,
+        config: { maxLeverage: 5 },
+      },
+      {
+        id: randomUUID(),
+        agentId,
+        type: "venue-allowlist" as const,
+        enabled: true,
+        config: { allowedVenues: [venue] },
+      },
+      {
+        id: randomUUID(),
+        agentId,
+        type: "spending-limit" as const,
+        enabled: true,
+        config: { maxPerTxUsd: 2000, maxPerDayUsd: 2000, maxPerWeekUsd: 5000 },
+      },
+      {
+        id: randomUUID(),
+        agentId,
+        type: "approved-addresses" as const,
+        enabled: true,
+        config: { addresses: approvedAddresses, mode: "whitelist" },
+      },
+    ];
+
+    await db.transaction(async (tx) => {
+      await tx.insert(encryptedChainKeys).values({
+        agentId,
+        chainFamily,
+        venue,
+        purpose: "venue",
+        ciphertext: encrypted.ciphertext,
+        iv: encrypted.iv,
+        tag: encrypted.tag,
+        salt: encrypted.salt,
+      });
+
+      await tx.insert(agentWallets).values({
+        agentId,
+        chainFamily,
+        venue,
+        purpose: "venue",
+        address,
+        createdAt,
+      });
+
+      await tx.insert(policies).values(policyRows);
+    });
+
+    return { address };
   }
 
   /**

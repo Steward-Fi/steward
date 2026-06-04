@@ -999,6 +999,9 @@ type SignerAuthorization =
   | { authMode: "signer"; signerId: string }
   | { authMode: "quorum"; quorumId: string; memberSignerIds: string[] };
 
+const SIGNER_AUTH_REQUIRED_ERROR =
+  "Signing requires owner/admin MFA (owner or admin session with recent MFA), or signer-bound X-Steward-Signer-Id and X-Steward-Signer-Secret headers";
+
 function signerAuthAuditMetadata(auth: SignerAuthorization): Record<string, unknown> {
   if (auth.authMode === "quorum") {
     return {
@@ -1051,10 +1054,7 @@ async function requireSignerPermission(
     if (!credentialsHeader) {
       return {
         ok: false,
-        response: c.json<ApiResponse>(
-          { ok: false, error: "Key quorum signing requires X-Steward-Key-Quorum-Credentials" },
-          403,
-        ),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
 
@@ -1114,16 +1114,13 @@ async function requireSignerPermission(
     if (!quorum || quorum.status !== "active") {
       return {
         ok: false,
-        response: c.json<ApiResponse>({ ok: false, error: "Invalid or inactive key quorum" }, 403),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
     if (!signerHasPermission(quorum.permissions, requiredPermission)) {
       return {
         ok: false,
-        response: c.json<ApiResponse>(
-          { ok: false, error: `Key quorum lacks ${requiredPermission} permission` },
-          403,
-        ),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
 
@@ -1131,19 +1128,13 @@ async function requireSignerPermission(
     if (uniqueSignerIds.some((id) => !memberSet.has(id))) {
       return {
         ok: false,
-        response: c.json<ApiResponse>(
-          { ok: false, error: "Key quorum credentials include non-member signer" },
-          403,
-        ),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
     if (uniqueSignerIds.length < quorum.threshold) {
       return {
         ok: false,
-        response: c.json<ApiResponse>(
-          { ok: false, error: "Key quorum threshold was not met" },
-          403,
-        ),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
 
@@ -1167,19 +1158,13 @@ async function requireSignerPermission(
       ) {
         return {
           ok: false,
-          response: c.json<ApiResponse>(
-            { ok: false, error: "Invalid or inactive key quorum signer credential" },
-            403,
-          ),
+          response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
         };
       }
       if (!signerHasPermission(signer.permissions, requiredPermission)) {
         return {
           ok: false,
-          response: c.json<ApiResponse>(
-            { ok: false, error: `Key quorum member lacks ${requiredPermission} permission` },
-            403,
-          ),
+          response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
         };
       }
       await db
@@ -1206,8 +1191,7 @@ async function requireSignerPermission(
       response: c.json<ApiResponse>(
         {
           ok: false,
-          error:
-            "Signing requires owner or admin session with recent MFA, or signer-bound X-Steward-Signer-Id and X-Steward-Signer-Secret headers",
+          error: SIGNER_AUTH_REQUIRED_ERROR,
         },
         403,
       ),
@@ -1247,19 +1231,13 @@ async function requireSignerPermission(
   ) {
     return {
       ok: false,
-      response: c.json<ApiResponse>(
-        { ok: false, error: "Invalid or inactive delegated signer credential" },
-        403,
-      ),
+      response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
     };
   }
   if (!signerHasPermission(signer.permissions, requiredPermission)) {
     return {
       ok: false,
-      response: c.json<ApiResponse>(
-        { ok: false, error: `Delegated signer lacks ${requiredPermission} permission` },
-        403,
-      ),
+      response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
     };
   }
 
@@ -3902,7 +3880,7 @@ vaultRoutes.post("/:agentId/sign-message", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Message signing requires owner or admin session with recent MFA verification",
+        error: "Message signing requires owner/admin session with recent MFA verification",
       },
       403,
     );

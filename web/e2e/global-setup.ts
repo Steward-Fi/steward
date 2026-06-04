@@ -80,12 +80,32 @@ function runCommand(
   }
 }
 
+function clearPort(port: number): void {
+  const result = spawnSync("lsof", [`-tiTCP:${port}`, "-sTCP:LISTEN"], {
+    encoding: "utf8",
+  });
+  const pids = result.stdout
+    .split(/\s+/)
+    .map((pid) => Number(pid))
+    .filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
 export default async function globalSetup(_config: FullConfig): Promise<void> {
   if (existsSync(PID_FILE)) rmSync(PID_FILE, { force: true });
   mkdirSync(E2E_DATA_DIR, { recursive: true });
+  clearPort(E2E_PORTS.fakeOAuth);
+  clearPort(E2E_PORTS.api);
+  clearPort(E2E_PORTS.web);
 
   const fakeOAuthOrigin = `http://localhost:${E2E_PORTS.fakeOAuth}`;
-  const apiOrigin = `http://localhost:${E2E_PORTS.api}`;
+  const apiOrigin = `http://127.0.0.1:${E2E_PORTS.api}`;
   const webOrigin = `http://localhost:${E2E_PORTS.web}`;
 
   const apiEnv: Record<string, string> = {

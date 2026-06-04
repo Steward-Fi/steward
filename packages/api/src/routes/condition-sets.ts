@@ -18,7 +18,6 @@ import {
   isNonEmptyString,
   requireTenantLevel,
   safeJsonParse,
-  setNoStoreHeaders,
 } from "../services/context";
 
 type ConditionSetResponse = {
@@ -216,11 +215,6 @@ async function restoreConditionSetItems(
 }
 
 export const conditionSetRoutes = new Hono<{ Variables: AppVariables }>();
-
-conditionSetRoutes.use("*", async (c, next) => {
-  setNoStoreHeaders(c);
-  await next();
-});
 
 const MAX_CONDITION_SETS = 100;
 const MAX_CONDITION_SET_NAME_LENGTH = 255;

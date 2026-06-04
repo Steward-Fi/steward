@@ -401,6 +401,38 @@ interface PolicyResult {
 
 ---
 
+## Privy-Style Parity Helpers
+
+The SDK root entrypoint exports the client methods and result types needed for common Privy-like app flows:
+
+| Area | Methods |
+|------|---------|
+| User account aggregation | `listUserAccounts`, `getUserAccount`, `getUserAccountAggregation` |
+| Agent account aggregation | `getAgentAccount`, `getAgentAccountAggregation` |
+| Pregenerated user wallets | `createPregeneratedUserWallets`, `listPregeneratedUserWallets`, `rotatePregeneratedUserWalletClaimToken`, `claimPregeneratedUserWallet` |
+| Global wallet consent/RPC | `getGlobalWalletConsentRequest`, `approveGlobalWalletConsent`, `listGlobalWalletConsents`, `revokeGlobalWalletConsent`, `confirmGlobalWalletAction`, `scanGlobalWalletTransaction`, `globalWalletRpc` |
+| MFA and recovery | `StewardAuth` TOTP/SMS/passkey/recovery-code helpers plus `setupUserWalletRecovery` and `restoreUserWalletRecovery` |
+| Webhook/admin APIs | `listWebhooks`, `createWebhook`, `updateWebhook`, `deleteWebhook`, delivery retry/replay/export helpers, `platformUsers`, `platformApps`, `platformTestAccounts`, and tenant-admin helpers |
+
+```typescript
+import { StewardAuth, StewardClient } from '@stwd/sdk';
+import type {
+  PlatformUserIdentity,
+  PregeneratedUserWalletCreateResult,
+  UserAccountSummary,
+} from '@stwd/sdk';
+
+const client = new StewardClient({
+  baseUrl: 'https://api.steward.fi',
+  bearerToken: userSessionToken,
+});
+
+const account: UserAccountSummary = await client.getUserAccountAggregation();
+await client.approveGlobalWalletConsent({ appId: 'tenant/client', scopes: ['eth_accounts'] });
+```
+
+---
+
 ## Error Handling
 
 All methods throw `StewardApiError` on failure.

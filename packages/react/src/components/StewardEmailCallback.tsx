@@ -3,6 +3,36 @@ import { useAuth } from "../hooks/useAuth.js";
 import type { StewardEmailCallbackProps } from "../types.js";
 
 type CallbackStep = "loading" | "success" | "error";
+type CallbackCredentials = { token: string; email: string };
+const HISTORY_STATE_KEY = "__stewardEmailCallback";
+
+function historyState(): Record<string, unknown> {
+  if (typeof window === "undefined") return {};
+  return window.history?.state && typeof window.history.state === "object"
+    ? { ...(window.history.state as Record<string, unknown>) }
+    : {};
+}
+
+function credentialsFromHistoryState(): CallbackCredentials | null {
+  const stored = historyState()[HISTORY_STATE_KEY];
+  if (!stored || typeof stored !== "object") return null;
+  const record = stored as Record<string, unknown>;
+  return typeof record.token === "string" && typeof record.email === "string"
+    ? { token: record.token, email: record.email }
+    : null;
+}
+
+function replaceHistoryState(state: Record<string, unknown>, url?: string): void {
+  if (typeof window === "undefined" || !window.history?.replaceState) return;
+  window.history.replaceState(state, "", url);
+}
+
+function clearCredentialsFromHistoryState(): void {
+  if (typeof window === "undefined" || !window.history?.replaceState) return;
+  const nextState = historyState();
+  delete nextState[HISTORY_STATE_KEY];
+  replaceHistoryState(nextState);
+}
 
 /**
  * Remove the magic-link `token` (and `email`) from the visible URL so the
@@ -18,10 +48,25 @@ function scrubTokenFromUrl(): void {
     if (!url.searchParams.has("token") && !url.searchParams.has("email")) return;
     url.searchParams.delete("token");
     url.searchParams.delete("email");
-    window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    replaceHistoryState(historyState(), url.pathname + url.search + url.hash);
   } catch {
     // Best effort — never block sign-in on URL cleanup.
   }
+}
+
+function callbackCredentialsFromLocation(): CallbackCredentials | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+  const email = params.get("email");
+  if (token && email) {
+    replaceHistoryState({
+      ...historyState(),
+      [HISTORY_STATE_KEY]: { token, email },
+    });
+    return { token, email };
+  }
+  return credentialsFromHistoryState();
 }
 
 /**
@@ -67,11 +112,9 @@ export function StewardEmailCallback({
       return;
     }
 
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get("token");
-    const email = params.get("email");
+    const credentials = callbackCredentialsFromLocation();
 
-    if (!token || !email) {
+    if (!credentials) {
       const msg = "Missing token or email in callback URL.";
       setErrorMsg(msg);
       setStep("error");
@@ -80,14 +123,15 @@ export function StewardEmailCallback({
     }
 
     // Capture before scrubbing so the Retry button can re-run the exchange.
-    credsRef.current = { token, email };
+    credsRef.current = credentials;
     // Strip the one-time token/email from the URL immediately after reading
     // them so they don't persist in history or leak via Referer.
     scrubTokenFromUrl();
 
     void (async () => {
       try {
-        const result = await verifyEmailCallback(token, email);
+        const result = await verifyEmailCallback(credentials.token, credentials.email);
+        clearCredentialsFromHistoryState();
         setStep("success");
         onSuccess?.(result);
 
@@ -95,6 +139,7 @@ export function StewardEmailCallback({
           window.location.href = redirectTo;
         }
       } catch (err) {
+        clearCredentialsFromHistoryState();
         const error = err instanceof Error ? err : new Error(String(err));
         setErrorMsg(error.message);
         setStep("error");
@@ -122,6 +167,7 @@ export function StewardEmailCallback({
     void (async () => {
       try {
         const result = await verifyEmailCallback(token, email);
+        clearCredentialsFromHistoryState();
         setStep("success");
         onSuccess?.(result);
 
@@ -129,6 +175,7 @@ export function StewardEmailCallback({
           window.location.href = redirectTo;
         }
       } catch (err) {
+        clearCredentialsFromHistoryState();
         const error = err instanceof Error ? err : new Error(String(err));
         setErrorMsg(error.message);
         setStep("error");

@@ -38,6 +38,14 @@ function toU8(value: unknown): Uint8Array {
   throw new Error("toU8: unsupported value");
 }
 
+function toByteaHex(value: Uint8Array): string {
+  return `\\x${Array.from(value, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function byteaSql(value: Uint8Array) {
+  return isPGLiteRuntime() ? sql`${value}` : sql`${toByteaHex(value)}::bytea`;
+}
+
 function u8Equals(a: Uint8Array, b: Uint8Array): boolean {
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
@@ -246,7 +254,7 @@ async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
              resource_type, resource_id, metadata, ip_address, user_agent,
              request_id, created_at)
           VALUES
-            (${ev.tenantId}, ${seq}, ${prevHash}, ${hmac}, ${ev.actorType},
+            (${ev.tenantId}, ${seq}, ${byteaSql(prevHash)}, ${byteaSql(hmac)}, ${ev.actorType},
              ${ev.actorId ?? null}, ${ev.action}, ${ev.resourceType ?? null},
              ${ev.resourceId ?? null}, ${JSON.stringify(metadata)}::jsonb,
              ${ev.ipAddress ?? null}, ${ev.userAgent ?? null},
@@ -260,11 +268,11 @@ async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
         // archived floor); head_hmac/expected_seq track the newest row.
         await tx.execute(sql`
           INSERT INTO audit_chain_heads (tenant_id, expected_seq, expected_count, head_hmac, updated_at)
-          VALUES (${ev.tenantId}, ${seq}, 1, ${hmac}, now())
+          VALUES (${ev.tenantId}, ${seq}, 1, ${byteaSql(hmac)}, now())
           ON CONFLICT (tenant_id) DO UPDATE
             SET expected_seq = ${seq},
                 expected_count = audit_chain_heads.expected_count + 1,
-                head_hmac = ${hmac},
+                head_hmac = ${byteaSql(hmac)},
                 updated_at = now()
         `);
       });

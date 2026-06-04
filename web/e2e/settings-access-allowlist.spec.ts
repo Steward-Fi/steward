@@ -86,7 +86,14 @@ test.describe("Dashboard access allowlist controls", () => {
     const valueInput = allowlist.getByRole("textbox", { name: /^Value$/ });
     await valueInput.fill("alice@example.test");
     await expect(valueInput).toHaveValue("alice@example.test");
-    await allowlist.getByRole("button", { name: "Add Entry" }).click();
+    await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().includes("/access-allowlist") &&
+          response.request().method() === "POST",
+      ),
+      allowlist.getByRole("button", { name: "Add Entry" }).click(),
+    ]);
     await expect(allowlist.getByText("alice@example.test")).toBeVisible();
 
     await allowlist
@@ -94,7 +101,14 @@ test.describe("Dashboard access allowlist controls", () => {
       .fill(
         "email_domain: customer.test\nwallet: 0x0000000000000000000000000000000000000001\nuser_id: 123e4567-e89b-12d3-a456-426614174000",
       );
-    await allowlist.getByRole("button", { name: "Add Entry" }).click();
+    await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().includes("/access-allowlist") &&
+          response.request().method() === "POST",
+      ),
+      allowlist.getByRole("button", { name: "Add Entry" }).click(),
+    ]);
     await expect(allowlist.getByText("customer.test")).toBeVisible();
     await expect(allowlist.getByText("0x0000000000000000000000000000000000000001")).toBeVisible();
     await expect(allowlist.getByText("123e4567-e89b-12d3-a456-426614174000")).toBeVisible();
@@ -102,10 +116,17 @@ test.describe("Dashboard access allowlist controls", () => {
       allowlist.getByRole("row", { name: /123e4567-e89b-12d3-a456-426614174000/ }),
     ).toContainText("User ID");
 
-    await allowlist
-      .getByRole("row", { name: /alice@example\.test/ })
-      .getByRole("button", { name: "Remove" })
-      .click();
+    await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().includes("/access-allowlist") &&
+          response.request().method() === "DELETE",
+      ),
+      allowlist
+        .getByRole("row", { name: /alice@example\.test/ })
+        .getByRole("button", { name: "Remove" })
+        .click(),
+    ]);
     await expect(allowlist.getByText("alice@example.test")).toBeHidden();
 
     await page.screenshot({

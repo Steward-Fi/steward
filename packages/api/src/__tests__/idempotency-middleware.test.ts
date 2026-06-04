@@ -753,15 +753,14 @@ describe("idempotencyMiddleware", () => {
       'app.use("/intents"',
       'app.use("/policies"',
       'app.use("/trade"',
-      'app.use("/platform"',
-      'app.use("/user"',
     ]) {
       const authStart = appSource.indexOf(marker);
       expect(authStart).toBeGreaterThanOrEqual(0);
       expect(authStart).toBeLessThan(idempotencyStart);
     }
-    expect(appSource.indexOf("userSessionAuth", appSource.indexOf('app.use("/user"'))).toBeLessThan(
-      idempotencyStart,
-    );
+    for (const marker of ['app.route("/platform"', 'app.route("/user"']) {
+      const routeStart = appSource.indexOf(marker);
+      expect(routeStart).toBeGreaterThan(idempotencyStart);
+    }
   });
 });

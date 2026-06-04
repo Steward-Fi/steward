@@ -44,13 +44,6 @@ function isEvmSelector(value: unknown): value is string {
   return typeof value === "string" && /^0x[a-fA-F0-9]{8}$/.test(value);
 }
 
-function isUuid(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
-  );
-}
-
 function areOptionalEvmAddresses(value: unknown): boolean {
   return value === undefined || (Array.isArray(value) && value.every(isEvmAddress));
 }
@@ -144,9 +137,6 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
     case "condition-set":
       if (typeof config.conditionSetId !== "string" || config.conditionSetId.trim() === "") {
         return "condition-set.conditionSetId is required";
-      }
-      if (!isUuid(config.conditionSetId)) {
-        return "condition-set.conditionSetId must be a UUID";
       }
       if (config.field !== undefined && !CONDITION_FIELDS.has(String(config.field))) {
         return "condition-set.field is invalid";
@@ -244,33 +234,6 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
     case "leverage-cap":
       if (!isPositiveFiniteNumber(config.maxLeverage)) {
         return "leverage-cap.maxLeverage must be a positive number";
-      }
-      return null;
-
-    case "raw-signing-chain":
-      if (
-        config.allowedChains !== undefined &&
-        (!Array.isArray(config.allowedChains) ||
-          config.allowedChains.some((chain) => typeof chain !== "string" || !chain.trim()))
-      ) {
-        return "raw-signing-chain.allowedChains must be a string array";
-      }
-      if (
-        config.blockedChains !== undefined &&
-        (!Array.isArray(config.blockedChains) ||
-          config.blockedChains.some((chain) => typeof chain !== "string" || !chain.trim()))
-      ) {
-        return "raw-signing-chain.blockedChains must be a string array";
-      }
-      if (
-        config.allowedCurves !== undefined &&
-        (!Array.isArray(config.allowedCurves) ||
-          config.allowedCurves.some((curve) => typeof curve !== "string" || !curve.trim()))
-      ) {
-        return "raw-signing-chain.allowedCurves must be a string array";
-      }
-      if (config.requireSupported !== undefined && typeof config.requireSupported !== "boolean") {
-        return "raw-signing-chain.requireSupported must be a boolean";
       }
       return null;
 

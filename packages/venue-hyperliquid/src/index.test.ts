@@ -4,6 +4,7 @@ import {
   actionHash,
   cancelOrder,
   createL1TypedData,
+  createWithdrawTypedData,
   getMarketableLimitPx,
   getOpenOrders,
   HyperliquidAdapter,
@@ -11,6 +12,7 @@ import {
   signOrder,
   submitOrder,
   toExchangeAction,
+  toWithdrawAction,
 } from "./index";
 
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as const;
@@ -193,6 +195,198 @@ describe("Hyperliquid L1 signing", () => {
       { nonce: NONCE, isMainnet: false },
     );
     expect(signed.nonce).toBe(NONCE);
+  });
+});
+
+describe("Hyperliquid withdraw (user-signed action)", () => {
+  test("createWithdrawTypedData produces the exact HL EIP-712 structure", () => {
+    const td = createWithdrawTypedData({
+      amount: "100",
+      destination: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+      time: NONCE,
+    });
+    // Withdraw is signed on Arbitrum (42161), NOT the L1 1337 domain.
+    expect(td.domain).toEqual({
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: 42161,
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    });
+    expect(td.primaryType).toBe("HyperliquidTransaction:Withdraw");
+    expect(td.types["HyperliquidTransaction:Withdraw"]).toEqual([
+      { name: "hyperliquidChain", type: "string" },
+      { name: "destination", type: "string" },
+      { name: "amount", type: "string" },
+      { name: "time", type: "uint64" },
+    ]);
+    // amount stays a string; destination is lowercased.
+    expect(td.value).toEqual({
+      hyperliquidChain: "Mainnet",
+      destination: "0xabcdef0123456789abcdef0123456789abcdef01",
+      amount: "100",
+      time: NONCE,
+    });
+    expect(typeof td.value.amount).toBe("string");
+  });
+
+  test("toWithdrawAction builds the documented withdraw3 wire shape", () => {
+    const action = toWithdrawAction({
+      amount: 250.5,
+      destination: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+      time: NONCE,
+    });
+    expect(action).toEqual({
+      type: "withdraw3",
+      hyperliquidChain: "Mainnet",
+      signatureChainId: "0xa4b1",
+      amount: "250.5",
+      time: NONCE,
+      destination: "0xabcdef0123456789abcdef0123456789abcdef01",
+    });
+  });
+
+  test("rejects malformed destination addresses", () => {
+    expect(() => toWithdrawAction({ amount: "1", destination: "not-an-address" })).toThrow();
+  });
+
+  test("adapter signs withdraw with vault EIP-712 and submits to /exchange", async () => {
+    let posted: any;
+    let signedDomain: any;
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const transport: HyperliquidTransport = {
+      async fetch(input, init) {
+        posted = JSON.parse(String(init?.body));
+        expect(String(input)).toMatch(/\/exchange$/);
+        return new Response(JSON.stringify({ status: "ok", response: { type: "default" } }), {
+          status: 200,
+        });
+      },
+    };
+    const adapter = new HyperliquidAdapter(
+      {
+        async signTypedData(i) {
+          signedDomain = i.domain;
+          return account.signTypedData({
+            domain: i.domain,
+            types: i.types,
+            primaryType: i.primaryType,
+            message: i.value,
+          });
+        },
+      },
+      "sol",
+      WALLET,
+      { transport, baseUrl: "https://api.hyperliquid.xyz" },
+    );
+    const signed = await adapter.signWithdraw({
+      amount: "100",
+      destination: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+      time: NONCE,
+    });
+    expect(signedDomain.chainId).toBe(42161);
+    expect(signed.nonce).toBe(NONCE);
+    expect(signed.action).toMatchObject({ type: "withdraw3", amount: "100" });
+    await adapter.submitWithdraw(signed);
+    expect(posted).toMatchObject({
+      action: { type: "withdraw3", destination: "0xabcdef0123456789abcdef0123456789abcdef01" },
+      nonce: NONCE,
+      signature: signed.signature,
+    });
+  });
+});
+
+describe("Hyperliquid close-all", () => {
+  function mkAdapter(positions: Array<{ coin: string; szi: string }>, posted: any[]) {
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const transport: HyperliquidTransport = {
+      async fetch(_input, init) {
+        const body = JSON.parse(String(init?.body));
+        if (body.type === "clearinghouseState") {
+          return new Response(
+            JSON.stringify({
+              assetPositions: positions.map((p) => ({ position: { coin: p.coin, szi: p.szi } })),
+            }),
+            { status: 200 },
+          );
+        }
+        if (body.type === "l2Book") {
+          // marketable price lookup for whichever coin signOrder closes
+          return new Response(
+            JSON.stringify({ levels: [[{ px: "100", sz: "1" }], [{ px: "101", sz: "1" }]] }),
+            { status: 200 },
+          );
+        }
+        // /exchange order submission
+        posted.push(body);
+        return new Response(
+          JSON.stringify({
+            status: "ok",
+            response: {
+              type: "order",
+              data: { statuses: [{ filled: { oid: 1, totalSz: "1", avgPx: "100" } }] },
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    };
+    return new HyperliquidAdapter(
+      {
+        async signTypedData(i) {
+          return account.signTypedData({
+            domain: i.domain,
+            types: i.types,
+            primaryType: i.primaryType,
+            message: i.value,
+          });
+        },
+      },
+      "sol",
+      WALLET,
+      { transport, baseUrl: "https://api.hyperliquid.xyz" },
+    );
+  }
+
+  test("marketClosePosition sells to close a long (reduce-only, opposite side, abs size)", async () => {
+    const posted: any[] = [];
+    const adapter = mkAdapter([{ coin: "BTC", szi: "0.5" }], posted);
+    await adapter.marketClosePosition("BTC");
+    expect(posted).toHaveLength(1);
+    const order = posted[0].action.orders[0];
+    expect(order.a).toBe(0); // BTC
+    expect(order.b).toBe(false); // sell to close a long
+    expect(order.r).toBe(true); // reduce-only
+    expect(order.s).toBe("0.5");
+  });
+
+  test("marketClosePosition buys to close a short", async () => {
+    const posted: any[] = [];
+    const adapter = mkAdapter([{ coin: "ETH", szi: "-2" }], posted);
+    await adapter.marketClosePosition("ETH");
+    const order = posted[0].action.orders[0];
+    expect(order.a).toBe(1); // ETH
+    expect(order.b).toBe(true); // buy to close a short
+    expect(order.r).toBe(true);
+    expect(order.s).toBe("2");
+  });
+
+  test("closeAllPositions iterates non-zero positions and skips flat ones", async () => {
+    const posted: any[] = [];
+    const adapter = mkAdapter(
+      [
+        { coin: "BTC", szi: "0.5" },
+        { coin: "SOL", szi: "0" }, // flat — skipped
+        { coin: "ETH", szi: "-2" },
+      ],
+      posted,
+    );
+    const results = await adapter.closeAllPositions();
+    expect(results.map((r) => r.coin)).toEqual(["BTC", "ETH"]);
+    expect(posted).toHaveLength(2);
+    // BTC long => sell, ETH short => buy; both reduce-only
+    expect(posted[0].action.orders[0]).toMatchObject({ a: 0, b: false, r: true, s: "0.5" });
+    expect(posted[1].action.orders[0]).toMatchObject({ a: 1, b: true, r: true, s: "2" });
+    expect(results[0].result.status).toBe("filled");
   });
 });
 

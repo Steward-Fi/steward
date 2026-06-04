@@ -84,7 +84,10 @@ describe("USD policy evaluation", () => {
     expect(overLimit.reason).toContain("daily USD spending limit");
   });
 
-  it("falls back to wei limits when the oracle cannot price the chain", async () => {
+  it("fails closed when a USD spending limit is set but no oracle is available", async () => {
+    // Fail-closed: when a USD limit is configured but the oracle cannot price the
+    // chain, the engine does NOT silently fall back to the wei limit. It rejects,
+    // because a configured USD ceiling that cannot be evaluated must not be bypassed.
     const result = await evaluatePolicy(
       rule("spending-limit", {
         maxPerTx: "500000000000000000",
@@ -94,7 +97,7 @@ describe("USD policy evaluation", () => {
     );
 
     expect(result.passed).toBe(false);
-    expect(result.reason).toContain("per-tx limit");
+    expect(result.reason).toContain("cannot be evaluated");
   });
 
   it("uses USD auto-approval thresholds before legacy wei thresholds", async () => {
@@ -110,7 +113,10 @@ describe("USD policy evaluation", () => {
     expect(result.reason).toContain("$2000.00");
   });
 
-  it("falls back from unavailable USD threshold to legacy wei threshold", async () => {
+  it("fails closed when a USD auto-approve threshold is set but no oracle is available", async () => {
+    // Fail-closed: a USD auto-approve threshold that cannot be priced does NOT fall
+    // through to the legacy wei threshold. An unevaluatable auto-approve rule must not
+    // grant approval.
     const result = await evaluatePolicy(
       rule("auto-approve-threshold", {
         threshold: ONE_ETH,
@@ -119,8 +125,8 @@ describe("USD policy evaluation", () => {
       makeContext({ priceOracle: fixedOracle(null) }),
     );
 
-    expect(result.passed).toBe(true);
-    expect(result.reason).toBe("Below auto-approve threshold");
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("cannot be evaluated");
   });
 });
 
@@ -145,14 +151,16 @@ describe("policy edge cases and composition", () => {
     expect(result.reason).toContain("Hourly");
   });
 
-  it("a negative auto-approve threshold never auto-approves a zero-value transaction", async () => {
+  it("a negative auto-approve threshold is rejected as an invalid uint256", async () => {
+    // Fail-closed: a negative threshold is not a valid uint256 wei value, so the rule
+    // is rejected outright rather than interpreted.
     const result = await evaluatePolicy(
       rule("auto-approve-threshold", { threshold: "-1" }),
       makeContext({ request: makeRequest({ value: "0" }) }),
     );
 
     expect(result.passed).toBe(false);
-    expect(result.reason).toContain("exceeds auto-approve threshold -1");
+    expect(result.reason).toContain("must be a uint256 wei string");
   });
 
   it("unknown policy types fail closed", async () => {

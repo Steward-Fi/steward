@@ -7,7 +7,7 @@ import {
   isEncryptedWebhookSecret,
   WebhookDispatcher,
 } from "@stwd/webhooks";
-import { db } from "./context";
+import { db, tenantConfigs } from "./context";
 import {
   acceptsConfiguredWebhookEvent,
   type ConfiguredWebhookEventType,
@@ -16,48 +16,33 @@ import {
 } from "./webhook-events";
 
 const INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000;
-const REDACTED_WEBHOOK_SECRET = "[REDACTED]";
+const SENSITIVE_WEBHOOK_KEYS = new Set([
+  "accesstoken",
+  "claimtoken",
+  "claimtokenhash",
+  "mnemonic",
+  "password",
+  "privatekey",
+  "recoveryphrase",
+  "refreshtoken",
+  "refresh_token",
+  "secret",
+  "seedphrase",
+]);
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isSensitiveWebhookPayloadKey(key: string): boolean {
-  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return (
-    normalized === "secret" ||
-    normalized.endsWith("secret") ||
-    normalized === "password" ||
-    normalized === "passphrase" ||
-    normalized === "mnemonic" ||
-    normalized === "recoveryphrase" ||
-    normalized === "seedphrase" ||
-    normalized === "privatekey" ||
-    normalized === "accesskey" ||
-    normalized === "apikey" ||
-    normalized === "accesstoken" ||
-    normalized === "refreshtoken" ||
-    normalized === "idtoken" ||
-    normalized === "sessiontoken" ||
-    normalized === "authtoken" ||
-    (normalized !== "token" && normalized.endsWith("token"))
-  );
-}
-
-export function redactWebhookSecrets(value: unknown): unknown {
+export function redactWebhookSecrets<T>(value: T): T {
   if (Array.isArray(value)) {
-    return value.map((entry) => redactWebhookSecrets(entry));
+    return value.map((item) => redactWebhookSecrets(item)) as T;
   }
-  if (!isPlainObject(value) || value instanceof Date) {
-    return value;
-  }
+  if (!value || typeof value !== "object") return value;
 
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [
-      key,
-      isSensitiveWebhookPayloadKey(key) ? REDACTED_WEBHOOK_SECRET : redactWebhookSecrets(entry),
-    ]),
-  );
+  const redacted: Record<string, unknown> = {};
+  for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>)) {
+    redacted[key] = SENSITIVE_WEBHOOK_KEYS.has(key.toLowerCase())
+      ? "[REDACTED]"
+      : redactWebhookSecrets(nestedValue);
+  }
+  return redacted as T;
 }
 
 export function dispatchWebhook(
@@ -71,81 +56,31 @@ export function dispatchWebhook(
     type: configuredType ?? type,
     tenantId,
     agentId,
-    data: redactWebhookSecrets(data) as Record<string, unknown>,
+    data: redactWebhookSecrets(data),
     timestamp: new Date(),
   };
   void dispatchConfiguredWebhooks(event, configuredType).catch((error) => {
     console.error("[webhooks] Failed to dispatch configured webhooks:", error);
   });
-}
 
-export async function dispatchTestWebhook(config: {
-  id: string;
-  tenantId: string;
-  url: string;
-  secret: string;
-  events: string[];
-  actorId?: string | null;
-}): Promise<typeof webhookDeliveries.$inferSelect> {
-  const event: WebhookEvent = {
-    type: "webhook.test",
-    tenantId: config.tenantId,
-    agentId: "dashboard",
-    data: {
-      test: true,
-      webhookConfigId: config.id,
-      actorId: config.actorId ?? null,
-    },
-    timestamp: new Date(),
-  };
-
-  return dispatchConfiguredWebhook(event, {
-    ...config,
-    maxRetries: 0,
-    retryBackoffMs: 0,
-    visibilityTimeoutMs: 0,
-  });
-}
-
-export async function dispatchReplayWebhook(config: {
-  id: string;
-  tenantId: string;
-  url: string;
-  secret: string;
-  events: string[];
-  maxRetries: number;
-  retryBackoffMs: number;
-  replayedFromDeliveryId: string;
-  originalPayload: Record<string, unknown>;
-  originalEventType: string;
-  originalAgentId?: string | null;
-  originalCreatedAt: Date | string;
-}): Promise<typeof webhookDeliveries.$inferSelect> {
-  const originalTimestamp =
-    typeof config.originalPayload.timestamp === "string" ||
-    config.originalPayload.timestamp instanceof Date
-      ? new Date(config.originalPayload.timestamp)
-      : new Date(config.originalCreatedAt);
-  const event: WebhookEvent = {
-    type: config.originalEventType as WebhookEvent["type"],
-    tenantId: config.tenantId,
-    agentId:
-      typeof config.originalPayload.agentId === "string"
-        ? config.originalPayload.agentId
-        : (config.originalAgentId ?? undefined),
-    data:
-      config.originalPayload.data && typeof config.originalPayload.data === "object"
-        ? (redactWebhookSecrets(config.originalPayload.data) as Record<string, unknown>)
-        : {},
-    timestamp: Number.isNaN(originalTimestamp.getTime())
-      ? new Date(config.originalCreatedAt)
-      : originalTimestamp,
-  };
-
-  return dispatchConfiguredWebhook(event, {
-    ...config,
-    replayedFromDeliveryId: config.replayedFromDeliveryId,
-  });
+  // Legacy tenant-config single webhook URL. Tenants can still set a webhookUrl
+  // via the tenants route (tenants.ts), so this fan-out must remain until that
+  // path is fully migrated to persisted webhook configs. It fires for every
+  // event regardless of configured-type mapping, using the raw event type.
+  const tenantConfigWebhookUrl = tenantConfigs.get(tenantId)?.webhookUrl;
+  if (tenantConfigWebhookUrl) {
+    const tenantConfigEvent: WebhookEvent = {
+      type,
+      tenantId,
+      agentId,
+      data: redactWebhookSecrets(data),
+      timestamp: new Date(),
+    };
+    const dispatcher = new WebhookDispatcher();
+    dispatcher.dispatch(tenantConfigEvent, tenantConfigWebhookUrl).catch((error) => {
+      console.error("[webhooks] Failed to dispatch tenant config webhook:", error);
+    });
+  }
 }
 
 async function dispatchConfiguredWebhooks(
@@ -186,10 +121,8 @@ async function dispatchConfiguredWebhook(
     events: string[];
     maxRetries: number;
     retryBackoffMs: number;
-    visibilityTimeoutMs?: number;
-    replayedFromDeliveryId?: string | null;
   },
-): Promise<typeof webhookDeliveries.$inferSelect> {
+): Promise<void> {
   const signingSecret = decryptWebhookSecret(config.secret);
   const encryptedSecret = isEncryptedWebhookSecret(config.secret)
     ? config.secret
@@ -201,19 +134,10 @@ async function dispatchConfiguredWebhook(
       .where(and(eq(webhookConfigs.id, config.id), eq(webhookConfigs.secret, config.secret)));
   }
   const deliveryId = randomUUID();
-  const signedAt = Math.floor(Date.now() / 1000);
-  const eventWithDelivery: WebhookEvent & {
-    deliveryId: string;
-    webhookConfigId: string;
-    signedAt: number;
-  } = {
+  const eventWithDelivery: WebhookEvent & { deliveryId: string; webhookConfigId: string } = {
     ...event,
     deliveryId,
     webhookConfigId: config.id,
-    signedAt,
-    ...(config.replayedFromDeliveryId
-      ? { replayedFromDeliveryId: config.replayedFromDeliveryId }
-      : {}),
   };
   const [delivery] = await db
     .insert(webhookDeliveries)
@@ -223,7 +147,6 @@ async function dispatchConfiguredWebhook(
       webhookConfigId: config.id,
       agentId: event.agentId,
       eventType: event.type,
-      replayedFromDeliveryId: config.replayedFromDeliveryId ?? null,
       payload: eventWithDelivery as unknown as Record<string, unknown>,
       url: config.url,
       secret: encryptedSecret,
@@ -231,12 +154,7 @@ async function dispatchConfiguredWebhook(
       status: "processing",
       attempts: 0,
       maxAttempts: config.maxRetries + 1,
-      nextRetryAt:
-        config.visibilityTimeoutMs === 0
-          ? null
-          : new Date(
-              Date.now() + (config.visibilityTimeoutMs ?? INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS),
-            ),
+      nextRetryAt: new Date(Date.now() + INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS),
     })
     .returning();
 
@@ -251,7 +169,7 @@ async function dispatchConfiguredWebhook(
   const result = await dispatcher.dispatch(eventWithDelivery, { ...config, secret: signingSecret });
   const retryable = !result.success && config.maxRetries > 0;
 
-  const [updated] = await db
+  await db
     .update(webhookDeliveries)
     .set({
       status: result.success ? "delivered" : retryable ? "pending" : "failed",
@@ -259,10 +177,6 @@ async function dispatchConfiguredWebhook(
       deliveredAt: result.deliveredAt ?? null,
       lastError: result.error ?? null,
       nextRetryAt: retryable ? new Date(Date.now() + config.retryBackoffMs) : null,
-      payload: eventWithDelivery as unknown as Record<string, unknown>,
     })
-    .where(eq(webhookDeliveries.id, delivery.id))
-    .returning();
-
-  return updated ?? delivery;
+    .where(eq(webhookDeliveries.id, delivery.id));
 }

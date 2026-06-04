@@ -1,6 +1,6 @@
 # Privy Parity Audit
 
-Date: 2026-06-03
+Date: 2026-06-04
 
 This audit compares Steward against Privy's public documentation and OpenAPI
 surface. Sources reviewed:
@@ -17,6 +17,10 @@ surface. Sources reviewed:
   intent types, wallet external IDs, connect-or-create wallet UX, Spark wallet
   actions, swap/earn action APIs, SDK language coverage, and request hardening
   docs.
+- 2026-06-04 local surface refresh: `agent_signers` P-256 public-key support,
+  nested key-quorum schema/middleware tests, account aggregation aliases,
+  validation matrix, SDK route helpers, dashboard Account/Settings surfaces,
+  and current API/web route names.
 - Steward codebase and docs in this repository.
 
 Legend:
@@ -87,12 +91,34 @@ The largest open-source feasible gaps are:
     wallet UX, richer external-wallet connector configuration, nested key
     quorums, and typed manual-approval intents for policy, wallet, rule, and
     quorum changes.
+14. Local 2026-06-04 refresh shows Steward has advanced the authorization-key
+    lane: agent signers now carry HMAC or P-256 public keys and nested
+    key-quorum verification is tested. Remaining Privy parity is resource-level
+    authorization-key CRUD, owner/signer assignment across wallets and policies,
+    dashboard reviewer UX, and route coverage beyond agent vault actions.
 
 Provider/compliance dependent areas should be adapter-first:
 
 - SMS/WhatsApp deliverability, fiat on/off-ramp, KYC/TOS, ACH/wire/SEPA, card
   funding, Kraken/exchange embed, licensed custody, curated yield distribution,
   SOC2 certification, and Privy's exact managed TEE/key-splitting network.
+
+## Current OSS Gap Ledger
+
+These are the highest-priority open-source-implementable deltas after comparing
+the Privy docs index with current local surfaces on 2026-06-04. Adapter-only and
+compliance-only work is intentionally separated from code-only gaps.
+
+| Priority | Product area | Steward status | Remaining OSS-buildable work |
+| ---: | --- | ---: | --- |
+| 1 | Account resources | Partial | Implement first-class account create/list/get/update plus account balance aliases, persistent aggregation create/get/delete resources, wallet membership mutation by `wallets_configuration` or `wallet_ids`, max-wallet validation, dashboard CRUD, SDK helpers, and tests. |
+| 2 | Wallet external IDs | Gap | Add immutable per-tenant wallet `external_id`, creation-time validation, get-by-external-ID, list filters, transaction lookup by external/reference ID alignment, SDK helpers, dashboard display, and collision/migration tests. |
+| 3 | Connect-or-create wallet UX | Gap | Add Privy-style React/mobile flow that lets users connect an external EVM wallet or create an embedded wallet fallback, including unauthenticated connect semantics, tenant/app-client config, hosted modal states, and e2e coverage. |
+| 4 | Authorization keys, owners, signers, quorums | Partial | P-256 signer keys and nested agent quorums exist locally. Add first-class authorization-key resources, owner/additional-signer assignment on wallets and policies, signer override policies, owner-transfer intents, dashboard management/reviewer MFA, and route coverage beyond agent vault actions. |
+| 5 | Typed intents and policy resources | Partial | Generic intents and nested policy-rule CRUD exist. Add stable Privy-style typed intent schemas for transfer/RPC/update-wallet/update-policy/update-rule/create-rule/delete-rule/update-quorum, condition-set item pagination/bulk update parity, dashboard renderers, and executor idempotency tests. |
+| 6 | Spark BTC/Lightning and broader chains | Gap / Adapter | Build OSS DTOs, mocks, policy gates, PSBT/static-deposit/Lightning/Spark transfer models, identity-key signing, balance/status APIs, and chain-specific builders before real provider wiring. |
+| 7 | Wallet actions and indexing | Partial / Adapter | Native EVM transfer and mock adapter seams exist. Add ERC20/SPL transfer execution, swap/earn route wiring, settled lifecycle events, reorg-aware indexing, dashboard action history, and adapter finalization rows. |
+| 8 | OpenAPI/generated SDKs | Partial | Generate and publish a Steward OpenAPI contract, mark request-hardening/idempotency requirements per route, generate route-specific clients, and add compatibility tests for documented examples. |
 
 ## Latest Docs Delta, Grouped by Product Area
 
@@ -129,9 +155,9 @@ the full historical audit.
 
 | Privy surface | Steward status | Remaining OSS-buildable work |
 | --- | ---: | --- |
-| Authorization keys | Partial | Steward has request-signing keys and app secrets, but lacks Privy-style authorization-key resources that can directly own/sign wallet and policy resources. Add key resource CRUD, encrypted/private-key or public-key enrollment modes, owner/signer assignment, SDK helpers, dashboard management, one-time reveal/rotation, and route-level authorization signature verification for every controlled resource. |
-| Owners and additional signers | Partial | Steward has delegated signer/quorum primitives on some vault paths, but Privy models owners and additional signers for wallets and policies with separate policy scopes. Add explicit owner fields on wallet/policy records, `additional_signers` arrays, owner-transfer intents, signer-specific override policies, export/delete restrictions, and tests proving signers cannot update owners/signers/policies/export keys. |
-| Nested key quorums | Partial | Steward key quorums support threshold authorization for selected signing paths, but Privy's key quorums can include users, authorization keys, and one nested quorum. Add mixed-member quorums, one-level nesting, parent/child threshold aggregation, quorum update/delete intents, dashboard reviewer UX, replay protection, and route coverage beyond vault signing. |
+| Authorization keys | Partial | Steward now has app/request-signing keys plus agent signer records that can carry HMAC credentials or registered P-256 public keys, with authorization-signature middleware tests for P-256 single-signer requests. It still lacks Privy-style authorization-key resources that can directly own wallets and policies. Add key resource CRUD, user/app/key member types, owner/signer assignment, SDK helpers, dashboard management, rotation/revocation, and route-level authorization signature verification for every controlled resource. |
+| Owners and additional signers | Partial | Steward has delegated/service/quorum-member signer metadata, signer-bound vault authorization, and owner/admin MFA fallback on agent paths, but Privy models owners and additional signers for wallets and policies with separate policy scopes. Add explicit owner fields on wallet/policy records, `additional_signers` arrays, owner-transfer intents, signer-specific override policies, export/delete restrictions, user-wallet signer surfaces, and tests proving signers cannot update owners/signers/policies/export keys. |
+| Nested key quorums | Partial | Agent key-quorum schema and authorization middleware now support P-256 nested quorum verification with bounded recursion/cycle-denial tests. Remaining parity is mixed user/authorization-key/quorum member CRUD, one-level nesting semantics exposed through public API/SDK/dashboard, quorum update/delete intents, reviewer MFA UX, and route coverage beyond agent vault signing. |
 | Typed manual-approval intents | Partial | Generic intents exist, but Privy's API exposes typed intents for transfer, RPC, update wallet, update policy, update policy rule, create/delete rule, and update key quorum. Add stable typed schemas, validation, executor idempotency, dashboard renderers, webhooks, and tests for every typed intent lifecycle. |
 | Condition-set item lifecycle | Partial | Steward has condition-set CRUD and item management, but Privy's API exposes item-level create/get/list/update/delete resources. Ensure item IDs, pagination, bulk updates, audit rows, SDK helpers, and policy-simulation fixtures match Privy semantics. |
 
@@ -245,8 +271,8 @@ the full historical audit.
 | Sui/Tron/Tempo conditions  |           Partial | Raw-digest signing policy conditions now constrain non-EVM raw signing by chain and curve, with explicit Sui/Aptos/Movement ed25519 support, Tron/Tempo secp256k1 support, allow/block lists, curve-mismatch denial, and Starknet fail-closed tests. Add full transaction/account parsers and richer chain-specific condition extraction once builders/adapters exist. |
 | Authorization signatures   |           Partial | Opt-in HMAC request signatures are implemented for sensitive mutating routes and SDK requests; add key management/dashboard controls and stronger per-app auth-key model.                                                                                                         |
 | Request expiry             |           Partial | Timestamp/expiry guard exists for sensitive endpoints; add dashboard controls and default enforcement profile.                                                                                                                                                                    |
-| Owners and signers         |           Partial | Agent signer metadata table, migration, owner/admin management API, scoped read API, SDK helpers, audit events, and lifecycle tests now model wallet owners/delegated/service/quorum-member signers. Sensitive signing and wallet-action routes require owner/admin sessions with recent MFA or signer-bound credentials (`X-Steward-Signer-Id` plus a one-time-issued secret stored only as a hash) and enforce scoped delegated permissions. Add asymmetric signer credentials, user-wallet signer surfaces, dashboard UX, and quorum signing flows. |
-| Key quorums                |           Partial | Agent key quorum table, migration, owner/admin REST management API, SDK helpers, validation against active signer membership, audit events, and focused tests now exist. Vault signing can now require a key quorum and verify threshold signer-bound credentials for signing authorization. Add manual approval flows, asymmetric key-share support, dashboard UX, and broader route-level quorum coverage. |
+| Owners and signers         |           Partial | Agent signer metadata table, migration, owner/admin management API, scoped read API, SDK helpers, audit events, and lifecycle tests now model wallet owners/delegated/service/quorum-member signers. Sensitive signing and wallet-action routes require owner/admin sessions with recent MFA or signer-bound credentials (`X-Steward-Signer-Id` plus a one-time-issued secret stored only as a hash) and enforce scoped delegated permissions. P-256 public-key signer credentials now exist on the authorization-signature path. Add user-wallet signer surfaces, dashboard UX, resource owner assignment, and signer override policy semantics. |
+| Key quorums                |           Partial | Agent key quorum table, migration, owner/admin REST management API, SDK helpers, validation against active signer membership, audit events, and focused tests now exist. Vault signing can now require a key quorum and verify threshold signer-bound credentials for signing authorization; P-256 nested quorum verification is covered by middleware tests with fail-closed depth/cycle behavior. Add manual approval flows, public nested-quorum CRUD/SDK/dashboard UX, reviewer MFA gates, and broader route-level quorum coverage. |
 | Intents                    |           Partial | Approval queue exists for tx signing and now emits `intent.created`/`authorized`/`executed`/`failed`/`rejected` webhooks across current vault approval flows. A first-class generic intents table, `/intents` create/list/get/lifecycle API, SDK helpers, tenant isolation, owner/admin MFA authorization, expiry/cancel/reject metadata, conditional terminal transitions, audit events, webhooks, focused tests, dashboard review UI, and typed control-plane execution handlers now exist for wallet updates, policy replacement, policy-rule CRUD, and key-quorum create/update/revoke intent objects. Generic transfer, wallet-action transfer, and wallet-action `send_calls` intents now bridge into vault signing with policy evaluation, rate-limit checks, spend recording, and wallet-action webhooks; `send_calls` allows contract calldata only when an enabled `contract-allowlist` policy permits the target contract and 4-byte selector, and ERC20-like selectors can constrain decoded recipient/spender/from and token amount fields. Intent execution now claims an internal `executing` state before side effects, disables broadcasted generic `send_calls` until idempotent batch nonce tracking exists, rejects malformed odd-length calldata before signing, redacts raw signed transactions from persisted intent results/webhooks, and blocks policy-clear intents unless explicitly acknowledged. RPC intents execute only through the vault RPC allowlist. Focused e2e coverage verifies successful transfer and multi-call intent execution through encrypted-key vault signing with mocked JSON-RPC, including selector-gated calldata signing, ERC20 argument rejection, and concurrent execute conflict coverage. Add ERC721/ERC1155/Solana argument extraction and richer dashboard policy UX. |
 | Manual approvals dashboard | Covered / Partial | Existing transaction approval queue remains available, and `/dashboard/intents` now provides generic intent filtering, detail inspection, payload/authorization/execution review, and authorize/reject/cancel/execute/fail lifecycle actions. Add richer quorum/signature semantics and ownership-policy UX before claiming full Privy manual-approval parity.                                                                                                   |
 
