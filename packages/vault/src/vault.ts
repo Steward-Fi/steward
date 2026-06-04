@@ -2112,7 +2112,17 @@ export class Vault {
       secret = kp.secretKey;
     }
 
-    const encrypted = await this.keyStore.encrypt(secret);
+    // Bind the full keystore context (incl. venue) into the AEAD AAD, exactly as
+    // createWallet does. Every decrypt path (signTransaction, signTypedData,
+    // master-password rotation) supplies { tenantId, agentId, chainFamily, venue }
+    // and the no-AAD fallback is disabled in production — so encrypting WITHOUT
+    // the context made venue keys permanently undecryptable (silent custody loss).
+    const encrypted = await this.keyStore.encrypt(secret, {
+      tenantId,
+      agentId,
+      chainFamily,
+      venue,
+    });
     const createdAt = new Date();
     const policyRows = [
       {
