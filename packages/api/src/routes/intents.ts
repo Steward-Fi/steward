@@ -540,7 +540,7 @@ async function executeTransferIntent(row: typeof intents.$inferSelect) {
   }
 
   return withAgentSpendLock(request.agentId, async () => {
-    const stats = await getTransactionStats(request.agentId);
+    const stats = await getTransactionStats(request.agentId, request.chainId);
     const evaluation = await policyEngine.evaluate(policySet, {
       request,
       recentTxCount1h: stats.recentTxCount1h,
@@ -632,7 +632,7 @@ async function executeSendCallsIntent(row: typeof intents.$inferSelect) {
   }
 
   return withAgentSpendLock(request.agentId, async () => {
-    const stats = await getTransactionStats(request.agentId);
+    const stats = await getTransactionStats(request.agentId, request.chainId);
     let runningSpentToday = BigInt(stats.spentToday);
     let runningSpentThisWeek = BigInt(stats.spentThisWeek);
     const evaluations = [];
