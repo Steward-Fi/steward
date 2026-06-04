@@ -382,7 +382,10 @@ async function testOAuthAuthorize(provider: "google" | "discord") {
  */
 async function testSiweNonce() {
   try {
-    const { status, data } = await api("GET", "/auth/nonce");
+    // SIWE nonce requests are bound to an allowed Origin (PR #79 hardening).
+    const { status, data } = await api("GET", "/auth/nonce", {
+      headers: { Origin: "https://steward.fi" },
+    });
 
     if (status === 200 && typeof data?.nonce === "string" && data.nonce.length > 0) {
       pass("SIWE nonce generation", `nonce=${data.nonce.slice(0, 12)}...`);
