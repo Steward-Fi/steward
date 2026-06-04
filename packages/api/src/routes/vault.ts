@@ -5646,7 +5646,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   // both sign — overspending the cap. This mirrors the EVM sign/transfer/
   // user-operation/authorization paths, which all wrap eval+sign under the lock.
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId);
+    const stats = await getTransactionStats(agentId, signRequest.chainId);
 
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,

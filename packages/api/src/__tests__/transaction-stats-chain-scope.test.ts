@@ -22,7 +22,17 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { agents, closeDb, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { getTransactionStats } from "../services/context";
+
+// context.ts reads required env and touches the DB at module import time, so
+// install the PGLite override before importing it.
+process.env.STEWARD_PGLITE_MEMORY = "true";
+process.env.STEWARD_MASTER_PASSWORD ??= "txstats-chain-master-password";
+const { db: pgliteDb, client: pgliteClient } = await createPGLiteDb("memory://");
+setPGLiteOverride(pgliteDb, async () => {
+  await pgliteClient.close();
+});
+
+const { getTransactionStats } = await import("../services/context");
 
 const TENANT_ID = `txstats-chain-tenant-${Date.now()}`;
 const AGENT_ID = `txstats-chain-agent-${Date.now()}`;
@@ -56,13 +66,6 @@ async function seedTx(idSuffix: string, chainId: number, value: string) {
 
 describe("getTransactionStats chain scoping (issue #110)", () => {
   beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
-    process.env.STEWARD_MASTER_PASSWORD ??= "txstats-chain-master-password";
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
-
     await getDb()
       .insert(tenants)
       .values({ id: TENANT_ID, name: "TxStats Chain Tenant", apiKeyHash: `hash-${TENANT_ID}` });
