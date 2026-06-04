@@ -1,12 +1,15 @@
 import { Buffer } from "node:buffer";
 import { createPrivateKey, sign as cryptoSign } from "node:crypto";
 import {
+  ComputeBudgetProgram,
   Connection,
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
+  type Signer,
   SystemProgram,
   Transaction,
+  type TransactionInstruction,
 } from "@solana/web3.js";
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
@@ -130,36 +133,263 @@ export function restoreSolanaKeypair(secretKey: string): Keypair {
   );
 }
 
+// ─── Compute budget / priority fees ──────────────────────────────────────────
+
+/**
+ * Safety rails for Solana priority-fee / compute-unit estimation.
+ *
+ * The estimator derives a compute-unit *limit* from transaction simulation and a
+ * per-CU *price* from recent on-chain prioritization fees (the correct, adaptive
+ * form — NOT a hardcoded constant). Every output is clamped by these bounds so a
+ * misbehaving RPC, a fee spike, or a bad override can never make the vault sign a
+ * transaction that reserves more than `MAX_UNIT_LIMIT` units, pays more than
+ * `MAX_MICRO_LAMPORTS_PER_CU` per unit, or burns more than `MAX_PRIORITY_FEE_LAMPORTS`
+ * in total priority fees.
+ */
+export const COMPUTE_BUDGET_BOUNDS = {
+  /** Floor for the unit limit. A bare SOL transfer consumes ~150 CU. */
+  MIN_UNIT_LIMIT: 300,
+  /** Protocol hard ceiling: 1.4M CU per transaction. */
+  MAX_UNIT_LIMIT: 1_400_000,
+  /** Headroom multiplier applied to simulated units. */
+  UNIT_LIMIT_MARGIN: 1.2,
+  /** Fallback unit limit when simulation is disabled or fails. */
+  DEFAULT_UNIT_LIMIT: 10_000,
+  /** Fallback per-CU price when recent-fee data is unavailable. */
+  DEFAULT_MICRO_LAMPORTS_PER_CU: 1_000,
+  /** Hard ceiling on the per-CU price (µlamports/CU). */
+  MAX_MICRO_LAMPORTS_PER_CU: 1_000_000,
+  /** Percentile (0..1) of recent fees to target. */
+  DEFAULT_FEE_PERCENTILE: 0.75,
+  /** Absolute ceiling on total priority fee (lamports) = 0.0005 SOL. */
+  MAX_PRIORITY_FEE_LAMPORTS: 500_000,
+} as const;
+
+export interface ComputeBudgetOptions {
+  /** Skip simulation and use this exact unit limit (still clamped to bounds). */
+  unitLimit?: number;
+  /** Skip the recent-fee query and use this exact per-CU price (still clamped). */
+  microLamportsPerCu?: number;
+  /** Percentile (0..1) of recent prioritization fees to target. Default 0.75. */
+  feePercentile?: number;
+  /** Lower the operative per-CU price ceiling below the hard maximum. */
+  maxMicroLamportsPerCu?: number;
+  /** Lower the operative total priority-fee ceiling below the hard maximum. */
+  maxPriorityFeeLamports?: number;
+  /** When false, skip simulation and use the default unit limit. Default true. */
+  simulate?: boolean;
+}
+
+export interface ComputeBudgetEstimate {
+  unitLimit: number;
+  microLamportsPerCu: number;
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, Math.floor(value)));
+}
+
+/**
+ * Median/percentile of recent prioritization fees for the writable accounts a
+ * transaction touches. Never throws — returns the default price on any RPC error
+ * or empty result so estimation degrades gracefully.
+ */
+async function priceFromRecentFees(
+  connection: Connection,
+  writableAccounts: PublicKey[],
+  percentile: number,
+): Promise<number> {
+  try {
+    const fees = await connection.getRecentPrioritizationFees(
+      writableAccounts.length > 0 ? { lockedWritableAccounts: writableAccounts } : undefined,
+    );
+    if (!Array.isArray(fees) || fees.length === 0) {
+      return COMPUTE_BUDGET_BOUNDS.DEFAULT_MICRO_LAMPORTS_PER_CU;
+    }
+    const values = fees
+      .map((f) => f.prioritizationFee)
+      .filter((n): n is number => typeof n === "number" && Number.isFinite(n))
+      .sort((a, b) => a - b);
+    if (values.length === 0) return COMPUTE_BUDGET_BOUNDS.DEFAULT_MICRO_LAMPORTS_PER_CU;
+    // Nearest-rank percentile via ceil(p*n)-1: for p=0.75 over [a,b,c,d] this
+    // selects index 2 (the 75th percentile), whereas floor(p*n) would snap to the
+    // last/max element for small n and systematically overpay. A non-finite
+    // percentile (e.g. an explicit NaN) falls back to the default rather than
+    // indexing values[NaN] === undefined, which would zero the fee.
+    const p = Number.isFinite(percentile)
+      ? Math.min(1, Math.max(0, percentile))
+      : COMPUTE_BUDGET_BOUNDS.DEFAULT_FEE_PERCENTILE;
+    const idx = Math.min(values.length - 1, Math.max(0, Math.ceil(p * values.length) - 1));
+    return values[idx];
+  } catch {
+    return COMPUTE_BUDGET_BOUNDS.DEFAULT_MICRO_LAMPORTS_PER_CU;
+  }
+}
+
+/**
+ * Compute-unit estimate from simulating the transaction with the maximum unit
+ * limit, then applying a headroom margin. Never throws — returns the default
+ * unit limit on any RPC/simulation error so estimation degrades gracefully.
+ */
+async function unitsFromSimulation(
+  connection: Connection,
+  params: {
+    feePayer: PublicKey;
+    instructions: TransactionInstruction[];
+    recentBlockhash: string;
+    signers: Signer[];
+  },
+): Promise<number> {
+  try {
+    const simTx = new Transaction({
+      recentBlockhash: params.recentBlockhash,
+      feePayer: params.feePayer,
+    }).add(
+      ComputeBudgetProgram.setComputeUnitLimit({ units: COMPUTE_BUDGET_BOUNDS.MAX_UNIT_LIMIT }),
+      ...params.instructions,
+    );
+    const sim = await connection.simulateTransaction(simTx, params.signers);
+    const units = sim?.value?.unitsConsumed;
+    if (sim?.value?.err || typeof units !== "number" || units <= 0) {
+      return COMPUTE_BUDGET_BOUNDS.DEFAULT_UNIT_LIMIT;
+    }
+    return Math.ceil(units * COMPUTE_BUDGET_BOUNDS.UNIT_LIMIT_MARGIN);
+  } catch {
+    return COMPUTE_BUDGET_BOUNDS.DEFAULT_UNIT_LIMIT;
+  }
+}
+
+/**
+ * Estimate a Solana compute budget (unit limit + per-CU price) for a set of
+ * instructions, bounded by {@link COMPUTE_BUDGET_BOUNDS}. The total projected
+ * priority fee (`unitLimit × microLamportsPerCu`) is capped by lowering the price
+ * while preserving the (landing-critical) unit limit. Never throws.
+ */
+export async function estimateSolanaComputeBudget(
+  connection: Connection,
+  params: {
+    feePayer: PublicKey;
+    instructions: TransactionInstruction[];
+    recentBlockhash: string;
+    signers: Signer[];
+    writableAccounts?: PublicKey[];
+  },
+  options: ComputeBudgetOptions = {},
+): Promise<ComputeBudgetEstimate> {
+  const B = COMPUTE_BUDGET_BOUNDS;
+  const priceCeiling = clampInt(
+    options.maxMicroLamportsPerCu ?? B.MAX_MICRO_LAMPORTS_PER_CU,
+    0,
+    B.MAX_MICRO_LAMPORTS_PER_CU,
+  );
+  const totalCeiling = clampInt(
+    options.maxPriorityFeeLamports ?? B.MAX_PRIORITY_FEE_LAMPORTS,
+    0,
+    B.MAX_PRIORITY_FEE_LAMPORTS,
+  );
+
+  let microLamportsPerCu =
+    typeof options.microLamportsPerCu === "number"
+      ? options.microLamportsPerCu
+      : await priceFromRecentFees(
+          connection,
+          params.writableAccounts ?? [],
+          options.feePercentile ?? B.DEFAULT_FEE_PERCENTILE,
+        );
+  microLamportsPerCu = clampInt(microLamportsPerCu, 0, priceCeiling);
+
+  let unitLimit: number;
+  if (typeof options.unitLimit === "number") {
+    unitLimit = options.unitLimit;
+  } else if (options.simulate === false) {
+    unitLimit = B.DEFAULT_UNIT_LIMIT;
+  } else {
+    unitLimit = await unitsFromSimulation(connection, params);
+  }
+  unitLimit = clampInt(unitLimit, B.MIN_UNIT_LIMIT, B.MAX_UNIT_LIMIT);
+
+  // Cap the total priority fee by lowering the price (keep the accurate limit).
+  const projectedLamports = Math.ceil((unitLimit * microLamportsPerCu) / 1_000_000);
+  if (projectedLamports > totalCeiling) {
+    microLamportsPerCu = Math.floor((totalCeiling * 1_000_000) / unitLimit);
+  }
+
+  return { unitLimit, microLamportsPerCu };
+}
+
+/** Build the two ComputeBudget instructions for a (limit, price) estimate. */
+export function buildComputeBudgetInstructions(
+  estimate: ComputeBudgetEstimate,
+): TransactionInstruction[] {
+  return [
+    ComputeBudgetProgram.setComputeUnitLimit({ units: estimate.unitLimit }),
+    ComputeBudgetProgram.setComputeUnitPrice({ microLamports: estimate.microLamportsPerCu }),
+  ];
+}
+
 // ─── Transactions ──────────────────────────────────────────────────────────
 
 /**
  * Build and sign a SOL transfer transaction. When broadcast is true, sends the
  * transaction and returns the signature. Otherwise returns the signed serialized
  * transaction as base64 without submitting it to RPC.
+ *
+ * Priority fees: pass `options.computeBudget` (an object, or `true` for defaults)
+ * to prepend adaptive ComputeBudget instructions — a simulated unit limit plus a
+ * per-CU price derived from recent on-chain fees, both bounded by
+ * {@link COMPUTE_BUDGET_BOUNDS}. Omit it (or pass `false`) to preserve the legacy
+ * single-instruction transfer with no compute budget. Estimation never throws:
+ * on any RPC error it falls back to safe defaults.
  */
 export async function signSolanaTransaction(
   secretKeyHex: string,
   to: string,
   lamports: bigint,
   rpcUrl: string,
-  options: { broadcast?: boolean } = {},
+  options: { broadcast?: boolean; computeBudget?: ComputeBudgetOptions | boolean } = {},
 ): Promise<string> {
   const keypair = restoreSolanaKeypair(secretKeyHex);
   const connection = new Connection(rpcUrl, "confirmed");
   const shouldBroadcast = options.broadcast !== false;
+  const toPubkey = new PublicKey(to);
 
   const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+
+  const transferIx = SystemProgram.transfer({
+    fromPubkey: keypair.publicKey,
+    toPubkey,
+    lamports: Number(lamports),
+  });
+
+  const instructions: TransactionInstruction[] = [];
+
+  // Compute budget is opt-in so existing single-instruction-transfer callers are
+  // unaffected. When enabled, the two ComputeBudget instructions are prepended so
+  // they sit ahead of the transfer (the runtime reads them regardless of order,
+  // but leading them is the convention).
+  const cbOption = options.computeBudget;
+  if (cbOption !== undefined && cbOption !== false) {
+    const estimate = await estimateSolanaComputeBudget(
+      connection,
+      {
+        feePayer: keypair.publicKey,
+        instructions: [transferIx],
+        recentBlockhash: blockhash,
+        signers: [keypair],
+        writableAccounts: [keypair.publicKey, toPubkey],
+      },
+      cbOption === true ? {} : cbOption,
+    );
+    instructions.push(...buildComputeBudgetInstructions(estimate));
+  }
+
+  instructions.push(transferIx);
 
   const tx = new Transaction({
     recentBlockhash: blockhash,
     feePayer: keypair.publicKey,
-  }).add(
-    SystemProgram.transfer({
-      fromPubkey: keypair.publicKey,
-      toPubkey: new PublicKey(to),
-      lamports: Number(lamports),
-    }),
-  );
+  }).add(...instructions);
 
   if (!shouldBroadcast) {
     tx.sign(keypair);
@@ -265,6 +495,45 @@ export function signEd25519Digest(
   };
 }
 
+/**
+ * Bound the priority fee a transaction may attach. ComputeBudget instructions move
+ * no value, but an arbitrarily large `setComputeUnitPrice` would drain the signing
+ * wallet's SOL as priority fees entirely outside the spend policy. This enforces
+ * the same ceiling the build path already applies (COMPUTE_BUDGET_BOUNDS.
+ * MAX_PRIORITY_FEE_LAMPORTS), so the caller-submitted-transaction signing path
+ * cannot be used as an uncapped fee drain. Decoded as bigint because the per-CU
+ * price is a u64 and `unitLimit × price` overflows Number.
+ */
+function assertComputeBudgetWithinCap(
+  computeBudgetInstructions: TransactionInstruction[],
+  totalInstructionCount: number,
+): void {
+  let explicitUnitLimit: number | undefined;
+  let microLamportsPerCu = 0n;
+  for (const ix of computeBudgetInstructions) {
+    const data = ix.data;
+    if (data.length < 1) continue;
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    // SetComputeUnitLimit (u32) / SetComputeUnitPrice (u64); the last of each wins
+    // on-chain, matching the runtime's behaviour.
+    if (data[0] === 2 && data.length >= 5) explicitUnitLimit = view.getUint32(1, true);
+    else if (data[0] === 3 && data.length >= 9) microLamportsPerCu = view.getBigUint64(1, true);
+  }
+  if (microLamportsPerCu === 0n) return; // no priority fee attached
+
+  // With no explicit unit limit the runtime defaults to 200k CU per instruction
+  // (capped at the protocol max) — a conservative upper bound on priced CU.
+  const effectiveUnitLimit =
+    explicitUnitLimit ??
+    Math.min(COMPUTE_BUDGET_BOUNDS.MAX_UNIT_LIMIT, 200_000 * Math.max(1, totalInstructionCount));
+  const projectedLamports = (BigInt(effectiveUnitLimit) * microLamportsPerCu) / 1_000_000n;
+  if (projectedLamports > BigInt(COMPUTE_BUDGET_BOUNDS.MAX_PRIORITY_FEE_LAMPORTS)) {
+    throw new Error(
+      `Solana priority fee (${projectedLamports} lamports) exceeds the allowed maximum of ${COMPUTE_BUDGET_BOUNDS.MAX_PRIORITY_FEE_LAMPORTS} lamports`,
+    );
+  }
+}
+
 export function assertSolanaTransferTransactionMatches(
   tx: Transaction,
   expected: { from: PublicKey; to: string; lamports: bigint },
@@ -272,11 +541,29 @@ export function assertSolanaTransferTransactionMatches(
   if (expected.lamports < 0n) {
     throw new Error("expected Solana transfer lamports must be non-negative");
   }
-  if (tx.instructions.length !== 1) {
-    throw new Error("Solana signing only supports a single policy-checked transfer instruction");
+
+  // ComputeBudget instructions (priority-fee price + compute-unit limit) carry no
+  // value movement — the ComputeBudget program cannot transfer lamports or tokens —
+  // so they are safe to ignore for value policy. After excluding them, the
+  // transaction must contain exactly one instruction: the SystemProgram transfer
+  // that matches the policy envelope. This lets the vault attach adaptive priority
+  // fees, and lets callers submit pre-built transfers that include them, without
+  // weakening the single-policy-checked-transfer guarantee. The priority fee they
+  // imply is still bounded so it cannot become an uncapped SOL drain.
+  const computeBudgetInstructions = tx.instructions.filter((ix) =>
+    ix.programId.equals(ComputeBudgetProgram.programId),
+  );
+  const valueInstructions = tx.instructions.filter(
+    (ix) => !ix.programId.equals(ComputeBudgetProgram.programId),
+  );
+  assertComputeBudgetWithinCap(computeBudgetInstructions, tx.instructions.length);
+  if (valueInstructions.length !== 1) {
+    throw new Error(
+      "Solana signing only supports a single policy-checked transfer instruction (plus optional compute-budget instructions)",
+    );
   }
 
-  const [instruction] = tx.instructions;
+  const [instruction] = valueInstructions;
   if (!instruction.programId.equals(SystemProgram.programId)) {
     throw new Error("Solana transaction instruction must be a SystemProgram transfer");
   }

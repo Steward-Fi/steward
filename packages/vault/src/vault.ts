@@ -808,6 +808,11 @@ export class Vault {
       const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(chainId);
       hash = await signSolanaTransaction(secretKey, request.to, BigInt(request.value), rpcUrl, {
         broadcast: shouldBroadcast,
+        // Attach adaptive priority fees (simulated CU limit + recent-fee-derived
+        // price, bounded by COMPUTE_BUDGET_BOUNDS). Estimation never throws and
+        // falls back to safe defaults on RPC error. Set STEWARD_SOLANA_PRIORITY_FEES=0
+        // to revert to the legacy no-compute-budget transfer.
+        computeBudget: process.env.STEWARD_SOLANA_PRIORITY_FEES === "0" ? false : {},
       });
     } else {
       assertEvmWalletAddressMatches(secretKey, request.walletAddress);
