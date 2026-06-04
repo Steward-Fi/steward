@@ -1407,11 +1407,25 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     );
     if (gasGuard) return gasGuard;
   }
+  // Build the SignRequest from its declared fields ONLY — never spread the raw
+  // body. The approved-addresses evaluator treats an envelope `destination`
+  // (and `action.destination` / `withdraw.destination`) as authoritative over
+  // `to` for the operator-withdraw flow; spreading the raw /sign body let a
+  // caller smuggle a whitelisted `destination` while `to` pointed at an
+  // arbitrary address, signing/broadcasting to `to` while the allowlist passed.
+  // /sign has no legitimate `destination` concept — its `to` IS the recipient.
   const signRequest: SignRequest = {
-    ...request,
     tenantId,
     agentId,
+    to: request.to,
+    value: request.value,
+    data: request.data,
     chainId: resolvedChainId,
+    nonce: request.nonce,
+    gasLimit: request.gasLimit,
+    broadcast: request.broadcast,
+    venue: request.venue,
+    walletAddress: request.walletAddress,
   };
   const requester = getAuthenticatedPrincipal(c);
   const shouldBroadcast = signRequest.broadcast !== false;
