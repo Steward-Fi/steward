@@ -4,6 +4,20 @@ import { join } from "node:path";
 
 const routeSource = readFileSync(join(import.meta.dir, "..", "routes", "agents.ts"), "utf8");
 
+function routeBody(marker: string, endMarker = "agentRoutes.") {
+  const start = routeSource.indexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = routeSource.indexOf(endMarker, start + marker.length);
+  return routeSource.slice(start, end === -1 ? undefined : end);
+}
+
+function functionBody(marker: string, endMarker = "\n}\n\nagentRoutes.") {
+  const start = routeSource.indexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = routeSource.indexOf(endMarker, start + marker.length);
+  return routeSource.slice(start, end === -1 ? undefined : end + 2);
+}
+
 function expectBefore(first: string, second: string) {
   const firstIndex = routeSource.indexOf(first);
   const secondIndex = routeSource.indexOf(second, firstIndex);
@@ -43,11 +57,8 @@ describe("agent route audit ordering", () => {
     expect(walletStart).toBeGreaterThanOrEqual(0);
     expect(routeSource.indexOf("Venue wallet creation", walletStart)).toBeGreaterThan(walletStart);
 
-    const signerCreateStart = routeSource.indexOf('agentRoutes.post("/:agentId/signers"');
-    expect(signerCreateStart).toBeGreaterThanOrEqual(0);
-    expect(routeSource.indexOf("Signer credential issuance", signerCreateStart)).toBeGreaterThan(
-      signerCreateStart,
-    );
+    const signerCreateRoute = routeBody('agentRoutes.post("/:agentId/signers"');
+    expect(signerCreateRoute).toContain("Signer creation");
 
     const signerPatchStart = routeSource.indexOf('agentRoutes.patch("/:agentId/signers/:signerId"');
     expect(signerPatchStart).toBeGreaterThanOrEqual(0);
@@ -84,9 +95,8 @@ describe("agent route audit ordering", () => {
       expect(routeSource.indexOf("requireRecentAdminMfa", start)).toBeGreaterThan(start);
     }
 
-    const batchStart = routeSource.indexOf('agentRoutes.post("/batch"');
-    expect(batchStart).toBeGreaterThanOrEqual(0);
-    expect(routeSource.indexOf("Batch agent creation", batchStart)).toBeGreaterThan(batchStart);
+    const batchRoute = functionBody("export async function createAgentBatch");
+    expect(batchRoute).toContain("Batch agent creation");
     const quorumPatchStart = routeSource.indexOf(
       'agentRoutes.patch("/:agentId/key-quorums/:quorumId"',
     );

@@ -4,6 +4,13 @@ import { join } from "node:path";
 
 const routeSource = readFileSync(join(import.meta.dir, "..", "routes", "agents.ts"), "utf8");
 
+function functionBody(marker: string, endMarker = "\n}\n\nagentRoutes.") {
+  const start = routeSource.indexOf(marker);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = routeSource.indexOf(endMarker, start + marker.length);
+  return routeSource.slice(start, end === -1 ? undefined : end + 2);
+}
+
 describe("agent audit rollback hardening", () => {
   it("removes newly persisted agent and wallet rows when final audit writes fail", () => {
     expect(routeSource).toContain("async function deleteAgentRows");
@@ -120,12 +127,7 @@ describe("agent audit rollback hardening", () => {
     expect(createRoute).not.toContain("agentIdExistsGlobally");
     expect(createRoute).not.toContain("vault.createAgent(tenantId, body.id");
 
-    const batchStart = routeSource.indexOf('agentRoutes.post("/batch"');
-    expect(batchStart).toBeGreaterThanOrEqual(0);
-    const batchRoute = routeSource.slice(
-      batchStart,
-      routeSource.indexOf('agentRoutes.get("/:agentId/policies"', batchStart),
-    );
+    const batchRoute = functionBody("export async function createAgentBatch");
     expect(batchRoute).toContain("const agentId = generateAgentId()");
     expect(batchRoute).not.toContain("agentIdExistsGlobally");
     expect(batchRoute).not.toContain("vault.createAgent(\n        tenantId,\n        agentSpec.id");

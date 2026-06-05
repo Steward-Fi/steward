@@ -330,6 +330,48 @@
       "when": 1780132200000,
       "tag": "0048_harden_tenant_join_default",
       "breakpoints": true
+    },
+    {
+      "idx": 67,
+      "version": "7",
+      "when": 1780132800000,
+      "tag": "0067_digital_asset_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 68,
+      "version": "7",
+      "when": 1780133400000,
+      "tag": "0068_app_client_embedded_wallets",
+      "breakpoints": true
+    },
+    {
+      "idx": 69,
+      "version": "7",
+      "when": 1780134000000,
+      "tag": "0069_agent_signer_policy_ids",
+      "breakpoints": true
+    },
+    {
+      "idx": 70,
+      "version": "7",
+      "when": 1780134600000,
+      "tag": "0070_bitcoin_wallet_metadata",
+      "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1780135200000,
+      "tag": "0071_app_client_native_allowlists",
+      "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1780135800000,
+      "tag": "0072_vault_signing_freezes_and_evm_nonces",
+      "breakpoints": true
     }
   ]
 }

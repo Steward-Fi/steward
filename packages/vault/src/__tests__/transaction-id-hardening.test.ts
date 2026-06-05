@@ -6,14 +6,14 @@ const vaultSource = readFileSync(join(import.meta.dir, "..", "vault.ts"), "utf8"
 
 describe("transaction id hardening", () => {
   it("rejects reusing a transaction id across agents before upsert", () => {
-    const signStart = vaultSource.indexOf("async signTransaction");
-    expect(signStart).toBeGreaterThanOrEqual(0);
+    const helperStart = vaultSource.indexOf("private async recordSignedTransaction");
+    expect(helperStart).toBeGreaterThanOrEqual(0);
     const guard = vaultSource.indexOf(
       "Transaction id already belongs to a different agent",
-      signStart,
+      helperStart,
     );
-    const upsert = vaultSource.indexOf(".onConflictDoUpdate", signStart);
-    expect(guard).toBeGreaterThan(signStart);
+    const upsert = vaultSource.indexOf(".onConflictDoUpdate", helperStart);
+    expect(guard).toBeGreaterThan(helperStart);
     expect(upsert).toBeGreaterThan(guard);
   });
 });

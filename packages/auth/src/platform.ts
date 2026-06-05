@@ -20,7 +20,9 @@ import { createMiddleware } from "hono/factory";
  */
 
 function getValidPlatformKeys(): string[] {
-  return (process.env.STEWARD_PLATFORM_KEYS || "")
+  return [process.env.STEWARD_PLATFORM_KEYS, process.env.STEWARD_PLATFORM_KEY]
+    .filter((value): value is string => Boolean(value))
+    .join(",")
     .split(",")
     .map((k) => k.trim())
     .filter(Boolean);

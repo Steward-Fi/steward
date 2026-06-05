@@ -513,8 +513,24 @@ export class Vault {
 
       // ── Multi-chain public address storage ───────────────────────────
       await tx.insert(agentWallets).values([
-        { agentId, chainFamily: "evm", address: evmAddress, createdAt },
-        { agentId, chainFamily: "solana", address: solanaAddress, createdAt },
+        {
+          agentId,
+          chainFamily: "evm",
+          address: evmAddress,
+          venue: null,
+          purpose: null,
+          metadata: {},
+          createdAt,
+        },
+        {
+          agentId,
+          chainFamily: "solana",
+          address: solanaAddress,
+          venue: null,
+          purpose: null,
+          metadata: {},
+          createdAt,
+        },
       ]);
     });
 
@@ -619,8 +635,24 @@ export class Vault {
       ]);
 
       await tx.insert(agentWallets).values([
-        { agentId, chainFamily: "evm", address: material.evmAddress, createdAt },
-        { agentId, chainFamily: "solana", address: material.solanaAddress, createdAt },
+        {
+          agentId,
+          chainFamily: "evm",
+          address: material.evmAddress,
+          venue: null,
+          purpose: null,
+          metadata: {},
+          createdAt,
+        },
+        {
+          agentId,
+          chainFamily: "solana",
+          address: material.solanaAddress,
+          venue: null,
+          purpose: null,
+          metadata: {},
+          createdAt,
+        },
       ]);
     });
 
@@ -808,6 +840,8 @@ export class Vault {
             agentId,
             chainFamily: "evm",
             venue: null,
+            purpose: null,
+            metadata: {},
             address: material.evmAddress,
             createdAt: now,
           },
@@ -815,6 +849,8 @@ export class Vault {
             agentId,
             chainFamily: "solana",
             venue: null,
+            purpose: null,
+            metadata: {},
             address: material.solanaAddress,
             createdAt: now,
           },
