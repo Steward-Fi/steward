@@ -151,6 +151,26 @@ describe("StewardAuth multi-tenant", () => {
       });
       expect(auth.getTenantId()).toBeUndefined();
     });
+
+    test("getSession exposes MFA freshness claims from stored tokens", () => {
+      const auth = new StewardAuth({
+        baseUrl: "http://127.0.0.1:1",
+        storage,
+      });
+      storage.setItem(
+        "steward_session_token",
+        fakeJwt({
+          mfaVerifiedAt: 1_770_000_000_000,
+          mfaMethod: "passkey",
+          factorEnrollmentVerifiedAt: 1_770_000_000_111,
+        }),
+      );
+
+      const session = auth.getSession();
+      expect(session?.mfaVerifiedAt).toBe(1_770_000_000_000);
+      expect(session?.mfaMethod).toBe("passkey");
+      expect(session?.factorEnrollmentVerifiedAt).toBe(1_770_000_000_111);
+    });
   });
 
   describe("listTenants", () => {
@@ -195,6 +215,261 @@ describe("StewardAuth multi-tenant", () => {
       });
 
       await expect(auth.listTenants()).rejects.toThrow("Not authenticated");
+    });
+  });
+
+  describe("getCurrentUser", () => {
+    test("passes configured tenant to /user/me bootstrap", async () => {
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("GET");
+        expect(request.path).toBe("/user/me?tenantId=my-app");
+        expect(request.headers["x-steward-tenant"]).toBe("my-app");
+        expect(request.headers.authorization).toBe(
+          `Bearer ${storage.getItem("steward_session_token")}`,
+        );
+        return {
+          json: {
+            ok: true,
+            data: {
+              userId: "user-1",
+              email: "test@example.com",
+              wallet: {
+                agentId: "user-wallet-user-1",
+                address: "0x1234567890123456789012345678901234567890",
+              },
+              walletAutoCreated: true,
+              embeddedWalletConfig: {
+                tenantId: "my-app",
+                createOnLogin: "users-without-wallets",
+              },
+            },
+          },
+        };
+      });
+
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl, "my-app");
+        const result = await auth.getCurrentUser();
+        expect(result.walletAutoCreated).toBe(true);
+        expect(result.embeddedWalletConfig).toEqual({
+          tenantId: "my-app",
+          createOnLogin: "users-without-wallets",
+        });
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
+  describe("current-session MFA step-up", () => {
+    test("stepUpWithTotp posts a bearer-authenticated TOTP code and stores refreshed tokens", async () => {
+      const steppedUpToken = fakeJwt({ mfaVerifiedAt: 1_770_000_000_000, mfaMethod: "totp" });
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/auth/mfa/totp/step-up");
+        expect(request.headers.authorization).toBe(
+          `Bearer ${storage.getItem("steward_session_token")}`,
+        );
+        expect(request.bodyJson).toEqual({ code: "123456" });
+        return {
+          json: {
+            ok: true,
+            token: steppedUpToken,
+            refreshToken: "totp-step-up-refresh",
+            expiresIn: 900,
+            user: { id: "user-1", email: "test@example.com" },
+          },
+        };
+      });
+
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        const result = await auth.stepUpWithTotp("123456");
+        expect(result.token).toBe(steppedUpToken);
+        expect(storage.getItem("steward_session_token")).toBe(steppedUpToken);
+        expect(storage.getItem("steward_refresh_token")).toBe("totp-step-up-refresh");
+        expect(auth.getSession()?.mfaMethod).toBe("totp");
+      } finally {
+        await server.close();
+      }
+    });
+
+    test("stepUpWithRecoveryCode and stepUpWithSms use current-session step-up endpoints", async () => {
+      const calls: string[] = [];
+      const server = await startStewardServer((request) => {
+        calls.push(request.path);
+        expect(request.headers.authorization).toBe(
+          `Bearer ${storage.getItem("steward_session_token")}`,
+        );
+        if (request.path === "/auth/mfa/totp/step-up") {
+          expect(request.bodyJson).toEqual({ recoveryCode: "ABCDE-FGHJK" });
+          return {
+            json: {
+              ok: true,
+              token: fakeJwt({ mfaMethod: "recovery_code" }),
+              refreshToken: "recovery-step-up-refresh",
+              expiresIn: 900,
+              user: { id: "user-1", email: "test@example.com" },
+            },
+          };
+        }
+        expect(request.path).toBe("/auth/mfa/sms/step-up");
+        expect(request.bodyJson).toEqual({ code: "654321" });
+        return {
+          json: {
+            ok: true,
+            token: fakeJwt({ mfaMethod: "sms" }),
+            refreshToken: "sms-step-up-refresh",
+            expiresIn: 900,
+            user: { id: "user-1", email: "test@example.com" },
+          },
+        };
+      });
+
+      try {
+        const auth = createAuthWithSession(storage, server.baseUrl);
+        await auth.stepUpWithRecoveryCode("ABCDE-FGHJK");
+        expect(auth.getSession()?.mfaMethod).toBe("recovery_code");
+        await auth.stepUpWithSms("654321");
+        expect(auth.getSession()?.mfaMethod).toBe("sms");
+        expect(calls).toEqual(["/auth/mfa/totp/step-up", "/auth/mfa/sms/step-up"]);
+      } finally {
+        await server.close();
+      }
+    });
+  });
+
+  describe("guest lifecycle", () => {
+    test("signInAsGuest stores tokens and reports 30-day expiry messaging", async () => {
+      const guestExpiresAt = new Date(Date.now() + 3 * 86_400_000).toISOString();
+      const token = fakeJwt({
+        userId: "guest-1",
+        email: undefined,
+        guest: true,
+        guestExpiresAt,
+      });
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/auth/guest");
+        expect(request.bodyJson).toEqual({ tenantId: "my-app", expiresIn: "7d" });
+        return {
+          json: {
+            ok: true,
+            token,
+            refreshToken: "guest-refresh",
+            expiresIn: 900,
+            user: {
+              id: "guest-1",
+              email: null,
+              isGuest: true,
+              guestExpiresAt,
+              tenantId: "my-app",
+            },
+          },
+        };
+      });
+
+      try {
+        const auth = new StewardAuth({ baseUrl: server.baseUrl, storage, tenantId: "my-app" });
+        const result = await auth.signInAsGuest({ expiresIn: "7d" });
+        expect(result.user.isGuest).toBe(true);
+        expect(storage.getItem("steward_session_token")).toBe(token);
+        expect(storage.getItem("steward_refresh_token")).toBe("guest-refresh");
+        expect(auth.getGuestState()).toMatchObject({
+          isGuest: true,
+          userId: "guest-1",
+          tenantId: "test-tenant",
+          expiresAt: guestExpiresAt,
+          isExpired: false,
+        });
+        expect(auth.getGuestState().expiryMessage).toContain("expires in");
+      } finally {
+        await server.close();
+      }
+    });
+
+    test("upgradeGuestWithEmail requires a guest session and exchanges verified email token", async () => {
+      const guestToken = fakeJwt({
+        userId: "guest-2",
+        guest: true,
+        guestExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      const upgradedToken = fakeJwt({
+        userId: "guest-2",
+        email: "guest@example.test",
+        guest: false,
+        guestExpiresAt: undefined,
+      });
+      storage.setItem("steward_session_token", guestToken);
+      storage.setItem("steward_refresh_token", "guest-refresh");
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("POST");
+        expect(request.path).toBe("/auth/guest/upgrade");
+        expect(request.headers.authorization).toBe(`Bearer ${guestToken}`);
+        expect(request.bodyJson).toEqual({
+          method: "email",
+          email: "guest@example.test",
+          token: "magic-token",
+        });
+        return {
+          json: {
+            ok: true,
+            token: upgradedToken,
+            refreshToken: "upgraded-refresh",
+            expiresIn: 900,
+            user: {
+              id: "guest-2",
+              email: "guest@example.test",
+              isGuest: false,
+            },
+          },
+        };
+      });
+
+      try {
+        const auth = new StewardAuth({ baseUrl: server.baseUrl, storage });
+        const result = await auth.upgradeGuestWithEmail({
+          email: "guest@example.test",
+          token: "magic-token",
+        });
+        expect("mfaRequired" in result).toBe(false);
+        expect(storage.getItem("steward_session_token")).toBe(upgradedToken);
+        expect(storage.getItem("steward_refresh_token")).toBe("upgraded-refresh");
+        expect(auth.getGuestState().isGuest).toBe(false);
+      } finally {
+        await server.close();
+      }
+
+      const fullAuth = createAuthWithSession(storage, "http://127.0.0.1:1");
+      await expect(
+        fullAuth.upgradeGuestWithEmail({ email: "full@example.test", token: "token" }),
+      ).rejects.toThrow("not a guest");
+    });
+
+    test("deleteGuest calls the explicit delete endpoint and clears local storage", async () => {
+      const guestToken = fakeJwt({
+        userId: "guest-3",
+        guest: true,
+        guestExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+      });
+      storage.setItem("steward_session_token", guestToken);
+      storage.setItem("steward_refresh_token", "guest-refresh");
+      const server = await startStewardServer((request) => {
+        expect(request.method).toBe("DELETE");
+        expect(request.path).toBe("/auth/guest");
+        expect(request.headers.authorization).toBe(`Bearer ${guestToken}`);
+        return { json: { ok: true, deleted: true, userId: "guest-3" } };
+      });
+
+      try {
+        const auth = new StewardAuth({ baseUrl: server.baseUrl, storage });
+        const result = await auth.deleteGuest();
+        expect(result).toEqual({ ok: true, deleted: true, userId: "guest-3" });
+        expect(storage.getItem("steward_session_token")).toBeNull();
+        expect(storage.getItem("steward_refresh_token")).toBeNull();
+      } finally {
+        await server.close();
+      }
     });
   });
 

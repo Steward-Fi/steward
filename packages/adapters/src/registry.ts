@@ -24,6 +24,7 @@ import { type KycAdapter, MockKycAdapter } from "./adapters/kyc.js";
 import { MockOfframpAdapter, type OfframpAdapter } from "./adapters/offramp.js";
 import { MockOnrampAdapter, type OnrampAdapter } from "./adapters/onramp.js";
 import { MockPushAdapter, type PushAdapter } from "./adapters/push.js";
+import { MockSparkAdapter, type SparkAdapter } from "./adapters/spark.js";
 import { MockSwapAdapter, type SwapAdapter } from "./adapters/swap.js";
 import { MockTosAdapter, type TosAdapter } from "./adapters/tos.js";
 import { type AdapterCategory, AdapterNotConfiguredError, type BaseAdapter } from "./types.js";
@@ -43,6 +44,7 @@ type CategoryToAdapter = {
   custodial: CustodialWalletAdapter;
   push: PushAdapter;
   bridge: BridgeAdapter;
+  spark: SparkAdapter;
   exchange: ExchangeEmbedAdapter;
 };
 
@@ -56,6 +58,7 @@ const ALL_CATEGORIES: readonly AdapterCategory[] = [
   "custodial",
   "push",
   "bridge",
+  "spark",
   "exchange",
 ];
 
@@ -97,6 +100,7 @@ const MOCK_FACTORIES: { [C in AdapterCategory]: () => CategoryToAdapter[C] } = {
   custodial: () => new MockCustodialWalletAdapter(),
   push: () => new MockPushAdapter(),
   bridge: () => new MockBridgeAdapter(),
+  spark: () => new MockSparkAdapter(),
   exchange: () => new MockExchangeEmbedAdapter(),
 };
 
@@ -219,6 +223,9 @@ export class AdapterRegistry {
   }
   bridge(): BridgeAdapter {
     return this.resolve("bridge");
+  }
+  spark(): SparkAdapter {
+    return this.resolve("spark");
   }
   exchange(): ExchangeEmbedAdapter {
     return this.resolve("exchange");

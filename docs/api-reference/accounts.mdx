@@ -1,0 +1,659 @@
+---
+title: "Accounts"
+description: "Create and manage tenant-scoped digital asset accounts that group wallets."
+---
+
+# Accounts API
+
+Digital asset accounts are tenant-scoped resources that group one or more
+wallets under a stable account ID. Use them when you need a Privy-style account
+object that can reference existing Steward wallets or provision new grouped
+wallets.
+
+These routes are mounted at both `/accounts` and `/v1/accounts`.
+
+<Note>
+  Account and balance responses include non-secret capability metadata derived
+  from wallet membership, custody type, and signer/quorum records. Metadata is
+  tenant scoped and never includes private keys, signing secrets, or encrypted
+  key material.
+</Note>
+
+## Account Object
+
+```typescript
+{
+  id: string;
+  tenantId: string;
+  displayName: string | null;
+  display_name: string | null;
+  metadata: Record<string, unknown>;
+  ownerUserIds: string[];
+  owner_user_ids: string[];
+  additionalSignerIds: string[];
+  additional_signer_ids: string[];
+  signerPolicyIds: string[];
+  signer_policy_ids: string[];
+  walletIds: string[];
+  wallet_ids: string[];
+  wallets: Array<{
+    id: string;
+    walletId: string;
+    membershipId: string;
+    name: string;
+    ownerUserId: string | null;
+    owner_user_id: string | null;
+    walletType: string;
+    wallet_type: string;
+    custody: {
+      type: "server" | "user_embedded";
+      ownerUserId: string | null;
+      owner_user_id: string | null;
+    };
+    signing: {
+      signerCount: number;
+      activeSignerCount: number;
+      quorumCount: number;
+      activeQuorumCount: number;
+    };
+    capabilities: Array<
+      | "sign_transaction"
+      | "sign_message"
+      | "sign_typed_data"
+      | "sign_user_operation"
+      | "sign_authorization"
+      | "send_calls"
+      | "transfer"
+      | "solana_transaction"
+      | "export_private_key"
+    >;
+    capabilityMetadata: {
+      custody: {
+        type: "server" | "user_embedded";
+        ownerUserId: string | null;
+        serverManaged: boolean;
+        userOwned: boolean;
+      };
+      signing: {
+        mode: "server" | "user" | "delegated" | "quorum";
+        signerCount: number;
+        activeSignerCount: number;
+        quorumCount: number;
+        activeQuorumCount: number;
+        hasActiveDelegatedSigners: boolean;
+        hasActiveKeyQuorums: boolean;
+      };
+      operations: Record<string, boolean>;
+    };
+    chainType: "ethereum" | "solana";
+    chainFamily: "evm" | "solana";
+    address: string | null;
+    purpose: string | null;
+    venue: string | null;
+    createdAt: string | null;
+  }>;
+  capabilities: string[];
+  capabilityMetadata: {
+    walletCount: number;
+    walletIds: string[];
+    chainFamilies: Array<"evm" | "solana">;
+    custodyTypes: Array<"server" | "user_embedded">;
+    walletTypes: string[];
+    hasServerWallets: boolean;
+    hasUserEmbeddedWallets: boolean;
+    hasActiveDelegatedSigners: boolean;
+    hasActiveKeyQuorums: boolean;
+  };
+  createdAt: string;
+  created_at: string;
+  updatedAt: string;
+  updated_at: string;
+}
+```
+
+## List Accounts
+
+Returns all digital asset accounts for the authenticated tenant.
+
+```
+GET /accounts
+```
+
+**Auth:** Tenant API key
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "accounts": [
+      {
+        "id": "acct_treasury",
+        "tenantId": "your-tenant",
+        "displayName": "Treasury",
+        "ownerUserIds": ["4f9f5fb8-5d32-4e1e-94ac-151f5e771f1f"],
+        "owner_user_ids": ["4f9f5fb8-5d32-4e1e-94ac-151f5e771f1f"],
+        "additionalSignerIds": ["signer_backup"],
+        "additional_signer_ids": ["signer_backup"],
+        "signerPolicyIds": ["policy_dual_approval"],
+        "signer_policy_ids": ["policy_dual_approval"],
+        "walletIds": ["treasury-evm"],
+        "wallet_ids": ["treasury-evm"],
+        "wallets": [
+          {
+            "id": "treasury-evm",
+            "walletId": "treasury-evm",
+            "walletType": "agent",
+            "custody": { "type": "server", "ownerUserId": null },
+            "signing": {
+              "signerCount": 0,
+              "activeSignerCount": 0,
+              "quorumCount": 0,
+              "activeQuorumCount": 0
+            },
+            "capabilities": [
+              "send_calls",
+              "sign_authorization",
+              "sign_message",
+              "sign_transaction",
+              "sign_typed_data",
+              "sign_user_operation",
+              "transfer"
+            ],
+            "capabilityMetadata": {
+              "custody": {
+                "type": "server",
+                "ownerUserId": null,
+                "serverManaged": true,
+                "userOwned": false
+              },
+              "signing": {
+                "mode": "server",
+                "signerCount": 0,
+                "activeSignerCount": 0,
+                "quorumCount": 0,
+                "activeQuorumCount": 0,
+                "hasActiveDelegatedSigners": false,
+                "hasActiveKeyQuorums": false
+              },
+              "operations": {
+                "readBalance": true,
+                "transfer": true,
+                "signTransaction": true,
+                "signTypedData": true
+              }
+            },
+            "chainType": "ethereum",
+            "chainFamily": "evm",
+            "address": "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
+          }
+        ],
+        "capabilities": [
+          "send_calls",
+          "sign_authorization",
+          "sign_message",
+          "sign_transaction",
+          "sign_typed_data",
+          "sign_user_operation",
+          "transfer"
+        ],
+        "capabilityMetadata": {
+          "walletCount": 1,
+          "walletIds": ["treasury-evm"],
+          "chainFamilies": ["evm"],
+          "custodyTypes": ["server"],
+          "walletTypes": ["agent"],
+          "hasServerWallets": true,
+          "hasUserEmbeddedWallets": false,
+          "hasActiveDelegatedSigners": false,
+          "hasActiveKeyQuorums": false
+        }
+      }
+    ]
+  }
+}
+```
+
+<CodeGroup>
+```typescript SDK
+const { accounts } = await steward.accounts.list();
+```
+
+```bash cURL
+curl https://api.steward.fi/accounts \
+  -H "X-Steward-Key: your-key"
+```
+</CodeGroup>
+
+## Create Account
+
+Creates an account from existing wallet IDs, newly configured wallets, or both.
+An account can contain at most five wallet memberships.
+
+```
+POST /accounts
+```
+
+**Auth:** Tenant API key
+
+**Request Body:**
+
+```typescript
+{
+  id?: string;                  // Optional stable account ID
+  display_name?: string | null; // or displayName
+  metadata?: Record<string, unknown>;
+  owner_user_ids?: string[];    // or ownerUserIds
+  additional_signer_ids?: string[]; // or additionalSignerIds
+  signer_policy_ids?: string[]; // or signerPolicyIds
+  wallet_ids?: string[];        // Existing Steward agent wallet IDs
+  user_wallet_ids?: string[];   // Existing user-owned embedded wallet IDs
+  wallets_configuration?: Array<{
+    chain_type: "ethereum" | "evm" | "solana";
+    name?: string;
+    wallet_id?: string;
+  }>;
+}
+```
+
+**Response:** Account object, status `201`.
+
+<CodeGroup>
+```typescript SDK
+const account = await steward.accounts.create({
+  id: "acct_treasury",
+  display_name: "Treasury",
+  owner_user_ids: ["4f9f5fb8-5d32-4e1e-94ac-151f5e771f1f"],
+  additional_signer_ids: ["signer_backup"],
+  signer_policy_ids: ["policy_dual_approval"],
+  wallet_ids: ["treasury-evm"],
+  user_wallet_ids: ["user-wallet-agent-id"],
+  wallets_configuration: [
+    { chain_type: "solana", name: "Treasury SOL" }
+  ],
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/accounts \
+  -H "X-Steward-Key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "acct_treasury",
+    "display_name": "Treasury",
+    "owner_user_ids": ["4f9f5fb8-5d32-4e1e-94ac-151f5e771f1f"],
+    "additional_signer_ids": ["signer_backup"],
+    "signer_policy_ids": ["policy_dual_approval"],
+    "wallet_ids": ["treasury-evm"],
+    "user_wallet_ids": ["user-wallet-agent-id"],
+    "wallets_configuration": [
+      { "chain_type": "solana", "name": "Treasury SOL" }
+    ]
+  }'
+```
+</CodeGroup>
+
+## Get Account
+
+Returns one account by ID.
+
+```
+GET /accounts/:accountId
+```
+
+**Auth:** Tenant API key
+
+<CodeGroup>
+```typescript SDK
+const account = await steward.accounts.get("acct_treasury");
+```
+
+```bash cURL
+curl https://api.steward.fi/accounts/acct_treasury \
+  -H "X-Steward-Key: your-key"
+```
+</CodeGroup>
+
+## Get Account Balance
+
+Returns a balance-compatible account wrapper with grouped wallets. This endpoint
+returns best-effort native balance rows, ERC20 token rows for EVM wallets, SPL
+token rows for Solana wallets, and per-chain native/token rollups. Provider
+failures are reported per wallet without failing the whole account response.
+
+```
+GET /accounts/:accountId/balance
+```
+
+**Auth:** Tenant API key
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "acct_treasury",
+    "accountId": "acct_treasury",
+    "account_id": "acct_treasury",
+    "wallets": [],
+    "capabilities": [
+      "send_calls",
+      "sign_authorization",
+      "sign_message",
+      "sign_transaction",
+      "sign_typed_data",
+      "sign_user_operation",
+      "transfer"
+    ],
+    "capabilityMetadata": {
+      "walletCount": 1,
+      "walletIds": ["treasury-evm"],
+      "chainFamilies": ["evm"],
+      "custodyTypes": ["server"],
+      "walletTypes": ["agent"],
+      "hasServerWallets": true,
+      "hasUserEmbeddedWallets": false,
+      "hasActiveDelegatedSigners": false,
+      "hasActiveKeyQuorums": false
+    },
+    "balances": [
+      {
+        "walletId": "treasury-evm",
+        "chainFamily": "evm",
+        "chainId": 84532,
+        "symbol": "ETH",
+        "native": "1000000000000000000",
+        "nativeFormatted": "1.0",
+        "walletAddress": "0x742d35Cc6634C0532925a3b844Bc9e7595f2bD18"
+      }
+    ],
+    "tokenBalances": [
+      {
+        "walletId": "treasury-evm",
+        "chainId": 84532,
+        "token": "0x9999999999999999999999999999999999999999",
+        "symbol": "USDC",
+        "balance": "1000000",
+        "formatted": "1.0",
+        "decimals": 6
+      },
+      {
+        "walletId": "treasury-solana",
+        "chainId": 101,
+        "token": "So11111111111111111111111111111111111111112",
+        "symbol": "SPL",
+        "balance": "2500000",
+        "formatted": "2.5",
+        "decimals": 6
+      }
+    ],
+    "rollups": {
+      "native": [
+        { "chainId": 84532, "symbol": "ETH", "native": "1000000000000000000" }
+      ],
+      "tokens": [
+        {
+          "chainId": 84532,
+          "token": "0x9999999999999999999999999999999999999999",
+          "symbol": "USDC",
+          "balance": "1000000",
+          "decimals": 6
+        },
+        {
+          "chainId": 101,
+          "token": "So11111111111111111111111111111111111111112",
+          "symbol": "SPL",
+          "balance": "2500000",
+          "decimals": 6
+        }
+      ]
+    }
+  }
+}
+```
+
+<CodeGroup>
+```typescript SDK
+const balance = await steward.accounts.getBalance("acct_treasury");
+```
+
+```bash cURL
+curl "https://api.steward.fi/accounts/acct_treasury/balance?chainId=84532&tokens=0x9999999999999999999999999999999999999999" \
+  -H "X-Steward-Key: your-key"
+```
+</CodeGroup>
+
+`tokens` accepts up to 25 comma-separated EVM token contract addresses. SPL
+token rows are discovered from parsed Solana RPC token accounts for the wallet;
+they use the mint address in `token` and do not infer ticker metadata from an
+indexer.
+
+## Update Account
+
+Updates account metadata, display name, authorization assignments, or replaces
+wallet membership when `wallet_ids`, `user_wallet_ids`, or
+`wallets_configuration` is supplied.
+
+```
+PATCH /accounts/:accountId
+```
+
+**Auth:** Tenant API key
+
+```typescript
+{
+  display_name?: string | null;
+  metadata?: Record<string, unknown>;
+  owner_user_ids?: string[];
+  additional_signer_ids?: string[];
+  signer_policy_ids?: string[];
+  wallet_ids?: string[];
+  user_wallet_ids?: string[];
+  wallets_configuration?: Array<{
+    chain_type: "ethereum" | "evm" | "solana";
+    name?: string;
+    wallet_id?: string;
+  }>;
+}
+```
+
+<CodeGroup>
+```typescript SDK
+const account = await steward.accounts.update("acct_treasury", {
+  display_name: "Main Treasury",
+  metadata: { environment: "production" },
+  signer_policy_ids: ["policy_dual_approval"],
+});
+```
+
+```bash cURL
+curl -X PATCH https://api.steward.fi/accounts/acct_treasury \
+  -H "X-Steward-Key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "display_name": "Main Treasury",
+    "signer_policy_ids": ["policy_dual_approval"]
+  }'
+```
+</CodeGroup>
+
+Assignment fields are stored by Steward under `metadata.authorization` and
+returned at the top level in both camel-case and snake-case. Treat
+`metadata.authorization` as reserved output: create and update requests must use
+`owner_user_ids`, `additional_signer_ids`, or `signer_policy_ids` instead.
+Replacing `metadata` on PATCH preserves existing authorization assignments
+unless one of those assignment fields is supplied. Replacing wallet membership
+also revalidates preserved assignments against the new wallet set.
+
+## Delete Account
+
+Deletes the account resource and its membership rows. This does not delete the
+underlying wallets.
+
+```
+DELETE /accounts/:accountId
+```
+
+**Auth:** Tenant API key
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "acct_treasury",
+    "deleted": true
+  }
+}
+```
+
+<CodeGroup>
+```typescript SDK
+await steward.accounts.delete("acct_treasury");
+```
+
+```bash cURL
+curl -X DELETE https://api.steward.fi/accounts/acct_treasury \
+  -H "X-Steward-Key: your-key"
+```
+</CodeGroup>
+
+## Validation and Limits
+
+- Account IDs must be 1-64 characters and may contain letters, numbers,
+  `_`, `-`, `.`, `:`.
+- `metadata` must be a JSON object and cannot exceed 16 KB.
+  `metadata.authorization` is reserved and rejected on input.
+- `owner_user_ids`, `additional_signer_ids`, and `signer_policy_ids` accept at
+  most 32 entries each. Each entry must be a non-empty bounded ID string using
+  letters, numbers, `_`, `-`, `.`, or `:`.
+- `owner_user_ids` entries must be UUID user IDs for active members of the
+  authenticated tenant.
+- `additional_signer_ids` entries must reference active signer IDs attached to
+  wallets in the account.
+- `signer_policy_ids` entries must reference policies attached to wallets in the
+  account.
+- `wallet_ids` must reference existing wallets in the authenticated tenant.
+- `user_wallet_ids` must reference existing user-owned embedded wallets in the
+  authenticated tenant.
+- `wallets_configuration` can provision EVM or Solana wallets into the account.
+- Accounts can contain at most five wallet memberships.
+- All responses are `no-store` and account audit events are written for create,
+  update, and delete operations.
+
+## Account Aggregations
+
+Account aggregations are persistent snapshots of an account's current wallet
+membership and chain families. They are useful when an app needs a durable
+reference to the grouped-wallet set at a point in time.
+
+### Aggregation Object
+
+```typescript
+{
+  id: string;
+  accountId: string;
+  account_id: string;
+  tenantId: string;
+  displayName: string | null;
+  display_name: string | null;
+  walletIds: string[];
+  wallet_ids: string[];
+  chainFamilies: Array<"evm" | "solana">;
+  chain_families: Array<"evm" | "solana">;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  created_at: string;
+  updatedAt: string;
+  updated_at: string;
+}
+```
+
+### List Aggregations
+
+```
+GET /accounts/:accountId/aggregations
+```
+
+**Auth:** Tenant API key
+
+<CodeGroup>
+```typescript SDK
+const { aggregations } = await steward.accounts.listAggregations("acct_treasury");
+```
+
+```bash cURL
+curl https://api.steward.fi/accounts/acct_treasury/aggregations \
+  -H "X-Steward-Key: your-key"
+```
+</CodeGroup>
+
+### Create Aggregation
+
+Creates a snapshot of the account's current wallet IDs and chain families.
+
+```
+POST /accounts/:accountId/aggregations
+```
+
+**Auth:** Tenant API key
+
+```typescript
+{
+  id?: string;
+  display_name?: string | null;
+  metadata?: Record<string, unknown>;
+}
+```
+
+<CodeGroup>
+```typescript SDK
+const aggregation = await steward.accounts.createAggregation("acct_treasury", {
+  id: "acct_agg_daily",
+  display_name: "Daily snapshot",
+  metadata: { cadence: "daily" },
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/accounts/acct_treasury/aggregations \
+  -H "X-Steward-Key: your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "acct_agg_daily",
+    "display_name": "Daily snapshot",
+    "metadata": { "cadence": "daily" }
+  }'
+```
+</CodeGroup>
+
+### Get Aggregation
+
+```
+GET /accounts/:accountId/aggregations/:aggregationId
+```
+
+**Auth:** Tenant API key
+
+```typescript
+const aggregation = await steward.accounts.getAggregation(
+  "acct_treasury",
+  "acct_agg_daily"
+);
+```
+
+### Delete Aggregation
+
+Deletes an aggregation snapshot. It does not modify the parent account or
+underlying wallets.
+
+```
+DELETE /accounts/:accountId/aggregations/:aggregationId
+```
+
+**Auth:** Tenant API key
+
+```typescript
+await steward.accounts.deleteAggregation("acct_treasury", "acct_agg_daily");
+```

@@ -76,7 +76,7 @@ export default function SecretsPage() {
     setTimeout(() => setToasts((p) => p.filter((t) => t.id !== id)), 3500);
   }
 
-  async function loadSecrets() {
+  const loadSecrets = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
@@ -87,7 +87,7 @@ export default function SecretsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, []);
 
   const loadRoutes = useCallback(async (secretId: string) => {
     setRoutesLoading(true);
@@ -267,6 +267,7 @@ export default function SecretsPage() {
                     Name <span className="text-accent">*</span>
                   </label>
                   <input
+                    aria-label="Name"
                     type="text"
                     value={createForm.name}
                     onChange={(e) => setCreateForm({ ...createForm, name: e.target.value })}
@@ -277,6 +278,7 @@ export default function SecretsPage() {
                 <div>
                   <label className="text-xs text-text-tertiary block mb-1.5">Description</label>
                   <input
+                    aria-label="Description"
                     type="text"
                     value={createForm.description}
                     onChange={(e) =>
@@ -295,6 +297,7 @@ export default function SecretsPage() {
                   Secret Value <span className="text-accent">*</span>
                 </label>
                 <input
+                  aria-label="Secret Value"
                   type="password"
                   value={createForm.value}
                   onChange={(e) => setCreateForm({ ...createForm, value: e.target.value })}
@@ -389,6 +392,7 @@ export default function SecretsPage() {
                     exit={{ opacity: 0, height: 0 }}
                     transition={{ duration: 0.25, ease }}
                     onClick={() => setSelected(selected?.id === secret.id ? null : secret)}
+                    aria-label={`Open secret ${secret.name}`}
                     className={`w-full text-left flex items-center justify-between py-4 px-3 border-b border-border-subtle transition-colors group ${
                       selected?.id === secret.id ? "bg-accent-bg" : "hover:bg-bg-elevated/40"
                     }`}
@@ -505,6 +509,7 @@ export default function SecretsPage() {
                           invalidated.
                         </p>
                         <input
+                          aria-label="New Secret Value"
                           type="password"
                           value={rotateValue}
                           onChange={(e) => setRotateValue(e.target.value)}
@@ -600,6 +605,7 @@ export default function SecretsPage() {
                                 Agent ID <span className="text-accent">*</span>
                               </label>
                               <input
+                                aria-label="Agent ID"
                                 type="text"
                                 value={routeForm.agentId}
                                 onChange={(e) =>
@@ -617,6 +623,7 @@ export default function SecretsPage() {
                                 Host Pattern <span className="text-accent">*</span>
                               </label>
                               <input
+                                aria-label="Host Pattern"
                                 type="text"
                                 value={routeForm.hostPattern}
                                 onChange={(e) =>
@@ -634,6 +641,7 @@ export default function SecretsPage() {
                                 Path Pattern
                               </label>
                               <input
+                                aria-label="Path Pattern"
                                 type="text"
                                 value={routeForm.pathPattern}
                                 onChange={(e) =>
@@ -653,6 +661,7 @@ export default function SecretsPage() {
                                 Inject As
                               </label>
                               <select
+                                aria-label="Inject As"
                                 value={routeForm.injectAs}
                                 onChange={(e) =>
                                   setRouteForm({
@@ -675,6 +684,7 @@ export default function SecretsPage() {
                                   Header Name
                                 </label>
                                 <input
+                                  aria-label="Header Name"
                                   type="text"
                                   value={routeForm.headerName}
                                   onChange={(e) =>
@@ -694,6 +704,7 @@ export default function SecretsPage() {
                                   Query Param
                                 </label>
                                 <input
+                                  aria-label="Query Param"
                                   type="text"
                                   value={routeForm.queryParam}
                                   onChange={(e) =>
@@ -713,6 +724,7 @@ export default function SecretsPage() {
                                   Body Path
                                 </label>
                                 <input
+                                  aria-label="Body Path"
                                   type="text"
                                   value={routeForm.bodyPath}
                                   onChange={(e) =>

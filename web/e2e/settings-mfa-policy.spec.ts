@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
+import { loginWithMagicLink } from "./fixtures/auth";
 
-const API = process.env.E2E_API_URL ?? "http://localhost:3299";
 const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
 
 test.describe("Dashboard MFA policy controls", () => {
@@ -66,17 +66,7 @@ test.describe("Dashboard MFA policy controls", () => {
       });
     });
 
-    const sendRes = await request.post(`${API}/auth/email/send`, { data: { email } });
-    expect(sendRes.status()).toBe(200);
-
-    const inboxRes = await request.get(`${API}/auth/test/inbox/${encodeURIComponent(email)}`);
-    expect(inboxRes.status()).toBe(200);
-    const inbox = (await inboxRes.json()) as { token: string };
-
-    await page.goto(
-      `${WEB}/auth/callback/email?token=${encodeURIComponent(inbox.token)}&email=${encodeURIComponent(email)}`,
-    );
-    await page.waitForURL(/\/dashboard/, { timeout: 30_000 });
+    await loginWithMagicLink(page, request, email);
 
     await page.goto(`${WEB}/dashboard/settings`);
     const form = page.locator("form").filter({
@@ -84,24 +74,32 @@ test.describe("Dashboard MFA policy controls", () => {
     });
     await expect(form).toBeVisible();
     await expect(form.getByLabel("MFA Max Age Seconds")).toHaveValue("300");
+    await expect(form.getByLabel("MFA Max Age Seconds")).toHaveAttribute("min", "30");
+    await expect(form.getByLabel("MFA Max Age Seconds")).toHaveAttribute("max", "3600");
+    await expect(form.getByLabel("MFA Max Age Seconds")).toHaveAttribute("step", "30");
 
-    await form.getByLabel("MFA Max Age Seconds").fill("120");
-    await form.getByLabel("Delegated signer automation").uncheck();
-    await form.getByLabel("Key quorum automation").uncheck();
+    await form.getByLabel("MFA Max Age Seconds").fill("900");
+    await form.getByLabel("Require MFA for vault signing").uncheck();
+    await form.getByLabel("Require MFA for key import").uncheck();
+    await form.getByLabel("Require MFA for key export").uncheck();
+    await form.getByLabel("Require MFA for recovery codes").uncheck();
+    await form.getByLabel("Require MFA for tenant admin changes").uncheck();
+    await form.getByLabel("Allow delegated signer automation").uncheck();
+    await form.getByLabel("Allow key quorum automation").uncheck();
     await form.getByRole("button", { name: "Save Controls" }).click();
     await expect(form.getByText("Saved")).toBeVisible();
 
     expect(savedAuthAbuseConfig).toMatchObject({
       mfa: {
-        maxAgeSeconds: 120,
+        maxAgeSeconds: 900,
         allowDelegatedSignerAutomation: false,
         allowKeyQuorumAutomation: false,
         requireFor: {
-          vaultSigning: true,
-          keyImport: true,
-          keyExport: true,
-          recoveryCodes: true,
-          tenantAdmin: true,
+          vaultSigning: false,
+          keyImport: false,
+          keyExport: false,
+          recoveryCodes: false,
+          tenantAdmin: false,
         },
       },
     });

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { agents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
-import { type AppVariables, tenantConfigs } from "../services/context";
+import type { AppVariables } from "../services/context";
 
 const RUN_ISOLATED = process.env.STEWARD_RUN_CONDITION_SET_INTEGRATION === "1";
 const TENANT_ID = `condition-sets-tenant-${Date.now()}`;
@@ -16,7 +16,10 @@ async function makeApp() {
   const app = new Hono<{ Variables: AppVariables }>();
   app.use("*", async (c, next) => {
     c.set("tenantId", TENANT_ID);
-    c.set("authType", c.req.header("x-test-auth-type") === "agent" ? "agent-token" : "api-key");
+    c.set("authType", c.req.header("x-test-auth-type") === "agent" ? "agent-token" : "session-jwt");
+    c.set("tenantRole", "admin");
+    c.set("sessionMfaVerifiedAt", Date.now());
+    c.set("userId", "11111111-1111-4111-8111-111111111111");
     await next();
   });
   app.route("/condition-sets", conditionSetRoutes);
@@ -32,6 +35,7 @@ describeConditionSets("condition sets", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "condition-sets-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "condition-sets-audit-hmac-key-with-enough-entropy";
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
@@ -54,9 +58,11 @@ describeConditionSets("condition sets", () => {
   });
 
   afterAll(async () => {
+    const { tenantConfigs } = await import("../services/context");
     tenantConfigs.delete(TENANT_ID);
     await closeDb();
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   it("creates condition sets, upserts items, replaces items, and evaluates policies", async () => {
@@ -87,6 +93,55 @@ describeConditionSets("condition sets", () => {
       }),
     });
     expect(upsertResponse.status).toBe(201);
+    const upsertBody = (await upsertResponse.json()) as {
+      ok: boolean;
+      data: { id: string; value: string; label: string | null };
+    };
+    expect(upsertBody.ok).toBe(true);
+    const itemId = upsertBody.data.id;
+
+    const getItemResponse = await app.request(`/condition-sets/${conditionSetId}/items/${itemId}`);
+    expect(getItemResponse.status).toBe(200);
+    const getItemBody = (await getItemResponse.json()) as {
+      ok: boolean;
+      data: { id: string; value: string; label: string | null };
+    };
+    expect(getItemBody.data).toMatchObject({
+      id: itemId,
+      value: "0x1234567890123456789012345678901234567890",
+      label: "treasury",
+    });
+
+    const updateItemResponse = await app.request(
+      `/condition-sets/${conditionSetId}/items/${itemId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          label: "treasury hot wallet",
+          metadata: { risk: "low" },
+        }),
+      },
+    );
+    expect(updateItemResponse.status).toBe(200);
+    const updateItemBody = (await updateItemResponse.json()) as {
+      data: { label: string | null; metadata: Record<string, unknown> };
+    };
+    expect(updateItemBody.data).toMatchObject({
+      label: "treasury hot wallet",
+      metadata: { risk: "low" },
+    });
+
+    const listItemsResponse = await app.request(
+      `/condition-sets/${conditionSetId}/items?limit=1&offset=0`,
+    );
+    expect(listItemsResponse.status).toBe(200);
+    const listItemsBody = (await listItemsResponse.json()) as {
+      data: { items: unknown[]; limit: number; offset: number };
+    };
+    expect(listItemsBody.data.items).toHaveLength(1);
+    expect(listItemsBody.data.limit).toBe(1);
+    expect(listItemsBody.data.offset).toBe(0);
 
     const replaceResponse = await app.request(`/condition-sets/${conditionSetId}/items`, {
       method: "PUT",
@@ -237,7 +292,7 @@ describeConditionSets("condition sets", () => {
     expect(body.error).toContain("limit");
   });
 
-  it("fails closed when evaluating legacy policies with missing condition sets", async () => {
+  it("rejects inline simulations that reference missing condition sets", async () => {
     const response = await app.request("/policies/simulate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -262,18 +317,14 @@ describeConditionSets("condition sets", () => {
       }),
     });
 
-    expect(response.status).toBe(200);
-    const body = (await response.json()) as {
-      ok: boolean;
-      data: { approved: boolean; results: Array<{ passed: boolean; reason?: string }> };
-    };
-    expect(body.ok).toBe(true);
-    expect(body.data.approved).toBe(false);
-    expect(body.data.results[0].passed).toBe(false);
-    expect(body.data.results[0].reason).toContain("was not loaded");
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("condition-set.conditionSetId not found for tenant");
   });
 
   it("simulates an agent with tenant default policies when no agent policies are stored", async () => {
+    const { tenantConfigs } = await import("../services/context");
     tenantConfigs.set(TENANT_ID, {
       id: TENANT_ID,
       name: "Condition Sets Tenant",

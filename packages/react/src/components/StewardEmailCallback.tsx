@@ -3,6 +3,37 @@ import { useAuth } from "../hooks/useAuth.js";
 import type { StewardEmailCallbackProps } from "../types.js";
 
 type CallbackStep = "loading" | "success" | "error";
+type CallbackCredentials = { token: string; email: string };
+const HISTORY_STATE_KEY = "__stewardEmailCallback";
+const inFlightEmailCallbackExchanges = new Map<string, Promise<unknown>>();
+
+function historyState(): Record<string, unknown> {
+  if (typeof window === "undefined") return {};
+  return window.history?.state && typeof window.history.state === "object"
+    ? { ...(window.history.state as Record<string, unknown>) }
+    : {};
+}
+
+function credentialsFromHistoryState(): CallbackCredentials | null {
+  const stored = historyState()[HISTORY_STATE_KEY];
+  if (!stored || typeof stored !== "object") return null;
+  const record = stored as Record<string, unknown>;
+  return typeof record.token === "string" && typeof record.email === "string"
+    ? { token: record.token, email: record.email }
+    : null;
+}
+
+function replaceHistoryState(state: Record<string, unknown>, url?: string): void {
+  if (typeof window === "undefined" || !window.history?.replaceState) return;
+  window.history.replaceState(state, "", url);
+}
+
+function clearCredentialsFromHistoryState(): void {
+  if (typeof window === "undefined" || !window.history?.replaceState) return;
+  const nextState = historyState();
+  delete nextState[HISTORY_STATE_KEY];
+  replaceHistoryState(nextState);
+}
 
 /**
  * Remove the magic-link `token` (and `email`) from the visible URL so the
@@ -22,6 +53,47 @@ function scrubTokenFromUrl(): void {
   } catch {
     // Best effort — never block sign-in on URL cleanup.
   }
+}
+
+function callbackCredentialsFromLocation(): CallbackCredentials | null {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token");
+  const email = params.get("email");
+  if (token && email) {
+    replaceHistoryState({
+      ...historyState(),
+      [HISTORY_STATE_KEY]: { token, email },
+    });
+    return { token, email };
+  }
+  return credentialsFromHistoryState();
+}
+
+function emailCallbackExchangeKey(credentials: CallbackCredentials): string {
+  return `${credentials.email}\0${credentials.token}`;
+}
+
+function emailCallbackExchange<T>(
+  credentials: CallbackCredentials,
+  start: () => Promise<T>,
+): Promise<T> {
+  const exchangeKey = emailCallbackExchangeKey(credentials);
+  const existing = inFlightEmailCallbackExchanges.get(exchangeKey);
+  if (existing) return existing as Promise<T>;
+
+  const exchange = start().then(
+    (result) => {
+      setTimeout(() => inFlightEmailCallbackExchanges.delete(exchangeKey), 5_000);
+      return result;
+    },
+    (error) => {
+      inFlightEmailCallbackExchanges.delete(exchangeKey);
+      throw error;
+    },
+  );
+  inFlightEmailCallbackExchanges.set(exchangeKey, exchange);
+  return exchange;
 }
 
 /**
@@ -67,11 +139,8 @@ export function StewardEmailCallback({
       return;
     }
 
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get("token");
-    const email = params.get("email");
-
-    if (!token || !email) {
+    const credentials = callbackCredentialsFromLocation();
+    if (!credentials) {
       const msg = "Missing token or email in callback URL.";
       setErrorMsg(msg);
       setStep("error");
@@ -80,21 +149,25 @@ export function StewardEmailCallback({
     }
 
     // Capture before scrubbing so the Retry button can re-run the exchange.
-    credsRef.current = { token, email };
-    // Strip the one-time token/email from the URL immediately after reading
-    // them so they don't persist in history or leak via Referer.
-    scrubTokenFromUrl();
+    credsRef.current = credentials;
 
     void (async () => {
       try {
-        const result = await verifyEmailCallback(token, email);
+        const result = await emailCallbackExchange(credentials, () =>
+          verifyEmailCallback(credentials.token, credentials.email),
+        );
+        clearCredentialsFromHistoryState();
         setStep("success");
         onSuccess?.(result);
 
         if (redirectTo && typeof window !== "undefined") {
-          window.location.href = redirectTo;
+          window.location.replace(redirectTo);
+        } else {
+          scrubTokenFromUrl();
         }
       } catch (err) {
+        clearCredentialsFromHistoryState();
+        scrubTokenFromUrl();
         const error = err instanceof Error ? err : new Error(String(err));
         setErrorMsg(error.message);
         setStep("error");
@@ -121,14 +194,22 @@ export function StewardEmailCallback({
 
     void (async () => {
       try {
-        const result = await verifyEmailCallback(token, email);
+        const credentials = { token, email };
+        const result = await emailCallbackExchange(credentials, () =>
+          verifyEmailCallback(token, email),
+        );
+        clearCredentialsFromHistoryState();
         setStep("success");
         onSuccess?.(result);
 
         if (redirectTo && typeof window !== "undefined") {
-          window.location.href = redirectTo;
+          window.location.replace(redirectTo);
+        } else {
+          scrubTokenFromUrl();
         }
       } catch (err) {
+        clearCredentialsFromHistoryState();
+        scrubTokenFromUrl();
         const error = err instanceof Error ? err : new Error(String(err));
         setErrorMsg(error.message);
         setStep("error");

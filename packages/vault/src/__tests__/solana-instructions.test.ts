@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AddressLookupTableAccount,
   Keypair,
   PublicKey,
   SystemProgram,
@@ -25,12 +26,16 @@ function legacyToBase64(tx: Transaction): string {
   return Buffer.from(bytes).toString("base64");
 }
 
-function v0ToBase64(instructions: TransactionInstruction[], payer: PublicKey): string {
+function v0ToBase64(
+  instructions: TransactionInstruction[],
+  payer: PublicKey,
+  addressLookupTableAccounts: AddressLookupTableAccount[] = [],
+): string {
   const msg = new TransactionMessage({
     payerKey: payer,
     recentBlockhash: RECENT_BLOCKHASH,
     instructions,
-  }).compileToV0Message();
+  }).compileToV0Message(addressLookupTableAccounts);
   const vtx = new VersionedTransaction(msg);
   return Buffer.from(vtx.serialize()).toString("base64");
 }
@@ -90,6 +95,53 @@ function tokenTransferCheckedIx(args: {
     ],
     data,
   } as unknown as TransactionInstruction;
+}
+
+function tokenApproveIx(args: {
+  source: PublicKey;
+  delegate: PublicKey;
+  owner: PublicKey;
+  amount: bigint;
+}): TransactionInstruction {
+  const data = Buffer.concat([Buffer.from([4]), Buffer.from(u64LE(args.amount))]);
+  return {
+    programId: TOKEN_PROGRAM,
+    keys: [
+      { pubkey: args.source, isSigner: false, isWritable: true },
+      { pubkey: args.delegate, isSigner: false, isWritable: false },
+      { pubkey: args.owner, isSigner: true, isWritable: false },
+    ],
+    data,
+  } as unknown as TransactionInstruction;
+}
+
+function tokenCloseAccountIx(args: {
+  account: PublicKey;
+  destination: PublicKey;
+  owner: PublicKey;
+}): TransactionInstruction {
+  return {
+    programId: TOKEN_PROGRAM,
+    keys: [
+      { pubkey: args.account, isSigner: false, isWritable: true },
+      { pubkey: args.destination, isSigner: false, isWritable: true },
+      { pubkey: args.owner, isSigner: true, isWritable: false },
+    ],
+    data: Buffer.from([9]),
+  } as unknown as TransactionInstruction;
+}
+
+function lookupTable(addresses: PublicKey[]): AddressLookupTableAccount {
+  return new AddressLookupTableAccount({
+    key: Keypair.generate().publicKey,
+    state: {
+      deactivationSlot: 18_446_744_073_709_551_615n,
+      lastExtendedSlot: 0n,
+      lastExtendedSlotStartIndex: 0,
+      authority: undefined,
+      addresses,
+    },
+  });
 }
 
 function rawIx(programId: PublicKey, keys: PublicKey[], data: Uint8Array): TransactionInstruction {
@@ -356,6 +408,83 @@ describe("FAIL CLOSED — undecodable instructions", () => {
     expect(summary.instructions[0].reason).toContain("unsupported SPL Token instruction");
   });
 
+  test("SPL approve/delegate is decoded but rejected as unsupported by the policy envelope", () => {
+    const payer = Keypair.generate().publicKey;
+    const source = Keypair.generate().publicKey;
+    const delegate = Keypair.generate().publicKey;
+    const tx = new Transaction({ feePayer: payer, recentBlockhash: RECENT_BLOCKHASH }).add(
+      tokenApproveIx({ source, delegate, owner: payer, amount: 123n }),
+    );
+
+    const summary = parseSolanaTransaction(legacyToBase64(tx));
+    expect(summary.fullyParsed).toBe(false);
+    expect(summary.instructions[0].instructionType).toBe("spl-token:Approve");
+    expect(summary.instructions[0].fields.delegate).toBe(delegate.toBase58());
+    expect(summary.instructions[0].reason).toContain("not supported by the Solana policy envelope");
+    expect(deriveSolanaPolicyFields(summary).fullyParsed).toBe(false);
+  });
+
+  test("SPL close-account is decoded but rejected instead of treated as zero-value safe", () => {
+    const payer = Keypair.generate().publicKey;
+    const tokenAccount = Keypair.generate().publicKey;
+    const destination = Keypair.generate().publicKey;
+    const tx = new Transaction({ feePayer: payer, recentBlockhash: RECENT_BLOCKHASH }).add(
+      tokenCloseAccountIx({ account: tokenAccount, destination, owner: payer }),
+    );
+
+    const summary = parseSolanaTransaction(legacyToBase64(tx));
+    expect(summary.fullyParsed).toBe(false);
+    expect(summary.instructions[0].instructionType).toBe("spl-token:CloseAccount");
+    expect(summary.instructions[0].fields.destination).toBe(destination.toBase58());
+    expect(summary.tokenTransfers).toEqual([]);
+    expect(summary.unparsedReasons[0]).toContain("spl-token:CloseAccount");
+  });
+
+  test("System create-account with lamports is decoded and counted", () => {
+    const payer = Keypair.generate().publicKey;
+    const newAccount = Keypair.generate().publicKey;
+    const tx = new Transaction({ feePayer: payer, recentBlockhash: RECENT_BLOCKHASH }).add(
+      SystemProgram.createAccount({
+        fromPubkey: payer,
+        newAccountPubkey: newAccount,
+        lamports: 1_000_000,
+        space: 0,
+        programId: TOKEN_PROGRAM,
+      }),
+    );
+
+    const summary = parseSolanaTransaction(legacyToBase64(tx));
+    expect(summary.fullyParsed).toBe(true);
+    expect(summary.instructions[0].instructionType).toBe("system:CreateAccount");
+    expect(summary.instructions[0].fields.lamports).toBe("1000000");
+    expect(summary.totalLamports).toBe("1000000");
+    expect(summary.lamportRecipients).toEqual([newAccount.toBase58()]);
+    expect(summary.unparsedReasons).toEqual([]);
+  });
+
+  test("v0 address lookup table account references are rejected as ambiguous", () => {
+    const payer = Keypair.generate().publicKey;
+    const lookupRecipient = Keypair.generate().publicKey;
+    const table = lookupTable([lookupRecipient]);
+    const base64 = v0ToBase64(
+      [
+        SystemProgram.transfer({
+          fromPubkey: payer,
+          toPubkey: lookupRecipient,
+          lamports: 10,
+        }),
+      ],
+      payer,
+      [table],
+    );
+
+    const summary = parseSolanaTransaction(base64);
+    expect(summary.version).toBe(0);
+    expect(summary.fullyParsed).toBe(false);
+    expect(summary.instructions[0].reason).toContain("address-lookup-table account");
+    expect(summary.totalLamports).toBe("0");
+  });
+
   test("truncated payloads throw (caller must treat as fail-closed)", () => {
     expect(() => parseSolanaTransaction("")).toThrow();
     expect(() => parseSolanaTransaction("!!!not base anything!!!")).toThrow();
@@ -370,9 +499,25 @@ describe("recognised value-neutral programs", () => {
     const ix = rawIx(computeBudget, [], new Uint8Array([2, 0, 0, 0, 0]));
     const tx = new Transaction({ feePayer: payer, recentBlockhash: RECENT_BLOCKHASH }).add(ix);
     const summary = parseSolanaTransaction(legacyToBase64(tx));
-    expect(summary.instructions[0].instructionType).toBe("compute-budget");
+    expect(summary.instructions[0].instructionType).toBe("compute-budget:SetComputeUnitLimit");
     expect(summary.fullyParsed).toBe(true);
     expect(summary.totalLamports).toBe("0");
+  });
+
+  test("nonzero compute unit price fails closed because priority fees spend SOL", () => {
+    const payer = Keypair.generate().publicKey;
+    const computeBudget = new PublicKey("ComputeBudget111111111111111111111111111111");
+    const data = new Uint8Array(9);
+    data[0] = 3; // SetComputeUnitPrice
+    data[1] = 1; // one microLamport, encoded u64 little-endian
+    const ix = rawIx(computeBudget, [], data);
+    const tx = new Transaction({ feePayer: payer, recentBlockhash: RECENT_BLOCKHASH }).add(ix);
+    const summary = parseSolanaTransaction(legacyToBase64(tx));
+
+    expect(summary.fullyParsed).toBe(false);
+    expect(summary.instructions[0].unparsed).toBe(true);
+    expect(summary.instructions[0].reason).toContain("priority fee");
+    expect(deriveSolanaPolicyFields(summary).fullyParsed).toBe(false);
   });
 });
 

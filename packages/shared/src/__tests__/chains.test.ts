@@ -62,6 +62,11 @@ describe("CHAINS registry", () => {
     expect(CHAINS["solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"]).toBeDefined();
   });
 
+  it("contains Bitcoin mainnet and testnet", () => {
+    expect(CHAINS["bip122:000000000019d6689c085ae165831e93"]).toBeDefined();
+    expect(CHAINS["bip122:000000000933ea01ad0ee984209779ba"]).toBeDefined();
+  });
+
   it("has correct metadata for Base", () => {
     const chain = CHAINS["eip155:8453"];
     expect(chain.numericId).toBe(8453);
@@ -92,6 +97,19 @@ describe("CHAINS registry", () => {
     expect(chain.numericId).toBe(102);
     expect(chain.family).toBe("solana");
     expect(chain.testnet).toBe(true);
+  });
+
+  it("has correct metadata for Bitcoin mainnet and testnet", () => {
+    const mainnet = CHAINS["bip122:000000000019d6689c085ae165831e93"];
+    expect(mainnet.numericId).toBe(201);
+    expect(mainnet.family).toBe("bitcoin");
+    expect(mainnet.symbol).toBe("BTC");
+    expect(mainnet.testnet).toBe(false);
+
+    const testnet = CHAINS["bip122:000000000933ea01ad0ee984209779ba"];
+    expect(testnet.numericId).toBe(202);
+    expect(testnet.family).toBe("bitcoin");
+    expect(testnet.testnet).toBe(true);
   });
 
   it("each entry has its caip2 field matching the registry key", () => {
@@ -144,6 +162,11 @@ describe("toCaip2", () => {
     expect(toCaip2(102)).toBe("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1");
   });
 
+  it("converts Bitcoin convention IDs to CAIP-2", () => {
+    expect(toCaip2(201)).toBe("bip122:000000000019d6689c085ae165831e93");
+    expect(toCaip2(202)).toBe("bip122:000000000933ea01ad0ee984209779ba");
+  });
+
   it("returns undefined for an unknown chain ID", () => {
     expect(toCaip2(999999)).toBeUndefined();
   });
@@ -166,6 +189,11 @@ describe("fromCaip2", () => {
 
   it("converts Solana devnet CAIP-2 to numeric 102", () => {
     expect(fromCaip2("solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1")).toBe(102);
+  });
+
+  it("converts Bitcoin CAIP-2 IDs to numeric convention IDs", () => {
+    expect(fromCaip2("bip122:000000000019d6689c085ae165831e93")).toBe(201);
+    expect(fromCaip2("bip122:000000000933ea01ad0ee984209779ba")).toBe(202);
   });
 
   it("returns undefined for an unknown CAIP-2 string", () => {

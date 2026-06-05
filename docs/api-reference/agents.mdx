@@ -320,6 +320,94 @@ GET /agents/:agentId/tokens?chainId=8453&tokens=0xUSDC,0xDAI
 
 ---
 
+## Authorization Keys and Key Quorums
+
+Agent signers model owners, delegated signers, service signers, and quorum
+members for an agent wallet. A signer with `keyType: "p256"` and a registered
+`publicKey` is Steward's Privy-style asymmetric authorization key. A signer with
+`keyType: "hmac"` can instead receive a one-time delegated credential secret when
+created with `issueCredential: true`.
+
+```
+GET /agents/:agentId/signers?status=active
+POST /agents/:agentId/signers
+PATCH /agents/:agentId/signers/:signerId
+DELETE /agents/:agentId/signers/:signerId
+```
+
+**Auth:** Owner/admin browser session. Create, revoke, and authority-changing
+updates require recent MFA.
+
+**Signer request body:**
+
+```typescript
+{
+  signerType: "owner" | "delegated" | "service" | "quorum_member";
+  subjectType: "user" | "wallet" | "api_key" | "external";
+  subjectId: string;
+  keyType?: "hmac" | "p256"; // default: "hmac"
+  publicKey?: string | null; // required for keyType: "p256"
+  address?: string | null;
+  chainFamily?: "evm" | "solana" | null;
+  label?: string | null;
+  permissions?: string[];
+  policyIds?: string[]; // policy rule ids on this same agent
+  metadata?: Record<string, unknown>;
+  issueCredential?: boolean; // hmac only; returns credentialSecret once
+}
+```
+
+```typescript
+const key = await steward.createAuthorizationKey("my-agent", {
+  signerType: "delegated",
+  subjectType: "external",
+  subjectId: "ops-key-1",
+  keyType: "p256",
+  publicKey: "BASE64_SPKI_P256_PUBLIC_KEY",
+  permissions: ["sign_message", "sign_transaction"],
+  policyIds: ["policy_daily_limit"],
+});
+```
+
+`policyIds` must reference policy rules on the same agent. Updating a signer's
+policy scope is an authority-changing operation and requires recent MFA:
+
+```typescript
+await steward.updateAuthorizationKey("my-agent", key.id, {
+  status: "paused",
+  policyIds: ["policy_daily_limit", "policy_manual_review"],
+});
+```
+
+Signer responses include `id`, `signerType`, `subjectType`, `subjectId`,
+`keyType`, `publicKey`, `permissions`, `policyIds`, `status`, `metadata`,
+`hasCredential`, and timestamps. `credentialSecret` is returned only on the
+create response when `issueCredential: true`; it is never returned by list or
+update calls.
+
+Key quorums group signer IDs and optional child quorum IDs behind a threshold.
+Nested quorum verification is bounded and fails closed on cycles or excessive
+depth.
+
+```
+GET /agents/:agentId/key-quorums?status=active
+POST /agents/:agentId/key-quorums
+PATCH /agents/:agentId/key-quorums/:quorumId
+DELETE /agents/:agentId/key-quorums/:quorumId
+```
+
+```typescript
+const quorum = await steward.createAgentKeyQuorum("my-agent", {
+  name: "Treasury approval",
+  threshold: 2,
+  memberSignerIds: ["signer-a"],
+  memberQuorumIds: ["child-quorum-a"],
+  permissions: ["sign_transaction"],
+});
+```
+
+---
+
 ## Batch Create
 
 Create multiple agents in one request with optional shared policies.

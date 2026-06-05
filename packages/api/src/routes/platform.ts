@@ -49,11 +49,12 @@ import type {
   ApiResponse,
   PolicyRule,
   SponsoredGasSpendSummary,
+  TenantAuthAbuseConfig,
   TenantOidcProviderConfig,
   TenantTestAccountConfig,
 } from "@stwd/shared";
 import { KeyStore, Vault } from "@stwd/vault";
-import { and, count, eq, ilike, isNull, ne, or, type SQL, sql } from "drizzle-orm";
+import { and, count, eq, ilike, inArray, isNull, ne, or, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import {
@@ -84,6 +85,8 @@ const MAX_PLATFORM_METADATA_BYTES = 16_384;
 const MAX_PLATFORM_METADATA_DEPTH = 8;
 const MAX_PLATFORM_METADATA_KEYS = 100;
 const MAX_PLATFORM_METADATA_STRING_BYTES = 4_096;
+const WALLET_EXTERNAL_ID_PROVIDER = "wallet_external_id";
+const MAX_WALLET_EXTERNAL_ID_LENGTH = 180;
 type PlatformTenantConfigRow = typeof tenantConfigs.$inferSelect;
 
 function parseDurationSeconds(value: string): number | null {
@@ -392,6 +395,84 @@ function isValidProviderAccountId(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 255;
 }
 
+function isThirdPartyWalletProvider(provider: string): boolean {
+  return provider === "wallet:ethereum" || provider === "wallet:solana";
+}
+
+async function userHasLinkedThirdPartyWallet(userId: string): Promise<boolean> {
+  const [linkedWallet] = await getDb()
+    .select({ id: accounts.id })
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.userId, userId),
+        or(eq(accounts.provider, "wallet:ethereum"), eq(accounts.provider, "wallet:solana")),
+      ),
+    )
+    .limit(1);
+  return Boolean(linkedWallet);
+}
+
+async function tenantIdsForWalletPolicy(userId: string, tenantId?: string): Promise<string[]> {
+  if (tenantId) {
+    const [membership] = await getDb()
+      .select({ tenantId: userTenants.tenantId })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+    return membership ? [membership.tenantId] : [];
+  }
+  const memberships = await getDb()
+    .select({ tenantId: userTenants.tenantId })
+    .from(userTenants)
+    .where(eq(userTenants.userId, userId));
+  return memberships.map((membership) => membership.tenantId);
+}
+
+async function restrictedWalletPolicyTenantIds(
+  userId: string,
+  tenantId?: string,
+): Promise<string[]> {
+  const tenantIds = await tenantIdsForWalletPolicy(userId, tenantId);
+  if (tenantId && tenantIds.length === 0) return [];
+  if (tenantIds.length === 0) return [];
+  const configs = await getDb()
+    .select({ tenantId: tenantConfigs.tenantId, authAbuseConfig: tenantConfigs.authAbuseConfig })
+    .from(tenantConfigs)
+    .where(inArray(tenantConfigs.tenantId, tenantIds));
+  return configs
+    .filter(
+      (config) =>
+        (config.authAbuseConfig as TenantAuthAbuseConfig | null)?.wallet
+          ?.restrictToOneThirdPartyWallet === true,
+    )
+    .map((config) => config.tenantId);
+}
+
+function isValidWalletExternalId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length > 0 &&
+    value.trim().length <= MAX_WALLET_EXTERNAL_ID_LENGTH &&
+    !/[\x00-\x1f\x7f]/.test(value.trim())
+  );
+}
+
+function walletExternalProviderAccountId(tenantId: string, externalId: string): string {
+  return `${tenantId}:${externalId.trim()}`;
+}
+
+function parseWalletExternalProviderAccountId(
+  providerAccountId: string,
+  tenantIds: string[],
+): { tenantId: string; externalId: string } | null {
+  const tenantId = tenantIds.find((id) => providerAccountId.startsWith(`${id}:`));
+  if (!tenantId) return null;
+  return {
+    tenantId,
+    externalId: providerAccountId.slice(tenantId.length + 1),
+  };
+}
+
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -481,6 +562,54 @@ function parseOffset(value: string | null): number {
   return Math.max(0, parsed);
 }
 
+function parseQueryList(value: string | undefined): string[] {
+  return value
+    ? value
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    : [];
+}
+
+async function resolveTenantWalletExternalIds(
+  tenantId: string,
+  externalIds: string[],
+): Promise<string[] | Error> {
+  const normalized = [...new Set(externalIds.map((id) => id.trim()).filter(Boolean))];
+  if (normalized.length === 0) return [];
+  if (normalized.length > 100) return new Error("wallet_external_ids can include at most 100 ids");
+  if (!normalized.every((id) => isValidWalletExternalId(id))) {
+    return new Error("wallet_external_ids contains an invalid wallet external id");
+  }
+
+  const rows = await getDb()
+    .select({ id: agents.id, platformId: agents.platformId })
+    .from(agents)
+    .where(and(eq(agents.tenantId, tenantId), inArray(agents.platformId, normalized)));
+
+  const byExternalId = new Map<string, string[]>();
+  for (const row of rows) {
+    if (!row.platformId) continue;
+    const ids = byExternalId.get(row.platformId) ?? [];
+    ids.push(row.id);
+    byExternalId.set(row.platformId, ids);
+  }
+
+  const missing = normalized.filter((externalId) => !byExternalId.has(externalId));
+  if (missing.length > 0) {
+    return new Error(`Unknown wallet_external_ids: ${missing.join(", ")}`);
+  }
+
+  const ambiguous = [...byExternalId.entries()]
+    .filter(([, ids]) => ids.length > 1)
+    .map(([externalId]) => externalId);
+  if (ambiguous.length > 0) {
+    return new Error(`Ambiguous wallet_external_ids: ${ambiguous.join(", ")}`);
+  }
+
+  return normalized.map((externalId) => (byExternalId.get(externalId) as string[])[0]);
+}
+
 async function getTenantOr404(tenantId: string) {
   const db = getDb();
   const [tenant] = await db
@@ -506,6 +635,7 @@ const PLATFORM_READ_ONLY_POST_PATHS = new Set([
   "/users/email/address",
   "/users/phone/number",
   "/users/wallet/address",
+  "/users/wallet/external-id",
   "/users/smart-wallet/address",
   "/users/custom-auth/id",
   "/users/discord/username",
@@ -607,10 +737,12 @@ platform.get("/stats", async (c) => {
 
 /**
  * GET /apps/gas_spend
- * Query: tenant_id=<tenant>&wallet_ids=<agent-1,agent-2>&start_timestamp=<unix>&end_timestamp=<unix>
+ * Query: tenant_id=<tenant>&wallet_ids=<agent-1,agent-2>&wallet_external_ids=<external-1,external-2>&start_timestamp=<unix>&end_timestamp=<unix>
  *
  * Returns sponsored gas reservations and settled spend for tenant-scoped wallets.
  * Timestamps may be Unix seconds or milliseconds; range is capped at 30 days.
+ * wallet_external_ids are tenant-scoped agent platform IDs and resolve before
+ * spend lookup, so history responses still use canonical wallet IDs.
  */
 platform.get("/apps/gas_spend", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:gas-spend:read");
@@ -627,8 +759,24 @@ platform.get("/apps/gas_spend", async (c) => {
     return Number.isFinite(parsed) ? parsed : Number.NaN;
   };
 
+  const externalWalletIds = parseQueryList(
+    c.req.query("wallet_external_ids") ?? c.req.query("walletExternalIds"),
+  );
+  const resolvedExternalWalletIds = await resolveTenantWalletExternalIds(
+    tenantId,
+    externalWalletIds,
+  );
+  if (resolvedExternalWalletIds instanceof Error) {
+    const status = resolvedExternalWalletIds.message.startsWith("Ambiguous")
+      ? 409
+      : resolvedExternalWalletIds.message.startsWith("Unknown")
+        ? 404
+        : 400;
+    return c.json<ApiResponse>({ ok: false, error: resolvedExternalWalletIds.message }, status);
+  }
+
   const normalized = normalizeGasSpendQuery({
-    walletIds: c.req.query("wallet_ids")?.split(","),
+    walletIds: [...parseQueryList(c.req.query("wallet_ids")), ...resolvedExternalWalletIds],
     startTimestamp: parseTimestamp(c.req.query("start_timestamp")),
     endTimestamp: parseTimestamp(c.req.query("end_timestamp")),
   });
@@ -2029,16 +2177,122 @@ platform.post("/agents/:id/revoke-tokens", async (c) => {
   });
 });
 
+type PlatformWalletExternalLink = PlatformWalletExternalIdRow & {
+  isNew: boolean;
+};
+
+async function linkWalletExternalIdForUser(input: {
+  userId: string;
+  tenantId: string;
+  externalId: string;
+}): Promise<PlatformWalletExternalLink | Error> {
+  const db = getDb();
+  const externalId = input.externalId.trim();
+  if (!isValidWalletExternalId(externalId)) return new Error("Invalid walletExternalId");
+
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, input.tenantId));
+  if (!tenant) return new Error("Tenant not found");
+
+  const [membership] = await db
+    .select({ id: userTenants.id })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, input.userId), eq(userTenants.tenantId, input.tenantId)));
+  if (!membership) return new Error("User not found in tenant");
+
+  const providerAccountId = walletExternalProviderAccountId(input.tenantId, externalId);
+  const [existingForExternalId] = await db
+    .select({ userId: accounts.userId })
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.provider, WALLET_EXTERNAL_ID_PROVIDER),
+        eq(accounts.providerAccountId, providerAccountId),
+      ),
+    );
+  if (existingForExternalId && existingForExternalId.userId !== input.userId) {
+    return new Error("walletExternalId already belongs to another user in this tenant");
+  }
+
+  const existingForUser = await db
+    .select({ providerAccountId: accounts.providerAccountId })
+    .from(accounts)
+    .where(
+      and(eq(accounts.userId, input.userId), eq(accounts.provider, WALLET_EXTERNAL_ID_PROVIDER)),
+    );
+  const existingForTenant = existingForUser
+    .map((row) => parseWalletExternalProviderAccountId(row.providerAccountId, [input.tenantId]))
+    .find((row) => row?.tenantId === input.tenantId);
+  if (existingForTenant && existingForTenant.externalId !== externalId) {
+    return new Error("walletExternalId is immutable for this user in this tenant");
+  }
+  if (existingForTenant) {
+    return { tenantId: input.tenantId, externalId, isNew: false };
+  }
+
+  await db.insert(accounts).values({
+    userId: input.userId,
+    provider: WALLET_EXTERNAL_ID_PROVIDER,
+    providerAccountId,
+  });
+  return { tenantId: input.tenantId, externalId, isNew: true };
+}
+
+async function insertTenantMembershipIfMissing(input: {
+  userId: string;
+  tenantId: string;
+  role: string;
+}): Promise<boolean> {
+  const [created] = await getDb()
+    .insert(userTenants)
+    .values(input)
+    .onConflictDoNothing()
+    .returning({ id: userTenants.id });
+  return Boolean(created);
+}
+
+async function rollbackTenantMembership(input: { userId: string; tenantId: string }) {
+  await getDb()
+    .delete(userTenants)
+    .where(and(eq(userTenants.userId, input.userId), eq(userTenants.tenantId, input.tenantId)));
+}
+
+function walletExternalLinkStatus(error: Error): 400 | 404 | 409 | 500 {
+  switch (error.message) {
+    case "Invalid walletExternalId":
+      return 400;
+    case "Tenant not found":
+    case "User not found in tenant":
+      return 404;
+    case "walletExternalId already belongs to another user in this tenant":
+    case "walletExternalId is immutable for this user in this tenant":
+      return 409;
+    default:
+      return 500;
+  }
+}
+
+type PlatformUserCreateData = {
+  userId: string;
+  isNew: boolean;
+  tenantId?: string;
+  walletExternalId?: string;
+};
+
 /**
  * POST /platform/users
  * Pre-provision a user record without sending an email or requiring interaction.
  * Intended for migration tooling (e.g. importing users from another auth provider).
  *
  * The route is idempotent: if a user with this email already exists, it returns
- * the existing record's ID and isNew=false — no data is overwritten.
+ * the existing record's ID and isNew=false — no data is overwritten. When
+ * tenantId + walletExternalId are provided, the user is linked to the tenant and
+ * assigned an immutable per-tenant wallet external ID at creation time.
  *
- * Body: { email: string; emailVerified?: boolean; name?: string; customMetadata?: object }
- * Returns: { ok: true; userId: string; isNew: boolean }
+ * Body: { email: string; emailVerified?: boolean; name?: string; customMetadata?: object; tenantId?: string; walletExternalId?: string }
+ * Returns: { ok: true; userId: string; isNew: boolean; tenantId?: string; walletExternalId?: string }
  */
 platform.post("/users", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:user:write");
@@ -2049,9 +2303,32 @@ platform.post("/users", async (c) => {
     emailVerified?: boolean;
     name?: string;
     customMetadata?: Record<string, unknown>;
+    tenantId?: unknown;
+    walletExternalId?: unknown;
+    externalId?: unknown;
   }>(c);
   if (!body?.email || typeof body.email !== "string" || !body.email.includes("@")) {
     return c.json<ApiResponse>({ ok: false, error: "A valid email is required" }, 400);
+  }
+  const walletExternalId =
+    typeof body.walletExternalId === "string"
+      ? body.walletExternalId
+      : typeof body.externalId === "string"
+        ? body.externalId
+        : undefined;
+  const tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : undefined;
+  if (walletExternalId !== undefined) {
+    if (!tenantId)
+      return c.json<ApiResponse>(
+        { ok: false, error: "tenantId is required with walletExternalId" },
+        400,
+      );
+    if (!isValidTenantId(tenantId)) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    }
+    if (!isValidWalletExternalId(walletExternalId)) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid walletExternalId" }, 400);
+    }
   }
   if (body.customMetadata !== undefined) {
     const metadataError = getPlatformMetadataValidationError(body.customMetadata, "customMetadata");
@@ -2064,19 +2341,53 @@ platform.post("/users", async (c) => {
   const [existing] = await db.select({ id: users.id }).from(users).where(eq(users.email, email));
 
   if (existing) {
+    if (tenantId && walletExternalId !== undefined) {
+      const [tenant] = await db
+        .select({ id: tenants.id })
+        .from(tenants)
+        .where(eq(tenants.id, tenantId));
+      if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+      const createdMembership = await insertTenantMembershipIfMissing({
+        userId: existing.id,
+        tenantId,
+        role: "member",
+      });
+      const linked = await linkWalletExternalIdForUser({
+        userId: existing.id,
+        tenantId,
+        externalId: walletExternalId,
+      });
+      if (linked instanceof Error) {
+        if (createdMembership) {
+          await rollbackTenantMembership({ userId: existing.id, tenantId });
+        }
+        return c.json<ApiResponse>(
+          { ok: false, error: linked.message },
+          walletExternalLinkStatus(linked),
+        );
+      }
+    }
     await writeAuditEvent({
       tenantId: PLATFORM_AUDIT_TENANT_ID,
       actorType: "platform",
       action: "user.provision.existing",
       resourceType: "user",
       resourceId: existing.id,
-      metadata: { email },
+      metadata: { email, hasWalletExternalId: walletExternalId !== undefined },
       ...auditCtx(c),
     });
-    return c.json<ApiResponse<{ userId: string; isNew: boolean }>>({
+    return c.json<ApiResponse<PlatformUserCreateData>>({
       ok: true,
-      data: { userId: existing.id, isNew: false },
+      data: { userId: existing.id, isNew: false, tenantId, walletExternalId },
     });
+  }
+
+  if (tenantId) {
+    const [tenant] = await db
+      .select({ id: tenants.id })
+      .from(tenants)
+      .where(eq(tenants.id, tenantId));
+    if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
   }
 
   await writeAuditEvent({
@@ -2089,6 +2400,7 @@ platform.post("/users", async (c) => {
       email,
       emailVerified: body.emailVerified ?? false,
       hasCustomMetadata: !!body.customMetadata,
+      hasWalletExternalId: walletExternalId !== undefined,
     },
     ...auditCtx(c),
   });
@@ -2103,15 +2415,175 @@ platform.post("/users", async (c) => {
     })
     .returning();
 
+  if (tenantId && walletExternalId !== undefined) {
+    await insertTenantMembershipIfMissing({ userId: newUser.id, tenantId, role: "member" });
+    const linked = await linkWalletExternalIdForUser({
+      userId: newUser.id,
+      tenantId,
+      externalId: walletExternalId,
+    });
+    if (linked instanceof Error) {
+      await db.delete(users).where(eq(users.id, newUser.id));
+      return c.json<ApiResponse>(
+        { ok: false, error: linked.message },
+        walletExternalLinkStatus(linked),
+      );
+    }
+  }
+
   dispatchWebhook(PLATFORM_AUDIT_TENANT_ID, newUser.id, "user.created", {
     userId: newUser.id,
     source: "platform.provision",
     hasEmail: true,
   });
 
-  return c.json<ApiResponse<{ userId: string; isNew: boolean }>>(
-    { ok: true, data: { userId: newUser.id, isNew: true } },
+  return c.json<ApiResponse<PlatformUserCreateData>>(
+    { ok: true, data: { userId: newUser.id, isNew: true, tenantId, walletExternalId } },
     201,
+  );
+});
+
+/**
+ * POST /users/wallet/external-id/connect-or-create
+ * Resolve a tenant wallet external ID to a user, or create/connect a user when
+ * no mapping exists. This is the backend primitive for connect-or-create wallet
+ * parity; hosted/modal UX can call it after external-wallet selection.
+ */
+platform.post("/users/wallet/external-id/connect-or-create", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:user:write");
+  if (scopeResponse) return scopeResponse;
+
+  const body = await safeJsonParse<{
+    tenantId?: unknown;
+    walletExternalId?: unknown;
+    externalId?: unknown;
+    email?: unknown;
+    emailVerified?: boolean;
+    name?: string;
+    customMetadata?: Record<string, unknown>;
+    role?: unknown;
+  }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  const tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : "";
+  const walletExternalId =
+    typeof body.walletExternalId === "string"
+      ? body.walletExternalId
+      : typeof body.externalId === "string"
+        ? body.externalId
+        : "";
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidWalletExternalId(walletExternalId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid walletExternalId" }, 400);
+  }
+  if (body.email !== undefined && (typeof body.email !== "string" || !body.email.includes("@"))) {
+    return c.json<ApiResponse>({ ok: false, error: "email must be valid when provided" }, 400);
+  }
+  if (body.customMetadata !== undefined) {
+    const metadataError = getPlatformMetadataValidationError(body.customMetadata, "customMetadata");
+    if (metadataError) return c.json<ApiResponse>({ ok: false, error: metadataError }, 400);
+  }
+
+  const db = getDb();
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+
+  const email = typeof body.email === "string" ? body.email.toLowerCase().trim() : null;
+  const [existingByEmail] = email
+    ? await db.select({ id: users.id }).from(users).where(eq(users.email, email))
+    : [];
+  const existingByExternalId = await lookupPlatformUserIdentity({ tenantId, walletExternalId });
+  if (existingByExternalId) {
+    if (existingByEmail && existingByEmail.id !== existingByExternalId.userId) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "walletExternalId already belongs to another user in this tenant" },
+        409,
+      );
+    }
+    return c.json<
+      ApiResponse<
+        PlatformUserCreateData & { createdExternalId: boolean; user: PlatformUserIdentity }
+      >
+    >({
+      ok: true,
+      data: {
+        userId: existingByExternalId.userId,
+        isNew: false,
+        createdExternalId: false,
+        tenantId,
+        walletExternalId: walletExternalId.trim(),
+        user: existingByExternalId,
+      },
+    });
+  }
+
+  const role =
+    typeof body.role === "string" && TENANT_MEMBER_ROLES.has(body.role) ? body.role : "member";
+  let userId = existingByEmail?.id;
+  let isNew = false;
+  if (!userId) {
+    const [created] = await db
+      .insert(users)
+      .values({
+        email,
+        emailVerified: body.emailVerified ?? false,
+        name: body.name ?? null,
+        customMetadata: body.customMetadata ?? {},
+      })
+      .returning({ id: users.id });
+    userId = created.id;
+    isNew = true;
+  }
+  const createdMembership = await insertTenantMembershipIfMissing({ userId, tenantId, role });
+  const linked = await linkWalletExternalIdForUser({
+    userId,
+    tenantId,
+    externalId: walletExternalId,
+  });
+  if (linked instanceof Error) {
+    if (isNew) {
+      await db.delete(users).where(eq(users.id, userId));
+    } else if (createdMembership) {
+      await rollbackTenantMembership({ userId, tenantId });
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: linked.message },
+      walletExternalLinkStatus(linked),
+    );
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "user.wallet_external_id.connect_or_create",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { isNew, createdExternalId: linked.isNew, hasEmail: !!email },
+    ...auditCtx(c),
+  });
+  const user = (await lookupPlatformUserIdentity({
+    tenantId,
+    walletExternalId,
+  })) as PlatformUserIdentity;
+  return c.json<
+    ApiResponse<PlatformUserCreateData & { createdExternalId: boolean; user: PlatformUserIdentity }>
+  >(
+    {
+      ok: true,
+      data: {
+        userId,
+        isNew,
+        createdExternalId: linked.isNew,
+        tenantId,
+        walletExternalId: walletExternalId.trim(),
+        user,
+      },
+    },
+    linked.isNew ? 201 : 200,
   );
 });
 
@@ -2120,6 +2592,11 @@ type PlatformLinkedAccountRow = {
   provider: string;
   providerAccountId: string;
   expiresAt: number | null;
+};
+
+type PlatformWalletExternalIdRow = {
+  tenantId: string;
+  externalId: string;
 };
 
 type PlatformUserIdentity = {
@@ -2136,6 +2613,7 @@ type PlatformUserIdentity = {
   updatedAt: Date;
   tenantIds: string[];
   linkedAccounts: PlatformLinkedAccountRow[];
+  walletExternalIds: PlatformWalletExternalIdRow[];
 };
 
 async function serializePlatformUserIdentity(userId: string): Promise<PlatformUserIdentity | null> {
@@ -2157,6 +2635,12 @@ async function serializePlatformUserIdentity(userId: string): Promise<PlatformUs
       .from(accounts)
       .where(eq(accounts.userId, userId)),
   ]);
+  const tenantIds = tenantRows.map((row) => row.tenantId);
+  const walletExternalIds = accountRows
+    .filter((row) => row.provider === WALLET_EXTERNAL_ID_PROVIDER)
+    .map((row) => parseWalletExternalProviderAccountId(row.providerAccountId, tenantIds))
+    .filter((row): row is PlatformWalletExternalIdRow => row !== null);
+
   return {
     userId: user.id,
     email: user.email,
@@ -2169,8 +2653,9 @@ async function serializePlatformUserIdentity(userId: string): Promise<PlatformUs
     deactivatedAt: user.deactivatedAt,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
-    tenantIds: tenantRows.map((row) => row.tenantId),
-    linkedAccounts: accountRows,
+    tenantIds,
+    linkedAccounts: accountRows.filter((row) => row.provider !== WALLET_EXTERNAL_ID_PROVIDER),
+    walletExternalIds,
   };
 }
 
@@ -2178,6 +2663,7 @@ type PlatformUserLookupInput = {
   email?: string;
   phone?: string;
   walletAddress?: string;
+  walletExternalId?: string;
   smartWalletId?: string;
   customAuthId?: string;
   provider?: string;
@@ -2192,6 +2678,7 @@ async function lookupPlatformUserIdentity(
   const email = input.email?.trim().toLowerCase();
   const phone = input.phone?.trim();
   const walletAddress = input.walletAddress?.trim();
+  const walletExternalId = input.walletExternalId?.trim();
   const smartWalletId = input.smartWalletId?.trim();
   const customAuthId = input.customAuthId?.trim();
   const provider = input.provider?.trim();
@@ -2215,6 +2702,22 @@ async function lookupPlatformUserIdentity(
       .from(users)
       .where(eq(users.walletAddress, walletAddress));
     candidateUserId = user?.id ?? null;
+  } else if (walletExternalId) {
+    if (!tenantId) throw new Error("tenantId is required for walletExternalId lookup");
+    if (!isValidWalletExternalId(walletExternalId)) throw new Error("Invalid walletExternalId");
+    const [account] = await db
+      .select({ userId: accounts.userId })
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.provider, WALLET_EXTERNAL_ID_PROVIDER),
+          eq(
+            accounts.providerAccountId,
+            walletExternalProviderAccountId(tenantId, walletExternalId),
+          ),
+        ),
+      );
+    candidateUserId = account?.userId ?? null;
   } else if (smartWalletId) {
     const [user] = await db
       .select({ id: users.id })
@@ -2237,7 +2740,7 @@ async function lookupPlatformUserIdentity(
     candidateUserId = account?.userId ?? null;
   } else {
     throw new Error(
-      "email, phone, walletAddress, smartWalletId, customAuthId, or provider + providerAccountId is required",
+      "email, phone, walletAddress, walletExternalId, smartWalletId, customAuthId, or provider + providerAccountId is required",
     );
   }
 
@@ -2257,14 +2760,15 @@ async function lookupPlatformUserIdentity(
     ...identity,
     tenantIds: [tenantId],
     linkedAccounts: [],
+    walletExternalIds: identity.walletExternalIds.filter((row) => row.tenantId === tenantId),
   };
 }
 
 /**
  * GET /users/lookup
- * Lookup by email, phone, walletAddress, smartWalletId, customAuthId, or
- * provider + providerAccountId. Optional tenantId constrains the result to
- * users linked to that tenant.
+ * Lookup by email, phone, walletAddress, walletExternalId, smartWalletId,
+ * customAuthId, or provider + providerAccountId. Optional tenantId constrains
+ * the result to users linked to that tenant. walletExternalId requires tenantId.
  */
 platform.get("/users/lookup", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:user:read");
@@ -2282,6 +2786,7 @@ platform.get("/users/lookup", async (c) => {
       email: c.req.query("email"),
       phone: c.req.query("phone"),
       walletAddress: c.req.query("walletAddress"),
+      walletExternalId: c.req.query("walletExternalId"),
       smartWalletId: c.req.query("smartWalletId"),
       customAuthId: c.req.query("customAuthId"),
       provider: c.req.query("provider"),
@@ -2352,6 +2857,24 @@ platform.post("/users/wallet/address", async (c) => {
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   return platformUserLookupAlias(c, {
     walletAddress: typeof body.walletAddress === "string" ? body.walletAddress : undefined,
+    tenantId: typeof body.tenantId === "string" ? body.tenantId : undefined,
+  });
+});
+
+platform.post("/users/wallet/external-id", async (c) => {
+  const body = await safeJsonParse<{
+    walletExternalId?: unknown;
+    externalId?: unknown;
+    tenantId?: unknown;
+  }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  return platformUserLookupAlias(c, {
+    walletExternalId:
+      typeof body.walletExternalId === "string"
+        ? body.walletExternalId
+        : typeof body.externalId === "string"
+          ? body.externalId
+          : undefined,
     tenantId: typeof body.tenantId === "string" ? body.tenantId : undefined,
   });
 });
@@ -2685,6 +3208,70 @@ platform.delete("/users/:userId", async (c) => {
 });
 
 /**
+ * POST /users/:userId/wallet/external-id
+ * Assign an immutable per-tenant external ID to a user's wallet identity.
+ * Body: { tenantId: string; walletExternalId: string }
+ */
+platform.post("/users/:userId/wallet/external-id", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:user:write");
+  if (scopeResponse) return scopeResponse;
+
+  const userId = c.req.param("userId");
+  if (!isValidUserId(userId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
+  }
+  const body = await safeJsonParse<{
+    tenantId?: unknown;
+    walletExternalId?: unknown;
+    externalId?: unknown;
+  }>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  const tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : "";
+  const walletExternalId =
+    typeof body.walletExternalId === "string"
+      ? body.walletExternalId
+      : typeof body.externalId === "string"
+        ? body.externalId
+        : "";
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  if (!isValidWalletExternalId(walletExternalId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid walletExternalId" }, 400);
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "user.wallet_external_id.link.authorized",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { hasWalletExternalId: true },
+    ...auditCtx(c),
+  });
+  const linked = await linkWalletExternalIdForUser({
+    userId,
+    tenantId,
+    externalId: walletExternalId,
+  });
+  if (linked instanceof Error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: linked.message },
+      walletExternalLinkStatus(linked),
+    );
+  }
+
+  dispatchWebhook(tenantId, userId, "user.updated_account", {
+    userId,
+    field: "walletExternalId",
+  });
+  return c.json<ApiResponse<PlatformWalletExternalLink>>(
+    { ok: true, data: linked },
+    linked.isNew ? 201 : 200,
+  );
+});
+
+/**
  * POST /users/:userId/accounts
  * Platform-only linked account mutation. Tenant-scoped routes intentionally
  * remain disabled to avoid cross-tenant identity mutation.
@@ -2701,7 +3288,11 @@ platform.post("/users/:userId/accounts", async (c) => {
   if (!isValidUserId(userId)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid user id format" }, 400);
   }
-  const body = await safeJsonParse<{ provider?: unknown; providerAccountId?: unknown }>(c);
+  const body = await safeJsonParse<{
+    provider?: unknown;
+    providerAccountId?: unknown;
+    tenantId?: unknown;
+  }>(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   if (!isValidAccountProvider(body.provider) || !isValidProviderAccountId(body.providerAccountId)) {
     return c.json<ApiResponse>(
@@ -2711,6 +3302,10 @@ platform.post("/users/:userId/accounts", async (c) => {
   }
   const provider = body.provider.trim();
   const providerAccountId = body.providerAccountId.trim();
+  const tenantId = typeof body.tenantId === "string" ? body.tenantId.trim() : undefined;
+  if (tenantId !== undefined && !isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
   const [user] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
   if (!user) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
 
@@ -2737,13 +3332,32 @@ platform.post("/users/:userId/accounts", async (c) => {
     });
   }
 
+  if (isThirdPartyWalletProvider(provider)) {
+    const restrictedTenantIds = await restrictedWalletPolicyTenantIds(userId, tenantId);
+    if (tenantId && restrictedTenantIds.length === 0) {
+      const requestedTenantIds = await tenantIdsForWalletPolicy(userId, tenantId);
+      if (requestedTenantIds.length === 0) {
+        return c.json<ApiResponse>({ ok: false, error: "User is not a member of tenant" }, 403);
+      }
+    }
+    if (restrictedTenantIds.length > 0 && (await userHasLinkedThirdPartyWallet(userId))) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "User already has a linked wallet",
+        },
+        409,
+      );
+    }
+  }
+
   await writeAuditEvent({
     tenantId: PLATFORM_AUDIT_TENANT_ID,
     actorType: "platform",
     action: "user.account.link",
     resourceType: "user",
     resourceId: userId,
-    metadata: { provider },
+    metadata: { provider, tenantId },
     ...auditCtx(c),
   });
   const [created] = await db
@@ -3099,7 +3713,7 @@ async function getTenantUser(tenantId: string, userId: string): Promise<TenantUs
 
 /**
  * GET /tenants/:id/users
- * Tenant-scoped user lookup/search. Supports q, email, limit, offset.
+ * Tenant-scoped user lookup/search. Supports q, email, walletExternalId, limit, offset.
  */
 platform.get("/tenants/:id/users", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-user:read");
@@ -3119,7 +3733,26 @@ platform.get("/tenants/:id/users", async (c) => {
   const limit = clampLimit(c.req.query("limit") ?? null);
   const offset = parseOffset(c.req.query("offset") ?? null);
   const email = c.req.query("email")?.trim().toLowerCase();
+  const walletExternalId = c.req.query("walletExternalId")?.trim();
   const q = c.req.query("q")?.trim();
+
+  if (walletExternalId) {
+    if (!isValidWalletExternalId(walletExternalId)) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid walletExternalId" }, 400);
+    }
+    const identity = await lookupPlatformUserIdentity({ tenantId, walletExternalId });
+    if (!identity) {
+      return c.json<ApiResponse<{ users: TenantUserRow[]; limit: number; offset: number }>>({
+        ok: true,
+        data: { users: [], limit, offset },
+      });
+    }
+    const user = await getTenantUser(tenantId, identity.userId);
+    return c.json<ApiResponse<{ users: TenantUserRow[]; limit: number; offset: number }>>({
+      ok: true,
+      data: { users: user ? [user] : [], limit, offset },
+    });
+  }
 
   const filters: SQL[] = [eq(userTenants.tenantId, tenantId)];
   if (email) {

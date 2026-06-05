@@ -1,0 +1,90 @@
+---
+title: "Platform Apps"
+description: "Platform-level app operations, including sponsored gas spend history."
+---
+
+# Platform Apps API
+
+Platform app routes expose cross-tenant operational data for platform
+operators. They require a platform key and route scopes when scoped platform
+keys are enabled.
+
+## Get Gas Spend
+
+Returns sponsored gas reservations and settled spend for tenant-scoped wallets.
+Timestamp filters accept Unix seconds or milliseconds, and the server caps the
+range at 30 days.
+
+```
+GET /platform/apps/gas_spend
+```
+
+**Auth:** Platform key with `platform:gas-spend:read`
+
+**Query Parameters:**
+
+```typescript
+{
+  tenant_id: string;
+  wallet_ids?: string;          // Comma-separated canonical Steward wallet IDs
+  wallet_external_ids?: string; // Comma-separated tenant-local wallet external IDs
+  start_timestamp?: number;
+  end_timestamp?: number;
+}
+```
+
+`wallet_external_ids` can also be sent as `walletExternalIds`. Steward resolves
+external IDs to canonical tenant wallet IDs before querying spend history, so
+response entries still use canonical `agentId` values.
+
+<CodeGroup>
+```typescript SDK
+const spend = await steward.platformApps.getGasSpend({
+  tenantId: "app-prod",
+  walletIds: ["agent-1"],
+  walletExternalIds: ["external-wallet-1"],
+  startTimestamp: 1764195200,
+  endTimestamp: 1764281600,
+});
+```
+
+```bash cURL
+curl "https://api.steward.fi/platform/apps/gas_spend?tenant_id=app-prod&wallet_external_ids=external-wallet-1" \
+  -H "X-Steward-Platform-Key: your-platform-key"
+```
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "tenantId": "app-prod",
+    "walletIds": ["agent-1"],
+    "count": 1,
+    "reservedUsd": "1.250000",
+    "actualUsd": "1.000000",
+    "entries": [
+      {
+        "id": "evt_123",
+        "tenantId": "app-prod",
+        "agentId": "agent-1",
+        "provider": "mock",
+        "mode": "erc4337",
+        "status": "settled",
+        "reservedUsd": "1.250000",
+        "actualUsd": "1.000000"
+      }
+    ]
+  }
+}
+```
+
+## External ID Errors
+
+| Status | Error |
+| --- | --- |
+| `400` | `wallet_external_ids` contains an invalid ID or more than 100 IDs. |
+| `404` | One or more wallet external IDs are unknown in the tenant. |
+| `409` | A wallet external ID maps to multiple tenant wallets and must be deduplicated before querying. |

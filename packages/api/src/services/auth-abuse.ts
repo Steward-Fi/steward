@@ -27,17 +27,30 @@ const MFA_REQUIRE_FOR = new Set([
   "recoveryCodes",
   "tenantAdmin",
 ] as const);
+const MFA_DISABLE_FOR = new Set(["keyImport", "keyExport"] as const);
+const MFA_MAX_AGE_FOR = MFA_REQUIRE_FOR;
 const MIN_MFA_MAX_AGE_SECONDS = 30;
 const MAX_MFA_MAX_AGE_SECONDS = 60 * 60;
 
 type TenantMfaPolicyConfig = {
   maxAgeSeconds?: number;
+  maxAgeFor?: {
+    vaultSigning?: number;
+    keyImport?: number;
+    keyExport?: number;
+    recoveryCodes?: number;
+    tenantAdmin?: number;
+  };
   requireFor?: {
     vaultSigning?: boolean;
     keyImport?: boolean;
     keyExport?: boolean;
     recoveryCodes?: boolean;
     tenantAdmin?: boolean;
+  };
+  disableFor?: {
+    keyImport?: boolean;
+    keyExport?: boolean;
   };
   allowDelegatedSignerAutomation?: boolean;
   allowKeyQuorumAutomation?: boolean;
@@ -181,6 +194,26 @@ function normalizeMfaPolicy(value: unknown): TenantMfaPolicyConfig | string {
     policy.maxAgeSeconds = maxAgeSeconds;
   }
 
+  if (value.maxAgeFor !== undefined) {
+    if (!isPlainObject(value.maxAgeFor)) return "mfa.maxAgeFor must be an object";
+    const maxAgeFor: NonNullable<TenantMfaPolicyConfig["maxAgeFor"]> = {};
+    for (const key of MFA_MAX_AGE_FOR) {
+      const rawMaxAgeSeconds = value.maxAgeFor[key];
+      if (rawMaxAgeSeconds !== undefined) {
+        const maxAgeSeconds = Number(rawMaxAgeSeconds);
+        if (
+          !Number.isSafeInteger(maxAgeSeconds) ||
+          maxAgeSeconds < MIN_MFA_MAX_AGE_SECONDS ||
+          maxAgeSeconds > MAX_MFA_MAX_AGE_SECONDS
+        ) {
+          return `mfa.maxAgeFor.${key} must be an integer between ${MIN_MFA_MAX_AGE_SECONDS} and ${MAX_MFA_MAX_AGE_SECONDS}`;
+        }
+        maxAgeFor[key] = maxAgeSeconds;
+      }
+    }
+    policy.maxAgeFor = maxAgeFor;
+  }
+
   if (value.requireFor !== undefined) {
     if (!isPlainObject(value.requireFor)) return "mfa.requireFor must be an object";
     const requireFor: NonNullable<TenantMfaPolicyConfig["requireFor"]> = {};
@@ -192,6 +225,19 @@ function normalizeMfaPolicy(value: unknown): TenantMfaPolicyConfig | string {
       }
     }
     policy.requireFor = requireFor;
+  }
+
+  if (value.disableFor !== undefined) {
+    if (!isPlainObject(value.disableFor)) return "mfa.disableFor must be an object";
+    const disableFor: NonNullable<TenantMfaPolicyConfig["disableFor"]> = {};
+    for (const key of MFA_DISABLE_FOR) {
+      const disabled = value.disableFor[key];
+      if (disabled !== undefined) {
+        if (typeof disabled !== "boolean") return `mfa.disableFor.${key} must be a boolean`;
+        disableFor[key] = disabled;
+      }
+    }
+    policy.disableFor = disableFor;
   }
 
   if (value.allowDelegatedSignerAutomation !== undefined) {
@@ -299,7 +345,17 @@ export function normalizeAuthAbuseConfig(value: unknown): TenantAuthAbuseConfigW
       "wallet.blockedWallets",
     );
     if (typeof blockedWallets === "string") return blockedWallets;
-    config.wallet = { allowedWallets, blockedWallets };
+    if (
+      value.wallet.restrictToOneThirdPartyWallet !== undefined &&
+      typeof value.wallet.restrictToOneThirdPartyWallet !== "boolean"
+    ) {
+      return "wallet.restrictToOneThirdPartyWallet must be a boolean";
+    }
+    config.wallet = {
+      allowedWallets,
+      blockedWallets,
+      restrictToOneThirdPartyWallet: value.wallet.restrictToOneThirdPartyWallet === true,
+    };
   }
 
   if (value.phone !== undefined) {

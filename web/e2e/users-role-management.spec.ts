@@ -15,6 +15,12 @@ type TenantUser = {
   deactivatedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  walletExternalIds?: Array<{
+    id?: string;
+    tenantId?: string;
+    walletExternalId?: string;
+    externalId?: string;
+  }>;
 };
 
 type TenantInvitation = {
@@ -30,6 +36,26 @@ type TenantInvitation = {
   expiresAt: string;
   createdAt: string;
   updatedAt: string;
+};
+
+type WalletPolicyViolationReport = {
+  tenantId: string;
+  policyEnabled: boolean;
+  total: number;
+  limit: number;
+  offset: number;
+  violations: Array<{
+    userId: string;
+    email: string | null;
+    name: string | null;
+    role: string;
+    walletCount: number;
+    wallets: Array<{
+      accountId: string;
+      provider: "wallet:ethereum" | "wallet:solana";
+      providerAccountId: string;
+    }>;
+  }>;
 };
 
 test.describe("Dashboard tenant team roles", () => {
@@ -51,14 +77,123 @@ test.describe("Dashboard tenant team roles", () => {
       updatedAt: now,
     };
     const invitations: TenantInvitation[] = [];
+    const walletPolicyReport: WalletPolicyViolationReport = {
+      tenantId,
+      policyEnabled: true,
+      total: 1,
+      limit: 50,
+      offset: 0,
+      violations: [
+        {
+          userId: tenantUser.userId,
+          email: tenantUser.email,
+          name: tenantUser.name,
+          role: tenantUser.role,
+          walletCount: 2,
+          wallets: [
+            {
+              accountId: "wallet-account-evm",
+              provider: "wallet:ethereum",
+              providerAccountId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            },
+            {
+              accountId: "wallet-account-solana",
+              provider: "wallet:solana",
+              providerAccountId: "So11111111111111111111111111111111111111112",
+            },
+          ],
+        },
+      ],
+    };
     let tenantUserRemoved = false;
     let lastInviteBody: { email: string; role: string; sendEmail: boolean } | null = null;
+    let lastUsersSearchUrl = "";
+    let lastBulkRemediationBody: { wallets: Array<{ userId: string; accountId: string }> } | null =
+      null;
+    const remediatedWalletAccountIds = new Set<string>();
+    let walletPolicyReportLoads = 0;
 
     await page.route(/\/user\/me\/tenants\/[^/]+\/users(?:\?.*)?$/, async (route) => {
+      lastUsersSearchUrl = route.request().url();
       await route.fulfill({
         json: { ok: true, data: { users: tenantUserRemoved ? [] : [tenantUser] } },
       });
     });
+    await page.route(
+      /\/user\/me\/tenants\/[^/]+\/users\/wallet-policy\/violations(?:\?.*)?$/,
+      async (route) => {
+        walletPolicyReportLoads += 1;
+        if (remediatedWalletAccountIds.size > 0) {
+          walletPolicyReport.violations = walletPolicyReport.violations
+            .map((violation) => ({
+              ...violation,
+              wallets: violation.wallets.filter(
+                (wallet) => !remediatedWalletAccountIds.has(wallet.accountId),
+              ),
+            }))
+            .filter((violation) => violation.wallets.length > 1);
+          walletPolicyReport.total = walletPolicyReport.violations.length;
+        }
+        await route.fulfill({ json: { ok: true, data: walletPolicyReport } });
+      },
+    );
+    await page.route(
+      /\/user\/me\/tenants\/[^/]+\/users\/[^/]+\/wallet-policy\/wallets\/[^/]+$/,
+      async (route) => {
+        expect(route.request().method()).toBe("DELETE");
+        const accountId = decodeURIComponent(route.request().url().split("/").pop() ?? "");
+        remediatedWalletAccountIds.add(accountId);
+        await route.fulfill({
+          json: {
+            ok: true,
+            data: {
+              deleted: true,
+              accountId,
+              provider: "wallet:solana",
+              providerAccountId: "So11111111111111111111111111111111111111112",
+              issuedBefore: Date.now(),
+            },
+          },
+        });
+      },
+    );
+    await page.route(
+      /\/user\/me\/tenants\/[^/]+\/users\/wallet-policy\/remediations$/,
+      async (route) => {
+        expect(route.request().method()).toBe("POST");
+        lastBulkRemediationBody = route.request().postDataJSON() as {
+          wallets: Array<{ userId: string; accountId: string }>;
+        };
+        for (const wallet of lastBulkRemediationBody.wallets) {
+          remediatedWalletAccountIds.add(wallet.accountId);
+        }
+        await route.fulfill({
+          json: {
+            ok: true,
+            data: {
+              tenantId,
+              succeeded: lastBulkRemediationBody.wallets.length,
+              failed: 0,
+              results: lastBulkRemediationBody.wallets.map((wallet) => ({
+                ok: true,
+                targetUserId: wallet.userId,
+                accountId: wallet.accountId,
+                provider:
+                  wallet.accountId === "wallet-account-solana"
+                    ? "wallet:solana"
+                    : "wallet:ethereum",
+                providerAccountId:
+                  wallet.accountId === "wallet-account-solana"
+                    ? "So11111111111111111111111111111111111111112"
+                    : "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                issuedBefore: Date.now(),
+                deleted: true,
+              })),
+            },
+          },
+        });
+      },
+    );
     await page.route(/\/user\/me\/tenants\/[^/]+\/users\/export(?:\?.*)?$/, async (route) => {
       await route.fulfill({
         body: "user_id,email\n11111111-1111-4111-8111-111111111111,dev@example.test\n",
@@ -180,7 +315,7 @@ test.describe("Dashboard tenant team roles", () => {
     await page.goto(
       `${WEB}/auth/callback/email?token=${encodeURIComponent(inbox.token)}&email=${encodeURIComponent(email)}`,
     );
-    await page.waitForURL(/\/dashboard/, { timeout: 30_000 });
+    await expect(page.getByRole("link", { name: "Users" })).toBeVisible({ timeout: 30_000 });
 
     await page.goto(`${WEB}/dashboard/users`);
     const tenantInput = page.getByPlaceholder("tenant-id");
@@ -200,6 +335,102 @@ test.describe("Dashboard tenant team roles", () => {
       await page.getByRole("button", { name: "Search" }).click();
       await expect(devUserButton).toBeVisible({ timeout: 3_000 });
     }).toPass({ timeout: 20_000 });
+    await expect(page.getByRole("heading", { name: "Third-Party Wallet Policy" })).toBeVisible();
+    await expect(page.getByText("Violating Users")).toBeVisible();
+    await expect(page.getByText("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).toBeVisible();
+    await expect(page.getByText("So11111111111111111111111111111111111111112")).toBeVisible();
+    expect(walletPolicyReportLoads).toBeGreaterThan(0);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Remove Wallet" }).nth(1).click();
+    await expect(page.getByText("Removed Solana wallet")).toBeVisible();
+    await expect(page.getByText("No users currently violate the one-wallet policy.")).toBeVisible();
+    expect(remediatedWalletAccountIds.has("wallet-account-solana")).toBe(true);
+    await page.getByRole("button", { name: "Refresh Report" }).click();
+    expect(walletPolicyReportLoads).toBeGreaterThan(1);
+    walletPolicyReport.violations = [
+      {
+        userId: tenantUser.userId,
+        email: tenantUser.email,
+        name: tenantUser.name,
+        role: tenantUser.role,
+        walletCount: 2,
+        wallets: [
+          {
+            accountId: "wallet-account-evm",
+            provider: "wallet:ethereum",
+            providerAccountId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          },
+          {
+            accountId: "wallet-account-solana",
+            provider: "wallet:solana",
+            providerAccountId: "So11111111111111111111111111111111111111112",
+          },
+        ],
+      },
+    ];
+    walletPolicyReport.total = 1;
+    remediatedWalletAccountIds.clear();
+    await page.getByRole("button", { name: "Refresh Report" }).click();
+    await page.getByLabel("Select wallet-account-evm").check();
+    await page.getByLabel("Select wallet-account-solana").check();
+    await expect(page.getByText("2 selected")).toBeVisible();
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Remove Selected" }).click();
+    await expect(page.getByText("Bulk remediation completed: 2 removed, 0 failed.")).toBeVisible();
+    expect(lastBulkRemediationBody).not.toBeNull();
+    const bulkBody = lastBulkRemediationBody as unknown as {
+      wallets: Array<{ userId: string; accountId: string }>;
+    };
+    expect(bulkBody.wallets).toEqual([
+      { userId: tenantUser.userId, accountId: "wallet-account-evm" },
+      { userId: tenantUser.userId, accountId: "wallet-account-solana" },
+    ]);
+    await expect(page.getByText("No users currently violate the one-wallet policy.")).toBeVisible();
+    walletPolicyReport.violations = [
+      {
+        userId: tenantUser.userId,
+        email: tenantUser.email,
+        name: tenantUser.name,
+        role: tenantUser.role,
+        walletCount: 2,
+        wallets: [
+          {
+            accountId: "wallet-account-evm",
+            provider: "wallet:ethereum",
+            providerAccountId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          },
+          {
+            accountId: "wallet-account-solana",
+            provider: "wallet:solana",
+            providerAccountId: "So11111111111111111111111111111111111111112",
+          },
+        ],
+      },
+    ];
+    walletPolicyReport.total = 1;
+    remediatedWalletAccountIds.clear();
+    await page.getByRole("button", { name: "Refresh Report" }).click();
+    await page.getByRole("button", { name: "Review User" }).click();
+    await expect(page.getByText("tenant.member.role.update")).toBeVisible();
+
+    await page.getByLabel("Search field").selectOption("walletExternalId");
+    await page.getByPlaceholder("wallet external id").fill("wallet-ext-dashboard-1");
+    tenantUser.walletExternalIds = [
+      {
+        id: "wallet-ext-row-1",
+        tenantId,
+        walletExternalId: "wallet-ext-dashboard-1",
+      },
+      {
+        tenantId,
+        externalId: "wallet-ext-legacy-shape",
+      },
+    ];
+    await page.getByRole("button", { name: "Search" }).click();
+    await expect(page.getByText("wallet-ext-dashboard-1").first()).toBeVisible();
+    expect(new URL(lastUsersSearchUrl).searchParams.get("walletExternalId")).toBe(
+      "wallet-ext-dashboard-1",
+    );
 
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export CSV" }).click();
@@ -208,6 +439,8 @@ test.describe("Dashboard tenant team roles", () => {
 
     await devUserButton.click();
     await expect(page.getByText("tenant.member.role.update")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Wallet External IDs" })).toBeVisible();
+    await expect(page.getByText("wallet-ext-legacy-shape")).toBeVisible();
     await page.getByLabel("Tenant role").selectOption("developer");
 
     await expect(page.getByLabel("Tenant role")).toHaveValue("developer");

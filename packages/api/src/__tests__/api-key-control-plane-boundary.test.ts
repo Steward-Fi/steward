@@ -11,7 +11,9 @@ const agentsSource = readFileSync(join(routesDir, "agents.ts"), "utf8");
 function routeStart(source: string, marker: string): number {
   const direct = source.indexOf(marker);
   if (direct >= 0) return direct;
-  return source.indexOf(marker.replace('")', '", async'));
+  const inlineAsync = source.indexOf(marker.replace('")', '", async'));
+  if (inlineAsync >= 0) return inlineAsync;
+  return source.indexOf(marker.replace('")', '",'));
 }
 
 function expectAdminBeforeTenantLevel(source: string, marker: string) {

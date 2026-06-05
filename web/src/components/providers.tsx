@@ -1,7 +1,7 @@
 "use client";
 
 import { StewardProvider, useAuth } from "@stwd/react";
-import { createElement, type ReactNode, useEffect, useRef, useState } from "react";
+import { createElement, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { clearAuthToken, setAuthToken, steward } from "@/lib/api";
 
 // Pre-import @simplewebauthn/browser so it's in the client bundle.
@@ -121,11 +121,13 @@ function WalletProviderTree({ children }: { children: ReactNode }) {
 }
 
 export function Providers({ children }: { children: ReactNode }) {
+  const stewardAuthConfig = useMemo(() => ({ baseUrl: API_URL, storage: authStorage }), []);
+
   return createElement(
     StewardProvider as any,
     {
       client: steward as any,
-      auth: { baseUrl: API_URL, storage: authStorage },
+      auth: stewardAuthConfig,
     },
     createElement(WalletProviderTree, null, createElement(AuthTokenSync, null, children)),
   ) as any;

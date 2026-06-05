@@ -168,6 +168,106 @@ http://localhost:3200/auth/oauth/twitter/callback
 | `/auth/oauth/{provider}/authorize` | GET | Start OAuth flow (redirect to provider) |
 | `/auth/oauth/{provider}/callback` | GET | Provider redirect target |
 | `/auth/oauth/{provider}/token` | POST | Exchange code for session (PKCE) |
+| `/auth/device/code` | POST | Issue a short-lived device code and user code |
+| `/auth/device/verify` | POST | Approve or deny a user code with an authenticated browser session |
+| `/auth/device/token` | POST | Poll `urn:ietf:params:oauth:grant-type:device_code` for a session |
+
+## Device Authorization Flow
+
+For CLIs, TVs, and other input-constrained clients, Steward supports a bounded RFC 8628-style device flow. Device codes expire after 10 minutes, polling starts at a 5 second interval, rapid polling returns `slow_down`, and an approved code is consumed on first successful token exchange.
+
+```typescript
+const auth = new StewardAuth({
+  baseUrl: "https://api.steward.fi",
+  tenantId: "my-tenant",
+});
+
+const issued = await auth.requestDeviceCode({
+  clientId: "device-cli",
+});
+
+console.log(`Open ${issued.verification_uri} and enter ${issued.user_code}`);
+
+let interval = issued.interval;
+while (true) {
+  await new Promise((resolve) => setTimeout(resolve, interval * 1000));
+  const result = await auth.pollDeviceToken({
+    deviceCode: issued.device_code,
+    clientId: "device-cli",
+  });
+  if (result.ok) break;
+  if (result.error === "slow_down" && result.interval) interval = result.interval;
+  if (result.error === "access_denied" || result.error === "expired_token") {
+    throw new Error(result.error);
+  }
+}
+```
+
+The verification UI should authenticate the user normally, then approve or deny the displayed code:
+
+```typescript
+await auth.verifyDeviceCode("ABCD-2345", "approve");
+```
+
+When `clientId` is supplied, issuance requires an enabled tenant app client and token polling must present the same client id. Polling returns RFC-style errors: `authorization_pending`, `slow_down`, `access_denied`, `expired_token`, `invalid_client`, `invalid_request`, and `unsupported_grant_type`.
+
+Native app clients can additionally send platform identifiers on device-flow
+requests:
+
+```bash
+X-Steward-Native-Bundle-Id: com.example.ios
+X-Steward-Native-Package-Name: com.example.android
+```
+
+If either header or the matching JSON fields (`native_bundle_id`,
+`native_package_name`, `nativeBundleId`, `nativePackageName`) is supplied,
+Steward validates the identifier format and checks it against the enabled app
+client's `allowedBundleIds` or `allowedPackageNames`. Accepted identifiers are
+bound to the issued device code, so `/auth/device/token` must present the same
+identifier. A different identifier returns `invalid_client` and leaves the
+approval state unchanged. This is deterministic server allowlist enforcement;
+full device attestation remains the responsibility of the OS, app store, or
+attestation provider used by the native app.
+
+Minimal iOS-bound device-code request:
+
+```bash
+curl -X POST https://api.steward.fi/auth/device/code \
+  -H "Content-Type: application/json" \
+  -H "X-Steward-Native-Bundle-Id: com.example.ios" \
+  -d '{
+    "tenantId": "my-tenant",
+    "client_id": "ios-prod"
+  }'
+```
+
+The response echoes the accepted identifier using snake_case:
+
+```json
+{
+  "device_code": "stwd_dc_...",
+  "user_code": "ABCD-2345",
+  "verification_uri": "https://app.steward.fi/auth/device",
+  "expires_in": 600,
+  "interval": 5,
+  "client_id": "ios-prod",
+  "native_bundle_id": "com.example.ios"
+}
+```
+
+The token poll must repeat the same app client and native identifier, either as
+headers or JSON fields:
+
+```bash
+curl -X POST https://api.steward.fi/auth/device/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    "device_code": "stwd_dc_...",
+    "client_id": "ios-prod",
+    "native_bundle_id": "com.example.ios"
+  }'
+```
 
 ## Security
 
@@ -175,7 +275,8 @@ http://localhost:3200/auth/oauth/twitter/callback
 - State parameter prevents CSRF attacks
 - Code verifier is stored client-side and never sent to the provider
 - Popup polling includes a 5-minute timeout
-- Provider tokens are not stored; only the Steward JWT is persisted
+- Device authorization codes are tenant/app-client bound, short-lived, rate-limited, and single-use
+- Provider tokens are encrypted before storage; Steward sessions return short-lived access tokens and rotated refresh tokens
 
 ## Related
 

@@ -110,6 +110,7 @@ describe("AdapterRegistry resolution", () => {
         "offramp",
         "onramp",
         "push",
+        "spark",
         "swap",
         "tos",
       ].sort(),

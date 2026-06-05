@@ -49,9 +49,17 @@ test.describe("Email magic-link — mock inbox round-trip", () => {
     await emailInput.waitFor();
     const email = `browser-${Date.now()}@example.test`;
     await emailInput.fill(email);
-    await page.getByRole("button", { name: /email me a link/i }).click();
+    await expect(emailInput).toHaveValue(email);
+    const [sendResponse] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url() === `${API}/auth/email/send` && response.request().method() === "POST",
+      ),
+      page.getByRole("button", { name: /email me a link/i }).click(),
+    ]);
+    expect(sendResponse.status()).toBe(200);
 
-    await page.getByText(/link sent to/i).waitFor();
+    await expect(page.getByText(/link sent to/i)).toBeVisible();
 
     // Inbox should now hold the magic link addressed to this user.
     const inbox = await page.request.get(`${API}/auth/test/inbox/${encodeURIComponent(email)}`);
@@ -68,6 +76,13 @@ test.describe("Email magic-link — mock inbox round-trip", () => {
     const { token } = (await (
       await page.request.get(`${API}/auth/test/inbox/${encodeURIComponent(email)}`)
     ).json()) as { token: string };
+
+    let verifyRequests = 0;
+    page.on("request", (request) => {
+      if (request.url() === `${API}/auth/email/verify` && request.method() === "POST") {
+        verifyRequests += 1;
+      }
+    });
 
     await page.goto(
       `${WEB}/auth/callback/email?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`,
@@ -88,6 +103,43 @@ test.describe("Email magic-link — mock inbox round-trip", () => {
     expect(storageState.refreshToken).toBeTruthy();
     expect(storageState.localToken).toBeNull();
     expect(storageState.localRefreshToken).toBeNull();
+    expect(verifyRequests).toBe(1);
+  });
+
+  test("browser callback never lands on stripped callback URL before session hydration", async ({
+    page,
+  }, testInfo) => {
+    const email = `callback-preserve-${Date.now()}@example.test`;
+    await page.request.post(`${API}/auth/email/send`, { data: { email } });
+    const { token } = (await (
+      await page.request.get(`${API}/auth/test/inbox/${encodeURIComponent(email)}`)
+    ).json()) as { token: string };
+
+    const navigations: string[] = [];
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) navigations.push(frame.url());
+    });
+
+    await page.goto(
+      `${WEB}/auth/callback/email?token=${encodeURIComponent(token)}&email=${encodeURIComponent(email)}`,
+    );
+    await page.waitForURL(/\/dashboard$/, { timeout: 30_000 });
+
+    const strippedCallback = navigations.find((url) => {
+      const parsed = new URL(url);
+      return (
+        parsed.pathname === "/auth/callback/email" &&
+        !parsed.searchParams.has("token") &&
+        !parsed.searchParams.has("email")
+      );
+    });
+    await testInfo.attach("email-callback-navigations", {
+      body: navigations.join("\n"),
+      contentType: "text/plain",
+    });
+
+    expect(strippedCallback).toBeUndefined();
+    await expect(page.getByText(/missing token or email/i)).toBeHidden();
   });
 
   test("stale localStorage auth tokens are ignored by the dashboard guard", async ({ page }) => {

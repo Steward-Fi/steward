@@ -302,7 +302,21 @@ function signerHasPermission(permissions: readonly string[], required: string): 
  * this layer" rather than allow-all.
  */
 function requiredPermissionForPath(path: string): string | null {
-  if (path.startsWith("/vault") || path.startsWith("/user")) {
+  if (path.startsWith("/vault")) {
+    const segments = path.split("/").filter(Boolean);
+    const action = segments[2] ?? "";
+    if (action === "sign") return "sign_transaction";
+    if (action === "sign-bitcoin-psbt") return "sign_transaction";
+    if (action === "sign-message") return "sign_message";
+    if (action === "sign-raw-hash" || action === "sign-raw-digest") return "sign_raw_hash";
+    if (action === "sign-typed-data") return "sign_typed_data";
+    if (action === "sign-user-operation") return "sign_user_operation";
+    if (action === "sign-authorization") return "sign_authorization";
+    if (action === "sign-solana") return "solana_transaction";
+    if (action === "actions" && segments[3] === "transfer") return "wallet_action_transfer";
+    if (action === "actions" && segments[3] === "send-calls") return "wallet_action_send_calls";
+  }
+  if (path.startsWith("/user")) {
     if (path.includes("/sign-raw") || path.endsWith("/sign_raw_hash")) return "sign_raw_hash";
     if (path.includes("/sign")) return "sign_message";
     if (path.includes("/transfer")) return "wallet_action_transfer";
@@ -393,8 +407,13 @@ type QuorumEvalContext = {
   quorums: Map<string, QuorumRecord>;
   /** signerId → whether that signer's P-256 signature over the canonical string verified. */
   verifiedSigners: Map<string, boolean>;
-  /** Memoized satisfaction result per quorum id to avoid re-evaluating shared subtrees. */
-  memo: Map<string, boolean>;
+  requiredPermission: string | null;
+  /**
+   * Memoized satisfying leaf-signer sets per quorum id. A quorum can be reached
+   * through multiple parent paths; callers must reason over the distinct
+   * underlying signers, not merely a boolean satisfied/not-satisfied flag.
+   */
+  memo: Map<string, Array<Set<string>>>;
 };
 
 /**
@@ -408,43 +427,92 @@ type QuorumEvalContext = {
  *  - Missing/unknown/inactive child quorum → that member simply does not count.
  *  - Non-positive or unsatisfiable threshold → false.
  */
+function quorumSatisfactionOptions(
+  quorumId: string,
+  ctx: QuorumEvalContext,
+  ancestry: Set<string>,
+  depth: number,
+): Array<Set<string>> {
+  if (depth > MAX_QUORUM_DEPTH) return [];
+  if (ancestry.has(quorumId)) return []; // cycle → deny
+  const cached = ctx.memo.get(quorumId);
+  if (cached !== undefined) return cached;
+
+  const quorum = ctx.quorums.get(quorumId);
+  if (!quorum) return [];
+  if (!Number.isInteger(quorum.threshold) || quorum.threshold <= 0) return [];
+  if (ctx.requiredPermission && !signerHasPermission(quorum.permissions, ctx.requiredPermission)) {
+    return [];
+  }
+
+  const nextAncestry = new Set(ancestry);
+  nextAncestry.add(quorumId);
+
+  const memberOptions: Array<Set<string>> = [];
+  for (const signerId of quorum.memberSignerIds) {
+    if (ctx.verifiedSigners.get(signerId) === true) memberOptions.push(new Set([signerId]));
+  }
+  for (const childId of quorum.memberQuorumIds) {
+    memberOptions.push(...quorumSatisfactionOptions(childId, ctx, nextAncestry, depth + 1));
+  }
+
+  type State = { count: number; signers: Set<string> };
+  let states: State[] = [{ count: 0, signers: new Set() }];
+  for (const option of memberOptions) {
+    const nextStates = states.map((state) => ({
+      count: state.count + 1,
+      signers: new Set([...state.signers, ...option]),
+    }));
+    states = dedupeQuorumStates([...states, ...nextStates]);
+    if (states.length > MAX_QUORUM_MEMBERS_EVALUATED) {
+      states = states.slice(0, MAX_QUORUM_MEMBERS_EVALUATED);
+    }
+  }
+
+  const options = dedupeSignerSets(
+    states
+      .filter((state) => state.count >= quorum.threshold && state.signers.size >= state.count)
+      .map((state) => state.signers),
+  );
+  ctx.memo.set(quorumId, options);
+  return options;
+}
+
+function signerSetKey(signers: Set<string>): string {
+  return [...signers].sort().join("\0");
+}
+
+function dedupeSignerSets(sets: Array<Set<string>>): Array<Set<string>> {
+  const seen = new Set<string>();
+  const result: Array<Set<string>> = [];
+  for (const set of sets) {
+    const key = signerSetKey(set);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(set);
+  }
+  return result;
+}
+
+function dedupeQuorumStates(states: Array<{ count: number; signers: Set<string> }>) {
+  const seen = new Set<string>();
+  const result: Array<{ count: number; signers: Set<string> }> = [];
+  for (const state of states) {
+    const key = `${state.count}:${signerSetKey(state.signers)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(state);
+  }
+  return result;
+}
+
 function evaluateQuorum(
   quorumId: string,
   ctx: QuorumEvalContext,
   ancestry: Set<string>,
   depth: number,
 ): boolean {
-  if (depth > MAX_QUORUM_DEPTH) return false;
-  if (ancestry.has(quorumId)) return false; // cycle → deny
-  const cached = ctx.memo.get(quorumId);
-  if (cached !== undefined) return cached;
-
-  const quorum = ctx.quorums.get(quorumId);
-  if (!quorum) return false;
-  if (!Number.isInteger(quorum.threshold) || quorum.threshold <= 0) return false;
-
-  const nextAncestry = new Set(ancestry);
-  nextAncestry.add(quorumId);
-
-  let satisfied = 0;
-  for (const signerId of quorum.memberSignerIds) {
-    if (ctx.verifiedSigners.get(signerId) === true) satisfied += 1;
-    if (satisfied >= quorum.threshold) {
-      ctx.memo.set(quorumId, true);
-      return true;
-    }
-  }
-  for (const childId of quorum.memberQuorumIds) {
-    if (evaluateQuorum(childId, ctx, nextAncestry, depth + 1)) satisfied += 1;
-    if (satisfied >= quorum.threshold) {
-      ctx.memo.set(quorumId, true);
-      return true;
-    }
-  }
-
-  const result = satisfied >= quorum.threshold;
-  ctx.memo.set(quorumId, result);
-  return result;
+  return quorumSatisfactionOptions(quorumId, ctx, ancestry, depth).length > 0;
 }
 
 /**
@@ -601,13 +669,17 @@ async function verifyP256AuthorizedRequest(
       verifiedSigners.set(credential.signerId, false);
       continue;
     }
+    if (requiredPermission && !signerHasPermission(signer.permissions, requiredPermission)) {
+      verifiedSigners.set(credential.signerId, false);
+      continue;
+    }
     const ok = await verifyP256Signature(signer.publicKey, canonical, credential.signature);
     verifiedSigners.set(credential.signerId, ok);
   }
 
   const satisfied = evaluateQuorum(
     quorumId,
-    { quorums, verifiedSigners, memo: new Map() },
+    { quorums, verifiedSigners, requiredPermission, memo: new Map() },
     new Set(),
     0,
   );

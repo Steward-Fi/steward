@@ -11,6 +11,9 @@ import {
 } from "@stwd/db";
 import type {
   AgentIdentity,
+  BitcoinAddressType,
+  BitcoinNetwork,
+  ChainFamily,
   PolicyResult,
   RpcRequest,
   RpcResponse,
@@ -18,6 +21,7 @@ import type {
   SignSolanaTransactionRequest,
   SignTypedDataRequest,
   TxStatus,
+  WalletAddressMetadata,
 } from "@stwd/shared";
 import { toCaip2 } from "@stwd/shared";
 import { and, eq, inArray, isNull, sql } from "drizzle-orm";
@@ -40,14 +44,38 @@ import {
   mainnet,
   polygon,
 } from "viem/chains";
-import { deriveEvmKey, deriveSolanaKey } from "./hd-wallet";
+import {
+  type BitcoinPsbtOutput,
+  type SignBitcoinPsbtResult as BitcoinPsbtSignerResult,
+  inspectBitcoinPsbt as inspectBitcoinPsbtPayload,
+  parseBitcoinPsbtSigningMetadata,
+  signBitcoinPsbt,
+} from "./bitcoin-psbt";
+import { allocateEvmNonce } from "./evm-nonce-manager";
+import {
+  assertNoExternalPrivateKeyMaterial,
+  type ExternalKeyCustodyProvider,
+  type ExternalKeyHandleImportRequest,
+  type ExternalKeyHandleRegistration,
+  type ExternalKeySigningAvailability,
+  externalKeyCustodyUnavailableError,
+  externalKeyPrivateExportUnavailableError,
+  externalKeySigningUnavailableError,
+  normalizeExternalKeyHandleRegistration,
+} from "./external-key-custody";
+import { deriveBitcoinKey, deriveEvmKey, deriveSolanaKey, generateMnemonic } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
 import { backendFromKeyStore, type KeystoreBackend } from "./keystore-backend";
+import { assertVaultSigningActive } from "./signing-freeze";
 import {
   assertSolanaTransferTransactionMatches,
+  buildSolanaSplTransferTransaction as buildSolanaSplTransferTx,
+  getSplTokenBalances as fetchSplTokenBalances,
   generateSolanaKeypair,
   getSolanaBalance,
   restoreSolanaKeypair,
+  type SolanaSplTransferTransaction,
+  type SplTokenBalance,
   signEd25519Digest,
   signSolanaMessage,
   signSolanaTransaction,
@@ -69,6 +97,7 @@ export interface VaultConfig {
   rpcUrl?: string;
   chainId?: number;
   keystoreBackend?: KeystoreBackend;
+  externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
 }
 
 /**
@@ -80,6 +109,43 @@ export interface ExportPrivateKeyAuthorization {
   breakGlass: true;
   actorId: string;
   reason?: string;
+}
+
+export interface BitcoinPrivateKeyExport {
+  privateKey: string;
+  address: string;
+  venue: string | null;
+  purpose: string | null;
+  metadata: WalletAddressMetadata;
+}
+
+export interface ExportPrivateKeyResult {
+  evm?: { privateKey: string; address: string };
+  solana?: { privateKey: string; address: string };
+  bitcoin?: BitcoinPrivateKeyExport[];
+}
+
+export interface SignBitcoinPsbtRequest {
+  tenantId: string;
+  agentId: string;
+  walletScope: string;
+  psbtBase64: string;
+  finalize?: boolean;
+}
+
+export interface InspectBitcoinPsbtResult {
+  walletScope: string;
+  walletAddress: string;
+  network: BitcoinNetwork;
+  outputs: Array<BitcoinPsbtOutput & { isChange: boolean }>;
+  inputTotalSats: string;
+  outputTotalSats: string;
+  feeSats: string;
+}
+
+export interface SignBitcoinPsbtResult extends BitcoinPsbtSignerResult {
+  walletScope: string;
+  walletAddress: string;
 }
 
 const CHAINS: Record<number, Chain> = {
@@ -173,6 +239,77 @@ export interface RestoreAgentFromMnemonicResult extends AgentIdentity {
   restoredExisting: boolean;
 }
 
+type WalletChainFamily = ChainFamily;
+
+interface BitcoinCreateOptions {
+  network?: BitcoinNetwork;
+  addressType?: BitcoinAddressType;
+  account?: number;
+  change?: 0 | 1;
+  index?: number;
+}
+
+interface WalletRowResult {
+  agentId: string;
+  chainFamily: WalletChainFamily;
+  venue: string | null;
+  purpose: string | null;
+  address: string;
+  metadata: Record<string, unknown>;
+}
+
+interface ExternalKeyWalletMetadata extends Record<string, unknown> {
+  custody: "external";
+  externalKey: {
+    providerId: string;
+    keyId: string;
+    version?: string;
+    region?: string;
+    registeredAt: string;
+    exportablePrivateKey: false;
+    signingAvailability: ExternalKeySigningAvailability;
+    providerMetadata?: Record<string, unknown>;
+  };
+}
+
+function bitcoinCaip2(network: BitcoinNetwork): string {
+  return network === "mainnet"
+    ? "bip122:000000000019d6689c085ae165831e93"
+    : "bip122:000000000933ea01ad0ee984209779ba";
+}
+
+function bitcoinWalletScope(options: Required<BitcoinCreateOptions>): string {
+  return `bitcoin:${options.network}:${options.addressType}:${options.account}:${options.change}:${options.index}`;
+}
+
+function isExternalKeyWalletMetadata(value: unknown): value is ExternalKeyWalletMetadata {
+  if (!value || typeof value !== "object") return false;
+  const metadata = value as Record<string, unknown>;
+  return metadata.custody === "external" && typeof metadata.externalKey === "object";
+}
+
+function toExternalKeyWalletMetadata(
+  registration: ExternalKeyHandleRegistration,
+): ExternalKeyWalletMetadata {
+  const metadata: ExternalKeyWalletMetadata = {
+    custody: "external",
+    externalKey: {
+      providerId: registration.handle.providerId,
+      keyId: registration.handle.keyId,
+      registeredAt: registration.registeredAt.toISOString(),
+      exportablePrivateKey: false,
+      signingAvailability: registration.signingAvailability,
+    },
+  };
+  if (registration.handle.version) metadata.externalKey.version = registration.handle.version;
+  if (registration.handle.region) metadata.externalKey.region = registration.handle.region;
+  if (Object.keys(registration.metadata).length > 0) {
+    metadata.externalKey.providerMetadata = registration.metadata;
+  }
+  assertNoExternalPrivateKeyMaterial(metadata, "walletMetadata");
+  return metadata;
+}
+
 /**
  * Vault - the core signing service.
  *
@@ -183,11 +320,102 @@ export interface RestoreAgentFromMnemonicResult extends AgentIdentity {
 export class Vault {
   private keyStore: KeystoreBackend;
   private config: VaultConfig;
+  private externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
 
   constructor(config: VaultConfig) {
     this.config = config;
+    this.externalKeyCustodyProvider = config.externalKeyCustodyProvider;
+    // Signing-vault keeps the legacy (undomain) root so existing wallet ciphertext
+    // stays decryptable; the SecretVault uses a distinct domain-separated root, so
+    // the two roots are cryptographically independent despite sharing masterPassword.
     this.keyStore =
       config.keystoreBackend ?? backendFromKeyStore(new KeyStore(config.masterPassword));
+  }
+
+  private async getExternalKeyWallet(args: {
+    agentId: string;
+    chainFamily: WalletChainFamily;
+    venue?: string | null;
+  }): Promise<
+    | {
+        address: string;
+        metadata: ExternalKeyWalletMetadata;
+      }
+    | undefined
+  > {
+    const db = getDb();
+    const [wallet] = await db
+      .select({ address: agentWallets.address, metadata: agentWallets.metadata })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, args.agentId),
+          eq(agentWallets.chainFamily, args.chainFamily),
+          args.venue ? eq(agentWallets.venue, args.venue) : isNull(agentWallets.venue),
+        ),
+      );
+    if (!wallet || !isExternalKeyWalletMetadata(wallet.metadata)) return undefined;
+    return { address: wallet.address, metadata: wallet.metadata };
+  }
+
+  private async assertNoExternalKeyWalletsForExport(agentId: string): Promise<void> {
+    const db = getDb();
+    const wallets = await db
+      .select({ metadata: agentWallets.metadata })
+      .from(agentWallets)
+      .where(eq(agentWallets.agentId, agentId));
+    if (wallets.some((wallet) => isExternalKeyWalletMetadata(wallet.metadata))) {
+      throw externalKeyPrivateExportUnavailableError();
+    }
+  }
+
+  private async recordSignedTransaction(
+    request: SignRequest,
+    chainId: number,
+    shouldBroadcast: boolean,
+    hash: string,
+    options: SignTransactionOptions,
+  ): Promise<void> {
+    const db = getDb();
+    const txId = options.txId ?? crypto.randomUUID();
+    const signedAt = new Date();
+    const [existingTransaction] = await db
+      .select({ agentId: transactions.agentId })
+      .from(transactions)
+      .where(eq(transactions.id, txId));
+    if (existingTransaction && existingTransaction.agentId !== request.agentId) {
+      throw new Error("Transaction id already belongs to a different agent");
+    }
+
+    await db
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: request.agentId,
+        status: shouldBroadcast ? (options.status ?? "signed") : "signed",
+        toAddress: request.to,
+        value: request.value,
+        data: request.data,
+        chainId,
+        txHash: shouldBroadcast ? hash : undefined,
+        policyResults: options.policyResults ?? [],
+        signedAt,
+        createdAt: signedAt,
+      })
+      .onConflictDoUpdate({
+        target: transactions.id,
+        set: {
+          agentId: request.agentId,
+          status: shouldBroadcast ? (options.status ?? "signed") : "signed",
+          toAddress: request.to,
+          value: request.value,
+          data: request.data,
+          chainId,
+          txHash: shouldBroadcast ? hash : undefined,
+          policyResults: options.policyResults ?? [],
+          signedAt,
+        },
+      });
   }
 
   /**
@@ -313,7 +541,13 @@ export class Vault {
     agentId: string,
     name: string,
     mnemonic: string,
-    options: { platformId?: string; passphrase?: string; walletType?: string } = {},
+    options: {
+      platformId?: string;
+      passphrase?: string;
+      walletType?: string;
+      evmIndex?: number;
+      solanaAccount?: number;
+    } = {},
   ): Promise<AgentIdentity> {
     const db = getDb();
     const [existingAgent] = await db
@@ -325,7 +559,11 @@ export class Vault {
       throw new Error(`Agent ${agentId} already exists for tenant ${tenantId}`);
     }
 
-    const material = await this.deriveMnemonicWalletMaterial(mnemonic, options.passphrase);
+    const material = await this.deriveMnemonicWalletMaterial(mnemonic, {
+      passphrase: options.passphrase,
+      evmIndex: options.evmIndex,
+      solanaAccount: options.solanaAccount,
+    });
 
     const evmEncrypted = await this.keyStore.encrypt(material.evmPrivateKey, {
       tenantId,
@@ -399,11 +637,17 @@ export class Vault {
 
   private async deriveMnemonicWalletMaterial(
     mnemonic: string,
-    passphrase?: string,
+    options: { passphrase?: string; evmIndex?: number; solanaAccount?: number } = {},
   ): Promise<MnemonicWalletMaterial> {
-    const evmKey = await deriveEvmKey(mnemonic, { passphrase });
+    const evmKey = await deriveEvmKey(mnemonic, {
+      index: options.evmIndex,
+      passphrase: options.passphrase,
+    });
     const evmAddress = privateKeyToAccount(evmKey.privateKey).address;
-    const solKey = await deriveSolanaKey(mnemonic, { passphrase });
+    const solKey = await deriveSolanaKey(mnemonic, {
+      account: options.solanaAccount,
+      passphrase: options.passphrase,
+    });
     const solanaSecretHex = bytesToHex(solKey.secretKey);
     const solanaAddress = restoreSolanaKeypair(solanaSecretHex).publicKey.toBase58();
     return {
@@ -430,7 +674,13 @@ export class Vault {
     agentId: string,
     name: string,
     mnemonic: string,
-    options: { platformId?: string; passphrase?: string; walletType?: string } = {},
+    options: {
+      platformId?: string;
+      passphrase?: string;
+      walletType?: string;
+      evmIndex?: number;
+      solanaAccount?: number;
+    } = {},
   ): Promise<RestoreAgentFromMnemonicResult> {
     const db = getDb();
     const [existingAgent] = await db
@@ -455,7 +705,11 @@ export class Vault {
       throw new Error("Existing wallet is not mnemonic-recoverable; refusing unsafe restore");
     }
 
-    const material = await this.deriveMnemonicWalletMaterial(mnemonic, options.passphrase);
+    const material = await this.deriveMnemonicWalletMaterial(mnemonic, {
+      passphrase: options.passphrase,
+      evmIndex: options.evmIndex,
+      solanaAccount: options.solanaAccount,
+    });
     const wallets = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
     const evmWallet = wallets.find(
       (wallet) => wallet.chainFamily === "evm" && wallet.venue === null,
@@ -592,10 +846,11 @@ export class Vault {
     const wallets = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
 
     if (wallets.length > 0) {
-      const addresses: { evm?: string; solana?: string } = {};
+      const addresses: Partial<Record<WalletChainFamily, string>> = {};
       for (const w of wallets) {
         if (w.chainFamily === "evm") addresses.evm = w.address;
         if (w.chainFamily === "solana") addresses.solana = w.address;
+        if (w.chainFamily === "bitcoin") addresses.bitcoin = w.address;
       }
       identity.walletAddresses = addresses;
     }
@@ -628,13 +883,14 @@ export class Vault {
       .from(agentWallets)
       .where(inArray(agentWallets.agentId, agentIds));
 
-    // Build a map: agentId → { evm?, solana? }
-    const walletMap = new Map<string, { evm?: string; solana?: string }>();
+    // Build a map: agentId -> { evm?, solana?, bitcoin? }
+    const walletMap = new Map<string, Partial<Record<WalletChainFamily, string>>>();
     for (const w of walletRows) {
       if (!walletMap.has(w.agentId)) walletMap.set(w.agentId, {});
       const entry = walletMap.get(w.agentId)!;
       if (w.chainFamily === "evm") entry.evm = w.address;
       if (w.chainFamily === "solana") entry.solana = w.address;
+      if (w.chainFamily === "bitcoin") entry.bitcoin = w.address;
     }
 
     return rows.map((agent) => {
@@ -664,7 +920,7 @@ export class Vault {
   async getAddresses(
     tenantId: string,
     agentId: string,
-  ): Promise<Array<{ chainFamily: "evm" | "solana"; address: string }>> {
+  ): Promise<Array<{ chainFamily: WalletChainFamily; address: string }>> {
     const db = getDb();
     // Verify agent belongs to this tenant
     const [agent] = await db
@@ -691,7 +947,7 @@ export class Vault {
     }
 
     return wallets.map((w) => ({
-      chainFamily: w.chainFamily as "evm" | "solana",
+      chainFamily: w.chainFamily as WalletChainFamily,
       address: w.address,
     }));
   }
@@ -725,12 +981,19 @@ export class Vault {
     const isSolana = chainId === 101 || chainId === 102;
     const chainFamilyToUse = isSolana ? "solana" : "evm";
     const shouldBroadcast = request.broadcast !== false;
+    const venue = resolveSignVenueSelector(request);
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: chainFamilyToUse,
+      venue,
+      walletAddress: request.walletAddress,
+    });
 
     // ── Resolve the correct signing key ─────────────────────────────────
     // 1. Try the multi-chain key table (new agents)
     // 2. Fall back to legacy single-key table (old EVM-only agents)
     let secretKey: string;
-    const venue = resolveSignVenueSelector(request);
     const [chainKey] = await db
       .select()
       .from(encryptedChainKeys)
@@ -761,6 +1024,21 @@ export class Vault {
         },
       );
     } else {
+      const externalWallet = await this.getExternalKeyWallet({
+        agentId: request.agentId,
+        chainFamily: chainFamilyToUse,
+        venue,
+      });
+      if (externalWallet) {
+        if (request.walletAddress && externalWallet.address) {
+          if (externalWallet.address.toLowerCase() !== request.walletAddress.toLowerCase()) {
+            throw new Error(
+              `Wallet address mismatch: resolved ${externalWallet.address} but request specified ${request.walletAddress}`,
+            );
+          }
+        }
+        throw externalKeySigningUnavailableError();
+      }
       if (venue) {
         throw missingSigningKeyError(request.agentId, chainFamilyToUse, venue);
       }
@@ -838,12 +1116,25 @@ export class Vault {
           chain,
           transport: http(rpcUrl),
         });
+        const publicClient = createPublicClient({
+          chain,
+          transport: http(rpcUrl),
+        });
+        const nonce =
+          request.nonce ??
+          (await allocateEvmNonce({
+            walletAddress: account.address,
+            chainId,
+            getPendingNonce: (address) =>
+              publicClient.getTransactionCount({ address, blockTag: "pending" }),
+          }));
 
         hash = await client.sendTransaction({
           to: request.to as `0x${string}`,
           value: BigInt(request.value),
           data: request.data as `0x${string}` | undefined,
           gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
+          nonce,
         });
       } else {
         // Sign without broadcasting - return the serialized signed transaction
@@ -854,8 +1145,11 @@ export class Vault {
         });
         const nonce =
           request.nonce ??
-          (await publicClient.getTransactionCount({
-            address: account.address,
+          (await allocateEvmNonce({
+            walletAddress: account.address,
+            chainId,
+            getPendingNonce: (address) =>
+              publicClient.getTransactionCount({ address, blockTag: "pending" }),
           }));
         const gasPrice = await publicClient.getGasPrice();
 
@@ -873,45 +1167,7 @@ export class Vault {
       }
     }
 
-    const txId = options.txId ?? crypto.randomUUID();
-    const signedAt = new Date();
-    const [existingTransaction] = await db
-      .select({ agentId: transactions.agentId })
-      .from(transactions)
-      .where(eq(transactions.id, txId));
-    if (existingTransaction && existingTransaction.agentId !== request.agentId) {
-      throw new Error("Transaction id already belongs to a different agent");
-    }
-
-    await db
-      .insert(transactions)
-      .values({
-        id: txId,
-        agentId: request.agentId,
-        status: shouldBroadcast ? (options.status ?? "signed") : "signed",
-        toAddress: request.to,
-        value: request.value,
-        data: request.data,
-        chainId,
-        txHash: shouldBroadcast ? hash : undefined,
-        policyResults: options.policyResults ?? [],
-        signedAt,
-        createdAt: signedAt,
-      })
-      .onConflictDoUpdate({
-        target: transactions.id,
-        set: {
-          agentId: request.agentId,
-          status: shouldBroadcast ? (options.status ?? "signed") : "signed",
-          toAddress: request.to,
-          value: request.value,
-          data: request.data,
-          chainId,
-          txHash: shouldBroadcast ? hash : undefined,
-          policyResults: options.policyResults ?? [],
-          signedAt,
-        },
-      });
+    await this.recordSignedTransaction(request, chainId, shouldBroadcast, hash, options);
 
     return hash;
   }
@@ -1007,6 +1263,77 @@ export class Vault {
     const rpcUrl = CHAIN_RPCS[resolvedChainId] ?? this.config.rpcUrl;
 
     return fetchTokenBalances(evmAddress, resolvedChainId, tokens, rpcUrl);
+  }
+
+  /**
+   * Get SPL token balances for an agent's Solana wallet.
+   *
+   * This uses parsed Solana RPC token-account reads. It does not require or
+   * imply a production portfolio indexer, and therefore does not infer token
+   * ticker metadata beyond the mint address.
+   */
+  async getSplTokenBalances(
+    tenantId: string,
+    agentId: string,
+    chainId?: number,
+  ): Promise<SplTokenBalance[]> {
+    const agent = await this.getAgent(tenantId, agentId);
+    if (!agent) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+
+    const resolvedChainId = chainId && (chainId === 101 || chainId === 102) ? chainId : 101;
+    const solanaAddress =
+      agent.walletAddresses?.solana ??
+      (detectChainType(agent.walletAddress) === "solana" ? agent.walletAddress : undefined);
+    if (!solanaAddress) {
+      throw new Error(`Agent ${agentId} does not have a Solana wallet`);
+    }
+    const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(resolvedChainId);
+
+    return fetchSplTokenBalances(solanaAddress, rpcUrl);
+  }
+
+  async buildSolanaSplTransferTransaction(request: {
+    agentId: string;
+    tenantId: string;
+    to: string;
+    token: string;
+    value: string;
+    chainId: number;
+  }): Promise<SolanaSplTransferTransaction> {
+    const db = getDb();
+    const [agentRow] = await db
+      .select({ walletAddress: agents.walletAddress })
+      .from(agents)
+      .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
+    if (!agentRow) {
+      throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    }
+    const [solWallet] = await db
+      .select({ address: agentWallets.address })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, request.agentId),
+          eq(agentWallets.chainFamily, "solana"),
+          isNull(agentWallets.venue),
+        ),
+      );
+    const from =
+      solWallet?.address ??
+      (detectChainType(agentRow.walletAddress) === "solana" ? agentRow.walletAddress : null);
+    if (!from) {
+      throw new Error(`Agent ${request.agentId} does not have a Solana wallet`);
+    }
+    const rpcUrl = this.config.rpcUrl ?? resolveSolanaRpc(request.chainId);
+    return buildSolanaSplTransferTx({
+      from,
+      to: request.to,
+      mint: request.token,
+      amount: BigInt(request.value),
+      rpcUrl,
+    });
   }
 
   /**
@@ -1141,6 +1468,110 @@ export class Vault {
   }
 
   /**
+   * Register an external hardware/HSM key handle for an agent.
+   *
+   * This is intentionally a custody seam only. It accepts provider-neutral
+   * handle metadata and returns the registered public identity, but signing
+   * through external handles is not wired into Vault signing paths yet and
+   * plaintext private key export is never available for external custody.
+   */
+  async importExternalKeyHandle(
+    request: ExternalKeyHandleImportRequest,
+  ): Promise<ExternalKeyHandleRegistration> {
+    assertNoExternalPrivateKeyMaterial(request);
+    if (!this.externalKeyCustodyProvider) {
+      throw externalKeyCustodyUnavailableError();
+    }
+    if (
+      request.chainFamily !== "evm" &&
+      request.chainFamily !== "solana" &&
+      request.chainFamily !== "bitcoin"
+    ) {
+      throw new Error(`Unsupported external key chain family: ${request.chainFamily}`);
+    }
+    if (!request.address.trim()) {
+      throw new Error("External key handle import requires a public wallet address");
+    }
+    if (!request.handle.providerId.trim() || !request.handle.keyId.trim()) {
+      throw new Error("External key handle import requires providerId and keyId");
+    }
+
+    const db = getDb();
+    const [agentRow] = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
+    if (!agentRow) {
+      throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    }
+
+    const registration = normalizeExternalKeyHandleRegistration(
+      request,
+      await this.externalKeyCustodyProvider.registerKeyHandle(request),
+    );
+    const metadata = toExternalKeyWalletMetadata(registration) as Record<string, unknown>;
+    const venue = request.venue ?? null;
+    const now = new Date();
+
+    const [existingEncryptedKey] = await db
+      .select({ id: encryptedChainKeys.id })
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, request.agentId),
+          eq(encryptedChainKeys.chainFamily, request.chainFamily),
+          venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+        ),
+      );
+    if (existingEncryptedKey) {
+      throw new Error("Cannot register external key handle over a server-managed signing key");
+    }
+
+    const [existingWallet] = await db
+      .select({ id: agentWallets.id, metadata: agentWallets.metadata })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, request.agentId),
+          eq(agentWallets.chainFamily, request.chainFamily),
+          venue ? eq(agentWallets.venue, venue) : isNull(agentWallets.venue),
+        ),
+      );
+    if (existingWallet && !isExternalKeyWalletMetadata(existingWallet.metadata)) {
+      throw new Error("Cannot register external key handle over a server-managed wallet");
+    }
+
+    if (existingWallet) {
+      await db
+        .update(agentWallets)
+        .set({
+          address: registration.address,
+          purpose: registration.purpose,
+          metadata,
+        })
+        .where(eq(agentWallets.id, existingWallet.id));
+    } else {
+      await db.insert(agentWallets).values({
+        agentId: registration.agentId,
+        chainFamily: registration.chainFamily,
+        venue,
+        purpose: registration.purpose,
+        address: registration.address,
+        metadata,
+        createdAt: now,
+      });
+    }
+
+    return registration;
+  }
+
+  async registerExternalKeyHandle(
+    request: ExternalKeyHandleImportRequest,
+  ): Promise<ExternalKeyHandleRegistration> {
+    return this.importExternalKeyHandle(request);
+  }
+
+  /**
    * Sign an arbitrary message. Routes to Solana Ed25519 or EVM ECDSA
    * based on the agent's wallet address format.
    */
@@ -1159,6 +1590,7 @@ export class Vault {
 
     const isSolana = detectChainType(agentRow.walletAddress) === "solana";
     const chainFamilyToUse = isSolana ? "solana" : "evm";
+    await assertVaultSigningActive({ tenantId, agentId, chainFamily: chainFamilyToUse });
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), fall back to legacy encryptedKeys
     let secretKey: string;
@@ -1236,6 +1668,7 @@ export class Vault {
     if (detectChainType(agentRow.walletAddress) !== "evm") {
       throw new Error("Raw secp256k1 signing requires an EVM agent");
     }
+    await assertVaultSigningActive({ tenantId, agentId, chainFamily: "evm" });
 
     let secretKey: string;
     const [chainKey] = await db
@@ -1338,6 +1771,7 @@ export class Vault {
     // on the agent's "primary" wallet address. The tenant scoping above is the
     // authorization boundary (the encrypted-key tables are keyed by agentId).
     const chainFamily = curve === "secp256k1" ? "evm" : "solana";
+    await assertVaultSigningActive({ tenantId, agentId, chainFamily });
 
     let secretKey: string;
     const [chainKey] = await db
@@ -1442,6 +1876,7 @@ export class Vault {
     if (detectChainType(agentRow.walletAddress) !== "evm") {
       throw new Error("signAuthorization requires an EVM agent");
     }
+    await assertVaultSigningActive({ tenantId, agentId, chainFamily: "evm" });
 
     let secretKey: string;
     const [chainKey] = await db
@@ -1514,6 +1949,12 @@ export class Vault {
     if (detectChainType(agentRow.walletAddress) === "solana") {
       throw new Error("EIP-712 typed data signing is not supported for Solana wallets");
     }
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: "evm",
+      venue: request.venue ?? null,
+    });
 
     // Resolve signing key: prefer encryptedChainKeys (multi-wallet), scoped by
     // venue when requested, then fall back to legacy encryptedKeys only for
@@ -1841,10 +2282,7 @@ export class Vault {
     tenantId: string,
     agentId: string,
     authorization?: ExportPrivateKeyAuthorization,
-  ): Promise<{
-    evm?: { privateKey: string; address: string };
-    solana?: { privateKey: string; address: string };
-  }> {
+  ): Promise<ExportPrivateKeyResult> {
     // Defense-in-depth: this returns plaintext key material, so it must never be
     // invoked casually. Require an explicit break-glass authorization context that
     // the (admin + MFA + audited) caller constructs, and emit a log entry every time.
@@ -1868,11 +2306,9 @@ export class Vault {
     if (!agentRow) {
       throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
     }
+    await this.assertNoExternalKeyWalletsForExport(agentId);
 
-    const result: {
-      evm?: { privateKey: string; address: string };
-      solana?: { privateKey: string; address: string };
-    } = {};
+    const result: ExportPrivateKeyResult = {};
 
     // ── Get EVM key (prefer multi-chain table, fall back to legacy) ──────
     const [evmChainKey] = await db
@@ -1965,7 +2401,200 @@ export class Vault {
       result.solana = { privateKey: pk, address: solWallet?.address ?? "" };
     }
 
+    // ── Get Bitcoin scoped keys ──────────────────────────────────────────
+    // Bitcoin wallets are always stored as scoped rows because their address
+    // metadata includes network/script/path. Return every Bitcoin key under
+    // this agent through the same audited break-glass gate.
+    const bitcoinChainKeys = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(eq(encryptedChainKeys.agentId, agentId), eq(encryptedChainKeys.chainFamily, "bitcoin")),
+      );
+
+    if (bitcoinChainKeys.length > 0) {
+      const bitcoinWalletRows = await db
+        .select({
+          address: agentWallets.address,
+          venue: agentWallets.venue,
+          purpose: agentWallets.purpose,
+          metadata: agentWallets.metadata,
+        })
+        .from(agentWallets)
+        .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.chainFamily, "bitcoin")));
+      const walletByVenue = new Map(
+        bitcoinWalletRows.map((wallet) => [wallet.venue ?? "", wallet]),
+      );
+
+      result.bitcoin = await Promise.all(
+        bitcoinChainKeys.map(async (chainKey) => {
+          const pk = await this.keyStore.decrypt(
+            {
+              ciphertext: chainKey.ciphertext,
+              iv: chainKey.iv,
+              tag: chainKey.tag,
+              salt: chainKey.salt,
+            },
+            {
+              tenantId,
+              agentId,
+              chainFamily: "bitcoin",
+              venue: chainKey.venue ?? null,
+            },
+          );
+          const wallet = walletByVenue.get(chainKey.venue ?? "");
+          return {
+            privateKey: pk,
+            address: wallet?.address ?? "",
+            venue: chainKey.venue ?? null,
+            purpose: chainKey.purpose ?? wallet?.purpose ?? null,
+            metadata: (wallet?.metadata ?? {}) as WalletAddressMetadata,
+          };
+        }),
+      );
+    }
+
     return result;
+  }
+
+  async inspectBitcoinPsbt(request: SignBitcoinPsbtRequest): Promise<InspectBitcoinPsbtResult> {
+    const { tenantId, agentId, walletScope, psbtBase64 } = request;
+    if (!walletScope?.trim()) {
+      throw new Error("Bitcoin PSBT inspection requires a walletScope");
+    }
+    const db = getDb();
+
+    const [agentRow] = await db
+      .select({ id: agents.id, tenantId: agents.tenantId })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    if (!agentRow) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+
+    const walletRows = await db
+      .select({
+        address: agentWallets.address,
+        venue: agentWallets.venue,
+        metadata: agentWallets.metadata,
+      })
+      .from(agentWallets)
+      .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.chainFamily, "bitcoin")));
+    const wallet = walletRows.find((row) => row.venue === walletScope);
+    if (!wallet) {
+      throw missingSigningKeyError(agentId, "bitcoin", walletScope);
+    }
+
+    const inspection = inspectBitcoinPsbtPayload(
+      psbtBase64,
+      (wallet.metadata ?? {}) as WalletAddressMetadata,
+    );
+    const metadata = parseBitcoinPsbtSigningMetadata(
+      (wallet.metadata ?? {}) as WalletAddressMetadata,
+    );
+    const sameNetworkWalletAddresses = new Set<string>();
+    for (const row of walletRows) {
+      try {
+        const rowMetadata = parseBitcoinPsbtSigningMetadata(
+          (row.metadata ?? {}) as WalletAddressMetadata,
+        );
+        if (rowMetadata.network === metadata.network) {
+          sameNetworkWalletAddresses.add(row.address);
+        }
+      } catch {
+        // Ignore malformed historical metadata when classifying PSBT change outputs.
+      }
+    }
+    const outputs = inspection.outputs.map((output) => ({
+      ...output,
+      isChange: sameNetworkWalletAddresses.has(output.address),
+    }));
+
+    return {
+      walletScope,
+      walletAddress: wallet.address,
+      network: metadata.network,
+      outputs,
+      inputTotalSats: inspection.inputTotalSats,
+      outputTotalSats: inspection.outputTotalSats,
+      feeSats: inspection.feeSats,
+    };
+  }
+
+  async signBitcoinPsbt(request: SignBitcoinPsbtRequest): Promise<SignBitcoinPsbtResult> {
+    const { tenantId, agentId, walletScope, psbtBase64, finalize } = request;
+    if (!walletScope?.trim()) {
+      throw new Error("Bitcoin PSBT signing requires a walletScope");
+    }
+    const db = getDb();
+
+    const [agentRow] = await db
+      .select({ id: agents.id, tenantId: agents.tenantId })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    if (!agentRow) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+    await assertVaultSigningActive({
+      tenantId,
+      agentId,
+      chainFamily: "bitcoin",
+      venue: walletScope,
+    });
+
+    const [wallet] = await db
+      .select({
+        address: agentWallets.address,
+        venue: agentWallets.venue,
+        metadata: agentWallets.metadata,
+      })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, agentId),
+          eq(agentWallets.chainFamily, "bitcoin"),
+          eq(agentWallets.venue, walletScope),
+        ),
+      );
+    if (!wallet) {
+      throw missingSigningKeyError(agentId, "bitcoin", walletScope);
+    }
+
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, "bitcoin"),
+          eq(encryptedChainKeys.venue, walletScope),
+        ),
+      );
+    if (!chainKey) {
+      throw missingSigningKeyError(agentId, "bitcoin", walletScope);
+    }
+
+    const privateKey = await this.keyStore.decrypt(
+      {
+        ciphertext: chainKey.ciphertext,
+        iv: chainKey.iv,
+        tag: chainKey.tag,
+        salt: chainKey.salt,
+      },
+      { tenantId, agentId, chainFamily: "bitcoin", venue: walletScope },
+    );
+    const signed = signBitcoinPsbt({
+      psbtBase64,
+      privateKey,
+      walletMetadata: (wallet.metadata ?? {}) as WalletAddressMetadata,
+      finalize,
+    });
+
+    return {
+      ...signed,
+      walletScope,
+      walletAddress: wallet.address,
+    };
   }
 
   /**
@@ -2045,35 +2674,36 @@ export class Vault {
    *
    * Throws if neither is provided, or if no matching row exists.
    */
-  async getWallet(args: { agentId: string; venue?: string; chainId?: number }): Promise<{
+  async getWallet(args: {
     agentId: string;
-    chainFamily: "evm" | "solana";
-    venue: string | null;
-    purpose: string | null;
-    address: string;
-  }> {
+    venue?: string;
+    scope?: string;
+    chainId?: number;
+  }): Promise<WalletRowResult> {
     const { agentId, venue, chainId } = args;
-    if (!venue && chainId === undefined) {
-      throw new Error("getWallet requires either `venue` or `chainId`");
+    const scope = args.scope ?? venue;
+    if (!scope && chainId === undefined) {
+      throw new Error("getWallet requires either `venue`, `scope`, or `chainId`");
     }
 
     const db = getDb();
 
-    if (venue) {
+    if (scope) {
       const [row] = await db
         .select()
         .from(agentWallets)
-        .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.venue, venue)));
+        .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.venue, scope)));
 
       if (!row) {
-        throw new Error(`No wallet found for agent ${agentId} on venue ${venue}`);
+        throw new Error(`No wallet found for agent ${agentId} on venue ${scope}`);
       }
       return {
         agentId: row.agentId,
-        chainFamily: row.chainFamily as "evm" | "solana",
+        chainFamily: row.chainFamily as WalletChainFamily,
         venue: row.venue,
         purpose: row.purpose,
         address: row.address,
+        metadata: row.metadata,
       };
     }
 
@@ -2095,10 +2725,11 @@ export class Vault {
     }
     return {
       agentId: row.agentId,
-      chainFamily: row.chainFamily as "evm" | "solana",
+      chainFamily: row.chainFamily as WalletChainFamily,
       venue: row.venue,
       purpose: row.purpose,
       address: row.address,
+      metadata: row.metadata,
     };
   }
 
@@ -2238,19 +2869,14 @@ export class Vault {
    */
   async createWallet(args: {
     agentId: string;
-    venue: string;
-    chainType: "evm" | "solana";
+    venue?: string;
+    scope?: string;
+    chainType: WalletChainFamily;
     purpose?: string;
-  }): Promise<{
-    agentId: string;
-    chainFamily: "evm" | "solana";
-    venue: string;
-    purpose: string | null;
-    address: string;
-  }> {
-    const { agentId, venue, chainType, purpose } = args;
-    if (!venue) throw new Error("createWallet requires a venue");
-    if (chainType !== "evm" && chainType !== "solana") {
+    bitcoin?: BitcoinCreateOptions;
+  }): Promise<WalletRowResult> {
+    const { agentId, chainType, purpose } = args;
+    if (chainType !== "evm" && chainType !== "solana" && chainType !== "bitcoin") {
       throw new Error(`createWallet: unsupported chainType ${chainType}`);
     }
 
@@ -2268,15 +2894,47 @@ export class Vault {
 
     let address: string;
     let secret: string;
+    let metadata: Record<string, unknown> = {};
+    let venue = args.scope ?? args.venue;
     if (chainType === "evm") {
+      if (!venue) throw new Error("createWallet requires a venue or scope");
       const pk = generatePrivateKey();
       const account = privateKeyToAccount(pk);
       address = account.address;
       secret = pk;
-    } else {
+    } else if (chainType === "solana") {
+      if (!venue) throw new Error("createWallet requires a venue or scope");
       const kp = generateSolanaKeypair();
       address = kp.publicKey;
       secret = kp.secretKey;
+    } else {
+      const bitcoinOptions: Required<BitcoinCreateOptions> = {
+        network: args.bitcoin?.network ?? "mainnet",
+        addressType: args.bitcoin?.addressType ?? "p2wpkh",
+        account: args.bitcoin?.account ?? 0,
+        change: args.bitcoin?.change ?? 0,
+        index: args.bitcoin?.index ?? 0,
+      };
+      venue ??= bitcoinWalletScope(bitcoinOptions);
+      const derived = await deriveBitcoinKey(generateMnemonic(256), bitcoinOptions);
+      address = derived.address;
+      secret = derived.privateKey;
+      metadata = {
+        bitcoin: {
+          network: derived.network,
+          addressType: derived.addressType,
+          path: derived.path,
+          publicKey: derived.publicKey,
+          xOnlyPublicKey: derived.xOnlyPublicKey,
+          account: bitcoinOptions.account,
+          change: bitcoinOptions.change,
+          index: bitcoinOptions.index,
+          caip2: bitcoinCaip2(derived.network),
+        },
+      };
+    }
+    if (!venue) {
+      throw new Error("createWallet could not resolve a wallet scope");
     }
 
     const encrypted = await this.keyStore.encrypt(secret, {
@@ -2305,6 +2963,7 @@ export class Vault {
         venue,
         purpose: purpose ?? null,
         address,
+        metadata,
         createdAt,
       });
     });
@@ -2315,6 +2974,7 @@ export class Vault {
       venue,
       purpose: purpose ?? null,
       address,
+      metadata,
     };
   }
 
@@ -2329,10 +2989,11 @@ export class Vault {
   async listWallets(args: { agentId: string }): Promise<
     Array<{
       agentId: string;
-      chainFamily: "evm" | "solana";
+      chainFamily: WalletChainFamily;
       venue: string | null;
       purpose: string | null;
       address: string;
+      metadata: Record<string, unknown>;
       createdAt: Date;
     }>
   > {
@@ -2347,10 +3008,11 @@ export class Vault {
 
     return rows.map((row) => ({
       agentId: row.agentId,
-      chainFamily: row.chainFamily as "evm" | "solana",
+      chainFamily: row.chainFamily as WalletChainFamily,
       venue: row.venue,
       purpose: row.purpose,
       address: row.address,
+      metadata: row.metadata,
       createdAt: row.createdAt,
     }));
   }
@@ -2360,7 +3022,8 @@ export class Vault {
  * Map an EVM chainId (or 101/102 for Solana) to its chain family.
  * Exposed at module scope so non-method callers (tests) can use it.
  */
-function chainIdToChainFamily(chainId: number): "evm" | "solana" {
+function chainIdToChainFamily(chainId: number): WalletChainFamily {
   if (chainId === 101 || chainId === 102) return "solana";
+  if (chainId === 201 || chainId === 202) return "bitcoin";
   return "evm";
 }

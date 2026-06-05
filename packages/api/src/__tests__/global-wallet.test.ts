@@ -21,6 +21,7 @@ const ORIGIN = "https://wallet.example.test";
 const ALT_ORIGIN = "https://wallet-alt.example.test";
 const REDIRECT_URI = "https://wallet.example.test/callback";
 let walletAddress = "0x1111111111111111111111111111111111111111";
+let secondWalletAddress = "0x2222222222222222222222222222222222222222";
 
 describe("global wallet routes", () => {
   let routes: typeof import("../routes/global-wallet").globalWalletRoutes;
@@ -80,6 +81,12 @@ describe("global wallet routes", () => {
       "User Wallet",
     );
     walletAddress = wallet.walletAddress;
+    const secondWallet = await vault.createAgent(
+      `personal-${userId}`,
+      `user-wallet-${userId}-2`,
+      "User Wallet 2",
+    );
+    secondWalletAddress = secondWallet.walletAddress;
     await getDb().update(users).set({ walletAddress }).where(eq(users.id, userId));
     await getDb()
       .insert(tenantAppClients)
@@ -210,6 +217,208 @@ describe("global wallet routes", () => {
       }),
     });
     expect(spoofed.status).toBe(400);
+  });
+
+  it("carries selected wallet index through consent, scan, confirmation, and execution", async () => {
+    const request = await routes.request(
+      `/consent/request?app_id=${encodeURIComponent(appId())}&wallet_index=2&scope=eth_accounts&scope=eth_sendTransaction`,
+      { headers: { Authorization: `Bearer ${await token()}`, Origin: ORIGIN } },
+    );
+    expect(request.status).toBe(200);
+    const requestBody = (await request.json()) as {
+      data: { wallet: { agentId: string; address: string; walletIndex: number } };
+    };
+    expect(requestBody.data.wallet).toEqual({
+      agentId: `user-wallet-${userId}-2`,
+      address: secondWalletAddress,
+      walletIndex: 2,
+    });
+
+    const approved = await routes.request("/consent/approve", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await token()}`,
+        "Content-Type": "application/json",
+        Origin: ORIGIN,
+      },
+      body: JSON.stringify({
+        app_id: appId(),
+        redirect_uri: REDIRECT_URI,
+        scopes: ["eth_accounts", "eth_sendTransaction"],
+        walletIndex: 2,
+      }),
+    });
+    expect(approved.status).toBe(200);
+    const approvedBody = (await approved.json()) as {
+      data: {
+        consent: { walletAgentId: string; walletAddress: string; walletIndex: number };
+        wallet: { walletIndex: number };
+      };
+    };
+    expect(approvedBody.data.consent.walletAgentId).toBe(`user-wallet-${userId}-2`);
+    expect(approvedBody.data.consent.walletAddress).toBe(secondWalletAddress);
+    expect(approvedBody.data.consent.walletIndex).toBe(2);
+    expect(approvedBody.data.wallet.walletIndex).toBe(2);
+
+    const defaultIndexRpc = await routes.request("/rpc", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await token()}`,
+        "Content-Type": "application/json",
+        Origin: ORIGIN,
+      },
+      body: JSON.stringify({ app_id: appId(), method: "eth_accounts" }),
+    });
+    expect(defaultIndexRpc.status).toBe(403);
+
+    const calldataScan = await routes.request("/rpc/scan", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await token()}`,
+        "Content-Type": "application/json",
+        Origin: ORIGIN,
+      },
+      body: JSON.stringify({
+        app_id: appId(),
+        method: "eth_sendTransaction",
+        wallet_index: 2,
+        params: [
+          {
+            from: secondWalletAddress,
+            to: "0x0000000000000000000000000000000000000001",
+            value: "0",
+            data: "0xabcdef01",
+          },
+        ],
+      }),
+    });
+    expect(calldataScan.status).toBe(200);
+    const calldataScanBody = (await calldataScan.json()) as {
+      data: { blocked: boolean; wallet: { agentId: string; address: string; walletIndex: number } };
+    };
+    expect(calldataScanBody.data.blocked).toBe(true);
+    expect(calldataScanBody.data.wallet).toEqual({
+      agentId: `user-wallet-${userId}-2`,
+      address: secondWalletAddress,
+      walletIndex: 2,
+    });
+
+    const scanned = await routes.request("/rpc/scan", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await token(false)}`,
+        "Content-Type": "application/json",
+        Origin: ORIGIN,
+      },
+      body: JSON.stringify({
+        app_id: appId(),
+        method: "eth_sendTransaction",
+        walletIndex: 2,
+        params: [
+          {
+            from: secondWalletAddress,
+            to: "0x0000000000000000000000000000000000000001",
+            value: "0x1",
+            chainId: "0x2105",
+          },
+        ],
+      }),
+    });
+    expect(scanned.status).toBe(200);
+    const scannedBody = (await scanned.json()) as {
+      data: { wallet: { agentId: string; address: string; walletIndex: number } };
+    };
+    expect(scannedBody.data.wallet.walletIndex).toBe(2);
+
+    const confirmation = await routes.request("/rpc/confirm", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await token()}`,
+        "Content-Type": "application/json",
+        Origin: ORIGIN,
+      },
+      body: JSON.stringify({
+        app_id: appId(),
+        method: "eth_sendTransaction",
+        wallet_index: 2,
+        params: [
+          {
+            from: secondWalletAddress,
+            to: "0x0000000000000000000000000000000000000001",
+            value: "0x1",
+            chainId: "0x2105",
+          },
+        ],
+      }),
+    });
+    expect(confirmation.status).toBe(200);
+    const confirmationBody = (await confirmation.json()) as {
+      data: { confirmationId: string; wallet: { agentId: string; walletIndex: number } };
+    };
+    expect(confirmationBody.data.wallet.agentId).toBe(`user-wallet-${userId}-2`);
+    expect(confirmationBody.data.wallet.walletIndex).toBe(2);
+
+    const wrongIndexExecution = await routes.request("/rpc", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await token()}`,
+        "Content-Type": "application/json",
+        Origin: ORIGIN,
+      },
+      body: JSON.stringify({
+        app_id: appId(),
+        method: "eth_sendTransaction",
+        params: [
+          {
+            from: secondWalletAddress,
+            to: "0x0000000000000000000000000000000000000001",
+            value: "0x1",
+            chainId: "0x2105",
+          },
+        ],
+        confirmation_id: confirmationBody.data.confirmationId,
+      }),
+    });
+    expect(wrongIndexExecution.status).toBe(403);
+
+    const txHash = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockResolvedValue(txHash);
+    try {
+      const execution = await routes.request("/rpc", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await token()}`,
+          "Content-Type": "application/json",
+          Origin: ORIGIN,
+        },
+        body: JSON.stringify({
+          app_id: appId(),
+          method: "eth_sendTransaction",
+          walletIndex: 2,
+          params: [
+            {
+              from: secondWalletAddress,
+              to: "0x0000000000000000000000000000000000000001",
+              value: "0x1",
+              chainId: "0x2105",
+            },
+          ],
+          confirmation_id: confirmationBody.data.confirmationId,
+        }),
+      });
+      expect(execution.status).toBe(200);
+      expect(signSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentId: `user-wallet-${userId}-2`,
+          tenantId: `personal-${userId}`,
+          walletAddress: secondWalletAddress,
+          value: "1",
+          chainId: 8453,
+        }),
+      );
+    } finally {
+      signSpy.mockRestore();
+    }
   });
 
   it("treats an empty app-client global wallet scope allowlist as deny-all", async () => {

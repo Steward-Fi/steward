@@ -18,11 +18,18 @@
  */
 
 /** Path prefixes whose mutating requests are treated as sensitive. */
-const SENSITIVE_PATH_PREFIXES: readonly string[] = [
+export const SENSITIVE_PATH_PREFIXES: readonly string[] = [
   "/vault",
   "/agents",
+  "/v1/agents",
+  "/wallets/batch",
+  "/v1/wallets/batch",
+  "/accounts",
+  "/v1/accounts",
   "/adapters",
+  "/v1/adapters",
   "/policies",
+  "/v1/policies",
   "/secrets",
   "/trade",
   "/v1/trade",
@@ -32,10 +39,12 @@ const SENSITIVE_PATH_PREFIXES: readonly string[] = [
   "/auth",
   "/global-wallet",
   "/user",
+  "/v1/users",
   "/webhooks",
   "/tenants",
   "/platform",
   "/condition-sets",
+  "/v1/condition-sets",
   "/condition_sets",
   "/v1/condition_sets",
 ];

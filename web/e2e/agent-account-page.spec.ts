@@ -1,7 +1,12 @@
 import { expect, test } from "@playwright/test";
+import { loginWithMagicLink } from "./fixtures/auth";
 
 const API = process.env.E2E_API_URL ?? "http://localhost:3299";
 const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
+
+type MockSigner = Record<string, unknown> & {
+  id: string;
+};
 
 test.describe("Dashboard agent account aggregation", () => {
   test("agent detail page shows portfolio, wallets, sponsorship, and capabilities", async ({
@@ -11,6 +16,31 @@ test.describe("Dashboard agent account aggregation", () => {
     const email = `agent-account-${Date.now()}@example.test`;
     const agentId = "agent-account-e2e";
     const walletAddress = "0x1111111111111111111111111111111111111111";
+    const p256PublicKey = "BASE64_SPKI_P256_PUBLIC_KEY";
+    let latestSignerUpdate: Record<string, unknown> | null = null;
+    let signers: MockSigner[] = [
+      {
+        id: "signer-p256",
+        tenantId: "personal-test",
+        agentId,
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "ops-key-1",
+        keyType: "p256",
+        publicKey: p256PublicKey,
+        address: null,
+        chainFamily: null,
+        label: "Ops P-256",
+        permissions: ["sign_message", "sign_transaction"],
+        policyIds: ["policy_daily_limit"],
+        metadata: {},
+        hasCredential: false,
+        status: "active",
+        createdBy: "admin-user",
+        createdAt: "2026-05-29T12:00:00.000Z",
+        updatedAt: "2026-05-29T12:00:00.000Z",
+      },
+    ];
 
     await page.route(
       (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}`,
@@ -35,7 +65,86 @@ test.describe("Dashboard agent account aggregation", () => {
     await page.route(
       (url) => url.href.startsWith(API) && url.pathname === `/agents/${agentId}/policies`,
       async (route) => {
-        await route.fulfill({ json: { ok: true, data: [] } });
+        await route.fulfill({
+          json: {
+            ok: true,
+            data: [
+              {
+                id: "policy_daily_limit",
+                type: "spending-limit",
+                enabled: true,
+                config: { maxPerTx: "1000000000000000000", maxPerDay: "5000000000000000000" },
+              },
+              {
+                id: "policy_manual_review",
+                type: "auto-approve-threshold",
+                enabled: true,
+                config: { threshold: "100000000000000000" },
+              },
+            ],
+          },
+        });
+      },
+    );
+
+    await page.route(
+      (url) => url.href.startsWith(API) && url.pathname.startsWith(`/agents/${agentId}/signers`),
+      async (route) => {
+        const request = route.request();
+        const method = request.method();
+        const url = new URL(request.url());
+
+        if (url.pathname === `/agents/${agentId}/signers` && method === "GET") {
+          await route.fulfill({ json: { ok: true, data: { signers } } });
+          return;
+        }
+
+        if (url.pathname === `/agents/${agentId}/signers` && method === "POST") {
+          const body = request.postDataJSON() as Record<string, unknown>;
+          const created: MockSigner = {
+            id: "signer-created",
+            tenantId: "personal-test",
+            agentId,
+            signerType: body.signerType,
+            subjectType: body.subjectType,
+            subjectId: body.subjectId,
+            keyType: body.keyType,
+            publicKey: body.publicKey,
+            address: null,
+            chainFamily: null,
+            label: body.label,
+            permissions: body.permissions,
+            policyIds: body.policyIds,
+            metadata: {},
+            hasCredential: false,
+            status: "active",
+            createdBy: "admin-user",
+            createdAt: "2026-05-29T12:00:00.000Z",
+            updatedAt: "2026-05-29T12:00:00.000Z",
+          };
+          signers = [created, ...signers];
+          await route.fulfill({ json: { ok: true, data: created } });
+          return;
+        }
+
+        if (url.pathname === `/agents/${agentId}/signers/signer-p256` && method === "PATCH") {
+          latestSignerUpdate = request.postDataJSON() as Record<string, unknown>;
+          signers = signers.map((signer) =>
+            signer.id === "signer-p256"
+              ? {
+                  ...signer,
+                  status: latestSignerUpdate?.status ?? signer.status,
+                  policyIds: latestSignerUpdate?.policyIds ?? signer.policyIds,
+                }
+              : signer,
+          );
+          await route.fulfill({
+            json: { ok: true, data: signers.find((signer) => signer.id === "signer-p256") },
+          });
+          return;
+        }
+
+        await route.fulfill({ status: 404, json: { ok: false, error: "not found" } });
       },
     );
 
@@ -148,17 +257,7 @@ test.describe("Dashboard agent account aggregation", () => {
       },
     );
 
-    const sendRes = await request.post(`${API}/auth/email/send`, { data: { email } });
-    expect(sendRes.status()).toBe(200);
-
-    const inboxRes = await request.get(`${API}/auth/test/inbox/${encodeURIComponent(email)}`);
-    expect(inboxRes.status()).toBe(200);
-    const inbox = (await inboxRes.json()) as { token: string };
-
-    await page.goto(
-      `${WEB}/auth/callback/email?token=${encodeURIComponent(inbox.token)}&email=${encodeURIComponent(email)}`,
-    );
-    await page.waitForURL(/\/dashboard/, { timeout: 30_000 });
+    await loginWithMagicLink(page, request, email);
 
     await page.goto(`${WEB}/dashboard/agents/${agentId}`);
     await expect(page.getByRole("heading", { name: "Portfolio Agent" })).toBeVisible();
@@ -169,6 +268,29 @@ test.describe("Dashboard agent account aggregation", () => {
     await expect(page.getByText("USDC", { exact: true })).toBeVisible();
     await expect(page.getByText("sign_transaction")).toBeVisible();
     await expect(page.getByText("send_calls")).toBeVisible();
+
+    await page.getByRole("button", { name: /Signers/ }).click();
+    await expect(page.getByText("Ops P-256")).toBeVisible();
+    await expect(page.getByText("external:ops-key-1")).toBeVisible();
+    await expect(page.locator("#signer-policies-signer-p256")).toHaveValue("policy_daily_limit");
+
+    await page.getByLabel("Subject ID").fill("ops-key-2");
+    await page.getByLabel("Public Key").fill(p256PublicKey);
+    await page.locator("#policy-ids").fill("policy_daily_limit");
+    await page.getByRole("button", { name: "Create Signer" }).click();
+    await expect(page.getByText("ops-key-2", { exact: true })).toBeVisible();
+
+    await page
+      .locator("#signer-policies-signer-p256")
+      .fill("policy_daily_limit, policy_manual_review");
+    await page.getByRole("button", { name: "Save signer ops-key-1" }).click();
+    await expect(page.locator("#signer-policies-signer-p256")).toHaveValue(
+      "policy_daily_limit, policy_manual_review",
+    );
+    expect(latestSignerUpdate).toMatchObject({
+      policyIds: ["policy_daily_limit", "policy_manual_review"],
+      status: "active",
+    });
 
     await page.screenshot({
       path: testInfo.outputPath("dashboard-agent-account.png"),

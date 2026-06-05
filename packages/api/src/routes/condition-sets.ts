@@ -57,6 +57,12 @@ type UpsertItemBody = {
   metadata?: Record<string, unknown>;
 };
 
+type UpdateItemBody = {
+  value?: string;
+  label?: string | null;
+  metadata?: Record<string, unknown>;
+};
+
 type ReplaceItemsBody = {
   items: UpsertItemBody[];
 };
@@ -147,6 +153,23 @@ function normalizeItem(body: UpsertItemBody): UpsertItemBody {
     value: body.value.trim(),
     label,
     metadata: normalizeMetadata(body.metadata),
+  };
+}
+
+function normalizeItemUpdate(current: ConditionSetItemRow, body: UpdateItemBody): UpsertItemBody {
+  const value =
+    body.value !== undefined
+      ? normalizeRequiredText(body.value, "item value", MAX_CONDITION_SET_ITEM_VALUE_LENGTH)
+      : current.value;
+  const label =
+    body.label !== undefined
+      ? (normalizeOptionalText(body.label, "item label", MAX_CONDITION_SET_ITEM_LABEL_LENGTH) ??
+        null)
+      : current.label;
+  return {
+    value,
+    label,
+    metadata: body.metadata !== undefined ? normalizeMetadata(body.metadata) : current.metadata,
   };
 }
 
@@ -584,9 +607,15 @@ conditionSetRoutes.get("/:id/items", async (c) => {
     .limit(limit)
     .offset(offset);
 
-  return c.json<ApiResponse<ConditionSetItemResponse[]>>({
+  return c.json<
+    ApiResponse<{
+      items: ConditionSetItemResponse[];
+      limit: number;
+      offset: number;
+    }>
+  >({
     ok: true,
-    data: rows.map(itemToResponse),
+    data: { items: rows.map(itemToResponse), limit, offset },
   });
 });
 
@@ -804,6 +833,125 @@ conditionSetRoutes.put("/:id/items", async (c) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to replace condition set items";
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
+});
+
+conditionSetRoutes.get("/:id/items/:itemId", async (c) => {
+  const tenantId = c.get("tenantId");
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Condition set item access requires owner or admin session" },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Condition set item access");
+  if (mfaResponse) return mfaResponse;
+
+  const set = await ensureConditionSet(tenantId, c.req.param("id"));
+  if (!set) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
+
+  const [item] = await db
+    .select()
+    .from(conditionSetItems)
+    .where(
+      and(
+        eq(conditionSetItems.id, c.req.param("itemId")),
+        eq(conditionSetItems.tenantId, tenantId),
+        eq(conditionSetItems.conditionSetId, set.id),
+      ),
+    );
+  if (!item) return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
+
+  return c.json<ApiResponse<ConditionSetItemResponse>>({ ok: true, data: itemToResponse(item) });
+});
+
+conditionSetRoutes.patch("/:id/items/:itemId", async (c) => {
+  const tenantId = c.get("tenantId");
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Condition set item updates require owner or admin session" },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Condition set item updates");
+  if (mfaResponse) return mfaResponse;
+
+  const set = await ensureConditionSet(tenantId, c.req.param("id"));
+  if (!set) return c.json<ApiResponse>({ ok: false, error: "Condition set not found" }, 404);
+
+  const body = await safeJsonParse<UpdateItemBody>(c);
+  if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+
+  const [current] = await db
+    .select()
+    .from(conditionSetItems)
+    .where(
+      and(
+        eq(conditionSetItems.id, c.req.param("itemId")),
+        eq(conditionSetItems.tenantId, tenantId),
+        eq(conditionSetItems.conditionSetId, set.id),
+      ),
+    );
+  if (!current)
+    return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
+
+  try {
+    const item = normalizeItemUpdate(current, body);
+    const previousItems = await snapshotConditionSetItems(tenantId, set.id);
+    await writeAuditEvent({
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? tenantId,
+      action: "condition_set.item.update.authorized",
+      resourceType: "condition_set_item",
+      resourceId: current.id,
+      metadata: { conditionSetId: set.id, value: item.value },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
+      userAgent: c.req.header("user-agent") ?? null,
+      requestId: c.get("requestId") ?? null,
+    });
+
+    const [row] = await db
+      .update(conditionSetItems)
+      .set({
+        value: item.value,
+        label: item.label,
+        metadata: item.metadata,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(conditionSetItems.id, current.id),
+          eq(conditionSetItems.tenantId, tenantId),
+          eq(conditionSetItems.conditionSetId, set.id),
+        ),
+      )
+      .returning();
+
+    if (!row) return c.json<ApiResponse>({ ok: false, error: "Condition set item not found" }, 404);
+
+    try {
+      await writeAuditEvent({
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? tenantId,
+        action: "condition_set.item.update",
+        resourceType: "condition_set_item",
+        resourceId: row.id,
+        metadata: { conditionSetId: set.id, value: row.value },
+        ipAddress: c.req.header("x-forwarded-for") ?? null,
+        userAgent: c.req.header("user-agent") ?? null,
+        requestId: c.get("requestId") ?? null,
+      });
+    } catch (error) {
+      await restoreConditionSetItems(tenantId, set.id, previousItems);
+      throw error;
+    }
+
+    return c.json<ApiResponse<ConditionSetItemResponse>>({ ok: true, data: itemToResponse(row) });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to update condition set item";
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
   }
 });

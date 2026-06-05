@@ -26,6 +26,7 @@ export type AdapterCategory =
   | "custodial"
   | "push"
   | "bridge"
+  | "spark"
   | "exchange";
 
 /**

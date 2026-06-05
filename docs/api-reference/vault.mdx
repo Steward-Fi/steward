@@ -101,6 +101,75 @@ curl -X POST https://api.steward.fi/vault/my-agent/sign \
 
 ---
 
+## Wallet Actions
+
+Privy-style wallet-action routes expose quote/create/status flows over the existing vault and policy engine.
+
+### Quote EVM Transfer
+
+```
+POST /vault/:agentId/actions/transfer/quote
+```
+
+**Auth:** Owner/admin browser session with recent MFA
+
+Quotes accept the same body as transfer creation:
+
+```typescript
+{
+  to: string;
+  value?: string;     // Wei amount as string
+  amountWei?: string; // Alias for value
+  token?: "native" | string; // ERC20 token address for token transfers
+  chainId?: number;
+  broadcast?: boolean;
+  referenceId?: string;
+  sponsor?: boolean;
+}
+```
+
+### Create EVM Transfer
+
+```
+POST /vault/:agentId/actions/transfer
+```
+
+**Auth:** Agent JWT with the required signer authorization for wallet actions
+
+Native and selector-gated ERC20 transfer actions return:
+
+- `200` with status `signed` or `broadcast` when policy allows signing.
+- `202` with status `pending_approval` when policy requires manual approval.
+- `403` with status `rejected` when policy denies the action.
+- `429` when policy rate limits reject the action.
+- `500` or `502` when signing or RPC submission fails; the error body includes `data.actionId` when an action row was created.
+
+Broadcasting actions require idempotency. Set a stable `referenceId` for caller-side dedupe and transaction lookup.
+
+ERC20 transfers require an enabled `contract-allowlist` policy for the token contract and `transfer(address,uint256)` selector (`0xa9059cbb`) with recipient allow/block constraints plus `maxAmount`. Approved ERC20 actions sign or broadcast against the token contract with zero native value, persist token/recipient/amount action metadata, and reject missing allowlists or over-limit amounts before signing. Settled token balance/spend accounting and confirmation polling remain follow-up work.
+
+### Create Send-Calls Intent
+
+```
+POST /vault/:agentId/actions/send-calls
+```
+
+**Auth:** Agent JWT with the required signer authorization for wallet actions
+
+Send-calls creates a batch-call wallet-action intent. Today it resolves to status `pending_approval` or `rejected`; execution continues through the manual approval/intents workflow. Calldata-bearing calls are rejected unless selector-specific policy extraction or the explicit unsafe signing opt-in is configured.
+
+### Get Transfer Action Status
+
+```
+GET /vault/:agentId/actions/:actionId
+```
+
+**Auth:** Agent JWT plus owner/admin browser session with recent MFA
+
+This status endpoint is transfer-only and returns status `pending_approval`, `rejected`, `signed`, `broadcast`, or `failed`. Send-calls status is available through transaction and intent history until a dedicated status route is added.
+
+---
+
 ## Sign Typed Data (EIP-712)
 
 Sign structured data using `eth_signTypedData_v4`. Used for DEX approvals, ERC-20 permits, and other typed signatures.
@@ -210,6 +279,244 @@ POST /vault/:agentId/sign-solana
 
 ---
 
+## Sign Bitcoin PSBT
+
+Sign a scoped Bitcoin PSBT for an agent wallet. The route signs matching wallet
+inputs only; it does not broadcast the transaction.
+
+```
+POST /vault/:agentId/sign-bitcoin-psbt
+```
+
+**Auth:** Agent JWT with signer authorization for `sign_transaction`, or tenant
+owner/admin session with recent MFA where configured.
+
+**Request Body:**
+
+```typescript
+{
+  walletScope: string;  // e.g. "bitcoin:testnet:p2wpkh:0:0:0"
+  psbtBase64: string;   // Base64-encoded PSBT
+  finalize?: boolean;   // Return raw tx metadata when the signed PSBT is finalizable
+  referenceId?: string; // Caller-supplied tracking ID for audit/history lookup
+}
+```
+
+**Success Response (200):**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "transactionId": "550e8400-e29b-41d4-a716-446655440000",
+    "signedPsbtBase64": "cHNidP8BA...",
+    "signedInputs": 1,
+    "walletScope": "bitcoin:testnet:p2wpkh:0:0:0",
+    "walletAddress": "tb1q...",
+    "addressType": "p2wpkh",
+    "network": "testnet",
+    "finalizedTxHex": "020000000001...",
+    "txId": "4f3c...",
+    "vsize": 141,
+    "feeSats": "280"
+  }
+}
+```
+
+`transactionId` is Steward's transaction record ID. When `finalize` is `true`
+and every input can be finalized, the response may also include
+`finalizedTxHex`, Bitcoin `txId`, `vsize`, and `feeSats`. Steward still does not
+broadcast that raw transaction; submit it through your own Bitcoin broadcaster
+or indexer integration.
+
+Before signing, Steward decodes standard destination outputs and evaluates the
+agent's spend and address policies. It also enforces Bitcoin raw-signing-chain
+policy requirements and fee caps before returning a signed PSBT or finalized
+raw transaction metadata.
+
+### Safe retry guidance
+
+Provide a stable `referenceId` for your business operation and an
+`Idempotency-Key` header when your deployment enforces or accepts idempotency on
+sensitive mutations. On network timeouts, retry the same PSBT with the same
+caller reference and idempotency key, then query transaction history by
+`referenceId` before creating a replacement request.
+
+If you requested `finalize: true`, treat a returned `finalizedTxHex` as a
+broadcast-ready artifact that may already have been handed to your own
+broadcasting layer. Do not blindly retry downstream broadcast attempts without
+checking your broadcaster or indexer for the Bitcoin `txId`; retrying a
+finalized raw transaction is different from retrying Steward PSBT signing.
+
+<CodeGroup>
+```typescript SDK
+const result = await steward.signBitcoinPsbt("my-agent", {
+  walletScope: "bitcoin:testnet:p2wpkh:0:0:0",
+  psbtBase64,
+  finalize: true,
+  referenceId: "order-123-bitcoin-withdrawal",
+});
+
+console.log("Steward transaction:", result.transactionId);
+
+if (result.finalizedTxHex) {
+  // Steward does not broadcast. Submit through your Bitcoin broadcaster after
+  // checking whether result.txId has already been broadcast for this reference.
+  console.log("Ready to broadcast:", result.txId);
+}
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/vault/my-agent/sign-bitcoin-psbt \
+  -H "Authorization: Bearer agent-jwt" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-123-bitcoin-psbt-v1" \
+  -d '{
+    "walletScope": "bitcoin:testnet:p2wpkh:0:0:0",
+    "psbtBase64": "cHNidP8BA...",
+    "finalize": true,
+    "referenceId": "order-123-bitcoin-withdrawal"
+  }'
+```
+</CodeGroup>
+
+---
+
+## Encrypted Private Key Import
+
+Encrypted import lets a tenant owner/admin replace an agent wallet key without
+sending a top-level plaintext `privateKey` field. The import session is
+one-time, short-lived, stored as an encrypted auth-store record, and bound to
+the selected tenant, agent, and chain.
+
+```
+POST /vault/:agentId/import/init
+POST /vault/:agentId/import/submit
+```
+
+**Auth:** Tenant owner/admin browser session with recent MFA. API-key automation
+is rejected when the sensitive-action MFA policy is enabled.
+
+**Feature flags:** `STEWARD_ALLOW_PRIVATE_KEY_IMPORT=true` and
+`STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT=true`
+
+### Initialize
+
+```json
+{
+  "chain": "evm"
+}
+```
+
+`chain` must be `"evm"` or `"solana"`. The response returns the server X25519
+public key, expiry, and AAD fields the client must bind into encryption:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "importSessionId": "wimp_...",
+    "publicKey": "base64url-spki",
+    "algorithm": "X25519-HKDF-SHA256-AES-256-GCM",
+    "expiresAt": "2026-06-05T12:00:00.000Z",
+    "aad": {
+      "importSessionId": "wimp_...",
+      "tenantId": "tenant_123",
+      "agentId": "my-agent",
+      "chain": "evm"
+    }
+  }
+}
+```
+
+### Submit
+
+Encrypt the raw private key client-side with `X25519-HKDF-SHA256-AES-256-GCM`.
+Use the returned `importSessionId` as the AES-GCM AAD. The HKDF info string is:
+
+```text
+steward:vault-import:v1:{tenantId}:{agentId}:{chain}:{importSessionId}
+```
+
+Submit only the encrypted envelope:
+
+```json
+{
+  "importSessionId": "wimp_...",
+  "ephemeralPublicKey": "base64url-spki",
+  "iv": "base64url-12-byte-nonce",
+  "ciphertext": "base64url-ciphertext",
+  "tag": "base64url-16-byte-tag"
+}
+```
+
+Wrong-agent submits return `400` and do not consume the original session. A
+later submit to the original `agentId` can still succeed. Once the tenant,
+agent, chain, envelope shape, and decrypted key validate, Steward atomically
+consumes the session before writing the new encrypted wallet. Replays after a
+successful submit return `400` with an invalid-or-expired session error.
+
+Session records are serialized through Steward's KeyStore envelope and stored
+through the shared auth `StoreBackend`: Redis when configured, otherwise
+Postgres `auth_kv_store` when migrations are available, otherwise an in-memory
+local-development fallback. This is not an HSM-backed import-session store.
+Production deployments should configure Redis or run migrations so init and
+submit can land on different API replicas. `/ready` reports
+`checks.importSessionStore.source` and fails production readiness when the source
+is `memory` unless `STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE=true`. Memory
+fallback is not durable across restarts or processes.
+
+Plaintext `privateKey` fields, malformed envelopes, expired sessions, tenant or
+agent mismatches, and failed decryptions fail closed. Audit and webhook metadata
+are redacted and never include the plaintext key or ciphertext.
+
+<CodeGroup>
+```typescript SDK
+const session = await steward.initializeEncryptedAgentKeyImport("my-agent", "evm");
+
+await steward.submitEncryptedAgentKeyImport("my-agent", {
+  importSessionId: session.importSessionId,
+  ephemeralPublicKey,
+  iv,
+  ciphertext,
+  tag,
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/vault/my-agent/import/init \
+  -H "Authorization: Bearer tenant-admin-session-jwt" \
+  -H "Content-Type: application/json" \
+  -d '{"chain":"evm"}'
+
+curl -X POST https://api.steward.fi/vault/my-agent/import/submit \
+  -H "Authorization: Bearer tenant-admin-session-jwt" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "importSessionId": "wimp_...",
+    "ephemeralPublicKey": "base64url-spki",
+    "iv": "base64url-12-byte-nonce",
+    "ciphertext": "base64url-ciphertext",
+    "tag": "base64url-16-byte-tag"
+  }'
+```
+</CodeGroup>
+
+**Success Response (200):**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "agentId": "my-agent",
+    "walletAddress": "0x...",
+    "chain": "evm"
+  }
+}
+```
+
+---
+
 ## Approve Transaction
 
 Manually approve a pending transaction from the approval queue.
@@ -303,6 +610,72 @@ curl https://api.steward.fi/vault/my-agent/history \
 
 ---
 
+## List Transactions
+
+Returns full transaction records for an agent with pagination and filters.
+
+```
+GET /vault/:agentId/transactions
+```
+
+**Auth:** Agent JWT or tenant key
+
+**Query Parameters:**
+
+```typescript
+{
+  status?: "pending" | "approved" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
+  actionType?: string;
+  txHash?: string;
+  referenceId?: string; // also accepts reference_id
+  limit?: number;
+  offset?: number;
+}
+```
+
+`referenceId` filters transactions whose action payload contains either
+`referenceId` or `reference_id`. This matches transfer, send-calls,
+user-operation, EIP-7702 authorization, raw-signing, and Bitcoin PSBT signing
+actions that store caller-provided reference IDs.
+
+<CodeGroup>
+```typescript SDK
+const result = await steward.listTransactions("my-agent", {
+  actionType: "transfer",
+  referenceId: "customer-order-123",
+  limit: 25,
+});
+```
+
+```bash cURL
+curl "https://api.steward.fi/vault/my-agent/transactions?actionType=transfer&referenceId=customer-order-123" \
+  -H "Authorization: Bearer agent-jwt"
+```
+</CodeGroup>
+
+## Get Transaction
+
+Returns one full transaction record by ID.
+
+```
+GET /vault/:agentId/transactions/:txId
+```
+
+**Auth:** Agent JWT or tenant key
+
+<CodeGroup>
+```typescript SDK
+const tx = await steward.getTransaction("my-agent", "tx_123");
+```
+
+```bash cURL
+curl https://api.steward.fi/vault/my-agent/transactions/tx_123 \
+  -H "Authorization: Bearer agent-jwt"
+```
+</CodeGroup>
+
+---
+
 ## Get Addresses
 
 List all wallet addresses across chain families.
@@ -326,7 +699,7 @@ curl https://api.steward.fi/vault/my-agent/addresses \
 
 ---
 
-## Import Key
+## Break-Glass Plaintext Key Import
 
 Import an existing private key into the vault.
 
@@ -334,7 +707,7 @@ Import an existing private key into the vault.
 POST /vault/:agentId/import
 ```
 
-**Auth:** Tenant API key only
+**Auth:** Tenant owner/admin browser session with recent MFA. Both `STEWARD_ALLOW_PRIVATE_KEY_IMPORT=true` and `STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT=true` must be enabled.
 
 **Request Body:**
 
@@ -346,7 +719,7 @@ POST /vault/:agentId/import
 ```
 
 <Warning>
-  Key import requires tenant-level authentication. The imported key is immediately encrypted. The plaintext is never stored or logged.
+  Prefer the encrypted import session for hosted and browser-based flows. Plaintext import is a break-glass server-side route for controlled operator environments only. The imported key is immediately encrypted, the response is `no-store`, and the plaintext is never stored or logged.
 </Warning>
 
 ---

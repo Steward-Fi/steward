@@ -4,7 +4,7 @@ import type {
   PolicyResult,
   PolicyTemplate,
   SecretRoutePreset,
-  TenantAppClient,
+  TenantAppClientEmbeddedWalletConfig,
   TenantAuthAbuseConfig,
   TenantFeatureFlags,
   TenantGasSponsorshipConfig,
@@ -75,7 +75,7 @@ export interface TenantEmailConfig {
   magicLinkCallbackPath?: string;
 }
 
-export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana"]);
+export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana", "bitcoin"]);
 
 export const policyTypeEnum = pgEnum("policy_type", [
   "spending-limit",
@@ -180,7 +180,10 @@ export const tenantAppClients = pgTable(
     isDefault: boolean("is_default").notNull().default(false),
     allowedOrigins: text("allowed_origins").array().notNull().default([]),
     allowedRedirectUrls: text("allowed_redirect_urls").array().notNull().default([]),
-    loginMethods: jsonb("login_methods").$type<TenantAppClient["loginMethods"]>(),
+    allowedBundleIds: text("allowed_bundle_ids").array().notNull().default([]),
+    allowedPackageNames: text("allowed_package_names").array().notNull().default([]),
+    loginMethods: jsonb("login_methods").$type<TenantAuthAbuseConfig["loginMethods"]>(),
+    embeddedWallets: jsonb("embedded_wallets").$type<TenantAppClientEmbeddedWalletConfig>(),
     globalWalletEnabled: boolean("global_wallet_enabled").notNull().default(false),
     globalWalletAllowedScopes: text("global_wallet_allowed_scopes")
       .array()
@@ -428,6 +431,8 @@ export const agentWallets = pgTable(
     venue: text("venue"),
     /** Optional human-readable label, e.g. "perp", "spot", "ops". */
     purpose: text("purpose"),
+    /** Non-secret address metadata such as Bitcoin network, script type, and derivation path. */
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -445,6 +450,175 @@ export const agentWallets = pgTable(
       .on(table.agentId, table.chainFamily)
       .where(sql`${table.venue} IS NULL`),
     agentIdIdx: index("agent_wallets_agent_id_idx").on(table.agentId),
+  }),
+);
+
+export const vaultSigningFreezes = pgTable(
+  "vault_signing_freezes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    scopeType: varchar("scope_type", { length: 16 }).notNull(),
+    agentId: varchar("agent_id", { length: 64 }).references(() => agents.id, {
+      onDelete: "cascade",
+    }),
+    walletId: uuid("wallet_id").references(() => agentWallets.id, { onDelete: "cascade" }),
+    reason: text("reason"),
+    createdByType: varchar("created_by_type", { length: 32 }).notNull().default("system"),
+    createdById: varchar("created_by_id", { length: 128 }),
+    liftedAt: timestamp("lifted_at", { withTimezone: true }),
+    liftedByType: varchar("lifted_by_type", { length: 32 }),
+    liftedById: varchar("lifted_by_id", { length: 128 }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantActiveUniqueIdx: uniqueIndex("vault_signing_freezes_tenant_active_idx")
+      .on(table.tenantId, table.scopeType)
+      .where(sql`${table.scopeType} = 'tenant' and ${table.liftedAt} is null`),
+    agentActiveUniqueIdx: uniqueIndex("vault_signing_freezes_agent_active_idx")
+      .on(table.tenantId, table.agentId)
+      .where(sql`${table.scopeType} = 'agent' and ${table.liftedAt} is null`),
+    walletActiveUniqueIdx: uniqueIndex("vault_signing_freezes_wallet_active_idx")
+      .on(table.walletId)
+      .where(sql`${table.scopeType} = 'wallet' and ${table.liftedAt} is null`),
+    tenantScopeIdx: index("vault_signing_freezes_tenant_scope_idx").on(
+      table.tenantId,
+      table.scopeType,
+    ),
+    agentIdx: index("vault_signing_freezes_agent_idx").on(table.agentId),
+    walletIdx: index("vault_signing_freezes_wallet_idx").on(table.walletId),
+  }),
+);
+
+export const evmWalletNonces = pgTable(
+  "evm_wallet_nonces",
+  {
+    walletAddress: varchar("wallet_address", { length: 42 }).notNull(),
+    chainId: integer("chain_id").notNull(),
+    nextNonce: bigint("next_nonce", { mode: "number" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdateFn(() => sql`now()`),
+  },
+  (table) => ({
+    walletChainUniqueIdx: uniqueIndex("evm_wallet_nonces_wallet_chain_idx").on(
+      table.walletAddress,
+      table.chainId,
+    ),
+  }),
+);
+
+/**
+ * Privy-style digital asset accounts group one or more Steward wallet agents
+ * into a single balance/accounting resource. This is distinct from the
+ * `accounts` identity-graph table in schema-auth.
+ */
+export const digitalAssetAccounts = pgTable(
+  "digital_asset_accounts",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    displayName: varchar("display_name", { length: 255 }),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdx: index("digital_asset_accounts_tenant_idx").on(table.tenantId),
+    tenantAccountUniqueIdx: uniqueIndex("digital_asset_accounts_tenant_id_idx").on(
+      table.tenantId,
+      table.id,
+    ),
+  }),
+);
+
+export const digitalAssetAccountWallets = pgTable(
+  "digital_asset_account_wallets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    accountId: varchar("account_id", { length: 64 })
+      .notNull()
+      .references(() => digitalAssetAccounts.id, { onDelete: "cascade" }),
+    walletAgentId: varchar("wallet_agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    chainFamily: chainFamilyEnum("chain_family"),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantAccountIdx: index("digital_asset_account_wallets_tenant_account_idx").on(
+      table.tenantId,
+      table.accountId,
+    ),
+    walletIdx: index("digital_asset_account_wallets_wallet_idx").on(table.walletAgentId),
+    accountWalletAllChainsUniqueIdx: uniqueIndex(
+      "digital_asset_account_wallets_account_wallet_all_idx",
+    )
+      .on(table.accountId, table.walletAgentId)
+      .where(sql`${table.chainFamily} is null`),
+    accountWalletChainUniqueIdx: uniqueIndex(
+      "digital_asset_account_wallets_account_wallet_chain_idx",
+    )
+      .on(table.accountId, table.walletAgentId, table.chainFamily)
+      .where(sql`${table.chainFamily} is not null`),
+    tenantWalletAllChainsUniqueIdx: uniqueIndex(
+      "digital_asset_account_wallets_tenant_wallet_all_idx",
+    )
+      .on(table.tenantId, table.walletAgentId)
+      .where(sql`${table.chainFamily} is null`),
+    tenantWalletChainUniqueIdx: uniqueIndex("digital_asset_account_wallets_tenant_wallet_chain_idx")
+      .on(table.tenantId, table.walletAgentId, table.chainFamily)
+      .where(sql`${table.chainFamily} is not null`),
+    tenantAccountFk: foreignKey({
+      columns: [table.tenantId, table.accountId],
+      foreignColumns: [digitalAssetAccounts.tenantId, digitalAssetAccounts.id],
+      name: "digital_asset_account_wallets_tenant_account_fk",
+    }).onDelete("cascade"),
+    tenantWalletFk: foreignKey({
+      columns: [table.tenantId, table.walletAgentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "digital_asset_account_wallets_tenant_wallet_fk",
+    }).onDelete("cascade"),
+  }),
+);
+
+export const digitalAssetAccountAggregations = pgTable(
+  "digital_asset_account_aggregations",
+  {
+    id: varchar("id", { length: 64 }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    accountId: varchar("account_id", { length: 64 })
+      .notNull()
+      .references(() => digitalAssetAccounts.id, { onDelete: "cascade" }),
+    displayName: varchar("display_name", { length: 255 }),
+    walletAgentIds: text("wallet_agent_ids").array().notNull().default([]),
+    chainFamilies: text("chain_families").array().notNull().default([]),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantAccountIdx: index("digital_asset_account_aggregations_tenant_account_idx").on(
+      table.tenantId,
+      table.accountId,
+    ),
+    tenantAggregationUniqueIdx: uniqueIndex("digital_asset_account_aggregations_tenant_id_idx").on(
+      table.tenantId,
+      table.id,
+    ),
+    tenantAccountFk: foreignKey({
+      columns: [table.tenantId, table.accountId],
+      foreignColumns: [digitalAssetAccounts.tenantId, digitalAssetAccounts.id],
+      name: "digital_asset_account_aggregations_tenant_account_fk",
+    }).onDelete("cascade"),
   }),
 );
 
@@ -485,6 +659,7 @@ export const agentSigners = pgTable(
     chainFamily: chainFamilyEnum("chain_family"),
     label: varchar("label", { length: 255 }),
     permissions: text("permissions").array().notNull().default([]),
+    policyIds: text("policy_ids").array().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     status: varchar("status", { length: 32 }).notNull().default("active"),
     createdBy: varchar("created_by", { length: 255 }),

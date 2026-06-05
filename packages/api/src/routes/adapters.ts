@@ -2,7 +2,8 @@
  * Financial-service adapter routes (@stwd/adapters seam).
  *
  * Tenant/agent-scoped endpoints for swaps, earn/yield, fiat onramp/offramp, KYC,
- * TOS/consent, and custodial wallets, backed by the pluggable AdapterRegistry.
+ * TOS/consent, custodial wallets, and Spark BTC/Lightning DTOs, backed by the
+ * pluggable AdapterRegistry.
  *
  * SECURITY POSTURE (money-path):
  *   - Any endpoint that produces a fund-moving tx/intent (swap build, earn
@@ -13,7 +14,8 @@
  *     still traverse the existing vault/policy signing path to move value.
  *   - Quote/status/read endpoints are non-fund-moving and only require auth.
  *   - The custodial signature endpoint can NEVER return a fabricated signature;
- *     the mock fails closed (501).
+ *     the mock fails closed (501). Spark identity-key signing follows the same
+ *     rule: no mock signatures.
  *
  * Mount: app.route("/adapters", adapterRoutes) — registered after the webhooks
  * route in app.ts.
@@ -25,6 +27,7 @@ import {
   AdapterValidationError,
   adapterRegistry,
   type BridgeQuote,
+  type SparkWallet,
   type UnsignedTxIntent,
 } from "@stwd/adapters";
 import { getDb, tenantAppClients, userTenants } from "@stwd/db";
@@ -48,6 +51,17 @@ import {
 } from "../services/context";
 
 export const adapterRoutes = new Hono<{ Variables: AppVariables }>();
+export const fiatRoutes = new Hono<{ Variables: AppVariables }>();
+
+adapterRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
+
+fiatRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 // ─── Auth / actor helpers ─────────────────────────────────────────────────────
 
@@ -385,6 +399,49 @@ function assertUnsigned(intent: UnsignedTxIntent): void {
   }
 }
 
+async function enforceAdapterIntentPolicy(
+  c: Context<{ Variables: AppVariables }>,
+  params: {
+    agentId: string;
+    estimatedUsd?: number;
+    auditAction: string;
+  },
+): Promise<{ allow: true } | { allow: false; response: Response }> {
+  const caps = spendCaps();
+  const estimatedUsd = params.estimatedUsd ?? caps.perOrderCapUsd;
+  const gate = await enforceFundMovingPolicy(c, {
+    agentId: params.agentId,
+    estimatedUsd,
+    perOrderCapUsd: caps.perOrderCapUsd,
+    dailyCapUsd: caps.dailyCapUsd,
+  });
+  if (gate.allow) return { allow: true };
+  await auditAdapterEvent(c, params.auditAction, params.agentId, {
+    reason: gate.reason,
+    estimatedUsd,
+  });
+  return {
+    allow: false,
+    response: c.json({ code: "policy-violation", reason: gate.reason }, 400),
+  };
+}
+
+async function requireSparkWalletAccess(
+  c: Context<{ Variables: AppVariables }>,
+  walletId: string,
+): Promise<{ ok: true; wallet: SparkWallet } | { ok: false; response: Response }> {
+  const wallet = await adapterRegistry.spark().getWallet(walletId);
+  if (!wallet) {
+    return {
+      ok: false,
+      response: c.json<ApiResponse>({ ok: false, error: "Wallet not found" }, 404),
+    };
+  }
+  const accessError = await requireAdapterUserAccess(c, wallet.userId);
+  if (accessError) return { ok: false, response: accessError };
+  return { ok: true, wallet };
+}
+
 // ─── Schemas ────────────────────────────────────────────────────────────────
 
 const tokenRefSchema = z.object({
@@ -486,6 +543,67 @@ const bridgeBuildSchema = z.object({
 const bridgeSessionSchema = z.object({
   userId: z.string().min(1).max(128).optional(),
   quote: z.record(z.string(), z.unknown()),
+});
+
+const sparkCreateWalletSchema = z.object({
+  userId: z.string().min(1).max(128).optional(),
+  network: z.enum(["mainnet", "testnet", "signet"]).optional(),
+  label: z.string().min(1).max(128).optional(),
+});
+
+const sparkWalletIdSchema = z.object({
+  walletId: z.string().min(1).max(128),
+});
+
+const sparkDepositQuoteSchema = z.object({
+  walletId: z.string().min(1).max(128),
+  amountSats: z.string().min(1).max(80).optional(),
+});
+
+const sparkDepositClaimSchema = z.object({
+  agentId: z.string().min(1).max(128).optional(),
+  quoteId: z.string().min(1).max(128),
+  walletId: z.string().min(1).max(128),
+  estimatedUsd: z.number().positive().max(1e12).optional(),
+});
+
+const sparkLightningInvoiceSchema = z.object({
+  walletId: z.string().min(1).max(128),
+  amountSats: z.string().min(1).max(80),
+  memo: z.string().min(1).max(280).optional(),
+  expiresInSeconds: z.number().int().min(60).max(86_400).optional(),
+});
+
+const sparkLightningPaymentSchema = z.object({
+  agentId: z.string().min(1).max(128).optional(),
+  walletId: z.string().min(1).max(128),
+  paymentRequest: z.string().min(1).max(4096),
+  maxFeeSats: z.string().min(1).max(80).optional(),
+  estimatedUsd: z.number().positive().max(1e12).optional(),
+});
+
+const sparkTransferSchema = z.object({
+  agentId: z.string().min(1).max(128).optional(),
+  walletId: z.string().min(1).max(128),
+  recipient: z.string().min(1).max(192),
+  amountSats: z.string().min(1).max(80),
+  memo: z.string().min(1).max(280).optional(),
+  estimatedUsd: z.number().positive().max(1e12).optional(),
+});
+
+const sparkTokenTransferSchema = z.object({
+  agentId: z.string().min(1).max(128).optional(),
+  walletId: z.string().min(1).max(128),
+  recipient: z.string().min(1).max(192),
+  tokenId: z.string().min(1).max(128),
+  amount: z.string().min(1).max(80),
+  memo: z.string().min(1).max(280).optional(),
+  estimatedUsd: z.number().positive().max(1e12).optional(),
+});
+
+const sparkIdentitySignSchema = z.object({
+  walletId: z.string().min(1).max(128),
+  payload: z.string().min(2).max(100_000),
 });
 
 const exchangeSessionSchema = z.object({
@@ -913,6 +1031,275 @@ adapterRoutes.get("/bridge/sessions/:id", async (c) => {
   }
 });
 
+// ─── Spark BTC / Lightning ──────────────────────────────────────────────────
+
+adapterRoutes.post("/spark/wallets", async (c) => {
+  const parsed = sparkCreateWalletSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const resolvedUser = await resolveAdapterUserId(c, parsed.data.userId);
+  if (!resolvedUser.ok) return resolvedUser.response;
+  try {
+    const wallet = await adapterRegistry.spark().createWallet({
+      userId: resolvedUser.userId,
+      network: parsed.data.network,
+      label: parsed.data.label,
+    });
+    await auditAdapterEvent(c, "adapter.spark.wallet.created", wallet.id, {
+      userId: wallet.userId,
+      network: wallet.network,
+      provider: wallet.provider,
+    });
+    return c.json(ok({ wallet }), 201);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.get("/spark/wallets/:walletId", async (c) => {
+  const parsed = sparkWalletIdSchema.safeParse({ walletId: c.req.param("walletId") });
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+    if (!access.ok) return access.response;
+    return c.json(ok({ wallet: access.wallet }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.get("/spark/wallets/:walletId/balance", async (c) => {
+  const parsed = sparkWalletIdSchema.safeParse({ walletId: c.req.param("walletId") });
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+    if (!access.ok) return access.response;
+    const balance = await adapterRegistry.spark().getBalance(parsed.data.walletId);
+    return c.json(ok({ balance }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/spark/static-btc-deposits", async (c) => {
+  const parsed = sparkDepositQuoteSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+    if (!access.ok) return access.response;
+    const quote = await adapterRegistry.spark().createStaticBtcDepositQuote({
+      walletId: parsed.data.walletId,
+      amountSats: parsed.data.amountSats,
+    });
+    await auditAdapterEvent(c, "adapter.spark.static_btc_deposit.created", quote.id, {
+      walletId: quote.walletId,
+      network: quote.network,
+      amountSats: quote.amountSats,
+    });
+    return c.json(ok({ quote }), 201);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/spark/static-btc-deposits/claim", async (c) => {
+  const parsed = sparkDepositClaimSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+  if (!access.ok) return access.response;
+  const resolution = await resolveAgentId(c, parsed.data.agentId);
+  if (!resolution.ok) return resolution.response;
+  try {
+    const intent = await adapterRegistry.spark().buildStaticBtcDepositClaim({
+      quoteId: parsed.data.quoteId,
+      owner: resolution.agentId,
+    });
+    if (intent.metadata?.walletId !== parsed.data.walletId) {
+      return c.json<ApiResponse>({ ok: false, error: "quote does not belong to walletId" }, 400);
+    }
+    assertUnsigned(intent);
+    const gate = await enforceAdapterIntentPolicy(c, {
+      agentId: resolution.agentId,
+      estimatedUsd: parsed.data.estimatedUsd,
+      auditAction: "adapter.spark.static_btc_deposit.policy-rejected",
+    });
+    if (!gate.allow) return gate.response;
+    await auditAdapterEvent(
+      c,
+      "adapter.spark.static_btc_deposit.claim.authorized",
+      resolution.agentId,
+      {
+        quoteId: parsed.data.quoteId,
+        walletId: parsed.data.walletId,
+      },
+    );
+    return c.json(ok({ unsignedIntent: intent }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/spark/lightning/invoices", async (c) => {
+  const parsed = sparkLightningInvoiceSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+    if (!access.ok) return access.response;
+    const invoice = await adapterRegistry.spark().createLightningInvoice(parsed.data);
+    await auditAdapterEvent(c, "adapter.spark.lightning.invoice.created", invoice.id, {
+      walletId: invoice.walletId,
+      amountSats: invoice.amountSats,
+    });
+    return c.json(ok({ invoice }), 201);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.get("/spark/lightning/invoices/:invoiceId", async (c) => {
+  try {
+    const invoice = await adapterRegistry.spark().getLightningInvoice(c.req.param("invoiceId"));
+    if (!invoice) return c.json<ApiResponse>({ ok: false, error: "Invoice not found" }, 404);
+    const access = await requireSparkWalletAccess(c, invoice.walletId);
+    if (!access.ok) return access.response;
+    return c.json(ok({ invoice }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/spark/lightning/pay", async (c) => {
+  const parsed = sparkLightningPaymentSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+  if (!access.ok) return access.response;
+  const resolution = await resolveAgentId(c, parsed.data.agentId);
+  if (!resolution.ok) return resolution.response;
+  try {
+    const intent = await adapterRegistry.spark().buildLightningPayment({
+      walletId: parsed.data.walletId,
+      paymentRequest: parsed.data.paymentRequest,
+      maxFeeSats: parsed.data.maxFeeSats,
+      owner: resolution.agentId,
+    });
+    assertUnsigned(intent);
+    const gate = await enforceAdapterIntentPolicy(c, {
+      agentId: resolution.agentId,
+      estimatedUsd: parsed.data.estimatedUsd,
+      auditAction: "adapter.spark.lightning.pay.policy-rejected",
+    });
+    if (!gate.allow) return gate.response;
+    await auditAdapterEvent(c, "adapter.spark.lightning.pay.authorized", resolution.agentId, {
+      walletId: parsed.data.walletId,
+      maxFeeSats: parsed.data.maxFeeSats,
+    });
+    return c.json(ok({ unsignedIntent: intent }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/spark/transfers", async (c) => {
+  const parsed = sparkTransferSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+  if (!access.ok) return access.response;
+  const resolution = await resolveAgentId(c, parsed.data.agentId);
+  if (!resolution.ok) return resolution.response;
+  try {
+    const intent = await adapterRegistry.spark().buildSparkTransfer({
+      walletId: parsed.data.walletId,
+      recipient: parsed.data.recipient,
+      amountSats: parsed.data.amountSats,
+      memo: parsed.data.memo,
+      owner: resolution.agentId,
+    });
+    assertUnsigned(intent);
+    const gate = await enforceAdapterIntentPolicy(c, {
+      agentId: resolution.agentId,
+      estimatedUsd: parsed.data.estimatedUsd,
+      auditAction: "adapter.spark.transfer.policy-rejected",
+    });
+    if (!gate.allow) return gate.response;
+    await auditAdapterEvent(c, "adapter.spark.transfer.authorized", resolution.agentId, {
+      walletId: parsed.data.walletId,
+      amountSats: parsed.data.amountSats,
+    });
+    return c.json(ok({ unsignedIntent: intent }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/spark/token-transfers", async (c) => {
+  const parsed = sparkTokenTransferSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+  if (!access.ok) return access.response;
+  const resolution = await resolveAgentId(c, parsed.data.agentId);
+  if (!resolution.ok) return resolution.response;
+  try {
+    const intent = await adapterRegistry.spark().buildSparkTokenTransfer({
+      walletId: parsed.data.walletId,
+      recipient: parsed.data.recipient,
+      tokenId: parsed.data.tokenId,
+      amount: parsed.data.amount,
+      memo: parsed.data.memo,
+      owner: resolution.agentId,
+    });
+    assertUnsigned(intent);
+    const gate = await enforceAdapterIntentPolicy(c, {
+      agentId: resolution.agentId,
+      estimatedUsd: parsed.data.estimatedUsd,
+      auditAction: "adapter.spark.token_transfer.policy-rejected",
+    });
+    if (!gate.allow) return gate.response;
+    await auditAdapterEvent(c, "adapter.spark.token_transfer.authorized", resolution.agentId, {
+      walletId: parsed.data.walletId,
+      tokenId: parsed.data.tokenId,
+      amount: parsed.data.amount,
+    });
+    return c.json(ok({ unsignedIntent: intent }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+adapterRoutes.post("/spark/identity/sign", async (c) => {
+  const parsed = sparkIdentitySignSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const access = await requireSparkWalletAccess(c, parsed.data.walletId);
+    if (!access.ok) return access.response;
+    const result = await adapterRegistry.spark().requestIdentitySignature(parsed.data);
+    await auditAdapterEvent(c, "adapter.spark.identity_sign.unavailable", parsed.data.walletId, {
+      provider: result.provider,
+    });
+    return c.json<ApiResponse>({ ok: false, error: result.reason }, 501);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
 // ─── Onramp ─────────────────────────────────────────────────────────────────
 
 adapterRoutes.post("/onramp/quote", async (c) => {
@@ -1139,6 +1526,247 @@ adapterRoutes.get("/tos/acceptances/:documentId", async (c) => {
       ? await tos.isCurrentVersionAccepted(userId, c.req.param("documentId"), currentVersion)
       : Boolean(acceptance);
     return c.json(ok({ acceptance, accepted }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+// ─── Privy-shaped fiat aliases ──────────────────────────────────────────────
+
+const fiatKycDocumentSchema = z.object({
+  verificationId: z.string().min(1).max(128),
+  documentType: z.string().min(1).max(64),
+  contentBase64: z.string().min(1).max(20_000_000),
+});
+
+async function fiatUserAccess(c: Context<{ Variables: AppVariables }>) {
+  const userId = c.req.param("userId");
+  if (!userId) {
+    return {
+      ok: false as const,
+      response: c.json<ApiResponse>({ ok: false, error: "userId is required" }, 400),
+    };
+  }
+  const accessError = await requireAdapterUserAccess(c, userId);
+  return accessError
+    ? { ok: false as const, response: accessError }
+    : { ok: true as const, userId };
+}
+
+fiatRoutes.get("/:userId/fiat/accounts", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  return c.json(ok({ accounts: [] }));
+});
+
+fiatRoutes.post("/:userId/fiat/accounts", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  await auditAdapterEvent(c, "adapter.fiat_account.create.unavailable", access.userId, {
+    userId: access.userId,
+    provider: "unconfigured",
+  });
+  return c.json<ApiResponse>(
+    {
+      ok: false,
+      error:
+        "Fiat account creation requires a configured banking/onramp provider; the open adapter route is fail-closed.",
+    },
+    501,
+  );
+});
+
+fiatRoutes.post("/:userId/fiat/kyc_link", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  const parsed = kycStartSchema
+    .omit({ userId: true })
+    .extend({ returnUrl: z.string().url().max(2048).optional() })
+    .safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const verification = await adapterRegistry.kyc().startVerification({
+      userId: access.userId,
+      level: parsed.data.level,
+    });
+    await auditAdapterEvent(c, "adapter.fiat.kyc_link.created", verification.id, {
+      userId: access.userId,
+      level: verification.level,
+      hasReturnUrl: Boolean(parsed.data.returnUrl),
+    });
+    return c.json(
+      ok({
+        verification,
+        kycLink: `mock://kyc/${verification.id}`,
+        kyc_link: `mock://kyc/${verification.id}`,
+      }),
+      201,
+    );
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+fiatRoutes.get("/:userId/fiat/kyc", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  const verificationId = c.req.query("verificationId") ?? c.req.query("verification_id");
+  if (!verificationId) {
+    return c.json(ok({ status: "not_started", verification: null }));
+  }
+  try {
+    const verification = await adapterRegistry.kyc().getStatus(verificationId);
+    if (!verification || verification.userId !== access.userId) {
+      return c.json<ApiResponse>({ ok: false, error: "Verification not found" }, 404);
+    }
+    return c.json(ok({ status: verification.status, verification }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+fiatRoutes.post("/:userId/fiat/kyc", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  const parsed = kycStartSchema.omit({ userId: true }).safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const verification = await adapterRegistry.kyc().startVerification({
+      userId: access.userId,
+      level: parsed.data.level,
+    });
+    await auditAdapterEvent(c, "adapter.fiat.kyc.started", verification.id, {
+      userId: access.userId,
+      level: verification.level,
+    });
+    return c.json(ok({ status: verification.status, verification }), 201);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+fiatRoutes.patch("/:userId/fiat/kyc", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  const parsed = fiatKycDocumentSchema.safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const content = decodeBase64(parsed.data.contentBase64);
+  if (!content) {
+    return c.json<ApiResponse>({ ok: false, error: "contentBase64 is not valid base64" }, 400);
+  }
+  try {
+    const kyc = adapterRegistry.kyc();
+    const existing = await kyc.getStatus(parsed.data.verificationId);
+    if (!existing || existing.userId !== access.userId) {
+      return c.json<ApiResponse>({ ok: false, error: "Verification not found" }, 404);
+    }
+    const verification = await kyc.submitDocument({
+      verificationId: parsed.data.verificationId,
+      documentType: parsed.data.documentType,
+      content,
+    });
+    await auditAdapterEvent(c, "adapter.fiat.kyc.document.submitted", verification.id, {
+      userId: access.userId,
+      documentType: parsed.data.documentType,
+      contentHash: verification.documents.at(-1)?.contentHash,
+      status: verification.status,
+    });
+    return c.json(ok({ status: verification.status, verification }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+fiatRoutes.post("/:userId/fiat/onramp", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  const parsed = onrampSessionSchema.omit({ userId: true }).safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const onramp = adapterRegistry.onramp();
+    const quote = await onramp.getQuote(parsed.data);
+    const session = await onramp.createSession(quote, parsed.data.destinationAddress, {
+      tenantId: c.get("tenantId"),
+      userId: access.userId,
+    });
+    await auditAdapterEvent(c, "adapter.fiat.onramp.session.created", session.id, {
+      userId: access.userId,
+      fiatCurrency: session.fiatCurrency,
+      fiatAmount: session.fiatAmount,
+      cryptoAsset: session.cryptoAsset,
+    });
+    return c.json(ok({ quote, session }), 201);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+fiatRoutes.get("/:userId/fiat/onramp/:sessionId", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  const sessionId = c.req.param("sessionId");
+  if (!sessionId) {
+    return c.json<ApiResponse>({ ok: false, error: "sessionId is required" }, 400);
+  }
+  try {
+    const session = await adapterRegistry.onramp().getSession(sessionId);
+    if (!session || session.userId !== access.userId || session.tenantId !== c.get("tenantId")) {
+      return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+    }
+    return c.json(ok({ session }));
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+fiatRoutes.post("/:userId/fiat/offramp", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  const parsed = offrampSessionSchema.omit({ userId: true }).safeParse(await safeJsonParse(c));
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  try {
+    const offramp = adapterRegistry.offramp();
+    const quote = await offramp.getQuote(parsed.data);
+    const session = await offramp.createSession(
+      quote,
+      { payoutMethodId: parsed.data.payoutMethodId },
+      { tenantId: c.get("tenantId"), userId: access.userId },
+    );
+    await auditAdapterEvent(c, "adapter.fiat.offramp.session.created", session.id, {
+      userId: access.userId,
+      cryptoAsset: session.cryptoAsset,
+      cryptoAmount: session.cryptoAmount,
+      fiatCurrency: session.fiatCurrency,
+    });
+    return c.json(ok({ quote, session }), 201);
+  } catch (err) {
+    return handleAdapterError(c, err);
+  }
+});
+
+fiatRoutes.get("/:userId/fiat/offramp/:sessionId", async (c) => {
+  const access = await fiatUserAccess(c);
+  if (!access.ok) return access.response;
+  const sessionId = c.req.param("sessionId");
+  if (!sessionId) {
+    return c.json<ApiResponse>({ ok: false, error: "sessionId is required" }, 400);
+  }
+  try {
+    const session = await adapterRegistry.offramp().getSession(sessionId);
+    if (!session || session.userId !== access.userId || session.tenantId !== c.get("tenantId")) {
+      return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
+    }
+    return c.json(ok({ session }));
   } catch (err) {
     return handleAdapterError(c, err);
   }

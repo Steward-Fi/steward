@@ -10,6 +10,7 @@
  */
 import { arbitrum } from "./arbitrum.js";
 import { base, baseSepolia } from "./base.js";
+import { bitcoin, bitcoinTestnet } from "./bitcoin.js";
 import { bsc, bscTestnet } from "./bsc.js";
 import { ethereum } from "./ethereum.js";
 import { gnosis } from "./gnosis.js";
@@ -45,6 +46,8 @@ export const CHAIN_PROVIDERS: readonly ChainProvider[] = [
   arbitrum,
   solana,
   solanaDevnet,
+  bitcoin,
+  bitcoinTestnet,
 ];
 
 /** Lookup helpers built from the registry. */
@@ -68,6 +71,8 @@ export {
   arbitrum,
   base,
   baseSepolia,
+  bitcoin,
+  bitcoinTestnet,
   bsc,
   bscTestnet,
   ethereum,

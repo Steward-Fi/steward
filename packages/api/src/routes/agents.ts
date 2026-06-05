@@ -4,11 +4,11 @@
  * Mount: app.route("/agents", agentRoutes)
  */
 
-import { hashSha256Hex, revocationStore } from "@stwd/auth";
+import { hashSha256Hex, importP256PublicKey, revocationStore } from "@stwd/auth";
 import { agentPolicies, toPersistedPolicyRule } from "@stwd/db";
 import { getSpend, getSpendByHost, invalidateCache, type SpendPeriod } from "@stwd/redis";
-import { and, eq, gte, sql } from "drizzle-orm";
-import { Hono } from "hono";
+import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { type Context, Hono } from "hono";
 import { isRedisAvailable } from "../middleware/redis";
 import { writeAuditEvent } from "../services/audit";
 import {
@@ -49,129 +49,36 @@ import {
 } from "../services/gas-sponsorship";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
 import { createSignerCredentialHash } from "../services/signer-credentials";
+import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
 
 export const agentRoutes = new Hono<{ Variables: AppVariables }>();
+
+agentRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 const MAX_BATCH_AGENTS = 25;
 const MAX_POLICIES_PER_AGENT = 100;
 const MAX_AGENT_LIST_LIMIT = 200;
 const MAX_AGENT_TOKEN_SECONDS = 30 * 24 * 60 * 60;
 const MAX_CUSTOM_TOKEN_BALANCES = 25;
-const SPEND_PERIODS = ["day", "week", "month"] as const satisfies readonly SpendPeriod[];
-
-const TRADE_POLICY_DEFAULTS = {
-  dailyCap: 1000,
-  perOrderCap: 500,
-  leverageCap: 10,
-  allowedAssets: ["BTC", "ETH", "BNB"],
-  allowedVenues: ["hyperliquid"],
-} as const;
-
-const TRADE_POLICY_LAYER_1_MAX = {
-  dailyCap: 50_000,
-  perOrderCap: 10_000,
-  leverageCap: 50,
-} as const;
-
-type AgentTradePolicyResponse = {
-  agentId: string;
-  dailyCap: number;
-  perOrderCap: number;
-  leverageCap: number;
-  allowedAssets: string[];
-  allowedVenues: string[];
-  updatedAt: string;
-  updatedBy: string;
-  updatedReason: string | null;
-};
-
-type AgentTradePolicySnapshot = Omit<
-  AgentTradePolicyResponse,
-  "updatedAt" | "updatedBy" | "updatedReason"
->;
-
-type AgentTradePolicyPatch = {
-  dailyCap?: unknown;
-  perOrderCap?: unknown;
-  leverageCap?: unknown;
-  allowedAssets?: unknown;
-  allowedVenues?: unknown;
-  reason?: unknown;
-  multisigApproval?: unknown;
-};
-
-function parseNumericPolicyValue(value: string | number): number {
-  return typeof value === "number" ? value : Number(value);
-}
-
-function policyRowToResponse(row: typeof agentPolicies.$inferSelect): AgentTradePolicyResponse {
-  return {
-    agentId: row.agentId,
-    dailyCap: parseNumericPolicyValue(row.dailyCapUsd),
-    perOrderCap: parseNumericPolicyValue(row.perOrderCapUsd),
-    leverageCap: parseNumericPolicyValue(row.leverageCap),
-    allowedAssets: row.allowedAssets,
-    allowedVenues: row.allowedVenues,
-    updatedAt: row.updatedAt.toISOString(),
-    updatedBy: row.updatedBy,
-    updatedReason: row.updatedReason ?? null,
-  };
-}
-
-function defaultPolicySnapshot(agentId: string): AgentTradePolicySnapshot {
-  return {
-    agentId,
-    dailyCap: TRADE_POLICY_DEFAULTS.dailyCap,
-    perOrderCap: TRADE_POLICY_DEFAULTS.perOrderCap,
-    leverageCap: TRADE_POLICY_DEFAULTS.leverageCap,
-    allowedAssets: [...TRADE_POLICY_DEFAULTS.allowedAssets],
-    allowedVenues: [...TRADE_POLICY_DEFAULTS.allowedVenues],
-  };
-}
-
-function policyDiff(before: AgentTradePolicySnapshot, after: AgentTradePolicyResponse) {
-  return {
-    dailyCap: { before: before.dailyCap, after: after.dailyCap },
-    perOrderCap: { before: before.perOrderCap, after: after.perOrderCap },
-    leverageCap: { before: before.leverageCap, after: after.leverageCap },
-    allowedAssets: { before: before.allowedAssets, after: after.allowedAssets },
-    allowedVenues: { before: before.allowedVenues, after: after.allowedVenues },
-  };
-}
-
-function validatePolicyNumber(
-  name: "dailyCap" | "perOrderCap" | "leverageCap",
-  value: unknown,
-): number | string {
-  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
-    return `${name} must be a positive number`;
-  }
-  if (value > TRADE_POLICY_LAYER_1_MAX[name]) {
-    return `${name} exceeds platform ceiling ${TRADE_POLICY_LAYER_1_MAX[name]}`;
-  }
-  return value;
-}
-
-function validatePolicyStringArray(name: string, value: unknown): string[] | string {
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.some((item) => typeof item !== "string" || item.length === 0)
-  ) {
-    return `${name} must be a non-empty string array`;
-  }
-  return [...new Set(value)];
-}
-
 const MAX_AGENT_SIGNER_PERMISSIONS = 32;
 const MAX_AGENT_SIGNER_METADATA_BYTES = 8_192;
 const MAX_AGENT_KEY_QUORUM_MEMBERS = 32;
+const SPEND_PERIODS = ["day", "week", "month"] as const satisfies readonly SpendPeriod[];
 const AGENT_SIGNER_TYPES = new Set(["owner", "delegated", "service", "quorum_member"]);
 const AGENT_SIGNER_SUBJECT_TYPES = new Set(["user", "wallet", "api_key", "external"]);
 const AGENT_SIGNER_STATUSES = new Set(["active", "paused", "revoked"]);
 const AGENT_KEY_QUORUM_STATUSES = new Set(["active", "paused", "revoked"]);
+const AGENT_SIGNER_KEY_TYPES = new Set(["hmac", "p256"]);
 const PREGENERATED_USER_WALLET_TYPE = "pregenerated_user";
 const PREGENERATED_CLAIM_PREFIX = "pregenerated:";
+const CLAIMED_PREGENERATED_CLAIM_PREFIX = "claimed:";
+const EXPIRED_PREGENERATED_CLAIM_PREFIX = "expired:";
+const DEFAULT_PREGENERATED_CLAIM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MIN_PREGENERATED_CLAIM_TTL_MS = 5 * 60 * 1000;
+const MAX_PREGENERATED_CLAIM_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const RESERVED_SIGNER_METADATA_KEYS = new Set([
   "credentialHash",
   "credentialCreatedAt",
@@ -202,6 +109,9 @@ type PortfolioAsset = {
 type AgentSignerRow = typeof agentSigners.$inferSelect;
 type AgentKeyQuorumRow = typeof agentKeyQuorums.$inferSelect;
 type PolicyRow = typeof policies.$inferSelect;
+type AgentWalletChainFamily = "evm" | "solana" | "bitcoin";
+type BitcoinNetwork = "mainnet" | "testnet";
+type BitcoinAddressType = "p2wpkh" | "p2tr";
 
 const USD_SCALE_DECIMALS = 18;
 
@@ -267,10 +177,11 @@ function agentWalletRowsToAccountWallets(
   agent: AgentIdentity,
   rows: Array<{
     id: string;
-    chainFamily: "evm" | "solana";
+    chainFamily: AgentWalletChainFamily;
     address: string;
     venue: string | null;
     purpose: string | null;
+    metadata: Record<string, unknown>;
     createdAt: Date;
   }>,
 ) {
@@ -281,6 +192,7 @@ function agentWalletRowsToAccountWallets(
       address: wallet.address,
       venue: wallet.venue,
       purpose: wallet.purpose,
+      metadata: redactWalletMetadataSecrets(wallet.metadata),
       createdAt: wallet.createdAt,
     }));
   }
@@ -292,6 +204,7 @@ function agentWalletRowsToAccountWallets(
       address: agent.walletAddress,
       venue: null,
       purpose: "primary",
+      metadata: {},
       createdAt: agent.createdAt,
     },
   ];
@@ -363,6 +276,65 @@ function generatePregeneratedWalletClaimToken(): string {
   return `stwd_claim_${crypto.randomUUID().replaceAll("-", "")}${crypto.randomUUID().replaceAll("-", "")}`;
 }
 
+function pregeneratedClaimPlatformId(claimTokenHash: string, expiresAt: Date): string {
+  return `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}:${expiresAt.getTime()}`;
+}
+
+function isPregeneratedClaimPlatformId(platformId: string | null | undefined): boolean {
+  return (
+    platformId?.startsWith(PREGENERATED_CLAIM_PREFIX) ||
+    platformId?.startsWith(CLAIMED_PREGENERATED_CLAIM_PREFIX) ||
+    platformId?.startsWith(EXPIRED_PREGENERATED_CLAIM_PREFIX) ||
+    false
+  );
+}
+
+function redactPregeneratedClaimPlatformId(agent: AgentIdentity): AgentIdentity {
+  if (!isPregeneratedClaimPlatformId(agent.platformId)) return agent;
+  const { platformId: _platformId, ...redacted } = agent;
+  return redacted;
+}
+
+function pregeneratedClaimStatus(platformId: string | null): {
+  status: "claimable" | "claimed" | "expired" | "unknown";
+  claimExpiresAt: string | null;
+} {
+  if (!platformId) return { status: "unknown", claimExpiresAt: null };
+  if (platformId.startsWith(CLAIMED_PREGENERATED_CLAIM_PREFIX)) {
+    return { status: "claimed", claimExpiresAt: null };
+  }
+  if (platformId.startsWith(EXPIRED_PREGENERATED_CLAIM_PREFIX)) {
+    return { status: "expired", claimExpiresAt: null };
+  }
+  if (!platformId.startsWith(PREGENERATED_CLAIM_PREFIX)) {
+    return { status: "unknown", claimExpiresAt: null };
+  }
+  const [, expiresAtRaw] = platformId.slice(PREGENERATED_CLAIM_PREFIX.length).split(":");
+  const expiresAtMs = Number(expiresAtRaw);
+  if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) {
+    return { status: "claimable", claimExpiresAt: null };
+  }
+  return {
+    status: expiresAtMs <= Date.now() ? "expired" : "claimable",
+    claimExpiresAt: new Date(expiresAtMs).toISOString(),
+  };
+}
+
+function normalizePregeneratedClaimExpiry(value: unknown): Date | string {
+  if (value === undefined || value === null) {
+    return new Date(Date.now() + DEFAULT_PREGENERATED_CLAIM_TTL_MS);
+  }
+  const seconds = Number(value);
+  if (!Number.isSafeInteger(seconds)) {
+    return "claimExpiresInSeconds must be an integer number of seconds";
+  }
+  const ttlMs = seconds * 1000;
+  if (ttlMs < MIN_PREGENERATED_CLAIM_TTL_MS || ttlMs > MAX_PREGENERATED_CLAIM_TTL_MS) {
+    return "claimExpiresInSeconds must be between 300 and 2592000 seconds";
+  }
+  return new Date(Date.now() + ttlMs);
+}
+
 async function deleteAgentRows(agentId: string, tenantId: string): Promise<void> {
   await db.transaction(async (tx) => {
     await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
@@ -377,9 +349,13 @@ async function deleteAgentRows(agentId: string, tenantId: string): Promise<void>
 
 async function deleteAgentWalletRows(
   agentId: string,
-  chainFamily: "evm" | "solana",
-  venue: string,
+  chainFamily: AgentWalletChainFamily,
+  venue: string | null,
 ): Promise<void> {
+  const venueCondition =
+    venue === null ? sql`${encryptedChainKeys.venue} is null` : eq(encryptedChainKeys.venue, venue);
+  const walletVenueCondition =
+    venue === null ? sql`${agentWallets.venue} is null` : eq(agentWallets.venue, venue);
   await db.transaction(async (tx) => {
     await tx
       .delete(encryptedChainKeys)
@@ -387,7 +363,7 @@ async function deleteAgentWalletRows(
         and(
           eq(encryptedChainKeys.agentId, agentId),
           eq(encryptedChainKeys.chainFamily, chainFamily),
-          eq(encryptedChainKeys.venue, venue),
+          venueCondition,
         ),
       );
     await tx
@@ -396,7 +372,7 @@ async function deleteAgentWalletRows(
         and(
           eq(agentWallets.agentId, agentId),
           eq(agentWallets.chainFamily, chainFamily),
-          eq(agentWallets.venue, venue),
+          walletVenueCondition,
         ),
       );
   });
@@ -510,13 +486,48 @@ function normalizeSignerPermissions(value: unknown): string[] {
           throw new Error("permissions must be non-empty strings");
         }
         const normalized = permission.trim();
-        if (normalized.length > 128) {
+        if (normalized.length > 128)
           throw new Error("permissions entries must be 128 chars or less");
+        return normalized;
+      }),
+    ),
+  ];
+}
+
+function normalizeSignerPolicyIds(value: unknown): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new Error("policyIds must be an array of policy rule ids");
+  if (value.length > 64) throw new Error("policyIds cannot contain more than 64 entries");
+  return [
+    ...new Set(
+      value.map((policyId) => {
+        if (typeof policyId !== "string" || !policyId.trim()) {
+          throw new Error("policyIds must contain non-empty strings");
+        }
+        const normalized = policyId.trim();
+        if (!isValidPolicyRuleId(normalized)) {
+          throw new Error("policyIds entries must be valid policy rule ids");
         }
         return normalized;
       }),
     ),
   ];
+}
+
+async function validateSignerPolicyIdsForAgent(
+  agentId: string,
+  policyIds: string[],
+): Promise<void> {
+  if (policyIds.length === 0) return;
+  const rows = await db
+    .select({ id: policies.id })
+    .from(policies)
+    .where(and(eq(policies.agentId, agentId), inArray(policies.id, policyIds)));
+  const found = new Set(rows.map((row) => row.id));
+  const missing = policyIds.filter((policyId) => !found.has(policyId));
+  if (missing.length > 0) {
+    throw new Error(`policyIds must reference policies on this agent: ${missing.join(", ")}`);
+  }
 }
 
 function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAgeMs = 5 * 60_000) {
@@ -566,24 +577,32 @@ function mergeSignerMetadataPreservingReserved(
   return merged;
 }
 
-function normalizeQuorumMemberSignerIds(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error("memberSignerIds must be a non-empty array");
+function normalizeOptionalQuorumMemberIds(value: unknown, field: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be an array`);
   }
   if (value.length > MAX_AGENT_KEY_QUORUM_MEMBERS) {
-    throw new Error(`memberSignerIds cannot contain more than ${MAX_AGENT_KEY_QUORUM_MEMBERS}`);
+    throw new Error(`${field} cannot contain more than ${MAX_AGENT_KEY_QUORUM_MEMBERS}`);
   }
   const ids = [
     ...new Set(
       value.map((id) => {
         if (typeof id !== "string" || !id.trim()) {
-          throw new Error("memberSignerIds must contain non-empty strings");
+          throw new Error(`${field} must contain non-empty strings`);
         }
         return id.trim();
       }),
     ),
   ];
   return ids;
+}
+
+function normalizeQuorumMemberSignerIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error("memberSignerIds must be a non-empty array");
+  }
+  return normalizeOptionalQuorumMemberIds(value, "memberSignerIds");
 }
 
 function normalizeQuorumThreshold(value: unknown, memberCount: number): number {
@@ -599,6 +618,8 @@ async function validateQuorumMembers(
   tenantId: string,
   agentId: string,
   memberSignerIds: string[],
+  memberQuorumIds: string[] = [],
+  selfQuorumId?: string,
 ): Promise<string | null> {
   const rows = await db
     .select({ id: agentSigners.id, status: agentSigners.status })
@@ -609,6 +630,19 @@ async function validateQuorumMembers(
     const status = byId.get(id);
     if (!status) return `memberSignerIds contains unknown signer ${id}`;
     if (status !== "active") return `memberSignerIds contains inactive signer ${id}`;
+  }
+  if (memberQuorumIds.length > 0) {
+    const quorumRows = await db
+      .select({ id: agentKeyQuorums.id, status: agentKeyQuorums.status })
+      .from(agentKeyQuorums)
+      .where(and(eq(agentKeyQuorums.tenantId, tenantId), eq(agentKeyQuorums.agentId, agentId)));
+    const quorumById = new Map(quorumRows.map((row) => [row.id, row.status]));
+    for (const id of memberQuorumIds) {
+      if (selfQuorumId && id === selfQuorumId) return "memberQuorumIds cannot include itself";
+      const status = quorumById.get(id);
+      if (!status) return `memberQuorumIds contains unknown quorum ${id}`;
+      if (status !== "active") return `memberQuorumIds contains inactive quorum ${id}`;
+    }
   }
   return null;
 }
@@ -621,6 +655,7 @@ function toAgentKeyQuorumResponse(row: typeof agentKeyQuorums.$inferSelect) {
     name: row.name,
     threshold: row.threshold,
     memberSignerIds: row.memberSignerIds,
+    memberQuorumIds: row.memberQuorumIds,
     permissions: row.permissions,
     metadata: row.metadata,
     status: row.status,
@@ -691,10 +726,13 @@ function toAgentSignerResponse(row: typeof agentSigners.$inferSelect) {
     signerType: row.signerType,
     subjectType: row.subjectType,
     subjectId: row.subjectId,
+    keyType: row.keyType,
+    publicKey: row.publicKey,
     address: row.address,
     chainFamily: row.chainFamily,
     label: row.label,
     permissions: row.permissions,
+    policyIds: row.policyIds,
     metadata: redactSignerMetadata(row.metadata),
     hasCredential: typeof row.metadata.credentialHash === "string",
     status: row.status,
@@ -702,6 +740,110 @@ function toAgentSignerResponse(row: typeof agentSigners.$inferSelect) {
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
+}
+
+const TRADE_POLICY_DEFAULTS = {
+  dailyCap: 1000,
+  perOrderCap: 500,
+  leverageCap: 10,
+  allowedAssets: ["BTC", "ETH", "BNB"],
+  allowedVenues: ["hyperliquid"],
+} as const;
+
+const TRADE_POLICY_LAYER_1_MAX = {
+  dailyCap: 50_000,
+  perOrderCap: 10_000,
+  leverageCap: 50,
+} as const;
+
+type AgentTradePolicyResponse = {
+  agentId: string;
+  dailyCap: number;
+  perOrderCap: number;
+  leverageCap: number;
+  allowedAssets: string[];
+  allowedVenues: string[];
+  updatedAt: string;
+  updatedBy: string;
+  updatedReason: string | null;
+};
+
+type AgentTradePolicySnapshot = Omit<
+  AgentTradePolicyResponse,
+  "updatedAt" | "updatedBy" | "updatedReason"
+>;
+
+type AgentTradePolicyPatch = {
+  dailyCap?: unknown;
+  perOrderCap?: unknown;
+  leverageCap?: unknown;
+  allowedAssets?: unknown;
+  allowedVenues?: unknown;
+  reason?: unknown;
+  multisigApproval?: unknown;
+};
+
+function parseNumericPolicyValue(value: string | number): number {
+  return typeof value === "number" ? value : Number(value);
+}
+
+function policyRowToResponse(row: typeof agentPolicies.$inferSelect): AgentTradePolicyResponse {
+  return {
+    agentId: row.agentId,
+    dailyCap: parseNumericPolicyValue(row.dailyCapUsd),
+    perOrderCap: parseNumericPolicyValue(row.perOrderCapUsd),
+    leverageCap: parseNumericPolicyValue(row.leverageCap),
+    allowedAssets: row.allowedAssets,
+    allowedVenues: row.allowedVenues,
+    updatedAt: row.updatedAt.toISOString(),
+    updatedBy: row.updatedBy,
+    updatedReason: row.updatedReason ?? null,
+  };
+}
+
+function defaultPolicySnapshot(agentId: string): AgentTradePolicySnapshot {
+  return {
+    agentId,
+    dailyCap: TRADE_POLICY_DEFAULTS.dailyCap,
+    perOrderCap: TRADE_POLICY_DEFAULTS.perOrderCap,
+    leverageCap: TRADE_POLICY_DEFAULTS.leverageCap,
+    allowedAssets: [...TRADE_POLICY_DEFAULTS.allowedAssets],
+    allowedVenues: [...TRADE_POLICY_DEFAULTS.allowedVenues],
+  };
+}
+
+function policyDiff(before: AgentTradePolicySnapshot, after: AgentTradePolicyResponse) {
+  return {
+    dailyCap: { before: before.dailyCap, after: after.dailyCap },
+    perOrderCap: { before: before.perOrderCap, after: after.perOrderCap },
+    leverageCap: { before: before.leverageCap, after: after.leverageCap },
+    allowedAssets: { before: before.allowedAssets, after: after.allowedAssets },
+    allowedVenues: { before: before.allowedVenues, after: after.allowedVenues },
+  };
+}
+
+function validatePolicyNumber(
+  name: "dailyCap" | "perOrderCap" | "leverageCap",
+  value: unknown,
+): number | string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return `${name} must be a positive number`;
+  }
+  if (value > TRADE_POLICY_LAYER_1_MAX[name]) {
+    return `${name} exceeds platform ceiling ${TRADE_POLICY_LAYER_1_MAX[name]}`;
+  }
+  return value;
+}
+
+function validatePolicyStringArray(name: string, value: unknown): string[] | string {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((item) => typeof item !== "string" || item.length === 0)
+  ) {
+    return `${name} must be a non-empty string array`;
+  }
+  return [...new Set(value)];
 }
 
 // ─── Create agent ─────────────────────────────────────────────────────────────
@@ -720,6 +862,9 @@ agentRoutes.post("/", async (c) => {
   if (mfaResponse) return mfaResponse;
 
   const tenantId = c.get("tenantId");
+  if (!tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant id required" }, 400);
+  }
   const body = await safeJsonParse<{
     id?: string;
     name: string;
@@ -803,6 +948,7 @@ agentRoutes.post("/pregenerated", async (c) => {
   const body = await safeJsonParse<{
     count?: unknown;
     namePrefix?: unknown;
+    claimExpiresInSeconds?: unknown;
     applyPolicies?: PolicyRule[];
   }>(c);
 
@@ -831,6 +977,11 @@ agentRoutes.post("/pregenerated", async (c) => {
     );
   }
 
+  const claimExpiresAt = normalizePregeneratedClaimExpiry(body.claimExpiresInSeconds);
+  if (typeof claimExpiresAt === "string") {
+    return c.json<ApiResponse>({ ok: false, error: claimExpiresAt }, 400);
+  }
+
   if (body.applyPolicies !== undefined) {
     if (!Array.isArray(body.applyPolicies)) {
       return c.json<ApiResponse>({ ok: false, error: "applyPolicies must be an array" }, 400);
@@ -857,7 +1008,7 @@ agentRoutes.post("/pregenerated", async (c) => {
     }
   }
 
-  const wallets: Array<{ agent: AgentIdentity; claimToken: string }> = [];
+  const wallets: Array<{ agent: AgentIdentity; claimToken: string; claimExpiresAt: string }> = [];
   const persistedPolicies = body.applyPolicies?.map(toPersistedPolicyRule);
 
   try {
@@ -865,7 +1016,7 @@ agentRoutes.post("/pregenerated", async (c) => {
       const agentId = generateAgentId();
       const claimToken = generatePregeneratedWalletClaimToken();
       const claimTokenHash = hashSha256Hex(claimToken);
-      const platformId = `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+      const platformId = pregeneratedClaimPlatformId(claimTokenHash, claimExpiresAt);
       const name = count === 1 ? namePrefix : `${namePrefix} ${index + 1}`;
 
       await writeAgentAudit(c, {
@@ -873,7 +1024,7 @@ agentRoutes.post("/pregenerated", async (c) => {
         action: "agent.pregenerated_user_wallet.create.authorized",
         resourceType: "agent",
         resourceId: agentId,
-        metadata: { batch: count > 1, claimTokenHash },
+        metadata: { batch: count > 1, claimExpiresAt: claimExpiresAt.toISOString() },
       });
 
       const identity = await vault.createAgent(tenantId, agentId, name, platformId);
@@ -906,7 +1057,7 @@ agentRoutes.post("/pregenerated", async (c) => {
           metadata: {
             batch: count > 1,
             appliedPolicyCount: persistedPolicies?.length ?? 0,
-            claimTokenHash,
+            claimExpiresAt: claimExpiresAt.toISOString(),
           },
         });
       } catch (error) {
@@ -914,7 +1065,11 @@ agentRoutes.post("/pregenerated", async (c) => {
         throw error;
       }
 
-      wallets.push({ agent: identity, claimToken });
+      wallets.push({
+        agent: redactPregeneratedClaimPlatformId(identity),
+        claimToken,
+        claimExpiresAt: claimExpiresAt.toISOString(),
+      });
     }
   } catch (error) {
     return c.json<ApiResponse>(
@@ -932,7 +1087,7 @@ agentRoutes.post("/pregenerated", async (c) => {
   setNoStoreHeaders(c);
   return c.json<
     ApiResponse<{
-      wallets: Array<{ agent: AgentIdentity; claimToken: string }>;
+      wallets: Array<{ agent: AgentIdentity; claimToken: string; claimExpiresAt: string }>;
       warning: string;
     }>
   >(
@@ -970,7 +1125,162 @@ agentRoutes.get("/", async (c) => {
   });
   return c.json<ApiResponse<{ agents: AgentIdentity[]; limit: number; offset: number }>>({
     ok: true,
-    data: { agents: tenantAgents, limit, offset },
+    data: { agents: tenantAgents.map(redactPregeneratedClaimPlatformId), limit, offset },
+  });
+});
+
+// ─── Pregenerated wallet inventory and claim-token rotation ──────────────────
+
+agentRoutes.get("/pregenerated", async (c) => {
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Pregenerated wallet inventory requires tenant-level authentication",
+      },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const limit = parseListLimit(c.req.query("limit"));
+  const offset = parseListOffset(c.req.query("offset"));
+  const rows = await db
+    .select()
+    .from(agents)
+    .where(and(eq(agents.tenantId, tenantId), eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE)))
+    .limit(limit)
+    .offset(offset);
+
+  return c.json<
+    ApiResponse<{
+      wallets: Array<{
+        agent: AgentIdentity;
+        status: "claimable" | "claimed" | "expired" | "unknown";
+        claimExpiresAt: string | null;
+      }>;
+      limit: number;
+      offset: number;
+    }>
+  >({
+    ok: true,
+    data: {
+      wallets: rows.map((row) => ({
+        agent: redactPregeneratedClaimPlatformId({
+          id: row.id,
+          tenantId: row.tenantId,
+          name: row.name,
+          walletAddress: row.walletAddress,
+          erc8004TokenId: row.erc8004TokenId ?? undefined,
+          platformId: row.platformId ?? undefined,
+          createdAt: row.createdAt,
+        }),
+        ...pregeneratedClaimStatus(row.platformId),
+      })),
+      limit,
+      offset,
+    },
+  });
+});
+
+agentRoutes.post("/pregenerated/:agentId/claim-token/rotate", async (c) => {
+  setNoStoreHeaders(c);
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Pregenerated wallet claim-token rotation requires owner or admin session",
+      },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Pregenerated wallet claim-token rotation");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const body = await safeJsonParse<{ claimExpiresInSeconds?: unknown }>(c);
+  const claimExpiresAt = normalizePregeneratedClaimExpiry(body?.claimExpiresInSeconds);
+  if (typeof claimExpiresAt === "string") {
+    return c.json<ApiResponse>({ ok: false, error: claimExpiresAt }, 400);
+  }
+
+  const [existing] = await db
+    .select()
+    .from(agents)
+    .where(
+      and(
+        eq(agents.id, agentId),
+        eq(agents.tenantId, tenantId),
+        eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+      ),
+    );
+  if (!existing) {
+    return c.json<ApiResponse>({ ok: false, error: "Pregenerated wallet not found" }, 404);
+  }
+  if (existing.platformId?.startsWith(CLAIMED_PREGENERATED_CLAIM_PREFIX)) {
+    return c.json<ApiResponse>({ ok: false, error: "Pregenerated wallet is already claimed" }, 409);
+  }
+
+  const claimToken = generatePregeneratedWalletClaimToken();
+  const claimTokenHash = hashSha256Hex(claimToken);
+  const platformId = pregeneratedClaimPlatformId(claimTokenHash, claimExpiresAt);
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.pregenerated_user_wallet.claim_token.rotate.authorized",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { claimExpiresAt: claimExpiresAt.toISOString() },
+  });
+
+  const [updated] = await db
+    .update(agents)
+    .set({ platformId, updatedAt: new Date() })
+    .where(
+      and(
+        eq(agents.id, agentId),
+        eq(agents.tenantId, tenantId),
+        eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+      ),
+    )
+    .returning();
+  if (!updated) {
+    return c.json<ApiResponse>({ ok: false, error: "Pregenerated wallet not found" }, 404);
+  }
+
+  await writeAgentAudit(c, {
+    tenantId,
+    action: "agent.pregenerated_user_wallet.claim_token.rotate",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: { claimExpiresAt: claimExpiresAt.toISOString() },
+  });
+
+  return c.json<
+    ApiResponse<{
+      agent: AgentIdentity;
+      claimToken: string;
+      claimExpiresAt: string;
+      warning: string;
+    }>
+  >({
+    ok: true,
+    data: {
+      agent: redactPregeneratedClaimPlatformId({
+        id: updated.id,
+        tenantId: updated.tenantId,
+        name: updated.name,
+        walletAddress: updated.walletAddress,
+        erc8004TokenId: updated.erc8004TokenId ?? undefined,
+        platformId: updated.platformId ?? undefined,
+        createdAt: updated.createdAt,
+      }),
+      claimToken,
+      claimExpiresAt: claimExpiresAt.toISOString(),
+      warning:
+        "Claim tokens are shown once. Steward stores only SHA-256 hashes and cannot recover lost claim tokens.",
+    },
   });
 });
 
@@ -1064,7 +1374,7 @@ agentRoutes.post("/:agentId/token", async (c) => {
 // Create venue-scoped wallet (Sprint 4)
 //
 // POST /agents/:agentId/wallets
-// Body: { venue: string, chainType: "evm" | "solana", purpose?: string }
+// Body: { venue?: string, scope?: string, chainType: "evm" | "solana" | "bitcoin", purpose?: string }
 //
 // Creates a venue-scoped wallet under (agentId, chainFamily, venue).
 // Required before trading on a venue: /v1/trade/sessions and
@@ -1096,18 +1406,43 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
 
   const body = await safeJsonParse<{
     venue?: string;
-    chainType?: "evm" | "solana";
+    scope?: string;
+    chainType?: AgentWalletChainFamily;
     purpose?: string;
+    bitcoinNetwork?: BitcoinNetwork;
+    bitcoinAddressType?: BitcoinAddressType;
+    account?: number;
+    change?: 0 | 1;
+    index?: number;
   }>(c);
 
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
-  if (!isNonEmptyString(body.venue)) {
-    return c.json<ApiResponse>({ ok: false, error: "venue is required" }, 400);
+  if (body.chainType !== "evm" && body.chainType !== "solana" && body.chainType !== "bitcoin") {
+    return c.json<ApiResponse>(
+      { ok: false, error: 'chainType must be "evm", "solana", or "bitcoin"' },
+      400,
+    );
   }
-  if (body.chainType !== "evm" && body.chainType !== "solana") {
-    return c.json<ApiResponse>({ ok: false, error: 'chainType must be "evm" or "solana"' }, 400);
+  const scope = body.scope ?? body.venue;
+  if (body.chainType !== "bitcoin" && !isNonEmptyString(scope)) {
+    return c.json<ApiResponse>({ ok: false, error: "venue or scope is required" }, 400);
+  }
+  if (body.bitcoinNetwork !== undefined && !["mainnet", "testnet"].includes(body.bitcoinNetwork)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: 'bitcoinNetwork must be "mainnet" or "testnet"' },
+      400,
+    );
+  }
+  if (
+    body.bitcoinAddressType !== undefined &&
+    !["p2wpkh", "p2tr"].includes(body.bitcoinAddressType)
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: 'bitcoinAddressType must be "p2wpkh" or "p2tr"' },
+      400,
+    );
   }
 
   try {
@@ -1117,16 +1452,29 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
       resourceType: "agent",
       resourceId: agentId,
       metadata: {
-        venue: body.venue,
+        venue: scope ?? null,
         chainType: body.chainType,
         purpose: body.purpose ?? null,
+        bitcoinNetwork: body.bitcoinNetwork ?? null,
+        bitcoinAddressType: body.bitcoinAddressType ?? null,
       },
     });
     const wallet = await vault.createWallet({
       agentId,
       venue: body.venue,
+      scope: body.scope,
       chainType: body.chainType,
       purpose: body.purpose,
+      bitcoin:
+        body.chainType === "bitcoin"
+          ? {
+              network: body.bitcoinNetwork,
+              addressType: body.bitcoinAddressType,
+              account: body.account,
+              change: body.change,
+              index: body.index,
+            }
+          : undefined,
     });
     try {
       await writeAgentAudit(c, {
@@ -1135,10 +1483,11 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
         resourceType: "agent",
         resourceId: agentId,
         metadata: {
-          venue: body.venue,
+          venue: wallet.venue,
           chainType: body.chainType,
           purpose: body.purpose ?? null,
           address: wallet.address,
+          walletMetadata: redactWalletMetadataSecrets(wallet.metadata),
         },
       });
     } catch (error) {
@@ -1148,12 +1497,13 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
     return c.json<
       ApiResponse<{
         agentId: string;
-        chainFamily: "evm" | "solana";
-        venue: string;
+        chainFamily: AgentWalletChainFamily;
+        venue: string | null;
         purpose: string | null;
         address: string;
+        metadata: Record<string, unknown>;
       }>
-    >({ ok: true, data: wallet });
+    >({ ok: true, data: { ...wallet, metadata: redactWalletMetadataSecrets(wallet.metadata) } });
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : "Unknown error";
     return c.json<ApiResponse>({ ok: false, error: message }, 400);
@@ -1201,22 +1551,15 @@ agentRoutes.get("/:agentId/policy", async (c) => {
 });
 
 agentRoutes.put("/:agentId/policy", async (c) => {
-  // SECURITY: policy/cap changes are PATRON/OWNER-only, never the agent itself.
-  // An agent must NOT be able to raise its own caps, leverage, or withdrawal
-  // allowlist — that would defeat the entire policy system. Require tenant-level
-  // auth (tenant API key / owner session); reject agent-token auth.
-  if (c.get("authType") === "agent-token") {
+  if (c.get("authType") !== "agent-token") {
     return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Forbidden: agents cannot modify their own policy; patron/owner auth required",
-      },
+      { ok: false, error: "Agent policy updates require agent JWT authentication" },
       403,
     );
   }
-  if (!requireTenantLevel(c)) {
+  if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Policy updates require patron/owner (tenant-level) authentication" },
+      { ok: false, error: "Forbidden: token scope does not match agent" },
       403,
     );
   }
@@ -1339,6 +1682,512 @@ agentRoutes.put("/:agentId/policy", async (c) => {
   });
 });
 
+// ─── Get agent ────────────────────────────────────────────────────────────────
+
+agentRoutes.get("/:agentId", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agent = await vault.getAgent(tenantId, c.req.param("agentId"));
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+  return c.json<ApiResponse<AgentIdentity>>({
+    ok: true,
+    data: redactPregeneratedClaimPlatformId(agent),
+  });
+});
+
+// ─── Delete agent ─────────────────────────────────────────────────────────────
+
+agentRoutes.delete("/:agentId", async (c) => {
+  if (!requireTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Agent deletion requires owner or admin session",
+      },
+      403,
+    );
+  }
+  const mfaResponse = requireRecentAdminMfa(c, "Agent deletion");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const deleteSnapshot = await db.transaction(async (tx) => {
+    const [agentRow] = await tx
+      .select()
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    return {
+      agent: agentRow ?? null,
+      approvalQueue: await tx
+        .select()
+        .from(approvalQueue)
+        .where(eq(approvalQueue.agentId, agentId)),
+      transactions: await tx.select().from(transactions).where(eq(transactions.agentId, agentId)),
+      policies: await tx.select().from(policies).where(eq(policies.agentId, agentId)),
+      encryptedChainKeys: await tx
+        .select()
+        .from(encryptedChainKeys)
+        .where(eq(encryptedChainKeys.agentId, agentId)),
+      encryptedKeys: await tx
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, agentId)),
+      agentWallets: await tx.select().from(agentWallets).where(eq(agentWallets.agentId, agentId)),
+    };
+  });
+  let agentRowsDeleted = false;
+  try {
+    await writeAgentAudit(c, {
+      tenantId,
+      action: "agent.delete.authorized",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { walletAddress: agent.walletAddress },
+    });
+    const issuedBefore = Math.floor(Date.now() / 1000);
+    await revocationStore.revokeAgentTokens(agentId, issuedBefore);
+    await db.transaction(async (tx) => {
+      // Cascade delete in dependency order
+      await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
+      await tx.delete(transactions).where(eq(transactions.agentId, agentId));
+      await tx.delete(policies).where(eq(policies.agentId, agentId));
+      await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
+      await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
+      await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
+      await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    });
+    agentRowsDeleted = true;
+    await writeAgentAudit(c, {
+      tenantId,
+      action: "agent.delete",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
+    });
+
+    return c.json<ApiResponse<{ deleted: string }>>({
+      ok: true,
+      data: { deleted: agentId },
+    });
+  } catch (e: unknown) {
+    if (agentRowsDeleted && deleteSnapshot.agent) {
+      await db.transaction(async (tx) => {
+        await tx.insert(agents).values(deleteSnapshot.agent).onConflictDoNothing();
+        if (deleteSnapshot.agentWallets.length > 0) {
+          await tx.insert(agentWallets).values(deleteSnapshot.agentWallets).onConflictDoNothing();
+        }
+        if (deleteSnapshot.encryptedKeys.length > 0) {
+          await tx.insert(encryptedKeys).values(deleteSnapshot.encryptedKeys).onConflictDoNothing();
+        }
+        if (deleteSnapshot.encryptedChainKeys.length > 0) {
+          await tx
+            .insert(encryptedChainKeys)
+            .values(deleteSnapshot.encryptedChainKeys)
+            .onConflictDoNothing();
+        }
+        if (deleteSnapshot.policies.length > 0) {
+          await tx.insert(policies).values(deleteSnapshot.policies).onConflictDoNothing();
+        }
+        if (deleteSnapshot.transactions.length > 0) {
+          await tx.insert(transactions).values(deleteSnapshot.transactions).onConflictDoNothing();
+        }
+        if (deleteSnapshot.approvalQueue.length > 0) {
+          await tx.insert(approvalQueue).values(deleteSnapshot.approvalQueue).onConflictDoNothing();
+        }
+      });
+    }
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Failed to delete agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
+// ─── Agent balance ────────────────────────────────────────────────────────────
+
+agentRoutes.get("/:agentId/balance", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const chainId = parseOptionalChainId(c.req.query("chainId"));
+  if (typeof chainId === "string") {
+    return c.json<ApiResponse>({ ok: false, error: chainId }, 400);
+  }
+
+  try {
+    const balance = await vault.getBalance(tenantId, agentId, chainId);
+    return c.json<ApiResponse>({
+      ok: true,
+      data: {
+        agentId,
+        walletAddress: balance.walletAddress,
+        balances: {
+          native: balance.native.toString(),
+          nativeFormatted: balance.nativeFormatted,
+          chainId: balance.chainId,
+          symbol: balance.symbol,
+        },
+      },
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
+});
+
+// ─── Agent token balances (ERC-20) ────────────────────────────────────────────
+
+agentRoutes.get("/:agentId/tokens", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  if (!agentId) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent id required" }, 400);
+  }
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const chainId = parseOptionalChainId(c.req.query("chainId"));
+  if (typeof chainId === "string") {
+    return c.json<ApiResponse>({ ok: false, error: chainId }, 400);
+  }
+  const tokensParam = c.req.query("tokens");
+  const customTokens = parseCustomTokenList(tokensParam);
+  if (typeof customTokens === "string") {
+    return c.json<ApiResponse>({ ok: false, error: customTokens }, 400);
+  }
+
+  try {
+    // Fetch native balance
+    const balance = await vault.getBalance(tenantId, agentId, chainId);
+
+    // Fetch ERC-20 token balances
+    const tokenBalances = await vault.getTokenBalances(tenantId, agentId, chainId, customTokens);
+
+    return c.json<ApiResponse>({
+      ok: true,
+      data: {
+        agentId,
+        walletAddress: balance.walletAddress,
+        chainId: balance.chainId,
+        native: {
+          symbol: balance.symbol,
+          balance: balance.native.toString(),
+          formatted: balance.nativeFormatted,
+        },
+        tokens: tokenBalances,
+      },
+    });
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : "Unknown error";
+    return c.json<ApiResponse>({ ok: false, error: message }, 400);
+  }
+});
+
+// ─── Agent spend summary ─────────────────────────────────────────────────────
+
+agentRoutes.get("/:agentId/spend", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const txStats = await getTransactionStats(agentId);
+  const sponsorship = publicGasSponsorshipState(await readTenantGasSponsorshipConfig(tenantId));
+  const oneMonthAgo = new Date(Date.now() - 30 * 86400_000);
+  const [monthlyStats] = await db
+    .select({
+      spentThisMonth: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
+    })
+    .from(transactions)
+    .where(
+      and(
+        eq(transactions.agentId, agentId),
+        gte(transactions.createdAt, oneMonthAgo),
+        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+      ),
+    );
+
+  const realtimeEnabled = isRedisAvailable();
+  const realtimePeriods = realtimeEnabled
+    ? await Promise.all(
+        SPEND_PERIODS.map(async (period) => ({
+          period,
+          spentUsd: await getSpend(agentId, period),
+          byHost: await getSpendByHost(agentId, period),
+        })),
+      )
+    : SPEND_PERIODS.map((period) => ({ period, spentUsd: null, byHost: {} }));
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: {
+      agentId,
+      walletAddress: agent.walletAddress,
+      onchain: {
+        todayWei: txStats.spentToday.toString(),
+        weekWei: txStats.spentThisWeek.toString(),
+        monthWei: monthlyStats?.spentThisMonth ?? "0",
+      },
+      realtime: {
+        enabled: realtimeEnabled,
+        periods: realtimePeriods,
+      },
+      sponsorship: {
+        enabled: sponsorship.enabled,
+        provider: sponsorship.provider,
+        mode: sponsorship.mode,
+        circuitBreakerEnabled: sponsorship.circuitBreakerEnabled,
+      },
+    },
+  });
+});
+
+// ─── Agent account aggregation ───────────────────────────────────────────────
+
+async function getAgentAccountAggregation(c: Context<{ Variables: AppVariables }>) {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  if (!tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant id required" }, 400);
+  }
+  const requestedAgentId = c.req.param("agentId");
+  if (!requestedAgentId) {
+    return c.json<ApiResponse>({ ok: false, error: "agentId is required" }, 400);
+  }
+  const agentId: string = requestedAgentId;
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const chainId = parseOptionalChainId(c.req.query("chainId"));
+  if (typeof chainId === "string") {
+    return c.json<ApiResponse>({ ok: false, error: chainId }, 400);
+  }
+  const tokensParam = c.req.query("tokens");
+  const customTokens = parseCustomTokenList(tokensParam);
+  if (typeof customTokens === "string") {
+    return c.json<ApiResponse>({ ok: false, error: customTokens }, 400);
+  }
+
+  const [
+    walletRows,
+    txStats,
+    monthlyStats,
+    balanceResult,
+    tokenBalancesResult,
+    gasSponsorshipConfig,
+  ] = await Promise.all([
+    db
+      .select({
+        id: agentWallets.id,
+        chainFamily: agentWallets.chainFamily,
+        address: agentWallets.address,
+        venue: agentWallets.venue,
+        purpose: agentWallets.purpose,
+        metadata: agentWallets.metadata,
+        createdAt: agentWallets.createdAt,
+      })
+      .from(agentWallets)
+      .where(eq(agentWallets.agentId, agentId)),
+    getTransactionStats(agentId),
+    db
+      .select({
+        spentThisMonth: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
+      })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.agentId, agentId),
+          gte(transactions.createdAt, new Date(Date.now() - 30 * 86400_000)),
+          sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+        ),
+      ),
+    vault.getBalance(tenantId, agentId, chainId).catch((error: unknown) => ({
+      unavailable: true as const,
+      reason: sanitizeErrorMessage(error),
+    })),
+    vault.getTokenBalances(tenantId, agentId, chainId, customTokens).catch((error: unknown) => ({
+      unavailable: true as const,
+      reason: sanitizeErrorMessage(error),
+    })),
+    readTenantGasSponsorshipConfig(tenantId),
+  ]);
+  const sponsorship = publicGasSponsorshipState(gasSponsorshipConfig);
+
+  const wallets = agentWalletRowsToAccountWallets(agent, walletRows);
+  const addresses = wallets.reduce<Record<string, string>>((acc, wallet) => {
+    acc[wallet.chainFamily] = wallet.address;
+    return acc;
+  }, {});
+  const portfolioChainId =
+    "unavailable" in balanceResult ? (chainId ?? null) : balanceResult.chainId;
+  const nativeAsset: PortfolioAsset | null =
+    "unavailable" in balanceResult
+      ? null
+      : await (async () => {
+          const balance = balanceResult.native.toString();
+          const usdPrice = await priceOracle.getNativeUsdPrice(balanceResult.chainId);
+          const usdValue = await priceOracle.weiToUsd(balance, balanceResult.chainId);
+          return {
+            token: "native",
+            symbol: balanceResult.symbol,
+            balance,
+            formatted: balanceResult.nativeFormatted,
+            decimals: 18,
+            usdPrice,
+            usdValue,
+            usdPriceText: priceToScaledText(usdPrice),
+            usdValueText: tokenAmountUsdText(balance, 18, usdPrice),
+          };
+        })();
+  const tokenAssets: PortfolioAsset[] =
+    "unavailable" in tokenBalancesResult
+      ? []
+      : await Promise.all(
+          tokenBalancesResult.map(async (token) => {
+            const usdPrice =
+              portfolioChainId === null
+                ? null
+                : await priceOracle.getTokenUsdPrice(portfolioChainId, token.token);
+            const usdValue =
+              portfolioChainId === null
+                ? null
+                : await priceOracle.weiToUsd(token.balance, portfolioChainId, token.token);
+            return {
+              token: token.token,
+              symbol: token.symbol,
+              balance: token.balance,
+              formatted: token.formatted,
+              decimals: token.decimals,
+              usdPrice,
+              usdValue,
+              usdPriceText: priceToScaledText(usdPrice),
+              usdValueText: tokenAmountUsdText(token.balance, token.decimals, usdPrice),
+            };
+          }),
+        );
+  const portfolioUnavailableReasons = [
+    "unavailable" in balanceResult ? balanceResult.reason : null,
+    "unavailable" in tokenBalancesResult ? tokenBalancesResult.reason : null,
+  ].filter((reason): reason is string => Boolean(reason));
+  const totalUsd = sumNullableUsd([
+    nativeAsset?.usdValue ?? null,
+    ...tokenAssets.map((token) => token.usdValue),
+  ]);
+  const totalUsdText = sumUsdText([
+    nativeAsset?.usdValueText ?? null,
+    ...tokenAssets.map((token) => token.usdValueText),
+  ]);
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: {
+      id: agentId,
+      type: "agent",
+      agentId,
+      tenantId,
+      name: agent.name,
+      walletAddress: agent.walletAddress,
+      walletAddresses: addresses,
+      wallets,
+      balances:
+        "unavailable" in balanceResult
+          ? {
+              evm: null,
+              unavailableReason: balanceResult.reason,
+            }
+          : {
+              evm: {
+                native: balanceResult.native.toString(),
+                nativeFormatted: balanceResult.nativeFormatted,
+                chainId: balanceResult.chainId,
+                symbol: balanceResult.symbol,
+                walletAddress: balanceResult.walletAddress,
+              },
+            },
+      portfolio: {
+        chainId: portfolioChainId,
+        walletAddress:
+          "unavailable" in balanceResult ? agent.walletAddress : balanceResult.walletAddress,
+        native: nativeAsset,
+        tokens: tokenAssets,
+        totalUsd,
+        totalUsdText,
+        ...(portfolioUnavailableReasons.length > 0
+          ? { unavailableReason: portfolioUnavailableReasons.join("; ") }
+          : {}),
+      },
+      spend: {
+        todayWei: txStats.spentToday.toString(),
+        weekWei: txStats.spentThisWeek.toString(),
+        monthWei: monthlyStats[0]?.spentThisMonth ?? "0",
+      },
+      capabilities: ACCOUNT_CAPABILITIES,
+      sponsorship: {
+        enabled: sponsorship.enabled,
+        provider: sponsorship.provider,
+        mode: sponsorship.mode,
+        circuitBreakerEnabled: sponsorship.circuitBreakerEnabled,
+      },
+      createdAt: agent.createdAt,
+    },
+  });
+}
+
+agentRoutes.get("/:agentId/account", getAgentAccountAggregation);
+
+agentRoutes.get("/:agentId/aggregation", getAgentAccountAggregation);
+
 // ─── Agent owners and delegated signers ──────────────────────────────────────
 
 agentRoutes.get("/:agentId/signers", async (c) => {
@@ -1406,19 +2255,19 @@ agentRoutes.post("/:agentId/signers", async (c) => {
     );
   }
 
-  const credentialRequested = body.issueCredential === true;
-  if (credentialRequested) {
-    const mfaResponse = requireRecentAdminMfa(c, "Signer credential issuance");
-    if (mfaResponse) return mfaResponse;
-  }
+  const mfaResponse = requireRecentAdminMfa(c, "Signer creation");
+  if (mfaResponse) return mfaResponse;
 
   let signerType: string;
   let subjectType: string;
   let subjectId: string;
+  let keyType: string;
+  let publicKey: string | null;
   let address: string | null;
   let chainFamily: "evm" | "solana" | null;
   let label: string | null;
   let permissions: string[];
+  let policyIds: string[];
   let metadata: Record<string, unknown>;
   let credentialSecret: string | null;
   try {
@@ -1430,6 +2279,25 @@ agentRoutes.post("/:agentId/signers", async (c) => {
     }
     if (!AGENT_SIGNER_SUBJECT_TYPES.has(subjectType)) {
       throw new Error("subjectType must be one of: user, wallet, api_key, external");
+    }
+    keyType =
+      body.keyType === undefined || body.keyType === null
+        ? "hmac"
+        : normalizeRequiredText(body.keyType, "keyType", 16);
+    if (!AGENT_SIGNER_KEY_TYPES.has(keyType)) {
+      throw new Error("keyType must be one of: hmac, p256");
+    }
+    publicKey = normalizeOptionalText(body.publicKey, "publicKey", 16_384);
+    if (keyType === "p256") {
+      if (!publicKey) throw new Error("publicKey is required when keyType is p256");
+      if (!(await importP256PublicKey(publicKey))) {
+        throw new Error("publicKey must be a valid P-256 public key");
+      }
+      if (body.issueCredential === true) {
+        throw new Error("issueCredential is only supported for hmac signers");
+      }
+    } else if (publicKey) {
+      throw new Error("publicKey is only supported when keyType is p256");
     }
     address = normalizeOptionalText(body.address, "address", 128);
     if (
@@ -1449,6 +2317,8 @@ agentRoutes.post("/:agentId/signers", async (c) => {
             })();
     label = normalizeOptionalText(body.label, "label", 255);
     permissions = normalizeSignerPermissions(body.permissions);
+    policyIds = normalizeSignerPolicyIds(body.policyIds);
+    await validateSignerPolicyIdsForAgent(agentId, policyIds);
     metadata = normalizeSignerMetadata(body.metadata);
     credentialSecret = body.issueCredential === true ? createSignerSecret() : null;
   } catch (error) {
@@ -1481,7 +2351,7 @@ agentRoutes.post("/:agentId/signers", async (c) => {
     action: "agent.signer.create.authorized",
     resourceType: "agent",
     resourceId: agentId,
-    metadata: { signerType, subjectType, subjectId, permissions },
+    metadata: { signerType, subjectType, subjectId, permissions, policyIds },
   });
 
   try {
@@ -1502,10 +2372,13 @@ agentRoutes.post("/:agentId/signers", async (c) => {
         signerType,
         subjectType,
         subjectId,
+        keyType,
+        publicKey,
         address,
         chainFamily,
         label,
         permissions,
+        policyIds,
         metadata: storedMetadata,
         status: "active",
         createdBy: c.get("userId") ?? c.get("authType") ?? null,
@@ -1600,6 +2473,35 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
       if (signerType !== existingSigner.signerType) privilegedSignerUpdate = true;
       updates.signerType = signerType;
     }
+    const nextKeyType =
+      body.keyType === undefined
+        ? existingSigner.keyType
+        : normalizeRequiredText(body.keyType, "keyType", 16);
+    if (!AGENT_SIGNER_KEY_TYPES.has(nextKeyType)) {
+      throw new Error("keyType must be one of: hmac, p256");
+    }
+    const nextPublicKey =
+      body.publicKey === undefined
+        ? existingSigner.publicKey
+        : normalizeOptionalText(body.publicKey, "publicKey", 16_384);
+    if (body.keyType !== undefined || body.publicKey !== undefined) {
+      if (nextKeyType === "p256") {
+        if (!nextPublicKey) throw new Error("publicKey is required when keyType is p256");
+        if (!(await importP256PublicKey(nextPublicKey))) {
+          throw new Error("publicKey must be a valid P-256 public key");
+        }
+      } else if (nextPublicKey) {
+        throw new Error("publicKey is only supported when keyType is p256");
+      }
+      if (nextKeyType !== existingSigner.keyType) {
+        privilegedSignerUpdate = true;
+        updates.keyType = nextKeyType;
+      }
+      if ((nextPublicKey ?? null) !== (existingSigner.publicKey ?? null)) {
+        privilegedSignerUpdate = true;
+        updates.publicKey = nextPublicKey;
+      }
+    }
     if (body.address !== undefined) {
       const address = normalizeOptionalText(body.address, "address", 128);
       if (
@@ -1634,6 +2536,12 @@ agentRoutes.patch("/:agentId/signers/:signerId", async (c) => {
     if (body.permissions !== undefined) {
       privilegedSignerUpdate = true;
       updates.permissions = normalizeSignerPermissions(body.permissions);
+    }
+    if (body.policyIds !== undefined) {
+      privilegedSignerUpdate = true;
+      const policyIds = normalizeSignerPolicyIds(body.policyIds);
+      await validateSignerPolicyIdsForAgent(agentId, policyIds);
+      updates.policyIds = policyIds;
     }
     if (body.metadata !== undefined) {
       privilegedSignerUpdate = true;
@@ -1825,12 +2733,20 @@ agentRoutes.post("/:agentId/key-quorums", async (c) => {
   let name: string;
   let threshold: number;
   let memberSignerIds: string[];
+  let memberQuorumIds: string[];
   let permissions: string[];
   let metadata: Record<string, unknown>;
   try {
     name = normalizeRequiredText(body.name, "name", 255);
     memberSignerIds = normalizeQuorumMemberSignerIds(body.memberSignerIds);
-    threshold = normalizeQuorumThreshold(body.threshold, memberSignerIds.length);
+    memberQuorumIds = normalizeOptionalQuorumMemberIds(body.memberQuorumIds, "memberQuorumIds");
+    if (memberSignerIds.length + memberQuorumIds.length === 0) {
+      throw new Error("key quorum must include at least one signer or child quorum");
+    }
+    threshold = normalizeQuorumThreshold(
+      body.threshold,
+      memberSignerIds.length + memberQuorumIds.length,
+    );
     permissions = normalizeSignerPermissions(body.permissions);
     metadata = normalizeSignerMetadata(body.metadata);
   } catch (error) {
@@ -1839,7 +2755,12 @@ agentRoutes.post("/:agentId/key-quorums", async (c) => {
       400,
     );
   }
-  const memberError = await validateQuorumMembers(tenantId, agentId, memberSignerIds);
+  const memberError = await validateQuorumMembers(
+    tenantId,
+    agentId,
+    memberSignerIds,
+    memberQuorumIds,
+  );
   if (memberError) return c.json<ApiResponse>({ ok: false, error: memberError }, 400);
 
   await writeAgentAudit(c, {
@@ -1847,7 +2768,7 @@ agentRoutes.post("/:agentId/key-quorums", async (c) => {
     action: "agent.key_quorum.create.authorized",
     resourceType: "agent_key_quorum",
     resourceId: agentId,
-    metadata: { agentId, name, threshold, memberSignerIds, permissions },
+    metadata: { agentId, name, threshold, memberSignerIds, memberQuorumIds, permissions },
   });
 
   const [row] = await db
@@ -1858,6 +2779,7 @@ agentRoutes.post("/:agentId/key-quorums", async (c) => {
       name,
       threshold,
       memberSignerIds,
+      memberQuorumIds,
       permissions,
       metadata,
       status: "active",
@@ -1871,7 +2793,7 @@ agentRoutes.post("/:agentId/key-quorums", async (c) => {
       action: "agent.key_quorum.create",
       resourceType: "agent_key_quorum",
       resourceId: row.id,
-      metadata: { agentId, threshold, memberSignerIds },
+      metadata: { agentId, threshold, memberSignerIds, memberQuorumIds },
     });
   } catch (error) {
     await deleteAgentKeyQuorumRow(row.id);
@@ -1917,16 +2839,27 @@ agentRoutes.patch("/:agentId/key-quorums/:quorumId", async (c) => {
       body.memberSignerIds === undefined
         ? existing.memberSignerIds
         : normalizeQuorumMemberSignerIds(body.memberSignerIds);
+    const nextMemberQuorumIds =
+      body.memberQuorumIds === undefined
+        ? existing.memberQuorumIds
+        : normalizeOptionalQuorumMemberIds(body.memberQuorumIds, "memberQuorumIds");
     if (body.memberSignerIds !== undefined) {
       updates.memberSignerIds = nextMemberSignerIds;
       privilegedUpdate = true;
     }
+    if (body.memberQuorumIds !== undefined) {
+      updates.memberQuorumIds = nextMemberQuorumIds;
+      privilegedUpdate = true;
+    }
     if (body.threshold !== undefined) {
-      updates.threshold = normalizeQuorumThreshold(body.threshold, nextMemberSignerIds.length);
+      updates.threshold = normalizeQuorumThreshold(
+        body.threshold,
+        nextMemberSignerIds.length + nextMemberQuorumIds.length,
+      );
       privilegedUpdate = true;
     } else if (
-      body.memberSignerIds !== undefined &&
-      existing.threshold > nextMemberSignerIds.length
+      (body.memberSignerIds !== undefined || body.memberQuorumIds !== undefined) &&
+      existing.threshold > nextMemberSignerIds.length + nextMemberQuorumIds.length
     ) {
       throw new Error("threshold cannot exceed member count");
     }
@@ -1943,8 +2876,17 @@ agentRoutes.patch("/:agentId/key-quorums/:quorumId", async (c) => {
       updates.status = status;
       if (status !== existing.status) privilegedUpdate = true;
     }
-    if (body.memberSignerIds !== undefined) {
-      const memberError = await validateQuorumMembers(tenantId, agentId, nextMemberSignerIds);
+    if (body.memberSignerIds !== undefined || body.memberQuorumIds !== undefined) {
+      if (nextMemberSignerIds.length + nextMemberQuorumIds.length === 0) {
+        throw new Error("key quorum must include at least one signer or child quorum");
+      }
+      const memberError = await validateQuorumMembers(
+        tenantId,
+        agentId,
+        nextMemberSignerIds,
+        nextMemberQuorumIds,
+        quorumId,
+      );
       if (memberError) throw new Error(memberError);
     }
   } catch (error) {
@@ -2061,505 +3003,9 @@ agentRoutes.delete("/:agentId/key-quorums/:quorumId", async (c) => {
   return c.json<ApiResponse>({ ok: true, data: toAgentKeyQuorumResponse(row) });
 });
 
-// ─── Get agent ────────────────────────────────────────────────────────────────
-
-agentRoutes.get("/:agentId", async (c) => {
-  if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
-      403,
-    );
-  }
-
-  const tenantId = c.get("tenantId");
-  const agent = await vault.getAgent(tenantId, c.req.param("agentId"));
-  if (!agent) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  }
-  return c.json<ApiResponse<AgentIdentity>>({ ok: true, data: agent });
-});
-
-// ─── Delete agent ─────────────────────────────────────────────────────────────
-
-agentRoutes.delete("/:agentId", async (c) => {
-  if (!requireTenantAdminSession(c)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Agent deletion requires owner or admin session",
-      },
-      403,
-    );
-  }
-  const mfaResponse = requireRecentAdminMfa(c, "Agent deletion");
-  if (mfaResponse) return mfaResponse;
-
-  const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId");
-  const agent = await ensureAgentForTenant(tenantId, agentId);
-
-  if (!agent) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  }
-
-  const deleteSnapshot = await db.transaction(async (tx) => {
-    const [agentRow] = await tx
-      .select()
-      .from(agents)
-      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
-    return {
-      agent: agentRow ?? null,
-      approvalQueue: await tx
-        .select()
-        .from(approvalQueue)
-        .where(eq(approvalQueue.agentId, agentId)),
-      transactions: await tx.select().from(transactions).where(eq(transactions.agentId, agentId)),
-      policies: await tx.select().from(policies).where(eq(policies.agentId, agentId)),
-      encryptedChainKeys: await tx
-        .select()
-        .from(encryptedChainKeys)
-        .where(eq(encryptedChainKeys.agentId, agentId)),
-      encryptedKeys: await tx
-        .select()
-        .from(encryptedKeys)
-        .where(eq(encryptedKeys.agentId, agentId)),
-      agentWallets: await tx.select().from(agentWallets).where(eq(agentWallets.agentId, agentId)),
-    };
-  });
-  let agentRowsDeleted = false;
-  try {
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.delete.authorized",
-      resourceType: "agent",
-      resourceId: agentId,
-      metadata: { walletAddress: agent.walletAddress },
-    });
-    const issuedBefore = Math.floor(Date.now() / 1000);
-    await revocationStore.revokeAgentTokens(agentId, issuedBefore);
-    await db.transaction(async (tx) => {
-      // Cascade delete in dependency order
-      await tx.delete(approvalQueue).where(eq(approvalQueue.agentId, agentId));
-      await tx.delete(transactions).where(eq(transactions.agentId, agentId));
-      await tx.delete(policies).where(eq(policies.agentId, agentId));
-      await tx.delete(encryptedChainKeys).where(eq(encryptedChainKeys.agentId, agentId));
-      await tx.delete(encryptedKeys).where(eq(encryptedKeys.agentId, agentId));
-      await tx.delete(agentWallets).where(eq(agentWallets.agentId, agentId));
-      await tx.delete(agents).where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
-    });
-    agentRowsDeleted = true;
-    await writeAgentAudit(c, {
-      tenantId,
-      action: "agent.delete",
-      resourceType: "agent",
-      resourceId: agentId,
-      metadata: { revokedAgentTokensIssuedBefore: issuedBefore },
-    });
-
-    return c.json<ApiResponse<{ deleted: string }>>({
-      ok: true,
-      data: { deleted: agentId },
-    });
-  } catch (e: unknown) {
-    if (agentRowsDeleted && deleteSnapshot.agent) {
-      await db.transaction(async (tx) => {
-        await tx.insert(agents).values(deleteSnapshot.agent).onConflictDoNothing();
-        if (deleteSnapshot.agentWallets.length > 0) {
-          await tx.insert(agentWallets).values(deleteSnapshot.agentWallets).onConflictDoNothing();
-        }
-        if (deleteSnapshot.encryptedKeys.length > 0) {
-          await tx.insert(encryptedKeys).values(deleteSnapshot.encryptedKeys).onConflictDoNothing();
-        }
-        if (deleteSnapshot.encryptedChainKeys.length > 0) {
-          await tx
-            .insert(encryptedChainKeys)
-            .values(deleteSnapshot.encryptedChainKeys)
-            .onConflictDoNothing();
-        }
-        if (deleteSnapshot.policies.length > 0) {
-          await tx.insert(policies).values(deleteSnapshot.policies).onConflictDoNothing();
-        }
-        if (deleteSnapshot.transactions.length > 0) {
-          await tx.insert(transactions).values(deleteSnapshot.transactions).onConflictDoNothing();
-        }
-        if (deleteSnapshot.approvalQueue.length > 0) {
-          await tx.insert(approvalQueue).values(deleteSnapshot.approvalQueue).onConflictDoNothing();
-        }
-      });
-    }
-    const requestId = c.get("requestId") || "unknown";
-    console.error(`[${requestId}] Failed to delete agent ${agentId}:`, e);
-    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
-  }
-});
-
-// ─── Agent balance ────────────────────────────────────────────────────────────
-
-agentRoutes.get("/:agentId/balance", async (c) => {
-  if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
-      403,
-    );
-  }
-  const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId");
-  const agent = await ensureAgentForTenant(tenantId, agentId);
-
-  if (!agent) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  }
-
-  const chainId = parseOptionalChainId(c.req.query("chainId"));
-  if (typeof chainId === "string") {
-    return c.json<ApiResponse>({ ok: false, error: chainId }, 400);
-  }
-
-  try {
-    const balance = await vault.getBalance(tenantId, agentId, chainId);
-    return c.json<ApiResponse>({
-      ok: true,
-      data: {
-        agentId,
-        walletAddress: balance.walletAddress,
-        balances: {
-          native: balance.native.toString(),
-          nativeFormatted: balance.nativeFormatted,
-          chainId: balance.chainId,
-          symbol: balance.symbol,
-        },
-      },
-    });
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
-  }
-});
-
-// ─── Agent token balances (ERC-20) ────────────────────────────────────────────
-
-agentRoutes.get("/:agentId/tokens", async (c) => {
-  if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
-      403,
-    );
-  }
-  const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId");
-  const agent = await ensureAgentForTenant(tenantId, agentId);
-
-  if (!agent) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  }
-
-  const chainId = parseOptionalChainId(c.req.query("chainId"));
-  if (typeof chainId === "string") {
-    return c.json<ApiResponse>({ ok: false, error: chainId }, 400);
-  }
-  const tokensParam = c.req.query("tokens");
-  const customTokens = parseCustomTokenList(tokensParam);
-  if (typeof customTokens === "string") {
-    return c.json<ApiResponse>({ ok: false, error: customTokens }, 400);
-  }
-
-  try {
-    // Fetch native balance
-    const balance = await vault.getBalance(tenantId, agentId, chainId);
-
-    // Fetch ERC-20 token balances
-    const tokenBalances = await vault.getTokenBalances(tenantId, agentId, chainId, customTokens);
-
-    return c.json<ApiResponse>({
-      ok: true,
-      data: {
-        agentId,
-        walletAddress: balance.walletAddress,
-        chainId: balance.chainId,
-        native: {
-          symbol: balance.symbol,
-          balance: balance.native.toString(),
-          formatted: balance.nativeFormatted,
-        },
-        tokens: tokenBalances,
-      },
-    });
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : "Unknown error";
-    return c.json<ApiResponse>({ ok: false, error: message }, 400);
-  }
-});
-
-// ─── Agent spend summary ─────────────────────────────────────────────────────
-
-agentRoutes.get("/:agentId/spend", async (c) => {
-  if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
-      403,
-    );
-  }
-  const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId");
-  const agent = await ensureAgentForTenant(tenantId, agentId);
-
-  if (!agent) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  }
-
-  const txStats = await getTransactionStats(agentId);
-  const sponsorship = publicGasSponsorshipState(await readTenantGasSponsorshipConfig(tenantId));
-  const oneMonthAgo = new Date(Date.now() - 30 * 86400_000);
-  const [monthlyStats] = await db
-    .select({
-      spentThisMonth: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
-    })
-    .from(transactions)
-    .where(
-      and(
-        eq(transactions.agentId, agentId),
-        gte(transactions.createdAt, oneMonthAgo),
-        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
-      ),
-    );
-
-  const realtimeEnabled = isRedisAvailable();
-  const realtimePeriods = realtimeEnabled
-    ? await Promise.all(
-        SPEND_PERIODS.map(async (period) => ({
-          period,
-          spentUsd: await getSpend(agentId, period),
-          byHost: await getSpendByHost(agentId, period),
-        })),
-      )
-    : SPEND_PERIODS.map((period) => ({ period, spentUsd: null, byHost: {} }));
-
-  return c.json<ApiResponse>({
-    ok: true,
-    data: {
-      agentId,
-      walletAddress: agent.walletAddress,
-      onchain: {
-        todayWei: txStats.spentToday.toString(),
-        weekWei: txStats.spentThisWeek.toString(),
-        monthWei: monthlyStats?.spentThisMonth ?? "0",
-      },
-      realtime: {
-        enabled: realtimeEnabled,
-        periods: realtimePeriods,
-      },
-      sponsorship: {
-        enabled: sponsorship.enabled,
-        provider: sponsorship.provider,
-        mode: sponsorship.mode,
-        circuitBreakerEnabled: sponsorship.circuitBreakerEnabled,
-      },
-    },
-  });
-});
-
-// ─── Agent account aggregation ───────────────────────────────────────────────
-
-agentRoutes.get("/:agentId/account", async (c) => {
-  if (!requireAgentAccess(c)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Forbidden: token scope does not match agent" },
-      403,
-    );
-  }
-  const tenantId = c.get("tenantId");
-  const agentId = c.req.param("agentId");
-  const agent = await ensureAgentForTenant(tenantId, agentId);
-
-  if (!agent) {
-    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
-  }
-
-  const chainId = parseOptionalChainId(c.req.query("chainId"));
-  if (typeof chainId === "string") {
-    return c.json<ApiResponse>({ ok: false, error: chainId }, 400);
-  }
-  const tokensParam = c.req.query("tokens");
-  const customTokens = parseCustomTokenList(tokensParam);
-  if (typeof customTokens === "string") {
-    return c.json<ApiResponse>({ ok: false, error: customTokens }, 400);
-  }
-
-  const [
-    walletRows,
-    txStats,
-    monthlyStats,
-    balanceResult,
-    tokenBalancesResult,
-    gasSponsorshipConfig,
-  ] = await Promise.all([
-    db
-      .select({
-        id: agentWallets.id,
-        chainFamily: agentWallets.chainFamily,
-        address: agentWallets.address,
-        venue: agentWallets.venue,
-        purpose: agentWallets.purpose,
-        createdAt: agentWallets.createdAt,
-      })
-      .from(agentWallets)
-      .where(eq(agentWallets.agentId, agentId)),
-    getTransactionStats(agentId),
-    db
-      .select({
-        spentThisMonth: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
-      })
-      .from(transactions)
-      .where(
-        and(
-          eq(transactions.agentId, agentId),
-          gte(transactions.createdAt, new Date(Date.now() - 30 * 86400_000)),
-          sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
-        ),
-      ),
-    vault.getBalance(tenantId, agentId, chainId).catch((error: unknown) => ({
-      unavailable: true as const,
-      reason: sanitizeErrorMessage(error),
-    })),
-    vault.getTokenBalances(tenantId, agentId, chainId, customTokens).catch((error: unknown) => ({
-      unavailable: true as const,
-      reason: sanitizeErrorMessage(error),
-    })),
-    readTenantGasSponsorshipConfig(tenantId),
-  ]);
-  const sponsorship = publicGasSponsorshipState(gasSponsorshipConfig);
-
-  const wallets = agentWalletRowsToAccountWallets(agent, walletRows);
-  const addresses = wallets.reduce<Record<string, string>>((acc, wallet) => {
-    acc[wallet.chainFamily] = wallet.address;
-    return acc;
-  }, {});
-  const portfolioChainId =
-    "unavailable" in balanceResult ? (chainId ?? null) : balanceResult.chainId;
-  const nativeAsset: PortfolioAsset | null =
-    "unavailable" in balanceResult
-      ? null
-      : await (async () => {
-          const balance = balanceResult.native.toString();
-          const usdPrice = await priceOracle.getNativeUsdPrice(balanceResult.chainId);
-          const usdValue = await priceOracle.weiToUsd(balance, balanceResult.chainId);
-          return {
-            token: "native",
-            symbol: balanceResult.symbol,
-            balance,
-            formatted: balanceResult.nativeFormatted,
-            decimals: 18,
-            usdPrice,
-            usdValue,
-            usdPriceText: priceToScaledText(usdPrice),
-            usdValueText: tokenAmountUsdText(balance, 18, usdPrice),
-          };
-        })();
-  const tokenAssets: PortfolioAsset[] =
-    "unavailable" in tokenBalancesResult
-      ? []
-      : await Promise.all(
-          tokenBalancesResult.map(async (token) => {
-            const usdPrice =
-              portfolioChainId === null
-                ? null
-                : await priceOracle.getTokenUsdPrice(portfolioChainId, token.token);
-            const usdValue =
-              portfolioChainId === null
-                ? null
-                : await priceOracle.weiToUsd(token.balance, portfolioChainId, token.token);
-            return {
-              token: token.token,
-              symbol: token.symbol,
-              balance: token.balance,
-              formatted: token.formatted,
-              decimals: token.decimals,
-              usdPrice,
-              usdValue,
-              usdPriceText: priceToScaledText(usdPrice),
-              usdValueText: tokenAmountUsdText(token.balance, token.decimals, usdPrice),
-            };
-          }),
-        );
-  const portfolioUnavailableReasons = [
-    "unavailable" in balanceResult ? balanceResult.reason : null,
-    "unavailable" in tokenBalancesResult ? tokenBalancesResult.reason : null,
-  ].filter((reason): reason is string => Boolean(reason));
-  const totalUsd = sumNullableUsd([
-    nativeAsset?.usdValue ?? null,
-    ...tokenAssets.map((token) => token.usdValue),
-  ]);
-  const totalUsdText = sumUsdText([
-    nativeAsset?.usdValueText ?? null,
-    ...tokenAssets.map((token) => token.usdValueText),
-  ]);
-
-  return c.json<ApiResponse>({
-    ok: true,
-    data: {
-      id: agentId,
-      type: "agent",
-      agentId,
-      tenantId,
-      name: agent.name,
-      walletAddress: agent.walletAddress,
-      walletAddresses: addresses,
-      wallets,
-      balances:
-        "unavailable" in balanceResult
-          ? {
-              evm: null,
-              unavailableReason: balanceResult.reason,
-            }
-          : {
-              evm: {
-                native: balanceResult.native.toString(),
-                nativeFormatted: balanceResult.nativeFormatted,
-                chainId: balanceResult.chainId,
-                symbol: balanceResult.symbol,
-                walletAddress: balanceResult.walletAddress,
-              },
-            },
-      portfolio: {
-        chainId: portfolioChainId,
-        walletAddress:
-          "unavailable" in balanceResult ? agent.walletAddress : balanceResult.walletAddress,
-        native: nativeAsset,
-        tokens: tokenAssets,
-        totalUsd,
-        totalUsdText,
-        ...(portfolioUnavailableReasons.length > 0
-          ? { unavailableReason: portfolioUnavailableReasons.join("; ") }
-          : {}),
-      },
-      spend: {
-        todayWei: txStats.spentToday.toString(),
-        weekWei: txStats.spentThisWeek.toString(),
-        monthWei: monthlyStats[0]?.spentThisMonth ?? "0",
-      },
-      capabilities: ACCOUNT_CAPABILITIES,
-      sponsorship: {
-        enabled: sponsorship.enabled,
-        provider: sponsorship.provider,
-        mode: sponsorship.mode,
-        circuitBreakerEnabled: sponsorship.circuitBreakerEnabled,
-      },
-      createdAt: agent.createdAt,
-    },
-  });
-});
-
-agentRoutes.get("/:agentId/aggregation", (c) => {
-  const query = new URL(c.req.url).search;
-  return agentRoutes.request(`/${encodeURIComponent(c.req.param("agentId"))}/account${query}`, {
-    method: "GET",
-    headers: c.req.raw.headers,
-  });
-});
-
 // ─── Batch create agents ──────────────────────────────────────────────────────
 
-agentRoutes.post("/batch", async (c) => {
+export async function createAgentBatch(c: Context<{ Variables: AppVariables }>) {
   if (!requireTenantAdminSession(c)) {
     return c.json<ApiResponse>(
       {
@@ -2574,20 +3020,26 @@ agentRoutes.post("/batch", async (c) => {
 
   const tenantId = c.get("tenantId");
   const body = await safeJsonParse<{
-    agents: Array<{ id?: string; name: string; platformId?: string }>;
+    agents?: Array<{ id?: string; name: string; platformId?: string; externalId?: string }>;
+    wallets?: Array<{ id?: string; name: string; platformId?: string; externalId?: string }>;
     applyPolicies?: PolicyRule[];
   }>(c);
 
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
-  if (!Array.isArray(body.agents) || body.agents.length === 0) {
+  const requestedAgents = body.agents ?? body.wallets;
+  if (!Array.isArray(requestedAgents) || requestedAgents.length === 0) {
     return c.json<ApiResponse>(
-      { ok: false, error: "agents array is required and must not be empty" },
+      { ok: false, error: "agents or wallets array is required and must not be empty" },
       400,
     );
   }
-  if (body.agents.length > MAX_BATCH_AGENTS) {
+  const normalizedAgents = requestedAgents.map(({ externalId, platformId, ...agent }) => ({
+    ...agent,
+    platformId: platformId ?? externalId,
+  }));
+  if (normalizedAgents.length > MAX_BATCH_AGENTS) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -2597,7 +3049,7 @@ agentRoutes.post("/batch", async (c) => {
     );
   }
 
-  for (const agentSpec of body.agents) {
+  for (const agentSpec of normalizedAgents) {
     if (agentSpec.id !== undefined && !isValidAgentId(agentSpec.id)) {
       return c.json<ApiResponse>(
         {
@@ -2644,7 +3096,7 @@ agentRoutes.post("/batch", async (c) => {
   const errors: Array<{ id: string; error: string }> = [];
   const batchIds = new Set<string>();
 
-  for (const agentSpec of body.agents) {
+  for (const agentSpec of normalizedAgents) {
     const clientReferenceId = agentSpec.id ?? crypto.randomUUID();
     try {
       if (batchIds.has(clientReferenceId)) {
@@ -2724,7 +3176,9 @@ agentRoutes.post("/batch", async (c) => {
     ok: true,
     data: { created, errors },
   });
-});
+}
+
+agentRoutes.post("/batch", createAgentBatch);
 
 // ─── Get agent policies ───────────────────────────────────────────────────────
 
@@ -2755,18 +3209,6 @@ agentRoutes.get("/:agentId/policies", async (c) => {
 // ─── Update agent policies ────────────────────────────────────────────────────
 
 agentRoutes.put("/:agentId/policies", async (c) => {
-  // SECURITY: policy/cap changes are PATRON/OWNER-only, never the agent itself.
-  // See PUT /:agentId/policy above — an agent raising its own policy rules
-  // (caps, leverage, withdrawal allowlist) would defeat the policy system.
-  if (c.get("authType") === "agent-token") {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Forbidden: agents cannot modify their own policies; patron/owner auth required",
-      },
-      403,
-    );
-  }
   if (!requireTenantAdminSession(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Policy updates require owner or admin session" },

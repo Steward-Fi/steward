@@ -90,6 +90,8 @@ Steward supports tenant-scoped app clients for grouping local, preview, staging,
       "isDefault": true,
       "allowedOrigins": ["https://app.example.com"],
       "allowedRedirectUrls": ["https://app.example.com/auth/callback"],
+      "allowedBundleIds": ["com.example.app"],
+      "allowedPackageNames": ["com.example.android"],
       "loginMethods": {
         "oauth": { "google": true, "discord": false }
       }
@@ -108,8 +110,46 @@ Steward supports tenant-scoped app clients for grouping local, preview, staging,
 
 OAuth authorize accepts `client_id` or `clientId`. When supplied, Steward validates `redirect_uri` against that enabled app client's redirects instead of the tenant-global fallback and applies that client's OAuth login-method overrides.
 
+Native app clients should also pin platform identifiers with `allowedBundleIds`
+for iOS and `allowedPackageNames` for Android. Steward rejects wildcards,
+single-label values, and malformed identifiers before persistence, so native
+callback trust must be expressed as explicit bundle/package allowlists.
+
+When a native integration supplies `X-Steward-Native-Bundle-Id` or
+`X-Steward-Native-Package-Name` on app-client-bound auth requests, Steward also
+accepts equivalent JSON fields: `native_bundle_id`, `native_package_name`,
+`nativeBundleId`, and `nativePackageName`. It validates identifier syntax and
+rejects values that are not allowlisted on the enabled app client. For OAuth
+device authorization, the accepted native identifier is bound to the issued
+device code and must match again during token polling. Mismatches return
+`invalid_client` and do not mint a session.
+
+These headers and JSON fields provide deterministic server-side allowlist
+enforcement. They do not prove the caller is an untampered native binary; real
+device attestation, signed app claims, and anti-tamper guarantees must come from
+the native platform or an attestation provider.
+
 ```bash
 GET /auth/oauth/google/authorize?tenant_id=my-platform&client_id=web-prod&redirect_uri=https%3A%2F%2Fapp.example.com%2Fauth%2Fcallback
+```
+
+```bash
+curl -X POST https://api.steward.fi/auth/device/code \
+  -H "Content-Type: application/json" \
+  -H "X-Steward-Native-Bundle-Id: com.example.app" \
+  -d '{
+    "tenantId": "my-platform",
+    "client_id": "ios-prod"
+  }'
+
+curl -X POST https://api.steward.fi/auth/device/token \
+  -H "Content-Type: application/json" \
+  -H "X-Steward-Native-Bundle-Id: com.example.app" \
+  -d '{
+    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    "device_code": "stwd_dc_...",
+    "client_id": "ios-prod"
+  }'
 ```
 
 Dedicated aliases:
@@ -254,6 +294,23 @@ bodies, stored response bodies, or credential material.
   }
 }
 ```
+
+Tenant admins can export the same privacy-preserving snapshot as CSV for
+operator review or archival:
+
+```bash
+GET /tenants/:id/idempotency-metrics/export
+```
+
+```bash
+curl "https://api.steward.fi/tenants/my-platform/idempotency-metrics/export" \
+  -H "Authorization: Bearer user-session-jwt" \
+  -o idempotency-metrics.csv
+```
+
+The CSV has one row with timestamps, TTL, and aggregate counter columns such as
+`observed`, `completed`, `replayed`, `conflicts`, and `store_errors`. It does not
+include idempotency keys, request bodies, replayed responses, or credentials.
 
 `POST` rotates the secret, returns `appSecret` once, and marks the previous active secret as `retiring` for a short overlap window. `GET` returns metadata only: secret prefix, status, timestamps, and the public app ID.
 
@@ -406,12 +463,23 @@ Client IDs must match `^[a-z0-9][a-z0-9_-]{2,63}$`. Redirect URLs must be exact 
   "authAbuseConfig": {
     "mfa": {
       "maxAgeSeconds": 120,
+      "maxAgeFor": {
+        "vaultSigning": 120,
+        "keyImport": 30,
+        "keyExport": 300,
+        "recoveryCodes": 120,
+        "tenantAdmin": 120
+      },
       "requireFor": {
         "vaultSigning": true,
         "keyImport": true,
         "keyExport": true,
         "recoveryCodes": true,
         "tenantAdmin": true
+      },
+      "disableFor": {
+        "keyImport": false,
+        "keyExport": false
       },
       "allowDelegatedSignerAutomation": false,
       "allowKeyQuorumAutomation": false
@@ -420,7 +488,7 @@ Client IDs must match `^[a-z0-9][a-z0-9_-]{2,63}$`. Redirect URLs must be exact 
 }
 ```
 
-`maxAgeSeconds` is bounded from 30 seconds to 1 hour. Each `requireFor` flag defaults to `true`; setting a flag to `false` disables only that action's MFA freshness gate. When signer or key-quorum automation is disabled, vault signing routes require an owner/admin session with recent MFA instead of signer-bound API credentials. Vault signing, key import/export, and tenant-admin control-plane routes use the tenant MFA freshness window and per-action `requireFor` flags. TOTP, SMS, recovery-code, and passkey MFA step-up sessions can satisfy recent-MFA checks; passkey step-up reuses the signed-in user's enrolled WebAuthn credentials.
+`maxAgeSeconds` is bounded from 30 seconds to 1 hour and acts as the default freshness window. `maxAgeFor` can override that window per sensitive surface with the same bounds; omitted actions fall back to `maxAgeSeconds`. Each `requireFor` flag defaults to `true`; setting a flag to `false` disables only that action's MFA freshness gate. `disableFor.keyImport` and `disableFor.keyExport` default to `false`; setting either to `true` blocks private-key import or export at the tenant-policy layer even when the corresponding environment break-glass flags are enabled and the caller has fresh MFA. When signer or key-quorum automation is disabled, vault signing routes require an owner/admin session with recent MFA instead of signer-bound API credentials. Vault signing, key import/export, user-wallet import/export, and tenant-admin control-plane routes use the tenant MFA freshness window and per-action `requireFor` flags. TOTP, SMS, recovery-code, and passkey MFA step-up sessions can satisfy recent-MFA checks; passkey step-up reuses the signed-in user's enrolled WebAuthn credentials.
 
 ---
 

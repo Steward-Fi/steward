@@ -11,6 +11,11 @@ import {
   Transaction,
   type TransactionInstruction,
 } from "@solana/web3.js";
+import {
+  ASSOCIATED_TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  TOKEN_PROGRAM_ID,
+} from "./solana-instructions";
 
 // ─── Internal helpers ──────────────────────────────────────────────────────
 
@@ -27,6 +32,27 @@ function uint8ArrayToHex(arr: Uint8Array): string {
 function uint8ArrayToBase64url(arr: Uint8Array): string {
   const base64 = btoa(Array.from(arr, (b) => String.fromCharCode(b)).join(""));
   return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function uint64ToLittleEndian(value: bigint): Uint8Array {
+  if (value < 0n || value > 18_446_744_073_709_551_615n) {
+    throw new Error("SPL token transfer amount must fit in uint64 base units");
+  }
+  const out = new Uint8Array(8);
+  let remaining = value;
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number(remaining & 0xffn);
+    remaining >>= 8n;
+  }
+  return out;
+}
+
+function transactionToBase64(tx: Transaction): string {
+  return btoa(
+    Array.from(tx.serialize({ requireAllSignatures: false, verifySignatures: false }), (b) =>
+      String.fromCharCode(b),
+    ).join(""),
+  );
 }
 
 // ─── Key Generation ────────────────────────────────────────────────────────
@@ -406,6 +432,115 @@ export async function signSolanaTransaction(
   return signature;
 }
 
+export interface SolanaSplTransferTransaction {
+  transaction: string;
+  sourceTokenAccount: string;
+  destinationTokenAccount: string;
+  mint: string;
+  tokenProgram: string;
+  decimals: number;
+}
+
+function associatedTokenAddress(
+  owner: PublicKey,
+  mint: PublicKey,
+  tokenProgram: PublicKey,
+): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [owner.toBuffer(), tokenProgram.toBuffer(), mint.toBuffer()],
+    new PublicKey(ASSOCIATED_TOKEN_PROGRAM_ID),
+  )[0];
+}
+
+function createTransferCheckedInstruction(args: {
+  source: PublicKey;
+  mint: PublicKey;
+  destination: PublicKey;
+  owner: PublicKey;
+  amount: bigint;
+  decimals: number;
+  tokenProgram: PublicKey;
+}): TransactionInstruction {
+  const data = new Uint8Array(10);
+  data[0] = 12;
+  data.set(uint64ToLittleEndian(args.amount), 1);
+  data[9] = args.decimals;
+  return {
+    programId: args.tokenProgram,
+    keys: [
+      { pubkey: args.source, isSigner: false, isWritable: true },
+      { pubkey: args.mint, isSigner: false, isWritable: false },
+      { pubkey: args.destination, isSigner: false, isWritable: true },
+      { pubkey: args.owner, isSigner: true, isWritable: false },
+    ],
+    data: data as unknown as Buffer,
+  } as TransactionInstruction;
+}
+
+/**
+ * Build a canonical SPL Token / Token-2022 TransferChecked transaction between
+ * deterministic associated token accounts. This intentionally does not create
+ * ATAs; the API parser currently rejects unknown side-effect programs, so a
+ * transfer action remains a single policy-checked token movement.
+ */
+export async function buildSolanaSplTransferTransaction(args: {
+  from: string;
+  to: string;
+  mint: string;
+  amount: bigint;
+  rpcUrl: string;
+}): Promise<SolanaSplTransferTransaction> {
+  const owner = new PublicKey(args.from);
+  const recipient = new PublicKey(args.to);
+  const mint = new PublicKey(args.mint);
+  const connection = new Connection(args.rpcUrl, "confirmed");
+  const mintAccount = await connection.getParsedAccountInfo(mint, "confirmed");
+  const account = mintAccount.value;
+  if (!account) {
+    throw new Error("SPL token mint account was not found");
+  }
+  const tokenProgram = account.owner;
+  if (
+    !tokenProgram.equals(new PublicKey(TOKEN_PROGRAM_ID)) &&
+    !tokenProgram.equals(new PublicKey(TOKEN_2022_PROGRAM_ID))
+  ) {
+    throw new Error("SPL token mint is not owned by the SPL Token or Token-2022 program");
+  }
+
+  const parsedData = account.data;
+  const decimals =
+    typeof parsedData === "object" && "parsed" in parsedData
+      ? Number((parsedData.parsed as { info?: { decimals?: unknown } })?.info?.decimals)
+      : Number.NaN;
+  if (!Number.isInteger(decimals) || decimals < 0 || decimals > 255) {
+    throw new Error("SPL token mint decimals could not be read from RPC");
+  }
+
+  const { blockhash } = await connection.getLatestBlockhash("confirmed");
+  const sourceTokenAccount = associatedTokenAddress(owner, mint, tokenProgram);
+  const destinationTokenAccount = associatedTokenAddress(recipient, mint, tokenProgram);
+  const tx = new Transaction({ feePayer: owner, recentBlockhash: blockhash }).add(
+    createTransferCheckedInstruction({
+      source: sourceTokenAccount,
+      mint,
+      destination: destinationTokenAccount,
+      owner,
+      amount: args.amount,
+      decimals,
+      tokenProgram,
+    }),
+  );
+
+  return {
+    transaction: transactionToBase64(tx),
+    sourceTokenAccount: sourceTokenAccount.toBase58(),
+    destinationTokenAccount: destinationTokenAccount.toBase58(),
+    mint: mint.toBase58(),
+    tokenProgram: tokenProgram.toBase58(),
+    decimals,
+  };
+}
+
 // ─── Balance ───────────────────────────────────────────────────────────────
 
 /**
@@ -421,6 +556,72 @@ export async function getSolanaBalance(
     lamports: BigInt(balance),
     formatted: (balance / LAMPORTS_PER_SOL).toFixed(9),
   };
+}
+
+export interface SplTokenBalance {
+  mint: string;
+  token: string;
+  symbol: "SPL";
+  balance: string;
+  formatted: string;
+  decimals: number;
+}
+
+function formatBaseUnits(amount: string, decimals: number): string {
+  if (decimals <= 0) return amount;
+  const padded = amount.padStart(decimals + 1, "0");
+  const whole = padded.slice(0, -decimals);
+  const fraction = padded.slice(-decimals).replace(/0+$/, "");
+  return fraction ? `${whole}.${fraction}` : whole;
+}
+
+/**
+ * Query parsed SPL Token and Token-2022 balances owned by a Solana address.
+ *
+ * This is a direct wallet RPC read, not an indexed portfolio source; token
+ * metadata such as ticker symbols is intentionally not inferred here.
+ */
+export async function getSplTokenBalances(
+  address: string,
+  rpcUrl: string,
+): Promise<SplTokenBalance[]> {
+  const connection = new Connection(rpcUrl, "confirmed");
+  const owner = new PublicKey(address);
+  const programIds = [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID];
+  const byMint = new Map<string, { balance: bigint; decimals: number }>();
+
+  for (const programId of programIds) {
+    const accounts = await connection.getParsedTokenAccountsByOwner(owner, {
+      programId: new PublicKey(programId),
+    });
+    for (const account of accounts.value) {
+      const parsed = account.account.data.parsed;
+      if (!parsed || typeof parsed !== "object" || parsed.info?.mint === undefined) continue;
+      const mint = String(parsed.info.mint);
+      const tokenAmount = parsed.info.tokenAmount;
+      const amount = String(tokenAmount?.amount ?? "0");
+      const decimals = Number(tokenAmount?.decimals ?? 0);
+      if (!/^\d+$/.test(amount) || !Number.isSafeInteger(decimals) || decimals < 0) continue;
+      const current = byMint.get(mint) ?? { balance: 0n, decimals };
+      current.balance += BigInt(amount);
+      current.decimals = decimals;
+      byMint.set(mint, current);
+    }
+  }
+
+  return [...byMint.entries()]
+    .filter(([, value]) => value.balance > 0n)
+    .map(([mint, value]) => {
+      const balance = value.balance.toString();
+      return {
+        mint,
+        token: mint,
+        symbol: "SPL",
+        balance,
+        formatted: formatBaseUnits(balance, value.decimals),
+        decimals: value.decimals,
+      };
+    });
 }
 
 // ─── Message Signing ──────────────────────────────────────────────────────

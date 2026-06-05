@@ -5,8 +5,17 @@
  * Mount: app.route("/vault", vaultRoutes)
  */
 
-import { verifyToken } from "@stwd/auth";
-import { tenantConfigs as tenantConfigsTable } from "@stwd/db";
+import {
+  createDecipheriv,
+  createPrivateKey,
+  createPublicKey,
+  diffieHellman,
+  generateKeyPairSync,
+  hkdfSync,
+  type KeyObject,
+  randomBytes,
+} from "node:crypto";
+import { tenantConfigs as tenantConfigsTable, users, userTenants } from "@stwd/db";
 import { recordAggregationEvent } from "@stwd/redis";
 import {
   type PolicyResult,
@@ -19,9 +28,11 @@ import {
   deriveSolanaPolicyFields,
   detectSolanaPolicyConflicts,
   ENTRY_POINT_V07,
+  type ExportPrivateKeyResult,
   getUserOperationHash,
   packUserOperation,
   parseSolanaTransaction,
+  readEip7702Delegation,
   type UnpackedUserOperationFields,
 } from "@stwd/vault";
 import { and, desc, eq, type SQL, sql } from "drizzle-orm";
@@ -37,12 +48,10 @@ import {
   db,
   ensureAgentForTenant,
   extractRpcErrorMessage,
-  getAuthenticatedPrincipal,
   getScopedPolicySet,
   getTransactionStats,
   isNonEmptyString,
   isRpcError,
-  isSameAuthenticatedPrincipal,
   isValidAddress,
   isValidAgentId,
   isValidAnyAddress,
@@ -70,10 +79,21 @@ import {
   reserveSponsoredGasEvent,
   resolveGasSponsorshipRequest,
 } from "../services/gas-sponsorship";
+import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
 import { verifySignerCredential } from "../services/signer-credentials";
 import { dispatchWebhook } from "../services/webhook-dispatch";
+import {
+  decryptImportSessionJson,
+  encryptImportSessionJson,
+  getImportSessionBackend,
+} from "./auth";
 
 export const vaultRoutes = new Hono<{ Variables: AppVariables }>();
+
+vaultRoutes.use("*", async (c, next) => {
+  setNoStoreHeaders(c);
+  await next();
+});
 
 async function writeVaultAudit(
   c: Context<{ Variables: AppVariables }>,
@@ -149,17 +169,46 @@ const MAX_VAULT_HISTORY_LIMIT = 200;
 const MAX_UINT256_DECIMAL =
   "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const MAX_UINT256_DECIMAL_DIGITS = 78;
+const MAX_UINT64_DECIMAL = "18446744073709551615";
+const MAX_UINT64_DECIMAL_DIGITS = 20;
 const MAX_QUORUM_CREDENTIALS = 32;
+const MAX_BITCOIN_PSBT_BASE64_LENGTH = 1_000_000;
+const DEFAULT_MAX_BITCOIN_PSBT_FEE_SATS = 100_000n;
 const DEFAULT_MFA_MAX_AGE_MS = 5 * 60_000;
+const ENCRYPTED_IMPORT_SESSION_TTL_MS = 10 * 60_000;
+const ENCRYPTED_IMPORT_MAX_CIPHERTEXT_BYTES = 4096;
+
+type EncryptedImportSession = {
+  id: string;
+  tenantId: string;
+  agentId: string;
+  chain: "evm" | "solana";
+  createdBy: string | null;
+  privateKey: string;
+  publicKey: string;
+  createdAt: number;
+  expiresAt: number;
+};
 
 type TenantMfaPolicyConfig = {
   maxAgeSeconds?: number;
+  maxAgeFor?: {
+    vaultSigning?: number;
+    keyImport?: number;
+    keyExport?: number;
+    recoveryCodes?: number;
+    tenantAdmin?: number;
+  };
   requireFor?: {
     vaultSigning?: boolean;
     keyImport?: boolean;
     keyExport?: boolean;
     recoveryCodes?: boolean;
     tenantAdmin?: boolean;
+  };
+  disableFor?: {
+    keyImport?: boolean;
+    keyExport?: boolean;
   };
   allowDelegatedSignerAutomation?: boolean;
   allowKeyQuorumAutomation?: boolean;
@@ -175,6 +224,185 @@ function userOperationPolicyModelAvailable(): boolean {
 
 function authorizationPolicyModelAvailable(): boolean {
   return false;
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function base64UrlDecode(value: string): Uint8Array | null {
+  try {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+    const paddingLength = (4 - (padded.length % 4)) % 4;
+    const binary = atob(`${padded}${"=".repeat(paddingLength)}`);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function exportKeyDerBase64Url(key: KeyObject, type: "spki" | "pkcs8"): string {
+  return base64UrlEncode(key.export({ type, format: "der" }) as Uint8Array);
+}
+
+function encryptedImportSessionId(): string {
+  return `wimp_${base64UrlEncode(randomBytes(24))}`;
+}
+
+function encryptedImportSessionStoreKey(id: string): string {
+  return `vault-agent:${id}`;
+}
+
+function parseStoredEncryptedImportSession(raw: string | null): EncryptedImportSession | null {
+  if (!raw) return null;
+  try {
+    const parsed = decryptImportSessionJson<Partial<EncryptedImportSession>>(raw);
+    const createdAt = parsed.createdAt;
+    const expiresAt = parsed.expiresAt;
+    if (
+      !isNonEmptyString(parsed.id) ||
+      !isNonEmptyString(parsed.tenantId) ||
+      !isNonEmptyString(parsed.agentId) ||
+      (parsed.chain !== "evm" && parsed.chain !== "solana") ||
+      !isNonEmptyString(parsed.privateKey) ||
+      !isNonEmptyString(parsed.publicKey) ||
+      typeof createdAt !== "number" ||
+      !Number.isSafeInteger(createdAt) ||
+      typeof expiresAt !== "number" ||
+      !Number.isSafeInteger(expiresAt)
+    ) {
+      return null;
+    }
+    return {
+      id: parsed.id,
+      tenantId: parsed.tenantId,
+      agentId: parsed.agentId,
+      chain: parsed.chain,
+      createdBy: typeof parsed.createdBy === "string" ? parsed.createdBy : null,
+      privateKey: parsed.privateKey,
+      publicKey: parsed.publicKey,
+      createdAt,
+      expiresAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function createEncryptedImportSession(input: {
+  tenantId: string;
+  agentId: string;
+  chain: "evm" | "solana";
+  createdBy: string | null;
+}): Promise<EncryptedImportSession> {
+  const { publicKey, privateKey } = generateKeyPairSync("x25519");
+  const now = Date.now();
+  const session: EncryptedImportSession = {
+    id: encryptedImportSessionId(),
+    tenantId: input.tenantId,
+    agentId: input.agentId,
+    chain: input.chain,
+    createdBy: input.createdBy,
+    publicKey: exportKeyDerBase64Url(publicKey, "spki"),
+    privateKey: exportKeyDerBase64Url(privateKey, "pkcs8"),
+    createdAt: now,
+    expiresAt: now + ENCRYPTED_IMPORT_SESSION_TTL_MS,
+  };
+  await getImportSessionBackend().set(
+    encryptedImportSessionStoreKey(session.id),
+    encryptImportSessionJson(session),
+    ENCRYPTED_IMPORT_SESSION_TTL_MS,
+  );
+  return session;
+}
+
+async function takeEncryptedImportSession(
+  id: unknown,
+  tenantId: string,
+  agentId: string,
+): Promise<EncryptedImportSession | string> {
+  if (!isNonEmptyString(id)) return "importSessionId is required";
+  const key = encryptedImportSessionStoreKey(id);
+  const session = parseStoredEncryptedImportSession(await getImportSessionBackend().get(key));
+  if (!session) return "Encrypted import session is invalid or expired";
+  if (session.tenantId !== tenantId || session.agentId !== agentId) {
+    return "Encrypted import session does not match this tenant or agent";
+  }
+  if (session.expiresAt <= Date.now()) {
+    return "Encrypted import session is invalid or expired";
+  }
+  const consumed = parseStoredEncryptedImportSession(await getImportSessionBackend().consume(key));
+  if (
+    !consumed ||
+    consumed.tenantId !== tenantId ||
+    consumed.agentId !== agentId ||
+    consumed.expiresAt <= Date.now()
+  ) {
+    return "Encrypted import session is invalid or expired";
+  }
+  return consumed;
+}
+
+function decryptEncryptedImportPrivateKey(
+  session: EncryptedImportSession,
+  payload: {
+    ephemeralPublicKey?: unknown;
+    iv?: unknown;
+    ciphertext?: unknown;
+    tag?: unknown;
+  },
+): string | null {
+  if (
+    !isNonEmptyString(payload.ephemeralPublicKey) ||
+    !isNonEmptyString(payload.iv) ||
+    !isNonEmptyString(payload.ciphertext) ||
+    !isNonEmptyString(payload.tag)
+  ) {
+    return null;
+  }
+  const ephemeralPublicKeyDer = base64UrlDecode(payload.ephemeralPublicKey);
+  const iv = base64UrlDecode(payload.iv);
+  const ciphertext = base64UrlDecode(payload.ciphertext);
+  const tag = base64UrlDecode(payload.tag);
+  if (!ephemeralPublicKeyDer || !iv || !ciphertext || !tag) return null;
+  if (iv.length !== 12 || tag.length !== 16) return null;
+  if (ciphertext.length === 0 || ciphertext.length > ENCRYPTED_IMPORT_MAX_CIPHERTEXT_BYTES) {
+    return null;
+  }
+  const privateKeyDer = base64UrlDecode(session.privateKey);
+  if (!privateKeyDer) return null;
+
+  const clientPublicKey = createPublicKey({
+    key: ephemeralPublicKeyDer as never,
+    type: "spki",
+    format: "der",
+  });
+  const sharedSecret = diffieHellman({
+    privateKey: createPrivateKey({ key: privateKeyDer as never, type: "pkcs8", format: "der" }),
+    publicKey: clientPublicKey,
+  });
+  const info = new TextEncoder().encode(
+    `steward:vault-import:v1:${session.tenantId}:${session.agentId}:${session.chain}:${session.id}`,
+  );
+  const derivedKey = hkdfSync("sha256", sharedSecret, new Uint8Array(), info, 32);
+  const decipher = createDecipheriv("aes-256-gcm", derivedKey as never, iv as never);
+  decipher.setAAD(new TextEncoder().encode(session.id));
+  decipher.setAuthTag(tag as never);
+  const first = decipher.update(ciphertext);
+  const final = decipher.final();
+  const plaintextBytes = new Uint8Array(first.length + final.length);
+  plaintextBytes.set(first, 0);
+  plaintextBytes.set(final, first.length);
+  return new TextDecoder().decode(plaintextBytes);
 }
 
 function parseListLimit(value: string | undefined, fallback = 100): number {
@@ -194,6 +422,13 @@ function isUint256DecimalString(value: unknown): value is string {
   const normalized = value.replace(/^0+/, "") || "0";
   if (normalized.length > MAX_UINT256_DECIMAL_DIGITS) return false;
   return normalized.length < MAX_UINT256_DECIMAL_DIGITS || normalized <= MAX_UINT256_DECIMAL;
+}
+
+function isUint64DecimalString(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) return false;
+  const normalized = value.replace(/^0+/, "") || "0";
+  if (normalized.length > MAX_UINT64_DECIMAL_DIGITS) return false;
+  return normalized.length < MAX_UINT64_DECIMAL_DIGITS || normalized <= MAX_UINT64_DECIMAL;
 }
 
 type TransferActionInput = {
@@ -221,6 +456,10 @@ type ParsedSendCall = {
   data?: string;
 };
 
+function isSolanaActionChain(chainId: number): boolean {
+  return chainId === 101 || chainId === 102;
+}
+
 function parseReferenceId(value: unknown): string | undefined | null {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") return null;
@@ -246,10 +485,23 @@ function parseTransferActionInput(body: TransferActionInput): {
       ? body.chainId
       : parseInt(process.env.CHAIN_ID || "8453", 10);
   const referenceId = parseReferenceId(body.referenceId);
+  const isSolanaTransfer = isSolanaActionChain(chainId);
 
-  if (!isNonEmptyString(body.to) || !isValidAddress(body.to)) return null;
-  if (token !== "native" && (!isNonEmptyString(token) || !isValidAddress(token))) return null;
+  if (
+    !isNonEmptyString(body.to) ||
+    (isSolanaTransfer ? !isValidSolanaAddress(body.to) : !isValidAddress(body.to))
+  ) {
+    return null;
+  }
+  if (
+    token !== "native" &&
+    (!isNonEmptyString(token) ||
+      (isSolanaTransfer ? !isValidSolanaAddress(token) : !isValidAddress(token)))
+  ) {
+    return null;
+  }
   if (!isNonEmptyString(value) || !isUint256DecimalString(value)) return null;
+  if (isSolanaTransfer && token !== "native" && !isUint64DecimalString(value)) return null;
   if (!Number.isSafeInteger(chainId) || chainId <= 0) return null;
   if (referenceId === null) return null;
 
@@ -325,7 +577,7 @@ function parseSendCallsActionInput(body: SendCallsActionInput):
 
 function transferActionResponse(input: {
   actionId: string;
-  status: "pending_approval" | "rejected" | "signed" | "broadcast" | "failed";
+  status: "pending_approval" | "rejected" | "signed" | "broadcast" | "confirmed" | "failed";
   chainId: number;
   to: string;
   value: string;
@@ -860,8 +1112,50 @@ function erc20TransferPolicyPrecheck(
   };
 }
 
+function splTransferPolicyPrecheck(
+  policySet: Array<{ id: string; type: string; enabled: boolean; config: unknown }>,
+  recipient: string,
+  mint: string,
+): PolicyResult | null {
+  for (const policy of policySet) {
+    if (policy.type !== "approved-addresses" || !policy.enabled) continue;
+    const config = policy.config;
+    if (!config || typeof config !== "object") continue;
+    const typedConfig = config as { addresses?: unknown; mode?: unknown };
+    if (typedConfig.mode !== "whitelist" || !Array.isArray(typedConfig.addresses)) continue;
+    const addresses = typedConfig.addresses.filter(
+      (address): address is string => typeof address === "string",
+    );
+    if (addresses.includes(recipient) && addresses.includes(mint)) {
+      return null;
+    }
+  }
+  return {
+    policyId: "spl-transfer-mint-recipient-allowlist-required",
+    type: "approved-addresses",
+    passed: false,
+    reason:
+      "SPL transfer actions require an enabled approved-addresses whitelist policy containing both the recipient and token mint",
+  };
+}
+
 function isBytes32Hex(value: unknown): value is `0x${string}` {
   return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
+}
+
+function isBitcoinPsbtBase64(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_BITCOIN_PSBT_BASE64_LENGTH &&
+    /^[A-Za-z0-9+/]+={0,2}$/.test(value)
+  );
+}
+
+function maxBitcoinPsbtFeeSats(): bigint {
+  const configured = process.env.STEWARD_MAX_BITCOIN_PSBT_FEE_SATS;
+  if (configured && /^\d+$/.test(configured)) return BigInt(configured);
+  return DEFAULT_MAX_BITCOIN_PSBT_FEE_SATS;
 }
 
 function parseBigIntString(value: unknown): bigint | null {
@@ -943,6 +1237,68 @@ function hasTenantAdminSession(c: Context<{ Variables: AppVariables }>): boolean
   return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
 }
 
+async function hasCurrentTenantAdminMembership(
+  tenantId: string,
+  userId: string | undefined,
+): Promise<boolean> {
+  if (!userId) return false;
+  const [membership] = await db
+    .select({ role: userTenants.role, deactivatedAt: users.deactivatedAt })
+    .from(userTenants)
+    .innerJoin(users, eq(users.id, userTenants.userId))
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+  return (
+    (membership?.role === "owner" || membership?.role === "admin") &&
+    membership.deactivatedAt === null
+  );
+}
+
+type ApprovalPrincipal = {
+  type: "user" | "signer" | "quorum" | "agent";
+  id: string;
+};
+
+function approvalPrincipal(
+  c: Context<{ Variables: AppVariables }>,
+  agentId: string,
+  auth?: SignerAuthorization,
+): ApprovalPrincipal {
+  if (auth?.authMode === "signer") return { type: "signer", id: auth.signerId };
+  if (auth?.authMode === "quorum") return { type: "quorum", id: auth.quorumId };
+
+  const userId = c.get("userId");
+  const authType = c.get("authType");
+  if (typeof userId === "string" && (authType === "session-jwt" || authType === "dashboard-jwt")) {
+    return { type: "user", id: userId };
+  }
+
+  return { type: "agent", id: agentId };
+}
+
+function approvalQueueValues(
+  c: Context<{ Variables: AppVariables }>,
+  agentId: string,
+  txId: string,
+  auth?: SignerAuthorization,
+) {
+  const principal = approvalPrincipal(c, agentId, auth);
+  return {
+    id: crypto.randomUUID(),
+    txId,
+    agentId,
+    status: "pending" as const,
+    requestedByType: principal.type,
+    requestedById: principal.id,
+  };
+}
+
+function isSameApprovalPrincipal(
+  row: { requestedByType: string | null; requestedById: string | null },
+  principal: ApprovalPrincipal,
+): boolean {
+  return row.requestedByType === principal.type && row.requestedById === principal.id;
+}
+
 async function readTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {
   const [row] = await db
     .select({ authAbuseConfig: tenantConfigsTable.authAbuseConfig })
@@ -951,8 +1307,13 @@ async function readTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyCon
   return (row?.authAbuseConfig as TenantAuthAbuseConfigWithMfa | undefined)?.mfa ?? {};
 }
 
-function tenantMfaMaxAgeMs(policy: TenantMfaPolicyConfig): number {
-  const seconds = policy.maxAgeSeconds;
+function tenantMfaMaxAgeMs(
+  policy: TenantMfaPolicyConfig,
+  action?: keyof NonNullable<TenantMfaPolicyConfig["requireFor"]>,
+): number {
+  const seconds = action
+    ? (policy.maxAgeFor?.[action] ?? policy.maxAgeSeconds)
+    : policy.maxAgeSeconds;
   return typeof seconds === "number" && Number.isFinite(seconds)
     ? Math.max(30, Math.min(3600, Math.floor(seconds))) * 1000
     : DEFAULT_MFA_MAX_AGE_MS;
@@ -965,6 +1326,13 @@ function tenantMfaRequiredFor(
   return policy.requireFor?.[action] !== false;
 }
 
+function tenantMfaDisabledFor(
+  policy: TenantMfaPolicyConfig,
+  action: keyof NonNullable<TenantMfaPolicyConfig["disableFor"]>,
+): boolean {
+  return policy.disableFor?.[action] === true;
+}
+
 async function hasRecentTenantSessionMfa(
   c: Context<{ Variables: AppVariables }>,
   tenantId: string,
@@ -972,7 +1340,7 @@ async function hasRecentTenantSessionMfa(
 ): Promise<boolean> {
   const policy = await readTenantMfaPolicy(tenantId);
   if (action && !tenantMfaRequiredFor(policy, action)) return true;
-  return hasRecentSessionMfa(c, tenantMfaMaxAgeMs(policy));
+  return hasRecentSessionMfa(c, tenantMfaMaxAgeMs(policy, action));
 }
 
 function signerHasPermission(permissions: readonly string[], required: string): boolean {
@@ -997,6 +1365,9 @@ type SignerAuthorization =
   | { authMode: "signer"; signerId: string }
   | { authMode: "quorum"; quorumId: string; memberSignerIds: string[] };
 
+const SIGNER_AUTH_REQUIRED_ERROR =
+  "Signing requires owner/admin MFA (owner or admin session with recent MFA), or signer-bound X-Steward-Signer-Id and X-Steward-Signer-Secret headers";
+
 function signerAuthAuditMetadata(auth: SignerAuthorization): Record<string, unknown> {
   if (auth.authMode === "quorum") {
     return {
@@ -1011,6 +1382,16 @@ function signerAuthAuditMetadata(auth: SignerAuthorization): Record<string, unkn
   };
 }
 
+function applySignerPolicyScope(
+  c: Context<{ Variables: AppVariables }>,
+  policyIds: readonly string[],
+): void {
+  const scopedPolicyIds = [...new Set(policyIds.filter((id) => typeof id === "string" && id))];
+  if (scopedPolicyIds.length > 0) {
+    c.set("agentPolicyIds", scopedPolicyIds);
+  }
+}
+
 async function requireSignerPermission(
   c: Context<{ Variables: AppVariables }>,
   tenantId: string,
@@ -1020,7 +1401,10 @@ async function requireSignerPermission(
   const mfaPolicy = await readTenantMfaPolicy(tenantId);
   const vaultSigningRequiresMfa = tenantMfaRequiredFor(mfaPolicy, "vaultSigning");
   if (hasTenantAdminSession(c)) {
-    if (!vaultSigningRequiresMfa || hasRecentSessionMfa(c, tenantMfaMaxAgeMs(mfaPolicy))) {
+    if (
+      !vaultSigningRequiresMfa ||
+      hasRecentSessionMfa(c, tenantMfaMaxAgeMs(mfaPolicy, "vaultSigning"))
+    ) {
       return { ok: true, auth: { authMode: "admin", signerId: c.get("userId") ?? null } };
     }
     return {
@@ -1049,10 +1433,7 @@ async function requireSignerPermission(
     if (!credentialsHeader) {
       return {
         ok: false,
-        response: c.json<ApiResponse>(
-          { ok: false, error: "Key quorum signing requires X-Steward-Key-Quorum-Credentials" },
-          403,
-        ),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
 
@@ -1112,16 +1493,13 @@ async function requireSignerPermission(
     if (!quorum || quorum.status !== "active") {
       return {
         ok: false,
-        response: c.json<ApiResponse>({ ok: false, error: "Invalid or inactive key quorum" }, 403),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
     if (!signerHasPermission(quorum.permissions, requiredPermission)) {
       return {
         ok: false,
-        response: c.json<ApiResponse>(
-          { ok: false, error: `Key quorum lacks ${requiredPermission} permission` },
-          403,
-        ),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
 
@@ -1129,19 +1507,13 @@ async function requireSignerPermission(
     if (uniqueSignerIds.some((id) => !memberSet.has(id))) {
       return {
         ok: false,
-        response: c.json<ApiResponse>(
-          { ok: false, error: "Key quorum credentials include non-member signer" },
-          403,
-        ),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
     if (uniqueSignerIds.length < quorum.threshold) {
       return {
         ok: false,
-        response: c.json<ApiResponse>(
-          { ok: false, error: "Key quorum threshold was not met" },
-          403,
-        ),
+        response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
       };
     }
 
@@ -1151,6 +1523,7 @@ async function requireSignerPermission(
       .where(and(eq(agentSigners.tenantId, tenantId), eq(agentSigners.agentId, agentId)));
     const signersById = new Map(rows.map((row) => [row.id, row]));
     const now = new Date();
+    const scopedPolicyIds: string[] = [];
     for (const credential of credentials) {
       const signer = signersById.get(credential.signerId);
       const credentialHash =
@@ -1165,21 +1538,16 @@ async function requireSignerPermission(
       ) {
         return {
           ok: false,
-          response: c.json<ApiResponse>(
-            { ok: false, error: "Invalid or inactive key quorum signer credential" },
-            403,
-          ),
+          response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
         };
       }
       if (!signerHasPermission(signer.permissions, requiredPermission)) {
         return {
           ok: false,
-          response: c.json<ApiResponse>(
-            { ok: false, error: `Key quorum member lacks ${requiredPermission} permission` },
-            403,
-          ),
+          response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
         };
       }
+      scopedPolicyIds.push(...signer.policyIds);
       await db
         .update(agentSigners)
         .set({
@@ -1191,6 +1559,7 @@ async function requireSignerPermission(
         })
         .where(eq(agentSigners.id, signer.id));
     }
+    applySignerPolicyScope(c, scopedPolicyIds);
 
     return {
       ok: true,
@@ -1204,8 +1573,7 @@ async function requireSignerPermission(
       response: c.json<ApiResponse>(
         {
           ok: false,
-          error:
-            "Signing requires owner/admin MFA or signer-bound X-Steward-Signer-Id and X-Steward-Signer-Secret headers",
+          error: SIGNER_AUTH_REQUIRED_ERROR,
         },
         403,
       ),
@@ -1245,19 +1613,13 @@ async function requireSignerPermission(
   ) {
     return {
       ok: false,
-      response: c.json<ApiResponse>(
-        { ok: false, error: "Invalid or inactive delegated signer credential" },
-        403,
-      ),
+      response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
     };
   }
   if (!signerHasPermission(signer.permissions, requiredPermission)) {
     return {
       ok: false,
-      response: c.json<ApiResponse>(
-        { ok: false, error: `Delegated signer lacks ${requiredPermission} permission` },
-        403,
-      ),
+      response: c.json<ApiResponse>({ ok: false, error: SIGNER_AUTH_REQUIRED_ERROR }, 403),
     };
   }
 
@@ -1271,6 +1633,8 @@ async function requireSignerPermission(
       updatedAt: new Date(),
     })
     .where(eq(agentSigners.id, signer.id));
+
+  applySignerPolicyScope(c, signer.policyIds);
 
   return { ok: true, auth: { authMode: "signer", signerId: signer.id } };
 }
@@ -1363,6 +1727,14 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
   }
 
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
   const request = await safeJsonParse<Omit<SignRequest, "agentId" | "tenantId">>(c);
   if (!request) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
@@ -1407,27 +1779,12 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     );
     if (gasGuard) return gasGuard;
   }
-  // Build the SignRequest from its declared fields ONLY — never spread the raw
-  // body. The approved-addresses evaluator treats an envelope `destination`
-  // (and `action.destination` / `withdraw.destination`) as authoritative over
-  // `to` for the operator-withdraw flow; spreading the raw /sign body let a
-  // caller smuggle a whitelisted `destination` while `to` pointed at an
-  // arbitrary address, signing/broadcasting to `to` while the allowlist passed.
-  // /sign has no legitimate `destination` concept — its `to` IS the recipient.
   const signRequest: SignRequest = {
+    ...request,
     tenantId,
     agentId,
-    to: request.to,
-    value: request.value,
-    data: request.data,
     chainId: resolvedChainId,
-    nonce: request.nonce,
-    gasLimit: request.gasLimit,
-    broadcast: request.broadcast,
-    venue: request.venue,
-    walletAddress: request.walletAddress,
   };
-  const requester = getAuthenticatedPrincipal(c);
   const shouldBroadcast = signRequest.broadcast !== false;
   if (shouldBroadcast && !isNonEmptyString(c.req.header("Idempotency-Key"))) {
     return c.json<ApiResponse>(
@@ -1435,13 +1792,6 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
       428,
     );
   }
-  const signerAuthorization = await requireSignerPermission(
-    c,
-    tenantId,
-    agentId,
-    "sign_transaction",
-  );
-  if (!signerAuthorization.ok) return signerAuthorization.response;
 
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
@@ -1467,7 +1817,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
   }
 
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId, signRequest.chainId);
+    const stats = await getTransactionStats(agentId);
 
     // Authoritative cumulative aggregates (Redis-sourced) for any aggregation
     // policies on this agent. Loaded INSIDE the per-agent spend lock so the
@@ -1506,14 +1856,9 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
               broadcast: signRequest.broadcast !== false,
             }),
           });
-          await tx.insert(approvalQueue).values({
-            id: crypto.randomUUID(),
-            txId,
-            agentId,
-            status: "pending",
-            requestedByType: requester.type,
-            requestedById: requester.id,
-          });
+          await tx
+            .insert(approvalQueue)
+            .values(approvalQueueValues(c, agentId, txId, signerAuthorization.auth));
         });
 
         await writeVaultAudit(c, {
@@ -1740,7 +2085,7 @@ vaultRoutes.post("/:agentId/actions/transfer/quote", async (c) => {
       {
         ok: false,
         error:
-          "'to' must be an EVM address, optional 'token' must be 'native' or an EVM token address, and 'value'/'amountWei' must be a uint256 wei string",
+          "'to' must be an EVM address or a Solana address on chainId 101/102, optional 'token' must be 'native', an EVM token address, or a Solana token mint on chainId 101/102, and 'value'/'amountWei' must be a base-unit integer string",
       },
       400,
     );
@@ -1897,7 +2242,7 @@ vaultRoutes.post("/:agentId/actions/send-calls", async (c) => {
       );
     }
 
-    const stats = await getTransactionStats(agentId, parsed.chainId);
+    const stats = await getTransactionStats(agentId);
     let runningSpentToday = stats.spentToday;
     let runningSpentThisWeek = stats.spentThisWeek;
     const evaluations = [];
@@ -1958,12 +2303,9 @@ vaultRoutes.post("/:agentId/actions/send-calls", async (c) => {
         policyResults,
       });
       if (requiresManualApproval) {
-        await db.insert(approvalQueue).values({
-          id: crypto.randomUUID(),
-          txId: actionId,
-          agentId,
-          status: "pending",
-        });
+        await db
+          .insert(approvalQueue)
+          .values(approvalQueueValues(c, agentId, actionId, signerAuthorization.auth));
       }
       await recordSponsoredActionIfNeeded({
         sponsorship: sponsorshipPayload,
@@ -2042,12 +2384,9 @@ vaultRoutes.post("/:agentId/actions/send-calls", async (c) => {
       actionPayload: payload,
       policyResults,
     });
-    await db.insert(approvalQueue).values({
-      id: crypto.randomUUID(),
-      txId: actionId,
-      agentId,
-      status: "pending",
-    });
+    await db
+      .insert(approvalQueue)
+      .values(approvalQueueValues(c, agentId, actionId, signerAuthorization.auth));
     await recordSponsoredActionIfNeeded({
       sponsorship: sponsorshipPayload,
       tenantId,
@@ -2131,7 +2470,7 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       {
         ok: false,
         error:
-          "'to' must be an EVM address, optional 'token' must be 'native' or an EVM token address, and 'value'/'amountWei' must be a uint256 wei string",
+          "'to' must be an EVM address or a Solana address on chainId 101/102, optional 'token' must be 'native' for Solana or 'native'/EVM token address for EVM, and 'value'/'amountWei' must be a uint256 base-unit string",
       },
       400,
     );
@@ -2191,30 +2530,48 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
   }
 
   const isTokenTransfer = transfer.token !== "native";
-  if (isTokenTransfer) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "ERC20 transfer actions require token-aware spend accounting before signing",
-      },
-      403,
+  const isSolanaTransfer = isSolanaActionChain(transfer.chainId);
+  const isSolanaTokenTransfer = isSolanaTransfer && isTokenTransfer;
+  let solanaTokenTransaction:
+    | Awaited<ReturnType<typeof vault.buildSolanaSplTransferTransaction>>
+    | undefined;
+  if (!isTokenTransfer) {
+    const gasGuard = await nativeTransferGasAccountingGuard(
+      c,
+      transfer.to,
+      transfer.chainId,
+      undefined,
     );
+    if (gasGuard) return gasGuard;
+  } else if (isSolanaTokenTransfer) {
+    try {
+      solanaTokenTransaction = await vault.buildSolanaSplTransferTransaction({
+        tenantId,
+        agentId,
+        to: transfer.to,
+        token: transfer.token,
+        value: transfer.value,
+        chainId: transfer.chainId,
+      });
+    } catch (error) {
+      return c.json<ApiResponse>(
+        { ok: false, error: sanitizeErrorMessage(error) || "Failed to build SPL transfer" },
+        422,
+      );
+    }
   }
-  const gasGuard = await nativeTransferGasAccountingGuard(
-    c,
-    transfer.to,
-    transfer.chainId,
-    undefined,
-  );
-  if (gasGuard) return gasGuard;
   const signRequest: SignRequest = {
     tenantId,
     agentId,
-    to: isTokenTransfer ? transfer.token : transfer.to,
-    value: isTokenTransfer ? "0" : transfer.value,
-    data: isTokenTransfer ? encodeErc20TransferCalldata(transfer.to, transfer.value) : undefined,
+    to: isTokenTransfer && !isSolanaTokenTransfer ? transfer.token : transfer.to,
+    value: isTokenTransfer && !isSolanaTokenTransfer ? "0" : transfer.value,
+    data: isTokenTransfer
+      ? isSolanaTokenTransfer
+        ? solanaTokenTransaction?.transaction
+        : encodeErc20TransferCalldata(transfer.to, transfer.value)
+      : undefined,
     chainId: transfer.chainId,
-    gasLimit: isTokenTransfer ? "65000" : undefined,
+    gasLimit: isTokenTransfer && !isSolanaTokenTransfer ? "65000" : undefined,
     broadcast: transfer.broadcast,
   };
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
@@ -2257,15 +2614,17 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       });
     }
 
-    const stats = await getTransactionStats(agentId, signRequest.chainId);
-    const erc20PrecheckFailure = isTokenTransfer
-      ? erc20TransferPolicyPrecheck(policySet, transfer.token)
-      : null;
-    const evaluation = erc20PrecheckFailure
+    const stats = await getTransactionStats(agentId);
+    const transferPrecheckFailure = isSolanaTokenTransfer
+      ? splTransferPolicyPrecheck(policySet, transfer.to, transfer.token)
+      : isTokenTransfer
+        ? erc20TransferPolicyPrecheck(policySet, transfer.token)
+        : null;
+    const evaluation = transferPrecheckFailure
       ? {
           approved: false,
           requiresManualApproval: false,
-          results: [erc20PrecheckFailure],
+          results: [transferPrecheckFailure],
         }
       : await policyEngine.evaluate(policySet, {
           request: signRequest,
@@ -2300,12 +2659,9 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         policyResults: evaluation.results,
       });
       if (evaluation.requiresManualApproval) {
-        await db.insert(approvalQueue).values({
-          id: crypto.randomUUID(),
-          txId: actionId,
-          agentId,
-          status: "pending",
-        });
+        await db
+          .insert(approvalQueue)
+          .values(approvalQueueValues(c, agentId, actionId, signerAuthorization.auth));
       }
       if (evaluation.requiresManualApproval) {
         const reservationError = await recordSponsoredActionIfNeeded({
@@ -2430,11 +2786,45 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
       if (typeof reservationError === "string") {
         return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
       }
-      const result = await vault.signTransaction(signRequest, {
-        txId: actionId,
-        policyResults: evaluation.results,
-        status: "signed",
-      });
+      let result: string;
+      if (isSolanaTokenTransfer) {
+        if (!signRequest.data) {
+          throw new Error("SPL transfer transaction was not built");
+        }
+        await db.insert(transactions).values({
+          id: actionId,
+          agentId,
+          status: "pending",
+          toAddress: transfer.to,
+          value: transfer.value,
+          data: signRequest.data,
+          chainId: transfer.chainId,
+          actionType: "transfer",
+          actionPayload: transferActionPayload({
+            token: transfer.token,
+            recipient: transfer.to,
+            amount: transfer.value,
+            broadcast: transfer.broadcast,
+            referenceId: transfer.referenceId,
+            sponsorship: sponsorshipPayload,
+          }),
+          policyResults: evaluation.results,
+        });
+        const signed = await vault.signSolanaTransaction({
+          agentId,
+          tenantId,
+          transaction: signRequest.data,
+          chainId: transfer.chainId,
+          broadcast: transfer.broadcast,
+        });
+        result = signed.signature;
+      } else {
+        result = await vault.signTransaction(signRequest, {
+          txId: actionId,
+          policyResults: evaluation.results,
+          status: transfer.broadcast ? "broadcast" : "signed",
+        });
+      }
       const txStatus = transfer.broadcast ? "broadcast" : "signed";
       completedResult = result;
       completedStatus = txStatus;
@@ -2651,9 +3041,11 @@ vaultRoutes.get("/:agentId/actions/:actionId", async (c) => {
         ? "rejected"
         : row.status === "broadcast"
           ? "broadcast"
-          : row.status === "failed"
-            ? "failed"
-            : "signed";
+          : row.status === "confirmed"
+            ? "confirmed"
+            : row.status === "failed"
+              ? "failed"
+              : "signed";
   return c.json<ApiResponse>({
     ok: true,
     data: {
@@ -2695,6 +3087,16 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
   const agentId = c.req.param("agentId");
   const txId = c.req.param("txId");
   const actorId = c.get("userId") ?? tenantId;
+  if (!(await hasCurrentTenantAdminMembership(tenantId, c.get("userId")))) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Transaction approval requires an active owner or admin tenant membership at review time",
+      },
+      403,
+    );
+  }
   const agent = await ensureAgentForTenant(tenantId, agentId);
 
   if (!agent) {
@@ -2702,8 +3104,22 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
   }
 
   const [transaction] = await db
-    .select()
+    .select({
+      transaction: transactions,
+      approval: {
+        requestedByType: approvalQueue.requestedByType,
+        requestedById: approvalQueue.requestedById,
+      },
+    })
     .from(transactions)
+    .innerJoin(
+      approvalQueue,
+      and(
+        eq(approvalQueue.txId, transactions.id),
+        eq(approvalQueue.agentId, transactions.agentId),
+        eq(approvalQueue.status, "pending"),
+      ),
+    )
     .where(
       and(
         eq(transactions.id, txId),
@@ -2714,62 +3130,43 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
   if (!transaction) {
     return c.json<ApiResponse>({ ok: false, error: "Transaction not found" }, 404);
   }
-
-  // Separation of duties: the principal who requested the transaction cannot
-  // also approve it.
-  const approver = getAuthenticatedPrincipal(c);
-  const [approvalEntry] = await db
-    .select({
-      id: approvalQueue.id,
-      status: approvalQueue.status,
-      requestedByType: approvalQueue.requestedByType,
-      requestedById: approvalQueue.requestedById,
-    })
-    .from(approvalQueue)
-    .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
-
-  if (!approvalEntry || approvalEntry.status !== "pending") {
+  const pendingApproval = transaction.approval;
+  const transactionRow = transaction.transaction;
+  const approverPrincipal = approvalPrincipal(c, agentId);
+  if (isSameApprovalPrincipal(pendingApproval, approverPrincipal)) {
     return c.json<ApiResponse>(
-      { ok: false, error: "Transaction already processed or not found" },
-      409,
+      {
+        ok: false,
+        error: "Manual approval requires separation of duties from the requester",
+      },
+      403,
     );
   }
 
-  if (
-    approvalEntry.requestedByType &&
-    approvalEntry.requestedById &&
-    isSameAuthenticatedPrincipal(
-      { type: approvalEntry.requestedByType, id: approvalEntry.requestedById },
-      approver,
-    )
-  ) {
-    return c.json<ApiResponse>({ ok: false, error: "Approval requires separation of duties" }, 403);
-  }
-
-  const isSolana = transaction.chainId === 101 || transaction.chainId === 102;
+  const isSolana = transactionRow.chainId === 101 || transactionRow.chainId === 102;
   const transferPayload =
-    transaction.actionType === "transfer"
-      ? getTransferActionPayload(transaction.actionPayload)
+    transactionRow.actionType === "transfer"
+      ? getTransferActionPayload(transactionRow.actionPayload)
       : null;
   const sendCallsPayload =
-    transaction.actionType === "send_calls"
-      ? getSendCallsActionPayload(transaction.actionPayload)
+    transactionRow.actionType === "send_calls"
+      ? getSendCallsActionPayload(transactionRow.actionPayload)
       : null;
   const transactionPayload =
-    !transaction.actionType || transaction.actionType === "transaction"
-      ? getTransactionActionPayload(transaction.actionPayload)
+    !transactionRow.actionType || transactionRow.actionType === "transaction"
+      ? getTransactionActionPayload(transactionRow.actionPayload)
       : null;
   const isSendCallsAction = sendCallsPayload !== null;
   if (
-    transaction.actionType === "send_calls" ||
-    transaction.actionType === "user_operation" ||
-    transaction.actionType === "authorization"
+    transactionRow.actionType === "send_calls" ||
+    transactionRow.actionType === "user_operation" ||
+    transactionRow.actionType === "authorization"
   ) {
     return c.json<ApiResponse>(
       {
         ok: false,
         error:
-          transaction.actionType === "send_calls"
+          transactionRow.actionType === "send_calls"
             ? "Approval execution for batch call actions is disabled until typed batch replay is implemented"
             : "Approval execution for unsafe account-abstraction actions is disabled until typed replay is implemented",
       },
@@ -2789,9 +3186,9 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     resourceId: txId,
     metadata: {
       agentId,
-      chainId: transaction.chainId,
-      to: transaction.toAddress,
-      value: transaction.value,
+      chainId: transactionRow.chainId,
+      to: transactionRow.toAddress,
+      value: transactionRow.value,
       broadcast:
         transferPayload?.broadcast ?? sendCallsPayload?.broadcast ?? transactionPayload?.broadcast,
     },
@@ -2811,10 +3208,10 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             : true;
       const shouldBroadcast = requestedBroadcast !== false;
       const approvalSignRequest: SignRequest = {
-        ...toSignRequest(transaction),
+        ...toSignRequest(transactionRow),
         tenantId,
         gasLimit:
-          transferPayload && transferPayload.token !== "native" && transaction.data
+          transferPayload && transferPayload.token !== "native" && transactionRow.data
             ? "65000"
             : undefined,
         broadcast: requestedBroadcast,
@@ -2838,16 +3235,33 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         }
       }
       const currentConditionSets = await loadConditionSetsForPolicies(tenantId, currentPolicySet);
-      const stats = await getTransactionStats(agentId, approvalSignRequest.chainId);
-      const currentEvaluation = await policyEngine.evaluate(currentPolicySet, {
-        request: approvalSignRequest,
-        recentTxCount1h: stats.recentTxCount1h,
-        recentTxCount24h: stats.recentTxCount24h,
-        spentToday: stats.spentToday,
-        spentThisWeek: stats.spentThisWeek,
-        priceOracle,
-        conditionSets: currentConditionSets,
-      });
+      const stats = await getTransactionStats(agentId);
+      const currentTransferPrecheckFailure =
+        isSolana &&
+        transferPayload !== null &&
+        transferPayload.token !== "native" &&
+        transactionRow.toAddress
+          ? splTransferPolicyPrecheck(
+              currentPolicySet,
+              transactionRow.toAddress,
+              transferPayload.token,
+            )
+          : null;
+      const currentEvaluation = currentTransferPrecheckFailure
+        ? {
+            approved: false,
+            requiresManualApproval: false,
+            results: [currentTransferPrecheckFailure],
+          }
+        : await policyEngine.evaluate(currentPolicySet, {
+            request: approvalSignRequest,
+            recentTxCount1h: stats.recentTxCount1h,
+            recentTxCount24h: stats.recentTxCount24h,
+            spentToday: stats.spentToday,
+            spentThisWeek: stats.spentThisWeek,
+            priceOracle,
+            conditionSets: currentConditionSets,
+          });
 
       if (!currentEvaluation.approved && !currentEvaluation.requiresManualApproval) {
         await db
@@ -2856,7 +3270,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
         await db
           .update(approvalQueue)
-          .set({ status: "rejected", resolvedAt, resolvedBy: actorId })
+          .set({
+            status: "rejected",
+            resolvedAt,
+            resolvedBy: `${approverPrincipal.type}:${approverPrincipal.id}`,
+            resolvedByType: approverPrincipal.type,
+            resolvedById: approverPrincipal.id,
+          })
           .where(
             and(
               eq(approvalQueue.txId, txId),
@@ -2873,9 +3293,9 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           resourceId: txId,
           metadata: {
             agentId,
-            chainId: transaction.chainId,
-            to: transaction.toAddress,
-            value: transaction.value,
+            chainId: transactionRow.chainId,
+            to: transactionRow.toAddress,
+            value: transactionRow.value,
             policyResults: currentEvaluation.results,
           },
         });
@@ -2891,7 +3311,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
 
       const claimResult = await db
         .update(approvalQueue)
-        .set({ status: "approved", resolvedAt, resolvedBy: actorId })
+        .set({
+          status: "approved",
+          resolvedAt,
+          resolvedBy: `${approverPrincipal.type}:${approverPrincipal.id}`,
+          resolvedByType: approverPrincipal.type,
+          resolvedById: approverPrincipal.id,
+        })
         .where(
           and(
             eq(approvalQueue.txId, txId),
@@ -2910,7 +3336,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       if (transferPayload?.sponsorship?.sponsored === true && !shouldBroadcast) {
         await db
           .update(approvalQueue)
-          .set({ status: "pending", resolvedAt: null, resolvedBy: null })
+          .set({
+            status: "pending",
+            resolvedAt: null,
+            resolvedBy: null,
+            resolvedByType: null,
+            resolvedById: null,
+          })
           .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
         return c.json<ApiResponse>(
           {
@@ -2927,41 +3359,50 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           tenantId,
           agentId,
           txId,
-          chainId: transaction.chainId,
-          caip2: toCaip2(transaction.chainId),
+          chainId: transactionRow.chainId,
+          caip2: toCaip2(transactionRow.chainId),
           actionType: "transfer",
           status: "reserved",
         });
         if (typeof reservationError === "string") {
           await db
             .update(approvalQueue)
-            .set({ status: "pending", resolvedAt: null, resolvedBy: null })
+            .set({
+              status: "pending",
+              resolvedAt: null,
+              resolvedBy: null,
+              resolvedByType: null,
+              resolvedById: null,
+            })
             .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
           return c.json<ApiResponse>({ ok: false, error: reservationError }, 403);
         }
       }
       dispatchIntentWebhook(tenantId, agentId, "intent.authorized", {
         intentId: txId,
-        actionType: transaction.actionType,
+        actionType: transactionRow.actionType,
         status: "authorized",
-        referenceId: actionReferenceId(transaction.actionPayload),
-        policyResults: transaction.policyResults,
+        referenceId: actionReferenceId(transactionRow.actionPayload),
+        policyResults: transactionRow.policyResults,
       });
 
       let txHash: string;
 
       if (isSolana) {
-        if (!transaction.data) {
+        if (!transactionRow.data) {
           throw new Error("Solana transaction blob not found; cannot replay approval");
         }
+        const isSolanaTokenTransfer =
+          transferPayload !== null && transferPayload.token !== "native";
         const result = await vault.signSolanaTransaction({
           agentId,
           tenantId,
-          transaction: transaction.data,
-          chainId: transaction.chainId,
+          transaction: transactionRow.data,
+          chainId: transactionRow.chainId,
           broadcast: shouldBroadcast,
-          expectedTo: transaction.toAddress,
-          expectedValue: transaction.value,
+          ...(isSolanaTokenTransfer
+            ? {}
+            : { expectedTo: transactionRow.toAddress, expectedValue: transactionRow.value }),
         });
         txHash = result.signature;
         irreversibleResult = shouldBroadcast;
@@ -2996,8 +3437,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           actionPayload: transferPayload
             ? transferActionPayload({
                 token: transferPayload.token,
-                recipient: transferPayload.recipient ?? transaction.toAddress,
-                amount: transferPayload.amount ?? transaction.value,
+                recipient: transferPayload.recipient ?? transactionRow.toAddress,
+                amount: transferPayload.amount ?? transactionRow.value,
                 broadcast: transferPayload.broadcast,
                 referenceId: transferPayload.referenceId,
                 sponsorship: transferPayload.sponsorship,
@@ -3007,14 +3448,14 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
                   broadcast: transactionPayload.broadcast,
                   referenceId: transactionPayload.referenceId,
                 })
-              : transaction.actionPayload,
+              : transactionRow.actionPayload,
           signedAt: resolvedAt,
         })
         .where(eq(transactions.id, txId));
 
       if (!isSolana && shouldBroadcast) {
-        recordVaultSpend(agentId, tenantId, transaction.value, transaction.chainId).catch((err) =>
-          console.error("[vault] Failed to record approved transaction spend:", err),
+        recordVaultSpend(agentId, tenantId, transactionRow.value, transactionRow.chainId).catch(
+          (err) => console.error("[vault] Failed to record approved transaction spend:", err),
         );
       }
       if (transferPayload) {
@@ -3023,8 +3464,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           tenantId,
           agentId,
           txId,
-          chainId: transaction.chainId,
-          caip2: toCaip2(transaction.chainId),
+          chainId: transactionRow.chainId,
+          caip2: toCaip2(transactionRow.chainId),
           txHash: shouldBroadcast ? txHash : undefined,
           actionType: "transfer",
           status: shouldBroadcast ? "submitted" : "signed",
@@ -3044,7 +3485,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         resourceId: txId,
         metadata: {
           agentId,
-          chainId: transaction.chainId,
+          chainId: transactionRow.chainId,
           txHash: shouldBroadcast ? txHash : undefined,
           broadcast:
             transferPayload?.broadcast ??
@@ -3072,18 +3513,18 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       }
       dispatchIntentWebhook(tenantId, agentId, "intent.executed", {
         intentId: txId,
-        actionType: transaction.actionType,
+        actionType: transactionRow.actionType,
         status: "executed",
         txHash: shouldBroadcast ? txHash : undefined,
         signedTx: shouldBroadcast ? undefined : txHash,
-        referenceId: actionReferenceId(transaction.actionPayload),
-        policyResults: transaction.policyResults,
+        referenceId: actionReferenceId(transactionRow.actionPayload),
+        policyResults: transactionRow.policyResults,
       });
       if (shouldBroadcast) {
         dispatchTransactionLifecycleWebhook(tenantId, agentId, "transaction.broadcasted", {
           txId,
           txHash,
-          chainId: transaction.chainId,
+          chainId: transactionRow.chainId,
           status: "broadcast",
         });
       }
@@ -3096,7 +3537,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       if (!irreversibleResult) {
         await db
           .update(approvalQueue)
-          .set({ status: "pending", resolvedAt: null, resolvedBy: null })
+          .set({
+            status: "pending",
+            resolvedAt: null,
+            resolvedBy: null,
+            resolvedByType: null,
+            resolvedById: null,
+          })
           .where(and(eq(approvalQueue.txId, txId), eq(approvalQueue.agentId, agentId)));
         if (transferPayload) {
           await recordSponsoredActionIfNeeded({
@@ -3104,8 +3551,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             tenantId,
             agentId,
             txId,
-            chainId: transaction.chainId,
-            caip2: toCaip2(transaction.chainId),
+            chainId: transactionRow.chainId,
+            caip2: toCaip2(transactionRow.chainId),
             actionType: "transfer",
             status: "failed",
           });
@@ -3115,7 +3562,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           .update(transactions)
           .set({
             status: "broadcast",
-            txHash: completedTxHash ?? transaction.txHash ?? null,
+            txHash: completedTxHash ?? transactionRow.txHash ?? null,
             signedAt: resolvedAt,
           })
           .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
@@ -3138,7 +3585,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         });
       }
 
-      if (transaction.actionType === "send_calls") {
+      if (transactionRow.actionType === "send_calls") {
         dispatchWebhook(tenantId, agentId, "wallet_action.send_calls.failed", {
           actionId: txId,
           error: rawMessage,
@@ -3153,11 +3600,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       }
       dispatchIntentWebhook(tenantId, agentId, "intent.failed", {
         intentId: txId,
-        actionType: transaction.actionType,
+        actionType: transactionRow.actionType,
         status: "failed",
         error: rawMessage,
-        referenceId: actionReferenceId(transaction.actionPayload),
-        policyResults: transaction.policyResults,
+        referenceId: actionReferenceId(transactionRow.actionPayload),
+        policyResults: transactionRow.policyResults,
       });
 
       if (isRpcError(e)) {
@@ -3190,6 +3637,7 @@ vaultRoutes.post("/:agentId/reject/:txId", async (c) => {
   const agentId = c.req.param("agentId");
   const txId = c.req.param("txId");
   const actorId = c.get("userId") ?? tenantId;
+  const rejectorPrincipal = approvalPrincipal(c, agentId);
   const agent = await ensureAgentForTenant(tenantId, agentId);
 
   if (!agent) {
@@ -3209,7 +3657,13 @@ vaultRoutes.post("/:agentId/reject/:txId", async (c) => {
   const [rejectedTransaction] = await db.transaction(async (tx) => {
     const rejectResult = await tx
       .update(approvalQueue)
-      .set({ status: "rejected", resolvedAt: new Date(), resolvedBy: actorId })
+      .set({
+        status: "rejected",
+        resolvedAt: new Date(),
+        resolvedBy: `${rejectorPrincipal.type}:${rejectorPrincipal.id}`,
+        resolvedByType: rejectorPrincipal.type,
+        resolvedById: rejectorPrincipal.id,
+      })
       .where(
         and(
           eq(approvalQueue.txId, txId),
@@ -3381,6 +3835,7 @@ vaultRoutes.get("/:agentId/transactions", async (c) => {
   const status = c.req.query("status");
   const actionType = c.req.query("actionType");
   const txHash = c.req.query("txHash");
+  const referenceId = parseReferenceId(c.req.query("referenceId") ?? c.req.query("reference_id"));
   const allowedStatuses = new Set([
     "pending",
     "approved",
@@ -3393,12 +3848,23 @@ vaultRoutes.get("/:agentId/transactions", async (c) => {
   if (status && !allowedStatuses.has(status)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid transaction status filter" }, 400);
   }
+  if (referenceId === null) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "referenceId must be a non-empty string up to 128 characters" },
+      400,
+    );
+  }
 
   const conditions: SQL[] = [eq(transactions.agentId, agentId)];
   if (status)
     conditions.push(eq(transactions.status, status as typeof transactions.$inferSelect.status));
   if (actionType) conditions.push(eq(transactions.actionType, actionType));
   if (txHash) conditions.push(eq(transactions.txHash, txHash));
+  if (referenceId) {
+    conditions.push(
+      sql`(${transactions.actionPayload}->>'referenceId' = ${referenceId} or ${transactions.actionPayload}->>'reference_id' = ${referenceId})`,
+    );
+  }
 
   const rows = await db
     .select()
@@ -4222,7 +4688,7 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
   if (rateLimitResult.headers) {
     for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
   }
-  const stats = await getTransactionStats(agentId, 0);
+  const stats = await getTransactionStats(agentId);
   const evaluation = await policyEngine.evaluate(policySet, {
     request: {
       agentId,
@@ -4307,6 +4773,401 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
   }
 });
 
+// POST /vault/:agentId/sign-bitcoin-psbt
+// Signs a Bitcoin PSBT with one scoped Bitcoin wallet. Standard non-change
+// outputs are decoded and evaluated against normal policy controls, same-agent
+// same-network Bitcoin wallet outputs are treated as change, and an explicit
+// raw-signing-chain bitcoin/secp256k1 policy keeps the capability opt-in and
+// fail-closed per agent.
+// body: { "walletScope": "bitcoin:testnet:p2wpkh:0:0:0", "psbtBase64": "...", "finalize"?: true, "referenceId"?: "caller-id" }
+// resp: { ok: true, data: { signedPsbtBase64, signedInputs, addressType, network, walletScope, walletAddress, transactionId, finalizedTxHex?, txId?, vsize?, feeSats? } }
+vaultRoutes.post("/:agentId/sign-bitcoin-psbt", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    walletScope?: unknown;
+    psbtBase64?: unknown;
+    finalize?: unknown;
+    referenceId?: unknown;
+  }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (
+    !isNonEmptyString(body.walletScope) ||
+    body.walletScope.length > 256 ||
+    !body.walletScope.startsWith("bitcoin:")
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must be a non-empty Bitcoin wallet scope" },
+      400,
+    );
+  }
+  if (!isBitcoinPsbtBase64(body.psbtBase64)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "psbtBase64 must be a non-empty base64 PSBT up to 1000000 bytes" },
+      400,
+    );
+  }
+  if (body.finalize !== undefined && typeof body.finalize !== "boolean") {
+    return c.json<ApiResponse>({ ok: false, error: "finalize must be a boolean" }, 400);
+  }
+  const walletScope = body.walletScope;
+  const psbtBase64 = body.psbtBase64;
+  const finalize = body.finalize === true;
+  const referenceId = parseReferenceId(body.referenceId);
+  if (referenceId === null) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "referenceId must be a non-empty string up to 128 characters" },
+      400,
+    );
+  }
+
+  const chainSupport = rawSigningChainSupport("bitcoin");
+  if (!chainSupport?.supported || chainSupport.curve !== "secp256k1") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Bitcoin PSBT signing is not supported by the raw-signing policy model" },
+      400,
+    );
+  }
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+  const hasBitcoinSigningPolicy = policySet.some(
+    (p) => p.enabled && p.type === "raw-signing-chain",
+  );
+  if (!hasBitcoinSigningPolicy) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Bitcoin PSBT signing requires a `raw-signing-chain` policy for this agent. Add one that explicitly allows bitcoin and secp256k1.",
+      },
+      403,
+    );
+  }
+  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+  const rateLimitResult = await enforceRateLimit(agentId, policySet);
+  if (!rateLimitResult.allowed) {
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+      429,
+    );
+  }
+  if (rateLimitResult.headers) {
+    for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+  }
+  let psbtInspection: Awaited<ReturnType<typeof vault.inspectBitcoinPsbt>>;
+  try {
+    psbtInspection = await vault.inspectBitcoinPsbt({
+      tenantId,
+      agentId,
+      walletScope,
+      psbtBase64,
+    });
+  } catch (e) {
+    const rawError = e instanceof Error ? e.message : String(e);
+    let error = sanitizeErrorMessage(e);
+    let status: 400 | 500 = 500;
+    if (rawError.includes("Malformed Bitcoin PSBT")) {
+      error = "Malformed Bitcoin PSBT";
+      status = 400;
+    } else if (rawError.includes("Bitcoin PSBT input amounts")) {
+      error = "Bitcoin PSBT input amounts are required for fee policy";
+      status = 400;
+    } else if (rawError.includes("Bitcoin PSBT outputs spend more")) {
+      error = "Bitcoin PSBT outputs spend more than input amounts";
+      status = 400;
+    }
+    return c.json<ApiResponse>({ ok: false, error }, status);
+  }
+  const destinationOutputs = psbtInspection.outputs.filter((output) => !output.isChange);
+  if (destinationOutputs.length === 0) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Bitcoin PSBT must contain at least one non-change output" },
+      400,
+    );
+  }
+  const destinationTotalSats = destinationOutputs.reduce(
+    (total, output) => total + BigInt(output.amountSats),
+    0n,
+  );
+  const feeSats = BigInt(psbtInspection.feeSats);
+  const maxFeeSats = maxBitcoinPsbtFeeSats();
+  if (feeSats > maxFeeSats) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Bitcoin PSBT fee exceeds configured maximum",
+        data: {
+          feeSats: feeSats.toString(),
+          maxFeeSats: maxFeeSats.toString(),
+        },
+      },
+      403,
+    );
+  }
+  const bitcoinSpendSats = (destinationTotalSats + feeSats).toString();
+
+  return withAgentSpendLock(agentId, async () => {
+    const stats = await getTransactionStats(agentId);
+    const bitcoinChainId = psbtInspection.network === "mainnet" ? 201 : 202;
+    const policyResults: PolicyResult[] = [];
+    for (const output of destinationOutputs) {
+      const evaluation = await policyEngine.evaluate(policySet, {
+        request: {
+          agentId,
+          tenantId,
+          to: output.address,
+          value: output.amountSats,
+          chainId: bitcoinChainId,
+          broadcast: false,
+        },
+        recentTxCount1h: stats.recentTxCount1h,
+        recentTxCount24h: stats.recentTxCount24h,
+        spentToday: stats.spentToday,
+        spentThisWeek: stats.spentThisWeek,
+        priceOracle,
+        conditionSets,
+        rawSigning: { chain: "bitcoin", curve: "secp256k1" },
+      });
+      const outputResults = evaluation.results.map((result) => ({
+        ...result,
+        outputIndex: output.index,
+      }));
+      policyResults.push(...outputResults);
+      if (!evaluation.approved) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Bitcoin PSBT signing rejected by policy",
+            data: {
+              output: {
+                index: output.index,
+                address: output.address,
+                amountSats: output.amountSats,
+              },
+              policyResults: outputResults,
+            },
+          },
+          403,
+        );
+      }
+    }
+
+    const aggregateEvaluation = await policyEngine.evaluate(policySet, {
+      request: {
+        agentId,
+        tenantId,
+        to: destinationOutputs[0].address,
+        value: bitcoinSpendSats,
+        chainId: bitcoinChainId,
+        broadcast: false,
+      },
+      recentTxCount1h: stats.recentTxCount1h,
+      recentTxCount24h: stats.recentTxCount24h,
+      spentToday: stats.spentToday,
+      spentThisWeek: stats.spentThisWeek,
+      priceOracle,
+      conditionSets,
+      rawSigning: { chain: "bitcoin", curve: "secp256k1" },
+    });
+    const aggregatePolicyResults = aggregateEvaluation.results.map((result) => ({
+      ...result,
+      aggregate: true,
+    }));
+    policyResults.push(...aggregatePolicyResults);
+    if (!aggregateEvaluation.approved) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Bitcoin PSBT signing rejected by policy",
+          data: {
+            aggregate: {
+              destinationTotalSats: destinationTotalSats.toString(),
+              feeSats: feeSats.toString(),
+              spendSats: bitcoinSpendSats,
+            },
+            policyResults: aggregatePolicyResults,
+          },
+        },
+        403,
+      );
+    }
+
+    try {
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: "vault.bitcoin_psbt.sign.authorized",
+        resourceType: "wallet",
+        resourceId: agentId,
+        metadata: {
+          walletScope,
+          psbtSize: psbtBase64.length,
+          inputTotalSats: psbtInspection.inputTotalSats,
+          outputTotalSats: psbtInspection.outputTotalSats,
+          destinationTotalSats: destinationTotalSats.toString(),
+          feeSats: feeSats.toString(),
+          destinationOutputs: destinationOutputs.map(({ index, address, amountSats }) => ({
+            index,
+            address,
+            amountSats,
+          })),
+          changeOutputCount: psbtInspection.outputs.length - destinationOutputs.length,
+          finalize,
+          referenceId: referenceId ?? null,
+          policyResults,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+      });
+
+      const result = await vault.signBitcoinPsbt({
+        tenantId,
+        agentId,
+        walletScope,
+        psbtBase64,
+        finalize,
+      });
+      const transactionId = crypto.randomUUID();
+      await db.insert(transactions).values({
+        id: transactionId,
+        agentId,
+        status: "signed",
+        toAddress: destinationOutputs[0].address,
+        value: bitcoinSpendSats,
+        data: null,
+        chainId: bitcoinChainId,
+        txHash: result.txId ?? null,
+        actionType: "bitcoin_psbt",
+        actionPayload: {
+          type: "bitcoin_psbt",
+          walletScope: result.walletScope,
+          walletAddress: result.walletAddress,
+          psbtSize: psbtBase64.length,
+          inputTotalSats: psbtInspection.inputTotalSats,
+          outputTotalSats: psbtInspection.outputTotalSats,
+          destinationTotalSats: destinationTotalSats.toString(),
+          feeSats: feeSats.toString(),
+          spendSats: bitcoinSpendSats,
+          destinationOutputs: destinationOutputs.map(({ index, address, amountSats }) => ({
+            index,
+            address,
+            amountSats,
+          })),
+          changeOutputCount: psbtInspection.outputs.length - destinationOutputs.length,
+          finalize,
+          referenceId: referenceId ?? null,
+        },
+        policyResults,
+        signedAt: new Date(),
+      });
+
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: "vault.bitcoin_psbt.signed",
+        resourceType: "wallet",
+        resourceId: agentId,
+        metadata: {
+          transactionId,
+          walletScope: result.walletScope,
+          walletAddress: result.walletAddress,
+          signedInputs: result.signedInputs,
+          addressType: result.addressType,
+          network: result.network,
+          psbtSize: psbtBase64.length,
+          inputTotalSats: psbtInspection.inputTotalSats,
+          outputTotalSats: psbtInspection.outputTotalSats,
+          destinationTotalSats: destinationTotalSats.toString(),
+          destinationOutputs: destinationOutputs.map(({ index, address, amountSats }) => ({
+            index,
+            address,
+            amountSats,
+          })),
+          changeOutputCount: psbtInspection.outputs.length - destinationOutputs.length,
+          finalize,
+          txId: result.txId ?? null,
+          vsize: result.vsize ?? null,
+          feeSats: result.feeSats ?? psbtInspection.feeSats,
+          referenceId: referenceId ?? null,
+          policyResults,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+      });
+
+      setNoStoreHeaders(c);
+      return c.json<ApiResponse>({ ok: true, data: { ...result, transactionId } });
+    } catch (e) {
+      console.error(`[Vault] sign-bitcoin-psbt failed for ${tenantId}/${agentId}:`, e);
+      const rawError = e instanceof Error ? e.message : String(e);
+      const isFinalizationFailure = rawError.includes("Bitcoin PSBT finalization failed");
+      const noSpendableInput = rawError.includes(
+        "Bitcoin PSBT does not contain inputs spendable by this wallet",
+      );
+      const error = isFinalizationFailure
+        ? "Bitcoin PSBT finalization failed"
+        : sanitizeErrorMessage(e);
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: "vault.bitcoin_psbt.sign.failed",
+        resourceType: "wallet",
+        resourceId: agentId,
+        metadata: {
+          walletScope,
+          psbtSize: psbtBase64.length,
+          inputTotalSats: psbtInspection.inputTotalSats,
+          outputTotalSats: psbtInspection.outputTotalSats,
+          destinationTotalSats: destinationTotalSats.toString(),
+          feeSats: feeSats.toString(),
+          destinationOutputs: destinationOutputs.map(({ index, address, amountSats }) => ({
+            index,
+            address,
+            amountSats,
+          })),
+          changeOutputCount: psbtInspection.outputs.length - destinationOutputs.length,
+          finalize,
+          referenceId: referenceId ?? null,
+          error,
+          failureKind: isFinalizationFailure
+            ? "finalization"
+            : noSpendableInput
+              ? "no_spendable_input"
+              : "signing",
+          policyResults,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+      });
+      const status = isFinalizationFailure || noSpendableInput ? 400 : 500;
+      return c.json<ApiResponse>({ ok: false, error }, status);
+    }
+  });
+});
+
 vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   if (!requireAgentAccess(c)) {
     return c.json<ApiResponse>(
@@ -4381,7 +5242,6 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     value: "0",
     chainId: resolvedChainId,
   };
-  const requester = getAuthenticatedPrincipal(c);
 
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
@@ -4424,7 +5284,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: rlResult.reason || "Rate limit exceeded" }, 429);
   }
 
-  const stats = await getTransactionStats(agentId, signRequest.chainId);
+  const stats = await getTransactionStats(agentId);
 
   const evaluation = await policyEngine.evaluate(policySet, {
     request: signRequest,
@@ -4451,14 +5311,9 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
           chainId: signRequest.chainId,
           policyResults: evaluation.results,
         });
-        await tx.insert(approvalQueue).values({
-          id: crypto.randomUUID(),
-          txId,
-          agentId,
-          status: "pending",
-          requestedByType: requester.type,
-          requestedById: requester.id,
-        });
+        await tx
+          .insert(approvalQueue)
+          .values(approvalQueueValues(c, agentId, txId, signerAuthorization.auth));
       });
 
       await writeVaultAudit(c, {
@@ -4471,6 +5326,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
         metadata: {
           chainId: signRequest.chainId,
           primaryType: body.primaryType,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           policyResults: evaluation.results,
         },
       });
@@ -4519,6 +5375,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       metadata: {
         chainId: signRequest.chainId,
         primaryType: body.primaryType,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
         policyResults: evaluation.results,
       },
     });
@@ -4541,6 +5398,21 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
   const txId = crypto.randomUUID();
 
   try {
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "agent",
+      actorId: agentId,
+      action: "vault.sign.typed_data.authorized",
+      resourceType: "transaction",
+      resourceId: txId,
+      metadata: {
+        chainId: signRequest.chainId,
+        primaryType: body.primaryType,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
+        policyResults: evaluation.results,
+      },
+    });
+
     const signature = await vault.signTypedData({
       agentId,
       tenantId,
@@ -4571,6 +5443,7 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       metadata: {
         chainId: signRequest.chainId,
         primaryType: body.primaryType,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
       },
     });
 
@@ -4726,7 +5599,7 @@ vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
   }
 
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId, signRequest.chainId);
+    const stats = await getTransactionStats(agentId);
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,
       recentTxCount1h: stats.recentTxCount1h,
@@ -4763,12 +5636,9 @@ vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
       if (evaluation.requiresManualApproval) {
         await db.transaction(async (tx) => {
           await tx.insert(transactions).values(transactionRow);
-          await tx.insert(approvalQueue).values({
-            id: crypto.randomUUID(),
-            txId,
-            agentId,
-            status: "pending",
-          });
+          await tx
+            .insert(approvalQueue)
+            .values(approvalQueueValues(c, agentId, txId, signerAuthorization.auth));
         });
       } else {
         await db.insert(transactions).values(transactionRow);
@@ -4933,6 +5803,63 @@ vaultRoutes.post("/:agentId/sign-user-operation", async (c) => {
 
 // ─── EIP-7702 Authorization Signing ──────────────────────────────────────────
 
+vaultRoutes.get("/:agentId/eip7702-delegation", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const chainId = Number(c.req.query("chainId"));
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) {
+    return c.json<ApiResponse>({ ok: false, error: "chainId must be a positive integer" }, 400);
+  }
+
+  if (!isValidAddress(agent.walletAddress)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "EIP-7702 delegation detection requires an EVM wallet address" },
+      400,
+    );
+  }
+
+  try {
+    const status = await readEip7702Delegation({
+      walletAddress: agent.walletAddress,
+      chainId,
+      getCode: async (address, blockTag) => {
+        const codeResponse = await vault.rpcPassthrough({
+          method: "eth_getCode",
+          params: [address, blockTag],
+          chainId,
+        });
+        if (codeResponse.error) {
+          throw new Error("eth_getCode returned an RPC error");
+        }
+        return codeResponse.result;
+      },
+    });
+
+    return c.json<ApiResponse<typeof status>>({ ok: true, data: status });
+  } catch {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "EIP-7702 delegation status cannot be read until account code is verified",
+      },
+      502,
+    );
+  }
+});
+
 vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
   if (!allowUnsafeAuthorizationSigning()) {
     return c.json<ApiResponse>(
@@ -5048,7 +5975,7 @@ vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
   }
 
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId, signRequest.chainId);
+    const stats = await getTransactionStats(agentId);
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,
       recentTxCount1h: stats.recentTxCount1h,
@@ -5084,12 +6011,9 @@ vaultRoutes.post("/:agentId/sign-authorization", async (c) => {
       if (evaluation.requiresManualApproval) {
         await db.transaction(async (tx) => {
           await tx.insert(transactions).values(transactionRow);
-          await tx.insert(approvalQueue).values({
-            id: crypto.randomUUID(),
-            txId,
-            agentId,
-            status: "pending",
-          });
+          await tx
+            .insert(approvalQueue)
+            .values(approvalQueueValues(c, agentId, txId, signerAuthorization.auth));
         });
       } else {
         await db.insert(transactions).values(transactionRow);
@@ -5267,6 +6191,14 @@ async function signSolanaBlind(
   if (idempotencyResponse) return idempotencyResponse;
 
   const signRequest = { agentId, tenantId, to: toAddress, value: txValue, chainId };
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
 
@@ -5281,7 +6213,7 @@ async function signSolanaBlind(
   // Same per-agent advisory spend lock as the parsed path: serialize eval+sign+
   // commit so concurrent blind-sign requests cannot race the spend cap.
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId, signRequest.chainId);
+    const stats = await getTransactionStats(agentId);
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,
       recentTxCount1h: stats.recentTxCount1h,
@@ -5306,12 +6238,9 @@ async function signSolanaBlind(
         policyResults: evaluation.results,
       });
       if (manual) {
-        await db.insert(approvalQueue).values({
-          id: crypto.randomUUID(),
-          txId,
-          agentId,
-          status: "pending",
-        });
+        await db
+          .insert(approvalQueue)
+          .values(approvalQueueValues(c, agentId, txId, signerAuthorization.auth));
       }
       await writeVaultAudit(c, {
         tenantId,
@@ -5328,6 +6257,7 @@ async function signSolanaBlind(
           value: txValue,
           blindSigned: true,
           unparsedReason: args.unparsedReason,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           policyResults: evaluation.results,
         },
       });
@@ -5367,7 +6297,7 @@ async function signSolanaBlind(
       await db.insert(transactions).values({
         id: txId,
         agentId,
-        status: "signed",
+        status: result.broadcast ? "broadcast" : "signed",
         toAddress,
         value: txValue,
         chainId,
@@ -5392,6 +6322,7 @@ async function signSolanaBlind(
           blindSigned: true,
           unparsedReason: args.unparsedReason,
           broadcast: result.broadcast,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           signature: result.broadcast ? result.signature : undefined,
         },
       });
@@ -5590,33 +6521,6 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     });
   }
 
-  // ── Fail-closed gate: more than one value recipient / mint ──────────────────
-  // The policy engine evaluates a single (to, value) envelope. A fully-parsed tx
-  // that pays MULTIPLE distinct recipients, or moves MULTIPLE token mints, cannot
-  // be fully policy-checked — only the first recipient/mint would be enforced, so
-  // the approved-address allowlist (and per-mint accounting) would be bypassed for
-  // the rest. Reject unless an audited blind-signing opt-in is set.
-  const distinctValueRecipients = new Set<string>([
-    ...derived.summary.lamportRecipients,
-    ...derived.summary.tokenTransfers.map((t) => t.destination),
-  ]);
-  if (distinctValueRecipients.size > 1 || derived.mints.length > 1) {
-    if (!allowUnsafeSolanaBlindSigning()) {
-      return c.json<ApiResponse>(
-        {
-          ok: false,
-          error:
-            "Solana transaction pays multiple recipients or moves multiple token mints; the policy engine can only enforce a single recipient/mint, so it was rejected (fail-closed). Set STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING=true only for audited multi-recipient flows.",
-          data: {
-            recipients: [...distinctValueRecipients],
-            mints: derived.mints,
-          },
-        },
-        422,
-      );
-    }
-  }
-
   // ── Spoof check: caller hints must not CONFLICT with the parsed truth ───────
   const conflicts = detectSolanaPolicyConflicts(derived, { to: body.to, value: body.value });
   if (conflicts.length > 0) {
@@ -5661,7 +6565,13 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
     value: txValue,
     chainId,
   };
-  const requester = getAuthenticatedPrincipal(c);
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
 
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
@@ -5687,7 +6597,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   // both sign — overspending the cap. This mirrors the EVM sign/transfer/
   // user-operation/authorization paths, which all wrap eval+sign under the lock.
   return withAgentSpendLock(agentId, async () => {
-    const stats = await getTransactionStats(agentId, signRequest.chainId);
+    const stats = await getTransactionStats(agentId);
 
     const evaluation = await policyEngine.evaluate(policySet, {
       request: signRequest,
@@ -5714,14 +6624,9 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
             chainId,
             policyResults: evaluation.results,
           });
-          await tx.insert(approvalQueue).values({
-            id: crypto.randomUUID(),
-            txId,
-            agentId,
-            status: "pending",
-            requestedByType: requester.type,
-            requestedById: requester.id,
-          });
+          await tx
+            .insert(approvalQueue)
+            .values(approvalQueueValues(c, agentId, txId, signerAuthorization.auth));
         });
 
         await writeVaultAudit(c, {
@@ -5735,6 +6640,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
             chainId,
             to: toAddress,
             value: txValue,
+            ...signerAuthAuditMetadata(signerAuthorization.auth),
             policyResults: evaluation.results,
           },
         });
@@ -5784,6 +6690,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           chainId,
           to: toAddress,
           value: txValue,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           policyResults: evaluation.results,
         },
       });
@@ -5838,7 +6745,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
       await db.insert(transactions).values({
         id: txId,
         agentId,
-        status: "signed",
+        status: result.broadcast ? "broadcast" : "signed",
         toAddress,
         value: txValue,
         chainId,
@@ -5864,6 +6771,7 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
           to: toAddress,
           value: txValue,
           broadcast: result.broadcast,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
           signature: result.broadcast ? result.signature : undefined,
           // Authoritative, parser-derived effects (not caller-supplied).
           derivedFromTransaction: true,
@@ -6000,7 +6908,7 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
     return c.json<
       ApiResponse<{
         agentId: string;
-        addresses: Array<{ chainFamily: "evm" | "solana"; address: string }>;
+        addresses: Array<{ chainFamily: "evm" | "solana" | "bitcoin"; address: string }>;
       }>
     >({
       ok: true,
@@ -6014,6 +6922,200 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
 });
 
 // ─── Key Import ───────────────────────────────────────────────────────────────
+
+function encryptedImportDisabledResponse(c: Context<{ Variables: AppVariables }>): Response | null {
+  if (allowPrivateKeyImport() && allowVaultPrivateKeyImport()) return null;
+  return c.json<ApiResponse>(
+    {
+      ok: false,
+      error:
+        "Encrypted private key import is disabled. Set STEWARD_ALLOW_PRIVATE_KEY_IMPORT=true and STEWARD_ALLOW_VAULT_PRIVATE_KEY_IMPORT=true only for audited import operations.",
+    },
+    403,
+  );
+}
+
+async function requireEncryptedImportAccess(
+  c: Context<{ Variables: AppVariables }>,
+  tenantId: string,
+  agentId: string,
+): Promise<Response | null> {
+  const disabled = encryptedImportDisabledResponse(c);
+  if (disabled) return disabled;
+  if (!requireTenantLevel(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Encrypted key import requires tenant-level authentication" },
+      403,
+    );
+  }
+  if (!hasTenantAdminSession(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Encrypted key import requires tenant admin session authentication" },
+      403,
+    );
+  }
+  const mfaPolicy = await readTenantMfaPolicy(tenantId);
+  if (tenantMfaDisabledFor(mfaPolicy, "keyImport")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Private key import is disabled by tenant MFA policy" },
+      403,
+    );
+  }
+  if (!(await hasRecentTenantSessionMfa(c, tenantId, "keyImport"))) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Encrypted key import requires a recent MFA step-up session" },
+      403,
+    );
+  }
+  if (!isValidAgentId(agentId)) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Invalid agent id — must be 1-128 alphanumeric characters (plus _ - . :)",
+      },
+      400,
+    );
+  }
+  return null;
+}
+
+vaultRoutes.post("/:agentId/import/init", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const accessError = await requireEncryptedImportAccess(c, tenantId, agentId);
+  if (accessError) return accessError;
+
+  const body = await safeJsonParse<{ chain?: unknown }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  const chain = body.chain;
+  if (chain !== "evm" && chain !== "solana") {
+    return c.json<ApiResponse>({ ok: false, error: "chain must be 'evm' or 'solana'" }, 400);
+  }
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const session = await createEncryptedImportSession({
+    tenantId,
+    agentId,
+    chain,
+    createdBy: c.get("userId") ?? null,
+  });
+  await writeVaultAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: c.get("userId") ?? c.get("authType") ?? null,
+    action: "vault.key.import_encrypted.initialized",
+    resourceType: "agent",
+    resourceId: agentId,
+    metadata: {
+      chain,
+      importSessionId: session.id,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+    },
+  });
+
+  return c.json<
+    ApiResponse<{
+      importSessionId: string;
+      publicKey: string;
+      algorithm: "X25519-HKDF-SHA256-AES-256-GCM";
+      expiresAt: string;
+      aad: { importSessionId: string; tenantId: string; agentId: string; chain: "evm" | "solana" };
+    }>
+  >({
+    ok: true,
+    data: {
+      importSessionId: session.id,
+      publicKey: session.publicKey,
+      algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      aad: { importSessionId: session.id, tenantId, agentId, chain },
+    },
+  });
+});
+
+vaultRoutes.post("/:agentId/import/submit", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const accessError = await requireEncryptedImportAccess(c, tenantId, agentId);
+  if (accessError) return accessError;
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    importSessionId?: unknown;
+    ephemeralPublicKey?: unknown;
+    iv?: unknown;
+    ciphertext?: unknown;
+    tag?: unknown;
+    privateKey?: unknown;
+  }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (body.privateKey !== undefined) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Plaintext privateKey is not accepted by encrypted import submit" },
+      400,
+    );
+  }
+
+  const session = await takeEncryptedImportSession(body.importSessionId, tenantId, agentId);
+  if (typeof session === "string") {
+    return c.json<ApiResponse>({ ok: false, error: session }, 400);
+  }
+
+  let privateKey: string | null = null;
+  try {
+    privateKey = decryptEncryptedImportPrivateKey(session, body);
+  } catch {
+    privateKey = null;
+  }
+  if (!privateKey || !isNonEmptyString(privateKey)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Encrypted private key payload could not be decrypted" },
+      400,
+    );
+  }
+
+  try {
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
+      action: "vault.key.import_encrypted.authorized",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { chain: session.chain, importSessionId: session.id },
+    });
+    const result = await vault.importKey(tenantId, agentId, privateKey, session.chain);
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
+      action: "vault.key.import_encrypted",
+      resourceType: "agent",
+      resourceId: agentId,
+      metadata: { chain: session.chain, walletAddress: result.walletAddress },
+    });
+    return c.json<ApiResponse<{ agentId: string; walletAddress: string; chain: string }>>({
+      ok: true,
+      data: { agentId, walletAddress: result.walletAddress, chain: session.chain },
+    });
+  } catch (e: unknown) {
+    const requestId = c.get("requestId") || "unknown";
+    console.error(`[${requestId}] Encrypted key import failed for agent ${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
 
 vaultRoutes.post("/:agentId/import", async (c) => {
   if (!allowPrivateKeyImport() || !allowVaultPrivateKeyImport()) {
@@ -6039,6 +7141,13 @@ vaultRoutes.post("/:agentId/import", async (c) => {
   if (!hasTenantAdminSession(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Key import requires tenant admin session authentication" },
+      403,
+    );
+  }
+  const mfaPolicy = await readTenantMfaPolicy(tenantId);
+  if (tenantMfaDisabledFor(mfaPolicy, "keyImport")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Private key import is disabled by tenant MFA policy" },
       403,
     );
   }
@@ -6130,54 +7239,6 @@ vaultRoutes.post("/:agentId/export", async (c) => {
       403,
     );
   }
-
-  const allowExport =
-    process.env.STEWARD_ALLOW_KEY_EXPORT !== undefined
-      ? process.env.STEWARD_ALLOW_KEY_EXPORT === "true"
-      : process.env.NODE_ENV !== "production";
-  if (!allowExport) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Key export is disabled by STEWARD_ALLOW_KEY_EXPORT" },
-      403,
-    );
-  }
-
-  const authHeader = c.req.header("Authorization");
-  let actorId = c.get("userId") ?? null;
-  let hasRecentMfa = false;
-  if (authHeader?.startsWith("Bearer ")) {
-    try {
-      const payload = await verifyToken(authHeader.slice(7));
-      actorId = typeof payload.userId === "string" ? payload.userId : actorId;
-      const verifiedAt = payload.sessionMfaVerifiedAt ?? payload.mfaVerifiedAt;
-      const verifiedAtMs =
-        typeof verifiedAt === "number"
-          ? verifiedAt < 10_000_000_000
-            ? verifiedAt * 1000
-            : verifiedAt
-          : typeof verifiedAt === "string"
-            ? Date.parse(verifiedAt)
-            : Number.NaN;
-      hasRecentMfa = Number.isFinite(verifiedAtMs) && Date.now() - verifiedAtMs <= 5 * 60 * 1000;
-    } catch {
-      hasRecentMfa = false;
-    }
-  }
-  if (!hasRecentMfa) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Key export requires recent MFA or passkey step-up" },
-      403,
-    );
-  }
-
-  const body = await safeJsonParse<{ reason: string }>(c);
-  if (!body || !isNonEmptyString(body.reason)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Key export requires a non-empty audited reason" },
-      400,
-    );
-  }
-
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
 
@@ -6187,12 +7248,25 @@ vaultRoutes.post("/:agentId/export", async (c) => {
       403,
     );
   }
+  const mfaPolicy = await readTenantMfaPolicy(tenantId);
+  if (tenantMfaDisabledFor(mfaPolicy, "keyExport")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Private key export is disabled by tenant MFA policy" },
+      403,
+    );
+  }
   if (!(await hasRecentTenantSessionMfa(c, tenantId, "keyExport"))) {
     return c.json<ApiResponse>(
       { ok: false, error: "Key export requires a recent MFA step-up session" },
       403,
     );
   }
+  const body = await safeJsonParse(c);
+  const plaintextGateError = plaintextKeyExportResponseGateError(body);
+  if (plaintextGateError) {
+    return c.json<ApiResponse>({ ok: false, error: plaintextGateError }, 403);
+  }
+
   const agent = await ensureAgentForTenant(tenantId, agentId);
 
   if (!agent) {
@@ -6200,49 +7274,43 @@ vaultRoutes.post("/:agentId/export", async (c) => {
   }
 
   try {
-    const requestId = c.get("requestId") || null;
-    const exportReason = body.reason.trim();
-    const exportActorId = actorId ?? c.get("authType") ?? "unknown";
     await writeAuditEvent({
       tenantId,
       actorType: "user",
-      actorId,
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
       action: "vault.private_key_export.authorized",
       resourceType: "wallet",
       resourceId: agentId,
-      metadata: {
-        sensitivity: "HIGH",
-        breakGlass: true,
-        reason: exportReason,
-        authType: c.get("authType"),
-      },
-      ipAddress: c.req.header("x-forwarded-for") ?? c.req.header("cf-connecting-ip") ?? null,
+      metadata: { breakGlass: true },
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
-      requestId,
+      requestId: c.get("requestId") ?? null,
     });
-
     const keys = await vault.exportPrivateKey(tenantId, agentId, {
       breakGlass: true,
-      actorId: exportActorId,
-      reason: exportReason,
+      actorId: c.get("userId") ?? c.get("authType") ?? "unknown",
+      reason: "tenant-admin break-glass export",
     });
-
+    const exportedFamilies = [
+      keys.evm ? "evm" : null,
+      keys.solana ? "solana" : null,
+      keys.bitcoin && keys.bitcoin.length > 0 ? "bitcoin" : null,
+    ].filter((family): family is string => Boolean(family));
     await writeAuditEvent({
       tenantId,
       actorType: "user",
-      actorId,
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
       action: "vault.private_key_export.succeeded",
       resourceType: "wallet",
       resourceId: agentId,
       metadata: {
-        sensitivity: "HIGH",
         breakGlass: true,
-        reason: exportReason,
-        authType: c.get("authType"),
+        chainFamilies: exportedFamilies,
+        bitcoinWalletCount: keys.bitcoin?.length ?? 0,
       },
-      ipAddress: c.req.header("x-forwarded-for") ?? c.req.header("cf-connecting-ip") ?? null,
+      ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
-      requestId,
+      requestId: c.get("requestId") ?? null,
     });
     dispatchWebhook(tenantId, agentId, "private_key.exported", {
       agentId,
@@ -6253,11 +7321,11 @@ vaultRoutes.post("/:agentId/export", async (c) => {
     c.header("Pragma", "no-cache");
     c.header("Expires", "0");
     return c.json<
-      ApiResponse<{
-        evm?: { privateKey: string; address: string };
-        solana?: { privateKey: string; address: string };
-        warning: string;
-      }>
+      ApiResponse<
+        ExportPrivateKeyResult & {
+          warning: string;
+        }
+      >
     >({
       ok: true,
       data: {

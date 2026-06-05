@@ -18,6 +18,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { getDb } from "@stwd/db";
 import { sql } from "drizzle-orm";
+import { redactWebhookSecrets } from "./webhook-redaction";
 
 const ZERO_HASH = new Uint8Array(32);
 function isPGLiteRuntime(): boolean {
@@ -222,7 +223,7 @@ async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
         // postgres-js does not auto-stringify Date objects in raw sql template
         // params. Convert to ISO and cast on the SQL side instead. See dcf772e.
         const createdAtIso = createdAt.toISOString();
-        const metadata = ev.metadata ?? {};
+        const metadata = redactWebhookSecrets(ev.metadata ?? {});
         const canonical = canonicalize({
           tenant_id: ev.tenantId,
           seq,

@@ -1,0 +1,21 @@
+name: steward_flutter
+description: Flutter and Dart client helpers for Steward auth, API access, OAuth callbacks, and push-token registration.
+version: 0.1.0
+homepage: https://github.com/Steward-Fi/steward
+repository: https://github.com/Steward-Fi/steward
+issue_tracker: https://github.com/Steward-Fi/steward/issues
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+  flutter: ">=3.19.0"
+
+dependencies:
+  crypto: ^3.0.3
+  flutter:
+    sdk: flutter
+  http: ^1.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^3.0.0

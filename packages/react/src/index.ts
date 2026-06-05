@@ -15,6 +15,8 @@ export { StewardMfaSettings } from "./components/StewardMfaSettings.js";
 export { StewardOAuthCallback } from "./components/StewardOAuthCallback.js";
 export { StewardTenantPicker } from "./components/StewardTenantPicker.js";
 export { StewardUserButton } from "./components/StewardUserButton.js";
+export type { StewardUserWalletKeyImportProps } from "./components/StewardUserWalletKeyImport.js";
+export { StewardUserWalletKeyImport } from "./components/StewardUserWalletKeyImport.js";
 export { TransactionHistory } from "./components/TransactionHistory.js";
 export { WalletOverview } from "./components/WalletOverview.js";
 // <WalletLogin /> and EVM/Solana provider wrappers live at the
@@ -24,6 +26,18 @@ export { WalletOverview } from "./components/WalletOverview.js";
 export { useApprovals } from "./hooks/useApprovals.js";
 // ─── Hooks ───
 export { useAuth } from "./hooks/useAuth.js";
+export type {
+  UseEncryptedUserWalletKeyImportResult,
+  UserWalletImportChain,
+  UserWalletKeyImportInput,
+} from "./hooks/useEncryptedUserWalletKeyImport.js";
+export { useEncryptedUserWalletKeyImport } from "./hooks/useEncryptedUserWalletKeyImport.js";
+// ─── Types ───
+export type {
+  MfaStepUpState,
+  UseMfaStepUpResult,
+} from "./hooks/useMfaStepUp.js";
+export { useMfaStepUp } from "./hooks/useMfaStepUp.js";
 export { usePolicies } from "./hooks/usePolicies.js";
 export { useSpend } from "./hooks/useSpend.js";
 export { useSteward } from "./hooks/useSteward.js";
@@ -38,7 +52,6 @@ export {
   PasskeyIcon,
 } from "./icons/index.js";
 export { StewardProvider } from "./provider.js";
-// ─── Types ───
 export type {
   AgentBalance,
   // Component data

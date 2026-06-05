@@ -2,7 +2,8 @@
  * oauth.ts — Generic OAuth2 authorization-code flow helper
  *
  * Supports any provider that follows the standard OAuth2 authorization-code flow.
- * Built-in configs for Google, Discord, and Twitter/X.
+ * Built-in configs for Google, Discord, Twitter/X, GitHub, LinkedIn, Spotify,
+ * Twitch, Instagram, LINE, Apple, and TikTok.
  *
  * Twitter specifics:
  *   - Requires PKCE (RFC 7636, S256 method) — Twitter OAuth2 mandates it for

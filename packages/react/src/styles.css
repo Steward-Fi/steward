@@ -197,6 +197,93 @@
   cursor: not-allowed;
 }
 
+/* ─── User Wallet Key Import ─── */
+.stwd-user-wallet-key-import {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+}
+
+.stwd-user-wallet-key-import__header h3 {
+  margin: 0;
+  color: var(--stwd-text);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.stwd-user-wallet-key-import__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.stwd-user-wallet-key-import__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  color: var(--stwd-text);
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+.stwd-user-wallet-key-import__secret {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+.stwd-user-wallet-key-import__success,
+.stwd-user-wallet-key-import__error {
+  border-radius: calc(var(--stwd-radius, 12px) / 2);
+  font-size: 0.875rem;
+  padding: 0.625rem 0.75rem;
+}
+
+.stwd-user-wallet-key-import__success {
+  align-items: center;
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--stwd-success, #10b981);
+  display: flex;
+  gap: 0.5rem;
+  justify-content: space-between;
+}
+
+.stwd-user-wallet-key-import__success code {
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.stwd-user-wallet-key-import__error {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--stwd-error, #ef4444);
+}
+
+.stwd-user-wallet-key-import__primary {
+  align-items: center;
+  background: var(--stwd-primary, #8b5cf6);
+  border: 0;
+  border-radius: var(--stwd-radius, 12px);
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  justify-content: center;
+  min-height: 2.5rem;
+  padding: 0.625rem 1rem;
+}
+
+.stwd-user-wallet-key-import__primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+@media (max-width: 520px) {
+  .stwd-user-wallet-key-import__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ─── Links ─── */
 .stwd-link {
   color: var(--stwd-accent, #a78bfa);
@@ -1582,8 +1669,16 @@
 }
 
 .stwd-wallet-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
   font-size: 12px;
   color: var(--stwd-wallet-muted);
+}
+
+.stwd-wallet-state {
+  color: var(--stwd-wallet-text);
+  font-weight: 500;
 }
 
 .stwd-wallet-addr {

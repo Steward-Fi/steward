@@ -268,6 +268,61 @@ describe("auth abuse controls", () => {
     ).toBe("phone number is blocked");
   });
 
+  it("normalizes the one third-party wallet tenant policy", () => {
+    expect(
+      normalizeAuthAbuseConfig({
+        wallet: { restrictToOneThirdPartyWallet: true },
+      }),
+    ).toMatchObject({
+      wallet: { restrictToOneThirdPartyWallet: true },
+    });
+
+    expect(
+      normalizeAuthAbuseConfig({
+        wallet: { restrictToOneThirdPartyWallet: "true" },
+      }),
+    ).toBe("wallet.restrictToOneThirdPartyWallet must be a boolean");
+  });
+
+  it("normalizes private-key import/export tenant posture controls", () => {
+    expect(
+      normalizeAuthAbuseConfig({
+        mfa: {
+          maxAgeFor: {
+            keyImport: 30,
+            keyExport: 600,
+          },
+          disableFor: {
+            keyImport: true,
+            keyExport: true,
+          },
+        },
+      }),
+    ).toMatchObject({
+      mfa: {
+        maxAgeFor: {
+          keyImport: 30,
+          keyExport: 600,
+        },
+        disableFor: {
+          keyImport: true,
+          keyExport: true,
+        },
+      },
+    });
+
+    expect(
+      normalizeAuthAbuseConfig({
+        mfa: { disableFor: { keyExport: "true" } },
+      }),
+    ).toBe("mfa.disableFor.keyExport must be a boolean");
+    expect(
+      normalizeAuthAbuseConfig({
+        mfa: { maxAgeFor: { keyImport: 29 } },
+      }),
+    ).toBe("mfa.maxAgeFor.keyImport must be an integer between 30 and 3600");
+  });
+
   it("normalizes exact phone allowlist and denylist controls", () => {
     const config = normalizeAuthAbuseConfig({
       phone: {

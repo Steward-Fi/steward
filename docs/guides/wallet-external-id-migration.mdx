@@ -1,0 +1,154 @@
+---
+title: "Wallet External ID Migration"
+description: "Move existing platform IDs or metadata wallet references onto immutable wallet external IDs."
+---
+
+# Wallet External ID Migration
+
+Wallet external IDs let you address a tenant user by an immutable
+application-defined wallet identifier. Use this guide when you already store
+wallet references in `platformId`, custom metadata, or an external user table
+and want to move those references into Steward's Privy-style wallet external ID
+surface.
+
+## Before You Start
+
+You need:
+
+- A platform key with `platform:user:read`, `platform:user:write`, and
+  `platform:tenant-user:read` scopes when scoped platform keys are enabled.
+- The tenant ID that owns the external wallet namespace.
+- A source-of-truth mapping of `userId` or email to the desired
+  `walletExternalId`.
+
+<Warning>
+  Wallet external IDs are write-once per user and tenant. Run the lookup steps
+  first and resolve conflicts before assigning values.
+</Warning>
+
+## 1. Normalize Source IDs
+
+Choose one stable external ID format and keep it tenant-scoped. Good examples:
+
+```text
+wallet_01J9X4T8GQ8A7P2
+custody-user-8421
+legacy-platform-id-ada
+```
+
+Avoid values that encode secrets, emails, phone numbers, or raw provider access
+tokens. Steward returns wallet external IDs in API responses and dashboard
+surfaces.
+
+## 2. Check for Existing Assignments
+
+Before assigning a value, ask Steward whether that wallet external ID is already
+claimed in the tenant.
+
+<CodeGroup>
+```typescript SDK
+const existing = await steward.platformUsers.resolveWalletExternalId({
+  tenantId: "app-prod",
+  walletExternalId: "legacy-platform-id-ada",
+});
+
+if (existing.user) {
+  console.log("Already assigned to", existing.user.userId);
+}
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/platform/users/wallet/external-id \
+  -H "X-Steward-Platform-Key: your-platform-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenantId": "app-prod",
+    "walletExternalId": "legacy-platform-id-ada"
+  }'
+```
+</CodeGroup>
+
+## 3. Assign Known Users
+
+If you already know the Steward `userId`, assign the external ID directly.
+
+<CodeGroup>
+```typescript SDK
+await steward.platformUsers.assignWalletExternalId("usr_123", {
+  tenantId: "app-prod",
+  walletExternalId: "legacy-platform-id-ada",
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/platform/users/usr_123/wallet/external-id \
+  -H "X-Steward-Platform-Key: your-platform-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenantId": "app-prod",
+    "walletExternalId": "legacy-platform-id-ada"
+  }'
+```
+</CodeGroup>
+
+Steward returns `409` if the external ID belongs to another user in that tenant
+or if this user already has a different wallet external ID in that tenant.
+
+## 4. Connect or Create Missing Users
+
+If your migration source only has an email and wallet external ID, use
+connect-or-create. Steward resolves the wallet external ID first, then connects
+an existing email user or creates a new user.
+
+```typescript
+const result = await steward.platformUsers.connectOrCreateByWalletExternalId({
+  tenantId: "app-prod",
+  walletExternalId: "legacy-platform-id-ada",
+  email: "ada@example.com",
+  emailVerified: true,
+  customMetadata: { migratedFrom: "legacy-platform-id" },
+});
+
+console.log(result.userId, result.isNew, result.createdExternalId);
+```
+
+## 5. Verify Tenant Search
+
+After assignment, tenant user search can filter by wallet external ID.
+
+```typescript
+const result = await steward.platformUsers.search("app-prod", {
+  walletExternalId: "legacy-platform-id-ada",
+});
+
+if (result.users.length !== 1) {
+  throw new Error("Migration verification failed");
+}
+```
+
+## Conflict Handling
+
+| Conflict | Meaning | Resolution |
+| --- | --- | --- |
+| `walletExternalId already belongs to another user in this tenant` | The source mapping points to an ID already claimed by a different Steward user. | Fix the source mapping or merge/transfer the affected user before retrying. |
+| `walletExternalId is immutable for this user in this tenant` | The target user already has a different external ID. | Keep the existing ID, or create an explicit user merge/transfer plan. |
+| `tenantId is required for walletExternalId lookup` | External IDs are tenant-scoped. | Pass the tenant ID on every lookup and assignment. |
+| `Tenant not found` | The target tenant does not exist or the platform key cannot access it. | Create the tenant or use the correct platform key. |
+
+## Cutover Checklist
+
+- Export or inventory all source wallet references before writing.
+- Normalize IDs and remove secrets or user PII from the external ID value.
+- Dry-run every ID through `resolveWalletExternalId`.
+- Assign known `userId` mappings first.
+- Use connect-or-create only for records that do not have a Steward `userId`.
+- Verify with tenant search by `walletExternalId`.
+- Update application code to look up users by `walletExternalId` instead of
+  custom metadata or `platformId`.
+- Keep the old metadata value for one deploy cycle if your application still
+  needs a rollback path.
+
+## Related APIs
+
+- [Platform Users](/api-reference/platform-users)
+- [Accounts API](/api-reference/accounts)

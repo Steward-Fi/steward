@@ -104,6 +104,18 @@ test.describe("Dashboard appearance settings", () => {
         },
       });
     });
+    await page.route(/\/tenants\/[^/]+\/idempotency-metrics\/export$/, async (route) => {
+      expect(route.request().method()).toBe("GET");
+      await route.fulfill({
+        body:
+          "tenant_id,generated_at,window_started_at,last_seen_at,ttl_ms,observed,reserved,completed,replayed,conflicts,in_flight_conflicts,suppressed_auth_responses,invalid_keys,store_errors,skipped_unsafe_context,released_on_error\n" +
+          '"personal-test","2026-06-04T00:00:00.000Z","2026-06-04T00:00:00.000Z","2026-06-04T00:00:01.000Z","86400000","3","1","1","1","1","0","0","0","0","0","0"\n',
+        headers: {
+          "Content-Disposition": 'attachment; filename="personal-test-idempotency-metrics.csv"',
+          "Content-Type": "text/csv; charset=utf-8",
+        },
+      });
+    });
 
     const sendRes = await request.post(`${API}/auth/email/send`, { data: { email } });
     expect(sendRes.status()).toBe(200);
@@ -115,7 +127,7 @@ test.describe("Dashboard appearance settings", () => {
     await page.goto(
       `${WEB}/auth/callback/email?token=${encodeURIComponent(inbox.token)}&email=${encodeURIComponent(email)}`,
     );
-    await page.waitForURL(/\/dashboard/, { timeout: 30_000 });
+    await expect(page.getByRole("link", { name: "Settings" })).toBeVisible({ timeout: 30_000 });
 
     await page.goto(`${WEB}/dashboard/settings`);
     const appearanceForm = page.locator("form").filter({
@@ -146,6 +158,10 @@ test.describe("Dashboard appearance settings", () => {
     await expect(appearanceForm.getByText("Saved")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Idempotency Metrics" })).toBeVisible();
     await expect(page.getByText("Replayed", { exact: true })).toBeVisible();
+    const idempotencyDownload = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export CSV" }).click();
+    const download = await idempotencyDownload;
+    expect(download.suggestedFilename()).toMatch(/idempotency-metrics\.csv$/);
 
     expect(theme.primaryColor).toBe("#3366FF");
     expect(theme.backgroundColor).toBe("#101828");

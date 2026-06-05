@@ -4,7 +4,8 @@
  * Provides clean, pluggable adapter seams (with working in-memory mocks) for the
  * external providers Privy integrates: token swaps, ERC-4626 earn/yield, fiat
  * onramp, fiat offramp, KYC, TOS/consent tracking, custodial wallets, and
- * outbound push delivery.
+ * outbound push delivery. It also exposes a provider-neutral Spark BTC /
+ * Lightning seam for wallet, deposit, invoice, transfer, and balance DTOs.
  *
  * Real providers are pluggable later via {@link AdapterRegistry.register}. The
  * registry fails closed in production when no real provider is configured.
@@ -83,6 +84,28 @@ export {
   type PushSendRequest,
   type PushSubscriptionTarget,
 } from "./adapters/push.js";
+export {
+  type CreateSparkWalletRequest,
+  type LightningInvoice,
+  type LightningInvoiceRequest,
+  type LightningInvoiceStatus,
+  type LightningPaymentRequest,
+  MockSparkAdapter,
+  type SparkAdapter,
+  type SparkBalance,
+  type SparkIdentitySignRequest,
+  type SparkIdentitySignResult,
+  type SparkNetwork,
+  type SparkTokenTransferRequest,
+  type SparkTransferRequest,
+  type SparkTransferStatus,
+  type SparkWallet,
+  type SparkWalletStatus,
+  type StaticBtcDepositClaimRequest,
+  type StaticBtcDepositQuote,
+  type StaticBtcDepositQuoteRequest,
+  type StaticBtcDepositStatus,
+} from "./adapters/spark.js";
 export {
   MockSwapAdapter,
   type SwapAdapter,

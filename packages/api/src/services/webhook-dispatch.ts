@@ -14,50 +14,11 @@ import {
   type DispatchableWebhookEventType,
   toConfiguredWebhookEventType,
 } from "./webhook-events";
+import { redactWebhookSecrets } from "./webhook-redaction";
 
 const INLINE_DELIVERY_VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000;
-const REDACTED_WEBHOOK_SECRET = "[REDACTED]";
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isSensitiveWebhookPayloadKey(key: string): boolean {
-  const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return (
-    normalized === "secret" ||
-    normalized.endsWith("secret") ||
-    normalized === "password" ||
-    normalized === "passphrase" ||
-    normalized === "mnemonic" ||
-    normalized === "recoveryphrase" ||
-    normalized === "seedphrase" ||
-    normalized === "privatekey" ||
-    normalized === "accesskey" ||
-    normalized === "apikey" ||
-    normalized === "accesstoken" ||
-    normalized === "refreshtoken" ||
-    normalized === "idtoken" ||
-    normalized === "sessiontoken" ||
-    normalized === "authtoken"
-  );
-}
-
-export function redactWebhookSecrets(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((entry) => redactWebhookSecrets(entry));
-  }
-  if (!isPlainObject(value) || value instanceof Date) {
-    return value;
-  }
-
-  return Object.fromEntries(
-    Object.entries(value).map(([key, entry]) => [
-      key,
-      isSensitiveWebhookPayloadKey(key) ? REDACTED_WEBHOOK_SECRET : redactWebhookSecrets(entry),
-    ]),
-  );
-}
+export { redactWebhookSecrets } from "./webhook-redaction";
 
 export function dispatchWebhook(
   tenantId: string,

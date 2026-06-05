@@ -83,16 +83,17 @@ export function toAgentIdentity(agent: Agent): DbAgentIdentity {
  */
 export async function getAgentWalletAddresses(
   agentId: string,
-): Promise<{ evm?: string; solana?: string }> {
+): Promise<{ evm?: string; solana?: string; bitcoin?: string }> {
   const { getDb } = await import("./client");
   const { agentWallets } = await import("./schema");
   const db = getDb();
   const rows = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
 
-  const result: { evm?: string; solana?: string } = {};
+  const result: { evm?: string; solana?: string; bitcoin?: string } = {};
   for (const row of rows) {
     if (row.chainFamily === "evm") result.evm = row.address;
     if (row.chainFamily === "solana") result.solana = row.address;
+    if (row.chainFamily === "bitcoin") result.bitcoin = row.address;
   }
   return result;
 }
@@ -103,7 +104,7 @@ export async function getAgentWalletAddresses(
  */
 export async function getAgentWalletAddressesBatch(
   agentIds: string[],
-): Promise<Map<string, { evm?: string; solana?: string }>> {
+): Promise<Map<string, { evm?: string; solana?: string; bitcoin?: string }>> {
   if (agentIds.length === 0) return new Map();
 
   const { getDb } = await import("./client");
@@ -111,12 +112,13 @@ export async function getAgentWalletAddressesBatch(
   const db = getDb();
   const rows = await db.select().from(agentWallets).where(inArray(agentWallets.agentId, agentIds));
 
-  const result = new Map<string, { evm?: string; solana?: string }>();
+  const result = new Map<string, { evm?: string; solana?: string; bitcoin?: string }>();
   for (const row of rows) {
     if (!result.has(row.agentId)) result.set(row.agentId, {});
     const entry = result.get(row.agentId)!;
     if (row.chainFamily === "evm") entry.evm = row.address;
     if (row.chainFamily === "solana") entry.solana = row.address;
+    if (row.chainFamily === "bitcoin") entry.bitcoin = row.address;
   }
   return result;
 }

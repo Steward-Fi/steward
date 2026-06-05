@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { privateKeyToAddress } from "viem/accounts";
 
 import {
+  deriveBitcoinKey,
   deriveEvmKey,
   deriveSolanaKey,
   generateMnemonic,
@@ -112,5 +113,47 @@ describe("Solana derivation (SLIP-10 path m/44'/501'/account'/0')", () => {
     const a = await deriveSolanaKey(TEST_MNEMONIC, { account: 0 });
     const b = await deriveSolanaKey(TEST_MNEMONIC, { account: 1 });
     expect(Array.from(a.secretKey)).not.toEqual(Array.from(b.secretKey));
+  });
+});
+
+describe("Bitcoin derivation (BIP-84 SegWit and BIP-86 Taproot)", () => {
+  test("derives the BIP-84 native SegWit mainnet test vector", async () => {
+    const key = await deriveBitcoinKey(TEST_MNEMONIC);
+    expect(key.path).toBe("m/84'/0'/0'/0/0");
+    expect(key.addressType).toBe("p2wpkh");
+    expect(key.network).toBe("mainnet");
+    expect(key.address).toBe("bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu");
+    expect(key.publicKey).toMatch(/^0x[0-9a-f]{66}$/);
+    expect(key.xOnlyPublicKey).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  test("derives the BIP-86 Taproot mainnet test vector", async () => {
+    const key = await deriveBitcoinKey(TEST_MNEMONIC, { addressType: "p2tr" });
+    expect(key.path).toBe("m/86'/0'/0'/0/0");
+    expect(key.address).toBe("bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr");
+  });
+
+  test("supports testnet, change paths, and index determinism", async () => {
+    const receive = await deriveBitcoinKey(TEST_MNEMONIC, { network: "testnet", index: 7 });
+    const receiveAgain = await deriveBitcoinKey(TEST_MNEMONIC, { network: "testnet", index: 7 });
+    const change = await deriveBitcoinKey(TEST_MNEMONIC, {
+      network: "testnet",
+      change: 1,
+      index: 7,
+    });
+    expect(receive.path).toBe("m/84'/1'/0'/0/7");
+    expect(receive.address).toStartWith("tb1q");
+    expect(receive.address).toBe(receiveAgain.address);
+    expect(change.path).toBe("m/84'/1'/0'/1/7");
+    expect(change.address).not.toBe(receive.address);
+  });
+
+  test("rejects unsupported Bitcoin derivation options", async () => {
+    await expect(deriveBitcoinKey(TEST_MNEMONIC, { account: -1 })).rejects.toThrow();
+    await expect(deriveBitcoinKey(TEST_MNEMONIC, { index: -1 })).rejects.toThrow();
+    await expect(deriveBitcoinKey(TEST_MNEMONIC, { change: 2 as 0 })).rejects.toThrow();
+    await expect(
+      deriveBitcoinKey(TEST_MNEMONIC, { addressType: "legacy" as "p2wpkh" }),
+    ).rejects.toThrow();
   });
 });

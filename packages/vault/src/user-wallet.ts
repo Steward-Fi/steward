@@ -22,6 +22,7 @@ export interface UserWalletResult {
   tenantId: string; // personal tenant scoping this wallet
   walletAddress: string;
   chainType: "evm";
+  walletIndex: number;
 }
 
 export interface UserWalletRestoreResult extends UserWalletResult {
@@ -66,8 +67,18 @@ export const USER_WALLET_DEFAULT_POLICIES: PersistedPolicyRule[] = [
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Deterministic agent/tenant IDs from a userId so lookups are cheap. */
-function agentIdFor(userId: string): string {
-  return `user-wallet-${userId}`;
+export function normalizeUserWalletIndex(value: unknown): number {
+  if (value === undefined || value === null || value === "") return 0;
+  const parsed =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 255) {
+    throw new Error("walletIndex must be an integer between 0 and 255");
+  }
+  return parsed;
+}
+
+function agentIdFor(userId: string, walletIndex = 0): string {
+  return walletIndex === 0 ? `user-wallet-${userId}` : `user-wallet-${userId}-${walletIndex}`;
 }
 
 function tenantIdFor(userId: string, overrideTenantId?: string): string {
@@ -94,6 +105,7 @@ export async function provisionUserWallet(
   userId: string,
   displayName: string,
   tenantId?: string,
+  walletIndex = 0,
 ): Promise<UserWalletResult> {
   if (!userId || userId.trim().length === 0) {
     throw new Error("userId is required");
@@ -102,7 +114,8 @@ export async function provisionUserWallet(
     throw new Error("displayName is required");
   }
 
-  const agentId = agentIdFor(userId);
+  const normalizedWalletIndex = normalizeUserWalletIndex(walletIndex);
+  const agentId = agentIdFor(userId, normalizedWalletIndex);
   const resolvedTenantId = tenantIdFor(userId, tenantId);
 
   let agent: AgentIdentity;
@@ -117,7 +130,7 @@ export async function provisionUserWallet(
     );
 
     // Apply default policies for newly-provisioned wallet
-    await applyUserWalletDefaults(userId, resolvedTenantId);
+    await applyUserWalletDefaults(userId, resolvedTenantId, normalizedWalletIndex);
 
     console.log(
       `[UserWallet] Provisioned wallet for user "${userId}" — address ${agent.walletAddress}`,
@@ -147,6 +160,7 @@ export async function provisionUserWallet(
     tenantId: resolvedTenantId,
     walletAddress: agent.walletAddress,
     chainType: "evm",
+    walletIndex: normalizedWalletIndex,
   };
 }
 
@@ -161,6 +175,7 @@ export async function provisionRecoverableUserWallet(
   displayName: string,
   mnemonic: string,
   tenantId?: string,
+  walletIndex = 0,
 ): Promise<UserWalletResult> {
   if (!userId || userId.trim().length === 0) {
     throw new Error("userId is required");
@@ -169,7 +184,8 @@ export async function provisionRecoverableUserWallet(
     throw new Error("displayName is required");
   }
 
-  const agentId = agentIdFor(userId);
+  const normalizedWalletIndex = normalizeUserWalletIndex(walletIndex);
+  const agentId = agentIdFor(userId, normalizedWalletIndex);
   const resolvedTenantId = tenantIdFor(userId, tenantId);
   const agent = await vault.createAgentFromMnemonic(
     resolvedTenantId,
@@ -179,10 +195,12 @@ export async function provisionRecoverableUserWallet(
     {
       platformId: `user:${userId}`,
       walletType: "recoverable_user",
+      evmIndex: normalizedWalletIndex,
+      solanaAccount: normalizedWalletIndex,
     },
   );
 
-  await applyUserWalletDefaults(userId, resolvedTenantId);
+  await applyUserWalletDefaults(userId, resolvedTenantId, normalizedWalletIndex);
 
   return {
     userId,
@@ -190,6 +208,7 @@ export async function provisionRecoverableUserWallet(
     tenantId: resolvedTenantId,
     walletAddress: agent.walletAddress,
     chainType: "evm",
+    walletIndex: normalizedWalletIndex,
   };
 }
 
@@ -206,6 +225,7 @@ export async function restoreRecoverableUserWallet(
   displayName: string,
   mnemonic: string,
   tenantId?: string,
+  walletIndex = 0,
 ): Promise<UserWalletRestoreResult> {
   if (!userId || userId.trim().length === 0) {
     throw new Error("userId is required");
@@ -214,7 +234,8 @@ export async function restoreRecoverableUserWallet(
     throw new Error("displayName is required");
   }
 
-  const agentId = agentIdFor(userId);
+  const normalizedWalletIndex = normalizeUserWalletIndex(walletIndex);
+  const agentId = agentIdFor(userId, normalizedWalletIndex);
   const resolvedTenantId = tenantIdFor(userId, tenantId);
   const agent = await vault.restoreAgentFromMnemonic(
     resolvedTenantId,
@@ -224,10 +245,12 @@ export async function restoreRecoverableUserWallet(
     {
       platformId: `user:${userId}`,
       walletType: "recoverable_user",
+      evmIndex: normalizedWalletIndex,
+      solanaAccount: normalizedWalletIndex,
     },
   );
 
-  await applyUserWalletDefaults(userId, resolvedTenantId);
+  await applyUserWalletDefaults(userId, resolvedTenantId, normalizedWalletIndex);
 
   return {
     userId,
@@ -235,6 +258,7 @@ export async function restoreRecoverableUserWallet(
     tenantId: resolvedTenantId,
     walletAddress: agent.walletAddress,
     chainType: "evm",
+    walletIndex: normalizedWalletIndex,
     restoredExisting: agent.restoredExisting,
   };
 }
@@ -252,8 +276,9 @@ export async function getUserWallet(
   vault: Vault,
   userId: string,
   tenantId?: string,
+  walletIndex = 0,
 ): Promise<AgentIdentity | null> {
-  const agentId = agentIdFor(userId);
+  const agentId = agentIdFor(userId, normalizeUserWalletIndex(walletIndex));
   const resolvedTenantId = tenantIdFor(userId, tenantId);
 
   const agent = await vault.getAgent(resolvedTenantId, agentId);
@@ -267,8 +292,13 @@ export async function getUserWallet(
  * @param userId    The application user ID.
  * @param tenantId  Optional override tenant (defaults to `personal-<userId>`).
  */
-export async function applyUserWalletDefaults(userId: string, _tenantId?: string): Promise<void> {
-  const agentId = agentIdFor(userId);
+export async function applyUserWalletDefaults(
+  userId: string,
+  _tenantId?: string,
+  walletIndex = 0,
+): Promise<void> {
+  const normalizedWalletIndex = normalizeUserWalletIndex(walletIndex);
+  const agentId = agentIdFor(userId, normalizedWalletIndex);
   const db = getDb();
 
   // Ensure the agent exists in the DB before inserting policies
@@ -281,13 +311,19 @@ export async function applyUserWalletDefaults(userId: string, _tenantId?: string
   // Replace policies atomically
   await db.delete(policies).where(eq(policies.agentId, agentId));
   await db.insert(policies).values(
-    USER_WALLET_DEFAULT_POLICIES.map((policy) => ({
-      id: `${policy.id}-${userId}`, // unique per user to avoid PK collisions
-      agentId,
-      type: policy.type,
-      enabled: policy.enabled,
-      config: policy.config,
-    })),
+    USER_WALLET_DEFAULT_POLICIES.map((policy) => {
+      const policyId =
+        normalizedWalletIndex === 0
+          ? `${policy.id}-${userId}`
+          : `${policy.id}-${userId}-${normalizedWalletIndex}`;
+      return {
+        id: policyId,
+        agentId,
+        type: policy.type,
+        enabled: policy.enabled,
+        config: policy.config,
+      };
+    }),
   );
 
   console.log(

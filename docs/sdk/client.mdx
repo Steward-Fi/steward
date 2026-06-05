@@ -156,6 +156,66 @@ interface SignSolanaTransactionInput {
 }
 ```
 
+### signBitcoinPsbt
+
+Signs a scoped Bitcoin PSBT for an agent wallet. Steward returns a signed PSBT
+and a Steward `transactionId`; it does not broadcast.
+
+```typescript
+const result = await client.signBitcoinPsbt(
+  agentId: string,
+  input: SignBitcoinPsbtInput
+): Promise<SignBitcoinPsbtResult>;
+```
+
+```typescript
+interface SignBitcoinPsbtInput {
+  walletScope: string;  // e.g. "bitcoin:testnet:p2wpkh:0:0:0"
+  psbtBase64: string;   // Base64-encoded PSBT
+  finalize?: boolean;   // Return raw tx metadata when fully finalizable
+  referenceId?: string; // Caller-stable tracking ID for audit/history lookup
+}
+
+interface SignBitcoinPsbtResult {
+  transactionId: string; // Steward transaction record ID
+  signedPsbtBase64: string;
+  signedInputs: number;
+  walletScope: string;
+  walletAddress: string;
+  addressType: "p2wpkh" | "p2tr";
+  network: "mainnet" | "testnet";
+  finalizedTxHex?: string;
+  txId?: string;
+  vsize?: number;
+  feeSats?: string;
+}
+```
+
+```typescript
+const referenceId = "withdrawal-123";
+
+const result = await client.signBitcoinPsbt("my-agent", {
+  walletScope: "bitcoin:testnet:p2wpkh:0:0:0",
+  psbtBase64,
+  finalize: true,
+  referenceId,
+});
+
+console.log(result.transactionId);
+
+if (result.finalizedTxHex) {
+  // Steward does not broadcast. Before retrying a downstream broadcast, check
+  // result.txId with your broadcaster or indexer.
+}
+```
+
+Steward decodes standard PSBT destination outputs and enforces fee caps,
+spend/address policies, and Bitcoin raw-signing-chain policy requirements before
+signing. For safe retries, reuse a stable `referenceId` and, where accepted by
+your deployment, the same `Idempotency-Key` header. If `finalize: true` returns
+`finalizedTxHex`, avoid blindly retrying broadcast attempts; first check whether
+the returned Bitcoin `txId` is already known to your broadcaster or indexer.
+
 ### signMessage
 
 Signs an arbitrary message.
@@ -166,6 +226,50 @@ const result = await client.signMessage(
   message: string
 ): Promise<{ signature: string }>;
 ```
+
+## Encrypted Key Import Methods
+
+Agent-vault import helpers require a tenant owner/admin bearer session with
+recent MFA. User-wallet import helpers require the authenticated user's bearer
+session with recent MFA. Both flows use a server X25519 init response and then
+submit only an encrypted envelope; do not include a plaintext `privateKey`
+field.
+
+```typescript
+const agentSession = await client.initializeEncryptedAgentKeyImport(
+  "my-agent",
+  "evm"
+);
+
+await client.submitEncryptedAgentKeyImport("my-agent", {
+  importSessionId: agentSession.importSessionId,
+  ephemeralPublicKey,
+  iv,
+  ciphertext,
+  tag,
+});
+```
+
+```typescript
+const userSession = await client.initializeEncryptedUserWalletKeyImport(
+  "evm",
+  { walletIndex: 2 }
+);
+
+await client.submitEncryptedUserWalletKeyImport({
+  importSessionId: userSession.importSessionId,
+  ephemeralPublicKey,
+  iv,
+  ciphertext,
+  tag,
+  walletIndex: userSession.aad.walletIndex,
+});
+```
+
+Init sessions are bound to tenant/app/user/agent/wallet fields returned in
+`aad`. Wrong-agent and wrong-wallet-index submits fail without consuming the
+original session; validated submits consume the session atomically, so replay
+fails.
 
 ## Query Methods
 
@@ -210,6 +314,88 @@ const result = await client.rpcPassthrough(
   input: { method: string; params?: unknown[]; chainId: number }
 ): Promise<RpcResponse>;
 ```
+
+## Global Wallet Methods
+
+Global wallet helpers require a user bearer token. Pass `walletIndex` when the
+user selected a non-default embedded wallet; the server binds consent, scan,
+confirmation, audit, and execution to that same wallet index plus wallet agent
+id/address. Omitting `walletIndex` selects index `0`.
+
+```typescript
+await client.approveGlobalWalletConsent({
+  appId: "tenant/client",
+  origin: "https://app.example",
+  scopes: ["eth_accounts", "eth_sendTransaction"],
+  walletIndex: 2,
+});
+
+const scan = await client.scanGlobalWalletTransaction({
+  appId: "tenant/client",
+  origin: "https://app.example",
+  walletIndex: 2,
+  params: [{ from, to, value: "0x1", chainId: "0x2105" }],
+});
+
+const confirmation = await client.confirmGlobalWalletAction({
+  appId: "tenant/client",
+  origin: "https://app.example",
+  method: "eth_sendTransaction",
+  walletIndex: 2,
+  params: [{ from, to, value: "0x1", chainId: "0x2105" }],
+});
+
+await client.globalWalletRpc({
+  appId: "tenant/client",
+  origin: "https://app.example",
+  method: "eth_sendTransaction",
+  walletIndex: 2,
+  confirmationId: confirmation.confirmationId,
+  params: [{ from, to, value: "0x1", chainId: "0x2105" }],
+});
+```
+
+Contract calldata remains blocked for global wallet transaction execution until
+selector-aware scanning and policy checks are configured for that deployment.
+
+## App Client Methods
+
+Tenant app-client helpers expose the same `TenantAppClient` shape documented in
+the control-plane API. Native app clients can set iOS and Android allowlists
+with `allowedBundleIds` and `allowedPackageNames`; device-code auth then checks
+`X-Steward-Native-Bundle-Id`, `X-Steward-Native-Package-Name`, or matching JSON
+fields against the enabled client.
+
+```typescript
+await client.createTenantAppClient("tenant-1", {
+  id: "ios-prod",
+  name: "iOS Production",
+  environment: "production",
+  enabled: true,
+  allowedBundleIds: ["com.example.app"],
+  allowedRedirectUrls: ["com.example.app://auth/callback"],
+});
+
+const clients = await client.listTenantAppClients("tenant-1");
+```
+
+## Tenant User Methods
+
+### bulkRemediateTenantWalletPolicyViolations
+
+Removes selected EVM/Solana linked wallet accounts from tenant members after an
+owner/admin has reviewed a one-third-party-wallet policy violation report.
+Requires a user bearer token scoped to the tenant with recent MFA.
+
+```typescript
+const result = await client.bulkRemediateTenantWalletPolicyViolations(
+  tenantId: string,
+  wallets: Array<{ userId: string; accountId: string }>
+): Promise<TenantWalletPolicyBulkRemediationResponse>;
+```
+
+The API caps requests at 50 items and returns per-item success/error results so
+callers can retry failed selections without repeating successful remediations.
 
 ## Policy Methods
 

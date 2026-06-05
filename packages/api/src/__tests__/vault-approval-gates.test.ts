@@ -38,6 +38,8 @@ import {
   policies,
   tenants,
   transactions,
+  users,
+  userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Vault } from "@stwd/vault";
@@ -46,7 +48,8 @@ import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `approval-gate-tenant-${Date.now()}`;
-const ACTOR_ID = "approval-gate-owner";
+const ACTOR_ID = "00000000-0000-4000-8000-000000000001";
+const REMOVED_ACTOR_ID = "00000000-0000-4000-8000-000000000002";
 // Recipient the pending transactions pay; "code" is irrelevant here because the
 // approve path re-evaluates POLICY (not the native-transfer eth_getCode guard).
 const RECIPIENT = "0x1234567890123456789012345678901234567890";
@@ -55,6 +58,8 @@ const OTHER_ADDRESS = "0x9999999999999999999999999999999999999999";
 const AGENT_POLICY_REJECT = `approval-reject-${Date.now()}`;
 const AGENT_AUDIT = `approval-audit-${Date.now()}`;
 const AGENT_LIFECYCLE = `approval-lifecycle-${Date.now()}`;
+const AGENT_SEPARATION = `approval-separation-${Date.now()}`;
+const AGENT_REMOVED_REVIEWER = `approval-removed-reviewer-${Date.now()}`;
 
 // One app per auth posture. The approve route reads auth purely from context
 // variables, so a per-test middleware that sets exactly the desired posture is
@@ -63,6 +68,7 @@ async function makeApp(opts: {
   authType: "session-jwt" | "api-key";
   role?: "owner" | "admin" | "member";
   mfa: boolean;
+  userId?: string;
 }) {
   const { vaultRoutes } = await import("../routes/vault");
   const app = new Hono<{ Variables: AppVariables }>();
@@ -70,7 +76,7 @@ async function makeApp(opts: {
     c.set("tenantId", TENANT_ID);
     c.set("authType", opts.authType);
     c.set("tenantRole", opts.role ?? "owner");
-    c.set("userId", ACTOR_ID);
+    c.set("userId", opts.userId ?? ACTOR_ID);
     // Set MFA fresh at request time so it is always within the 5-minute window.
     if (opts.mfa) c.set("sessionMfaVerifiedAt", Date.now());
     await next();
@@ -104,7 +110,12 @@ async function seedWhitelist(agentId: string, addresses: string[]) {
 
 // A pending native-transfer transaction + its approval-queue row, exactly as the
 // /sign path would persist when an op is routed to manual approval.
-async function seedPendingTx(agentId: string, txId: string, to: string) {
+async function seedPendingTx(
+  agentId: string,
+  txId: string,
+  to: string,
+  requestedBy?: { type: string; id: string },
+) {
   await getDb()
     .insert(transactions)
     .values({
@@ -124,6 +135,8 @@ async function seedPendingTx(agentId: string, txId: string, to: string) {
       txId,
       agentId,
       status: "pending",
+      requestedByType: requestedBy?.type,
+      requestedById: requestedBy?.id,
     });
 }
 
@@ -152,6 +165,18 @@ describe("vault approval gates (real /approve path)", () => {
         name: "Approval Gate Tenant",
         apiKeyHash: `hash-${TENANT_ID}`,
       });
+    await getDb()
+      .insert(users)
+      .values([
+        { id: ACTOR_ID, email: "approval-gate-owner@example.test" },
+        { id: REMOVED_ACTOR_ID, email: "approval-gate-removed@example.test" },
+      ]);
+    await getDb()
+      .insert(userTenants)
+      .values([
+        { userId: ACTOR_ID, tenantId: TENANT_ID, role: "owner" },
+        { userId: REMOVED_ACTOR_ID, tenantId: TENANT_ID, role: "owner" },
+      ]);
 
     // Reject scenario: the agent's ONLY allowlisted address is some OTHER address,
     // so the pending tx to RECIPIENT is now a hard policy failure at approval time.
@@ -164,6 +189,18 @@ describe("vault approval gates (real /approve path)", () => {
     await seedAgent(AGENT_AUDIT, "2");
     await seedWhitelist(AGENT_AUDIT, [RECIPIENT]);
     await seedPendingTx(AGENT_AUDIT, "tx-audit-order", RECIPIENT);
+
+    // Separation-of-duties scenario: same authenticated user queued the approval.
+    await seedAgent(AGENT_SEPARATION, "4");
+    await seedWhitelist(AGENT_SEPARATION, [RECIPIENT]);
+    await seedPendingTx(AGENT_SEPARATION, "tx-same-requester", RECIPIENT, {
+      type: "user",
+      id: ACTOR_ID,
+    });
+
+    await seedAgent(AGENT_REMOVED_REVIEWER, "5");
+    await seedWhitelist(AGENT_REMOVED_REVIEWER, [RECIPIENT]);
+    await seedPendingTx(AGENT_REMOVED_REVIEWER, "tx-removed-reviewer", RECIPIENT);
 
     // Lifecycle scenario: a tx that reached "broadcast" but whose approval-queue
     // row is somehow still pending. The lifecycle route must refuse to promote it
@@ -223,6 +260,37 @@ describe("vault approval gates (real /approve path)", () => {
     expect(row.status).toBe("pending");
   });
 
+  it("refuses approval when the reviewer was removed from the tenant after session issuance", async () => {
+    await getDb()
+      .delete(userTenants)
+      .where(and(eq(userTenants.userId, REMOVED_ACTOR_ID), eq(userTenants.tenantId, TENANT_ID)));
+    const app = await makeApp({
+      authType: "session-jwt",
+      role: "owner",
+      mfa: true,
+      userId: REMOVED_ACTOR_ID,
+    });
+    const res = await approve(app, AGENT_REMOVED_REVIEWER, "tx-removed-reviewer");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error?: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe(
+      "Transaction approval requires an active owner or admin tenant membership at review time",
+    );
+
+    const [tx] = await getDb()
+      .select({ status: transactions.status })
+      .from(transactions)
+      .where(eq(transactions.id, "tx-removed-reviewer"));
+    expect(tx.status).toBe("pending");
+    const [queue] = await getDb()
+      .select({ status: approvalQueue.status, resolvedById: approvalQueue.resolvedById })
+      .from(approvalQueue)
+      .where(eq(approvalQueue.txId, "tx-removed-reviewer"));
+    expect(queue.status).toBe("pending");
+    expect(queue.resolvedById).toBeNull();
+  });
+
   it("re-evaluates current policy and rejects a pending tx that no longer passes", async () => {
     const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
     const res = await approve(app, AGENT_POLICY_REJECT, "tx-policy-reject");
@@ -238,10 +306,18 @@ describe("vault approval gates (real /approve path)", () => {
       .where(eq(transactions.id, "tx-policy-reject"));
     expect(tx.status).toBe("rejected");
     const [queue] = await getDb()
-      .select({ status: approvalQueue.status })
+      .select({
+        status: approvalQueue.status,
+        resolvedBy: approvalQueue.resolvedBy,
+        resolvedByType: approvalQueue.resolvedByType,
+        resolvedById: approvalQueue.resolvedById,
+      })
       .from(approvalQueue)
       .where(eq(approvalQueue.txId, "tx-policy-reject"));
     expect(queue.status).toBe("rejected");
+    expect(queue.resolvedBy).toBe(`user:${ACTOR_ID}`);
+    expect(queue.resolvedByType).toBe("user");
+    expect(queue.resolvedById).toBe(ACTOR_ID);
 
     // A re-evaluation rejection is itself audited.
     const auditRows = await getDb()
@@ -254,6 +330,32 @@ describe("vault approval gates (real /approve path)", () => {
         ),
       );
     expect(auditRows.length).toBe(1);
+  });
+
+  it("refuses approval by the same authenticated principal that requested it", async () => {
+    const app = await makeApp({ authType: "session-jwt", role: "owner", mfa: true });
+    const res = await approve(app, AGENT_SEPARATION, "tx-same-requester");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { ok: boolean; error?: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("Manual approval requires separation of duties from the requester");
+
+    const [tx] = await getDb()
+      .select({ status: transactions.status })
+      .from(transactions)
+      .where(eq(transactions.id, "tx-same-requester"));
+    expect(tx.status).toBe("pending");
+    const [queue] = await getDb()
+      .select({
+        status: approvalQueue.status,
+        resolvedByType: approvalQueue.resolvedByType,
+        resolvedById: approvalQueue.resolvedById,
+      })
+      .from(approvalQueue)
+      .where(eq(approvalQueue.txId, "tx-same-requester"));
+    expect(queue.status).toBe("pending");
+    expect(queue.resolvedByType).toBeNull();
+    expect(queue.resolvedById).toBeNull();
   });
 
   it("refuses a lifecycle promotion while the tx still has a pending approval", async () => {

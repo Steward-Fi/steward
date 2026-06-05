@@ -18,6 +18,8 @@
  * Solana peer install. See README for bundler tips.
  */
 
+export type { StewardConnectOrCreateWalletProps } from "../components/StewardConnectOrCreateWallet.js";
+export { StewardConnectOrCreateWallet } from "../components/StewardConnectOrCreateWallet.js";
 export type {
   WalletChains,
   WalletLoginClassOverrides,

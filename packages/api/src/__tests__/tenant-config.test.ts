@@ -259,6 +259,9 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
           showFundingQR: true,
           showTransactionHistory: true,
           showSpendDashboard: false,
+          embeddedWallets: {
+            createOnLogin: "users-without-wallets",
+          },
         },
         approvalConfig: {
           autoExpireSeconds: 3600,
@@ -285,7 +288,139 @@ describe.skipIf(SKIP)("Tenant Config API", () => {
       expect(body.data.policyTemplates).toHaveLength(1);
       expect(body.data.featureFlags.showFundingQR).toBe(true);
       expect(body.data.featureFlags.showSpendDashboard).toBe(false);
+      expect(body.data.featureFlags.embeddedWallets.createOnLogin).toBe("users-without-wallets");
       expect(body.data.theme.primaryColor).toBe("#FF0000");
+    });
+
+    it("merges partial embedded wallet feature flag updates", async () => {
+      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: adminHeaders(),
+        body: JSON.stringify({
+          featureFlags: {
+            embeddedWallets: {
+              createOnLogin: "all-users",
+            },
+          },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.featureFlags.showFundingQR).toBe(true);
+      expect(body.data.featureFlags.showSpendDashboard).toBe(false);
+      expect(body.data.featureFlags.embeddedWallets.createOnLogin).toBe("all-users");
+    });
+
+    it("rejects invalid embedded wallet create-on-login feature flags", async () => {
+      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: adminHeaders(),
+        body: JSON.stringify({
+          featureFlags: {
+            embeddedWallets: {
+              createOnLogin: "sometimes",
+            },
+          },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("featureFlags.embeddedWallets.createOnLogin");
+
+      const saved = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        headers: headers(),
+      });
+      const savedBody = await saved.json();
+      expect(savedBody.data.featureFlags.embeddedWallets.createOnLogin).toBe("all-users");
+    });
+
+    it("persists app-client embedded wallet create-on-login overrides", async () => {
+      const appClients = [
+        {
+          id: "web-prod",
+          name: "Production Web",
+          environment: "production",
+          enabled: true,
+          isDefault: true,
+          allowedOrigins: ["https://app.example.test"],
+          allowedRedirectUrls: ["https://app.example.test/auth/callback"],
+          embeddedWallets: { createOnLogin: "off" },
+        },
+      ];
+
+      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: adminHeaders(),
+        body: JSON.stringify({ appClients }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.appClients[0].embeddedWallets.createOnLogin).toBe("off");
+
+      const saved = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        headers: adminHeaders(),
+      });
+      const savedBody = await saved.json();
+      expect(savedBody.data.appClients[0].embeddedWallets.createOnLogin).toBe("off");
+    });
+
+    it("preserves app-client embedded wallet inheritance when no override is supplied", async () => {
+      const appClients = [
+        {
+          id: "web-inherit",
+          name: "Inherited Web",
+          environment: "preview",
+          enabled: true,
+          isDefault: false,
+          allowedOrigins: ["https://inherit.example.test"],
+          allowedRedirectUrls: ["https://inherit.example.test/auth/callback"],
+        },
+      ];
+
+      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: adminHeaders(),
+        body: JSON.stringify({ appClients }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.appClients[0].embeddedWallets).toBeUndefined();
+
+      const saved = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        headers: adminHeaders(),
+      });
+      const savedBody = await saved.json();
+      expect(savedBody.data.appClients[0].embeddedWallets).toBeUndefined();
+    });
+
+    it("rejects invalid app-client embedded wallet create-on-login overrides", async () => {
+      const res = await fetch(`${BASE_URL}/tenants/${TENANT_ID}/config`, {
+        method: "PUT",
+        headers: adminHeaders(),
+        body: JSON.stringify({
+          appClients: [
+            {
+              id: "web-bad",
+              name: "Bad Web",
+              environment: "production",
+              embeddedWallets: { createOnLogin: "sometimes" },
+            },
+          ],
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain('app client "web-bad" embeddedWallets.createOnLogin');
     });
 
     it("GET returns the saved config", async () => {

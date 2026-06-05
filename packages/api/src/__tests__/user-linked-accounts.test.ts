@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { createPrivateKey, sign as cryptoSign } from "node:crypto";
+import { createPrivateKey, sign as cryptoSign, generateKeyPairSync } from "node:crypto";
 
 import { MockSmsInbox, signTelegramLoginPayload } from "@stwd/auth";
 import {
@@ -59,13 +59,13 @@ function buildSiwfMessage(address: string, nonce: string, fid = "4242") {
   ].join("\n");
 }
 
-function signSolanaMessage(message: string): string {
+function signSolanaMessage(message: string, keypair = SOLANA_TEST_KEYPAIR): string {
   const keyObject = createPrivateKey({
     key: {
       kty: "OKP",
       crv: "Ed25519",
-      d: SOLANA_TEST_KEYPAIR.d,
-      x: SOLANA_TEST_KEYPAIR.x,
+      d: keypair.d,
+      x: keypair.x,
     },
     format: "jwk",
   });
@@ -73,16 +73,35 @@ function signSolanaMessage(message: string): string {
   return bs58.encode(cryptoSign(null, Buffer.from(message, "utf8"), keyObject));
 }
 
+function generateSolanaKeypair() {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const privateJwk = privateKey.export({ format: "jwk" }) as JsonWebKey;
+  const publicJwk = publicKey.export({ format: "jwk" }) as JsonWebKey;
+  if (!privateJwk.d || !publicJwk.x) throw new Error("generated Ed25519 key is missing JWK fields");
+  return {
+    d: privateJwk.d,
+    x: publicJwk.x,
+    publicKey: bs58.encode(Buffer.from(publicJwk.x, "base64url")),
+  };
+}
+
 describe("user linked account routes", () => {
   let userRoutes: typeof import("../routes/user").userRoutes;
   let createSessionToken: typeof import("../routes/auth").createSessionToken;
   let userId = "";
   let accountOnlyUserId = "";
+  let tenantOwnerUserId = "";
+  let walletViolationUserId = "";
+  let singleWalletUserId = "";
+  let walletOnlyUserId = "";
+  let bulkWalletViolationUserId = "";
+  let bulkWalletOnlyUserId = "";
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "user-linked-accounts-master-password";
     process.env.STEWARD_JWT_SECRET = "user-linked-accounts-jwt-secret-32chars";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "user-linked-accounts-audit-hmac-key-with-enough-entropy";
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
@@ -106,13 +125,49 @@ describe("user linked account routes", () => {
       .insert(users)
       .values({ email: null, emailVerified: false, walletAddress: null })
       .returning({ id: users.id });
+    const [tenantOwner] = await getDb()
+      .insert(users)
+      .values({ email: "tenant-owner@example.test", emailVerified: true, walletAddress: null })
+      .returning({ id: users.id });
+    const [walletViolationUser] = await getDb()
+      .insert(users)
+      .values({ email: "multi-wallet@example.test", emailVerified: true, walletAddress: null })
+      .returning({ id: users.id });
+    const [singleWalletUser] = await getDb()
+      .insert(users)
+      .values({ email: "single-wallet@example.test", emailVerified: true, walletAddress: null })
+      .returning({ id: users.id });
+    const [walletOnlyUser] = await getDb()
+      .insert(users)
+      .values({ email: null, emailVerified: false, walletAddress: null })
+      .returning({ id: users.id });
+    const [bulkWalletViolationUser] = await getDb()
+      .insert(users)
+      .values({ email: "bulk-multi-wallet@example.test", emailVerified: true, walletAddress: null })
+      .returning({ id: users.id });
+    const [bulkWalletOnlyUser] = await getDb()
+      .insert(users)
+      .values({ email: null, emailVerified: false, walletAddress: null })
+      .returning({ id: users.id });
     userId = user.id;
     accountOnlyUserId = accountOnlyUser.id;
+    tenantOwnerUserId = tenantOwner.id;
+    walletViolationUserId = walletViolationUser.id;
+    singleWalletUserId = singleWalletUser.id;
+    walletOnlyUserId = walletOnlyUser.id;
+    bulkWalletViolationUserId = bulkWalletViolationUser.id;
+    bulkWalletOnlyUserId = bulkWalletOnlyUser.id;
     await getDb()
       .insert(userTenants)
       .values([
         { userId, tenantId: TENANT_ID, role: "member" },
         { userId: accountOnlyUserId, tenantId: TENANT_ID, role: "member" },
+        { userId: tenantOwnerUserId, tenantId: TENANT_ID, role: "owner" },
+        { userId: walletViolationUserId, tenantId: TENANT_ID, role: "member" },
+        { userId: singleWalletUserId, tenantId: TENANT_ID, role: "member" },
+        { userId: walletOnlyUserId, tenantId: TENANT_ID, role: "member" },
+        { userId: bulkWalletViolationUserId, tenantId: TENANT_ID, role: "member" },
+        { userId: bulkWalletOnlyUserId, tenantId: TENANT_ID, role: "member" },
       ]);
     await getDb()
       .insert(tenants)
@@ -153,6 +208,41 @@ describe("user linked account routes", () => {
       .values([
         { userId, provider: "google", providerAccountId: "google-linked" },
         { userId: accountOnlyUserId, provider: "github", providerAccountId: "github-only" },
+        {
+          userId: walletViolationUserId,
+          provider: "wallet:ethereum",
+          providerAccountId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        },
+        {
+          userId: walletViolationUserId,
+          provider: "wallet:solana",
+          providerAccountId: "So11111111111111111111111111111111111111112",
+        },
+        {
+          userId: singleWalletUserId,
+          provider: "wallet:ethereum",
+          providerAccountId: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+        {
+          userId: walletOnlyUserId,
+          provider: "wallet:ethereum",
+          providerAccountId: "0xcccccccccccccccccccccccccccccccccccccccc",
+        },
+        {
+          userId: bulkWalletViolationUserId,
+          provider: "wallet:ethereum",
+          providerAccountId: "0xdddddddddddddddddddddddddddddddddddddddd",
+        },
+        {
+          userId: bulkWalletViolationUserId,
+          provider: "wallet:solana",
+          providerAccountId: "So22222222222222222222222222222222222222222",
+        },
+        {
+          userId: bulkWalletOnlyUserId,
+          provider: "wallet:ethereum",
+          providerAccountId: "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        },
       ]);
     await getDb()
       .insert(authenticators)
@@ -202,6 +292,7 @@ describe("user linked account routes", () => {
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
     delete process.env.STEWARD_JWT_SECRET;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   async function tokenFor(id: string): Promise<string> {
@@ -218,6 +309,21 @@ describe("user linked account routes", () => {
     return createSessionToken("0x0000000000000000000000000000000000000000", tenantId, {
       userId: id,
       tenantId,
+    });
+  }
+
+  async function tenantAdminTokenFor(id: string): Promise<string> {
+    return createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID, {
+      userId: id,
+      tenantId: TENANT_ID,
+      mfaVerifiedAt: Date.now(),
+    });
+  }
+
+  async function staleTenantAdminTokenFor(id: string): Promise<string> {
+    return createSessionToken("0x0000000000000000000000000000000000000000", TENANT_ID, {
+      userId: id,
+      tenantId: TENANT_ID,
     });
   }
 
@@ -505,6 +611,431 @@ describe("user linked account routes", () => {
       }),
     });
     expect(crossUser.status).toBe(409);
+  });
+
+  it("enforces a tenant policy that restricts users to one linked third-party wallet", async () => {
+    const existingWallet = privateKeyToAccount(
+      "0x8b3a350cf5c34c9194ca3a545dfe31d14edcb4d668d6148f570c12365cddad0f",
+    );
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId: `personal-${accountOnlyUserId}`,
+        authAbuseConfig: { wallet: { restrictToOneThirdPartyWallet: true } },
+      })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { authAbuseConfig: { wallet: { restrictToOneThirdPartyWallet: true } } },
+      });
+    await getDb().insert(accounts).values({
+      userId: accountOnlyUserId,
+      provider: "wallet:ethereum",
+      providerAccountId: existingWallet.address.toLowerCase(),
+    });
+
+    const existingNonceResponse = await userRoutes.request("/me/accounts/wallet/ethereum/nonce", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(accountOnlyUserId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ address: existingWallet.address }),
+    });
+    const existingNonceBody = (await existingNonceResponse.json()) as {
+      data: { message: string };
+    };
+    const existingSignature = await existingWallet.signMessage({
+      message: existingNonceBody.data.message,
+    });
+    const idempotentRelink = await userRoutes.request("/me/accounts/wallet/ethereum", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(accountOnlyUserId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        address: existingWallet.address,
+        message: existingNonceBody.data.message,
+        signature: existingSignature,
+      }),
+    });
+    expect(idempotentRelink.status).toBe(200);
+    const idempotentBody = (await idempotentRelink.json()) as { data: { isNew: boolean } };
+    expect(idempotentBody.data.isNew).toBe(false);
+
+    const solanaWallet = generateSolanaKeypair();
+    const nonceResponse = await userRoutes.request("/me/accounts/wallet/solana/nonce", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(accountOnlyUserId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ publicKey: solanaWallet.publicKey }),
+    });
+    const nonceBody = (await nonceResponse.json()) as { data: { message: string } };
+    const blockedLink = await userRoutes.request("/me/accounts/wallet/solana", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await tokenFor(accountOnlyUserId)}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        publicKey: solanaWallet.publicKey,
+        message: nonceBody.data.message,
+        signature: signSolanaMessage(nonceBody.data.message, solanaWallet),
+      }),
+    });
+    expect(blockedLink.status).toBe(409);
+    expect(((await blockedLink.json()) as { error: string }).error).toContain(
+      "already has a linked wallet",
+    );
+    await getDb()
+      .delete(accounts)
+      .where(
+        and(
+          eq(accounts.userId, accountOnlyUserId),
+          eq(accounts.provider, "wallet:ethereum"),
+          eq(accounts.providerAccountId, existingWallet.address.toLowerCase()),
+        ),
+      );
+  });
+
+  it("reports existing users that violate a tenant one-wallet policy", async () => {
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        authAbuseConfig: { wallet: { restrictToOneThirdPartyWallet: true } },
+      })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { authAbuseConfig: { wallet: { restrictToOneThirdPartyWallet: true } } },
+      });
+
+    const response = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/wallet-policy/violations`,
+      {
+        headers: { Authorization: `Bearer ${await tenantAdminTokenFor(tenantOwnerUserId)}` },
+      },
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        tenantId: string;
+        policyEnabled: boolean;
+        total: number;
+        violations: Array<{
+          userId: string;
+          email: string | null;
+          walletCount: number;
+          wallets: Array<{ provider: string; providerAccountId: string }>;
+        }>;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.tenantId).toBe(TENANT_ID);
+    expect(body.data.policyEnabled).toBe(true);
+    expect(body.data.total).toBeGreaterThanOrEqual(1);
+    expect(body.data.violations).toEqual(
+      expect.arrayContaining([
+        {
+          userId: walletViolationUserId,
+          email: "multi-wallet@example.test",
+          name: null,
+          role: "member",
+          walletCount: 2,
+          wallets: [
+            expect.objectContaining({
+              provider: "wallet:ethereum",
+              providerAccountId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }),
+            expect.objectContaining({
+              provider: "wallet:solana",
+              providerAccountId: "So11111111111111111111111111111111111111112",
+            }),
+          ],
+        },
+      ]),
+    );
+    expect(body.data.violations).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ userId: singleWalletUserId })]),
+    );
+  });
+
+  it("lets tenant admins remediate wallet-policy violations with audit and session revocation", async () => {
+    const [solanaWallet] = await getDb()
+      .select({ id: accounts.id, providerAccountId: accounts.providerAccountId })
+      .from(accounts)
+      .where(
+        and(eq(accounts.userId, walletViolationUserId), eq(accounts.provider, "wallet:solana")),
+      );
+    expect(solanaWallet).toBeDefined();
+    await getDb()
+      .insert(refreshTokens)
+      .values({
+        id: "wallet-policy-remediation-refresh-token",
+        userId: walletViolationUserId,
+        tenantId: TENANT_ID,
+        tokenHash: "wallet-policy-remediation-refresh-hash",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+    const noMfa = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/${walletViolationUserId}/wallet-policy/wallets/${solanaWallet.id}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${await staleTenantAdminTokenFor(tenantOwnerUserId)}` },
+      },
+    );
+    expect(noMfa.status).toBe(403);
+
+    const response = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/${walletViolationUserId}/wallet-policy/wallets/${solanaWallet.id}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${await tenantAdminTokenFor(tenantOwnerUserId)}` },
+      },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: { deleted: boolean; accountId: string; provider: string; issuedBefore: number };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data).toMatchObject({
+      deleted: true,
+      accountId: solanaWallet.id,
+      provider: "wallet:solana",
+    });
+    expect(body.data.issuedBefore).toBeGreaterThan(0);
+
+    const [deletedWallet] = await getDb()
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(eq(accounts.id, solanaWallet.id));
+    expect(deletedWallet).toBeUndefined();
+    const remainingRefreshTokens = await getDb()
+      .select({ id: refreshTokens.id })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.userId, walletViolationUserId));
+    expect(remainingRefreshTokens).toHaveLength(0);
+
+    const audits = await getDb()
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.tenantId, TENANT_ID))
+      .orderBy(auditEvents.createdAt);
+    expect(audits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "tenant.wallet_policy.remediation.authorized",
+          actorId: tenantOwnerUserId,
+          resourceId: walletViolationUserId,
+        }),
+        expect.objectContaining({
+          action: "tenant.wallet_policy.remediation",
+          actorId: tenantOwnerUserId,
+          resourceId: walletViolationUserId,
+        }),
+      ]),
+    );
+
+    const postReport = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/wallet-policy/violations`,
+      {
+        headers: { Authorization: `Bearer ${await tenantAdminTokenFor(tenantOwnerUserId)}` },
+      },
+    );
+    expect(postReport.status).toBe(200);
+    const postReportBody = (await postReport.json()) as {
+      data: { violations: Array<{ userId: string }> };
+    };
+    expect(postReportBody.data.violations).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ userId: walletViolationUserId })]),
+    );
+  });
+
+  it("lets tenant admins bulk remediate selected wallet-policy violations with per-item results", async () => {
+    const bulkWallets = await getDb()
+      .select({ id: accounts.id, provider: accounts.provider })
+      .from(accounts)
+      .where(eq(accounts.userId, bulkWalletViolationUserId))
+      .orderBy(accounts.provider);
+    const solanaWallet = bulkWallets.find((account) => account.provider === "wallet:solana");
+    expect(solanaWallet).toBeDefined();
+    const [nonWalletAccount] = await getDb()
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(and(eq(accounts.userId, userId), eq(accounts.provider, "google")));
+    expect(nonWalletAccount).toBeDefined();
+    const [walletOnlyAccount] = await getDb()
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(eq(accounts.userId, bulkWalletOnlyUserId));
+    expect(walletOnlyAccount).toBeDefined();
+
+    await getDb()
+      .insert(refreshTokens)
+      .values({
+        id: "bulk-wallet-policy-remediation-refresh-token",
+        userId: bulkWalletViolationUserId,
+        tenantId: TENANT_ID,
+        tokenHash: "bulk-wallet-policy-remediation-refresh-hash",
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+
+    const noMfa = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/wallet-policy/remediations`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await staleTenantAdminTokenFor(tenantOwnerUserId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          wallets: [{ userId: bulkWalletViolationUserId, accountId: solanaWallet!.id }],
+        }),
+      },
+    );
+    expect(noMfa.status).toBe(403);
+
+    const response = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/wallet-policy/remediations`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${await tenantAdminTokenFor(tenantOwnerUserId)}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          wallets: [
+            { userId: bulkWalletViolationUserId, accountId: solanaWallet!.id },
+            { userId: bulkWalletViolationUserId, accountId: solanaWallet!.id },
+            { userId, accountId: nonWalletAccount!.id },
+            { userId: bulkWalletOnlyUserId, accountId: walletOnlyAccount!.id },
+          ],
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: boolean;
+      data: {
+        succeeded: number;
+        failed: number;
+        results: Array<{
+          ok: boolean;
+          targetUserId: string;
+          accountId: string;
+          provider?: string;
+          providerAccountId?: string;
+          status?: number;
+          error?: string;
+        }>;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.succeeded).toBe(1);
+    expect(body.data.failed).toBe(3);
+    expect(body.data.results[0]).toMatchObject({
+      ok: true,
+      targetUserId: bulkWalletViolationUserId,
+      accountId: solanaWallet!.id,
+      provider: "wallet:solana",
+    });
+    expect(body.data.results[1]).toMatchObject({
+      ok: false,
+      status: 409,
+      error: "Duplicate remediation item",
+    });
+    expect(body.data.results[2]).toMatchObject({
+      ok: false,
+      status: 404,
+      error: "Linked wallet account not found",
+    });
+    expect(body.data.results[3]).toMatchObject({
+      ok: false,
+      status: 409,
+      error: "Cannot unlink the user's last login method",
+    });
+
+    const [deletedWallet] = await getDb()
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(eq(accounts.id, solanaWallet!.id));
+    expect(deletedWallet).toBeUndefined();
+    const remainingRefreshTokens = await getDb()
+      .select({ id: refreshTokens.id })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.userId, bulkWalletViolationUserId));
+    expect(remainingRefreshTokens).toHaveLength(0);
+
+    const audits = await getDb()
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, bulkWalletViolationUserId),
+        ),
+      )
+      .orderBy(auditEvents.createdAt);
+    expect(audits).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: "tenant.wallet_policy.remediation.authorized",
+          actorId: tenantOwnerUserId,
+        }),
+        expect.objectContaining({
+          action: "tenant.wallet_policy.remediation",
+          actorId: tenantOwnerUserId,
+        }),
+      ]),
+    );
+  });
+
+  it("blocks wallet-policy remediation for non-wallet accounts, cross-tenant users, and last login methods", async () => {
+    const [googleAccount] = await getDb()
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(and(eq(accounts.userId, userId), eq(accounts.provider, "google")));
+    expect(googleAccount).toBeDefined();
+    const nonWallet = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/${userId}/wallet-policy/wallets/${googleAccount.id}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${await tenantAdminTokenFor(tenantOwnerUserId)}` },
+      },
+    );
+    expect(nonWallet.status).toBe(404);
+
+    const crossTenant = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/${accountOnlyUserId}/wallet-policy/wallets/${googleAccount.id}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${await tenantAdminTokenFor(tenantOwnerUserId)}` },
+      },
+    );
+    expect(crossTenant.status).toBe(404);
+
+    const [walletOnlyAccount] = await getDb()
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(eq(accounts.userId, walletOnlyUserId));
+    expect(walletOnlyAccount).toBeDefined();
+    const lastLogin = await userRoutes.request(
+      `/me/tenants/${TENANT_ID}/users/${walletOnlyUserId}/wallet-policy/wallets/${walletOnlyAccount.id}`,
+      {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${await tenantAdminTokenFor(tenantOwnerUserId)}` },
+      },
+    );
+    expect(lastLogin.status).toBe(409);
+    expect(((await lastLogin.json()) as { error: string }).error).toBe(
+      "Cannot unlink the user's last login method",
+    );
   });
 
   it("links an OAuth account to the authenticated user and blocks cross-user reuse", async () => {

@@ -182,6 +182,26 @@ unenrollment flows.
 <StewardMfaSettings onUpdated={() => refetchUser()} />
 ```
 
+### `<StewardUserWalletKeyImport>`
+
+Hosted encrypted private-key import for an authenticated user's embedded wallet.
+The component initializes a one-time import session, encrypts the supplied EVM or
+Solana key in the browser with WebCrypto, submits only the encrypted envelope,
+and clears the local input after a successful import.
+
+```tsx
+<StewardUserWalletKeyImport
+  chain="evm"
+  walletIndex={0}
+  onImported={(result) => console.log("Imported", result.walletAddress)}
+/>
+```
+
+Use it only inside `StewardProvider` with a user bearer session that can satisfy
+the tenant's recent-MFA policy for `keyImport`. The server still enforces import
+feature flags, tenant policy, session binding, replay rejection, and no-store
+responses.
+
 ### `<StewardEmailCallback>`
 
 Mount on your `/auth/callback` route to handle magic link token verification:

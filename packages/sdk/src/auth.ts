@@ -18,9 +18,18 @@ import type {
   StewardAuthConfig,
   StewardAuthExchangeResponse,
   StewardAuthResult,
+  StewardCurrentUserResult,
+  StewardDeviceCodeOptions,
+  StewardDeviceCodeResult,
+  StewardDeviceTokenPendingResult,
+  StewardDeviceVerifyResult,
   StewardEmailResult,
   StewardFarcasterLoginConfig,
   StewardFarcasterLoginPayload,
+  StewardGuestDeleteResult,
+  StewardGuestSignInOptions,
+  StewardGuestState,
+  StewardGuestUpgradeEmailInput,
   StewardIdentityTokenResult,
   StewardJwtLoginConfig,
   StewardMfaRequiredResult,
@@ -57,6 +66,7 @@ const OAUTH_TENANT_KEY = "steward_oauth_tenant";
 
 /** Kick off a token refresh when fewer than this many seconds remain on the access token */
 const REFRESH_THRESHOLD_SECS = 120;
+const GUEST_EXPIRY_WARNING_DAYS = 30;
 
 // ─── Minimal JWT decode (no verification — server already verified) ───────────
 
@@ -78,15 +88,39 @@ function decodeJwtPayload(token: string): Record<string, unknown> | null {
 function sessionFromToken(token: string, user?: StewardUser): StewardSession | null {
   const payload = decodeJwtPayload(token);
   if (!payload) return null;
+  const mfaVerifiedAt =
+    typeof payload.mfaVerifiedAt === "number" && Number.isFinite(payload.mfaVerifiedAt)
+      ? payload.mfaVerifiedAt
+      : undefined;
+  const factorEnrollmentVerifiedAt =
+    typeof payload.factorEnrollmentVerifiedAt === "number" &&
+    Number.isFinite(payload.factorEnrollmentVerifiedAt)
+      ? payload.factorEnrollmentVerifiedAt
+      : undefined;
   return {
     token,
     address: (payload.address as string) ?? "",
     tenantId: (payload.tenantId as string) ?? "",
     userId: payload.userId as string | undefined,
     email: payload.email as string | undefined,
+    isGuest: payload.guest === true,
+    guestExpiresAt: typeof payload.guestExpiresAt === "string" ? payload.guestExpiresAt : null,
+    mfaVerifiedAt,
+    mfaMethod: typeof payload.mfaMethod === "string" ? payload.mfaMethod : undefined,
+    factorEnrollmentVerifiedAt,
     expiresAt: payload.exp as number | undefined,
     user,
   };
+}
+
+function guestExpiryMessage(expiresAtMs: number | null | undefined): string | null {
+  if (!expiresAtMs || Number.isNaN(expiresAtMs)) return null;
+  const remainingMs = expiresAtMs - Date.now();
+  if (remainingMs <= 0) return "Guest account expired. Sign in or start a new guest session.";
+  const days = Math.ceil(remainingMs / 86_400_000);
+  if (days > GUEST_EXPIRY_WARNING_DAYS) return null;
+  if (days <= 1) return "Guest account expires today. Upgrade to keep your wallet and data.";
+  return `Guest account expires in ${days} days. Upgrade to keep your wallet and data.`;
 }
 
 function getOAuthCallbackParams(url: URL): { code?: string; state?: string; error?: string } {
@@ -343,6 +377,143 @@ export class StewardAuth {
     return this.getSession() !== null;
   }
 
+  /**
+   * Fetch the authenticated user's bootstrap payload. When a tenant is
+   * configured, it is sent as both query and header so backend app-level
+   * create-on-login wallet config can resolve without exposing platform keys.
+   */
+  async getCurrentUser(options: { tenantId?: string } = {}): Promise<StewardCurrentUserResult> {
+    const token = this.getToken();
+    if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
+    const tenantId = options.tenantId ?? this.tenantId;
+    const path = tenantId ? `/user/me?tenantId=${encodeURIComponent(tenantId)}` : "/user/me";
+    const res = await authRequest<{
+      ok: boolean;
+      data: StewardCurrentUserResult;
+    }>(
+      this.baseUrl,
+      path,
+      {
+        headers: tenantId ? { "X-Steward-Tenant": tenantId } : undefined,
+      },
+      token,
+    );
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+    return res.data.data;
+  }
+
+  /**
+   * Create or replace the current local session with a bounded guest account.
+   * Guest sessions are persisted through the configured storage just like other
+   * auth flows, so reloads can continue until the server-side guest expiry.
+   */
+  async signInAsGuest(options: StewardGuestSignInOptions = {}): Promise<StewardAuthResult> {
+    const body: Record<string, unknown> = {};
+    const tenantId = options.tenantId ?? this.tenantId;
+    if (tenantId) body.tenantId = tenantId;
+    if (options.expiresIn) body.expiresIn = options.expiresIn;
+
+    const res = await authRequest<StewardAuthExchangeResponse>(this.baseUrl, "/auth/guest", {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+    return this.storeExchangeResponse(res.data) as StewardAuthResult;
+  }
+
+  /**
+   * Returns guest lifecycle state for the current session, including the
+   * 30-day expiry warning copy consumers can surface in their own UI.
+   */
+  getGuestState(): StewardGuestState {
+    const session = this.getSession();
+    if (!session?.isGuest) {
+      return {
+        isGuest: false,
+        isExpired: false,
+        expiryMessage: null,
+      };
+    }
+    const expiresAtMs = session.guestExpiresAt ? Date.parse(session.guestExpiresAt) : null;
+    const isExpired = !!expiresAtMs && expiresAtMs <= Date.now();
+    const secondsUntilExpiry =
+      expiresAtMs && !Number.isNaN(expiresAtMs)
+        ? Math.max(0, Math.floor((expiresAtMs - Date.now()) / 1000))
+        : null;
+    return {
+      isGuest: true,
+      userId: session.userId,
+      tenantId: session.tenantId,
+      expiresAt: session.guestExpiresAt ?? null,
+      expiresAtMs: expiresAtMs && !Number.isNaN(expiresAtMs) ? expiresAtMs : null,
+      isExpired,
+      secondsUntilExpiry,
+      expiryMessage: guestExpiryMessage(expiresAtMs),
+    };
+  }
+
+  /**
+   * Upgrade the current guest into a full user using a verified email magic-link
+   * token. This is intentionally guest-only: callers signed into a full account
+   * must not use this path to merge guest data into an existing identity.
+   */
+  async upgradeGuestWithEmail(
+    input: StewardGuestUpgradeEmailInput,
+  ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
+    const token = this.getToken();
+    if (!token) throw new StewardApiError("Not authenticated. Sign in as a guest first.", 0);
+    if (!this.getGuestState().isGuest) {
+      throw new StewardApiError("Current session is not a guest account.", 0);
+    }
+    const email = input.email.trim();
+    if (!email || !input.token.trim()) {
+      throw new StewardApiError("email and token are required to upgrade a guest", 0);
+    }
+
+    const res = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/guest/upgrade",
+      {
+        method: "POST",
+        body: JSON.stringify({ method: "email", email, token: input.token }),
+      },
+      token,
+    );
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+    return this.storeExchangeResponse(res.data);
+  }
+
+  /**
+   * Explicitly delete the current guest account server-side and clear local
+   * persisted tokens. Full accounts are rejected locally and by the API.
+   */
+  async deleteGuest(): Promise<StewardGuestDeleteResult> {
+    const token = this.getToken();
+    if (!token) throw new StewardApiError("Not authenticated. Sign in as a guest first.", 0);
+    if (!this.getGuestState().isGuest) {
+      throw new StewardApiError("Current session is not a guest account.", 0);
+    }
+
+    const res = await authRequest<{ ok: boolean; deleted: boolean; userId?: string }>(
+      this.baseUrl,
+      "/auth/guest",
+      { method: "DELETE" },
+      token,
+    );
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+    this.clearToken();
+    this.notifyListeners(null);
+    return res.data;
+  }
+
   async getIdentityToken(): Promise<StewardIdentityTokenResult> {
     const token = this.getToken();
     if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
@@ -416,6 +587,90 @@ export class StewardAuth {
     }
     this.clearToken();
     this.notifyListeners(null);
+  }
+
+  async requestDeviceCode(
+    options: StewardDeviceCodeOptions = {},
+  ): Promise<StewardDeviceCodeResult> {
+    const tenantId = options.tenantId ?? this.tenantId;
+    if (!tenantId) {
+      throw new StewardApiError("tenantId is required for device authorization", 400);
+    }
+    const res = await authRequest<StewardDeviceCodeResult>(this.baseUrl, "/auth/device/code", {
+      method: "POST",
+      body: JSON.stringify({
+        tenantId,
+        ...(options.clientId ? { client_id: options.clientId } : {}),
+        ...(options.scope ? { scope: options.scope } : {}),
+      }),
+    });
+    if (!res.ok) throw new StewardApiError(res.error, res.status);
+    return res.data;
+  }
+
+  async verifyDeviceCode(
+    userCode: string,
+    action: "approve" | "deny" = "approve",
+  ): Promise<StewardDeviceVerifyResult> {
+    const token = this.getToken();
+    if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
+    const res = await authRequest<StewardDeviceVerifyResult>(
+      this.baseUrl,
+      "/auth/device/verify",
+      {
+        method: "POST",
+        body: JSON.stringify({ user_code: userCode, action }),
+      },
+      token,
+    );
+    if (!res.ok) throw new StewardApiError(res.error, res.status);
+    return res.data;
+  }
+
+  async pollDeviceToken(input: {
+    deviceCode: string;
+    clientId?: string;
+  }): Promise<StewardAuthResult | StewardDeviceTokenPendingResult> {
+    const response = await fetch(`${this.baseUrl}/auth/device/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+        device_code: input.deviceCode,
+        ...(input.clientId ? { client_id: input.clientId } : {}),
+      }),
+    }).catch((err) => {
+      throw new StewardApiError(err instanceof Error ? err.message : "Network request failed", 0);
+    });
+
+    const text = await response.text();
+    const payload = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+    if (!response.ok || payload.ok === false) {
+      const error = typeof payload.error === "string" ? payload.error : `status_${response.status}`;
+      if (
+        error === "authorization_pending" ||
+        error === "slow_down" ||
+        error === "access_denied" ||
+        error === "expired_token" ||
+        error === "invalid_client" ||
+        error === "invalid_request" ||
+        error === "unsupported_grant_type"
+      ) {
+        return {
+          ok: false,
+          error,
+          ...(typeof payload.interval === "number" ? { interval: payload.interval } : {}),
+        };
+      }
+      throw new StewardApiError(error, response.status);
+    }
+
+    return this.storeExchangeResponse(
+      payload as unknown as StewardAuthExchangeResponse,
+    ) as StewardAuthResult;
   }
 
   /**
@@ -951,6 +1206,56 @@ export class StewardAuth {
     );
   }
 
+  async stepUpWithTotp(code: string): Promise<StewardAuthResult> {
+    const token = this.getToken();
+    if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
+
+    const res = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/mfa/totp/step-up",
+      {
+        method: "POST",
+        body: JSON.stringify({ code }),
+      },
+      token,
+    );
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    return this.storeAndReturn(
+      res.data.token,
+      (res.data as { refreshToken?: string }).refreshToken ?? "",
+      res.data.user,
+      (res.data as { expiresIn?: number }).expiresIn,
+    );
+  }
+
+  async stepUpWithRecoveryCode(recoveryCode: string): Promise<StewardAuthResult> {
+    const token = this.getToken();
+    if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
+
+    const res = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/mfa/totp/step-up",
+      {
+        method: "POST",
+        body: JSON.stringify({ recoveryCode }),
+      },
+      token,
+    );
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    return this.storeAndReturn(
+      res.data.token,
+      (res.data as { refreshToken?: string }).refreshToken ?? "",
+      res.data.user,
+      (res.data as { expiresIn?: number }).expiresIn,
+    );
+  }
+
   async getRecoveryCodeStatus(): Promise<StewardRecoveryCodeStatus> {
     const token = this.getToken();
     if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
@@ -1073,6 +1378,31 @@ export class StewardAuth {
         method: "POST",
         body: JSON.stringify({ challengeId, code }),
       },
+    );
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    return this.storeAndReturn(
+      res.data.token,
+      (res.data as { refreshToken?: string }).refreshToken ?? "",
+      res.data.user,
+      (res.data as { expiresIn?: number }).expiresIn,
+    );
+  }
+
+  async stepUpWithSms(code: string): Promise<StewardAuthResult> {
+    const token = this.getToken();
+    if (!token) throw new StewardApiError("Not authenticated. Sign in first.", 0);
+
+    const res = await authRequest<StewardAuthExchangeResponse>(
+      this.baseUrl,
+      "/auth/mfa/sms/step-up",
+      {
+        method: "POST",
+        body: JSON.stringify({ code }),
+      },
+      token,
     );
     if (!res.ok) {
       throw new StewardApiError(res.error, res.status);

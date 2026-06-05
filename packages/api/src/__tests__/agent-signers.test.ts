@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { agentSigners, agents, closeDb, getDb, tenants } from "@stwd/db";
+import { generateP256KeyPair } from "@stwd/auth";
+import { agentSigners, agents, closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
@@ -50,6 +51,24 @@ describe("agent signer API", () => {
       name: "Agent Signers Agent",
       walletAddress: "0x1234567890123456789012345678901234567890",
     });
+    await getDb()
+      .insert(policies)
+      .values([
+        {
+          id: "signer-policy",
+          agentId: AGENT_ID,
+          type: "spending-limit",
+          enabled: true,
+          config: { maxPerTx: "100" },
+        },
+        {
+          id: "signer-policy-2",
+          agentId: AGENT_ID,
+          type: "rate-limit",
+          enabled: true,
+          config: { maxTxPerHour: 1, maxTxPerDay: 2 },
+        },
+      ]);
     app = await makeApp();
   });
 
@@ -71,17 +90,22 @@ describe("agent signer API", () => {
         chainFamily: "evm",
         label: "Ops signer",
         permissions: ["sign_transaction", "sign_message"],
+        policyIds: ["signer-policy"],
         metadata: { ticket: "SEC-1" },
         issueCredential: true,
       }),
     });
     expect(createResponse.status).toBe(201);
+    expect(createResponse.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    expect(createResponse.headers.get("Pragma")).toBe("no-cache");
+    expect(createResponse.headers.get("Expires")).toBe("0");
     const created = (await createResponse.json()) as {
       ok: boolean;
       data: {
         id: string;
         signerType: string;
         permissions: string[];
+        policyIds: string[];
         status: string;
         hasCredential: boolean;
         credentialSecret?: string;
@@ -91,6 +115,7 @@ describe("agent signer API", () => {
     expect(created.ok).toBe(true);
     expect(created.data.signerType).toBe("delegated");
     expect(created.data.permissions).toEqual(["sign_transaction", "sign_message"]);
+    expect(created.data.policyIds).toEqual(["signer-policy"]);
     expect(created.data.status).toBe("active");
     expect(created.data.hasCredential).toBe(true);
     expect(created.data.credentialSecret?.startsWith("stwd_signer_")).toBe(true);
@@ -121,6 +146,7 @@ describe("agent signer API", () => {
           id: string;
           label: string | null;
           hasCredential: boolean;
+          policyIds: string[];
           credentialSecret?: string;
           metadata: Record<string, unknown>;
         }>;
@@ -129,6 +155,7 @@ describe("agent signer API", () => {
     expect(listed.ok).toBe(true);
     expect(listed.data.signers).toHaveLength(1);
     expect(listed.data.signers[0].id).toBe(signerId);
+    expect(listed.data.signers[0].policyIds).toEqual(["signer-policy"]);
     expect(listed.data.signers[0].hasCredential).toBe(true);
     expect(listed.data.signers[0].credentialSecret).toBeUndefined();
     expect(listed.data.signers[0].metadata.credentialHash).toBeUndefined();
@@ -136,15 +163,20 @@ describe("agent signer API", () => {
     const updateResponse = await app.request(`/agents/${AGENT_ID}/signers/${signerId}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ status: "paused", label: "Paused ops signer" }),
+      body: JSON.stringify({
+        status: "paused",
+        label: "Paused ops signer",
+        policyIds: ["signer-policy-2"],
+      }),
     });
     expect(updateResponse.status).toBe(200);
     const updated = (await updateResponse.json()) as {
       ok: boolean;
-      data: { status: string; label: string | null };
+      data: { status: string; label: string | null; policyIds: string[] };
     };
     expect(updated.data.status).toBe("paused");
     expect(updated.data.label).toBe("Paused ops signer");
+    expect(updated.data.policyIds).toEqual(["signer-policy-2"]);
 
     const revokeResponse = await app.request(`/agents/${AGENT_ID}/signers/${signerId}`, {
       method: "DELETE",
@@ -182,6 +214,37 @@ describe("agent signer API", () => {
     expect(invalid.error).toContain("permissions");
   });
 
+  it("rejects signer policy scopes that do not belong to the agent", async () => {
+    const response = await app.request(`/agents/${AGENT_ID}/signers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "foreign-policy-scope",
+        permissions: ["sign_transaction"],
+        policyIds: ["not-this-agent"],
+      }),
+    });
+    const body = (await response.json()) as { ok: boolean; error?: string };
+    expect(response.status).toBe(400);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("policyIds must reference policies on this agent");
+  });
+
+  it("requires recent MFA before changing signer policy scope", async () => {
+    const noMfaApp = await makeApp("admin-no-mfa");
+    const response = await noMfaApp.request(`/agents/${AGENT_ID}/signers/${signerId}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ policyIds: ["signer-policy"] }),
+    });
+    const body = (await response.json()) as { ok: boolean; error?: string };
+    expect(response.status).toBe(403);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Signer updates requires recent MFA verification");
+  });
+
   it("rejects caller-chosen delegated signer credential secrets", async () => {
     const response = await app.request(`/agents/${AGENT_ID}/signers`, {
       method: "POST",
@@ -198,6 +261,51 @@ describe("agent signer API", () => {
     expect(response.status).toBe(400);
     expect(body.ok).toBe(false);
     expect(body.error).toContain("server-generated");
+  });
+
+  it("registers P-256 authorization-key signers through the public route", async () => {
+    const keypair = await generateP256KeyPair();
+    const createResponse = await app.request(`/agents/${AGENT_ID}/signers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "p256-auth-key",
+        keyType: "p256",
+        publicKey: keypair.publicKeySpkiBase64,
+        permissions: ["sign_message"],
+      }),
+    });
+    expect(createResponse.status).toBe(201);
+    const created = (await createResponse.json()) as {
+      data: {
+        keyType: string;
+        publicKey: string;
+        hasCredential: boolean;
+        credentialSecret?: string;
+      };
+    };
+    expect(created.data.keyType).toBe("p256");
+    expect(created.data.publicKey).toBe(keypair.publicKeySpkiBase64);
+    expect(created.data.hasCredential).toBe(false);
+    expect(created.data.credentialSecret).toBeUndefined();
+
+    const invalidResponse = await app.request(`/agents/${AGENT_ID}/signers`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        signerType: "delegated",
+        subjectType: "external",
+        subjectId: "p256-invalid",
+        keyType: "p256",
+        publicKey: "not-a-p256-key",
+      }),
+    });
+    const invalid = (await invalidResponse.json()) as { ok: boolean; error?: string };
+    expect(invalidResponse.status).toBe(400);
+    expect(invalid.ok).toBe(false);
+    expect(invalid.error).toContain("valid P-256");
   });
 
   it("requires recent MFA for signer credential issuance and reserved metadata is not writable", async () => {

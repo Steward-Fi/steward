@@ -25,7 +25,7 @@
  *     rejected before promotion).
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
-import { closeDb, getDb, tenants, users, userTenants } from "@stwd/db";
+import { closeDb, getDb, refreshTokens, tenants, users, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 
@@ -349,5 +349,57 @@ describe("guest upgrade", () => {
       .from(users)
       .where(eq(users.id, guest.user?.id as string));
     expect(row?.isGuest).toBe(true);
+  });
+});
+
+describe("guest delete", () => {
+  it("deactivates a guest, revokes refresh tokens, and invalidates the access token", async () => {
+    const guest = await mintGuest();
+    const guestId = guest.user?.id as string;
+    const auth = { Authorization: `Bearer ${guest.token}` };
+
+    const res = await authRoutes.request("/guest", {
+      method: "DELETE",
+      headers: auth,
+    });
+    const body = (await res.json()) as { ok: boolean; deleted?: boolean; userId?: string };
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, deleted: true, userId: guestId });
+
+    const [row] = await getDb()
+      .select({ isGuest: users.isGuest, deactivatedAt: users.deactivatedAt })
+      .from(users)
+      .where(eq(users.id, guestId));
+    expect(row?.isGuest).toBe(true);
+    expect(row?.deactivatedAt).toBeInstanceOf(Date);
+
+    const remainingRefreshTokens = await getDb()
+      .select({ id: refreshTokens.id })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.userId, guestId));
+    expect(remainingRefreshTokens).toHaveLength(0);
+    expect(await verifySessionToken(guest.token as string)).toBeNull();
+  });
+
+  it("refuses to delete an upgraded full account through the guest endpoint", async () => {
+    const guest = await mintGuest();
+    const auth = { Authorization: `Bearer ${guest.token}`, "content-type": "application/json" };
+    const email = `guest-delete-upgraded-${guest.user?.id}@example.test`;
+    const token = await magicLinkToken(email);
+    const upgrade = await authRoutes.request("/guest/upgrade", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ method: "email", token, email }),
+    });
+    expect(upgrade.status).toBe(200);
+
+    const upgradedToken = ((await upgrade.json()) as GuestResponse).token as string;
+    const res = await authRoutes.request("/guest", {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${upgradedToken}` },
+    });
+    const body = (await res.json()) as { error?: string };
+    expect(res.status).toBe(409);
+    expect(body.error).toContain("Only guest accounts");
   });
 });

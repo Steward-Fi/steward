@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { StewardApiError } from "@stwd/sdk";
 import * as React from "react";
 import { renderToString } from "react-dom/server";
 
 const { StewardMfaChallenge } = await import("../components/StewardMfaChallenge.js");
 const { StewardMfaSettings } = await import("../components/StewardMfaSettings.js");
+const { useMfaStepUp } = await import("../hooks/useMfaStepUp.js");
 const { StewardAuthContext } = await import("../provider.js");
 
 type AuthCtx = React.ContextType<typeof StewardAuthContext>;
@@ -13,7 +15,14 @@ function authCtx(): NonNullable<AuthCtx> {
     isAuthenticated: true,
     isLoading: false,
     user: { id: "user-1", email: "u@example.com" },
-    session: { token: "token", address: "0x1234", tenantId: "tenant-1" },
+    session: {
+      token: "token",
+      address: "0x1234",
+      tenantId: "tenant-1",
+      mfaVerifiedAt: 1_770_000_000_000,
+      mfaMethod: "passkey",
+      factorEnrollmentVerifiedAt: 1_770_000_000_111,
+    },
     providers: null,
     isProvidersLoading: false,
     signOut: () => {},
@@ -75,6 +84,18 @@ function authCtx(): NonNullable<AuthCtx> {
       expiresIn: 900,
       user: { id: "user-1", email: "u@example.com" },
     }),
+    stepUpWithTotp: async () => ({
+      token: "token",
+      refreshToken: "refresh",
+      expiresIn: 900,
+      user: { id: "user-1", email: "u@example.com" },
+    }),
+    stepUpWithRecoveryCode: async () => ({
+      token: "token",
+      refreshToken: "refresh",
+      expiresIn: 900,
+      user: { id: "user-1", email: "u@example.com" },
+    }),
     getRecoveryCodeStatus: async () => ({ ok: true, enabled: false, remaining: 0 }),
     regenerateRecoveryCodes: async () => ({ ok: true, recoveryCodes: ["ABCDE-FGHJK"] }),
     unenrollTotp: async () => ({ ok: true }),
@@ -87,6 +108,12 @@ function authCtx(): NonNullable<AuthCtx> {
       expiresAt: new Date().toISOString(),
     }),
     completeSmsMfa: async () => ({
+      token: "token",
+      refreshToken: "refresh",
+      expiresIn: 900,
+      user: { id: "user-1", email: "u@example.com" },
+    }),
+    stepUpWithSms: async () => ({
       token: "token",
       refreshToken: "refresh",
       expiresIn: 900,
@@ -172,5 +199,40 @@ describe("<StewardMfaSettings />", () => {
     expect(html).toContain("authenticator app");
     expect(html).toContain("sms");
     expect(html).toContain("recovery codes");
+  });
+});
+
+describe("useMfaStepUp()", () => {
+  test("exposes session MFA freshness and SDK MFA-error classifier", () => {
+    function Probe() {
+      const stepUp = useMfaStepUp();
+      return React.createElement(
+        "output",
+        {},
+        [
+          stepUp.state.mfaVerifiedAt,
+          stepUp.state.mfaMethod,
+          stepUp.state.factorEnrollmentVerifiedAt,
+          String(
+            stepUp.isMfaRequiredError(
+              new StewardApiError(
+                "Wallet transaction signing requires a recent MFA step-up session",
+                403,
+              ),
+            ),
+          ),
+          typeof stepUp.stepUpWithTotp,
+          typeof stepUp.stepUpWithRecoveryCode,
+          typeof stepUp.sendSmsCode,
+          typeof stepUp.stepUpWithSms,
+          typeof stepUp.stepUpWithPasskey,
+        ].join("|"),
+      );
+    }
+
+    const html = renderToString(wrap(React.createElement(Probe)));
+    expect(html).toContain(
+      "1770000000000|passkey|1770000000111|true|function|function|function|function|function",
+    );
   });
 });

@@ -46,6 +46,17 @@ function approvalActor(c: Context<{ Variables: AppVariables }>): string {
   return c.get("userId") ?? `${c.get("authType") ?? "tenant"}:${c.get("tenantId")}`;
 }
 
+function approvalPrincipal(c: Context<{ Variables: AppVariables }>): {
+  type: "user" | "tenant";
+  id: string;
+} {
+  const userId = c.get("userId");
+  if (typeof userId === "string" && userId.length > 0) {
+    return { type: "user", id: userId };
+  }
+  return { type: "tenant", id: c.get("tenantId") };
+}
+
 function requireHumanApprover(c: Context<{ Variables: AppVariables }>): boolean {
   const authType = c.get("authType");
   const role = c.get("tenantRole");
@@ -445,6 +456,7 @@ approvalRoutes.post("/:txId/deny", async (c) => {
   }
 
   const resolvedBy = approvalActor(c);
+  const principal = approvalPrincipal(c);
 
   await writeApprovalAudit(c, {
     action: "approval.deny.authorized",
@@ -467,6 +479,8 @@ approvalRoutes.post("/:txId/deny", async (c) => {
           status: "rejected",
           resolvedAt: new Date(),
           resolvedBy: `${resolvedBy}: ${reason}`,
+          resolvedByType: principal.type,
+          resolvedById: principal.id,
         })
         .where(and(eq(approvalQueue.id, entry.id), eq(approvalQueue.status, "pending")))
         .returning();

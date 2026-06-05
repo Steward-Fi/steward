@@ -1,0 +1,148 @@
+---
+title: "Audits"
+description: "Query tenant audit events and action history."
+---
+
+# Audits API
+
+Audit routes expose the tenant-scoped, tamper-evident event history used by
+wallet/action history, account history, and compliance review views.
+
+**Base path:** `/audit`
+
+**Auth:** Tenant owner/admin browser session with recent MFA verification
+
+<Warning>
+  Audit routes do not accept tenant API keys or platform keys. Use a user
+  bearer session for a tenant owner or admin, and complete MFA again if the
+  recent-MFA window has expired.
+</Warning>
+
+## List Audit Events
+
+```bash
+GET /audit/events
+```
+
+Returns raw audit-chain events for the authenticated tenant. Results are sorted
+newest first by audit sequence.
+
+<CodeGroup>
+```typescript SDK
+import { StewardClient } from "@stwd/sdk";
+
+const steward = new StewardClient({
+  baseUrl: "https://api.steward.fi",
+  bearerToken: sessionToken,
+});
+
+const events = await steward.getAuditEvents({
+  actionPrefix: "wallet.action.",
+  resourceType: "account",
+  resourceId: "acct_prod_123",
+  metadata: {
+    "adapter.kind": "swap",
+    "adapter.lifecycleStatus": "built",
+  },
+  limit: 25,
+});
+```
+
+```typescript Server
+const params = new URLSearchParams({
+  actionPrefix: "wallet.action.",
+  resourceType: "account",
+  resourceId: "acct_prod_123",
+  "metadata.adapter.kind": "swap",
+  "metadata.adapter.lifecycleStatus": "built",
+  limit: "25",
+});
+
+const response = await fetch(`https://api.steward.fi/audit/events?${params}`, {
+  headers: {
+    Authorization: `Bearer ${sessionToken}`,
+  },
+});
+
+const events = await response.json();
+```
+</CodeGroup>
+
+## Query Parameters
+
+| Parameter | Description |
+| --- | --- |
+| `action` | Exact audit action match, for example `wallet.action.signed`. |
+| `actionPrefix` | Prefix match for action families, for example `wallet.action.`. |
+| `actorType` | Exact actor type, such as `user`, `agent`, or `system`. |
+| `actorId` | Exact actor ID. |
+| `resourceType` | Exact resource type, such as `wallet`, `account`, or `adapter`. |
+| `resourceId` | Exact resource ID. |
+| `requestId` | Exact request ID mirrored into audit metadata. |
+| `metadata.<path>` | Exact JSON metadata value match at a dot-separated path. |
+| `dateFrom` | Inclusive ISO date-time lower bound. |
+| `dateTo` | Inclusive ISO date-time upper bound. |
+| `page` | Page number, default `1`, max `5000`. |
+| `limit` | Page size, default `50`, max `200`. |
+
+`action` and `actionPrefix` accept letters, numbers, `_`, `.`, `:`, and `-`,
+up to 128 characters. You can combine `actionPrefix` with resource and metadata
+filters to build narrow action-history views without fetching unrelated rows.
+
+Metadata filters use query keys in the form `metadata.<path>`, where `<path>` is
+up to five dot-separated path segments. Each path segment may contain letters,
+numbers, and `_`; `__proto__`, `prototype`, and `constructor` are rejected. Up
+to five metadata filters are accepted per request, and values must be
+1-256 characters. Matching is exact after the metadata value is read as text.
+
+## Pagination
+
+Responses include page/limit pagination metadata:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "data": [
+      {
+        "id": "evt_123",
+        "seq": 142,
+        "actor_type": "user",
+        "actor_id": "usr_123",
+        "action": "wallet.action.signed",
+        "resource_type": "account",
+        "resource_id": "acct_prod_123",
+        "metadata": {
+          "adapter": {
+            "kind": "swap",
+            "lifecycleStatus": "built"
+          }
+        },
+        "ip_address": "203.0.113.10",
+        "user_agent": "Mozilla/5.0",
+        "request_id": "req_123",
+        "created_at": "2026-06-04T14:21:00.000Z"
+      }
+    ],
+    "pagination": {
+      "page": 1,
+      "limit": 25,
+      "total": 1,
+      "totalPages": 1
+    }
+  }
+}
+```
+
+Use `page` and `limit` for incremental review. Large exports should use the
+bounded audit export endpoint instead of walking unbounded event pages.
+
+## Common Filters
+
+| Use case | Query |
+| --- | --- |
+| Wallet/action history | `actionPrefix=wallet.action.` |
+| Account-scoped history | `resourceType=account&resourceId=acct_prod_123` |
+| Adapter lifecycle rows | `metadata.adapter.kind=swap&metadata.adapter.lifecycleStatus=built` |
+| Request trace | `requestId=req_123` |
+| User activity | `actorType=user&actorId=usr_123` |

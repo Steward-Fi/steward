@@ -5,7 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
-import { steward } from "@/lib/api";
+import { API_URL, steward } from "@/lib/api";
 import { cn, formatDate, shortenAddress } from "@/lib/utils";
 
 const STATUS_FILTERS = [
@@ -45,7 +45,8 @@ const statusStyles: Record<string, string> = {
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 type TypeFilter = (typeof TYPE_FILTERS)[number];
 type Toast = { id: string; message: string; kind: "success" | "error" };
-type IntentAction = "authorize" | "reject" | "cancel" | "execute" | "fail";
+type IntentAction = "approve" | "reject" | "cancel" | "execute" | "fail";
+type ReviewerMfaStatus = "loading" | "enrolled" | "missing" | "unavailable";
 
 function readable(value: string) {
   return value
@@ -106,7 +107,7 @@ function JsonBlock({ label, value }: { label: string; value: unknown }) {
 }
 
 export default function IntentsPage() {
-  useAuth();
+  const auth = useAuth();
   const [intents, setIntents] = useState<Intent[]>([]);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
@@ -114,6 +115,7 @@ export default function IntentsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [reviewerMfaStatus, setReviewerMfaStatus] = useState<ReviewerMfaStatus>("loading");
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   const loadIntents = useCallback(async () => {
@@ -143,6 +145,47 @@ export default function IntentsPage() {
     loadIntents();
   }, [loadIntents]);
 
+  useEffect(() => {
+    if (!auth.isAuthenticated) return;
+    let cancelled = false;
+
+    async function loadReviewerMfaStatus() {
+      setReviewerMfaStatus("loading");
+      const token =
+        typeof window === "undefined"
+          ? null
+          : window.sessionStorage.getItem("steward_session_token");
+      if (!token) {
+        setReviewerMfaStatus("unavailable");
+        return;
+      }
+
+      try {
+        const [totpResponse, smsResponse] = await Promise.all([
+          fetch(`${API_URL}/auth/mfa/totp/status`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(`${API_URL}/auth/mfa/sms/status`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ]);
+        const [totp, sms] = (await Promise.all([
+          totpResponse.json(),
+          smsResponse.json(),
+        ])) as Array<{ ok?: boolean; enabled?: boolean }>;
+        if (cancelled) return;
+        setReviewerMfaStatus(totp.enabled || sms.enabled ? "enrolled" : "missing");
+      } catch {
+        if (!cancelled) setReviewerMfaStatus("unavailable");
+      }
+    }
+
+    void loadReviewerMfaStatus();
+    return () => {
+      cancelled = true;
+    };
+  }, [auth.isAuthenticated]);
+
   function addToast(message: string, kind: Toast["kind"]) {
     const id = `${Date.now()}-${Math.random()}`;
     setToasts((prev) => [...prev, { id, message, kind }]);
@@ -156,6 +199,11 @@ export default function IntentsPage() {
     const key = `${id}-${action}`;
     let reason: string | null = null;
 
+    if (reviewerActionsBlocked) {
+      addToast("Enroll MFA before reviewing intents", "error");
+      return;
+    }
+
     if (action === "reject" || action === "cancel" || action === "fail") {
       reason = window.prompt(`${readable(action)} reason`);
       if (reason === null) return;
@@ -164,8 +212,8 @@ export default function IntentsPage() {
     setActionLoading(key);
     try {
       let updated: Intent;
-      if (action === "authorize") {
-        updated = await steward.authorizeIntent(id, { reason: "Reviewed from dashboard" });
+      if (action === "approve") {
+        updated = await steward.approveIntent(id, { reason: "Reviewed from dashboard" });
       } else if (action === "reject") {
         updated = await steward.rejectIntent(id, { reason: reason || "Rejected from dashboard" });
       } else if (action === "cancel") {
@@ -195,6 +243,16 @@ export default function IntentsPage() {
     () => intents.find((intent) => intentId(intent) === selectedId) ?? null,
     [intents, selectedId],
   );
+
+  const reviewerActionsBlocked = reviewerMfaStatus !== "enrolled";
+  const reviewerMfaMessage =
+    reviewerMfaStatus === "loading"
+      ? "Checking reviewer MFA enrollment before enabling intent actions."
+      : reviewerMfaStatus === "missing"
+        ? "Reviewer MFA required: enroll authenticator or SMS MFA from Account before approving, rejecting, canceling, executing, or failing intents."
+        : reviewerMfaStatus === "unavailable"
+          ? "Reviewer MFA status could not be verified. Refresh after signing in again or completing MFA enrollment."
+          : null;
 
   const counts = useMemo(
     () =>
@@ -432,21 +490,39 @@ export default function IntentsPage() {
                   </span>
                 </div>
 
+                {reviewerMfaMessage && (
+                  <div
+                    data-testid="intent-reviewer-mfa-warning"
+                    className="border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-sm text-amber-200"
+                  >
+                    <div className="font-medium text-amber-100">Reviewer MFA required</div>
+                    <p className="mt-1 text-xs leading-relaxed text-amber-100/80">
+                      {reviewerMfaMessage}
+                    </p>
+                    <Link
+                      href="/dashboard/account"
+                      className="mt-2 inline-block text-xs font-medium text-amber-100 underline underline-offset-4"
+                    >
+                      Open Account MFA
+                    </Link>
+                  </div>
+                )}
+
                 <div className="flex flex-wrap gap-2">
                   {selectedIntent.status === "pending" && (
                     <>
                       <button
-                        onClick={() => runAction(selectedIntent, "authorize")}
-                        disabled={actionLoading !== null}
+                        onClick={() => runAction(selectedIntent, "approve")}
+                        disabled={actionLoading !== null || reviewerActionsBlocked}
                         className="bg-emerald-400/10 px-3 py-2 text-xs font-medium text-emerald-400 transition-colors hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-40"
                       >
-                        {actionLoading === `${intentId(selectedIntent)}-authorize`
+                        {actionLoading === `${intentId(selectedIntent)}-approve`
                           ? "..."
-                          : "Authorize"}
+                          : "Approve"}
                       </button>
                       <button
                         onClick={() => runAction(selectedIntent, "reject")}
-                        disabled={actionLoading !== null}
+                        disabled={actionLoading !== null || reviewerActionsBlocked}
                         className="bg-red-400/10 px-3 py-2 text-xs font-medium text-red-400 transition-colors hover:bg-red-400/20 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         {actionLoading === `${intentId(selectedIntent)}-reject` ? "..." : "Reject"}
@@ -457,7 +533,7 @@ export default function IntentsPage() {
                     selectedIntent.status === "authorized") && (
                     <button
                       onClick={() => runAction(selectedIntent, "cancel")}
-                      disabled={actionLoading !== null}
+                      disabled={actionLoading !== null || reviewerActionsBlocked}
                       className="bg-text-tertiary/10 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:bg-bg-surface disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       {actionLoading === `${intentId(selectedIntent)}-cancel` ? "..." : "Cancel"}
@@ -467,7 +543,7 @@ export default function IntentsPage() {
                     <>
                       <button
                         onClick={() => runAction(selectedIntent, "execute")}
-                        disabled={actionLoading !== null}
+                        disabled={actionLoading !== null || reviewerActionsBlocked}
                         className="bg-sky-400/10 px-3 py-2 text-xs font-medium text-sky-400 transition-colors hover:bg-sky-400/20 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         {actionLoading === `${intentId(selectedIntent)}-execute`
@@ -476,7 +552,7 @@ export default function IntentsPage() {
                       </button>
                       <button
                         onClick={() => runAction(selectedIntent, "fail")}
-                        disabled={actionLoading !== null}
+                        disabled={actionLoading !== null || reviewerActionsBlocked}
                         className="bg-orange-400/10 px-3 py-2 text-xs font-medium text-orange-400 transition-colors hover:bg-orange-400/20 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         {actionLoading === `${intentId(selectedIntent)}-fail` ? "..." : "Fail"}

@@ -18,6 +18,8 @@
  * webpack/Vite optimization tips when building EVM-only.
  */
 
+export type { StewardConnectOrCreateWalletProps } from "../components/StewardConnectOrCreateWallet.js";
+export { StewardConnectOrCreateWallet } from "../components/StewardConnectOrCreateWallet.js";
 export type {
   WalletChains,
   WalletLoginClassOverrides,

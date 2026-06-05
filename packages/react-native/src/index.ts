@@ -4,6 +4,7 @@ import type {
   StewardAuthExchangeResponse,
   StewardAuthResult,
   StewardClientConfig,
+  StewardCurrentUserResult,
   StewardEmailResult,
   StewardMfaRequiredResult,
   StewardOAuthConfig,
@@ -102,11 +103,17 @@ export function createReactNativeSessionStorage(
 export interface StewardNativeAuthConfig extends Omit<StewardAuthConfig, "storage"> {
   storage: AsyncKeyValueStorage | HydratedSessionStorage;
   storageNamespace?: string;
+  /**
+   * Calls /user/me after a hydrated or newly-created session so tenant
+   * create-on-login embedded-wallet policy can run. Defaults to true.
+   */
+  bootstrapCurrentUser?: boolean;
 }
 
 export async function createStewardNativeAuth({
   storage,
   storageNamespace,
+  bootstrapCurrentUser = true,
   ...config
 }: StewardNativeAuthConfig): Promise<StewardAuth> {
   const sessionStorage =
@@ -114,7 +121,11 @@ export async function createStewardNativeAuth({
       ? storage
       : createReactNativeSessionStorage(storage, { namespace: storageNamespace });
   await sessionStorage.hydrate();
-  return new StewardAuth({ ...config, storage: sessionStorage });
+  const auth = new StewardAuth({ ...config, storage: sessionStorage });
+  if (bootstrapCurrentUser) {
+    scheduleNativeCurrentUserBootstrap(auth, { tenantId: config.tenantId });
+  }
+  return auth;
 }
 
 export interface StewardNativeClientConfig extends StewardClientConfig {
@@ -321,6 +332,40 @@ function tenantForNativeAuth(auth: StewardAuth, tenantId?: string): string | und
   return tenantId ?? auth.getTenantId();
 }
 
+function authResultHasSession(
+  result: StewardAuthResult | StewardMfaRequiredResult | StewardOAuthResult,
+): result is StewardAuthResult | StewardOAuthResult {
+  return !("mfaRequired" in result && result.mfaRequired);
+}
+
+export async function bootstrapNativeCurrentUser(
+  auth: StewardAuth,
+  options: { tenantId?: string } = {},
+): Promise<StewardCurrentUserResult | null> {
+  if (!auth.getSession()) return null;
+  try {
+    return await auth.getCurrentUser({ tenantId: tenantForNativeAuth(auth, options.tenantId) });
+  } catch {
+    return null;
+  }
+}
+
+function scheduleNativeCurrentUserBootstrap(
+  auth: StewardAuth,
+  options: { tenantId?: string } = {},
+): void {
+  void bootstrapNativeCurrentUser(auth, options);
+}
+
+function bootstrapNativeAuthResult<
+  T extends StewardAuthResult | StewardMfaRequiredResult | StewardOAuthResult,
+>(auth: StewardAuth, result: T, tenantId?: string): T {
+  if (authResultHasSession(result)) {
+    scheduleNativeCurrentUserBootstrap(auth, { tenantId });
+  }
+  return result;
+}
+
 function storeNativeExchangeResponse(
   auth: StewardAuth,
   data: StewardAuthExchangeResponse,
@@ -438,7 +483,10 @@ export async function completeNativeEmailCallback(
   url: string,
 ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
   const callback = parseNativeEmailCallbackUrl(url);
-  return auth.verifyEmailCallback(callback.token, callback.email);
+  return bootstrapNativeAuthResult(
+    auth,
+    await auth.verifyEmailCallback(callback.token, callback.email),
+  );
 }
 
 export async function sendNativeOtp(
@@ -458,16 +506,18 @@ export async function verifyNativeOtp(
   code: string,
   channel: NativeOtpChannel = "sms",
 ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
-  return channel === "whatsapp"
-    ? auth.verifyWhatsAppOtp(phone, code)
-    : auth.verifySmsOtp(phone, code);
+  const result =
+    channel === "whatsapp"
+      ? await auth.verifyWhatsAppOtp(phone, code)
+      : await auth.verifySmsOtp(phone, code);
+  return bootstrapNativeAuthResult(auth, result);
 }
 
 export async function getNativeTestAccessToken(
   auth: StewardAuth,
   options: StewardTestAccountLoginOptions,
 ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
-  return auth.getTestAccessToken(options);
+  return bootstrapNativeAuthResult(auth, await auth.getTestAccessToken(options), options.tenantId);
 }
 
 export async function signInWithNativePasskey(
@@ -518,7 +568,11 @@ export async function signInWithNativePasskey(
     },
   );
   if (verifyRes.ok === false) throw new StewardApiError(verifyRes.error, verifyRes.status);
-  return storeNativeExchangeResponse(auth, verifyRes.data);
+  return bootstrapNativeAuthResult(
+    auth,
+    storeNativeExchangeResponse(auth, verifyRes.data),
+    tenantId,
+  );
 }
 
 export async function registerNativePasskey(
@@ -574,7 +628,11 @@ export async function registerNativePasskey(
     token,
   );
   if (verifyRes.ok === false) throw new StewardApiError(verifyRes.error, verifyRes.status);
-  return storeNativeExchangeResponse(auth, verifyRes.data);
+  return bootstrapNativeAuthResult(
+    auth,
+    storeNativeExchangeResponse(auth, verifyRes.data),
+    tenantId,
+  );
 }
 
 export async function completeNativePasskeyMfa(
@@ -622,7 +680,7 @@ export async function completeNativePasskeyMfa(
     token,
   );
   if (verifyRes.ok === false) throw new StewardApiError(verifyRes.error, verifyRes.status);
-  return storeNativeAuthResult(auth, verifyRes.data);
+  return bootstrapNativeAuthResult(auth, storeNativeAuthResult(auth, verifyRes.data));
 }
 
 export function createNativeEthereumConnectorFromProvider(
@@ -676,10 +734,13 @@ export async function signInWithNativeEthereumWallet(
 ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
   const address = await connector.getAddress();
   const chainId = options.chainId ?? normalizeEvmChainId(await connector.getChainId?.());
-  return auth.signInWithSIWE(
-    address,
-    (message) => Promise.resolve(connector.signMessage(message)),
-    chainId,
+  return bootstrapNativeAuthResult(
+    auth,
+    await auth.signInWithSIWE(
+      address,
+      (message) => Promise.resolve(connector.signMessage(message)),
+      chainId,
+    ),
   );
 }
 
@@ -689,10 +750,13 @@ export async function signInWithNativeSolanaWallet(
   options: NativeWalletSignInOptions = {},
 ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
   const publicKey = await connector.getPublicKey();
-  return auth.signInWithSolana(
-    publicKey,
-    async (message) => normalizeSignatureBytes(await connector.signMessage(message)),
-    options.chain,
+  return bootstrapNativeAuthResult(
+    auth,
+    await auth.signInWithSolana(
+      publicKey,
+      async (message) => normalizeSignatureBytes(await connector.signMessage(message)),
+      options.chain,
+    ),
   );
 }
 
@@ -804,12 +868,16 @@ export async function completeNativeOAuthCallback(
     throw new StewardApiError("OAuth state mismatch, possible CSRF attack", 0);
   }
 
-  return internals.exchangeOAuthCode(
-    provider,
-    code,
-    options.redirectUri ?? callbackRedirectUri(parsed),
-    state,
-    storedVerifier,
+  return bootstrapNativeAuthResult(
+    auth,
+    await internals.exchangeOAuthCode(
+      provider,
+      code,
+      options.redirectUri ?? callbackRedirectUri(parsed),
+      state,
+      storedVerifier,
+      storedTenantId,
+    ),
     storedTenantId,
   );
 }
@@ -828,6 +896,7 @@ export type {
   StewardAuthResult,
   StewardClient,
   StewardClientConfig,
+  StewardCurrentUserResult,
   StewardEmailResult,
   StewardMfaRequiredResult,
   StewardOAuthConfig,

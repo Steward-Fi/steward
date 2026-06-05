@@ -37,6 +37,7 @@ describe("middleware security hardening", () => {
   it("fails closed when configured Redis rate-limit enforcement is unavailable", () => {
     expect(redisSource).toContain("function isRedisConfigured");
     expect(redisSource).toContain("Rate limit check failed, denying sensitive request");
+    expect(redisSource).toContain("Proxy rate limit check failed, denying request");
     expect(redisSource).toContain("return { allowed: false, remaining: 0, resetMs: 60_000 }");
     expect(redisEnforcementSource).toContain("isRedisConfigured()");
     expect(redisEnforcementSource).toContain("Rate limit enforcement is unavailable");

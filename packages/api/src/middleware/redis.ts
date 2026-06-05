@@ -2,8 +2,9 @@
  * Redis middleware — initializes the Redis client and exposes
  * rate-limiting + spend-tracking helpers on the Hono context.
  *
- * When REDIS_URL is not set, the middleware is a no-op and the helpers
- * return permissive defaults so the API still works without Redis.
+ * When Redis is not configured, the middleware is a no-op and the helpers
+ * return documented local-development defaults. If Redis is configured and a
+ * money-path/rate-limit helper cannot read it, the helper fails closed.
  */
 
 import {
@@ -23,8 +24,9 @@ let redisAvailable = false;
 let redisClient: IoredisLike | null = null;
 
 /**
- * Try to connect to Redis on startup. If it fails, we degrade gracefully —
- * rate-limit and spend-tracking are skipped (policy engine still works).
+ * Try to connect to Redis on startup. If it fails, route-level helpers decide
+ * whether to use local-development defaults or fail closed based on whether
+ * Redis was configured for this deployment.
  */
 export async function initRedis(env?: Record<string, unknown>): Promise<boolean> {
   if (redisAvailable && redisClient) return true;
@@ -146,10 +148,10 @@ export async function checkProxyRateLimit(
     return await checkRateLimit(key, windowMs, maxRequests);
   } catch (err) {
     console.error(
-      "[steward:redis] Proxy rate limit check failed, allowing request:",
+      "[steward:redis] Proxy rate limit check failed, denying request:",
       (err as Error).message,
     );
-    return PERMISSIVE_RATE_LIMIT;
+    return { allowed: false, remaining: 0, resetMs: 60_000 };
   }
 }
 

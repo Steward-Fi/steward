@@ -31,10 +31,19 @@ describe("tenant app clients hardening", () => {
     expect(schema).toContain(
       'allowedRedirectUrls: text("allowed_redirect_urls").array().notNull().default([])',
     );
+    expect(schema).toContain(
+      'allowedBundleIds: text("allowed_bundle_ids").array().notNull().default([])',
+    );
+    expect(schema).toContain(
+      'allowedPackageNames: text("allowed_package_names").array().notNull().default([])',
+    );
     expect(migration).toContain('CREATE TABLE IF NOT EXISTS "tenant_app_clients"');
     expect(migration).toContain('"tenant_id" varchar(64) NOT NULL');
     expect(migration).toContain('"tenant_app_clients_tenant_id_tenants_id_fk"');
     expect(migration).toContain('"allowed_redirect_urls" text[] DEFAULT');
+    expect(read("packages/db/drizzle/0071_app_client_native_allowlists.sql")).toContain(
+      '"allowed_bundle_ids" text[] DEFAULT',
+    );
   });
 
   it("keeps app-client mutations behind owner/admin recent MFA and validates redirect/origin inputs", () => {
@@ -48,11 +57,17 @@ describe("tenant app clients hardening", () => {
     expect(source).toContain("normalizeTenantAppClients");
     expect(source).toContain("normalizeAllowedOrigins(raw.allowedOrigins ?? [])");
     expect(source).toContain("normalizeAllowedRedirectUrls(raw.allowedRedirectUrls ?? [])");
+    expect(source).toContain("normalizeAllowedBundleIds(raw.allowedBundleIds ?? [])");
+    expect(source).toContain("normalizeAllowedPackageNames(raw.allowedPackageNames ?? [])");
     expect(source).toContain("allowedOrigins cannot include wildcard");
     expect(source).toContain("allowedOrigins entries cannot be wildcard");
     expect(source).toContain(
       "allowedOrigins entries must use https except for loopback development origins",
     );
+    expect(source).toContain("allowedBundleIds entries cannot be wildcard");
+    expect(source).toContain("allowedBundleIds entries must be explicit iOS bundle identifiers");
+    expect(source).toContain("allowedPackageNames entries cannot be wildcard");
+    expect(source).toContain("allowedPackageNames entries must be explicit Android package names");
   });
 
   it("audits app-client create/delete authorization before mutation and rolls back on final audit failure", () => {
@@ -124,6 +139,20 @@ describe("tenant app clients hardening", () => {
     expect(auth).toContain("assertAllowedOAuthRedirectUri(redirectUri, tenantId, clientId)");
     expect(auth).not.toContain(": (client.allowedOrigins ?? [])");
     expect(auth).not.toContain(": (row?.allowedOrigins ?? [])");
+  });
+
+  it("enforces supplied native identifiers against enabled app clients at auth runtime", () => {
+    const auth = read("packages/api/src/routes/auth.ts");
+
+    expect(auth).toContain("readNativeClientAssertion(c, body)");
+    expect(auth).toContain('c.req.header("X-Steward-Native-Bundle-Id")');
+    expect(auth).toContain('c.req.header("X-Steward-Native-Package-Name")');
+    expect(auth).toContain("native bundle id is not allowed for this app client");
+    expect(auth).toContain("native package name is not allowed for this app client");
+    expect(auth).toContain("record.nativeBundleId && nativeBundleId !== record.nativeBundleId");
+    expect(auth).toContain(
+      "record.nativePackageName && nativePackageName !== record.nativePackageName",
+    );
   });
 
   it("adds Privy-style app-client secrets without weakening session-MFA control plane", () => {

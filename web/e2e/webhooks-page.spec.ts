@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { loginWithMagicLink } from "./fixtures/auth";
 
 const API = process.env.E2E_API_URL ?? "http://localhost:3299";
 const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
@@ -77,6 +78,8 @@ test.describe("Dashboard webhook delivery history", () => {
       },
     ];
     let lastDeliveryQuery = "";
+    let createPayload: { url: string; events: string[]; description?: string } | null = null;
+    let deletedEndpointId = "";
 
     await page.route(`${API}/webhooks`, async (route) => {
       if (route.request().method() === "POST") {
@@ -85,6 +88,7 @@ test.describe("Dashboard webhook delivery history", () => {
           events: string[];
           description?: string;
         };
+        createPayload = body;
         const created = {
           id: "webhook-created",
           tenantId: "e2e-tenant",
@@ -111,6 +115,13 @@ test.describe("Dashboard webhook delivery history", () => {
     });
 
     await page.route(`${API}/webhooks/webhook-created`, async (route) => {
+      if (route.request().method() === "DELETE") {
+        deletedEndpointId = "webhook-created";
+        const index = webhooks.findIndex((row) => row.id === "webhook-created");
+        if (index >= 0) webhooks.splice(index, 1);
+        await route.fulfill({ json: { ok: true } });
+        return;
+      }
       const body = route.request().postDataJSON() as { enabled?: boolean };
       const webhook = webhooks.find((row) => row.id === "webhook-created");
       if (webhook && typeof body.enabled === "boolean") webhook.enabled = body.enabled;
@@ -194,17 +205,7 @@ test.describe("Dashboard webhook delivery history", () => {
       await route.fulfill({ status: 202, json: { ok: true, data: testDelivery } });
     });
 
-    const sendRes = await request.post(`${API}/auth/email/send`, { data: { email } });
-    expect(sendRes.status()).toBe(200);
-
-    const inboxRes = await request.get(`${API}/auth/test/inbox/${encodeURIComponent(email)}`);
-    expect(inboxRes.status()).toBe(200);
-    const inbox = (await inboxRes.json()) as { token: string };
-
-    await page.goto(
-      `${WEB}/auth/callback/email?token=${encodeURIComponent(inbox.token)}&email=${encodeURIComponent(email)}`,
-    );
-    await page.waitForURL(/\/dashboard/, { timeout: 30_000 });
+    await loginWithMagicLink(page, request, email);
 
     await page.goto(`${WEB}/dashboard/webhooks`);
     await expect(page.getByRole("heading", { name: "Webhooks" })).toBeVisible();
@@ -216,21 +217,44 @@ test.describe("Dashboard webhook delivery history", () => {
       .getByPlaceholder("https://api.example.com/webhooks/steward")
       .fill("https://hooks.example.test/steward");
     await page.getByPlaceholder("Production event sink").fill("Webhook page create test");
+    await page.getByLabel("Events").fill("wallet.recovery_setup\nmfa.enabled");
     await page.getByRole("button", { name: "Add Endpoint" }).click();
+    expect(createPayload).toEqual({
+      url: "https://hooks.example.test/steward",
+      description: "Webhook page create test",
+      events: ["wallet.recovery_setup", "mfa.enabled"],
+    });
     await expect(page.getByText("whsec_created_once")).toBeVisible();
     await expect(page.getByText("https://hooks.example.test/steward").first()).toBeVisible();
+    await expect(page.getByText("wallet.recovery_setup, mfa.enabled")).toBeVisible();
     await page.getByRole("button", { name: "Disable" }).first().click();
     await expect(page.getByText("disabled").first()).toBeVisible();
     await page.getByText("https://example.test/steward-webhooks").first().click();
 
     await page.getByLabel("Delivery status").selectOption("failed");
     await expect.poll(() => lastDeliveryQuery).toContain("status=failed");
+    await page.getByLabel("Delivery event type").fill("user.created");
+    await expect.poll(() => lastDeliveryQuery).toContain("eventType=user.created");
+    await page.getByLabel("Delivery error state").selectOption("with_error");
+    await expect.poll(() => lastDeliveryQuery).toContain("hasError=true");
+    await expect(page.getByRole("button", { name: /user\.created failed/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /transaction\.confirmed/ })).toHaveCount(0);
+
+    await page.screenshot({
+      path: testInfo.outputPath("dashboard-webhook-management-filters.png"),
+      fullPage: true,
+    });
+
     const downloadPromise = page.waitForEvent("download");
     await page.getByRole("button", { name: "Export CSV" }).click();
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toContain("webhook-deliveries-webhook-1");
     await expect.poll(() => lastDeliveryQuery).toContain("status=failed");
+    await expect.poll(() => lastDeliveryQuery).toContain("eventType=user.created");
+    await expect.poll(() => lastDeliveryQuery).toContain("hasError=true");
     await page.getByLabel("Delivery status").selectOption("all");
+    await page.getByLabel("Delivery event type").fill("");
+    await page.getByLabel("Delivery error state").selectOption("all");
     await expect(page.getByRole("button", { name: /user\.created/ })).toBeVisible();
     await page.getByRole("button", { name: /user\.created/ }).click();
     await expect(page.getByText("Last error")).toBeVisible();
@@ -245,6 +269,15 @@ test.describe("Dashboard webhook delivery history", () => {
     await expect(page.getByRole("button", { name: /user\.created pending/ })).toBeVisible();
     await page.getByRole("button", { name: "Send Test" }).nth(1).click();
     await expect(page.getByText("webhook.test")).toBeVisible();
+
+    page.once("dialog", async (dialog) => {
+      expect(dialog.message()).toContain("Delete webhook endpoint");
+      await dialog.accept();
+    });
+    await page.getByText("https://hooks.example.test/steward").first().click();
+    await page.getByRole("button", { name: "Delete" }).first().click();
+    expect(deletedEndpointId).toBe("webhook-created");
+    await expect(page.getByText("https://hooks.example.test/steward")).toHaveCount(0);
 
     await page.screenshot({
       path: testInfo.outputPath("dashboard-webhook-delivery-history.png"),

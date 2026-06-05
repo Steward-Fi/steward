@@ -22,5 +22,5 @@
     "@types/node": "^25.5.0",
     "typescript": "^5.8.0"
   },
-  "description": "Financial-service adapter interfaces and mock/provider implementations for Steward (swaps, earn, onramp, offramp, KYC, TOS, custodial wallets, push) — real providers pluggable via the registry"
+  "description": "Financial-service adapter interfaces and mock/provider implementations for Steward (swaps, earn, onramp, offramp, KYC, TOS, custodial wallets, push, Spark BTC/Lightning) — real providers pluggable via the registry"
 }

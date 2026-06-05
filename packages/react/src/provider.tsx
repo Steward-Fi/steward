@@ -1,6 +1,14 @@
 import type { StewardSession } from "@stwd/sdk";
 import { StewardAuth } from "@stwd/sdk";
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   StewardAuthConfig,
   StewardAuthContextValue,
@@ -87,11 +95,12 @@ export function StewardProvider({
       storage: authConfig.storage,
       tenantId: authConfig.tenantId ?? tenantIdProp,
     });
-  }, [authConfig?.baseUrl, authConfig?.storage, authConfig?.tenantId, tenantIdProp, authConfig]);
+  }, [authConfig?.baseUrl, authConfig?.storage, authConfig?.tenantId, tenantIdProp]);
 
   const [authSession, setAuthSession] = useState<StewardSession | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authInitialized, setAuthInitialized] = useState(false);
+  const lastBootstrapKeyRef = useRef<string | null>(null);
 
   // Subscribe to session changes from the StewardAuth instance
   useEffect(() => {
@@ -108,6 +117,52 @@ export function StewardProvider({
 
   const signOut = useCallback(() => {
     authInstance?.signOut();
+  }, [authInstance]);
+
+  const guestState = useMemo(
+    () =>
+      authInstance?.getGuestState() ?? {
+        isGuest: false,
+        isExpired: false,
+        expiryMessage: null,
+      },
+    [authInstance, authSession],
+  );
+
+  const signInAsGuest = useCallback(
+    async (options?: import("@stwd/sdk").StewardGuestSignInOptions) => {
+      if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+      setAuthLoading(true);
+      try {
+        return await authInstance.signInAsGuest(options);
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [authInstance],
+  );
+
+  const upgradeGuestWithEmail = useCallback(
+    async (input: import("@stwd/sdk").StewardGuestUpgradeEmailInput) => {
+      if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+      setAuthLoading(true);
+      try {
+        return await authInstance.upgradeGuestWithEmail(input);
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [authInstance],
+  );
+
+  const deleteGuest = useCallback(async () => {
+    if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+    setAuthLoading(true);
+    try {
+      return await authInstance.deleteGuest();
+    } finally {
+      setAuthLoading(false);
+    }
   }, [authInstance]);
 
   const getToken = useCallback((): string | null => {
@@ -335,6 +390,32 @@ export function StewardProvider({
     [authInstance],
   );
 
+  const stepUpWithTotp = useCallback(
+    async (code: string) => {
+      if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+      setAuthLoading(true);
+      try {
+        return await authInstance.stepUpWithTotp(code);
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [authInstance],
+  );
+
+  const stepUpWithRecoveryCode = useCallback(
+    async (recoveryCode: string) => {
+      if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+      setAuthLoading(true);
+      try {
+        return await authInstance.stepUpWithRecoveryCode(recoveryCode);
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [authInstance],
+  );
+
   const getRecoveryCodeStatus = useCallback(async () => {
     if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
     return authInstance.getRecoveryCodeStatus();
@@ -388,6 +469,19 @@ export function StewardProvider({
       setAuthLoading(true);
       try {
         return await authInstance.completeSmsMfa(challengeId, code);
+      } finally {
+        setAuthLoading(false);
+      }
+    },
+    [authInstance],
+  );
+
+  const stepUpWithSms = useCallback(
+    async (code: string) => {
+      if (!authInstance) throw new Error("StewardProvider: auth prop not configured");
+      setAuthLoading(true);
+      try {
+        return await authInstance.stepUpWithSms(code);
       } finally {
         setAuthLoading(false);
       }
@@ -540,6 +634,18 @@ export function StewardProvider({
     };
   }, [authInstance, authSession]);
 
+  useEffect(() => {
+    if (!authInstance || !authSession) return;
+    const tenantId = authInstance.getTenantId() ?? activeTenantId ?? undefined;
+    const bootstrapKey = `${authSession.token}:${tenantId ?? ""}`;
+    if (lastBootstrapKeyRef.current === bootstrapKey) return;
+    lastBootstrapKeyRef.current = bootstrapKey;
+    authInstance.getCurrentUser({ tenantId }).catch(() => {
+      // Bootstrap is best effort: auth remains valid even if user metadata or
+      // create-on-login wallet provisioning is temporarily unavailable.
+    });
+  }, [activeTenantId, authInstance, authSession]);
+
   const authContextValue = useMemo<StewardAuthContextValue | null>(() => {
     if (!authInstance) return null;
     return {
@@ -549,7 +655,11 @@ export function StewardProvider({
       session: authSession,
       providers,
       isProvidersLoading,
+      guestState,
       signOut,
+      signInAsGuest,
+      upgradeGuestWithEmail,
+      deleteGuest,
       getToken,
       signInWithPasskey,
       addPasskey,
@@ -570,6 +680,8 @@ export function StewardProvider({
       verifyTotp,
       completeTotpMfa,
       completeRecoveryCodeMfa,
+      stepUpWithTotp,
+      stepUpWithRecoveryCode,
       getRecoveryCodeStatus,
       regenerateRecoveryCodes,
       unenrollTotp,
@@ -578,6 +690,7 @@ export function StewardProvider({
       verifySmsMfa,
       sendSmsMfaCode,
       completeSmsMfa,
+      stepUpWithSms,
       completePasskeyMfa,
       unenrollSmsMfa,
       // Multi-tenant
@@ -596,7 +709,11 @@ export function StewardProvider({
     authInitialized,
     providers,
     isProvidersLoading,
+    guestState,
     signOut,
+    signInAsGuest,
+    upgradeGuestWithEmail,
+    deleteGuest,
     getToken,
     signInWithPasskey,
     addPasskey,
@@ -617,6 +734,8 @@ export function StewardProvider({
     verifyTotp,
     completeTotpMfa,
     completeRecoveryCodeMfa,
+    stepUpWithTotp,
+    stepUpWithRecoveryCode,
     getRecoveryCodeStatus,
     regenerateRecoveryCodes,
     unenrollTotp,
@@ -625,6 +744,7 @@ export function StewardProvider({
     verifySmsMfa,
     sendSmsMfaCode,
     completeSmsMfa,
+    stepUpWithSms,
     completePasskeyMfa,
     unenrollSmsMfa,
     activeTenantId,

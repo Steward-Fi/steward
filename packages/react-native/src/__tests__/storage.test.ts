@@ -3,6 +3,7 @@ import { StewardAuth } from "@stwd/sdk";
 import {
   type AsyncKeyValueStorage,
   assertNativePasskeysUnsupported,
+  bootstrapNativeCurrentUser,
   completeNativeEmailCallback,
   completeNativeOAuthCallback,
   completeNativePasskeyMfa,
@@ -57,6 +58,7 @@ type CapturedRequest = {
 };
 
 let lastRequest: CapturedRequest | null = null;
+let requestLog: CapturedRequest[] = [];
 const originalFetch = global.fetch;
 
 function installAuthFetch(responseBody: object, status = 200): void {
@@ -73,6 +75,7 @@ function installAuthFetch(responseBody: object, status = 200): void {
       headers: Object.fromEntries(new Headers(init?.headers).entries()),
       body: init?.body ? JSON.parse(init.body as string) : undefined,
     };
+    requestLog.push(lastRequest);
     return new Response(JSON.stringify(responseBody), {
       status,
       headers: { "Content-Type": "application/json" },
@@ -95,6 +98,7 @@ function installAuthFetchSequence(responses: Array<{ body: object; status?: numb
       headers: Object.fromEntries(new Headers(init?.headers).entries()),
       body: init?.body ? JSON.parse(init.body as string) : undefined,
     };
+    requestLog.push(lastRequest);
     const response = responses[Math.min(index, responses.length - 1)];
     index += 1;
     return new Response(JSON.stringify(response?.body ?? {}), {
@@ -107,8 +111,11 @@ function installAuthFetchSequence(responses: Array<{ body: object; status?: numb
 describe("@stwd/react-native storage", () => {
   afterEach(() => {
     lastRequest = null;
+    requestLog = [];
     global.fetch = originalFetch;
   });
+
+  const requestFor = (url: string) => requestLog.find((request) => request.url === url);
 
   test("hydrates existing SDK session keys from async storage", async () => {
     const token = fakeJwt({
@@ -153,6 +160,10 @@ describe("@stwd/react-native storage", () => {
     const asyncStorage = memoryAsyncStorage({
       "steward:steward_session_token": token,
     });
+    installAuthFetch({
+      ok: true,
+      data: { user: { id: "user-1" }, embeddedWalletConfig: { createOnLogin: "off" } },
+    });
 
     const auth = await createStewardNativeAuth({
       baseUrl: "https://api.example.test",
@@ -161,6 +172,57 @@ describe("@stwd/react-native storage", () => {
 
     expect(auth).toBeInstanceOf(StewardAuth);
     expect(auth.getSession()?.userId).toBe("user-1");
+  });
+
+  test("bootstraps the current user with tenant context after hydrating a native session", async () => {
+    const token = fakeJwt({
+      sub: "0x0000000000000000000000000000000000000001",
+      userId: "user-bootstrap",
+      tenantId: "tenant-1",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    installAuthFetch({
+      ok: true,
+      data: {
+        user: { id: "user-bootstrap" },
+        embeddedWalletConfig: { createOnLogin: "users-without-wallets" },
+        walletAutoCreated: { id: "wallet-1" },
+      },
+    });
+
+    await createStewardNativeAuth({
+      baseUrl: "https://api.example.test",
+      tenantId: "tenant-1",
+      storage: memoryAsyncStorage({ "steward:steward_session_token": token }),
+    });
+
+    expect(lastRequest).toMatchObject({
+      url: "https://api.example.test/user/me?tenantId=tenant-1",
+      method: "GET",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "x-steward-tenant": "tenant-1",
+      },
+    });
+  });
+
+  test("native current-user bootstrap is best-effort", async () => {
+    const token = fakeJwt({
+      sub: "0x0000000000000000000000000000000000000001",
+      userId: "user-bootstrap-error",
+      tenantId: "tenant-1",
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    installAuthFetch({ ok: false, error: "wallet provisioning unavailable" }, 503);
+    const auth = await createStewardNativeAuth({
+      baseUrl: "https://api.example.test",
+      tenantId: "tenant-1",
+      bootstrapCurrentUser: false,
+      storage: memoryAsyncStorage({ "steward:steward_session_token": token }),
+    });
+
+    await expect(bootstrapNativeCurrentUser(auth)).resolves.toBeNull();
+    expect(auth.getSession()?.userId).toBe("user-bootstrap-error");
   });
 
   test("parses and completes native email callback URLs", async () => {
@@ -192,11 +254,12 @@ describe("@stwd/react-native storage", () => {
       "steward://auth/email?token=email-token&email=u%40example.com",
     );
 
-    expect(lastRequest).toMatchObject({
+    expect(requestFor("https://api.example.test/auth/email/verify")).toMatchObject({
       url: "https://api.example.test/auth/email/verify",
       method: "POST",
       body: { token: "email-token", email: "u@example.com", tenantId: "tenant-1" },
     });
+    expect(lastRequest?.url).toBe("https://api.example.test/user/me?tenantId=tenant-1");
     expect("user" in result && result.user.id).toBe("user-email");
     expect(auth.getSession()?.userId).toBe("user-email");
   });
@@ -237,7 +300,7 @@ describe("@stwd/react-native storage", () => {
     });
 
     await verifyNativeOtp(auth, "+15551234567", "123456", "sms");
-    expect(lastRequest).toMatchObject({
+    expect(requestFor("https://api.example.test/auth/sms/verify")).toMatchObject({
       url: "https://api.example.test/auth/sms/verify",
       method: "POST",
       body: { phone: "+15551234567", code: "123456", tenantId: "tenant-1" },
@@ -269,7 +332,7 @@ describe("@stwd/react-native storage", () => {
       otp: "000000",
     });
 
-    expect(lastRequest).toMatchObject({
+    expect(requestFor("https://api.example.test/auth/test/token")).toMatchObject({
       url: "https://api.example.test/auth/test/token",
       method: "POST",
       body: { tenantId: "tenant-1", email: "test@example.com", otp: "000000" },
@@ -318,14 +381,14 @@ describe("@stwd/react-native storage", () => {
       { redirectUri: "steward://oauth/google" },
     );
 
-    expect(lastRequest?.url).toBe("https://api.example.test/auth/oauth/google/token");
-    expect(lastRequest?.body).toMatchObject({
+    const oauthRequest = requestFor("https://api.example.test/auth/oauth/google/token");
+    expect(oauthRequest?.body).toMatchObject({
       code: "oauth-code",
       redirectUri: "steward://oauth/google",
       state,
       tenantId: "tenant-1",
     });
-    expect(typeof lastRequest?.body?.codeVerifier).toBe("string");
+    expect(typeof oauthRequest?.body?.codeVerifier).toBe("string");
     expect("provider" in result && result.provider).toBe("google");
     expect(auth.getSession()?.userId).toBe("user-oauth");
   });
@@ -382,12 +445,14 @@ describe("@stwd/react-native storage", () => {
       "personal_sign",
     ]);
     expect((requests.at(-1)?.params ?? [])[1]).toBe("0x0000000000000000000000000000000000000001");
-    expect(lastRequest).toMatchObject({
+    expect(requestFor("https://api.example.test/auth/verify")).toMatchObject({
       url: "https://api.example.test/auth/verify",
       method: "POST",
       body: { signature: "0xsigned" },
     });
-    expect(String(lastRequest?.body?.message)).toContain("Chain ID: 8453");
+    expect(String(requestFor("https://api.example.test/auth/verify")?.body?.message)).toContain(
+      "Chain ID: 8453",
+    );
     expect("user" in result && result.user.walletChain).toBe("ethereum");
     expect(auth.getSession()?.userId).toBe("user-evm");
   });
@@ -434,7 +499,7 @@ describe("@stwd/react-native storage", () => {
     expect(new TextDecoder().decode(signedMessage ?? new Uint8Array())).toContain(
       "So11111111111111111111111111111111111111112",
     );
-    expect(lastRequest).toMatchObject({
+    expect(requestFor("https://api.example.test/auth/verify/solana")).toMatchObject({
       url: "https://api.example.test/auth/verify/solana",
       method: "POST",
       body: {
@@ -587,7 +652,7 @@ describe("@stwd/react-native storage", () => {
     );
 
     expect(bridgeOptions).toMatchObject({ challengeId: "challenge-login" });
-    expect(lastRequest).toMatchObject({
+    expect(requestFor("https://api.example.test/auth/passkey/login/verify")).toMatchObject({
       url: "https://api.example.test/auth/passkey/login/verify",
       method: "POST",
       headers: { origin: "https://app.example.test" },
@@ -612,6 +677,7 @@ describe("@stwd/react-native storage", () => {
     const auth = await createStewardNativeAuth({
       baseUrl: "https://api.example.test",
       tenantId: "tenant-1",
+      bootstrapCurrentUser: false,
       storage: memoryAsyncStorage({ "steward:steward_session_token": token }),
     });
     let bridgeOptions: Record<string, unknown> | null = null;
@@ -643,7 +709,7 @@ describe("@stwd/react-native storage", () => {
     );
 
     expect(bridgeOptions).toMatchObject({ challenge: "registration-challenge" });
-    expect(lastRequest).toMatchObject({
+    expect(requestFor("https://api.example.test/auth/passkey/register/verify")).toMatchObject({
       url: "https://api.example.test/auth/passkey/register/verify",
       method: "POST",
       headers: {
@@ -676,6 +742,7 @@ describe("@stwd/react-native storage", () => {
     });
     const auth = await createStewardNativeAuth({
       baseUrl: "https://api.example.test",
+      bootstrapCurrentUser: false,
       storage: memoryAsyncStorage({ "steward:steward_session_token": token }),
     });
     installAuthFetchSequence([
@@ -696,7 +763,7 @@ describe("@stwd/react-native storage", () => {
       },
     });
 
-    expect(lastRequest).toMatchObject({
+    expect(requestFor("https://api.example.test/auth/mfa/passkey/complete")).toMatchObject({
       url: "https://api.example.test/auth/mfa/passkey/complete",
       method: "POST",
       headers: { authorization: `Bearer ${token}` },

@@ -18,19 +18,19 @@
  */
 
 import { platformAuthMiddleware } from "@stwd/auth";
+import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
 import { requireAgentJwt } from "./middleware/agent-jwt";
-import { authorizationSignature } from "./middleware/authorization-signature";
 import { correlationId } from "./middleware/correlation";
 import { idempotencyMiddleware } from "./middleware/idempotency";
 import { operatorAuth } from "./middleware/operator-auth";
-import { requestExpiry } from "./middleware/request-expiry";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
-import { createOpenAPIApp, isOpenApiHttpEnabled, OPENAPI_DOC } from "./openapi";
-import { adapterRoutes } from "./routes/adapters";
-import { agentRoutes } from "./routes/agents";
+import { getOpenApiSpec } from "./openapi";
+import { accountRoutes } from "./routes/accounts";
+import { adapterRoutes, fiatRoutes } from "./routes/adapters";
+import { agentRoutes, createAgentBatch } from "./routes/agents";
 import { approvalRoutes } from "./routes/approvals";
 import { auditRoutes } from "./routes/audit";
 import { authRoutes } from "./routes/auth";
@@ -44,7 +44,6 @@ import { operatorRecoveryRoutes } from "./routes/operator-recovery";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { secretsRoutes } from "./routes/secrets";
-import { sessionSignerRoutes } from "./routes/session-signers";
 import { tenantConfigRoutes } from "./routes/tenant-config";
 import { tenantRoutes } from "./routes/tenants";
 import { tradeRoutes } from "./routes/trade";
@@ -54,13 +53,14 @@ import { webhookRoutes } from "./routes/webhooks";
 import {
   API_VERSION,
   type ApiResponse,
+  type AppVariables,
   dashboardAuthMiddleware,
   tenantAuth,
 } from "./services/context";
 
 const startTime = Date.now();
 
-const app = createOpenAPIApp();
+const app = new Hono<{ Variables: AppVariables }>();
 
 // ─── Global error handler ─────────────────────────────────────────────────────
 
@@ -87,6 +87,7 @@ app.use("*", securityHeaders);
 app.use("*", tenantCors);
 app.use("*", logger());
 app.use("*", correlationId);
+
 app.use(
   "*",
   bodyLimit({
@@ -95,21 +96,24 @@ app.use(
       c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
   }),
 );
-app.use("*", requestExpiry());
-app.use("*", authorizationSignature());
 
 // ─── Auth middleware per route group ──────────────────────────────────────────
 
 app.use("/agents", (c, next) => tenantAuth(c, next));
 app.use("/agents/*", (c, next) => tenantAuth(c, next));
+app.use("/wallets/batch", (c, next) => tenantAuth(c, next));
+app.use("/v1/wallets/batch", (c, next) => tenantAuth(c, next));
 app.use("/v1/agents", (c, next) => tenantAuth(c, next));
 app.use("/v1/agents/*", (c, next) => tenantAuth(c, next));
-app.use("/adapters", (c, next) => tenantAuth(c, next));
-app.use("/adapters/*", (c, next) => tenantAuth(c, next));
+app.use("/accounts", (c, next) => tenantAuth(c, next));
+app.use("/accounts/*", (c, next) => tenantAuth(c, next));
+app.use("/v1/accounts", (c, next) => tenantAuth(c, next));
+app.use("/v1/accounts/*", (c, next) => tenantAuth(c, next));
 app.use("/vault/*", (c, next) => tenantAuth(c, next));
 app.use("/secrets", (c, next) => tenantAuth(c, next));
 app.use("/secrets/*", (c, next) => tenantAuth(c, next));
 app.use("/tenants/:id", (c, next) => {
+  if (c.req.method === "POST" && c.req.path === "/tenants") return next();
   // GET /tenants/config (no id) is a public discovery endpoint used by the
   // @stwd/sdk React provider to fetch default-tenant policy/theme/feature
   // flags before the user has authenticated. The :id wildcard would otherwise
@@ -128,6 +132,10 @@ app.use("/tenants/:id/config/*", (c, next) =>
   tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
 );
 app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
+app.use("/platform", platformAuthMiddleware());
+app.use("/platform/*", platformAuthMiddleware());
+app.use("/user", (c, next) => userSessionAuth(c as never, next));
+app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
 app.use("/webhooks", (c, next) => tenantAuth(c, next));
 app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
 app.use("/approvals", (c, next) => tenantAuth(c, next));
@@ -136,6 +144,11 @@ app.use("/intents", (c, next) => tenantAuth(c, next));
 app.use("/intents/*", (c, next) => tenantAuth(c, next));
 app.use("/audit", (c, next) => tenantAuth(c, next));
 app.use("/audit/*", (c, next) => tenantAuth(c, next));
+app.use("/adapters", (c, next) => tenantAuth(c, next));
+app.use("/adapters/*", (c, next) => tenantAuth(c, next));
+app.use("/v1/adapters", (c, next) => tenantAuth(c, next));
+app.use("/v1/adapters/*", (c, next) => tenantAuth(c, next));
+app.use("/v1/users/*", (c, next) => tenantAuth(c, next));
 app.use("/policies", (c, next) => tenantAuth(c, next));
 app.use("/policies/*", (c, next) => tenantAuth(c, next));
 app.use("/condition-sets", (c, next) => tenantAuth(c, next));
@@ -163,16 +176,13 @@ app.use("/v1/trade/*", (c, next) => {
   if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
   return tenantAuth(c, next);
 });
-app.use("/platform", platformAuthMiddleware());
-app.use("/platform/*", platformAuthMiddleware());
-app.use("/user", (c, next) => userSessionAuth(c as never, next));
-app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
 
 app.use("*", idempotencyMiddleware());
 
 // ─── Health & root ────────────────────────────────────────────────────────────
 
 app.get("/", (c) => c.json({ name: "steward", version: API_VERSION, status: "running" }));
+app.get("/openapi.json", (c) => c.json(getOpenApiSpec()));
 app.get("/health", (c) =>
   c.json({
     status: "ok",
@@ -181,29 +191,19 @@ app.get("/health", (c) =>
   }),
 );
 
-// ─── OpenAPI spec (opt-in) ────────────────────────────────────────────────────
-// The spec is generated from the route definitions (the single source of truth)
-// and is always emitted at build time for the SDK and docs. The *live* endpoint is
-// gated and fails closed by default — a custody API should not expose its surface
-// publicly. Human-readable docs are served by the Mintlify site (which consumes the
-// generated openapi.json), not an in-app reference UI. See isOpenApiHttpEnabled.
-if (isOpenApiHttpEnabled()) {
-  app.get("/openapi.json", (c) => c.json(app.getOpenAPI31Document(OPENAPI_DOC)));
-}
-
 // ─── Route modules ────────────────────────────────────────────────────────────
 
 app.route("/", identityDiscoveryRoutes);
 app.route("/auth", authRoutes);
-app.route("/", identityDiscoveryRoutes);
 app.route("/platform", platformRoutes);
 app.route("/user", userRoutes);
+app.route("/global-wallet", globalWalletRoutes);
+app.route("/accounts", accountRoutes);
+app.route("/v1/accounts", accountRoutes);
 app.route("/agents", agentRoutes);
 app.route("/v1/agents", agentRoutes);
-// Session signers are nested under a specific agent; mounted as its own sub-app
-// so the path is /agents/:agentId/session-signers. The "/agents/*" tenantAuth
-// middleware (above) already gates it.
-app.route("/agents/:agentId/session-signers", sessionSignerRoutes);
+app.post("/wallets/batch", createAgentBatch);
+app.post("/v1/wallets/batch", createAgentBatch);
 app.route("/vault", vaultRoutes);
 app.route("/secrets", secretsRoutes);
 // tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler
@@ -211,12 +211,13 @@ app.route("/secrets", secretsRoutes);
 app.route("/tenants", tenantConfigRoutes);
 app.route("/tenants", tenantRoutes);
 app.route("/dashboard", dashboardRoutes);
-app.route("/global-wallet", globalWalletRoutes);
 app.route("/webhooks", webhookRoutes);
-app.route("/adapters", adapterRoutes);
 app.route("/approvals", approvalRoutes);
 app.route("/intents", intentRoutes);
 app.route("/audit", auditRoutes);
+app.route("/adapters", adapterRoutes);
+app.route("/v1/adapters", adapterRoutes);
+app.route("/v1/users", fiatRoutes);
 app.route("/policies", policiesStandaloneRoutes);
 app.route("/condition-sets", conditionSetRoutes);
 app.route("/condition_sets", conditionSetRoutes);

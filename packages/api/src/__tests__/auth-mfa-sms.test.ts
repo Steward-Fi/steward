@@ -175,6 +175,21 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
     const freshToken = ((await completeRes.json()) as { token: string }).token;
     webhookDispatches.splice(2);
 
+    const recoveryStepUpRes = await authRoutes.request("/mfa/totp/step-up", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${freshToken!}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ recoveryCode: verifyMfa.recoveryCodes[1] }),
+    });
+    expect(recoveryStepUpRes.status).toBe(200);
+    const recoveryStepUp = (await recoveryStepUpRes.json()) as { token: string };
+    expect(await verifySessionToken(recoveryStepUp.token)).toMatchObject({
+      userId: auth.user.id,
+      mfaMethod: "recovery_code",
+    });
+
     const invalidUnenrollRes = await authRoutes.request("/mfa/totp/unenroll", {
       method: "POST",
       headers: {
@@ -382,6 +397,30 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       userId: auth.user.id,
       mfaMethod: "recovery_code",
     });
+
+    const totpStepUpTime = Date.now() + 60_000;
+    const totpStepUpCode = await generateTotp(enrollment.secret, { time: totpStepUpTime });
+    const originalNowForTotpStepUp = Date.now;
+    Date.now = () => totpStepUpTime;
+    try {
+      const totpStepUpRes = await authRoutes.request("/mfa/totp/step-up", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${completed.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ code: totpStepUpCode }),
+      });
+      expect(totpStepUpRes.status).toBe(200);
+      const totpStepUp = (await totpStepUpRes.json()) as { token: string; refreshToken: string };
+      expect(totpStepUp.refreshToken).toBeTruthy();
+      expect(await verifySessionToken(totpStepUp.token)).toMatchObject({
+        userId: auth.user.id,
+        mfaMethod: "totp",
+      });
+    } finally {
+      Date.now = originalNowForTotpStepUp;
+    }
 
     const reusedRecoveryRes = await authRoutes.request("/mfa/totp/complete", {
       method: "POST",
@@ -676,6 +715,31 @@ describe("SMS OTP auth and TOTP MFA routes", () => {
       mfaMethod: "sms",
     });
     webhookDispatches.splice(1);
+
+    const smsStepUpSendRes = await authRoutes.request("/mfa/sms/send", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${completed.token}` },
+    });
+    expect(smsStepUpSendRes.status).toBe(200);
+    const smsStepUpInboxRes = await authRoutes.request(
+      `/test/sms-inbox/${encodeURIComponent(phone)}`,
+    );
+    const smsStepUpInbox = (await smsStepUpInboxRes.json()) as { code: string };
+    const smsStepUpRes = await authRoutes.request("/mfa/sms/step-up", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${completed.token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ code: smsStepUpInbox.code }),
+    });
+    expect(smsStepUpRes.status).toBe(200);
+    const smsStepUp = (await smsStepUpRes.json()) as { token: string; refreshToken: string };
+    expect(smsStepUp.refreshToken).toBeTruthy();
+    expect(await verifySessionToken(smsStepUp.token)).toMatchObject({
+      userId: auth.user.id,
+      mfaMethod: "sms",
+    });
 
     const replayRes = await authRoutes.request("/mfa/sms/complete", {
       method: "POST",

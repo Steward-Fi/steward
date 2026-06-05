@@ -150,7 +150,6 @@ export async function createAgentToken(
 }
 
 export async function verifySessionToken(token: string) {
-  const _dbg = process.env.STEWARD_DEBUG_SESSION_VERIFY === "true";
   try {
     const payload = (await verifyToken(token)) as {
       address: string;
@@ -166,8 +165,7 @@ export async function verifySessionToken(token: string) {
       jti?: string;
       exp?: number;
     };
-    if (_dbg) console.log("[dbg-vst] verifyToken OK", JSON.stringify({ typ: payload.typ, userId: payload.userId, tenantId: payload.tenantId, scope: payload.scope, agentId: payload.agentId }));
-    if (payload.typ === "identity") { if (_dbg) console.log("[dbg-vst] null: typ identity"); return null; }
+    if (payload.typ === "identity") return null;
     await assertTokenNotRevoked(payload);
     if (payload.userId) {
       const [user] = await getDb()
@@ -178,13 +176,12 @@ export async function verifySessionToken(token: string) {
         })
         .from(users)
         .where(eq(users.id, payload.userId));
-      if (!user || user.deactivatedAt) { if (_dbg) console.log("[dbg-vst] null: no user / deactivated", JSON.stringify({ found: !!user })); return null; }
+      if (!user || user.deactivatedAt) return null;
       // Fail-closed guest expiry: enforce the guest's hard expiry against the
       // authoritative DB column, not just the access-token `exp`. A refreshed
       // access token (or one minted with a longer TTL) is still rejected once
       // the guest window has elapsed. Full accounts have guestExpiresAt = null.
       if (user.isGuest && user.guestExpiresAt && user.guestExpiresAt.getTime() <= Date.now()) {
-        if (_dbg) console.log("[dbg-vst] null: guest expired");
         return null;
       }
       if (payload.tenantId) {
@@ -194,12 +191,11 @@ export async function verifySessionToken(token: string) {
           .where(
             and(eq(userTenants.userId, payload.userId), eq(userTenants.tenantId, payload.tenantId)),
           );
-        if (!membership) { if (_dbg) console.log("[dbg-vst] null: no membership"); return null; }
+        if (!membership) return null;
       }
     }
     return payload;
-  } catch (e) {
-    if (_dbg) console.log("[dbg-vst] THREW:", e instanceof Error ? `${e.name}: ${e.message}` : String(e));
+  } catch {
     return null;
   }
 }

@@ -933,7 +933,24 @@ let _challengeStore: ChallengeStore | null = null;
 let _tokenStore: TokenStore | null = null;
 let _oauthCodeStore: ChallengeStore | null = null;
 let _mfaBackend: StoreBackend | null = null;
+let _importSessionBackend: StoreBackend | null = null;
+let _authStoreSources: AuthStoreSources = {
+  challenge: "memory",
+  token: "memory",
+  siweNonce: "memory",
+  mfa: "memory",
+  importSession: "memory",
+};
 let _phoneAuth: PhoneAuth | null = null;
+
+export type AuthStoreSource = "redis" | "postgres" | "memory";
+export type AuthStoreSources = {
+  challenge: AuthStoreSource;
+  token: AuthStoreSource;
+  siweNonce: AuthStoreSource;
+  mfa: AuthStoreSource;
+  importSession: AuthStoreSource;
+};
 
 /**
  * One-time OAuth nonce-exchange codes (response_type=code) live for 60s —
@@ -959,22 +976,32 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
     { backend: tokenBackend, source: tokenSource },
     { backend: nonceBackend, source: nonceSource },
     { backend: mfaBackend, source: mfaSource },
+    { backend: importSessionBackend, source: importSessionSource },
   ] = await Promise.all([
     buildBackend("challenge", redisClient, usePostgres),
     buildBackend("token", redisClient, usePostgres),
     buildBackend("siwe-nonce", redisClient, usePostgres),
     buildBackend("mfa", redisClient, usePostgres),
+    buildBackend("import-session", redisClient, usePostgres),
   ]);
 
   console.log(
     `[steward:auth] challenge store: ${challengeSource}, token store: ${tokenSource}, ` +
-      `siwe-nonce store: ${nonceSource}, mfa store: ${mfaSource}`,
+      `siwe-nonce store: ${nonceSource}, mfa store: ${mfaSource}, ` +
+      `import-session store: ${importSessionSource}`,
   );
 
   _challengeStore = new ChallengeStore({ backend: challengeBackend });
   _tokenStore = new TokenStore({ backend: tokenBackend });
   _nonceBackend = nonceBackend;
   _mfaBackend = mfaBackend;
+  _authStoreSources = {
+    challenge: challengeSource,
+    token: tokenSource,
+    siweNonce: nonceSource,
+    mfa: mfaSource,
+    importSession: importSessionSource,
+  };
   // Reuse the challenge backend (Redis when available) for OAuth nonce codes
   // so they survive worker restarts and round-robin between isolates. The
   // 60s TTL is enforced at write time by ChallengeStore.
@@ -982,6 +1009,7 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
     backend: challengeBackend,
     ttlMs: OAUTH_CODE_TTL_MS,
   });
+  _importSessionBackend = importSessionBackend;
 
   // Reset singletons so they pick up the new stores on next use
   _passkeyAuth = null;
@@ -1062,6 +1090,31 @@ function getMfaBackend(): StoreBackend {
   const { MemoryBackend } = require("@stwd/auth") as typeof import("@stwd/auth");
   _mfaBackend = new MemoryBackend();
   return _mfaBackend;
+}
+
+export function getImportSessionBackend(): StoreBackend {
+  if (_importSessionBackend) return _importSessionBackend;
+  const { MemoryBackend } = require("@stwd/auth") as typeof import("@stwd/auth");
+  _importSessionBackend = new MemoryBackend();
+  return _importSessionBackend;
+}
+
+export function getAuthStoreSources(): AuthStoreSources {
+  return { ..._authStoreSources };
+}
+
+export function encryptImportSessionJson(value: unknown): string {
+  return JSON.stringify(getOAuthKeyStore().encrypt(JSON.stringify(value)));
+}
+
+export function decryptImportSessionJson<T>(value: string): T {
+  const encrypted = JSON.parse(value) as {
+    ciphertext: string;
+    iv: string;
+    tag: string;
+    salt: string;
+  };
+  return JSON.parse(getOAuthKeyStore().decrypt(encrypted)) as T;
 }
 
 let _passkeyAuth: PasskeyAuth | null = null;
@@ -2475,6 +2528,52 @@ async function getSmsMfa(userId: string): Promise<StoredSmsMfa | null> {
   return readMfaJson<StoredSmsMfa>(mfaKey("sms:enabled", userId));
 }
 
+async function currentSessionMfaStepUpResponse(
+  c: Context,
+  session: Extract<Awaited<ReturnType<typeof requireSession>>, { ok: true }>,
+  method: "totp" | "sms" | "passkey" | "recovery_code",
+) {
+  if (!(await isActiveTenantMember(session.payload.userId, session.payload.tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
+  }
+
+  const [user] = await getDb()
+    .select({
+      id: users.id,
+      email: users.email,
+      walletAddress: users.walletAddress,
+      walletChain: users.walletChain,
+    })
+    .from(users)
+    .where(eq(users.id, session.payload.userId));
+
+  const mfaClaims = {
+    mfaVerifiedAt: Date.now(),
+    mfaMethod: method,
+    factorEnrollmentVerifiedAt: Date.now(),
+  };
+  const token = await createSessionToken(session.payload.address, session.payload.tenantId, {
+    userId: session.payload.userId,
+    email: session.payload.email,
+    authMethod: session.payload.authMethod,
+    ...mfaClaims,
+  });
+  const refreshToken = await createRefreshToken(
+    session.payload.userId,
+    session.payload.tenantId,
+    mfaClaims,
+  );
+
+  return c.json(
+    buildAuthResponse(token, refreshToken, {
+      id: user?.id ?? session.payload.userId,
+      email: user?.email ?? session.payload.email ?? "",
+      walletAddress: user?.walletAddress ?? session.payload.address,
+      walletChain: user?.walletChain ?? undefined,
+    }),
+  );
+}
+
 async function createMfaAuthChallenge(payload: Omit<PendingMfaAuth, "expiresAt">): Promise<{
   challengeId: string;
   expiresAt: number;
@@ -2598,6 +2697,245 @@ function setAuthNoStoreHeaders(c: Pick<Context, "header">): void {
   c.header("Cache-Control", "no-store, max-age=0");
   c.header("Pragma", "no-cache");
   c.header("Expires", "0");
+}
+
+const DEVICE_AUTH_TTL_MS = 10 * 60 * 1000;
+const DEVICE_AUTH_DEFAULT_INTERVAL_SECONDS = 5;
+const DEVICE_AUTH_MAX_SLOW_DOWNS = 3;
+
+type DeviceAuthorizationRecord = {
+  tenantId: string;
+  clientId?: string;
+  nativeBundleId?: string;
+  nativePackageName?: string;
+  userCode: string;
+  scope?: string;
+  status: "pending" | "approved" | "denied";
+  issuedAt: number;
+  expiresAt: number;
+  intervalSeconds: number;
+  lastPollAt?: number;
+  slowDownCount: number;
+  approvedUserId?: string;
+  approvedAt?: number;
+  deniedAt?: number;
+};
+
+function normalizeDeviceUserCode(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toUpperCase().replace(/[\s-]/g, "");
+  return /^[A-Z0-9]{8}$/.test(normalized) ? normalized : undefined;
+}
+
+function displayDeviceUserCode(value: string): string {
+  return `${value.slice(0, 4)}-${value.slice(4)}`;
+}
+
+function generateDeviceUserCode(): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+}
+
+function deviceCodeKey(deviceCode: string): string {
+  return `device-auth:device:${hashSha256Hex(deviceCode)}`;
+}
+
+function deviceUserCodeKey(userCode: string): string {
+  return `device-auth:user:${hashSha256Hex(userCode)}`;
+}
+
+async function getEnabledTenantAppClient(tenantId: string, clientId: string) {
+  const [client] = await getDb()
+    .select({
+      id: tenantAppClients.id,
+      allowedBundleIds: tenantAppClients.allowedBundleIds,
+      allowedPackageNames: tenantAppClients.allowedPackageNames,
+    })
+    .from(tenantAppClients)
+    .where(
+      and(
+        eq(tenantAppClients.tenantId, tenantId),
+        eq(tenantAppClients.id, clientId),
+        eq(tenantAppClients.enabled, true),
+      ),
+    )
+    .limit(1);
+  return client ?? null;
+}
+
+function normalizeNativeBundleId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const bundleId = value.trim();
+  if (
+    bundleId.length === 0 ||
+    bundleId === "*" ||
+    bundleId.length > 255 ||
+    !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)+$/.test(
+      bundleId,
+    )
+  ) {
+    return null;
+  }
+  return bundleId;
+}
+
+function normalizeNativePackageName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const packageName = value.trim().toLowerCase();
+  if (
+    packageName.length === 0 ||
+    packageName === "*" ||
+    packageName.length > 255 ||
+    !/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/.test(packageName)
+  ) {
+    return null;
+  }
+  return packageName;
+}
+
+function readNativeClientAssertion(
+  c: Context,
+  body: Record<string, unknown> | undefined | null,
+): { rawBundleId?: unknown; rawPackageName?: unknown } {
+  return {
+    rawBundleId:
+      body?.native_bundle_id ??
+      body?.nativeBundleId ??
+      body?.bundle_id ??
+      body?.bundleId ??
+      c.req.header("X-Steward-Native-Bundle-Id"),
+    rawPackageName:
+      body?.native_package_name ??
+      body?.nativePackageName ??
+      body?.package_name ??
+      body?.packageName ??
+      c.req.header("X-Steward-Native-Package-Name"),
+  };
+}
+
+async function assertDeviceAuthTenantAndClient(
+  tenantId: string,
+  rawClientId: unknown,
+  nativeAssertion?: { rawBundleId?: unknown; rawPackageName?: unknown },
+): Promise<
+  | { ok: true; clientId?: string; nativeBundleId?: string; nativePackageName?: string }
+  | { ok: false; status: 400 | 404; error: string }
+> {
+  if (!isValidTenantId(tenantId)) {
+    return { ok: false, status: 400, error: "Invalid tenant id" };
+  }
+  if (!(await tenantExists(tenantId))) {
+    return { ok: false, status: 404, error: `Tenant '${tenantId}' not found` };
+  }
+
+  if (rawClientId === undefined || rawClientId === null || rawClientId === "") {
+    return { ok: true };
+  }
+  const clientId = normalizePublicClientId(rawClientId);
+  if (!clientId) return { ok: false, status: 400, error: "client_id is invalid" };
+  const client = await getEnabledTenantAppClient(tenantId, clientId);
+  if (!client) {
+    return { ok: false, status: 404, error: "App client not found or disabled" };
+  }
+  const nativeBundleId =
+    nativeAssertion?.rawBundleId === undefined
+      ? undefined
+      : normalizeNativeBundleId(nativeAssertion.rawBundleId);
+  if (nativeAssertion?.rawBundleId !== undefined && !nativeBundleId) {
+    return { ok: false, status: 400, error: "native bundle id is invalid" };
+  }
+  const nativePackageName =
+    nativeAssertion?.rawPackageName === undefined
+      ? undefined
+      : normalizeNativePackageName(nativeAssertion.rawPackageName);
+  if (nativeAssertion?.rawPackageName !== undefined && !nativePackageName) {
+    return { ok: false, status: 400, error: "native package name is invalid" };
+  }
+  if (nativeBundleId && !((client.allowedBundleIds ?? []) as string[]).includes(nativeBundleId)) {
+    return { ok: false, status: 400, error: "native bundle id is not allowed for this app client" };
+  }
+  if (
+    nativePackageName &&
+    !((client.allowedPackageNames ?? []) as string[]).includes(nativePackageName)
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      error: "native package name is not allowed for this app client",
+    };
+  }
+  return {
+    ok: true,
+    clientId,
+    ...(nativeBundleId ? { nativeBundleId } : {}),
+    ...(nativePackageName ? { nativePackageName } : {}),
+  };
+}
+
+async function saveDeviceAuthorizationRecord(
+  deviceCode: string,
+  record: DeviceAuthorizationRecord,
+): Promise<void> {
+  await saveDeviceAuthorizationRecordByHash(hashSha256Hex(deviceCode), record);
+}
+
+async function saveDeviceAuthorizationRecordByHash(
+  deviceCodeHash: string,
+  record: DeviceAuthorizationRecord,
+): Promise<void> {
+  const ttlMs = Math.max(1_000, record.expiresAt - Date.now());
+  await writeMfaJson(`device-auth:device:${deviceCodeHash}`, record, ttlMs);
+  await getMfaBackend().set(deviceUserCodeKey(record.userCode), deviceCodeHash, ttlMs);
+}
+
+async function readDeviceAuthorizationRecord(
+  deviceCode: string,
+): Promise<DeviceAuthorizationRecord | null> {
+  const record = await readMfaJson<DeviceAuthorizationRecord>(deviceCodeKey(deviceCode));
+  if (!record) return null;
+  if (record.expiresAt <= Date.now()) {
+    await getMfaBackend().delete(deviceCodeKey(deviceCode));
+    await getMfaBackend().delete(deviceUserCodeKey(record.userCode));
+    return null;
+  }
+  return record;
+}
+
+async function consumeDeviceAuthorizationRecord(
+  deviceCode: string,
+): Promise<DeviceAuthorizationRecord | null> {
+  const raw = await getMfaBackend().consume(deviceCodeKey(deviceCode));
+  if (!raw) return null;
+  try {
+    const record = decryptMfaJson<DeviceAuthorizationRecord>(raw);
+    await getMfaBackend().delete(deviceUserCodeKey(record.userCode));
+    if (record.expiresAt <= Date.now()) return null;
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+async function readDeviceAuthorizationRecordByUserCode(
+  userCode: string,
+): Promise<{ deviceCodeHash: string; record: DeviceAuthorizationRecord } | null> {
+  const deviceCodeHash = await getMfaBackend().get(deviceUserCodeKey(userCode));
+  if (!deviceCodeHash) return null;
+  const record = await readMfaJson<DeviceAuthorizationRecord>(
+    `device-auth:device:${deviceCodeHash}`,
+  );
+  if (!record) {
+    await getMfaBackend().delete(deviceUserCodeKey(userCode));
+    return null;
+  }
+  if (record.expiresAt <= Date.now()) {
+    await getMfaBackend().delete(`device-auth:device:${deviceCodeHash}`);
+    await getMfaBackend().delete(deviceUserCodeKey(userCode));
+    return null;
+  }
+  return { deviceCodeHash, record };
 }
 
 async function getTenantOidcProviders(tenantId: string): Promise<TenantOidcProviderConfig[]> {
@@ -5328,6 +5666,314 @@ auth.get("/session", async (c) => {
   });
 });
 
+/**
+ * POST /device/code
+ * RFC 8628-style device authorization issuance.
+ * Body: { tenantId, client_id?/clientId?/app_client_id?, scope? }
+ */
+auth.post("/device/code", async (c) => {
+  const rl = await checkAuthRateLimit(c, "device-code", 60_000, 20);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>({ ok: false, error: "Too many device code requests" }, 429);
+  }
+
+  const body = await safeJsonParse<{
+    tenantId?: string;
+    client_id?: string;
+    clientId?: string;
+    app_client_id?: string;
+    appClientId?: string;
+    native_bundle_id?: string;
+    nativeBundleId?: string;
+    bundle_id?: string;
+    bundleId?: string;
+    native_package_name?: string;
+    nativePackageName?: string;
+    package_name?: string;
+    packageName?: string;
+    scope?: string;
+  }>(c);
+  const tenantId = body?.tenantId?.trim() || c.req.header("X-Steward-Tenant")?.trim();
+  if (!tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "tenantId is required" }, 400);
+  }
+
+  const rawClientId = body?.client_id ?? body?.clientId ?? body?.app_client_id ?? body?.appClientId;
+  const validation = await assertDeviceAuthTenantAndClient(
+    tenantId,
+    rawClientId,
+    readNativeClientAssertion(c, body),
+  );
+  if (!validation.ok) {
+    return c.json<ApiResponse>({ ok: false, error: validation.error }, validation.status);
+  }
+
+  const deviceCode = randomBase64Url(32);
+  let userCode = generateDeviceUserCode();
+  for (let i = 0; i < 5 && (await getMfaBackend().get(deviceUserCodeKey(userCode))); i += 1) {
+    userCode = generateDeviceUserCode();
+  }
+  if (await getMfaBackend().get(deviceUserCodeKey(userCode))) {
+    return c.json<ApiResponse>({ ok: false, error: "Unable to issue device code" }, 500);
+  }
+
+  const issuedAt = Date.now();
+  const record: DeviceAuthorizationRecord = {
+    tenantId,
+    ...(validation.clientId ? { clientId: validation.clientId } : {}),
+    ...(validation.nativeBundleId ? { nativeBundleId: validation.nativeBundleId } : {}),
+    ...(validation.nativePackageName ? { nativePackageName: validation.nativePackageName } : {}),
+    userCode,
+    ...(body?.scope ? { scope: body.scope.trim().slice(0, 512) } : {}),
+    status: "pending",
+    issuedAt,
+    expiresAt: issuedAt + DEVICE_AUTH_TTL_MS,
+    intervalSeconds: DEVICE_AUTH_DEFAULT_INTERVAL_SECONDS,
+    slowDownCount: 0,
+  };
+  await saveDeviceAuthorizationRecord(deviceCode, record);
+
+  const verificationUri = `${authCallbackBaseUrl(c)}/auth/device`;
+  return c.json({
+    ok: true,
+    device_code: deviceCode,
+    user_code: displayDeviceUserCode(userCode),
+    verification_uri: verificationUri,
+    verification_uri_complete: `${verificationUri}?user_code=${encodeURIComponent(
+      displayDeviceUserCode(userCode),
+    )}`,
+    expires_in: Math.floor(DEVICE_AUTH_TTL_MS / 1000),
+    interval: DEVICE_AUTH_DEFAULT_INTERVAL_SECONDS,
+    tenantId,
+    ...(validation.clientId ? { client_id: validation.clientId } : {}),
+    ...(validation.nativeBundleId ? { native_bundle_id: validation.nativeBundleId } : {}),
+    ...(validation.nativePackageName ? { native_package_name: validation.nativePackageName } : {}),
+  });
+});
+
+/**
+ * POST /device/verify
+ * Authenticated approval/denial endpoint for the user code shown on a device.
+ * Body: { user_code/userCode, action?: "approve" | "deny" }
+ */
+auth.post("/device/verify", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(
+    c,
+    "device-verify",
+    60_000,
+    10,
+    `user:${session.payload.userId}`,
+  );
+  if (!rl.allowed) {
+    return c.json<ApiResponse>({ ok: false, error: "Too many device verification attempts" }, 429);
+  }
+
+  const body = await safeJsonParse<{
+    user_code?: string;
+    userCode?: string;
+    action?: string;
+  }>(c);
+  const userCode = normalizeDeviceUserCode(body?.user_code ?? body?.userCode);
+  if (!userCode) {
+    return c.json<ApiResponse>({ ok: false, error: "Valid user_code is required" }, 400);
+  }
+  const action = body?.action === "deny" ? "deny" : "approve";
+
+  const found = await readDeviceAuthorizationRecordByUserCode(userCode);
+  if (!found) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired user code" }, 404);
+  }
+  const { deviceCodeHash, record } = found;
+  if (record.status !== "pending") {
+    return c.json<ApiResponse>({ ok: false, error: "Device code has already been handled" }, 409);
+  }
+  if (record.tenantId !== session.payload.tenantId) {
+    return c.json<ApiResponse>({ ok: false, error: "Device code tenant mismatch" }, 403);
+  }
+  if (!(await isActiveTenantMember(session.payload.userId, record.tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "User is not a member of this tenant" }, 403);
+  }
+
+  const next: DeviceAuthorizationRecord =
+    action === "deny"
+      ? { ...record, status: "denied", deniedAt: Date.now() }
+      : {
+          ...record,
+          status: "approved",
+          approvedUserId: session.payload.userId,
+          approvedAt: Date.now(),
+        };
+  await saveDeviceAuthorizationRecordByHash(deviceCodeHash, next);
+  await writeAuditEvent({
+    tenantId: record.tenantId,
+    actorType: "user",
+    actorId: session.payload.userId,
+    action: action === "deny" ? "auth.device.deny" : "auth.device.approve",
+    resourceType: "session",
+    metadata: { clientId: record.clientId ?? null },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
+  return c.json({ ok: true, status: next.status, tenantId: record.tenantId });
+});
+
+/**
+ * POST /device/token
+ * Body: { grant_type, device_code, client_id?/clientId? }
+ */
+auth.post("/device/token", async (c) => {
+  const rl = await checkAuthRateLimit(c, "device-token", 60_000, 60);
+  if (!rl.allowed) {
+    return c.json({ ok: false, error: "slow_down", interval: rl.retryAfterSecs ?? 60 }, 429);
+  }
+
+  const body = await safeJsonParse<{
+    grant_type?: string;
+    device_code?: string;
+    deviceCode?: string;
+    client_id?: string;
+    clientId?: string;
+    app_client_id?: string;
+    appClientId?: string;
+    native_bundle_id?: string;
+    nativeBundleId?: string;
+    bundle_id?: string;
+    bundleId?: string;
+    native_package_name?: string;
+    nativePackageName?: string;
+    package_name?: string;
+    packageName?: string;
+  }>(c);
+  if (body?.grant_type !== "urn:ietf:params:oauth:grant-type:device_code") {
+    return c.json({ ok: false, error: "unsupported_grant_type" }, 400);
+  }
+  const deviceCode = body.device_code ?? body.deviceCode;
+  if (typeof deviceCode !== "string" || deviceCode.trim().length < 20) {
+    return c.json({ ok: false, error: "invalid_request" }, 400);
+  }
+
+  const record = await readDeviceAuthorizationRecord(deviceCode);
+  if (!record) {
+    return c.json({ ok: false, error: "expired_token" }, 400);
+  }
+  const rawClientId = body.client_id ?? body.clientId ?? body.app_client_id ?? body.appClientId;
+  const clientId = rawClientId ? normalizePublicClientId(rawClientId) : undefined;
+  if (rawClientId && !clientId) {
+    return c.json({ ok: false, error: "invalid_client" }, 401);
+  }
+  if (record.clientId && clientId !== record.clientId) {
+    return c.json({ ok: false, error: "invalid_client" }, 401);
+  }
+  const nativeAssertion = readNativeClientAssertion(c, body);
+  const nativeBundleId =
+    nativeAssertion.rawBundleId === undefined
+      ? undefined
+      : normalizeNativeBundleId(nativeAssertion.rawBundleId);
+  if (nativeAssertion.rawBundleId !== undefined && !nativeBundleId) {
+    return c.json({ ok: false, error: "invalid_client" }, 401);
+  }
+  const nativePackageName =
+    nativeAssertion.rawPackageName === undefined
+      ? undefined
+      : normalizeNativePackageName(nativeAssertion.rawPackageName);
+  if (nativeAssertion.rawPackageName !== undefined && !nativePackageName) {
+    return c.json({ ok: false, error: "invalid_client" }, 401);
+  }
+  if (nativeBundleId && !record.nativeBundleId) {
+    return c.json({ ok: false, error: "invalid_client" }, 401);
+  }
+  if (nativePackageName && !record.nativePackageName) {
+    return c.json({ ok: false, error: "invalid_client" }, 401);
+  }
+  if (record.nativeBundleId && nativeBundleId !== record.nativeBundleId) {
+    return c.json({ ok: false, error: "invalid_client" }, 401);
+  }
+  if (record.nativePackageName && nativePackageName !== record.nativePackageName) {
+    return c.json({ ok: false, error: "invalid_client" }, 401);
+  }
+  if (record.status === "denied") {
+    await consumeDeviceAuthorizationRecord(deviceCode);
+    return c.json({ ok: false, error: "access_denied" }, 400);
+  }
+
+  const now = Date.now();
+  if (
+    record.lastPollAt &&
+    now - record.lastPollAt < record.intervalSeconds * 1000 &&
+    record.slowDownCount < DEVICE_AUTH_MAX_SLOW_DOWNS
+  ) {
+    const next = {
+      ...record,
+      intervalSeconds: record.intervalSeconds + 5,
+      lastPollAt: now,
+      slowDownCount: record.slowDownCount + 1,
+    };
+    await saveDeviceAuthorizationRecord(deviceCode, next);
+    return c.json({ ok: false, error: "slow_down", interval: next.intervalSeconds }, 400);
+  }
+
+  if (record.status === "pending") {
+    await saveDeviceAuthorizationRecord(deviceCode, { ...record, lastPollAt: now });
+    return c.json(
+      { ok: false, error: "authorization_pending", interval: record.intervalSeconds },
+      400,
+    );
+  }
+
+  const consumed = await consumeDeviceAuthorizationRecord(deviceCode);
+  if (!consumed || consumed.status !== "approved" || !consumed.approvedUserId) {
+    return c.json({ ok: false, error: "expired_token" }, 400);
+  }
+  const [user] = await getDb()
+    .select({
+      id: users.id,
+      email: users.email,
+      walletAddress: users.walletAddress,
+      walletChain: users.walletChain,
+    })
+    .from(users)
+    .where(eq(users.id, consumed.approvedUserId));
+  if (!user || !(await isActiveTenantMember(user.id, consumed.tenantId))) {
+    return c.json({ ok: false, error: "access_denied" }, 400);
+  }
+
+  const claims = {
+    userId: user.id,
+    ...(user.email ? { email: user.email } : {}),
+    authMethod: "device_code",
+    ...(consumed.clientId ? { appClientId: consumed.clientId } : {}),
+  };
+  const token = await createSessionToken(user.walletAddress ?? "", consumed.tenantId, claims);
+  const refreshToken = await createRefreshToken(user.id, consumed.tenantId, claims);
+  await writeAuthLoginAudit(c, consumed.tenantId, user.id, claims, {
+    clientId: consumed.clientId ?? null,
+    grantType: "device_code",
+  });
+  dispatchUserAuthenticated(consumed.tenantId, user.id, "device_code");
+
+  return c.json({
+    ok: true,
+    token,
+    access_token: token,
+    token_type: "Bearer",
+    refreshToken,
+    refresh_token: refreshToken,
+    expiresIn: ACCESS_TOKEN_EXPIRY_SECONDS,
+    expires_in: ACCESS_TOKEN_EXPIRY_SECONDS,
+    user: {
+      id: user.id,
+      email: user.email,
+      walletAddress: user.walletAddress ?? undefined,
+      walletChain: user.walletChain ?? undefined,
+    },
+  });
+});
+
 auth.get("/identity-token", async (c) => {
   const session = await requireSession(c);
   if (!session.ok) return session.response;
@@ -5622,6 +6268,71 @@ auth.post("/mfa/totp/complete", async (c) => {
     typeof challenge.claims?.authMethod === "string" ? challenge.claims.authMethod : undefined,
   );
   return c.json(buildAuthResponse(token, refreshToken, challenge.user));
+});
+
+auth.post("/mfa/totp/step-up", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-totp-step-up", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{
+    code?: string;
+    recoveryCode?: string;
+  }>(c);
+  const hasTotpCode = typeof body?.code === "string" && body.code.length > 0;
+  const hasRecoveryCode = typeof body?.recoveryCode === "string" && body.recoveryCode.length > 0;
+  if (hasTotpCode === hasRecoveryCode) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Provide exactly one of code or recoveryCode" },
+      400,
+    );
+  }
+  if (hasTotpCode && !/^\d{6}$/.test(body?.code ?? "")) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const attemptScope = `step-up:${session.payload.userId}`;
+  if ((await getTotpVerifyFailedAttempts(attemptScope)) >= TOTP_VERIFY_MAX_FAILED_ATTEMPTS) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many invalid codes. Please try again later." },
+      429,
+    );
+  }
+
+  let method: "totp" | "recovery_code" = "totp";
+  if (hasRecoveryCode) {
+    const verified = await verifyRecoveryCode(
+      recoveryCodeStore,
+      session.payload.userId,
+      body?.recoveryCode ?? "",
+    );
+    if (!verified.valid) {
+      await recordTotpVerifyFailure(attemptScope);
+      return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+    }
+    method = "recovery_code";
+  } else {
+    const verified = await verifyStoredTotp(session.payload.userId, body?.code ?? "");
+    if (!verified.valid || !verified.stored || typeof verified.acceptedStep !== "number") {
+      await recordTotpVerifyFailure(attemptScope);
+      return c.json<ApiResponse>({ ok: false, error: "Invalid code" }, 401);
+    }
+    await writeMfaJson(mfaKey("totp:enabled", session.payload.userId), {
+      ...verified.stored,
+      lastAcceptedStep: verified.acceptedStep,
+    });
+  }
+  await clearTotpVerifyFailures(attemptScope);
+
+  return currentSessionMfaStepUpResponse(c, session, method);
 });
 
 auth.get("/mfa/recovery-codes/status", async (c) => {
@@ -5988,6 +6699,49 @@ auth.post("/mfa/sms/complete", async (c) => {
     typeof challenge.claims?.authMethod === "string" ? challenge.claims.authMethod : undefined,
   );
   return c.json(buildAuthResponse(token, refreshToken, challenge.user));
+});
+
+auth.post("/mfa/sms/step-up", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+
+  const rl = await checkAuthRateLimit(c, "mfa-sms-step-up", 60_000, 5);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+      { "Retry-After": String(rl.retryAfterSecs ?? 60) },
+    );
+  }
+
+  const body = await safeJsonParse<{ code: string }>(c);
+  if (typeof body?.code !== "string" || !/^\d{6}$/.test(body.code)) {
+    return c.json<ApiResponse>({ ok: false, error: "code must be 6 digits" }, 400);
+  }
+
+  const smsMfa = await getSmsMfa(session.payload.userId);
+  if (!smsMfa) {
+    return c.json<ApiResponse>({ ok: false, error: "SMS MFA is not enabled" }, 404);
+  }
+
+  const otpPurpose = smsMfaManagePurpose(session.payload.userId);
+  if (
+    (await getSmsVerifyFailedAttempts(smsMfa.phone, otpPurpose)) >= SMS_VERIFY_MAX_FAILED_ATTEMPTS
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many invalid SMS verification attempts. Request a new code." },
+      429,
+    );
+  }
+
+  const verified = await getPhoneAuth().verifyOtp(smsMfa.phone, body.code, otpPurpose);
+  if (!verified.valid) {
+    await recordSmsVerifyFailure(smsMfa.phone, otpPurpose);
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
+  }
+  await clearSmsVerifyFailures(smsMfa.phone, otpPurpose);
+
+  return currentSessionMfaStepUpResponse(c, session, "sms");
 });
 
 auth.post("/mfa/passkey/options", async (c) => {
@@ -7344,6 +8098,64 @@ auth.post("/guest", async (c) => {
       tenantId,
     }),
   );
+});
+
+auth.delete("/guest", async (c) => {
+  const session = await requireSession(c);
+  if (!session.ok) return session.response;
+  const userId = session.payload.userId;
+  const tenantId = session.payload.tenantId;
+  const db = getDb();
+
+  const [user] = await db
+    .select({ id: users.id, isGuest: users.isGuest, deactivatedAt: users.deactivatedAt })
+    .from(users)
+    .where(eq(users.id, userId));
+  if (!user) return c.json<ApiResponse>({ ok: false, error: "User not found" }, 404);
+  if (!user.isGuest) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Only guest accounts can be deleted with this endpoint" },
+      409,
+    );
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "auth.guest.delete.authorized",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { method: "guest" },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
+  await db.transaction(async (tx) => {
+    await tx.update(users).set({ deactivatedAt: new Date() }).where(eq(users.id, userId));
+    await tx.delete(refreshTokens).where(eq(refreshTokens.userId, userId));
+  });
+  await revocationStore.revokeUserTokens(userId);
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "auth.guest.deleted",
+    resourceType: "user",
+    resourceId: userId,
+    metadata: { method: "guest", wasAlreadyDeactivated: user.deactivatedAt !== null },
+    ipAddress: c.req.header("x-forwarded-for") ?? null,
+    userAgent: c.req.header("user-agent") ?? null,
+    requestId: c.get("requestId") ?? null,
+  });
+
+  return c.json({
+    ok: true,
+    deleted: true,
+    userId,
+  });
 });
 
 auth.post("/guest/upgrade", async (c) => {

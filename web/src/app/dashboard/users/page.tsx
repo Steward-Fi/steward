@@ -19,6 +19,14 @@ type TenantUser = {
   deactivatedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  walletExternalIds?: WalletExternalId[];
+};
+
+type WalletExternalId = {
+  id?: string;
+  tenantId?: string;
+  walletExternalId?: string;
+  externalId?: string;
 };
 
 type TenantInvitation = {
@@ -45,7 +53,58 @@ type TenantUserEvent = {
   createdAt: string;
 };
 
+type WalletPolicyViolation = {
+  userId: string;
+  email: string | null;
+  name: string | null;
+  role: string;
+  walletCount: number;
+  wallets: Array<{
+    accountId: string;
+    provider: "wallet:ethereum" | "wallet:solana";
+    providerAccountId: string;
+  }>;
+};
+
+type WalletPolicyViolationReport = {
+  tenantId: string;
+  policyEnabled: boolean;
+  violations: WalletPolicyViolation[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+type WalletPolicyRemediationResult = {
+  deleted: true;
+  accountId: string;
+  provider: "wallet:ethereum" | "wallet:solana";
+  providerAccountId: string;
+  issuedBefore: number;
+};
+
+type WalletPolicyBulkRemediationResponse = {
+  tenantId: string;
+  succeeded: number;
+  failed: number;
+  results: Array<
+    | ({
+        ok: true;
+        targetUserId: string;
+      } & WalletPolicyRemediationResult)
+    | {
+        ok: false;
+        targetUserId: string;
+        accountId: string;
+        status: number;
+        error: string;
+      }
+  >;
+};
+
 type LoadState = "idle" | "loading" | "ready" | "error";
+type WalletPolicyReportState = "idle" | "loading" | "ready" | "error";
+type SearchField = "auto" | "email" | "q" | "walletExternalId";
 const TENANT_ROLES = ["owner", "admin", "developer", "billing", "viewer", "member"] as const;
 type TenantRole = (typeof TENANT_ROLES)[number];
 const INVITE_ROLES = ["admin", "developer", "billing", "viewer", "member"] as const;
@@ -69,6 +128,38 @@ function userStatus(user: Pick<TenantUser, "deactivatedAt">): string {
   return user.deactivatedAt ? "Deactivated" : "Active";
 }
 
+function walletProviderLabel(provider: "wallet:ethereum" | "wallet:solana"): string {
+  return provider === "wallet:ethereum" ? "EVM" : "Solana";
+}
+
+function walletSelectionKey(userId: string, accountId: string): string {
+  return `${userId}:${accountId}`;
+}
+
+function walletExternalIdValue(row: WalletExternalId): string | null {
+  return row.walletExternalId ?? row.externalId ?? null;
+}
+
+function walletExternalIds(user: Pick<TenantUser, "walletExternalIds">): string[] {
+  return (user.walletExternalIds ?? [])
+    .map(walletExternalIdValue)
+    .filter((value): value is string => Boolean(value));
+}
+
+function applyUserSearchParams(params: URLSearchParams, query: string, field: SearchField) {
+  const value = query.trim();
+  if (!value) return;
+  if (field === "email" || (field === "auto" && value.includes("@"))) {
+    params.set("email", value);
+    return;
+  }
+  if (field === "walletExternalId") {
+    params.set("walletExternalId", value);
+    return;
+  }
+  params.set("q", value);
+}
+
 async function userRequest<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
@@ -89,12 +180,29 @@ export default function UsersPage() {
   const auth = useAuth();
   const [tenantId, setTenantId] = useState("");
   const [query, setQuery] = useState("");
+  const [searchField, setSearchField] = useState<SearchField>("auto");
   const [status, setStatus] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
   const [users, setUsers] = useState<TenantUser[]>([]);
   const [selected, setSelected] = useState<TenantUser | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<TenantUserEvent[]>([]);
   const [invitations, setInvitations] = useState<TenantInvitation[]>([]);
+  const [walletPolicyReport, setWalletPolicyReport] = useState<WalletPolicyViolationReport | null>(
+    null,
+  );
+  const [walletPolicyReportState, setWalletPolicyReportState] =
+    useState<WalletPolicyReportState>("idle");
+  const [walletPolicyReportError, setWalletPolicyReportError] = useState<string | null>(null);
+  const [walletPolicyRemediationTarget, setWalletPolicyRemediationTarget] = useState<string | null>(
+    null,
+  );
+  const [walletPolicyRemediationMessage, setWalletPolicyRemediationMessage] = useState<
+    string | null
+  >(null);
+  const [walletPolicySelectedWallets, setWalletPolicySelectedWallets] = useState<
+    Record<string, { userId: string; accountId: string }>
+  >({});
+  const [walletPolicyBulkSaving, setWalletPolicyBulkSaving] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<InviteRole>("member");
   const [sendInviteEmail, setSendInviteEmail] = useState(true);
@@ -119,7 +227,7 @@ export default function UsersPage() {
       setStatus("loading");
       setError(null);
       const params = new URLSearchParams();
-      if (query.trim()) params.set(query.includes("@") ? "email" : "q", query.trim());
+      applyUserSearchParams(params, query, searchField);
       params.set("limit", "50");
       const data = await userRequest<{ users: TenantUser[] }>(
         `/user/me/tenants/${encodeURIComponent(tenantId)}/users?${params.toString()}`,
@@ -129,8 +237,17 @@ export default function UsersPage() {
         `/user/me/tenants/${encodeURIComponent(tenantId)}/invitations?status=pending&limit=50`,
         token,
       );
+      const walletPolicyData = await userRequest<WalletPolicyViolationReport>(
+        `/user/me/tenants/${encodeURIComponent(tenantId)}/users/wallet-policy/violations?limit=50`,
+        token,
+      );
       setUsers(data.users);
       setInvitations(inviteData.invitations);
+      setWalletPolicyReport(walletPolicyData);
+      setWalletPolicyReportState("ready");
+      setWalletPolicyReportError(null);
+      setWalletPolicyRemediationMessage(null);
+      setWalletPolicySelectedWallets({});
       const refreshedSelected = selected
         ? (data.users.find((user) => user.userId === selected.userId) ?? null)
         : null;
@@ -144,6 +261,110 @@ export default function UsersPage() {
     }
   }
 
+  async function loadWalletPolicyReport() {
+    const token = auth.getToken();
+    if (!tenantId || !token) return;
+    try {
+      setWalletPolicyReportState("loading");
+      setWalletPolicyReportError(null);
+      const report = await userRequest<WalletPolicyViolationReport>(
+        `/user/me/tenants/${encodeURIComponent(tenantId)}/users/wallet-policy/violations?limit=50`,
+        token,
+      );
+      setWalletPolicyReport(report);
+      setWalletPolicyReportState("ready");
+      setWalletPolicySelectedWallets({});
+    } catch (err) {
+      setWalletPolicyReportState("error");
+      setWalletPolicyReportError(
+        err instanceof Error ? err.message : "Failed to load wallet policy report",
+      );
+    }
+  }
+
+  async function remediateWalletPolicyViolation(
+    violation: WalletPolicyViolation,
+    wallet: WalletPolicyViolation["wallets"][number],
+  ) {
+    const token = auth.getToken();
+    if (!tenantId || !token) return;
+    const label = violation.email || violation.name || violation.userId;
+    if (
+      !window.confirm(
+        `Remove ${walletProviderLabel(wallet.provider)} wallet ${wallet.providerAccountId} from ${label}? This revokes the user's sessions and writes audit events.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      setWalletPolicyRemediationTarget(wallet.accountId);
+      setWalletPolicyReportError(null);
+      setWalletPolicyRemediationMessage(null);
+      const result = await userRequest<WalletPolicyRemediationResult>(
+        `/user/me/tenants/${encodeURIComponent(tenantId)}/users/${encodeURIComponent(violation.userId)}/wallet-policy/wallets/${encodeURIComponent(wallet.accountId)}`,
+        token,
+        { method: "DELETE" },
+      );
+      setWalletPolicyRemediationMessage(
+        `Removed ${walletProviderLabel(result.provider)} wallet ${result.providerAccountId}. Sessions issued before ${new Date(result.issuedBefore).toLocaleString()} were revoked.`,
+      );
+      await loadWalletPolicyReport();
+    } catch (err) {
+      setWalletPolicyReportError(
+        err instanceof Error ? err.message : "Failed to remediate wallet policy violation",
+      );
+    } finally {
+      setWalletPolicyRemediationTarget(null);
+    }
+  }
+
+  function toggleWalletPolicySelection(userId: string, accountId: string, selected: boolean) {
+    const key = walletSelectionKey(userId, accountId);
+    setWalletPolicySelectedWallets((current) => {
+      const next = { ...current };
+      if (selected) next[key] = { userId, accountId };
+      else delete next[key];
+      return next;
+    });
+  }
+
+  async function bulkRemediateWalletPolicyViolations() {
+    const token = auth.getToken();
+    const wallets = Object.values(walletPolicySelectedWallets);
+    if (!tenantId || !token || wallets.length === 0) return;
+    if (
+      !window.confirm(
+        `Remove ${wallets.length} selected wallet${wallets.length === 1 ? "" : "s"}? This revokes affected user sessions and writes audit events.`,
+      )
+    ) {
+      return;
+    }
+    try {
+      setWalletPolicyBulkSaving(true);
+      setWalletPolicyReportError(null);
+      setWalletPolicyRemediationMessage(null);
+      const result = await userRequest<WalletPolicyBulkRemediationResponse>(
+        `/user/me/tenants/${encodeURIComponent(tenantId)}/users/wallet-policy/remediations`,
+        token,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ wallets }),
+        },
+      );
+      setWalletPolicyRemediationMessage(
+        `Bulk remediation completed: ${result.succeeded} removed, ${result.failed} failed.`,
+      );
+      await loadWalletPolicyReport();
+    } catch (err) {
+      setWalletPolicyReportError(
+        err instanceof Error ? err.message : "Failed to bulk remediate wallet policy violations",
+      );
+    } finally {
+      setWalletPolicyBulkSaving(false);
+    }
+  }
+
   async function exportTenantUsers() {
     const token = auth.getToken();
     if (!tenantId || !token) return;
@@ -151,7 +372,7 @@ export default function UsersPage() {
       setExportSaving(true);
       setError(null);
       const params = new URLSearchParams();
-      if (query.trim()) params.set(query.includes("@") ? "email" : "q", query.trim());
+      applyUserSearchParams(params, query, searchField);
       const response = await fetch(
         `${API_URL}/user/me/tenants/${encodeURIComponent(tenantId)}/users/export?${params.toString()}`,
         {
@@ -377,6 +598,8 @@ export default function UsersPage() {
     }
   }
 
+  const walletPolicySelectedCount = Object.keys(walletPolicySelectedWallets).length;
+
   return (
     <motion.div
       initial={{ opacity: 0 }}
@@ -392,7 +615,7 @@ export default function UsersPage() {
       <section className="border border-border-subtle bg-bg">
         <form
           onSubmit={loadTenantUsers}
-          className="grid grid-cols-1 gap-3 border-b border-border-subtle p-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+          className="grid grid-cols-1 gap-3 border-b border-border-subtle p-4 md:grid-cols-[minmax(0,1fr)_180px_minmax(0,1fr)_auto]"
         >
           <div>
             <label className="text-xs text-text-tertiary block mb-1.5">Tenant</label>
@@ -405,10 +628,30 @@ export default function UsersPage() {
           </div>
           <div>
             <label className="text-xs text-text-tertiary block mb-1.5">Search</label>
+            <select
+              aria-label="Search field"
+              value={searchField}
+              onChange={(event) => setSearchField(event.target.value as SearchField)}
+              className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+            >
+              <option value="auto">Auto</option>
+              <option value="q">Name or User ID</option>
+              <option value="email">Email</option>
+              <option value="walletExternalId">Wallet External ID</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-text-tertiary block mb-1.5">Query</label>
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="email, name, or user id"
+              placeholder={
+                searchField === "walletExternalId"
+                  ? "wallet external id"
+                  : searchField === "email"
+                    ? "user@example.com"
+                    : "email, name, or user id"
+              }
               className="w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
             />
           </div>
@@ -431,7 +674,7 @@ export default function UsersPage() {
               </button>
             </div>
           </div>
-          <label className="flex items-center gap-2 text-xs text-text-tertiary md:col-span-3">
+          <label className="flex items-center gap-2 text-xs text-text-tertiary md:col-span-4">
             <input
               type="checkbox"
               checked={sendInviteEmail}
@@ -465,7 +708,7 @@ export default function UsersPage() {
                 key={user.userId}
                 type="button"
                 onClick={() => loadTenantUser(user.userId)}
-                className="grid w-full grid-cols-1 gap-3 px-4 py-4 text-left hover:bg-bg-elevated/40 transition-colors md:grid-cols-[minmax(0,1.4fr)_minmax(0,.65fr)_minmax(0,.75fr)_minmax(0,1fr)_auto]"
+                className="grid w-full grid-cols-1 gap-3 px-4 py-4 text-left hover:bg-bg-elevated/40 transition-colors md:grid-cols-[minmax(0,1.4fr)_minmax(0,.7fr)_minmax(0,.65fr)_minmax(0,.75fr)_minmax(0,1fr)_auto]"
               >
                 <div className="min-w-0">
                   <div className="truncate text-sm font-medium text-text">{userLabel(user)}</div>
@@ -475,6 +718,19 @@ export default function UsersPage() {
                     </span>
                     <CopyButton text={user.userId} />
                   </div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-xs text-text-tertiary">Wallet External ID</div>
+                  {walletExternalIds(user).length > 0 ? (
+                    <div className="mt-1 flex items-center gap-2">
+                      <span className="truncate font-mono text-xs text-text-secondary">
+                        {walletExternalIds(user)[0]}
+                      </span>
+                      <CopyButton text={walletExternalIds(user)[0]} />
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-sm text-text-tertiary">—</div>
+                  )}
                 </div>
                 <div className="min-w-0">
                   <div className="text-xs text-text-tertiary">Role</div>
@@ -505,6 +761,189 @@ export default function UsersPage() {
             ))
           )}
         </div>
+      </section>
+
+      <section className="border border-border-subtle bg-bg">
+        <div className="flex flex-col gap-3 border-b border-border-subtle p-4 md:flex-row md:items-center md:justify-between">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              Third-Party Wallet Policy
+            </h2>
+            <p className="mt-1 max-w-2xl text-xs text-text-tertiary">
+              Existing tenant users with more than one linked EVM or Solana wallet.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {walletPolicyReport?.violations.length ? (
+              <div className="text-xs text-text-tertiary">{walletPolicySelectedCount} selected</div>
+            ) : null}
+            <button
+              type="button"
+              onClick={bulkRemediateWalletPolicyViolations}
+              disabled={walletPolicySelectedCount === 0 || walletPolicyBulkSaving}
+              className="h-9 border border-red-400/40 px-3 text-sm text-red-300 transition-colors hover:border-red-300 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {walletPolicyBulkSaving ? "Removing Selected" : "Remove Selected"}
+            </button>
+            <button
+              type="button"
+              onClick={loadWalletPolicyReport}
+              disabled={
+                !tenantId ||
+                !auth.getToken() ||
+                walletPolicyReportState === "loading" ||
+                walletPolicyBulkSaving
+              }
+              className="h-9 border border-border px-3 text-sm text-text-secondary hover:border-accent hover:text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {walletPolicyReportState === "loading" ? "Refreshing" : "Refresh Report"}
+            </button>
+          </div>
+        </div>
+
+        {walletPolicyReportError && (
+          <div className="border-b border-border-subtle bg-red-400/5 px-4 py-3 text-xs font-mono text-red-300">
+            {walletPolicyReportError}
+          </div>
+        )}
+        {walletPolicyRemediationMessage && (
+          <div className="border-b border-border-subtle bg-emerald-400/5 px-4 py-3 text-xs text-emerald-300">
+            {walletPolicyRemediationMessage}
+          </div>
+        )}
+
+        {walletPolicyReportState === "loading" ? (
+          <div className="space-y-px">
+            {[...Array(2)].map((_, index) => (
+              <div key={index} className="h-20 animate-pulse bg-bg-elevated/40" />
+            ))}
+          </div>
+        ) : !walletPolicyReport ? (
+          <div className="p-5 text-sm text-text-tertiary">
+            Search or refresh to load the wallet policy report.
+          </div>
+        ) : (
+          <div className="divide-y divide-border-subtle">
+            <div className="grid grid-cols-1 gap-3 p-4 md:grid-cols-3">
+              <div>
+                <div className="text-xs text-text-tertiary">Policy</div>
+                <div
+                  className={
+                    walletPolicyReport.policyEnabled
+                      ? "mt-1 text-sm text-emerald-300"
+                      : "mt-1 text-sm text-text-tertiary"
+                  }
+                >
+                  {walletPolicyReport.policyEnabled ? "Enabled" : "Disabled"}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-text-tertiary">Violating Users</div>
+                <div className="mt-1 text-sm text-text-secondary">{walletPolicyReport.total}</div>
+              </div>
+              <div>
+                <div className="text-xs text-text-tertiary">Tenant</div>
+                <div className="mt-1 truncate font-mono text-sm text-text-secondary">
+                  {walletPolicyReport.tenantId}
+                </div>
+              </div>
+            </div>
+
+            {walletPolicyReport.violations.length === 0 ? (
+              <div className="p-5 text-sm text-text-tertiary">
+                No users currently violate the one-wallet policy.
+              </div>
+            ) : (
+              walletPolicyReport.violations.map((violation) => (
+                <div
+                  key={violation.userId}
+                  className="grid grid-cols-1 gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_auto]"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium text-text">
+                      {violation.email || violation.name || violation.userId}
+                    </div>
+                    <div className="mt-1 flex items-center gap-2">
+                      <span className="truncate font-mono text-xs text-text-tertiary">
+                        {violation.userId}
+                      </span>
+                      <CopyButton text={violation.userId} />
+                    </div>
+                    <div className="mt-2 text-xs text-text-tertiary">
+                      {violation.role} · {violation.walletCount} linked wallets
+                    </div>
+                  </div>
+
+                  <div className="divide-y divide-border-subtle border border-border-subtle">
+                    {violation.wallets.map((wallet) => (
+                      <div
+                        key={wallet.accountId}
+                        className="grid grid-cols-1 gap-2 p-3 md:grid-cols-[24px_72px_minmax(0,1fr)_auto]"
+                      >
+                        <label
+                          className="flex items-center"
+                          aria-label={`Select ${wallet.accountId}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={Boolean(
+                              walletPolicySelectedWallets[
+                                walletSelectionKey(violation.userId, wallet.accountId)
+                              ],
+                            )}
+                            onChange={(event) =>
+                              toggleWalletPolicySelection(
+                                violation.userId,
+                                wallet.accountId,
+                                event.target.checked,
+                              )
+                            }
+                            disabled={
+                              walletPolicyBulkSaving || walletPolicyRemediationTarget !== null
+                            }
+                            className="h-4 w-4 accent-accent disabled:opacity-40"
+                          />
+                        </label>
+                        <div className="text-xs text-text-tertiary">
+                          {walletProviderLabel(wallet.provider)}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="truncate font-mono text-xs text-text-secondary">
+                            {wallet.providerAccountId}
+                          </div>
+                          <div className="mt-1 truncate font-mono text-[11px] text-text-tertiary">
+                            {wallet.accountId}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <CopyButton text={wallet.providerAccountId} />
+                          <button
+                            type="button"
+                            onClick={() => remediateWalletPolicyViolation(violation, wallet)}
+                            disabled={walletPolicyRemediationTarget !== null}
+                            className="h-7 border border-red-400/40 px-2 text-xs text-red-300 transition-colors hover:border-red-300 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-40"
+                          >
+                            {walletPolicyRemediationTarget === wallet.accountId
+                              ? "Removing"
+                              : "Remove Wallet"}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => loadTenantUser(violation.userId)}
+                    className="h-8 self-start border border-border px-3 text-xs text-text-secondary hover:border-accent hover:text-accent transition-colors lg:self-center"
+                  >
+                    Review User
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        )}
       </section>
 
       <section className="border border-border-subtle bg-bg">
@@ -701,6 +1140,31 @@ export default function UsersPage() {
                     </div>
                   </div>
                 </div>
+              </div>
+
+              <div className="p-4">
+                <h3 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+                  Wallet External IDs
+                </h3>
+                {walletExternalIds(selected).length === 0 ? (
+                  <div className="mt-3 border border-border-subtle p-3 text-xs text-text-tertiary">
+                    No wallet external IDs returned for this tenant user.
+                  </div>
+                ) : (
+                  <div className="mt-3 divide-y divide-border-subtle border border-border-subtle">
+                    {walletExternalIds(selected).map((externalId) => (
+                      <div
+                        key={externalId}
+                        className="flex min-w-0 items-center justify-between gap-3 p-3"
+                      >
+                        <span className="truncate font-mono text-xs text-text-secondary">
+                          {externalId}
+                        </span>
+                        <CopyButton text={externalId} />
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="p-4">

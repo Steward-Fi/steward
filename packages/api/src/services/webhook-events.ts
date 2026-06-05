@@ -21,6 +21,7 @@ export const CONFIGURED_WEBHOOK_EVENT_TYPES = [
   "mfa.enabled",
   "mfa.disabled",
   "private_key.exported",
+  "wallet.imported",
   "wallet.recovery_setup",
   "wallet.recovered",
   "wallet.raw_signature.created",

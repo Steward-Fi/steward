@@ -53,7 +53,15 @@ type AuthCtx = {
     siws?: boolean;
   };
   isProvidersLoading: boolean;
+  guestState: {
+    isGuest: boolean;
+    isExpired: boolean;
+    expiryMessage: string | null;
+  };
   signOut: () => void;
+  signInAsGuest: () => Promise<unknown>;
+  upgradeGuestWithEmail: (input: unknown) => Promise<unknown>;
+  deleteGuest: () => Promise<unknown>;
   getToken: () => null;
   signInWithPasskey: (email: string) => Promise<unknown>;
   signInWithEmail: (email: string) => Promise<unknown>;
@@ -84,7 +92,11 @@ function baseCtx(overrides: Partial<AuthCtx> = {}): AuthCtx {
     session: null,
     providers: { google: true, discord: true, github: true, twitter: true, siwe: true, siws: true },
     isProvidersLoading: false,
+    guestState: { isGuest: false, isExpired: false, expiryMessage: null },
     signOut: () => {},
+    signInAsGuest: async () => ({}),
+    upgradeGuestWithEmail: async () => ({}),
+    deleteGuest: async () => ({}),
     getToken: () => null,
     signInWithPasskey: async () => ({}),
     signInWithEmail: async () => ({}),
@@ -146,6 +158,92 @@ describe("<StewardLogin /> rules-of-hooks branch coverage", () => {
     );
     expect(html).toContain("welcome");
     expect(html).toContain("passkey");
+  });
+
+  test("guest lifecycle state is available through auth context", () => {
+    function Probe() {
+      const ctx = React.useContext(StewardAuthContext);
+      return React.createElement("p", null, ctx?.guestState.expiryMessage ?? "missing");
+    }
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          guestState: {
+            isGuest: true,
+            isExpired: false,
+            expiryMessage: "Guest account expires in 3 days. Upgrade to keep your wallet and data.",
+          },
+        }),
+        React.createElement(Probe),
+      ),
+    );
+    expect(html).toContain("Guest account expires in 3 days");
+  });
+
+  test("renders default guest sign-in entry while signed out", () => {
+    const html = renderToString(
+      wrap(baseCtx({ isAuthenticated: false }), React.createElement(StewardLogin, {})),
+    );
+    expect(html).toContain('data-testid="stwd-login-guest"');
+    expect(html).toContain("continue as guest");
+  });
+
+  test("showGuest={false} hides the signed-out guest entry", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({ isAuthenticated: false }),
+        React.createElement(StewardLogin, { showGuest: false }),
+      ),
+    );
+    expect(html).not.toContain('data-testid="stwd-login-guest"');
+    expect(html).not.toContain("continue as guest");
+  });
+
+  test("renders guest lifecycle panel for authenticated guest sessions", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          isAuthenticated: true,
+          session: {
+            token: "guest-token",
+            user: { id: "guest_123", email: "" },
+          },
+          guestState: {
+            isGuest: true,
+            isExpired: false,
+            expiryMessage: "Guest account expires in 3 days. Upgrade to keep your wallet and data.",
+          },
+        }),
+        React.createElement(StewardLogin, {}),
+      ),
+    );
+    expect(html).toContain('data-testid="stwd-login-guest-lifecycle"');
+    expect(html).toContain("Guest account expires in 3 days");
+    expect(html).toContain('aria-label="guest upgrade email"');
+    expect(html).toContain('aria-label="guest upgrade token"');
+    expect(html).toContain('data-testid="stwd-login-guest-upgrade"');
+    expect(html).toContain('data-testid="stwd-login-guest-delete"');
+  });
+
+  test("showGuest={false} keeps authenticated guest sessions headless", () => {
+    const html = renderToString(
+      wrap(
+        baseCtx({
+          isAuthenticated: true,
+          session: {
+            token: "guest-token",
+            user: { id: "guest_123", email: "" },
+          },
+          guestState: {
+            isGuest: true,
+            isExpired: false,
+            expiryMessage: "Guest account expires in 3 days. Upgrade to keep your wallet and data.",
+          },
+        }),
+        React.createElement(StewardLogin, { showGuest: false }),
+      ),
+    );
+    expect(html).toBe("");
   });
 
   test("renders SMS OTP fields when backend reports sms enabled", () => {
@@ -222,7 +320,7 @@ describe("<StewardLogin /> rules-of-hooks branch coverage", () => {
         React.createElement(StewardLogin, {}),
       ),
     );
-    // Signed-in returns null.
+    // Full signed-in users return null; guest sessions render lifecycle UI.
     expect(html).toBe("");
   });
 

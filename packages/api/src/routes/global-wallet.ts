@@ -112,6 +112,33 @@ function parseAppId(value: unknown): { tenantId: string; clientId: string } | nu
   return { tenantId: match[1], clientId: match[2] };
 }
 
+function parseWalletIndex(value: unknown): number | string {
+  if (value === undefined || value === null || value === "") return 0;
+  const parsed =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && /^(0|[1-9][0-9]*)$/.test(value.trim())
+        ? Number(value.trim())
+        : NaN;
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 255) {
+    return "walletIndex must be an integer between 0 and 255";
+  }
+  return parsed;
+}
+
+function userWalletAgentId(userId: string, walletIndex: number): string {
+  return walletIndex === 0 ? `user-wallet-${userId}` : `user-wallet-${userId}-${walletIndex}`;
+}
+
+function walletIndexFromAgentId(userId: string, agentId: string | null): number | null {
+  if (!agentId) return null;
+  if (agentId === `user-wallet-${userId}`) return 0;
+  const prefix = `user-wallet-${userId}-`;
+  if (!agentId.startsWith(prefix)) return null;
+  const parsed = parseWalletIndex(agentId.slice(prefix.length));
+  return typeof parsed === "number" ? parsed : null;
+}
+
 function normalizeOrigin(value: unknown): string | null {
   if (typeof value !== "string") return null;
   try {
@@ -225,7 +252,9 @@ function stableJson(value: unknown): string {
 function globalWalletActionHash(input: {
   method: string;
   params: unknown;
+  walletAgentId: string;
   walletAddress: string;
+  walletIndex: number;
 }): string {
   return createHash("sha256").update(stableJson(input)).digest("hex");
 }
@@ -421,11 +450,15 @@ function validateAppOriginAndRedirect(
   return null;
 }
 
-async function getUserWalletAddress(userId: string): Promise<{
+async function getUserWalletAddress(
+  userId: string,
+  walletIndex: number,
+): Promise<{
   agentId: string;
   walletAddress: string;
+  walletIndex: number;
 } | null> {
-  const agentId = `user-wallet-${userId}`;
+  const agentId = userWalletAgentId(userId, walletIndex);
   const [wallet] = await getDb()
     .select({ id: agents.id, walletAddress: agents.walletAddress })
     .from(agents)
@@ -442,10 +475,11 @@ async function getUserWalletAddress(userId: string): Promise<{
         sql`${agentWallets.venue} is null`,
       ),
     );
-  return { agentId, walletAddress: evmWallet?.address ?? wallet.walletAddress };
+  return { agentId, walletAddress: evmWallet?.address ?? wallet.walletAddress, walletIndex };
 }
 
-function serializeConsent(row: ConsentRow) {
+function serializeConsent(row: ConsentRow, userId?: string) {
+  const walletIndex = userId ? walletIndexFromAgentId(userId, row.walletAgentId) : null;
   return {
     id: row.id,
     tenantId: row.tenantId,
@@ -455,6 +489,7 @@ function serializeConsent(row: ConsentRow) {
     redirectUri: row.redirectUri,
     walletAgentId: row.walletAgentId,
     walletAddress: row.walletAddress,
+    walletIndex,
     scopes: row.scopes,
     status: row.status,
     grantedAt: row.grantedAt,
@@ -509,6 +544,17 @@ async function activeConsentFor(
       ),
     );
   return consent ?? null;
+}
+
+function consentMatchesWallet(
+  consent: ConsentRow,
+  wallet: { agentId: string; walletAddress: string },
+) {
+  return (
+    consent.walletAgentId === wallet.agentId &&
+    (!consent.walletAddress ||
+      consent.walletAddress.toLowerCase() === wallet.walletAddress.toLowerCase())
+  );
 }
 
 async function consumeActionConfirmation(input: {
@@ -570,7 +616,12 @@ globalWalletRoutes.get("/consent/request", async (c) => {
   );
   if (typeof scopes === "string") return c.json<ApiResponse>({ ok: false, error: scopes }, 400);
 
-  const wallet = await getUserWalletAddress(c.get("userId"));
+  const walletIndex = parseWalletIndex(c.req.query("wallet_index") ?? c.req.query("walletIndex"));
+  if (typeof walletIndex === "string") {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex }, 400);
+  }
+
+  const wallet = await getUserWalletAddress(c.get("userId"), walletIndex);
   if (!wallet) {
     return c.json<ApiResponse>(
       { ok: false, error: "No wallet found - call POST /user/me/wallet to provision" },
@@ -578,12 +629,14 @@ globalWalletRoutes.get("/consent/request", async (c) => {
     );
   }
 
-  const existingConsent = await activeConsentFor(
+  const activeConsent = await activeConsentFor(
     c.get("userId"),
     parsed.tenantId,
     parsed.clientId,
     origin!,
   );
+  const existingConsent =
+    activeConsent && consentMatchesWallet(activeConsent, wallet) ? activeConsent : null;
 
   return c.json<ApiResponse>({
     ok: true,
@@ -598,8 +651,8 @@ globalWalletRoutes.get("/consent/request", async (c) => {
         redirectUri,
       },
       requestedScopes: scopes,
-      wallet: { agentId: wallet.agentId, address: wallet.walletAddress },
-      consent: existingConsent ? serializeConsent(existingConsent) : null,
+      wallet: { agentId: wallet.agentId, address: wallet.walletAddress, walletIndex },
+      consent: existingConsent ? serializeConsent(existingConsent, c.get("userId")) : null,
     },
   });
 });
@@ -620,6 +673,8 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
     redirectUri?: unknown;
     scope?: unknown;
     scopes?: unknown;
+    wallet_index?: unknown;
+    walletIndex?: unknown;
   }>(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
 
@@ -641,7 +696,12 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
   const scopes = parseScopes(body.scopes ?? body.scope, client.globalWalletAllowedScopes);
   if (typeof scopes === "string") return c.json<ApiResponse>({ ok: false, error: scopes }, 400);
 
-  const wallet = await getUserWalletAddress(c.get("userId"));
+  const walletIndex = parseWalletIndex(body.wallet_index ?? body.walletIndex);
+  if (typeof walletIndex === "string") {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex }, 400);
+  }
+
+  const wallet = await getUserWalletAddress(c.get("userId"), walletIndex);
   if (!wallet) {
     return c.json<ApiResponse>(
       { ok: false, error: "No wallet found - call POST /user/me/wallet to provision" },
@@ -654,7 +714,7 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
     tenantId: parsed.tenantId,
     action: "global_wallet.consent.approve.authorized",
     resourceId: `${parsed.clientId}:${origin}`,
-    metadata: { clientId: parsed.clientId, origin, redirectUri, scopes },
+    metadata: { clientId: parsed.clientId, origin, redirectUri, scopes, walletIndex },
   });
 
   const revokedAtApprove = await getDb()
@@ -705,7 +765,7 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
       tenantId: parsed.tenantId,
       action: "global_wallet.consent.approved",
       resourceId: consent.id,
-      metadata: { clientId: parsed.clientId, origin, redirectUri, scopes },
+      metadata: { clientId: parsed.clientId, origin, redirectUri, scopes, walletIndex },
     });
   } catch (error) {
     await getDb().transaction(async (tx) => {
@@ -734,8 +794,8 @@ globalWalletRoutes.post("/consent/approve", async (c) => {
   return c.json<ApiResponse>({
     ok: true,
     data: {
-      consent: serializeConsent(consent),
-      wallet: { agentId: wallet.agentId, address: wallet.walletAddress },
+      consent: serializeConsent(consent, c.get("userId")),
+      wallet: { agentId: wallet.agentId, address: wallet.walletAddress, walletIndex },
     },
   });
 });
@@ -746,7 +806,10 @@ globalWalletRoutes.get("/consents", async (c) => {
     .from(userWalletAppConsents)
     .where(eq(userWalletAppConsents.userId, c.get("userId")))
     .orderBy(sql`${userWalletAppConsents.updatedAt} desc`);
-  return c.json<ApiResponse>({ ok: true, data: { consents: rows.map(serializeConsent) } });
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { consents: rows.map((row) => serializeConsent(row, c.get("userId"))) },
+  });
 });
 
 globalWalletRoutes.post("/consents/:id/revoke", async (c) => {
@@ -777,7 +840,10 @@ globalWalletRoutes.post("/consents/:id/revoke", async (c) => {
     resourceId: consent.id,
     metadata: { clientId: consent.clientId, origin: consent.origin },
   });
-  return c.json<ApiResponse>({ ok: true, data: { consent: serializeConsent(consent) } });
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { consent: serializeConsent(consent, c.get("userId")) },
+  });
 });
 
 globalWalletRoutes.post("/rpc/confirm", async (c) => {
@@ -794,6 +860,8 @@ globalWalletRoutes.post("/rpc/confirm", async (c) => {
     origin?: unknown;
     method?: unknown;
     params?: unknown;
+    wallet_index?: unknown;
+    walletIndex?: unknown;
   }>(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
 
@@ -829,13 +897,13 @@ globalWalletRoutes.post("/rpc/confirm", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: `Consent does not include ${method}` }, 403);
   }
 
-  const wallet = await getUserWalletAddress(c.get("userId"));
+  const walletIndex = parseWalletIndex(body.wallet_index ?? body.walletIndex);
+  if (typeof walletIndex === "string") {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex }, 400);
+  }
+  const wallet = await getUserWalletAddress(c.get("userId"), walletIndex);
   if (!wallet) return c.json<ApiResponse>({ ok: false, error: "No wallet found" }, 404);
-  if (
-    consent.walletAgentId !== wallet.agentId ||
-    (consent.walletAddress &&
-      consent.walletAddress.toLowerCase() !== wallet.walletAddress.toLowerCase())
-  ) {
+  if (!consentMatchesWallet(consent, wallet)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Global wallet consent is no longer valid for the current wallet" },
       403,
@@ -896,36 +964,96 @@ globalWalletRoutes.post("/rpc/confirm", async (c) => {
   const requestHash = globalWalletActionHash({
     method,
     params: body.params,
+    walletAgentId: wallet.agentId,
     walletAddress: wallet.walletAddress,
+    walletIndex,
   });
-  const [confirmation] = await getDb()
-    .insert(globalWalletActionConfirmations)
-    .values({
-      consentId: consent.id,
-      tenantId: parsed.tenantId,
-      clientId: parsed.clientId,
-      userId: c.get("userId"),
-      origin: origin!,
-      method,
-      requestHash,
-      status: "approved",
-      expiresAt,
-      approvedAt: now,
-      updatedAt: now,
-    })
-    .returning();
+  const confirmation = await getDb().transaction(async (tx) => {
+    if (process.env.STEWARD_DB_MODE !== "pglite" && process.env.STEWARD_PGLITE_MEMORY !== "true") {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(hashtext(${`global-wallet-confirmation:${consent.id}:${method}:${requestHash}`}))`,
+      );
+    }
+    const [existing] = await tx
+      .select({ id: globalWalletActionConfirmations.id })
+      .from(globalWalletActionConfirmations)
+      .where(
+        and(
+          eq(globalWalletActionConfirmations.consentId, consent.id),
+          eq(globalWalletActionConfirmations.userId, c.get("userId")),
+          eq(globalWalletActionConfirmations.tenantId, parsed.tenantId),
+          eq(globalWalletActionConfirmations.clientId, parsed.clientId),
+          eq(globalWalletActionConfirmations.origin, origin!),
+          eq(globalWalletActionConfirmations.method, method),
+          eq(globalWalletActionConfirmations.requestHash, requestHash),
+          eq(globalWalletActionConfirmations.status, "approved"),
+          sql`${globalWalletActionConfirmations.expiresAt} > now()`,
+        ),
+      )
+      .limit(1);
+    if (existing) return null;
+    const [row] = await tx
+      .insert(globalWalletActionConfirmations)
+      .values({
+        consentId: consent.id,
+        tenantId: parsed.tenantId,
+        clientId: parsed.clientId,
+        userId: c.get("userId"),
+        origin: origin!,
+        method,
+        requestHash,
+        status: "approved",
+        expiresAt,
+        approvedAt: now,
+        updatedAt: now,
+      })
+      .returning();
+    return row;
+  });
 
-  await writeGlobalWalletAudit(c, {
-    tenantId: parsed.tenantId,
-    action: "global_wallet.rpc.action_confirmed",
-    resourceId: consent.id,
-    metadata: { clientId: parsed.clientId, origin, method, confirmationId: confirmation.id },
-  });
+  if (!confirmation) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Global wallet action confirmation is already pending" },
+      409,
+    );
+  }
+
+  try {
+    await writeGlobalWalletAudit(c, {
+      tenantId: parsed.tenantId,
+      action: "global_wallet.rpc.action_confirmed",
+      resourceId: consent.id,
+      metadata: {
+        clientId: parsed.clientId,
+        origin,
+        method,
+        walletAgentId: wallet.agentId,
+        walletAddress: wallet.walletAddress,
+        walletIndex,
+        confirmationId: confirmation.id,
+      },
+    });
+  } catch (error) {
+    await getDb()
+      .delete(globalWalletActionConfirmations)
+      .where(
+        and(
+          eq(globalWalletActionConfirmations.id, confirmation.id),
+          eq(globalWalletActionConfirmations.userId, c.get("userId")),
+        ),
+      );
+    throw error;
+  }
 
   setNoStoreHeaders(c);
   return c.json<ApiResponse>({
     ok: true,
-    data: { confirmationId: confirmation.id, method, expiresAt: expiresAt.toISOString() },
+    data: {
+      confirmationId: confirmation.id,
+      method,
+      wallet: { agentId: wallet.agentId, address: wallet.walletAddress, walletIndex },
+      expiresAt: expiresAt.toISOString(),
+    },
   });
 });
 
@@ -936,6 +1064,8 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
     origin?: unknown;
     method?: unknown;
     params?: unknown;
+    wallet_index?: unknown;
+    walletIndex?: unknown;
   }>(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
 
@@ -971,13 +1101,13 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: `Consent does not include ${method}` }, 403);
   }
 
-  const wallet = await getUserWalletAddress(c.get("userId"));
+  const walletIndex = parseWalletIndex(body.wallet_index ?? body.walletIndex);
+  if (typeof walletIndex === "string") {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex }, 400);
+  }
+  const wallet = await getUserWalletAddress(c.get("userId"), walletIndex);
   if (!wallet) return c.json<ApiResponse>({ ok: false, error: "No wallet found" }, 404);
-  if (
-    consent.walletAgentId !== wallet.agentId ||
-    (consent.walletAddress &&
-      consent.walletAddress.toLowerCase() !== wallet.walletAddress.toLowerCase())
-  ) {
+  if (!consentMatchesWallet(consent, wallet)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Global wallet consent is no longer valid for the current wallet" },
       403,
@@ -1021,6 +1151,9 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
       clientId: parsed.clientId,
       origin,
       method,
+      walletAgentId: wallet.agentId,
+      walletAddress: wallet.walletAddress,
+      walletIndex,
       to: parsedTx.to,
       valueWei: parsedTx.valueWei,
       chainId: parsedTx.chainId,
@@ -1033,7 +1166,7 @@ globalWalletRoutes.post("/rpc/scan", async (c) => {
     ok: true,
     data: {
       method,
-      wallet: { address: wallet.walletAddress, agentId: wallet.agentId },
+      wallet: { address: wallet.walletAddress, agentId: wallet.agentId, walletIndex },
       transaction: parsedTx,
       blocked,
       riskLevel: blocked ? "blocked" : parsedTx.valueWei === "0" ? "low" : "medium",
@@ -1061,6 +1194,8 @@ globalWalletRoutes.post("/rpc", async (c) => {
     confirmationId?: unknown;
     id?: unknown;
     jsonrpc?: unknown;
+    wallet_index?: unknown;
+    walletIndex?: unknown;
   }>(c);
   if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON body" }, 400);
 
@@ -1116,13 +1251,13 @@ globalWalletRoutes.post("/rpc", async (c) => {
     );
   }
 
-  const wallet = await getUserWalletAddress(c.get("userId"));
+  const walletIndex = parseWalletIndex(body.wallet_index ?? body.walletIndex);
+  if (typeof walletIndex === "string") {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex }, 400);
+  }
+  const wallet = await getUserWalletAddress(c.get("userId"), walletIndex);
   if (!wallet) return c.json<ApiResponse>({ ok: false, error: "No wallet found" }, 404);
-  if (
-    consent.walletAgentId !== wallet.agentId ||
-    (consent.walletAddress &&
-      consent.walletAddress.toLowerCase() !== wallet.walletAddress.toLowerCase())
-  ) {
+  if (!consentMatchesWallet(consent, wallet)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Global wallet consent is no longer valid for the current wallet" },
       403,
@@ -1171,7 +1306,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
       requestHash: globalWalletActionHash({
         method,
         params: body.params,
+        walletAgentId: wallet.agentId,
         walletAddress: wallet.walletAddress,
+        walletIndex,
       }),
     });
     if (confirmationError) return c.json<ApiResponse>({ ok: false, error: confirmationError }, 403);
@@ -1183,6 +1320,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
         clientId: parsed.clientId,
         origin,
         method,
+        walletAgentId: wallet.agentId,
+        walletAddress: wallet.walletAddress,
+        walletIndex,
         messageLength: parsedParams.message.length,
         confirmationId: body.confirmation_id ?? body.confirmationId,
       },
@@ -1210,6 +1350,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
         clientId: parsed.clientId,
         origin,
         method,
+        walletAgentId: wallet.agentId,
+        walletAddress: wallet.walletAddress,
+        walletIndex,
         messageLength: parsedParams.message.length,
         unsafeCompatibilityMode: true,
       },
@@ -1260,7 +1403,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
       requestHash: globalWalletActionHash({
         method,
         params: body.params,
+        walletAgentId: wallet.agentId,
         walletAddress: wallet.walletAddress,
+        walletIndex,
       }),
     });
     if (confirmationError) return c.json<ApiResponse>({ ok: false, error: confirmationError }, 403);
@@ -1272,6 +1417,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
         clientId: parsed.clientId,
         origin,
         method,
+        walletAgentId: wallet.agentId,
+        walletAddress: wallet.walletAddress,
+        walletIndex,
         primaryType: parsedParams.primaryType,
         chainId: parsedParams.domain.chainId ?? null,
         verifyingContract: parsedParams.domain.verifyingContract ?? null,
@@ -1305,6 +1453,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
         clientId: parsed.clientId,
         origin,
         method,
+        walletAgentId: wallet.agentId,
+        walletAddress: wallet.walletAddress,
+        walletIndex,
         primaryType: parsedParams.primaryType,
         chainId: parsedParams.domain.chainId ?? null,
         verifyingContract: parsedParams.domain.verifyingContract ?? null,
@@ -1365,7 +1516,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
       requestHash: globalWalletActionHash({
         method,
         params: body.params,
+        walletAgentId: wallet.agentId,
         walletAddress: wallet.walletAddress,
+        walletIndex,
       }),
     });
     if (confirmationError) return c.json<ApiResponse>({ ok: false, error: confirmationError }, 403);
@@ -1377,6 +1530,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
         clientId: parsed.clientId,
         origin,
         method,
+        walletAgentId: wallet.agentId,
+        walletAddress: wallet.walletAddress,
+        walletIndex,
         to: parsedTx.to,
         valueWei: parsedTx.valueWei,
         chainId: parsedTx.chainId,
@@ -1413,6 +1569,9 @@ globalWalletRoutes.post("/rpc", async (c) => {
         clientId: parsed.clientId,
         origin,
         method,
+        walletAgentId: wallet.agentId,
+        walletAddress: wallet.walletAddress,
+        walletIndex,
         to: parsedTx.to,
         valueWei: parsedTx.valueWei,
         chainId: parsedTx.chainId,
@@ -1435,7 +1594,14 @@ globalWalletRoutes.post("/rpc", async (c) => {
     tenantId: parsed.tenantId,
     action: "global_wallet.rpc.used",
     resourceId: consent.id,
-    metadata: { clientId: parsed.clientId, origin, method },
+    metadata: {
+      clientId: parsed.clientId,
+      origin,
+      method,
+      walletAgentId: wallet.agentId,
+      walletAddress: wallet.walletAddress,
+      walletIndex,
+    },
   });
 
   const result =

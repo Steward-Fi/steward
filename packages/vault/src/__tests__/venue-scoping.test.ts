@@ -182,10 +182,10 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     ).rejects.toThrow(/No wallet found for agent legacy-agent on venue hyperliquid/);
   });
 
-  test("getWallet with neither venue nor chainId throws", async () => {
+  test("getWallet with no venue, scope, or chainId throws", async () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
     await expect(vault.getWallet({ agentId: "sol" })).rejects.toThrow(
-      /getWallet requires either `venue` or `chainId`/,
+      /getWallet requires either `venue`, `scope`, or `chainId`/,
     );
   });
 
@@ -255,10 +255,99 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     expect(all[0]!.venue).toBeNull();
   });
 
+  test("createWallet provisions Bitcoin mainnet P2WPKH metadata with a scoped row", async () => {
+    await vault.createAgent(TENANT_ID, "satoshi", "Satoshi");
+
+    const wallet = await vault.createWallet({
+      agentId: "satoshi",
+      chainType: "bitcoin",
+      bitcoin: { network: "mainnet", addressType: "p2wpkh" },
+    });
+
+    expect(wallet.agentId).toBe("satoshi");
+    expect(wallet.chainFamily).toBe("bitcoin");
+    expect(wallet.venue).toBe("bitcoin:mainnet:p2wpkh:0:0:0");
+    expect(wallet.address).toMatch(/^bc1q/);
+    expect(wallet.metadata.bitcoin).toMatchObject({
+      network: "mainnet",
+      addressType: "p2wpkh",
+      account: 0,
+      change: 0,
+      index: 0,
+      caip2: "bip122:000000000019d6689c085ae165831e93",
+    });
+    expect((wallet.metadata.bitcoin as { path: string }).path).toBe("m/84'/0'/0'/0/0");
+  });
+
+  test("listWallets serializes Bitcoin testnet Taproot metadata alongside EVM/Solana", async () => {
+    await vault.createAgent(TENANT_ID, "satoshi", "Satoshi");
+    const created = await vault.createWallet({
+      agentId: "satoshi",
+      chainType: "bitcoin",
+      bitcoin: { network: "testnet", addressType: "p2tr", account: 1, index: 7 },
+    });
+
+    const all = await vault.listWallets({ agentId: "satoshi" });
+    const bitcoin = all.find((wallet) => wallet.chainFamily === "bitcoin");
+
+    expect(bitcoin).toBeDefined();
+    expect(bitcoin?.address).toBe(created.address);
+    expect(bitcoin?.address).toMatch(/^tb1p/);
+    expect(bitcoin?.metadata.bitcoin).toMatchObject({
+      network: "testnet",
+      addressType: "p2tr",
+      account: 1,
+      change: 0,
+      index: 7,
+      caip2: "bip122:000000000933ea01ad0ee984209779ba",
+    });
+    expect(all.map((wallet) => wallet.chainFamily).sort()).toEqual(["bitcoin", "evm", "solana"]);
+  });
+
+  test("exportPrivateKey includes Bitcoin scoped key material only through break-glass", async () => {
+    await vault.createAgent(TENANT_ID, "satoshi", "Satoshi");
+    const created = await vault.createWallet({
+      agentId: "satoshi",
+      chainType: "bitcoin",
+      bitcoin: { network: "testnet", addressType: "p2tr", account: 2, index: 9 },
+    });
+
+    await expect(vault.exportPrivateKey(TENANT_ID, "satoshi")).rejects.toThrow(/break-glass/);
+
+    const exported = await vault.exportPrivateKey(TENANT_ID, "satoshi", {
+      breakGlass: true,
+      actorId: "test-actor",
+      reason: "venue-scoping unit test: verify Bitcoin export metadata",
+    });
+
+    expect(exported.bitcoin).toHaveLength(1);
+    expect(exported.bitcoin?.[0]).toMatchObject({
+      address: created.address,
+      venue: "bitcoin:testnet:p2tr:2:0:9",
+      purpose: null,
+      metadata: {
+        bitcoin: {
+          network: "testnet",
+          addressType: "p2tr",
+          path: "m/86'/1'/2'/0/9",
+          account: 2,
+          change: 0,
+          index: 9,
+          caip2: "bip122:000000000933ea01ad0ee984209779ba",
+        },
+      },
+    });
+    expect(exported.bitcoin?.[0]?.privateKey).toMatch(/^0x[0-9a-f]{64}$/);
+    expect(JSON.stringify(created)).not.toContain(exported.bitcoin?.[0]?.privateKey ?? "");
+    expect(JSON.stringify(await vault.listWallets({ agentId: "satoshi" }))).not.toContain(
+      exported.bitcoin?.[0]?.privateKey ?? "",
+    );
+  });
+
   test("createWallet rejects unknown chainType", async () => {
     await vault.createAgent(TENANT_ID, "sol", "Sol");
     await expect(
-      vault.createWallet({ agentId: "sol", venue: "x", chainType: "bitcoin" as any }),
+      vault.createWallet({ agentId: "sol", venue: "x", chainType: "unknown" as any }),
     ).rejects.toThrow(/unsupported chainType/);
   });
 
@@ -278,7 +367,7 @@ describe("Vault venue scoping (Sprint 4 Day 1)", () => {
     // Type-level: the return type has no `privateKey` / `secretKey`. Runtime:
     // verify the returned object has no key-shaped fields.
     expect(Object.keys(wallet).sort()).toEqual(
-      ["address", "agentId", "chainFamily", "purpose", "venue"].sort(),
+      ["address", "agentId", "chainFamily", "metadata", "purpose", "venue"].sort(),
     );
   });
 

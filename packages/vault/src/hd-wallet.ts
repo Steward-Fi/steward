@@ -23,12 +23,16 @@
  * Library: @scure/bip39 and @scure/bip32 — audited, no native deps.
  */
 
+import { createHash } from "node:crypto";
 import { HDKey } from "@scure/bip32";
 import * as bip39 from "@scure/bip39";
 import { wordlist as englishWordlist } from "@scure/bip39/wordlists/english";
 
 const EVM_PATH_PREFIX = "m/44'/60'";
 const SOLANA_PATH_PREFIX = "m/44'/501'";
+const BITCOIN_NATIVE_SEGWIT_PATH_PREFIX = "m/84'";
+const BITCOIN_TAPROOT_PATH_PREFIX = "m/86'";
+const BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
 
 export type MnemonicStrength = 128 | 160 | 192 | 224 | 256;
 
@@ -152,6 +156,92 @@ export async function deriveSolanaKey(
   return { secretKey: key, publicKey, path };
 }
 
+export type BitcoinNetwork = "mainnet" | "testnet";
+export type BitcoinAddressType = "p2wpkh" | "p2tr";
+
+export interface DerivedBitcoinKey {
+  /** 0x-prefixed 32-byte secp256k1 private key at the derived BIP path. */
+  privateKey: `0x${string}`;
+  /** Compressed SEC1 public key, 33 bytes hex. */
+  publicKey: `0x${string}`;
+  /** X-only public key used by Taproot, 32 bytes hex. */
+  xOnlyPublicKey: `0x${string}`;
+  address: string;
+  addressType: BitcoinAddressType;
+  network: BitcoinNetwork;
+  path: string;
+}
+
+/**
+ * Derive a Bitcoin native SegWit (BIP-84/P2WPKH) or Taproot (BIP-86/P2TR)
+ * receive/change key from the same BIP-39 seed used for the EVM/Solana wallet.
+ *
+ * This intentionally returns key material and address metadata only. Persisting
+ * Bitcoin wallets requires a DB chain-family migration because the current
+ * schema stores only EVM/Solana chain families.
+ */
+export async function deriveBitcoinKey(
+  mnemonic: string,
+  options: {
+    addressType?: BitcoinAddressType;
+    network?: BitcoinNetwork;
+    account?: number;
+    change?: 0 | 1;
+    index?: number;
+    passphrase?: string;
+  } = {},
+): Promise<DerivedBitcoinKey> {
+  const addressType = options.addressType ?? "p2wpkh";
+  const network = options.network ?? "mainnet";
+  const account = options.account ?? 0;
+  const change = options.change ?? 0;
+  const index = options.index ?? 0;
+  if (addressType !== "p2wpkh" && addressType !== "p2tr") {
+    throw new Error("addressType must be p2wpkh or p2tr");
+  }
+  if (network !== "mainnet" && network !== "testnet") {
+    throw new Error("network must be mainnet or testnet");
+  }
+  if (!Number.isInteger(account) || account < 0) {
+    throw new Error("account must be a non-negative integer");
+  }
+  if (change !== 0 && change !== 1) {
+    throw new Error("change must be 0 or 1");
+  }
+  if (!Number.isInteger(index) || index < 0) {
+    throw new Error("index must be a non-negative integer");
+  }
+
+  const seed = await mnemonicToSeed(mnemonic, options.passphrase);
+  const root = HDKey.fromMasterSeed(seed);
+  const coinType = network === "mainnet" ? 0 : 1;
+  const purpose =
+    addressType === "p2tr" ? BITCOIN_TAPROOT_PATH_PREFIX : BITCOIN_NATIVE_SEGWIT_PATH_PREFIX;
+  const path = `${purpose}/${coinType}'/${account}'/${change}/${index}`;
+  const child = root.derive(path);
+  if (!child.privateKey || !child.publicKey) {
+    throw new Error("derivation failed (no key material)");
+  }
+
+  const publicKey = compressSecp256k1(child.publicKey);
+  const xOnlyPublicKey = publicKey.slice(1);
+  const hrp = network === "mainnet" ? "bc" : "tb";
+  const address =
+    addressType === "p2tr"
+      ? encodeSegwitAddress(hrp, 1, taprootOutputKey(xOnlyPublicKey))
+      : encodeSegwitAddress(hrp, 0, hash160(publicKey));
+
+  return {
+    privateKey: bytesToHex0x(child.privateKey),
+    publicKey: bytesToHex0x(publicKey),
+    xOnlyPublicKey: bytesToHex0x(xOnlyPublicKey),
+    address,
+    addressType,
+    network,
+    path,
+  };
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 function bytesToHex0x(bytes: Uint8Array): `0x${string}` {
@@ -177,6 +267,117 @@ function uncompressSecp256k1(compressed: Uint8Array): Uint8Array {
     require("@noble/curves/secp256k1") as typeof import("@noble/curves/secp256k1");
   const point = secp256k1.ProjectivePoint.fromHex(compressed);
   return point.toRawBytes(false);
+}
+
+function compressSecp256k1(publicKey: Uint8Array): Uint8Array {
+  if (publicKey.length === 33 && (publicKey[0] === 0x02 || publicKey[0] === 0x03)) {
+    return publicKey;
+  }
+  if (publicKey.length !== 65 || publicKey[0] !== 0x04) {
+    throw new Error("expected secp256k1 public key");
+  }
+  const { secp256k1 } =
+    require("@noble/curves/secp256k1") as typeof import("@noble/curves/secp256k1");
+  const point = secp256k1.ProjectivePoint.fromHex(publicKey);
+  return point.toRawBytes(true);
+}
+
+function hash160(bytes: Uint8Array): Uint8Array {
+  return createHash("ripemd160").update(createHash("sha256").update(bytes).digest()).digest();
+}
+
+function taprootOutputKey(xOnlyPublicKey: Uint8Array): Uint8Array {
+  if (xOnlyPublicKey.length !== 32) throw new Error("Taproot x-only public key must be 32 bytes");
+  const { secp256k1 } =
+    require("@noble/curves/secp256k1") as typeof import("@noble/curves/secp256k1");
+  const tweak = bytesToNumber(taggedHash("TapTweak", xOnlyPublicKey)) % secp256k1.CURVE.n;
+  const internal = secp256k1.ProjectivePoint.fromHex(
+    concatBytes(new Uint8Array([0x02]), xOnlyPublicKey),
+  );
+  const output =
+    tweak === 0n ? internal : internal.add(secp256k1.ProjectivePoint.BASE.multiply(tweak));
+  return output.toRawBytes(true).slice(1);
+}
+
+function taggedHash(tag: string, message: Uint8Array): Uint8Array {
+  const tagHash = createHash("sha256").update(tag).digest();
+  return createHash("sha256").update(tagHash).update(tagHash).update(message).digest();
+}
+
+function bytesToNumber(bytes: Uint8Array): bigint {
+  let value = 0n;
+  for (const byte of bytes) value = (value << 8n) + BigInt(byte);
+  return value;
+}
+
+function encodeSegwitAddress(hrp: string, version: number, program: Uint8Array): string {
+  if (version < 0 || version > 16) throw new Error("invalid witness version");
+  const words = [version, ...convertBits(program, 8, 5, true)];
+  return bech32Encode(hrp, words, version === 0 ? 1 : 0x2bc830a3);
+}
+
+function bech32Encode(hrp: string, words: number[], checksumConstant: number): string {
+  const checksum = bech32CreateChecksum(hrp, words, checksumConstant);
+  const combined = [...words, ...checksum];
+  return `${hrp}1${combined.map((word) => BECH32_CHARSET[word]).join("")}`;
+}
+
+function bech32CreateChecksum(hrp: string, words: number[], checksumConstant: number): number[] {
+  const values = [...bech32HrpExpand(hrp), ...words, 0, 0, 0, 0, 0, 0];
+  const mod = bech32Polymod(values) ^ checksumConstant;
+  const result: number[] = [];
+  for (let p = 0; p < 6; p++) result.push((mod >> (5 * (5 - p))) & 31);
+  return result;
+}
+
+function bech32HrpExpand(hrp: string): number[] {
+  const high = Array.from(hrp, (char) => char.charCodeAt(0) >> 5);
+  const low = Array.from(hrp, (char) => char.charCodeAt(0) & 31);
+  return [...high, 0, ...low];
+}
+
+function bech32Polymod(values: number[]): number {
+  const generator = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+  let chk = 1;
+  for (const value of values) {
+    const top = chk >> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ value;
+    for (let i = 0; i < 5; i++) {
+      if ((top >> i) & 1) chk ^= generator[i] as number;
+    }
+  }
+  return chk;
+}
+
+function convertBits(data: Uint8Array, fromBits: number, toBits: number, pad: boolean): number[] {
+  let acc = 0;
+  let bits = 0;
+  const result: number[] = [];
+  const maxv = (1 << toBits) - 1;
+  for (const value of data) {
+    if (value < 0 || value >> fromBits !== 0) throw new Error("invalid value for bit conversion");
+    acc = (acc << fromBits) | value;
+    bits += fromBits;
+    while (bits >= toBits) {
+      bits -= toBits;
+      result.push((acc >> bits) & maxv);
+    }
+  }
+  if (pad && bits > 0) result.push((acc << (toBits - bits)) & maxv);
+  if (!pad && (bits >= fromBits || ((acc << (toBits - bits)) & maxv) !== 0)) {
+    throw new Error("invalid incomplete bit group");
+  }
+  return result;
+}
+
+function concatBytes(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    out.set(part, offset);
+    offset += part.length;
+  }
+  return out;
 }
 
 async function hmacSha512(key: Uint8Array, message: Uint8Array): Promise<Uint8Array> {

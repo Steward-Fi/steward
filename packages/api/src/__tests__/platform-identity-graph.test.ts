@@ -1,7 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 
 import { hashSha256Hex } from "@stwd/auth";
-import { accounts, closeDb, getDb, refreshTokens, tenants, users, userTenants } from "@stwd/db";
+import {
+  accounts,
+  agents,
+  closeDb,
+  getDb,
+  refreshTokens,
+  sponsoredGasEvents,
+  tenantConfigs,
+  tenants,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 
@@ -28,11 +39,14 @@ describe("platform global identity graph routes", () => {
         "platform:user:delete",
         "platform:tenant-user:read",
         "platform:tenant-user:write",
+        "platform:gas-spend:read",
         "platform:identity-migration",
         "platform:identity-migration:force",
       ],
     });
     process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION = "true";
+    process.env.STEWARD_AUDIT_HMAC_KEY =
+      "platform-identity-graph-audit-hmac-key-with-enough-entropy";
 
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
@@ -83,6 +97,7 @@ describe("platform global identity graph routes", () => {
     delete process.env.STEWARD_PLATFORM_KEYS;
     delete process.env.STEWARD_PLATFORM_KEY_SCOPES;
     delete process.env.STEWARD_ALLOW_PLATFORM_IDENTITY_MIGRATION;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   function headers() {
@@ -254,6 +269,286 @@ describe("platform global identity graph routes", () => {
     expect(customAuthBody.data.user?.userId).toBe(aliasUser.id);
   });
 
+  it("assigns wallet external ids at user creation and resolves them by lookup aliases", async () => {
+    const create = await platformRoutes.request("/users", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        email: "wallet-external-create@example.test",
+        tenantId: TENANT_ID,
+        walletExternalId: "wallet-ext-create-1",
+      }),
+    });
+
+    expect(create.status).toBe(201);
+    const createBody = (await create.json()) as {
+      data: { userId: string; isNew: boolean; tenantId: string; walletExternalId: string };
+    };
+    expect(createBody.data.isNew).toBe(true);
+    expect(createBody.data.tenantId).toBe(TENANT_ID);
+    expect(createBody.data.walletExternalId).toBe("wallet-ext-create-1");
+
+    const byQuery = await platformRoutes.request(
+      "/users/lookup?tenantId=platform-identity-graph-tenant&walletExternalId=wallet-ext-create-1",
+      { headers: headers() },
+    );
+    expect(byQuery.status).toBe(200);
+    const queryBody = (await byQuery.json()) as {
+      data: {
+        user: {
+          userId: string;
+          tenantIds: string[];
+          linkedAccounts: Array<{ provider: string }>;
+          walletExternalIds: Array<{ tenantId: string; externalId: string }>;
+        } | null;
+      };
+    };
+    expect(queryBody.data.user?.userId).toBe(createBody.data.userId);
+    expect(queryBody.data.user?.tenantIds).toEqual([TENANT_ID]);
+    expect(queryBody.data.user?.linkedAccounts).toEqual([]);
+    expect(queryBody.data.user?.walletExternalIds).toEqual([
+      { tenantId: TENANT_ID, externalId: "wallet-ext-create-1" },
+    ]);
+
+    const byAlias = await platformRoutes.request("/users/wallet/external-id", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ tenantId: TENANT_ID, externalId: "wallet-ext-create-1" }),
+    });
+    expect(byAlias.status).toBe(200);
+    const aliasBody = (await byAlias.json()) as {
+      data: { user: { userId: string } | null };
+    };
+    expect(aliasBody.data.user?.userId).toBe(createBody.data.userId);
+
+    const list = await platformRoutes.request(
+      `/tenants/${TENANT_ID}/users?walletExternalId=wallet-ext-create-1`,
+      { headers: headers() },
+    );
+    expect(list.status).toBe(200);
+    const listBody = (await list.json()) as { data: { users: Array<{ userId: string }> } };
+    expect(listBody.data.users.map((row) => row.userId)).toEqual([createBody.data.userId]);
+  });
+
+  it("connects or creates users by wallet external id idempotently", async () => {
+    const create = await platformRoutes.request("/users/wallet/external-id/connect-or-create", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        tenantId: OTHER_TENANT_ID,
+        walletExternalId: "wallet-ext-connect-1",
+        name: "External Wallet User",
+      }),
+    });
+
+    expect(create.status).toBe(201);
+    const createBody = (await create.json()) as {
+      data: {
+        userId: string;
+        isNew: boolean;
+        createdExternalId: boolean;
+        user: { walletExternalIds: Array<{ tenantId: string; externalId: string }> };
+      };
+    };
+    expect(createBody.data.isNew).toBe(true);
+    expect(createBody.data.createdExternalId).toBe(true);
+    expect(createBody.data.user.walletExternalIds).toEqual([
+      { tenantId: OTHER_TENANT_ID, externalId: "wallet-ext-connect-1" },
+    ]);
+
+    const again = await platformRoutes.request("/users/wallet/external-id/connect-or-create", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        tenantId: OTHER_TENANT_ID,
+        walletExternalId: "wallet-ext-connect-1",
+      }),
+    });
+    expect(again.status).toBe(200);
+    const againBody = (await again.json()) as {
+      data: { userId: string; isNew: boolean; createdExternalId: boolean };
+    };
+    expect(againBody.data).toMatchObject({
+      userId: createBody.data.userId,
+      isNew: false,
+      createdExternalId: false,
+    });
+  });
+
+  it("enforces wallet external id tenant uniqueness and immutability", async () => {
+    await getDb().insert(userTenants).values({
+      userId: otherUserId,
+      tenantId: TENANT_ID,
+      role: "member",
+    });
+
+    const link = await platformRoutes.request(`/users/${userId}/wallet/external-id`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ tenantId: TENANT_ID, walletExternalId: "wallet-ext-immutable-1" }),
+    });
+    expect(link.status).toBe(201);
+
+    const idempotent = await platformRoutes.request(`/users/${userId}/wallet/external-id`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ tenantId: TENANT_ID, walletExternalId: "wallet-ext-immutable-1" }),
+    });
+    expect(idempotent.status).toBe(200);
+
+    const mutate = await platformRoutes.request(`/users/${userId}/wallet/external-id`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ tenantId: TENANT_ID, walletExternalId: "wallet-ext-immutable-2" }),
+    });
+    expect(mutate.status).toBe(409);
+
+    const collision = await platformRoutes.request(`/users/${otherUserId}/wallet/external-id`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ tenantId: TENANT_ID, walletExternalId: "wallet-ext-immutable-1" }),
+    });
+    expect(collision.status).toBe(409);
+  });
+
+  it("does not leave tenant membership behind when wallet external id assignment fails", async () => {
+    await getDb()
+      .insert(accounts)
+      .values({
+        userId,
+        provider: "wallet_external_id",
+        providerAccountId: `${TENANT_ID}:wallet-ext-membership-collision`,
+      });
+    const [victim] = await getDb()
+      .insert(users)
+      .values({ email: "wallet-external-rollback@example.test", emailVerified: true })
+      .returning({ id: users.id });
+
+    const createCollision = await platformRoutes.request("/users", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        email: "wallet-external-rollback@example.test",
+        tenantId: TENANT_ID,
+        walletExternalId: "wallet-ext-membership-collision",
+      }),
+    });
+    expect(createCollision.status).toBe(409);
+
+    const leakedMembership = await getDb()
+      .select({ id: userTenants.id })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, victim.id), eq(userTenants.tenantId, TENANT_ID)));
+    expect(leakedMembership).toHaveLength(0);
+
+    await getDb()
+      .insert(accounts)
+      .values({
+        userId: victim.id,
+        provider: "wallet_external_id",
+        providerAccountId: `${TENANT_ID}:wallet-ext-victim-existing`,
+      });
+    const immutableCollision = await platformRoutes.request(
+      "/users/wallet/external-id/connect-or-create",
+      {
+        method: "POST",
+        headers: headers(),
+        body: JSON.stringify({
+          email: "wallet-external-rollback@example.test",
+          tenantId: TENANT_ID,
+          walletExternalId: "wallet-ext-victim-new",
+        }),
+      },
+    );
+    expect(immutableCollision.status).toBe(409);
+
+    const leakedImmutableMembership = await getDb()
+      .select({ id: userTenants.id })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, victim.id), eq(userTenants.tenantId, TENANT_ID)));
+    expect(leakedImmutableMembership).toHaveLength(0);
+  });
+
+  it("filters platform gas spend history by wallet external ids", async () => {
+    const walletA = "gas-spend-wallet-a";
+    const walletB = "gas-spend-wallet-b";
+    await getDb()
+      .insert(agents)
+      .values([
+        {
+          id: walletA,
+          tenantId: TENANT_ID,
+          name: "Gas Spend Wallet A",
+          walletAddress: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          platformId: "external-gas-wallet-a",
+        },
+        {
+          id: walletB,
+          tenantId: TENANT_ID,
+          name: "Gas Spend Wallet B",
+          walletAddress: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          platformId: "external-gas-wallet-b",
+        },
+      ]);
+    await getDb()
+      .insert(sponsoredGasEvents)
+      .values([
+        {
+          tenantId: TENANT_ID,
+          agentId: walletA,
+          provider: "mock",
+          mode: "erc4337",
+          status: "settled",
+          reservedUsd: "1.25",
+          actualUsd: "1.00",
+        },
+        {
+          tenantId: TENANT_ID,
+          agentId: walletB,
+          provider: "mock",
+          mode: "erc4337",
+          status: "settled",
+          reservedUsd: "2.25",
+          actualUsd: "2.00",
+        },
+      ]);
+
+    const response = await platformRoutes.request(
+      `/apps/gas_spend?tenant_id=${TENANT_ID}&wallet_external_ids=external-gas-wallet-a`,
+      { headers: headers() },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      data: {
+        count: number;
+        actualUsd: string;
+        entries: Array<{ agentId: string }>;
+      };
+    };
+    expect(body.data.count).toBe(1);
+    expect(body.data.actualUsd).toBe("1.000000");
+    expect(body.data.entries.map((entry) => entry.agentId)).toEqual([walletA]);
+
+    const missing = await platformRoutes.request(
+      `/apps/gas_spend?tenant_id=${TENANT_ID}&wallet_external_ids=missing-external-wallet`,
+      { headers: headers() },
+    );
+    expect(missing.status).toBe(404);
+
+    await getDb().insert(agents).values({
+      id: "gas-spend-wallet-duplicate",
+      tenantId: TENANT_ID,
+      name: "Gas Spend Wallet Duplicate",
+      walletAddress: "0xcccccccccccccccccccccccccccccccccccccccc",
+      platformId: "external-gas-wallet-a",
+    });
+    const ambiguous = await platformRoutes.request(
+      `/apps/gas_spend?tenant_id=${TENANT_ID}&wallet_external_ids=external-gas-wallet-a`,
+      { headers: headers() },
+    );
+    expect(ambiguous.status).toBe(409);
+  });
+
   it("links, rejects duplicate ownership, and unlinks global accounts", async () => {
     const link = await platformRoutes.request(`/users/${userId}/accounts`, {
       method: "POST",
@@ -301,6 +596,109 @@ describe("platform global identity graph routes", () => {
     );
 
     expect(response.status).toBe(409);
+  });
+
+  it("enforces tenant one-wallet policy for platform wallet links", async () => {
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        authAbuseConfig: { wallet: { restrictToOneThirdPartyWallet: true } },
+      })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { authAbuseConfig: { wallet: { restrictToOneThirdPartyWallet: true } } },
+      });
+
+    const firstWallet = await platformRoutes.request(`/users/${userId}/accounts`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        provider: "wallet:ethereum",
+        providerAccountId: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        tenantId: TENANT_ID,
+      }),
+    });
+    expect(firstWallet.status).toBe(201);
+
+    const secondWallet = await platformRoutes.request(`/users/${userId}/accounts`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        provider: "wallet:solana",
+        providerAccountId: "So11111111111111111111111111111111111111112",
+        tenantId: TENANT_ID,
+      }),
+    });
+    expect(secondWallet.status).toBe(409);
+    expect(((await secondWallet.json()) as { error: string }).error).toContain(
+      "already has a linked wallet",
+    );
+  });
+
+  it("enforces one-wallet policy from user memberships when platform link omits tenantId", async () => {
+    const [policyUser] = await getDb()
+      .insert(users)
+      .values({ email: "wallet-policy-membership@example.test", emailVerified: true })
+      .returning({ id: users.id });
+    await getDb()
+      .insert(userTenants)
+      .values({ userId: policyUser.id, tenantId: TENANT_ID, role: "member" });
+    await getDb()
+      .insert(tenantConfigs)
+      .values({
+        tenantId: TENANT_ID,
+        authAbuseConfig: { wallet: { restrictToOneThirdPartyWallet: true } },
+      })
+      .onConflictDoUpdate({
+        target: tenantConfigs.tenantId,
+        set: { authAbuseConfig: { wallet: { restrictToOneThirdPartyWallet: true } } },
+      });
+
+    const firstWallet = await platformRoutes.request(`/users/${policyUser.id}/accounts`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        provider: "wallet:ethereum",
+        providerAccountId: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      }),
+    });
+    expect(firstWallet.status).toBe(201);
+
+    const secondWallet = await platformRoutes.request(`/users/${policyUser.id}/accounts`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        provider: "wallet:solana",
+        providerAccountId: "So22222222222222222222222222222222222222222",
+      }),
+    });
+    expect(secondWallet.status).toBe(409);
+    expect(((await secondWallet.json()) as { error: string }).error).toContain(
+      "already has a linked wallet",
+    );
+  });
+
+  it("rejects platform wallet links scoped to a tenant the user is not a member of", async () => {
+    const [nonMember] = await getDb()
+      .insert(users)
+      .values({ email: "wallet-policy-nonmember@example.test", emailVerified: true })
+      .returning({ id: users.id });
+
+    const response = await platformRoutes.request(`/users/${nonMember.id}/accounts`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        provider: "wallet:ethereum",
+        providerAccountId: "0xcccccccccccccccccccccccccccccccccccccccc",
+        tenantId: TENANT_ID,
+      }),
+    });
+
+    expect(response.status).toBe(403);
+    expect(((await response.json()) as { error: string }).error).toContain(
+      "not a member of tenant",
+    );
   });
 
   it("transfers linked accounts between users and invalidates both refresh token sets", async () => {

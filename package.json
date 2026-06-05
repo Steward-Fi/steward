@@ -23,7 +23,8 @@
     "test:e2e:browser:chromium": "cd web && bun run build && bun run e2e:chromium",
     "test:e2e:all": "bun run test:e2e:smoke && bun run test:e2e:auth && bun run test:e2e:integration",
     "seed": "bun packages/seed/src/index.ts",
-    "start:local": "bun run scripts/start-local.ts"
+    "start:local": "bun run scripts/start-local.ts",
+    "privy:openapi-parity": "bun run scripts/privy-openapi-parity.ts"
   },
   "packageManager": "bun@1.3.9",
   "devDependencies": {

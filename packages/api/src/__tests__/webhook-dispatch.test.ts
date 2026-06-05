@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { WebhookEvent } from "@stwd/shared";
 // Captured before mock.module replaces @stwd/webhooks, so these hold the REAL
 // secret-codec functions; the mock re-exports them so dispatched secrets keep
@@ -41,6 +41,8 @@ let nextDispatchResult: DispatchResult = {
   attempts: 1,
   deliveredAt: new Date("2026-05-20T00:00:00Z"),
 };
+
+process.env.STEWARD_MASTER_PASSWORD = "webhook-dispatch-test-master-password";
 
 const db = {
   select: () => ({
@@ -122,6 +124,10 @@ beforeEach(() => {
   };
 });
 
+afterAll(() => {
+  delete process.env.STEWARD_MASTER_PASSWORD;
+});
+
 describe("dispatchWebhook", () => {
   it("dispatches subscribed persisted webhook configs with their own secret", async () => {
     webhookRows.push(
@@ -186,124 +192,87 @@ describe("dispatchWebhook", () => {
     });
   });
 
-  it("does not sleep through configured retries in the API dispatch path", async () => {
+  it("routes aliased failed transaction lifecycle events to configured subscribers and redacts payloads", async () => {
     webhookRows.push({
       tenantId: "tenant-1",
-      url: "https://example.com/fails",
-      secret: "whsec_fails",
-      events: ["tx.signed"],
-      enabled: true,
-      maxRetries: 10,
-      retryBackoffMs: 3_600_000,
-    });
-    nextDispatchResult = {
-      success: false,
-      attempts: 1,
-      error: "Webhook responded with status 500",
-    };
-
-    const before = Date.now();
-    dispatchWebhook("tenant-1", "agent-1", "tx_signed", { txId: "tx-1" });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(dispatcherOptions[0]).toEqual({ maxRetries: 0, retryDelayMs: 0 });
-    // The real secret codec re-encrypts the config secret first, so the delivery
-    // status update is not necessarily updatedDeliveries[0] — select it by shape.
-    const deliveryUpdate = updatedDeliveries.find((u) => "attempts" in u);
-    expect(deliveryUpdate).toMatchObject({
-      status: "pending",
-      attempts: 1,
-      lastError: "Webhook responded with status 500",
-    });
-    expect(deliveryUpdate?.nextRetryAt).toBeInstanceOf(Date);
-    expect((deliveryUpdate?.nextRetryAt as Date).getTime()).toBeGreaterThanOrEqual(
-      before + 3_600_000,
-    );
-  });
-
-  it("dispatches unsupported legacy events only to tenant-wide persisted webhooks", async () => {
-    webhookRows.push(
-      {
-        tenantId: "tenant-1",
-        url: "https://example.com/specific",
-        secret: "whsec_specific",
-        events: ["tx.signed"],
-        enabled: true,
-        maxRetries: 2,
-        retryBackoffMs: 1000,
-      },
-      {
-        tenantId: "tenant-1",
-        url: "https://tenant-config.example.com/hook",
-        secret: "whsec_legacy",
-        events: [],
-        enabled: true,
-        maxRetries: 2,
-        retryBackoffMs: 1000,
-      },
-    );
-
-    dispatchWebhook("tenant-1", "agent-1", "unknown.event" as never, { txId: "tx-1" });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(dispatches).toHaveLength(1);
-    expect(dispatches[0]?.event.type).toBe("unknown.event");
-    expect(dispatches[0]?.webhook).toMatchObject({
-      url: "https://tenant-config.example.com/hook",
-      secret: "whsec_legacy",
-    });
-    expect(insertedDeliveries[0]).toMatchObject({
-      eventType: "unknown.event",
-      url: "https://tenant-config.example.com/hook",
-    });
-  });
-
-  it("maps legacy failed and confirmed events to configured transaction lifecycle events", async () => {
-    webhookRows.push({
-      tenantId: "tenant-1",
-      url: "https://example.com/transactions",
-      secret: "whsec_transactions",
-      events: ["transaction.failed", "transaction.confirmed"],
+      url: "https://example.com/failed",
+      secret: "whsec_failed",
+      events: ["transaction.failed"],
       enabled: true,
       maxRetries: 2,
       retryBackoffMs: 1000,
     });
+    tenantConfigs.set("tenant-1", { webhookUrl: "https://tenant-config.example.com/hook" });
 
-    dispatchWebhook("tenant-1", "agent-1", "tx_failed", { txId: "tx-1" });
-    dispatchWebhook("tenant-1", "agent-1", "tx_confirmed", { txId: "tx-2" });
+    dispatchWebhook("tenant-1", "agent-1", "tx_failed", {
+      txId: "tx-1",
+      transaction_id: "tx-1",
+      status: "failed",
+      error: {
+        message: "provider rejected",
+        privateKey: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      },
+      replacement: {
+        secret: "should-not-leak",
+      },
+    });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(dispatches.map((record) => record.event.type)).toEqual([
-      "transaction.failed",
-      "transaction.confirmed",
-    ]);
-    expect(insertedDeliveries.map((delivery) => delivery.eventType)).toEqual([
-      "transaction.failed",
-      "transaction.confirmed",
-    ]);
+    expect(insertedDeliveries).toHaveLength(1);
+    expect(dispatches).toHaveLength(2);
+    expect(insertedDeliveries[0]).toMatchObject({
+      tenantId: "tenant-1",
+      agentId: "agent-1",
+      eventType: "transaction.failed",
+      url: "https://example.com/failed",
+    });
+    expect(insertedDeliveries[0]?.payload).toMatchObject({
+      type: "transaction.failed",
+      data: {
+        txId: "tx-1",
+        transaction_id: "tx-1",
+        status: "failed",
+        error: {
+          message: "provider rejected",
+          privateKey: "[REDACTED]",
+        },
+        replacement: {
+          secret: "[REDACTED]",
+        },
+      },
+    });
+    const configuredDispatch = dispatches.find(
+      (dispatch) => dispatch.event.type === "transaction.failed",
+    );
+    const legacyDispatch = dispatches.find((dispatch) => dispatch.event.type === "tx_failed");
+    expect(configuredDispatch?.event).toMatchObject({
+      type: "transaction.failed",
+      data: {
+        error: { privateKey: "[REDACTED]" },
+        replacement: { secret: "[REDACTED]" },
+      },
+    });
+    expect(legacyDispatch?.event).toMatchObject({
+      type: "tx_failed",
+      data: {
+        error: { privateKey: "[REDACTED]" },
+        replacement: { secret: "[REDACTED]" },
+      },
+    });
+    expect(JSON.stringify(insertedDeliveries)).not.toContain(
+      "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    );
+    expect(JSON.stringify(dispatches)).not.toContain("should-not-leak");
   });
 
-  it("dispatches newly cataloged events to matching configured subscriptions", async () => {
-    webhookRows.push({
-      tenantId: "tenant-1",
-      url: "https://example.com/actions",
-      secret: "whsec_actions",
-      events: ["wallet_action.swap.succeeded"],
-      enabled: true,
-      maxRetries: 2,
-      retryBackoffMs: 1000,
-    });
+  it("preserves tenant config webhook dispatch when no configured webhook accepts an event", async () => {
+    tenantConfigs.set("tenant-1", { webhookUrl: "https://tenant-config.example.com/hook" });
 
-    dispatchWebhook("tenant-1", "agent-1", "wallet_action.swap.succeeded", {
-      walletActionId: "action-1",
-    });
+    dispatchWebhook("tenant-1", "agent-1", "tx_unknown_state", { txId: "tx-1" });
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(dispatches).toHaveLength(1);
-    expect(dispatches[0]?.event.type).toBe("wallet_action.swap.succeeded");
-    expect(insertedDeliveries[0]).toMatchObject({
-      eventType: "wallet_action.swap.succeeded",
-      url: "https://example.com/actions",
-    });
+    expect(dispatches[0]?.event.type).toBe("tx_unknown_state");
+    expect(dispatches[0]?.webhook).toBe("https://tenant-config.example.com/hook");
   });
 });

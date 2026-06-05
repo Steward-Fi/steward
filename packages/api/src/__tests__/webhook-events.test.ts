@@ -12,6 +12,7 @@ describe("webhook event routing", () => {
     expect(toConfiguredWebhookEventType("tx.denied")).toBe("tx.denied");
     expect(toConfiguredWebhookEventType("tx.signed")).toBe("tx.signed");
     expect(toConfiguredWebhookEventType("policy.violation")).toBe("policy.violation");
+    expect(toConfiguredWebhookEventType("wallet.imported")).toBe("wallet.imported");
   });
 
   it("exposes Privy-like event categories as configurable subscriptions", () => {

@@ -21,7 +21,7 @@ describe("user wallet signing hardening", () => {
     expect(routeStart).toBeGreaterThanOrEqual(0);
     const routeEnd = userSource.indexOf('user.post("/me/wallet/sign-message"', routeStart);
     const routeBody = userSource.slice(routeStart, routeEnd);
-    const valueGuard = routeBody.indexOf("isUint256DecimalString(body.value)");
+    const valueGuard = routeBody.indexOf("isUint256DecimalString(signBody.value)");
     const signRequest = routeBody.indexOf("const signRequest");
 
     expect(valueGuard).toBeGreaterThanOrEqual(0);
@@ -57,6 +57,31 @@ describe("user wallet signing hardening", () => {
     expect(contractRecipientGuard).toBeGreaterThan(codeLookup);
     expect(signRequest).toBeGreaterThan(contractRecipientGuard);
     expect(routeBody).toContain("recipient contract code is verified");
+  });
+
+  it("evaluates user wallet signing policy against aggregate indexed-wallet stats", () => {
+    const routeStart = userSource.indexOf('user.post("/me/wallet/sign"');
+    expect(routeStart).toBeGreaterThanOrEqual(0);
+    const routeEnd = userSource.indexOf('user.post("/me/wallet/sign-message"', routeStart);
+    const routeBody = userSource.slice(routeStart, routeEnd);
+    const lock = routeBody.indexOf("withAgentSpendLock(");
+    const userWalletLock = routeBody.indexOf("`user-wallet-${userId}`", lock);
+    const aggregateStats = routeBody.indexOf(
+      "getUserWalletTransactionStats(userId)",
+      userWalletLock,
+    );
+    const policyEvaluation = routeBody.indexOf("engine.evaluate", aggregateStats);
+    const selectedWalletSign = routeBody.indexOf(
+      "vault.signTransaction(signRequest",
+      policyEvaluation,
+    );
+
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(userWalletLock).toBeGreaterThan(lock);
+    expect(aggregateStats).toBeGreaterThan(userWalletLock);
+    expect(policyEvaluation).toBeGreaterThan(aggregateStats);
+    expect(selectedWalletSign).toBeGreaterThan(policyEvaluation);
+    expect(userSource).toContain("inArray(transactions.agentId, agentIds)");
   });
 
   it("does not report completed user wallet broadcasts as failed if bookkeeping throws", () => {

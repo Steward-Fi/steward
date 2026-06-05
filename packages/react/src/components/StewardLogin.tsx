@@ -30,6 +30,9 @@ type LoadingButton =
   | "sms-verify"
   | "whatsapp"
   | "whatsapp-verify"
+  | "guest"
+  | "guest-upgrade"
+  | "guest-delete"
   | "google"
   | "discord"
   | "github"
@@ -165,6 +168,13 @@ export function StewardLogin({
   showEmail = true,
   showSms = true,
   showWhatsApp = true,
+  showGuest = true,
+  guestSignInLabel = "continue as guest",
+  guestUpgradeLabel = "upgrade guest",
+  guestDeleteLabel = "delete guest",
+  guestEmailPlaceholder = "you@example.com",
+  guestTokenPlaceholder = "email verification token",
+  onGuestDeleted,
   showSIWE = false,
   showWallets = false,
   showGoogle = true,
@@ -187,6 +197,8 @@ export function StewardLogin({
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [smsCode, setSmsCode] = useState("");
+  const [guestUpgradeEmail, setGuestUpgradeEmail] = useState("");
+  const [guestUpgradeToken, setGuestUpgradeToken] = useState("");
   const [smsStep, setSmsStep] = useState<SmsStep>("idle");
   const [phoneOtpChannel, setPhoneOtpChannel] = useState<PhoneOtpChannel | null>(null);
   const [step, setStep] = useState<LoginStep>("idle");
@@ -295,11 +307,6 @@ export function StewardLogin({
     );
   }
 
-  // Already signed in
-  if (ctx.isAuthenticated) {
-    return null;
-  }
-
   // Determine which OAuth providers to show based on API + props
   const googleEnabled = showGoogle && (providers?.google ?? false);
   const discordEnabled = showDiscord && (providers?.discord ?? false);
@@ -335,6 +342,63 @@ export function StewardLogin({
     setStep("error");
     setLoadingBtn(null);
     onError?.(error);
+  };
+
+  const handleGuestSignIn = async () => {
+    setStep("loading");
+    setLoadingBtn("guest");
+    setErrorMsg(null);
+    try {
+      const result = await ctx.signInAsGuest(tenantId ? { tenantId } : undefined);
+      if ("token" in result) {
+        didFireSuccess.current = true;
+        onSuccess?.({ token: result.token, user: result.user });
+      } else {
+        onSuccess?.(result);
+      }
+    } catch (err) {
+      handleError(err);
+    }
+  };
+
+  const handleGuestUpgrade = async () => {
+    const trimmedEmail = guestUpgradeEmail.trim();
+    const trimmedToken = guestUpgradeToken.trim();
+    if (!trimmedEmail || !trimmedToken) {
+      setErrorMsg("enter the guest email and verification token");
+      setStep("error");
+      return;
+    }
+    setStep("loading");
+    setLoadingBtn("guest-upgrade");
+    setErrorMsg(null);
+    try {
+      const result = await ctx.upgradeGuestWithEmail({ email: trimmedEmail, token: trimmedToken });
+      if ("token" in result) {
+        didFireSuccess.current = true;
+        onSuccess?.({ token: result.token, user: result.user });
+      } else {
+        onSuccess?.(result);
+      }
+      setLoadingBtn(null);
+      setStep("idle");
+    } catch (err) {
+      handleError(err);
+    }
+  };
+
+  const handleGuestDelete = async () => {
+    setStep("loading");
+    setLoadingBtn("guest-delete");
+    setErrorMsg(null);
+    try {
+      const result = await ctx.deleteGuest();
+      onGuestDeleted?.(result);
+      setLoadingBtn(null);
+      setStep("idle");
+    } catch (err) {
+      handleError(err);
+    }
   };
 
   const handlePasskey = async () => {
@@ -518,6 +582,83 @@ export function StewardLogin({
   const isLoading = step === "loading" || ctx.isLoading;
   const variantClass = variant === "card" ? "stwd-login--card" : "stwd-login--inline";
 
+  // Full users have already completed auth. Guests keep a small hosted/default
+  // lifecycle panel available so they can upgrade or explicitly delete the
+  // temporary account without leaving the widget.
+  if (ctx.isAuthenticated) {
+    if (!showGuest || !ctx.guestState.isGuest) return null;
+    return (
+      <div
+        className={`stwd-login ${variantClass} stwd-login--guest ${className ?? ""}`}
+        data-testid="stwd-login-guest-lifecycle"
+      >
+        <div className="stwd-login__notice">
+          <p>{ctx.guestState.expiryMessage ?? "guest session active"}</p>
+          {ctx.guestState.isExpired ? (
+            <p className="stwd-login__notice-sub">upgrade or delete this guest account</p>
+          ) : (
+            <p className="stwd-login__notice-sub">upgrade to keep your wallet and data</p>
+          )}
+        </div>
+
+        <div className="stwd-login__fields">
+          <input
+            className="stwd-login__input"
+            type="email"
+            placeholder={guestEmailPlaceholder}
+            value={guestUpgradeEmail}
+            onChange={(e) => setGuestUpgradeEmail(e.target.value)}
+            disabled={isLoading}
+            autoComplete="email"
+            aria-label="guest upgrade email"
+          />
+          <input
+            className="stwd-login__input"
+            type="text"
+            placeholder={guestTokenPlaceholder}
+            value={guestUpgradeToken}
+            onChange={(e) => setGuestUpgradeToken(e.target.value)}
+            disabled={isLoading}
+            aria-label="guest upgrade token"
+          />
+        </div>
+
+        <div className="stwd-login__actions">
+          <button
+            className="stwd-login__btn stwd-login__btn--email"
+            onClick={() => void handleGuestUpgrade()}
+            disabled={isLoading}
+            type="button"
+            data-testid="stwd-login-guest-upgrade"
+          >
+            {loadingBtn === "guest-upgrade" ? (
+              <span className="stwd-login__spinner" />
+            ) : (
+              <EmailIcon size={18} />
+            )}
+            <span>{guestUpgradeLabel}</span>
+          </button>
+          <button
+            className="stwd-login__btn stwd-login__btn--back"
+            onClick={() => void handleGuestDelete()}
+            disabled={isLoading}
+            type="button"
+            data-testid="stwd-login-guest-delete"
+          >
+            {loadingBtn === "guest-delete" ? <span className="stwd-login__spinner" /> : null}
+            <span>{guestDeleteLabel}</span>
+          </button>
+        </div>
+
+        {step === "error" && errorMsg && (
+          <p className="stwd-login__error" role="alert">
+            {errorMsg}
+          </p>
+        )}
+      </div>
+    );
+  }
+
   if (step === "email-sent") {
     const wasFallback =
       typeof window !== "undefined" &&
@@ -697,6 +838,19 @@ export function StewardLogin({
             </span>
           </button>
         )}
+
+        {showGuest && (
+          <button
+            className="stwd-login__btn stwd-login__btn--guest"
+            onClick={() => void handleGuestSignIn()}
+            disabled={isLoading}
+            type="button"
+            data-testid="stwd-login-guest"
+          >
+            {loadingBtn === "guest" ? <span className="stwd-login__spinner" /> : null}
+            <span>{guestSignInLabel}</span>
+          </button>
+        )}
       </div>
 
       {/* Wallet sign-in. Renders inline panels (Approach A) so consumers reuse
@@ -747,7 +901,7 @@ export function StewardLogin({
       )}
 
       {/* Divider */}
-      {hasOAuth && (showPasskey || showEmail || hasPhoneOtp || hasWallet) && (
+      {hasOAuth && (showPasskey || showEmail || hasPhoneOtp || hasWallet || showGuest) && (
         <div className="stwd-login__divider">
           <span>or</span>
         </div>

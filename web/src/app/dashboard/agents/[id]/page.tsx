@@ -3,6 +3,7 @@
 import type {
   AgentAccountSummary,
   AgentIdentity,
+  AgentSigner,
   PolicyRule,
   PolicyType,
   TxRecord,
@@ -30,6 +31,71 @@ interface BalanceInfo {
 }
 
 type PortfolioAsset = NonNullable<AgentAccountSummary["portfolio"]["native"]>;
+
+const DEFAULT_SIGNER_PERMISSIONS = "sign_message, sign_transaction";
+
+type DashboardAgentSigner = AgentSigner & {
+  policyIds: string[];
+  credentialSecret?: string;
+};
+
+type SignerFormState = {
+  signerType: AgentSigner["signerType"];
+  subjectType: AgentSigner["subjectType"];
+  subjectId: string;
+  keyType: AgentSigner["keyType"];
+  publicKey: string;
+  label: string;
+  permissions: string;
+  policyIds: string;
+  issueCredential: boolean;
+};
+
+type SignerEditState = {
+  status: AgentSigner["status"];
+  policyIds: string;
+};
+
+const DEFAULT_SIGNER_FORM: SignerFormState = {
+  signerType: "delegated",
+  subjectType: "external",
+  subjectId: "",
+  keyType: "p256",
+  publicKey: "",
+  label: "",
+  permissions: DEFAULT_SIGNER_PERMISSIONS,
+  policyIds: "",
+  issueCredential: false,
+};
+
+function splitCsv(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function joinCsv(values: string[] | null | undefined): string {
+  return (values ?? []).join(", ");
+}
+
+function buildSignerEdits(signers: DashboardAgentSigner[]): Record<string, SignerEditState> {
+  return Object.fromEntries(
+    signers.map((signer) => [
+      signer.id,
+      {
+        status: signer.status,
+        policyIds: joinCsv(signer.policyIds),
+      },
+    ]),
+  );
+}
+
+function signerStatusClass(status: AgentSigner["status"]): string {
+  if (status === "active") return "text-emerald-400 border-emerald-400/30 bg-emerald-400/5";
+  if (status === "paused") return "text-amber-400 border-amber-400/30 bg-amber-400/5";
+  return "text-text-tertiary border-border-subtle bg-bg-elevated/40";
+}
 
 function formatUsd(value: number | string | null | undefined): string {
   if (value === null || value === undefined || value === "") return "Unavailable";
@@ -123,13 +189,26 @@ export default function AgentDetailPage() {
   const [agent, setAgent] = useState<AgentIdentity | null>(null);
   const [policies, setPolicies] = useState<PolicyRule[]>([]);
   const [transactions, setTransactions] = useState<TxRecord[]>([]);
+  const [signers, setSigners] = useState<DashboardAgentSigner[]>([]);
   const [balance, setBalance] = useState<BalanceInfo | null>(null);
   const [account, setAccount] = useState<AgentAccountSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [policiesError, setPoliciesError] = useState<string | null>(null);
   const [transactionsError, setTransactionsError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"transactions" | "policies">("transactions");
+  const [signersError, setSignersError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"transactions" | "policies" | "signers">(
+    "transactions",
+  );
+  const [signerForm, setSignerForm] = useState<SignerFormState>(DEFAULT_SIGNER_FORM);
+  const [signerEdits, setSignerEdits] = useState<Record<string, SignerEditState>>({});
+  const [creatingSigner, setCreatingSigner] = useState(false);
+  const [createSignerError, setCreateSignerError] = useState<string | null>(null);
+  const [createdCredential, setCreatedCredential] = useState<{
+    signerId: string;
+    credentialSecret: string;
+  } | null>(null);
+  const [savingSignerId, setSavingSignerId] = useState<string | null>(null);
 
   const loadAgent = useCallback(async () => {
     try {
@@ -141,7 +220,8 @@ export default function AgentDetailPage() {
       // wallet-security page that could read as "this wallet is unprotected".
       setPoliciesError(null);
       setTransactionsError(null);
-      const [agentData, policyResult, txResult] = await Promise.all([
+      setSignersError(null);
+      const [agentData, policyResult, txResult, signerResult] = await Promise.all([
         steward.getAgent(agentId),
         steward
           .getPolicies(agentId)
@@ -161,6 +241,15 @@ export default function AgentDetailPage() {
                 error: err instanceof Error ? err.message : "Failed to load transactions",
               }) as const,
           ),
+        steward
+          .listAgentSigners(agentId)
+          .then((data) => ({ data: data as DashboardAgentSigner[] }) as const)
+          .catch(
+            (err: unknown) =>
+              ({
+                error: err instanceof Error ? err.message : "Failed to load signers",
+              }) as const,
+          ),
       ]);
       setAgent(agentData);
 
@@ -176,6 +265,15 @@ export default function AgentDetailPage() {
         setTransactions([]);
       } else {
         setTransactions(txResult.data);
+      }
+
+      if ("error" in signerResult) {
+        setSignersError(signerResult.error);
+        setSigners([]);
+        setSignerEdits({});
+      } else {
+        setSigners(signerResult.data);
+        setSignerEdits(buildSignerEdits(signerResult.data));
       }
 
       // Fetch account aggregation separately so the legacy detail shell still loads
@@ -201,6 +299,94 @@ export default function AgentDetailPage() {
       setLoading(false);
     }
   }, [agentId]);
+
+  async function createSigner(e: React.FormEvent) {
+    e.preventDefault();
+    if (!signerForm.subjectId.trim()) return;
+    if (signerForm.keyType === "p256" && !signerForm.publicKey.trim()) return;
+
+    setCreateSignerError(null);
+    setCreatedCredential(null);
+    try {
+      setCreatingSigner(true);
+      const created = (await steward.createAgentSigner(agentId, {
+        signerType: signerForm.signerType,
+        subjectType: signerForm.subjectType,
+        subjectId: signerForm.subjectId.trim(),
+        keyType: signerForm.keyType,
+        publicKey: signerForm.keyType === "p256" ? signerForm.publicKey.trim() : null,
+        label: signerForm.label.trim() || null,
+        permissions: splitCsv(signerForm.permissions),
+        policyIds: splitCsv(signerForm.policyIds),
+        issueCredential: signerForm.keyType === "hmac" ? signerForm.issueCredential : undefined,
+      } as unknown as Parameters<typeof steward.createAgentSigner>[1])) as DashboardAgentSigner;
+      setSigners((prev) => [created, ...prev.filter((signer) => signer.id !== created.id)]);
+      setSignerEdits((prev) => ({
+        ...prev,
+        [created.id]: {
+          status: created.status,
+          policyIds: joinCsv(created.policyIds),
+        },
+      }));
+      if (created.credentialSecret) {
+        setCreatedCredential({ signerId: created.id, credentialSecret: created.credentialSecret });
+      }
+      setSignerForm(DEFAULT_SIGNER_FORM);
+    } catch (err: unknown) {
+      setCreateSignerError(err instanceof Error ? err.message : "Failed to create signer");
+    } finally {
+      setCreatingSigner(false);
+    }
+  }
+
+  async function saveSigner(signer: DashboardAgentSigner) {
+    const edit = signerEdits[signer.id];
+    if (!edit) return;
+
+    setSavingSignerId(signer.id);
+    setCreateSignerError(null);
+    try {
+      const updated = (await steward.updateAgentSigner(agentId, signer.id, {
+        status: edit.status,
+        policyIds: splitCsv(edit.policyIds),
+      } as unknown as Parameters<typeof steward.updateAgentSigner>[2])) as DashboardAgentSigner;
+      setSigners((prev) => prev.map((current) => (current.id === updated.id ? updated : current)));
+      setSignerEdits((prev) => ({
+        ...prev,
+        [updated.id]: {
+          status: updated.status,
+          policyIds: joinCsv(updated.policyIds),
+        },
+      }));
+    } catch (err: unknown) {
+      setCreateSignerError(err instanceof Error ? err.message : "Failed to update signer");
+    } finally {
+      setSavingSignerId(null);
+    }
+  }
+
+  async function revokeSigner(signer: DashboardAgentSigner) {
+    const confirmed = window.confirm(`Revoke signer ${signer.subjectId}?`);
+    if (!confirmed) return;
+
+    setSavingSignerId(signer.id);
+    setCreateSignerError(null);
+    try {
+      const updated = (await steward.revokeAgentSigner(agentId, signer.id)) as DashboardAgentSigner;
+      setSigners((prev) => prev.map((current) => (current.id === updated.id ? updated : current)));
+      setSignerEdits((prev) => ({
+        ...prev,
+        [updated.id]: {
+          status: updated.status,
+          policyIds: joinCsv(updated.policyIds),
+        },
+      }));
+    } catch (err: unknown) {
+      setCreateSignerError(err instanceof Error ? err.message : "Failed to revoke signer");
+    } finally {
+      setSavingSignerId(null);
+    }
+  }
 
   useEffect(() => {
     void loadAgent();
@@ -268,6 +454,10 @@ export default function AgentDetailPage() {
   const pendingCount = transactions.filter((tx) => tx.status === "pending").length;
 
   const activePolicies = policies.filter((p) => p.enabled).length;
+  const availablePolicyIds = policies
+    .filter((policy) => !policy.id.startsWith("default-"))
+    .map((policy) => policy.id);
+  const activeSigners = signers.filter((signer) => signer.status === "active").length;
   const portfolio = account?.portfolio;
   const nativeAsset = portfolio?.native;
   const tokenAssets = portfolio?.tokens ?? [];
@@ -483,7 +673,7 @@ export default function AgentDetailPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 border-b border-border-subtle">
-        {(["transactions", "policies"] as const).map((tab) => (
+        {(["transactions", "policies", "signers"] as const).map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
@@ -493,7 +683,9 @@ export default function AgentDetailPage() {
           >
             {tab === "transactions"
               ? `Transactions ${transactionsError ? "(!)" : `(${transactions.length})`}`
-              : `Policies ${policiesError ? "(!)" : `(${activePolicies}/${policies.length})`}`}
+              : tab === "policies"
+                ? `Policies ${policiesError ? "(!)" : `(${activePolicies}/${policies.length})`}`
+                : `Signers ${signersError ? "(!)" : `(${activeSigners}/${signers.length})`}`}
             {activeTab === tab && (
               <motion.div
                 layoutId="agent-tab-indicator"
@@ -658,6 +850,340 @@ export default function AgentDetailPage() {
                 </motion.div>
               ))}
             </div>
+          </div>
+        ))}
+
+      {/* Signers Tab */}
+      {activeTab === "signers" &&
+        (signersError ? (
+          <div className="py-16 text-center border border-red-400/20 bg-red-400/5">
+            <p className="text-text-secondary text-sm mb-1">Couldn&apos;t load signers</p>
+            <p className="text-text-tertiary text-xs mb-4 font-mono">{signersError}</p>
+            <button
+              onClick={loadAgent}
+              className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors"
+            >
+              Retry
+            </button>
+          </div>
+        ) : (
+          <div className="space-y-8">
+            <form onSubmit={createSigner} className="border border-border bg-bg-elevated p-5">
+              <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-4">
+                <div>
+                  <h3 className="font-display text-sm font-600">Create Authorization Key</h3>
+                  <p className="text-xs text-text-tertiary mt-1">
+                    {availablePolicyIds.length > 0
+                      ? `Available policy IDs: ${availablePolicyIds.join(", ")}`
+                      : "No configured policy IDs returned for this agent"}
+                  </p>
+                </div>
+                <button
+                  type="submit"
+                  disabled={
+                    creatingSigner ||
+                    !signerForm.subjectId.trim() ||
+                    (signerForm.keyType === "p256" && !signerForm.publicKey.trim())
+                  }
+                  className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed font-medium"
+                >
+                  {creatingSigner ? "Creating..." : "Create Signer"}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mt-5">
+                <div>
+                  <label className="text-xs text-text-tertiary block mb-1.5" htmlFor="signer-type">
+                    Signer Type
+                  </label>
+                  <select
+                    id="signer-type"
+                    value={signerForm.signerType}
+                    onChange={(e) =>
+                      setSignerForm({
+                        ...signerForm,
+                        signerType: e.target.value as AgentSigner["signerType"],
+                      })
+                    }
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                  >
+                    <option value="delegated">Delegated</option>
+                    <option value="service">Service</option>
+                    <option value="owner">Owner</option>
+                    <option value="quorum_member">Quorum member</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-text-tertiary block mb-1.5" htmlFor="subject-type">
+                    Subject Type
+                  </label>
+                  <select
+                    id="subject-type"
+                    value={signerForm.subjectType}
+                    onChange={(e) =>
+                      setSignerForm({
+                        ...signerForm,
+                        subjectType: e.target.value as AgentSigner["subjectType"],
+                      })
+                    }
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                  >
+                    <option value="external">External</option>
+                    <option value="user">User</option>
+                    <option value="wallet">Wallet</option>
+                    <option value="api_key">API key</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-text-tertiary block mb-1.5" htmlFor="key-type">
+                    Key Type
+                  </label>
+                  <select
+                    id="key-type"
+                    value={signerForm.keyType}
+                    onChange={(e) =>
+                      setSignerForm({
+                        ...signerForm,
+                        keyType: e.target.value as AgentSigner["keyType"],
+                        issueCredential:
+                          e.target.value === "hmac" ? signerForm.issueCredential : false,
+                      })
+                    }
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                  >
+                    <option value="p256">P-256 authorization key</option>
+                    <option value="hmac">HMAC delegated secret</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-text-tertiary block mb-1.5" htmlFor="signer-label">
+                    Label
+                  </label>
+                  <input
+                    id="signer-label"
+                    type="text"
+                    value={signerForm.label}
+                    onChange={(e) => setSignerForm({ ...signerForm, label: e.target.value })}
+                    placeholder="Ops signer"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-text-tertiary block mb-1.5" htmlFor="subject-id">
+                    Subject ID <span className="text-accent">*</span>
+                  </label>
+                  <input
+                    id="subject-id"
+                    type="text"
+                    value={signerForm.subjectId}
+                    onChange={(e) => setSignerForm({ ...signerForm, subjectId: e.target.value })}
+                    placeholder="ops-key-1"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                  />
+                </div>
+                <div>
+                  <label
+                    className="text-xs text-text-tertiary block mb-1.5"
+                    htmlFor="signer-permissions"
+                  >
+                    Permissions
+                  </label>
+                  <input
+                    id="signer-permissions"
+                    type="text"
+                    value={signerForm.permissions}
+                    onChange={(e) => setSignerForm({ ...signerForm, permissions: e.target.value })}
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                  />
+                </div>
+                <div className="md:col-span-2">
+                  <label className="text-xs text-text-tertiary block mb-1.5" htmlFor="policy-ids">
+                    Policy IDs
+                  </label>
+                  <input
+                    id="policy-ids"
+                    type="text"
+                    value={signerForm.policyIds}
+                    onChange={(e) => setSignerForm({ ...signerForm, policyIds: e.target.value })}
+                    placeholder="policy_daily_limit, policy_sol_transfer"
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                  />
+                </div>
+              </div>
+
+              {signerForm.keyType === "p256" ? (
+                <div className="mt-4">
+                  <label className="text-xs text-text-tertiary block mb-1.5" htmlFor="public-key">
+                    Public Key <span className="text-accent">*</span>
+                  </label>
+                  <textarea
+                    id="public-key"
+                    value={signerForm.publicKey}
+                    onChange={(e) => setSignerForm({ ...signerForm, publicKey: e.target.value })}
+                    placeholder="BASE64_SPKI_P256_PUBLIC_KEY"
+                    rows={3}
+                    className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+                  />
+                </div>
+              ) : (
+                <label className="flex items-center gap-2 mt-4 text-sm text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={signerForm.issueCredential}
+                    onChange={(e) =>
+                      setSignerForm({ ...signerForm, issueCredential: e.target.checked })
+                    }
+                    className="accent-[oklch(0.75_0.15_55)]"
+                  />
+                  Issue delegated credential secret
+                </label>
+              )}
+
+              {createdCredential && (
+                <div className="mt-4 border border-amber-400/30 bg-amber-400/5 p-3">
+                  <div className="text-xs text-amber-300 mb-1">One-time credential secret</div>
+                  <div className="flex items-center gap-2">
+                    <code className="font-mono text-xs text-text break-all flex-1">
+                      {createdCredential.credentialSecret}
+                    </code>
+                    <CopyButton text={createdCredential.credentialSecret} />
+                  </div>
+                  <div className="font-mono text-xs text-text-tertiary mt-1">
+                    signerId: {createdCredential.signerId}
+                  </div>
+                </div>
+              )}
+
+              {createSignerError && (
+                <p className="text-xs text-red-400 font-mono mt-4">{createSignerError}</p>
+              )}
+            </form>
+
+            {signers.length === 0 ? (
+              <div className="py-16 text-center border border-border-subtle">
+                <p className="text-text-tertiary text-sm">No signers for this agent yet.</p>
+              </div>
+            ) : (
+              <div className="space-y-px bg-border">
+                {signers.map((signer, i) => {
+                  const edit = signerEdits[signer.id] ?? {
+                    status: signer.status,
+                    policyIds: joinCsv(signer.policyIds),
+                  };
+                  return (
+                    <motion.div
+                      key={signer.id}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      transition={{ delay: i * 0.04, duration: 0.3 }}
+                      className="bg-bg p-5"
+                    >
+                      <div className="grid grid-cols-1 lg:grid-cols-[1fr_220px_280px] gap-5">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-display font-600 text-sm text-text">
+                              {signer.label || signer.subjectId}
+                            </span>
+                            <span
+                              className={`border px-2 py-0.5 text-[11px] uppercase ${signerStatusClass(
+                                signer.status,
+                              )}`}
+                            >
+                              {signer.status}
+                            </span>
+                            <span className="border border-border-subtle px-2 py-0.5 text-[11px] text-text-tertiary uppercase">
+                              {signer.keyType}
+                            </span>
+                          </div>
+                          <div className="font-mono text-xs text-text-tertiary mt-2 break-all">
+                            {signer.subjectType}:{signer.subjectId}
+                          </div>
+                          <div className="text-xs text-text-tertiary mt-2">
+                            {signer.permissions.length > 0
+                              ? signer.permissions.join(", ")
+                              : "No permissions"}
+                            {signer.hasCredential ? " · credential stored" : ""}
+                          </div>
+                          {signer.publicKey && (
+                            <div className="font-mono text-xs text-text-tertiary mt-2 break-all">
+                              publicKey: {signer.publicKey}
+                            </div>
+                          )}
+                        </div>
+
+                        <div>
+                          <label
+                            className="text-xs text-text-tertiary block mb-1.5"
+                            htmlFor={`signer-status-${signer.id}`}
+                          >
+                            Status
+                          </label>
+                          <select
+                            id={`signer-status-${signer.id}`}
+                            value={edit.status}
+                            onChange={(e) =>
+                              setSignerEdits((prev) => ({
+                                ...prev,
+                                [signer.id]: {
+                                  ...edit,
+                                  status: e.target.value as AgentSigner["status"],
+                                },
+                              }))
+                            }
+                            className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                          >
+                            <option value="active">Active</option>
+                            <option value="paused">Paused</option>
+                            <option value="revoked">Revoked</option>
+                          </select>
+                        </div>
+
+                        <div>
+                          <label
+                            className="text-xs text-text-tertiary block mb-1.5"
+                            htmlFor={`signer-policies-${signer.id}`}
+                          >
+                            Policy IDs
+                          </label>
+                          <input
+                            id={`signer-policies-${signer.id}`}
+                            type="text"
+                            value={edit.policyIds}
+                            onChange={(e) =>
+                              setSignerEdits((prev) => ({
+                                ...prev,
+                                [signer.id]: { ...edit, policyIds: e.target.value },
+                              }))
+                            }
+                            className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors"
+                          />
+                          <div className="flex items-center gap-2 mt-3">
+                            <button
+                              type="button"
+                              aria-label={`Save signer ${signer.subjectId}`}
+                              onClick={() => saveSigner(signer)}
+                              disabled={savingSignerId === signer.id}
+                              className="px-3 py-1.5 text-xs bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40"
+                            >
+                              {savingSignerId === signer.id ? "Saving..." : "Save"}
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Revoke signer ${signer.subjectId}`}
+                              onClick={() => revokeSigner(signer)}
+                              disabled={savingSignerId === signer.id || signer.status === "revoked"}
+                              className="px-3 py-1.5 text-xs text-red-300 hover:text-red-200 transition-colors disabled:opacity-40"
+                            >
+                              Revoke
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ))}
     </motion.div>

@@ -36,4 +36,41 @@ describe("webhook URL validation", () => {
       expect(validateWebhookUrl(url)).toBe("url host must be public");
     }
   });
+
+  it("rejects the full IPv6 link-local range", () => {
+    for (const url of [
+      "https://[fe80::1]/hook",
+      "https://[fe90::1]/hook",
+      "https://[fea0::1]/hook",
+      "https://[febf::1]/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+  });
+
+  it("rejects special-use IPv4 literal addresses", () => {
+    for (const url of [
+      "https://0.0.0.0/hook",
+      "https://192.0.0.9/hook",
+      "https://192.0.2.10/hook",
+      "https://192.88.99.10/hook",
+      "https://198.18.0.1/hook",
+      "https://198.51.100.20/hook",
+      "https://203.0.113.30/hook",
+      "https://224.0.0.1/hook",
+      "https://255.255.255.255/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+  });
+
+  it("rejects IPv6 translations that embed special-use IPv4 targets", () => {
+    for (const url of [
+      "https://[::ffff:c633:6414]/hook",
+      "https://[64:ff9b::cb00:711e]/hook",
+      "https://[2002:c000:020a::]/hook",
+    ]) {
+      expect(validateWebhookUrl(url)).toBe("url host must be public");
+    }
+  });
 });

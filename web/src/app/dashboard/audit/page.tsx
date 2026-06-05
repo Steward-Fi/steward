@@ -252,6 +252,7 @@ export default function AuditPage() {
           <div className="flex-1 min-w-[140px]">
             <label className="text-xs text-text-tertiary block mb-1">Agent</label>
             <select
+              aria-label="Agent"
               value={filters.agentId}
               onChange={(e) => setFilters({ ...filters, agentId: e.target.value })}
               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
@@ -268,6 +269,7 @@ export default function AuditPage() {
           <div className="flex-1 min-w-[140px]">
             <label className="text-xs text-text-tertiary block mb-1">Action Type</label>
             <select
+              aria-label="Action Type"
               value={filters.action}
               onChange={(e) =>
                 setFilters({
@@ -288,6 +290,7 @@ export default function AuditPage() {
           <div className="flex-1 min-w-[120px]">
             <label className="text-xs text-text-tertiary block mb-1">Result</label>
             <select
+              aria-label="Result"
               value={filters.result}
               onChange={(e) => setFilters({ ...filters, result: e.target.value })}
               className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
@@ -302,6 +305,7 @@ export default function AuditPage() {
           <div className="flex-1 min-w-[140px]">
             <label className="text-xs text-text-tertiary block mb-1">From</label>
             <input
+              aria-label="From"
               type="datetime-local"
               value={filters.from}
               onChange={(e) => setFilters({ ...filters, from: e.target.value })}
@@ -312,6 +316,7 @@ export default function AuditPage() {
           <div className="flex-1 min-w-[140px]">
             <label className="text-xs text-text-tertiary block mb-1">To</label>
             <input
+              aria-label="To"
               type="datetime-local"
               value={filters.to}
               onChange={(e) => setFilters({ ...filters, to: e.target.value })}

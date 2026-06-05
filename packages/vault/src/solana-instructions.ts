@@ -26,10 +26,13 @@ import {
  * Every instruction in the message is examined. If we cannot *confidently* decode
  * an instruction — unknown program id, unrecognised discriminator, truncated data,
  * out-of-range account index — the instruction is returned with `unparsed: true`
- * and a reason. The summary's `fullyParsed` flag is false whenever ANY instruction
- * is unparsed. Callers MUST refuse to sign a not-fully-parsed transaction unless an
- * explicit, audited blind-signing opt-in is set. Unknown program ids are NEVER
- * treated as safe.
+ * and a reason. The same fail-closed marker is applied to decoded instructions
+ * whose side effects are not yet represented in the policy envelope (for example
+ * SPL approvals/delegates, mint/burn, close-account, or System account creation).
+ * The summary's `fullyParsed` flag is false whenever ANY instruction is unparsed
+ * or unsupported for policy. Callers MUST refuse to sign a not-fully-parsed
+ * transaction unless an explicit, audited blind-signing opt-in is set. Unknown
+ * program ids are NEVER treated as safe.
  *
  * The instruction byte layouts decoded here (System Program, SPL Token / Token-2022)
  * are part of those programs' stable on-chain ABIs and are decoded directly from
@@ -76,6 +79,8 @@ export type SolanaInstructionType =
   | "spl-token:CloseAccount"
   | "spl-token:InitializeAccount3"
   // Recognised but value-neutral
+  | "compute-budget:SetComputeUnitLimit"
+  | "compute-budget:SetComputeUnitPrice"
   | "compute-budget"
   | "memo"
   | "associated-token-account:Create";
@@ -280,6 +285,27 @@ function numLookupAccounts(message: VersionedMessage): number {
   );
 }
 
+const POLICY_SUPPORTED_INSTRUCTION_TYPES = new Set<SolanaInstructionType>([
+  "system:Transfer",
+  "system:CreateAccount",
+  "spl-token:Transfer",
+  "spl-token:TransferChecked",
+  "compute-budget:SetComputeUnitLimit",
+  "compute-budget",
+  "memo",
+]);
+
+function failClosedPolicyReason(instructionType: SolanaInstructionType | undefined): string | null {
+  if (!instructionType || POLICY_SUPPORTED_INSTRUCTION_TYPES.has(instructionType)) return null;
+  return `${instructionType} is decoded but not supported by the Solana policy envelope; refusing to sign without blind-signing opt-in`;
+}
+
+function markUnsupportedPolicyInstruction(ix: ParsedInstruction): ParsedInstruction {
+  if (ix.unparsed) return ix;
+  const reason = failClosedPolicyReason(ix.instructionType);
+  return reason ? { ...ix, unparsed: true, reason } : ix;
+}
+
 // ─── Little-endian byte readers ──────────────────────────────────────────────
 
 function readU32LE(data: Uint8Array, offset: number): number {
@@ -298,6 +324,60 @@ function readU64LE(data: Uint8Array, offset: number): bigint {
     result |= BigInt(data[offset + i]) << BigInt(8 * i);
   }
   return result;
+}
+
+const COMPUTE_BUDGET_IX = {
+  RequestUnitsDeprecated: 0,
+  RequestHeapFrame: 1,
+  SetComputeUnitLimit: 2,
+  SetComputeUnitPrice: 3,
+  SetLoadedAccountsDataSizeLimit: 4,
+} as const;
+
+function decodeComputeBudgetInstruction(index: number, data: Uint8Array): ParsedInstruction {
+  const base = (extra: Partial<ParsedInstruction>): ParsedInstruction => ({
+    programId: COMPUTE_BUDGET_PROGRAM_ID,
+    index,
+    unparsed: false,
+    fields: {},
+    ...extra,
+  });
+  const unparsed = (reason: string): ParsedInstruction =>
+    base({ unparsed: true, reason, fields: {} });
+
+  if (data.length < 1) return unparsed("compute budget instruction data too short");
+  const disc = data[0];
+
+  switch (disc) {
+    case COMPUTE_BUDGET_IX.SetComputeUnitLimit: {
+      if (data.length < 5) return unparsed("SetComputeUnitLimit data too short");
+      return base({
+        instructionType: "compute-budget:SetComputeUnitLimit",
+        fields: { computeUnitLimit: readU32LE(data, 1) },
+      });
+    }
+    case COMPUTE_BUDGET_IX.SetComputeUnitPrice: {
+      if (data.length < 9) return unparsed("SetComputeUnitPrice data too short");
+      const microLamports = readU64LE(data, 1);
+      if (microLamports > 0n) {
+        return unparsed(
+          "SetComputeUnitPrice sets a nonzero priority fee; no Solana priority-fee policy is configured",
+        );
+      }
+      return base({
+        instructionType: "compute-budget:SetComputeUnitPrice",
+        fields: { microLamports: "0" },
+      });
+    }
+    case COMPUTE_BUDGET_IX.RequestUnitsDeprecated:
+    case COMPUTE_BUDGET_IX.RequestHeapFrame:
+    case COMPUTE_BUDGET_IX.SetLoadedAccountsDataSizeLimit:
+      return unparsed(
+        `unsupported Compute Budget instruction discriminator ${disc}; cannot verify fee exposure`,
+      );
+    default:
+      return unparsed(`unsupported Compute Budget instruction discriminator ${disc}`);
+  }
 }
 
 // ─── System Program decoding ─────────────────────────────────────────────────
@@ -663,8 +743,7 @@ export function parseSolanaTransaction(serialized: string): ParsedTransactionSum
       return decodeTokenInstruction(programId, index, ix.data, accounts);
     }
     if (programId === COMPUTE_BUDGET_PROGRAM_ID) {
-      // No value movement; recognised as benign for policy purposes.
-      return { programId, index, instructionType: "compute-budget", unparsed: false, fields: {} };
+      return decodeComputeBudgetInstruction(index, ix.data);
     }
     if (programId === MEMO_PROGRAM_ID) {
       return { programId, index, instructionType: "memo", unparsed: false, fields: {} };
@@ -680,7 +759,7 @@ export function parseSolanaTransaction(serialized: string): ParsedTransactionSum
     };
   });
 
-  return summarize(parsed, version, accountKeys);
+  return summarize(parsed.map(markUnsupportedPolicyInstruction), version, accountKeys);
 }
 
 function summarize(

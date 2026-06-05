@@ -1,6 +1,5 @@
 import { getDb, sponsoredGasEvents, tenantConfigs as tenantConfigsTable } from "@stwd/db";
 import type {
-  ChainFamily,
   GasSponsorshipMode,
   GasSponsorshipProvider,
   SponsoredGasSpendEntry,
@@ -8,6 +7,8 @@ import type {
   TenantGasSponsorshipConfig,
 } from "@stwd/shared";
 import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
+
+type SponsoredGasChainFamily = "evm" | "solana";
 
 const PROVIDERS = new Set<GasSponsorshipProvider>([
   "custom_evm_paymaster",
@@ -359,7 +360,7 @@ export async function recordSponsoredGasEvent(input: {
   agentId: string;
   userId?: string | null;
   txId?: string | null;
-  chainFamily?: ChainFamily;
+  chainFamily?: SponsoredGasChainFamily;
   chainId?: number | null;
   caip2?: string | null;
   provider: GasSponsorshipProvider | string;
@@ -415,7 +416,7 @@ export async function reserveSponsoredGasEvent(input: {
   tenantId: string;
   agentId: string;
   txId: string;
-  chainFamily?: ChainFamily;
+  chainFamily?: SponsoredGasChainFamily;
   chainId?: number | null;
   caip2?: string | null;
   provider: GasSponsorshipProvider | string;

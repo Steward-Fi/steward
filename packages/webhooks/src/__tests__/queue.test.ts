@@ -406,6 +406,41 @@ describe("RetryQueue", () => {
     }
   });
 
+  it("blocks DNS rebinding to special-use IPv4 addresses at connection time", async () => {
+    for (const address of [
+      "192.0.2.10",
+      "192.88.99.10",
+      "198.18.0.1",
+      "198.51.100.20",
+      "203.0.113.30",
+      "255.255.255.255",
+    ]) {
+      const server = await startWebhookServer([200]);
+      const lookup: LookupFunction = (_hostname, _options, callback) => {
+        callback(null, address, 4);
+      };
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1000,
+        lookup,
+        allowInsecureHttp: true,
+      });
+
+      try {
+        const result = await dispatcher.dispatch(makeEvent(), {
+          url: server.webhook.url.replace("127.0.0.1", "rebind.example.test"),
+          secret: server.webhook.secret,
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Webhook host must resolve to a public address");
+        expect(server.requests).toHaveLength(0);
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
   it("blocks DNS rebinding to IPv4-mapped private IPv6 addresses", async () => {
     const server = await startWebhookServer([200]);
     const lookup: LookupFunction = (_hostname, _options, callback) => {
@@ -490,6 +525,34 @@ describe("RetryQueue", () => {
 
   it("blocks the IPv6 site-local fec0::/10 range", async () => {
     for (const address of ["fec0::1", "fed0::1", "feff::1"]) {
+      const server = await startWebhookServer([200]);
+      const lookup: LookupFunction = (_hostname, _options, callback) => {
+        callback(null, address, 6);
+      };
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1000,
+        lookup,
+        allowInsecureHttp: true,
+      });
+
+      try {
+        const result = await dispatcher.dispatch(makeEvent(), {
+          url: server.webhook.url.replace("127.0.0.1", "rebind.example.test"),
+          secret: server.webhook.secret,
+        });
+
+        expect(result.success).toBe(false);
+        expect(result.error).toBe("Webhook host must resolve to a public address");
+        expect(server.requests).toHaveLength(0);
+      } finally {
+        await server.close();
+      }
+    }
+  });
+
+  it("blocks Teredo and documentation IPv6 DNS rebinding answers", async () => {
+    for (const address of ["2001::1", "2001:db8::1"]) {
       const server = await startWebhookServer([200]);
       const lookup: LookupFunction = (_hostname, _options, callback) => {
         callback(null, address, 6);

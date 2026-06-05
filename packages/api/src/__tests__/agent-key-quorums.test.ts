@@ -36,6 +36,7 @@ describe("agent key quorum API", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-quorums-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "agent-quorums-audit-hmac-key-with-enough-entropy";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -102,6 +103,7 @@ describe("agent key quorum API", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   it("creates, lists, updates, and revokes key quorums", async () => {
@@ -197,6 +199,39 @@ describe("agent key quorum API", () => {
     expect(inactiveResponse.status).toBe(400);
     expect(inactiveBody.ok).toBe(false);
     expect(inactiveBody.error).toContain("inactive signer");
+  });
+
+  it("creates parent quorums with child member quorum ids", async () => {
+    const childResponse = await app.request(`/agents/${AGENT_ID}/key-quorums`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Child quorum",
+        threshold: 1,
+        memberSignerIds: [signerA],
+      }),
+    });
+    expect(childResponse.status).toBe(201);
+    const child = (await childResponse.json()) as { data: { id: string } };
+
+    const parentResponse = await app.request(`/agents/${AGENT_ID}/key-quorums`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Parent quorum",
+        threshold: 2,
+        memberSignerIds: [signerB],
+        memberQuorumIds: [child.data.id],
+        permissions: ["sign_transaction"],
+      }),
+    });
+    expect(parentResponse.status).toBe(201);
+    const parent = (await parentResponse.json()) as {
+      data: { threshold: number; memberSignerIds: string[]; memberQuorumIds: string[] };
+    };
+    expect(parent.data.threshold).toBe(2);
+    expect(parent.data.memberSignerIds).toEqual([signerB]);
+    expect(parent.data.memberQuorumIds).toEqual([child.data.id]);
   });
 
   it("does not expose key quorums to non-admin tenant credentials", async () => {

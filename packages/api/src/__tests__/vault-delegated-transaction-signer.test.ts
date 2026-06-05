@@ -2,16 +2,18 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { agentKeyQuorums, agentSigners, agents, closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
-import type { AppVariables } from "../services/context";
+import type { AppVariables, SignRequest } from "../services/context";
 import { createSignerCredentialHash } from "../services/signer-credentials";
 
 const TENANT_ID = `delegated-tx-signer-tenant-${Date.now()}`;
 const AGENT_ID = `delegated-tx-signer-agent-${Date.now()}`;
+const SCOPED_AGENT_ID = `delegated-tx-scoped-signer-agent-${Date.now()}`;
 const ALLOWED = "0x1234567890123456789012345678901234567890";
 const BLOCKED = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SIGNER_SECRET = "stwd_signer_delegated_transaction_signer_secret_0001";
 const QUORUM_SIGNER_SECRET = "stwd_signer_delegated_transaction_quorum_secret_0001";
 const READ_ONLY_SECRET = "stwd_signer_delegated_transaction_read_only_secret_0001";
+const SCOPED_SIGNER_SECRET = "stwd_signer_delegated_transaction_scoped_secret_0001";
 
 async function makeApp() {
   const { vaultRoutes } = await import("../routes/vault");
@@ -30,8 +32,14 @@ describe("vault delegated transaction signer enforcement", () => {
   let signerId = "";
   let quorumSignerId = "";
   let noPermissionSignerId = "";
+  let scopedSignerId = "";
   let quorumId = "";
   let readOnlyQuorumId = "";
+  let contextVault: typeof import("../services/context")["vault"] | undefined;
+  let originalSignTransaction:
+    | typeof import("../services/context")["vault"]["signTransaction"]
+    | undefined;
+  const signedRequests: SignRequest[] = [];
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -40,6 +48,13 @@ describe("vault delegated transaction signer enforcement", () => {
     setPGLiteOverride(db, async () => {
       await client.close();
     });
+    const context = await import("../services/context");
+    contextVault = context.vault;
+    originalSignTransaction = contextVault.signTransaction;
+    contextVault.signTransaction = async (request) => {
+      signedRequests.push(request);
+      return "0xsigned";
+    };
     await getDb().insert(tenants).values({
       id: TENANT_ID,
       name: "Delegated Transaction Signer Tenant",
@@ -51,15 +66,37 @@ describe("vault delegated transaction signer enforcement", () => {
       name: "Delegated Transaction Signer Agent",
       walletAddress: ALLOWED,
     });
+    await getDb().insert(agents).values({
+      id: SCOPED_AGENT_ID,
+      tenantId: TENANT_ID,
+      name: "Delegated Transaction Scoped Signer Agent",
+      walletAddress: ALLOWED,
+    });
     await getDb()
       .insert(policies)
-      .values({
-        id: "delegated-tx-approved-recipients",
-        agentId: AGENT_ID,
-        type: "approved-addresses",
-        enabled: true,
-        config: { addresses: [ALLOWED], mode: "whitelist" },
-      });
+      .values([
+        {
+          id: "delegated-tx-approved-recipients",
+          agentId: AGENT_ID,
+          type: "approved-addresses",
+          enabled: true,
+          config: { addresses: [ALLOWED], mode: "whitelist" },
+        },
+        {
+          id: "delegated-tx-scoped-approved-recipients",
+          agentId: SCOPED_AGENT_ID,
+          type: "approved-addresses",
+          enabled: true,
+          config: { addresses: [ALLOWED], mode: "whitelist" },
+        },
+        {
+          id: "delegated-tx-scoped-zero-spend",
+          agentId: SCOPED_AGENT_ID,
+          type: "spending-limit",
+          enabled: true,
+          config: { maxPerTx: "0", maxPerDay: "0", maxPerWeek: "0" },
+        },
+      ]);
     const [signer] = await getDb()
       .insert(agentSigners)
       .values({
@@ -99,6 +136,20 @@ describe("vault delegated transaction signer enforcement", () => {
       })
       .returning();
     noPermissionSignerId = noPermissionSigner.id;
+    const [scopedSigner] = await getDb()
+      .insert(agentSigners)
+      .values({
+        tenantId: TENANT_ID,
+        agentId: SCOPED_AGENT_ID,
+        signerType: "delegated",
+        subjectType: "api_key",
+        subjectId: "api-key:scoped-tx",
+        permissions: ["sign_transaction"],
+        policyIds: ["delegated-tx-scoped-zero-spend"],
+        metadata: { credentialHash: await createSignerCredentialHash(SCOPED_SIGNER_SECRET) },
+      })
+      .returning();
+    scopedSignerId = scopedSigner.id;
     const [quorum] = await getDb()
       .insert(agentKeyQuorums)
       .values({
@@ -127,9 +178,61 @@ describe("vault delegated transaction signer enforcement", () => {
   });
 
   afterAll(async () => {
+    if (contextVault && originalSignTransaction) {
+      contextVault.signTransaction = originalSignTransaction;
+    }
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+  });
+
+  it("narrows policy evaluation to signer-scoped policyIds for delegated signer credentials", async () => {
+    const response = await app.request(`/vault/${SCOPED_AGENT_ID}/sign`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-steward-signer-id": scopedSignerId,
+        "x-steward-signer-secret": SCOPED_SIGNER_SECRET,
+      },
+      body: JSON.stringify({ to: ALLOWED, value: "1", chainId: 8453, broadcast: false }),
+    });
+    const body = (await response.json()) as {
+      ok: boolean;
+      error?: string;
+      data?: { results?: Array<{ policyId: string; passed: boolean }> };
+    };
+
+    expect(response.status).toBe(403);
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("Transaction rejected by policy");
+    expect(body.data?.results?.map((result) => result.policyId)).toEqual([
+      "delegated-tx-scoped-zero-spend",
+    ]);
+    expect(body.data?.results?.[0]?.passed).toBe(false);
+  });
+
+  it("keeps full-policy behavior for unscoped delegated signer credentials", async () => {
+    signedRequests.length = 0;
+    const response = await app.request(`/vault/${AGENT_ID}/sign`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-steward-signer-id": signerId,
+        "x-steward-signer-secret": SIGNER_SECRET,
+      },
+      body: JSON.stringify({ to: ALLOWED, value: "1", chainId: 8453, broadcast: false }),
+    });
+    const body = (await response.json()) as {
+      ok: boolean;
+      data?: { signedTx?: string };
+      error?: string;
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.data?.signedTx).toBe("0xsigned");
+    expect(signedRequests).toHaveLength(1);
+    expect(signedRequests[0].to).toBe(ALLOWED);
   });
 
   it("rejects transaction signing without signer-bound authentication", async () => {

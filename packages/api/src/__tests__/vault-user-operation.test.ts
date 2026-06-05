@@ -1,10 +1,20 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from "bun:test";
-import { agents, approvalQueue, closeDb, getDb, policies, tenants, transactions } from "@stwd/db";
+import {
+  agents,
+  approvalQueue,
+  closeDb,
+  getDb,
+  policies,
+  tenants,
+  transactions,
+  users,
+  userTenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Vault } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
-import type { AppVariables } from "../services/context";
+import type { AppVariables, RpcRequest } from "../services/context";
 
 const dispatchWebhookMock = mock(() => {});
 
@@ -18,6 +28,7 @@ const ALLOWED = "0x1234567890123456789012345678901234567890";
 const BLOCKED = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TEST_PRIVATE_KEY = `0x${"1".repeat(64)}`;
 const TEST_WALLET_ADDRESS = "0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A";
+const ADMIN_USER_ID = "00000000-0000-4000-8000-00000000a770";
 
 const baseUserOperation = {
   sender: ALLOWED,
@@ -37,6 +48,7 @@ async function makeApp() {
     c.set("tenantId", TENANT_ID);
     c.set("authType", "session-jwt");
     c.set("tenantRole", "owner");
+    c.set("userId", ADMIN_USER_ID);
     c.set("sessionMfaVerifiedAt", Date.now());
     await next();
   });
@@ -61,6 +73,16 @@ describe("vault user operation signing", () => {
       id: TENANT_ID,
       name: "User Operation Tenant",
       apiKeyHash: "hash",
+    });
+    await getDb().insert(users).values({
+      id: ADMIN_USER_ID,
+      email: "vault-user-operation-admin@example.test",
+      emailVerified: true,
+    });
+    await getDb().insert(userTenants).values({
+      userId: ADMIN_USER_ID,
+      tenantId: TENANT_ID,
+      role: "owner",
     });
     await getDb().insert(agents).values({
       id: AGENT_ID,
@@ -189,6 +211,71 @@ describe("vault user operation signing", () => {
     expect(rejectedBody.error).toContain("EIP-7702 authorization signing is disabled");
   });
 
+  it("reads EIP-7702 delegated implementation status through eth_getCode", async () => {
+    const { vault: contextVault } = await import("../services/context");
+    const implementationAddress = "0x1234567890123456789012345678901234567890";
+    const originalRpcPassthrough = contextVault.rpcPassthrough;
+    const rpcPassthroughMock = mock(async (request: RpcRequest) => {
+      expect(request).toEqual({
+        method: "eth_getCode",
+        params: [TEST_WALLET_ADDRESS, "latest"],
+        chainId: 8453,
+      });
+      return {
+        jsonrpc: "2.0",
+        id: 1,
+        result: `0xef0100${implementationAddress.slice(2)}`,
+      };
+    });
+    contextVault.rpcPassthrough = rpcPassthroughMock as typeof contextVault.rpcPassthrough;
+
+    try {
+      const response = await app.request(`/vault/${AGENT_ID}/eip7702-delegation?chainId=8453`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: boolean;
+        data: {
+          walletAddress: string;
+          chainId: number;
+          delegated: boolean;
+          implementationAddress: string | null;
+          code: string;
+        };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.data).toEqual({
+        walletAddress: TEST_WALLET_ADDRESS,
+        chainId: 8453,
+        delegated: true,
+        implementationAddress,
+        code: `0xef0100${implementationAddress.slice(2)}`,
+      });
+      expect(rpcPassthroughMock).toHaveBeenCalledTimes(1);
+    } finally {
+      contextVault.rpcPassthrough = originalRpcPassthrough;
+    }
+  });
+
+  it("fails closed when EIP-7702 eth_getCode returns malformed code", async () => {
+    const { vault: contextVault } = await import("../services/context");
+    const originalRpcPassthrough = contextVault.rpcPassthrough;
+    contextVault.rpcPassthrough = mock(async () => ({
+      jsonrpc: "2.0",
+      id: 1,
+      result: "0xef01001234",
+    })) as typeof contextVault.rpcPassthrough;
+
+    try {
+      const response = await app.request(`/vault/${AGENT_ID}/eip7702-delegation?chainId=8453`);
+      expect(response.status).toBe(502);
+      const body = (await response.json()) as { ok: boolean; error?: string };
+      expect(body.ok).toBe(false);
+      expect(body.error).toContain("account code is verified");
+    } finally {
+      contextVault.rpcPassthrough = originalRpcPassthrough;
+    }
+  });
+
   it("lists and gets first-class transaction records with filters", async () => {
     const txId = `tx-list-${Date.now()}`;
     await getDb()
@@ -203,7 +290,24 @@ describe("vault user operation signing", () => {
         chainId: 8453,
         txHash: "0xfeedface",
         actionType: "test_action",
-        actionPayload: { type: "test_action", externalId: "external-1" },
+        actionPayload: { type: "test_action", externalId: "external-1", referenceId: "ref-1" },
+        policyResults: [],
+        signedAt: new Date(),
+      });
+    const snakeRefTxId = `tx-list-snake-ref-${Date.now()}`;
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: snakeRefTxId,
+        agentId: AGENT_ID,
+        status: "broadcast",
+        toAddress: ALLOWED,
+        value: "43",
+        data: "0x",
+        chainId: 8453,
+        txHash: "0xfeedface2",
+        actionType: "test_action",
+        actionPayload: { type: "test_action", reference_id: "snake-ref-1" },
         policyResults: [],
         signedAt: new Date(),
       });
@@ -229,7 +333,31 @@ describe("vault user operation signing", () => {
     expect(listBody.data.transactions.some((tx) => tx.id === txId)).toBe(true);
     const listed = listBody.data.transactions.find((tx) => tx.id === txId);
     expect(listed?.actionType).toBe("test_action");
-    expect(listed?.actionPayload).toMatchObject({ externalId: "external-1" });
+    expect(listed?.actionPayload).toMatchObject({ externalId: "external-1", referenceId: "ref-1" });
+
+    const byReference = await app.request(
+      `/vault/${AGENT_ID}/transactions?referenceId=ref-1&actionType=test_action`,
+    );
+    expect(byReference.status).toBe(200);
+    const byReferenceBody = (await byReference.json()) as {
+      data: { transactions: Array<{ id: string }> };
+    };
+    expect(byReferenceBody.data.transactions.map((tx) => tx.id)).toContain(txId);
+    expect(byReferenceBody.data.transactions.map((tx) => tx.id)).not.toContain(snakeRefTxId);
+
+    const bySnakeReference = await app.request(
+      `/vault/${AGENT_ID}/transactions?reference_id=snake-ref-1`,
+    );
+    expect(bySnakeReference.status).toBe(200);
+    const bySnakeReferenceBody = (await bySnakeReference.json()) as {
+      data: { transactions: Array<{ id: string }> };
+    };
+    expect(bySnakeReferenceBody.data.transactions.map((tx) => tx.id)).toEqual([snakeRefTxId]);
+
+    const invalidReference = await app.request(
+      `/vault/${AGENT_ID}/transactions?referenceId=${"x".repeat(129)}`,
+    );
+    expect(invalidReference.status).toBe(400);
 
     const getResponse = await app.request(`/vault/${AGENT_ID}/transactions/${txId}`);
     expect(getResponse.status).toBe(200);

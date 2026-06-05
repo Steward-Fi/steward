@@ -83,6 +83,7 @@ type AuthAbuseForm = {
   blockedDomains: string;
   allowedWallets: string;
   blockedWallets: string;
+  restrictToOneThirdPartyWallet: boolean;
   blockVoip: boolean;
   allowedCountryCodes: string;
   blockedCountryCodes: string;
@@ -106,6 +107,9 @@ type GasSponsorshipForm = {
   requireSimulation: boolean;
   circuitBreakerEnabled: boolean;
 };
+
+type EmbeddedWalletCreateOnLogin = "off" | "users-without-wallets" | "all-users";
+type AppClientEmbeddedWalletCreateOnLogin = "inherit" | EmbeddedWalletCreateOnLogin;
 
 type ThemeForm = {
   primaryColor: string;
@@ -150,6 +154,7 @@ type AppClientForm = {
   oauthDiscord: boolean;
   oauthGithub: boolean;
   oauthTwitter: boolean;
+  embeddedWalletCreateOnLogin: AppClientEmbeddedWalletCreateOnLogin;
   globalWalletEnabled: boolean;
   globalWalletAllowedScopes: string;
 };
@@ -265,6 +270,41 @@ const APP_CLIENT_ENVIRONMENTS: Array<{ value: AppClientEnvironment; label: strin
   { value: "production", label: "Production" },
 ];
 
+const EMBEDDED_WALLET_CREATE_ON_LOGIN_OPTIONS: Array<{
+  value: EmbeddedWalletCreateOnLogin;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "off",
+    label: "Do not create automatically",
+    description: "Users create embedded wallets only from explicit wallet flows.",
+  },
+  {
+    value: "users-without-wallets",
+    label: "Create when missing",
+    description: "Create one embedded wallet after login only when the user has none.",
+  },
+  {
+    value: "all-users",
+    label: "Ensure every login",
+    description: "Re-check on each login and create the embedded wallet when absent.",
+  },
+];
+
+const APP_CLIENT_EMBEDDED_WALLET_CREATE_ON_LOGIN_OPTIONS: Array<{
+  value: AppClientEmbeddedWalletCreateOnLogin;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: "inherit",
+    label: "Inherit tenant policy",
+    description: "Use the tenant-wide embedded wallet creation setting.",
+  },
+  ...EMBEDDED_WALLET_CREATE_ON_LOGIN_OPTIONS,
+];
+
 const emptyOidcProvider = (): OidcProviderForm => ({
   id: "",
   enabled: true,
@@ -333,6 +373,7 @@ const emptyAuthAbuseForm = (): AuthAbuseForm => ({
   blockedDomains: "",
   allowedWallets: "",
   blockedWallets: "",
+  restrictToOneThirdPartyWallet: false,
   blockVoip: false,
   allowedCountryCodes: "",
   blockedCountryCodes: "",
@@ -394,6 +435,7 @@ const emptyAppClient = (): AppClientForm => ({
   oauthDiscord: true,
   oauthGithub: true,
   oauthTwitter: true,
+  embeddedWalletCreateOnLogin: "inherit",
   globalWalletEnabled: false,
   globalWalletAllowedScopes: "eth_accounts\npersonal_sign",
 });
@@ -407,6 +449,18 @@ function linesToList(value: string): string[] {
     .split(/[\n,]/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function embeddedWalletCreateOnLoginFromConfig(value: unknown): EmbeddedWalletCreateOnLogin {
+  if (value === "users-without-wallets" || value === "all-users") return value;
+  return "off";
+}
+
+function appClientEmbeddedWalletCreateOnLoginFromConfig(
+  value: unknown,
+): AppClientEmbeddedWalletCreateOnLogin {
+  if (value === undefined || value === null) return "inherit";
+  return embeddedWalletCreateOnLoginFromConfig(value);
 }
 
 function linesToNumberList(value: string): number[] {
@@ -444,6 +498,9 @@ function appClientFormFromConfig(client: any): AppClientForm {
     oauthDiscord: oauth.discord !== false,
     oauthGithub: oauth.github !== false,
     oauthTwitter: oauth.twitter !== false,
+    embeddedWalletCreateOnLogin: appClientEmbeddedWalletCreateOnLoginFromConfig(
+      client?.embeddedWallets?.createOnLogin,
+    ),
     globalWalletEnabled: client?.globalWalletEnabled === true,
     globalWalletAllowedScopes: listToLines(
       Array.isArray(client?.globalWalletAllowedScopes)
@@ -454,7 +511,7 @@ function appClientFormFromConfig(client: any): AppClientForm {
 }
 
 function appClientPayloadFromForm(client: AppClientForm) {
-  return {
+  const payload = {
     id: client.id.trim(),
     name: client.name.trim(),
     environment: client.environment,
@@ -480,6 +537,13 @@ function appClientPayloadFromForm(client: AppClientForm) {
     },
     globalWalletEnabled: client.globalWalletEnabled,
     globalWalletAllowedScopes: linesToList(client.globalWalletAllowedScopes),
+  };
+  if (client.embeddedWalletCreateOnLogin === "inherit") return payload;
+  return {
+    ...payload,
+    embeddedWallets: {
+      createOnLogin: client.embeddedWalletCreateOnLogin,
+    },
   };
 }
 
@@ -573,6 +637,7 @@ function authAbuseFormFromConfig(config: any): AuthAbuseForm {
     blockedDomains: listToLines(config?.email?.blockedDomains),
     allowedWallets: listToLines(config?.wallet?.allowedWallets),
     blockedWallets: listToLines(config?.wallet?.blockedWallets),
+    restrictToOneThirdPartyWallet: config?.wallet?.restrictToOneThirdPartyWallet === true,
     blockVoip: config?.phone?.blockVoip === true,
     allowedCountryCodes: listToLines(config?.phone?.allowedCountryCodes),
     blockedCountryCodes: listToLines(config?.phone?.blockedCountryCodes),
@@ -630,6 +695,7 @@ function authAbusePayloadFromForm(form: AuthAbuseForm) {
     wallet: {
       allowedWallets: linesToList(form.allowedWallets),
       blockedWallets: linesToList(form.blockedWallets),
+      restrictToOneThirdPartyWallet: form.restrictToOneThirdPartyWallet,
     },
     phone: {
       blockVoip: form.blockVoip,
@@ -738,6 +804,7 @@ export default function SettingsPage() {
   );
   const [idempotencyMetricsLoading, setIdempotencyMetricsLoading] = useState(false);
   const [idempotencyMetricsError, setIdempotencyMetricsError] = useState<string | null>(null);
+  const [idempotencyExportSaving, setIdempotencyExportSaving] = useState(false);
   const [requestSigningKeys, setRequestSigningKeys] = useState<TenantRequestSigningKey[]>([]);
   const [requestSigningKeyName, setRequestSigningKeyName] = useState("Production signing key");
   const [requestSigningKeyReveal, setRequestSigningKeyReveal] =
@@ -766,6 +833,11 @@ export default function SettingsPage() {
     {},
   );
   const [appClientSecretRotating, setAppClientSecretRotating] = useState<string | null>(null);
+  const [embeddedWalletCreateOnLogin, setEmbeddedWalletCreateOnLogin] =
+    useState<EmbeddedWalletCreateOnLogin>("off");
+  const [embeddedWalletSaving, setEmbeddedWalletSaving] = useState(false);
+  const [embeddedWalletSaved, setEmbeddedWalletSaved] = useState(false);
+  const [embeddedWalletError, setEmbeddedWalletError] = useState<string | null>(null);
   const [ssoDomains, setSsoDomains] = useState<TenantSsoDomain[]>([]);
   const [ssoDomainValue, setSsoDomainValue] = useState("");
   const [ssoDomainRequired, setSsoDomainRequired] = useState(true);
@@ -809,6 +881,12 @@ export default function SettingsPage() {
           setAllowedRedirectUrls(listToLines(data.data.allowedRedirectUrls ?? []));
           setAppClients((data.data.appClients ?? []).map(appClientFormFromConfig));
           setTheme(themeFormFromConfig(data.data.theme));
+          setEmbeddedWalletCreateOnLogin(
+            embeddedWalletCreateOnLoginFromConfig(
+              data.data.featureFlags?.embeddedWallets?.createOnLogin ??
+                data.data.featureFlags?.embeddedWalletCreateOnLogin,
+            ),
+          );
         }
       })
       .catch((e: unknown) => {
@@ -1505,6 +1583,51 @@ export default function SettingsPage() {
     }
   }
 
+  async function saveEmbeddedWalletCreation(e: React.FormEvent) {
+    e.preventDefault();
+    if (!TENANT_ID || !authToken) {
+      setEmbeddedWalletError("Sign in again to save embedded wallet creation");
+      return;
+    }
+    setEmbeddedWalletSaving(true);
+    setEmbeddedWalletSaved(false);
+    setEmbeddedWalletError(null);
+    try {
+      const res = await fetch(`${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/config`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          featureFlags: {
+            embeddedWallets: {
+              createOnLogin: embeddedWalletCreateOnLogin,
+            },
+          },
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "Failed to save embedded wallet creation");
+      }
+      setEmbeddedWalletCreateOnLogin(
+        embeddedWalletCreateOnLoginFromConfig(
+          data.data.featureFlags?.embeddedWallets?.createOnLogin ??
+            data.data.featureFlags?.embeddedWalletCreateOnLogin,
+        ),
+      );
+      setEmbeddedWalletSaved(true);
+      setTimeout(() => setEmbeddedWalletSaved(false), 2000);
+    } catch (e: unknown) {
+      setEmbeddedWalletError(
+        e instanceof Error ? e.message : "Failed to save embedded wallet creation",
+      );
+    } finally {
+      setEmbeddedWalletSaving(false);
+    }
+  }
+
   function addAppClient() {
     setAppClients((clients) => [...clients, emptyAppClient()]);
   }
@@ -1589,6 +1712,42 @@ export default function SettingsPage() {
       );
     } finally {
       setRequestSigningKeysSaving(false);
+    }
+  }
+
+  async function exportIdempotencyMetrics() {
+    if (!TENANT_ID || !authToken) return;
+    try {
+      setIdempotencyExportSaving(true);
+      setIdempotencyMetricsError(null);
+      const response = await fetch(
+        `${API_URL}/tenants/${encodeURIComponent(TENANT_ID)}/idempotency-metrics/export`,
+        {
+          headers: {
+            Accept: "text/csv",
+            Authorization: `Bearer ${authToken}`,
+          },
+        },
+      );
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error || `Export failed with ${response.status}`);
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${TENANT_ID}-idempotency-metrics.csv`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setIdempotencyMetricsError(
+        err instanceof Error ? err.message : "Failed to export idempotency metrics",
+      );
+    } finally {
+      setIdempotencyExportSaving(false);
     }
   }
 
@@ -2230,6 +2389,35 @@ const policies = await steward.getPolicies("my-agent")`;
                 <div className="bg-bg border border-border-subtle p-4 space-y-3">
                   <div>
                     <div className="text-xs text-text-secondary uppercase tracking-wider">
+                      Embedded Wallet Creation
+                    </div>
+                    <p className="text-xs text-text-tertiary mt-1">
+                      Override the tenant create-on-login policy for this client.
+                    </p>
+                  </div>
+                  <label className="space-y-1.5 block max-w-sm">
+                    <span className="text-xs text-text-tertiary block">Create on Login</span>
+                    <select
+                      value={client.embeddedWalletCreateOnLogin}
+                      onChange={(event) =>
+                        updateAppClient(index, {
+                          embeddedWalletCreateOnLogin: event.target
+                            .value as AppClientEmbeddedWalletCreateOnLogin,
+                        })
+                      }
+                      className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+                    >
+                      {APP_CLIENT_EMBEDDED_WALLET_CREATE_ON_LOGIN_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+                <div className="bg-bg border border-border-subtle p-4 space-y-3">
+                  <div>
+                    <div className="text-xs text-text-secondary uppercase tracking-wider">
                       Login Methods
                     </div>
                     <p className="text-xs text-text-tertiary mt-1">
@@ -2337,6 +2525,77 @@ const policies = await steward.getPolicies("my-agent")`;
             </motion.span>
           )}
           {appClientsError && <span className="text-xs text-red-400">{appClientsError}</span>}
+        </div>
+      </form>
+
+      {/* Embedded Wallet Creation */}
+      <form onSubmit={saveEmbeddedWalletCreation} className="space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="font-display text-sm font-600 text-text-secondary tracking-wider uppercase">
+              Embedded Wallet Creation
+            </h2>
+            <p className="text-xs text-text-tertiary max-w-2xl mt-1">
+              Control whether authenticated app login bootstraps create embedded user wallets.
+            </p>
+          </div>
+          <button
+            type="submit"
+            disabled={embeddedWalletSaving || originsLoading || !TENANT_ID}
+            className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover transition-colors disabled:opacity-40 font-medium"
+          >
+            {embeddedWalletSaving ? "Saving..." : "Save Wallet Creation"}
+          </button>
+        </div>
+        <div className="space-y-px bg-border max-w-5xl">
+          <div className="bg-bg p-5 grid grid-cols-1 md:grid-cols-[320px_minmax(0,1fr)] gap-4">
+            <label className="space-y-1.5">
+              <span className="text-xs text-text-tertiary block">Create on Login</span>
+              <select
+                value={embeddedWalletCreateOnLogin}
+                onChange={(event) =>
+                  setEmbeddedWalletCreateOnLogin(event.target.value as EmbeddedWalletCreateOnLogin)
+                }
+                className="w-full bg-bg border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent transition-colors"
+              >
+                {EMBEDDED_WALLET_CREATE_ON_LOGIN_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="text-sm text-text-secondary">
+              <div className="text-text">
+                {
+                  EMBEDDED_WALLET_CREATE_ON_LOGIN_OPTIONS.find(
+                    (option) => option.value === embeddedWalletCreateOnLogin,
+                  )?.label
+                }
+              </div>
+              <div className="text-xs text-text-tertiary mt-1">
+                {
+                  EMBEDDED_WALLET_CREATE_ON_LOGIN_OPTIONS.find(
+                    (option) => option.value === embeddedWalletCreateOnLogin,
+                  )?.description
+                }
+              </div>
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {embeddedWalletSaved && (
+            <motion.span
+              initial={{ opacity: 0, x: -8 }}
+              animate={{ opacity: 1, x: 0 }}
+              className="text-xs text-emerald-400"
+            >
+              Saved
+            </motion.span>
+          )}
+          {embeddedWalletError && (
+            <span className="text-xs text-red-400">{embeddedWalletError}</span>
+          )}
         </div>
       </form>
 
@@ -3084,11 +3343,21 @@ const policies = await steward.getPolicies("my-agent")`;
               </p>
             )}
           </div>
-          {idempotencyMetrics && (
-            <div className="text-xs text-text-tertiary">
-              TTL {Math.round(idempotencyMetrics.ttlMs / 1000)}s
-            </div>
-          )}
+          <div className="flex items-center gap-3">
+            {idempotencyMetrics && (
+              <div className="text-xs text-text-tertiary">
+                TTL {Math.round(idempotencyMetrics.ttlMs / 1000)}s
+              </div>
+            )}
+            <button
+              type="button"
+              onClick={exportIdempotencyMetrics}
+              disabled={!TENANT_ID || !authToken || idempotencyExportSaving}
+              className="px-3 py-2 text-xs border border-border text-text-secondary hover:border-accent hover:text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {idempotencyExportSaving ? "Exporting" : "Export CSV"}
+            </button>
+          </div>
         </div>
         <div className="space-y-px bg-border max-w-5xl">
           <div className="bg-bg p-5 space-y-4">
@@ -3377,35 +3646,73 @@ const policies = await steward.getPolicies("my-agent")`;
                   type="number"
                   min={30}
                   max={3600}
+                  step={30}
+                  inputMode="numeric"
                   value={authAbuse.mfaMaxAgeSeconds}
                   onChange={(event) => updateAuthAbuse({ mfaMaxAgeSeconds: event.target.value })}
                   className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono"
                 />
               </label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-                {[
-                  ["Vault signing MFA", "mfaVaultSigning"],
-                  ["Key import MFA", "mfaKeyImport"],
-                  ["Key export MFA", "mfaKeyExport"],
-                  ["Recovery code MFA", "mfaRecoveryCodes"],
-                  ["Tenant admin MFA", "mfaTenantAdmin"],
-                  ["Delegated signer automation", "mfaAllowDelegatedSignerAutomation"],
-                  ["Key quorum automation", "mfaAllowKeyQuorumAutomation"],
-                ].map(([label, key]) => (
-                  <label key={key} className="flex items-center gap-2 text-sm text-text-secondary">
-                    <input
-                      type="checkbox"
-                      checked={authAbuse[key as keyof AuthAbuseForm] as boolean}
-                      onChange={(event) =>
-                        updateAuthAbuse({
-                          [key]: event.target.checked,
-                        } as Partial<AuthAbuseForm>)
-                      }
-                      className="accent-accent"
-                    />
-                    {label}
-                  </label>
-                ))}
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <div className="text-xs uppercase tracking-[0.18em] text-text-tertiary">
+                    Sensitive Actions
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {[
+                      ["Require MFA for vault signing", "mfaVaultSigning"],
+                      ["Require MFA for key import", "mfaKeyImport"],
+                      ["Require MFA for key export", "mfaKeyExport"],
+                      ["Require MFA for recovery codes", "mfaRecoveryCodes"],
+                      ["Require MFA for tenant admin changes", "mfaTenantAdmin"],
+                    ].map(([label, key]) => (
+                      <label
+                        key={key}
+                        className="flex items-center gap-2 text-sm text-text-secondary"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={authAbuse[key as keyof AuthAbuseForm] as boolean}
+                          onChange={(event) =>
+                            updateAuthAbuse({
+                              [key]: event.target.checked,
+                            } as Partial<AuthAbuseForm>)
+                          }
+                          className="accent-accent"
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+                <div className="space-y-2">
+                  <div className="text-xs uppercase tracking-[0.18em] text-text-tertiary">
+                    Automation Exceptions
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {[
+                      ["Allow delegated signer automation", "mfaAllowDelegatedSignerAutomation"],
+                      ["Allow key quorum automation", "mfaAllowKeyQuorumAutomation"],
+                    ].map(([label, key]) => (
+                      <label
+                        key={key}
+                        className="flex items-center gap-2 text-sm text-text-secondary"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={authAbuse[key as keyof AuthAbuseForm] as boolean}
+                          onChange={(event) =>
+                            updateAuthAbuse({
+                              [key]: event.target.checked,
+                            } as Partial<AuthAbuseForm>)
+                          }
+                          className="accent-accent"
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -3445,8 +3752,6 @@ const policies = await steward.getPolicies("my-agent")`;
                 ["Blocked Emails", "blockedEmails", "blocked@example.com"],
                 ["Allowed Domains", "allowedDomains", "example.com"],
                 ["Blocked Domains", "blockedDomains", "mailinator.com"],
-                ["Allowed Wallets", "allowedWallets", "0x... or solana:..."],
-                ["Blocked Wallets", "blockedWallets", "0x... or solana:..."],
                 ["Allowed Phone Codes", "allowedCountryCodes", "1"],
                 ["Blocked Phone Codes", "blockedCountryCodes", "7"],
               ].map(([label, key, placeholder]) => (
@@ -3463,6 +3768,59 @@ const policies = await steward.getPolicies("my-agent")`;
                   />
                 </label>
               ))}
+            </div>
+            <div className="border-t border-border pt-4 space-y-3">
+              <div>
+                <h3 className="text-xs font-600 uppercase tracking-wider text-text-secondary">
+                  Third-Party Wallet Sign-In Policy
+                </h3>
+                <p className="text-xs text-text-tertiary mt-1 max-w-2xl">
+                  Applied to SIWE and SIWS login attempts before a session is issued.
+                </p>
+              </div>
+              <label className="flex items-start gap-3 text-sm text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={authAbuse.restrictToOneThirdPartyWallet}
+                  onChange={(event) =>
+                    updateAuthAbuse({ restrictToOneThirdPartyWallet: event.target.checked })
+                  }
+                  className="mt-0.5 h-4 w-4 accent-accent"
+                />
+                <span>
+                  <span className="block text-text">Restrict users to one linked wallet</span>
+                  <span className="block text-xs text-text-tertiary">
+                    Prevents a user from linking more than one external EVM or Solana wallet.
+                  </span>
+                </span>
+              </label>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {[
+                  [
+                    "Third-party Wallet Allowlist",
+                    "allowedWallets",
+                    "0x0000000000000000000000000000000000000001\nsolana:11111111111111111111111111111111",
+                  ],
+                  [
+                    "Third-party Wallet Blocklist",
+                    "blockedWallets",
+                    "0x0000000000000000000000000000000000000002\nsolana:22222222222222222222222222222222",
+                  ],
+                ].map(([label, key, placeholder]) => (
+                  <label key={key} className="space-y-1.5">
+                    <span className="text-xs text-text-tertiary block">{label}</span>
+                    <textarea
+                      value={authAbuse[key as keyof AuthAbuseForm] as string}
+                      onChange={(event) =>
+                        updateAuthAbuse({ [key]: event.target.value } as Partial<AuthAbuseForm>)
+                      }
+                      rows={4}
+                      placeholder={placeholder}
+                      className="w-full bg-bg border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent transition-colors font-mono resize-y"
+                    />
+                  </label>
+                ))}
+              </div>
             </div>
           </div>
         </div>

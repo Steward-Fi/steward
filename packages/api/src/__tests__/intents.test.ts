@@ -12,6 +12,8 @@ import {
   policies,
   tenants,
   transactions,
+  users,
+  userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
@@ -22,6 +24,10 @@ const TENANT_ID = `intents-tenant-${Date.now()}`;
 const OTHER_TENANT_ID = `intents-other-tenant-${Date.now()}`;
 const AGENT_ID = `intents-agent-${Date.now()}`;
 const SUCCESS_AGENT_ID = `intents-success-agent-${Date.now()}`;
+const ADMIN_USER_ID = "00000000-0000-4000-8000-000000000101";
+const OTHER_ADMIN_USER_ID = "00000000-0000-4000-8000-000000000102";
+const REMOVED_REVIEWER_USER_ID = "00000000-0000-4000-8000-000000000103";
+const DEACTIVATED_REVIEWER_USER_ID = "00000000-0000-4000-8000-000000000104";
 const ABI_ALLOWED_RECIPIENT = "0x1111111111111111111111111111111111111111";
 const ABI_BLOCKED_RECIPIENT = "0x2222222222222222222222222222222222222222";
 
@@ -47,7 +53,7 @@ async function makeApp(
     if (options.authMode === "admin" || options.authMode === "admin-no-mfa") {
       c.set("authType", "session-jwt");
       c.set("tenantRole", "owner");
-      c.set("userId", options.userId ?? "intent-admin");
+      c.set("userId", options.userId ?? ADMIN_USER_ID);
       if (options.authMode === "admin") c.set("sessionMfaVerifiedAt", Date.now());
     } else {
       c.set("authType", "api-key");
@@ -68,6 +74,7 @@ describe("generic intents API", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "intents-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "intents-test-audit-hmac-key-0123456789abcdef0123456789";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -82,6 +89,25 @@ describe("generic intents API", () => {
           apiKeyHash: `hash-${OTHER_TENANT_ID}`,
         },
       ]);
+    await getDb()
+      .insert(users)
+      .values([
+        { id: ADMIN_USER_ID, email: "intent-admin@example.test" },
+        { id: OTHER_ADMIN_USER_ID, email: "intent-other-admin@example.test" },
+        { id: REMOVED_REVIEWER_USER_ID, email: "intent-removed-reviewer@example.test" },
+        {
+          id: DEACTIVATED_REVIEWER_USER_ID,
+          email: "intent-deactivated-reviewer@example.test",
+          deactivatedAt: new Date(),
+        },
+      ]);
+    await getDb()
+      .insert(userTenants)
+      .values([
+        { userId: ADMIN_USER_ID, tenantId: TENANT_ID, role: "owner" },
+        { userId: OTHER_ADMIN_USER_ID, tenantId: TENANT_ID, role: "admin" },
+        { userId: DEACTIVATED_REVIEWER_USER_ID, tenantId: TENANT_ID, role: "admin" },
+      ]);
     await getDb().insert(agents).values({
       id: AGENT_ID,
       tenantId: TENANT_ID,
@@ -92,7 +118,7 @@ describe("generic intents API", () => {
     await vault.createAgent(TENANT_ID, SUCCESS_AGENT_ID, "Intent Success Agent");
     apiApp = await makeApp();
     adminApp = await makeApp({ authMode: "admin" });
-    otherAdminApp = await makeApp({ authMode: "admin", userId: "intent-other-admin" });
+    otherAdminApp = await makeApp({ authMode: "admin", userId: OTHER_ADMIN_USER_ID });
     adminNoMfaApp = await makeApp({ authMode: "admin-no-mfa" });
   });
 
@@ -100,7 +126,55 @@ describe("generic intents API", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
+
+  async function createReviewIntent(label: string): Promise<string> {
+    const createResponse = await adminApp.request("/intents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        intentType: "wallet_update",
+        agentId: AGENT_ID,
+        payload: { displayName: `Review ${label}` },
+      }),
+    });
+    expect(createResponse.status).toBe(201);
+    const created = (await createResponse.json()) as { data: { id: string } };
+    return created.data.id;
+  }
+
+  async function expectStaleReviewerBlocked(
+    app: Awaited<ReturnType<typeof makeApp>>,
+    action: "authorize" | "approve" | "reject" | "cancel" | "execute" | "fail",
+    label: string,
+  ) {
+    const id = await createReviewIntent(`${label}-${action}`);
+    if (action === "execute") {
+      const authorize = await otherAdminApp.request(`/intents/${id}/authorize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(authorize.status).toBe(200);
+    }
+
+    const response = await app.request(`/intents/${id}/${action}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body:
+        action === "fail"
+          ? JSON.stringify({ reason: "stale reviewer fail", executionResult: { ok: false } })
+          : JSON.stringify({ reason: "stale reviewer" }),
+    });
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { ok: boolean; error: string };
+    expect(body.ok).toBe(false);
+    expect(body.error).toContain("active owner or admin tenant membership");
+
+    const [stored] = await getDb().select().from(intents).where(eq(intents.id, id));
+    expect(stored.status).toBe(action === "execute" ? "authorized" : "pending");
+  }
 
   it("creates, lists, and retrieves generic wallet intents", async () => {
     const createResponse = await adminApp.request("/intents", {
@@ -237,6 +311,47 @@ describe("generic intents API", () => {
     expect(rejectAfterAuthorize.status).toBe(409);
   });
 
+  it("accepts Privy-style intent type, wallet, and approve aliases", async () => {
+    const existingIntentId = intentId;
+    const createResponse = await adminApp.request("/intents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        intent_type: "rpc",
+        wallet_id: AGENT_ID,
+        resource_type: "agent_rpc",
+        resource_id: AGENT_ID,
+        payload: { method: "eth_chainId" },
+      }),
+    });
+    expect(createResponse.status).toBe(201);
+    const created = (await createResponse.json()) as {
+      data: { id: string; intent_type: string; wallet_id: string | null };
+    };
+    expect(created.data.intent_type).toBe("rpc");
+    expect(created.data.wallet_id).toBe(AGENT_ID);
+
+    const listResponse = await apiApp.request(`/intents?intent_type=rpc&wallet_id=${AGENT_ID}`);
+    expect(listResponse.status).toBe(200);
+    const listed = (await listResponse.json()) as {
+      data: { intents: Array<{ id: string }> };
+    };
+    expect(listed.data.intents.map((intent) => intent.id)).toContain(created.data.id);
+
+    const approveResponse = await otherAdminApp.request(`/intents/${created.data.id}/approve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "approved through alias" }),
+    });
+    expect(approveResponse.status).toBe(200);
+    const approved = (await approveResponse.json()) as {
+      data: { status: string; authorizedBy: string | null };
+    };
+    expect(approved.data.status).toBe("authorized");
+    expect(approved.data.authorizedBy).toBe(OTHER_ADMIN_USER_ID);
+    intentId = existingIntentId;
+  });
+
   it("rejects self-authorization of user-created intents", async () => {
     const createResponse = await adminApp.request("/intents", {
       method: "POST",
@@ -267,6 +382,57 @@ describe("generic intents API", () => {
     expect(stored.authorizedBy).toBeNull();
   });
 
+  it("rejects malformed lifecycle JSON without changing intent state", async () => {
+    const createResponse = await adminApp.request("/intents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        intentType: "policy_update",
+        agentId: AGENT_ID,
+        payload: {
+          policies: [],
+          allowClearAllPolicies: true,
+        },
+      }),
+    });
+    expect(createResponse.status).toBe(201);
+    const created = (await createResponse.json()) as { data: { id: string } };
+
+    const authorize = await otherAdminApp.request(`/intents/${created.data.id}/authorize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    });
+    expect(authorize.status).toBe(400);
+    const body = (await authorize.json()) as { error: string };
+    expect(body.error).toContain("Malformed JSON");
+
+    const [stored] = await getDb().select().from(intents).where(eq(intents.id, created.data.id));
+    expect(stored.status).toBe("pending");
+    expect(stored.authorizedBy).toBeNull();
+    expect(stored.authorizedAt).toBeNull();
+  });
+
+  it("rejects intent lifecycle actions when reviewer membership was removed after token issuance", async () => {
+    const removedReviewerApp = await makeApp({
+      authMode: "admin",
+      userId: REMOVED_REVIEWER_USER_ID,
+    });
+    for (const action of ["authorize", "approve", "reject", "cancel", "execute", "fail"] as const) {
+      await expectStaleReviewerBlocked(removedReviewerApp, action, "removed");
+    }
+  });
+
+  it("rejects intent lifecycle actions when reviewer user was deactivated after token issuance", async () => {
+    const deactivatedReviewerApp = await makeApp({
+      authMode: "admin",
+      userId: DEACTIVATED_REVIEWER_USER_ID,
+    });
+    for (const action of ["authorize", "approve", "reject", "cancel", "execute", "fail"] as const) {
+      await expectStaleReviewerBlocked(deactivatedReviewerApp, action, "deactivated");
+    }
+  });
+
   it("rejects API-key creation of control-plane intents to prevent identity-split self approval", async () => {
     const createResponse = await apiApp.request("/intents", {
       method: "POST",
@@ -288,21 +454,39 @@ describe("generic intents API", () => {
   });
 
   it("executes authorized intents and prevents double execution", async () => {
-    const apiExecute = await apiApp.request(`/intents/${intentId}/execute`, {
+    const createResponse = await adminApp.request("/intents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        intentType: "wallet_update",
+        agentId: AGENT_ID,
+        payload: { displayName: "Treasury" },
+      }),
+    });
+    expect(createResponse.status).toBe(201);
+    const created = (await createResponse.json()) as { data: { id: string } };
+    const authorizeResponse = await otherAdminApp.request(`/intents/${created.data.id}/authorize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(authorizeResponse.status).toBe(200);
+
+    const apiExecute = await apiApp.request(`/intents/${created.data.id}/execute`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ executionResult: { ok: true, txHash: "0xabc" } }),
     });
     expect(apiExecute.status).toBe(403);
 
-    const noMfaExecute = await adminNoMfaApp.request(`/intents/${intentId}/execute`, {
+    const noMfaExecute = await adminNoMfaApp.request(`/intents/${created.data.id}/execute`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ executionResult: { ok: true, txHash: "0xabc" } }),
     });
     expect(noMfaExecute.status).toBe(403);
 
-    const execute = await otherAdminApp.request(`/intents/${intentId}/execute`, {
+    const execute = await otherAdminApp.request(`/intents/${created.data.id}/execute`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ executionResult: { ok: true, txHash: "0xabc" } }),
@@ -320,7 +504,7 @@ describe("generic intents API", () => {
     const [updatedAgent] = await getDb().select().from(agents).where(eq(agents.id, AGENT_ID));
     expect(updatedAgent.name).toBe("Treasury");
 
-    const again = await otherAdminApp.request(`/intents/${intentId}/execute`, {
+    const again = await otherAdminApp.request(`/intents/${created.data.id}/execute`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
@@ -410,7 +594,7 @@ describe("generic intents API", () => {
     };
     expect(canceled.data.status).toBe("canceled");
     expect(canceled.data.canceledAt).toBeTruthy();
-    expect(canceled.data.canceledBy).toBe("intent-admin");
+    expect(canceled.data.canceledBy).toBe(ADMIN_USER_ID);
     expect(canceled.data.cancellationReason).toBe("caller withdrew request");
 
     const executeCanceled = await adminApp.request(`/intents/${created.data.id}/execute`, {
@@ -494,6 +678,97 @@ describe("generic intents API", () => {
       .from(policies)
       .where(eq(policies.id, "intent-spend"));
     expect(updatedPolicy.enabled).toBe(false);
+
+    const createRuleIntent = await adminApp.request("/intents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        intentType: "policy_rule_create",
+        agentId: AGENT_ID,
+        payload: {
+          rule: {
+            id: "intent-approved-addresses",
+            type: "approved-addresses",
+            enabled: true,
+            config: {
+              mode: "whitelist",
+              addresses: ["0x1111111111111111111111111111111111111111"],
+            },
+          },
+        },
+      }),
+    });
+    expect(createRuleIntent.status).toBe(201);
+    const createRuleCreated = (await createRuleIntent.json()) as { data: { id: string } };
+    await otherAdminApp.request(`/intents/${createRuleCreated.data.id}/authorize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const createRuleExecute = await otherAdminApp.request(
+      `/intents/${createRuleCreated.data.id}/execute`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    expect(createRuleExecute.status).toBe(200);
+    const createRuleBody = (await createRuleExecute.json()) as {
+      data: { executionResult: { handler: string; action: string; rule: { id: string } } };
+    };
+    expect(createRuleBody.data.executionResult.handler).toBe("policy_rule_create");
+    expect(createRuleBody.data.executionResult.action).toBe("create");
+    expect(createRuleBody.data.executionResult.rule.id).toBe("intent-approved-addresses");
+
+    const createRuleAgain = await otherAdminApp.request(
+      `/intents/${createRuleCreated.data.id}/execute`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    expect(createRuleAgain.status).toBe(409);
+
+    const deleteRuleIntent = await adminApp.request("/intents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        intentType: "policy_rule_delete",
+        agentId: AGENT_ID,
+        payload: {
+          ruleId: "intent-approved-addresses",
+        },
+      }),
+    });
+    expect(deleteRuleIntent.status).toBe(201);
+    const deleteRuleCreated = (await deleteRuleIntent.json()) as { data: { id: string } };
+    await otherAdminApp.request(`/intents/${deleteRuleCreated.data.id}/authorize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const deleteRuleExecute = await otherAdminApp.request(
+      `/intents/${deleteRuleCreated.data.id}/execute`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      },
+    );
+    expect(deleteRuleExecute.status).toBe(200);
+    const deleteRuleBody = (await deleteRuleExecute.json()) as {
+      data: { executionResult: { handler: string; action: string; rule: { id: string } } };
+    };
+    expect(deleteRuleBody.data.executionResult.handler).toBe("policy_rule_delete");
+    expect(deleteRuleBody.data.executionResult.action).toBe("delete");
+    expect(deleteRuleBody.data.executionResult.rule.id).toBe("intent-approved-addresses");
+    const postTypedRulePolicies = await getDb()
+      .select()
+      .from(policies)
+      .where(eq(policies.agentId, AGENT_ID));
+    expect(postTypedRulePolicies.map((policy) => policy.id)).toEqual(["intent-spend"]);
 
     const deleteLastRuleIntent = await adminApp.request("/intents", {
       method: "POST",
@@ -1344,7 +1619,7 @@ describe("generic intents API", () => {
         resourceType: "wallet_action",
         resourceId: "action-1",
         authorizedAt: new Date(Date.now() - 5000),
-        authorizedBy: "intent-admin",
+        authorizedBy: ADMIN_USER_ID,
         expiresAt: new Date(Date.now() - 1000),
       });
 
@@ -1369,7 +1644,7 @@ describe("generic intents API", () => {
       resourceType: "wallet_action",
       resourceId: "action-manual-expire",
       authorizedAt: new Date(),
-      authorizedBy: "intent-admin",
+      authorizedBy: ADMIN_USER_ID,
     });
 
     const apiExpire = await apiApp.request(`/intents/${id}/expire`, {

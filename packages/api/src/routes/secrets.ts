@@ -74,6 +74,7 @@ const VALID_PROXY_METHODS = new Set(["*", "GET", "POST", "PUT", "PATCH", "DELETE
 const ALLOW_BROAD_SECRET_ROUTES = process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES === "true";
 const MAX_SECRET_INJECT_FORMAT_LENGTH = 255;
 const MAX_SECRET_ROUTE_PRIORITY = 1_000_000;
+const HTTP_HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
 const SECRET_ROUTE_UPDATE_KEYS = new Set([
   "hostPattern",
   "agentId",
@@ -201,7 +202,7 @@ function validateSecretRouteConfig(input: {
 
   if (input.injectKey !== undefined) {
     const key = input.injectKey.trim().toLowerCase();
-    if (!key || /[\r\n:]/.test(key)) return "injectKey is invalid";
+    if (!key || !HTTP_HEADER_NAME.test(key)) return "injectKey is invalid";
     if (BLOCKED_INJECT_HEADERS.has(key)) return `injectKey '${input.injectKey}' is not allowed`;
   }
 

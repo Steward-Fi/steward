@@ -18,10 +18,16 @@ export interface SessionStorage {
 
 export interface StewardUser {
   id: string;
-  email: string;
+  email: string | null;
   walletAddress?: string;
   walletChain?: "ethereum" | "solana";
+  isGuest?: boolean;
+  guestExpiresAt?: string | null;
+  tenantId?: string;
+  alreadyUpgraded?: boolean;
 }
+
+export type StewardMfaMethod = "totp" | "sms" | "passkey" | "recovery_code" | string;
 
 export interface StewardSession {
   /** Raw JWT string (access token, 15 min) */
@@ -31,6 +37,14 @@ export interface StewardSession {
   tenantId: string;
   userId?: string;
   email?: string;
+  isGuest?: boolean;
+  guestExpiresAt?: string | null;
+  /** Unix milliseconds when this session last completed MFA step-up, when present. */
+  mfaVerifiedAt?: number;
+  /** MFA factor used for the current session step-up claim. */
+  mfaMethod?: StewardMfaMethod;
+  /** Unix milliseconds when this session last satisfied factor-enrollment step-up, when present. */
+  factorEnrollmentVerifiedAt?: number;
   /** Expiry as unix timestamp (seconds) — parsed from JWT `exp` claim */
   expiresAt?: number;
   /** The user object returned at sign-in time (if available) */
@@ -47,6 +61,34 @@ export interface StewardAuthResult {
   /** Access token lifetime in seconds (900) */
   expiresIn: number;
   user: StewardUser;
+}
+
+export interface StewardGuestSignInOptions {
+  tenantId?: string;
+  /** Server accepts bounded durations like "30m", "24h", or "7d". */
+  expiresIn?: string;
+}
+
+export interface StewardGuestState {
+  isGuest: boolean;
+  userId?: string;
+  tenantId?: string;
+  expiresAt?: string | null;
+  expiresAtMs?: number | null;
+  isExpired: boolean;
+  secondsUntilExpiry?: number | null;
+  expiryMessage: string | null;
+}
+
+export interface StewardGuestUpgradeEmailInput {
+  email: string;
+  token: string;
+}
+
+export interface StewardGuestDeleteResult {
+  ok: boolean;
+  deleted: boolean;
+  userId?: string;
 }
 
 export interface StewardMfaRequiredResult {
@@ -78,6 +120,20 @@ export interface StewardAuthExchangeResponse {
     name: string;
     apiKey?: string;
   };
+}
+
+export interface StewardEmbeddedWalletLoginConfig {
+  tenantId: string;
+  createOnLogin: "off" | "users-without-wallets" | "all-users";
+}
+
+export interface StewardCurrentUserResult {
+  userId: string;
+  address?: string;
+  email?: string;
+  wallet: { address: string; agentId: string } | null;
+  walletAutoCreated: boolean;
+  embeddedWalletConfig: StewardEmbeddedWalletLoginConfig;
 }
 
 export interface StewardEmailResult {
@@ -253,6 +309,47 @@ export interface StewardRefreshResult {
   token: string;
   refreshToken: string;
   expiresIn: number;
+}
+
+// ─── Device authorization types ──────────────────────────────────────────────
+
+export interface StewardDeviceCodeOptions {
+  tenantId?: string;
+  clientId?: string;
+  scope?: string;
+}
+
+export interface StewardDeviceCodeResult {
+  ok: boolean;
+  device_code: string;
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  expires_in: number;
+  interval: number;
+  tenantId: string;
+  client_id?: string;
+}
+
+export type StewardDeviceTokenError =
+  | "authorization_pending"
+  | "slow_down"
+  | "access_denied"
+  | "expired_token"
+  | "invalid_client"
+  | "invalid_request"
+  | "unsupported_grant_type";
+
+export interface StewardDeviceTokenPendingResult {
+  ok: false;
+  error: StewardDeviceTokenError;
+  interval?: number;
+}
+
+export interface StewardDeviceVerifyResult {
+  ok: boolean;
+  status: "approved" | "denied";
+  tenantId: string;
 }
 
 // ─── OAuth types ──────────────────────────────────────────────────────────────

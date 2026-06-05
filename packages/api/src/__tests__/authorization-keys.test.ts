@@ -20,7 +20,10 @@ import type { AppVariables } from "../services/context";
 const TENANT_ID = `authz-keys-tenant-${Date.now()}`;
 const AGENT_ID = `authz-keys-agent-${Date.now()}`;
 const HMAC_SECRET = "request-signing-secret-with-enough-entropy";
-const PATH = `/vault/${AGENT_ID}/sign`;
+const PATH = `/vault/${AGENT_ID}/sign-message`;
+const TRANSACTION_SIGN_PATH = `/vault/${AGENT_ID}/sign`;
+const BITCOIN_PSBT_SIGN_PATH = `/vault/${AGENT_ID}/sign-bitcoin-psbt`;
+const AUTHORIZATION_SIGN_PATH = `/vault/${AGENT_ID}/sign-authorization`;
 const BODY = JSON.stringify({ value: "1000" });
 const FRESH_TS = () => String(Math.floor(Date.now() / 1000));
 
@@ -42,6 +45,10 @@ const ids = {
 const quorumIds = {
   topLevel: "", // 2-of-3: [quorumA, quorumB] signers + [childQuorum] child
   child: "", // 2-of-2: [childA, childB]
+  lowPermissionLeaf: "",
+  duplicateChildA: "",
+  duplicateChildB: "",
+  duplicateParent: "",
   cyclicA: "",
   cyclicB: "",
   deep: "", // root of an over-deep nested chain
@@ -50,9 +57,12 @@ const quorumIds = {
 function makeApp() {
   const app = new Hono<{ Variables: AppVariables }>();
   app.use("*", authorizationSignature({ required: true, secrets: [HMAC_SECRET] }));
-  app.post("/vault/:agentId/sign", (c) =>
-    c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) }),
-  );
+  const handler = (c: Parameters<Parameters<typeof app.post>[1]>[0]) =>
+    c.json({ ok: true, verified: Boolean(c.get("requestSignatureVerified")) });
+  app.post("/vault/:agentId/sign", handler);
+  app.post("/vault/:agentId/sign-bitcoin-psbt", handler);
+  app.post("/vault/:agentId/sign-message", handler);
+  app.post("/vault/:agentId/sign-authorization", handler);
   return app;
 }
 
@@ -215,6 +225,27 @@ beforeAll(async () => {
     threshold: 2,
     memberSignerIds: [ids.quorumA, ids.quorumB],
     memberQuorumIds: [quorumIds.child],
+    permissions: ["sign_message"],
+  });
+  quorumIds.lowPermissionLeaf = await insertQuorum({
+    threshold: 2,
+    memberSignerIds: [ids.quorumA, ids.signerNoRole],
+    permissions: ["sign_message"],
+  });
+  quorumIds.duplicateChildA = await insertQuorum({
+    threshold: 1,
+    memberSignerIds: [ids.childA],
+    permissions: ["sign_message"],
+  });
+  quorumIds.duplicateChildB = await insertQuorum({
+    threshold: 1,
+    memberSignerIds: [ids.childA],
+    permissions: ["sign_message"],
+  });
+  quorumIds.duplicateParent = await insertQuorum({
+    threshold: 2,
+    memberSignerIds: [],
+    memberQuorumIds: [quorumIds.duplicateChildA, quorumIds.duplicateChildB],
     permissions: ["sign_message"],
   });
 
@@ -474,6 +505,102 @@ describe("authorizationSignature P-256 path", () => {
     expect((await res.json()).error).toContain("sign_message");
   });
 
+  it("does not let message-only P-256 signers authorize transaction signing", async () => {
+    const app = makeApp();
+    const ts = FRESH_TS();
+    const idem = "idem-p256-tx-scope";
+    const canonical = await buildAuthorizationCanonicalString({
+      method: "POST",
+      url: TRANSACTION_SIGN_PATH,
+      tenantId: TENANT_ID,
+      signerId: ids.signerSign,
+      timestamp: ts,
+      idempotencyKey: idem,
+      body: BODY,
+    });
+    const sig = await signP256(keypairs.signerSign.privateKey, canonical);
+
+    const res = await app.request(TRANSACTION_SIGN_PATH, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-steward-tenant": TENANT_ID,
+        "x-steward-signer-id": ids.signerSign,
+        "x-steward-request-timestamp": ts,
+        "idempotency-key": idem,
+        "x-steward-signature": `p256=${sig}`,
+      },
+      body: BODY,
+    });
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toContain("sign_transaction");
+  });
+
+  it("does not let message-only P-256 signers authorize Bitcoin PSBT signing", async () => {
+    const app = makeApp();
+    const ts = FRESH_TS();
+    const idem = "idem-p256-btc-psbt-scope";
+    const canonical = await buildAuthorizationCanonicalString({
+      method: "POST",
+      url: BITCOIN_PSBT_SIGN_PATH,
+      tenantId: TENANT_ID,
+      signerId: ids.signerSign,
+      timestamp: ts,
+      idempotencyKey: idem,
+      body: BODY,
+    });
+    const sig = await signP256(keypairs.signerSign.privateKey, canonical);
+
+    const res = await app.request(BITCOIN_PSBT_SIGN_PATH, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-steward-tenant": TENANT_ID,
+        "x-steward-signer-id": ids.signerSign,
+        "x-steward-request-timestamp": ts,
+        "idempotency-key": idem,
+        "x-steward-signature": `p256=${sig}`,
+      },
+      body: BODY,
+    });
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toContain("sign_transaction");
+  });
+
+  it("does not let message-only P-256 signers authorize EIP-7702 authorization signing", async () => {
+    const app = makeApp();
+    const ts = FRESH_TS();
+    const idem = "idem-p256-authz-scope";
+    const canonical = await buildAuthorizationCanonicalString({
+      method: "POST",
+      url: AUTHORIZATION_SIGN_PATH,
+      tenantId: TENANT_ID,
+      signerId: ids.signerSign,
+      timestamp: ts,
+      idempotencyKey: idem,
+      body: BODY,
+    });
+    const sig = await signP256(keypairs.signerSign.privateKey, canonical);
+
+    const res = await app.request(AUTHORIZATION_SIGN_PATH, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-steward-tenant": TENANT_ID,
+        "x-steward-signer-id": ids.signerSign,
+        "x-steward-request-timestamp": ts,
+        "idempotency-key": idem,
+        "x-steward-signature": `p256=${sig}`,
+      },
+      body: BODY,
+    });
+
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toContain("sign_authorization");
+  });
+
   it("rejects an unknown signer id", async () => {
     const app = makeApp();
     const ts = FRESH_TS();
@@ -664,6 +791,23 @@ describe("authorizationSignature nested key quorum (P-256)", () => {
     expect((await res.json()).error).toContain("threshold");
   });
 
+  it("denies when a low-permission leaf signer would otherwise satisfy quorum threshold", async () => {
+    const app = makeApp();
+    const headers = await quorumHeaders({
+      quorumId: quorumIds.lowPermissionLeaf,
+      members: [
+        { id: ids.quorumA, kp: keypairs.quorumA },
+        { id: ids.signerNoRole, kp: keypairs.signerNoRole },
+      ],
+      timestamp: FRESH_TS(),
+      idempotencyKey: "idem-q-lowperm-leaf",
+    });
+
+    const res = await app.request(PATH, { method: "POST", headers, body: BODY });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toContain("threshold");
+  });
+
   it("denies when the child quorum is only partially satisfied", async () => {
     const app = makeApp();
     // Only childA signs → child (2-of-2) NOT satisfied → only 1 of top-level → deny.
@@ -676,6 +820,20 @@ describe("authorizationSignature nested key quorum (P-256)", () => {
 
     const res = await app.request(PATH, { method: "POST", headers, body: BODY });
     expect(res.status).toBe(403);
+  });
+
+  it("denies when one signer is reused through multiple child quorums to fake parent threshold", async () => {
+    const app = makeApp();
+    const headers = await quorumHeaders({
+      quorumId: quorumIds.duplicateParent,
+      members: [{ id: ids.childA, kp: keypairs.childA }],
+      timestamp: FRESH_TS(),
+      idempotencyKey: "idem-q-duplicate-child-union",
+    });
+
+    const res = await app.request(PATH, { method: "POST", headers, body: BODY });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toContain("threshold");
   });
 
   it("denies a credential whose signature is invalid (does not count toward threshold)", async () => {

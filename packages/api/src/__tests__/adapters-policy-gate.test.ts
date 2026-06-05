@@ -95,7 +95,7 @@ async function makeApp(tenantId: string, options?: { userId?: string }) {
       walletAddress: AGENT_WALLET,
     })
     .onConflictDoNothing();
-  const { adapterRoutes } = adapterRoutesModule;
+  const { adapterRoutes, fiatRoutes } = adapterRoutesModule;
   const app = new Hono<{ Variables: AppVariables }>();
   app.use("*", async (c, next) => {
     c.set("tenantId", tenantId);
@@ -105,6 +105,7 @@ async function makeApp(tenantId: string, options?: { userId?: string }) {
     await next();
   });
   app.route("/adapters", adapterRoutes);
+  app.route("/v1/users", fiatRoutes);
   return { app, agentId };
 }
 
@@ -284,6 +285,171 @@ describe("adapter fund-moving policy gate", () => {
     const body = (await buildRes.json()) as Record<string, unknown>;
     expect(body.code).toBe("policy-violation");
     expect(body.unsignedIntent).toBeUndefined();
+  });
+
+  it("creates Spark BTC/Lightning mock DTOs and reads wallet balance", async () => {
+    const { app } = await makeApp(`tenant-adapter-spark-dtos-${Date.now()}`);
+
+    const walletRes = await app.request("/adapters/spark/wallets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: USER_1, network: "testnet", label: "primary" }),
+    });
+    expect(walletRes.status).toBe(201);
+    expect(walletRes.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    const walletBody = (await walletRes.json()) as {
+      data: { wallet: { id: string; provider: string; sparkAddress: string } };
+    };
+    expect(walletBody.data.wallet.provider).toBe("mock");
+    expect(walletBody.data.wallet.sparkAddress).toMatch(/^spk_testnet_/);
+
+    const balanceRes = await app.request(
+      `/adapters/spark/wallets/${walletBody.data.wallet.id}/balance`,
+    );
+    expect(balanceRes.status).toBe(200);
+    const balanceBody = (await balanceRes.json()) as {
+      data: { balance: { btcSats: string; lightningSats: string } };
+    };
+    expect(balanceBody.data.balance.btcSats).toBe("0");
+    expect(balanceBody.data.balance.lightningSats).toBe("0");
+
+    const depositRes = await app.request("/adapters/spark/static-btc-deposits", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ walletId: walletBody.data.wallet.id, amountSats: "1000" }),
+    });
+    expect(depositRes.status).toBe(201);
+    const depositBody = (await depositRes.json()) as {
+      data: { quote: { depositAddress: string; status: string } };
+    };
+    expect(depositBody.data.quote.depositAddress).toMatch(/^tb1q/);
+    expect(depositBody.data.quote.status).toBe("created");
+
+    const invoiceRes = await app.request("/adapters/spark/lightning/invoices", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        walletId: walletBody.data.wallet.id,
+        amountSats: "2500",
+        memo: "coffee",
+      }),
+    });
+    expect(invoiceRes.status).toBe(201);
+    const invoiceBody = (await invoiceRes.json()) as {
+      data: { invoice: { paymentRequest: string; status: string } };
+    };
+    expect(invoiceBody.data.invoice.paymentRequest).toMatch(/^lntb/);
+    expect(invoiceBody.data.invoice.status).toBe("created");
+  });
+
+  it("DENIES Spark transfers above cap before returning a signable artifact", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "10";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "100";
+    const { app, agentId } = await makeApp(`tenant-adapter-spark-deny-${Date.now()}`);
+
+    const walletRes = await app.request("/adapters/spark/wallets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: USER_1, network: "testnet" }),
+    });
+    const walletBody = (await walletRes.json()) as { data: { wallet: { id: string } } };
+
+    const transferRes = await app.request("/adapters/spark/transfers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        walletId: walletBody.data.wallet.id,
+        recipient: "spk_testnet_recipient_123456",
+        amountSats: "1000",
+        estimatedUsd: 5000,
+      }),
+    });
+    expect(transferRes.status).toBe(400);
+    const body = (await transferRes.json()) as Record<string, unknown>;
+    expect(body.code).toBe("policy-violation");
+    expect(body.unsignedIntent).toBeUndefined();
+  });
+
+  it("ALLOWS Spark transfer and Lightning pay builds within caps as UNSIGNED intents", async () => {
+    process.env.STEWARD_ADAPTER_PER_OP_CAP_USD = "100000";
+    process.env.STEWARD_ADAPTER_DAILY_CAP_USD = "1000000";
+    const { app, agentId } = await makeApp(`tenant-adapter-spark-allow-${Date.now()}`);
+
+    const walletRes = await app.request("/adapters/spark/wallets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: USER_1, network: "testnet" }),
+    });
+    const walletBody = (await walletRes.json()) as { data: { wallet: { id: string } } };
+
+    const transferRes = await app.request("/adapters/spark/transfers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        walletId: walletBody.data.wallet.id,
+        recipient: "spk_testnet_recipient_123456",
+        amountSats: "1000",
+        estimatedUsd: 5,
+      }),
+    });
+    expect(transferRes.status).toBe(200);
+    const transferBody = (await transferRes.json()) as {
+      data: {
+        unsignedIntent: {
+          signed: boolean;
+          kind: string;
+          category: string;
+          owner: string;
+          metadata: { operation: string };
+        };
+      };
+    };
+    expect(transferBody.data.unsignedIntent.signed).toBe(false);
+    expect(transferBody.data.unsignedIntent.kind).toBe("abstract-intent");
+    expect(transferBody.data.unsignedIntent.category).toBe("spark");
+    expect(transferBody.data.unsignedIntent.owner).toBe(agentId);
+    expect(transferBody.data.unsignedIntent.metadata.operation).toBe("spark.transfer");
+
+    const payRes = await app.request("/adapters/spark/lightning/pay", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        walletId: walletBody.data.wallet.id,
+        paymentRequest: "lntb2500n1mockinvoice",
+        maxFeeSats: "10",
+        estimatedUsd: 5,
+      }),
+    });
+    expect(payRes.status).toBe(200);
+    const payBody = (await payRes.json()) as {
+      data: { unsignedIntent: { signed: boolean; metadata: { operation: string } } };
+    };
+    expect(payBody.data.unsignedIntent.signed).toBe(false);
+    expect(payBody.data.unsignedIntent.metadata.operation).toBe("spark.lightning.pay");
+  });
+
+  it("Spark identity signing fails closed with 501 and NEVER returns a signature", async () => {
+    const { app } = await makeApp(`tenant-adapter-spark-sign-${Date.now()}`);
+    const walletRes = await app.request("/adapters/spark/wallets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId: USER_1, network: "testnet" }),
+    });
+    const walletBody = (await walletRes.json()) as { data: { wallet: { id: string } } };
+
+    const signRes = await app.request("/adapters/spark/identity/sign", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ walletId: walletBody.data.wallet.id, payload: "0xdeadbeef" }),
+    });
+    expect(signRes.status).toBe(501);
+    const body = (await signRes.json()) as Record<string, unknown>;
+    expect(body.signature).toBeUndefined();
+    expect(body.ok).toBe(false);
+    expect(String(body.error)).toContain("mock never holds keys");
   });
 
   it("custodial sign endpoint fails closed with 501 and NEVER returns a signature", async () => {
@@ -470,5 +636,88 @@ describe("adapter fund-moving policy gate", () => {
     };
     expect(body.data.verification.status).toBe("verified");
     expect(body.data.verification.documents[0].contentHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("exposes Privy-shaped fiat aliases without weakening user boundaries or PII handling", async () => {
+    const { app } = await makeApp(`tenant-adapter-fiat-alias-${Date.now()}`);
+
+    const foreignAccounts = await app.request(`/v1/users/${FOREIGN_USER}/fiat/accounts`);
+    expect(foreignAccounts.status).toBe(404);
+
+    const accounts = await app.request(`/v1/users/${USER_1}/fiat/accounts`);
+    expect(accounts.status).toBe(200);
+    expect(accounts.headers.get("Cache-Control")).toBe("no-store, max-age=0");
+    await expect(accounts.json()).resolves.toMatchObject({ ok: true, data: { accounts: [] } });
+
+    const createAccount = await app.request(`/v1/users/${USER_1}/fiat/accounts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ provider: "mock" }),
+    });
+    expect(createAccount.status).toBe(501);
+
+    const kycLink = await app.request(`/v1/users/${USER_1}/fiat/kyc_link`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level: "basic" }),
+    });
+    expect(kycLink.status).toBe(201);
+    const kycLinkBody = (await kycLink.json()) as {
+      data: { verification: { id: string }; kycLink: string };
+    };
+    expect(kycLinkBody.data.kycLink).toContain(kycLinkBody.data.verification.id);
+
+    const secret = "PASSPORT-RAW-CONTENT";
+    const patchKyc = await app.request(`/v1/users/${USER_1}/fiat/kyc`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        verificationId: kycLinkBody.data.verification.id,
+        documentType: "passport",
+        contentBase64: Buffer.from(secret, "utf8").toString("base64"),
+      }),
+    });
+    expect(patchKyc.status).toBe(200);
+    const patchKycText = await patchKyc.text();
+    expect(patchKycText).not.toContain(secret);
+    expect(JSON.parse(patchKycText).data.verification.documents[0].contentHash).toMatch(
+      /^[0-9a-f]{64}$/,
+    );
+
+    const onramp = await app.request(`/v1/users/${USER_1}/fiat/onramp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fiatCurrency: "USD",
+        fiatAmount: 100,
+        cryptoAsset: "ETH",
+        chainId: 8453,
+        destinationAddress: AGENT_WALLET,
+      }),
+    });
+    expect(onramp.status).toBe(201);
+    const onrampBody = (await onramp.json()) as { data: { session: { id: string } } };
+    const onrampRead = await app.request(
+      `/v1/users/${USER_1}/fiat/onramp/${onrampBody.data.session.id}`,
+    );
+    expect(onrampRead.status).toBe(200);
+
+    const offramp = await app.request(`/v1/users/${USER_1}/fiat/offramp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cryptoAsset: "ETH",
+        cryptoAmount: "1000000000000000000",
+        chainId: 8453,
+        fiatCurrency: "USD",
+        payoutMethodId: "pm_mock",
+      }),
+    });
+    expect(offramp.status).toBe(201);
+    const offrampBody = (await offramp.json()) as { data: { session: { id: string } } };
+    const foreignOfframpRead = await app.request(
+      `/v1/users/${USER_EXCHANGE}/fiat/offramp/${offrampBody.data.session.id}`,
+    );
+    expect(foreignOfframpRead.status).toBe(404);
   });
 });

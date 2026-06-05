@@ -1,0 +1,300 @@
+---
+title: "User Wallets"
+description: "Authenticated user-wallet provisioning, indexed wallets, and additional signer credentials."
+---
+
+# User Wallets API
+
+User-wallet routes operate on the authenticated user's embedded wallet. Routes that create,
+list, or revoke additional signer credentials require a personal user session with recent MFA.
+
+Use `walletIndex` to target a non-default wallet. When omitted, Steward uses `walletIndex: 0`.
+
+## Encrypted Private Key Import
+
+Encrypted import lets an authenticated user import an existing EVM or Solana private key into an
+embedded user wallet without sending a top-level plaintext `privateKey` field. The flow is exposed
+through the API and SDK, and `@stwd/react` includes a hosted import component that encrypts the key
+client-side before submit. Sessions are bound to the selected wallet index so one indexed wallet
+cannot consume another wallet's import.
+
+```
+POST /user/me/wallet/import/init
+POST /user/me/wallet/import/submit
+```
+
+**Auth:** Personal user session with recent MFA
+
+**Feature flags:** `STEWARD_ALLOW_PRIVATE_KEY_IMPORT=true` and
+`STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT=true`
+
+**Request headers:** `Authorization: Bearer <user-session-jwt>` and
+`Content-Type: application/json`. Responses that carry import-session material
+are returned with `Cache-Control: no-store`.
+
+### Initialize
+
+```json
+{
+  "chain": "evm",
+  "walletIndex": 2
+}
+```
+
+The init response returns a one-time X25519 public key, a 10-minute expiry, and AAD fields bound to
+the personal tenant, user, wallet agent, chain, wallet index, and app client when the session
+contains one.
+
+```json
+{
+  "ok": true,
+  "data": {
+    "importSessionId": "uwimp_...",
+    "publicKey": "base64url-spki",
+    "algorithm": "X25519-HKDF-SHA256-AES-256-GCM",
+    "expiresAt": "2026-06-05T12:00:00.000Z",
+    "aad": {
+      "importSessionId": "uwimp_...",
+      "tenantId": "personal-user_123",
+      "userId": "user_123",
+      "agentId": "user-wallet-user_123-2",
+      "chain": "evm",
+      "walletIndex": 2,
+      "appClientId": "native-ios"
+    }
+  }
+}
+```
+
+### Submit
+
+Encrypt the private key client-side with `X25519-HKDF-SHA256-AES-256-GCM` using the init public key.
+The AES-GCM AAD is the `importSessionId`; the HKDF info string is:
+
+```text
+steward:user-wallet-import:v1:{tenantId}:{userId}:{agentId}:{chain}:{walletIndex}:{appClientId}:{importSessionId}
+```
+
+Use an empty string for `appClientId` when the returned AAD value is `null`.
+Submit only the encrypted envelope:
+
+```json
+{
+  "importSessionId": "uwimp_...",
+  "ephemeralPublicKey": "base64url-spki",
+  "iv": "base64url-12-byte-nonce",
+  "ciphertext": "base64url-ciphertext",
+  "tag": "base64url-16-byte-tag",
+  "walletIndex": 2
+}
+```
+
+`walletIndex` is optional only when importing the default wallet. If supplied,
+it must match the `walletIndex` returned by init. Wrong-index submits return
+`400` and do not consume the original session; a later submit with the original
+index can still succeed. Once the tenant, user, app client, agent, chain, wallet
+index, envelope shape, and decrypted key validate, Steward atomically consumes
+the session before writing wallet storage. Replay after a successful submit
+returns `400` with `"Encrypted import session is invalid or expired"`.
+
+Session records are serialized through Steward's KeyStore envelope, then stored through the shared
+auth `StoreBackend` (`RedisBackend` when Redis is configured, otherwise Postgres `auth_kv_store`
+when migrations are available, otherwise memory for local/dev fallback). This is not an HSM-backed
+import-session store. Replay, expiry, tenant/user/app/wallet mismatch, malformed envelopes, and
+top-level `privateKey` fields fail closed. Successful import writes encrypted vault storage,
+reapplies user-wallet default policies, emits redacted audit/webhook metadata, and returns:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "agentId": "user-wallet-user_123-2",
+    "walletAddress": "0x...",
+    "chain": "evm",
+    "walletIndex": 2,
+    "imported": true
+  }
+}
+```
+
+```typescript SDK
+const session = await steward.initializeEncryptedUserWalletKeyImport("evm", {
+  walletIndex: 2,
+});
+
+await steward.submitEncryptedUserWalletKeyImport({
+  importSessionId: session.importSessionId,
+  ephemeralPublicKey,
+  iv,
+  ciphertext,
+  tag,
+  walletIndex: session.aad.walletIndex,
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/user/me/wallet/import/init \
+  -H "Authorization: Bearer user-session-jwt" \
+  -H "Content-Type: application/json" \
+  -d '{"chain":"evm","walletIndex":2}'
+
+curl -X POST https://api.steward.fi/user/me/wallet/import/submit \
+  -H "Authorization: Bearer user-session-jwt" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "importSessionId": "uwimp_...",
+    "ephemeralPublicKey": "base64url-spki",
+    "iv": "base64url-12-byte-nonce",
+    "ciphertext": "base64url-ciphertext",
+    "tag": "base64url-16-byte-tag",
+    "walletIndex": 2
+  }'
+```
+
+Production deployments should initialize Redis or run migrations so the import-session backend is
+durable across API replicas. If auth store initialization falls back to memory, init/submit must stay
+on one process and sessions will not survive restarts. The Bun `/ready` probe reports
+`checks.importSessionStore.source` and fails production readiness when import sessions are backed by
+memory unless `STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE=true`.
+
+## Additional Signer Credentials
+
+Additional signers let a user create bounded delegated credentials for one wallet index without
+exporting the wallet private key. User-wallet signers are always HMAC delegated signers and are
+limited to signing permissions such as `sign_message` and `sign_transaction`. Private-key export,
+recovery, owner, policy, and quorum permissions are rejected by the API.
+
+The credential secret is generated by Steward and returned only in the create response. It is never
+returned by list or revoke responses, and signer metadata redacts credential hashes.
+
+### List Signers
+
+```
+GET /user/me/wallet/signers?walletIndex=2&status=active
+```
+
+**Auth:** Personal user session with recent MFA
+
+**Query Parameters:**
+
+```typescript
+{
+  walletIndex?: number; // 0-255; defaults to 0
+  status?: "active" | "paused" | "revoked";
+}
+```
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "signers": [
+      {
+        "id": "signer_123",
+        "agentId": "user-wallet-user_123-2",
+        "signerType": "delegated",
+        "subjectType": "external",
+        "subjectId": "mobile-device-1",
+        "keyType": "hmac",
+        "permissions": ["sign_message", "sign_transaction"],
+        "hasCredential": true,
+        "status": "active",
+        "metadata": {}
+      }
+    ]
+  }
+}
+```
+
+### Create Signer
+
+```
+POST /user/me/wallet/signers
+```
+
+**Auth:** Personal user session with recent MFA
+
+**Request Body:**
+
+```typescript
+{
+  walletIndex?: number;
+  subjectType?: "external" | "user" | "wallet" | "api_key";
+  subjectId: string;
+  label?: string;
+  permissions?: string[];
+  address?: string;
+  chainFamily?: "evm" | "solana";
+  metadata?: Record<string, unknown>;
+}
+```
+
+Do not send `credentialSecret`, `policyIds`, `publicKey`, or non-HMAC key settings. Steward
+generates the signer credential and stores only a server-side hash.
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "signer_123",
+    "agentId": "user-wallet-user_123-2",
+    "subjectType": "external",
+    "subjectId": "mobile-device-1",
+    "keyType": "hmac",
+    "permissions": ["sign_message", "sign_transaction"],
+    "hasCredential": true,
+    "status": "active",
+    "credentialSecret": "stwd_signer_..."
+  }
+}
+```
+
+Store `credentialSecret` immediately. Steward displays it once and cannot retrieve it later.
+
+### Revoke Signer
+
+```
+DELETE /user/me/wallet/signers/:signerId?walletIndex=2
+```
+
+**Auth:** Personal user session with recent MFA
+
+The signer must belong to the selected wallet index. Revocation returns the redacted signer object
+with `status: "revoked"` and does not include `credentialSecret`.
+
+<CodeGroup>
+```typescript SDK
+const signers = await steward.listUserWalletSigners({
+  walletIndex: 2,
+  status: "active",
+});
+
+const created = await steward.createUserWalletSigner({
+  walletIndex: 2,
+  subjectType: "external",
+  subjectId: "mobile-device-1",
+  label: "Mobile app signer",
+  permissions: ["sign_message", "sign_transaction"],
+});
+
+await storeOnce(created.credentialSecret);
+
+await steward.revokeUserWalletSigner(created.id, { walletIndex: 2 });
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/user/me/wallet/signers \
+  -H "Authorization: Bearer user-session-jwt" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "walletIndex": 2,
+    "subjectType": "external",
+    "subjectId": "mobile-device-1",
+    "permissions": ["sign_message", "sign_transaction"]
+  }'
+```
+</CodeGroup>

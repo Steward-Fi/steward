@@ -89,6 +89,7 @@ const MAX_POLICY_TEMPLATES_BYTES = 262_144;
 const MAX_TEMPLATE_CUSTOMIZABLE_FIELDS = 50;
 const MAX_ALLOWED_ORIGINS = 50;
 const MAX_ALLOWED_REDIRECT_URLS = 100;
+const MAX_NATIVE_APP_IDENTIFIERS = 50;
 const MAX_APP_CLIENTS = 25;
 const THEME_COLOR_KEYS = [
   "primaryColor",
@@ -114,6 +115,7 @@ const APP_CLIENT_ENVIRONMENTS = new Set<TenantAppClientEnvironment>([
   "staging",
   "production",
 ]);
+const EMBEDDED_WALLET_CREATE_ON_LOGIN = new Set(["off", "users-without-wallets", "all-users"]);
 
 type AccessAllowlistEntryType =
   typeof ACCESS_ALLOWLIST_TYPES extends Set<infer Type> ? Type : never;
@@ -141,6 +143,10 @@ interface TenantSecurityChecklist {
   generatedAt: string;
   summary: Record<TenantSecurityChecklistStatus, number>;
   items: TenantSecurityChecklistItem[];
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 interface TenantRequestSigningKey {
@@ -174,6 +180,62 @@ const emptyTenantConfig = (tenantId: string): TenantControlPlaneConfig => ({
   gasSponsorshipConfig: {},
   allowedRedirectUrls: [],
 });
+
+function normalizeTenantFeatureFlags(
+  value: unknown,
+  base: TenantFeatureFlags = {},
+): TenantFeatureFlags | string {
+  if (value === undefined) return base;
+  if (!isPlainObject(value)) return "featureFlags must be an object";
+
+  const flags: TenantFeatureFlags = { ...base, ...value } as TenantFeatureFlags;
+  const embeddedWallets = value.embeddedWallets;
+  if (embeddedWallets !== undefined) {
+    if (!isPlainObject(embeddedWallets)) {
+      return "featureFlags.embeddedWallets must be an object";
+    }
+    const createOnLogin = embeddedWallets.createOnLogin;
+    if (
+      createOnLogin !== undefined &&
+      (typeof createOnLogin !== "string" || !EMBEDDED_WALLET_CREATE_ON_LOGIN.has(createOnLogin))
+    ) {
+      return "featureFlags.embeddedWallets.createOnLogin must be off, users-without-wallets, or all-users";
+    }
+    flags.embeddedWallets = {
+      ...(isPlainObject(base.embeddedWallets) ? base.embeddedWallets : {}),
+      ...embeddedWallets,
+    } as TenantFeatureFlags["embeddedWallets"];
+  }
+
+  const legacyCreateOnLogin = value.embeddedWalletCreateOnLogin;
+  if (
+    legacyCreateOnLogin !== undefined &&
+    (typeof legacyCreateOnLogin !== "string" ||
+      !EMBEDDED_WALLET_CREATE_ON_LOGIN.has(legacyCreateOnLogin))
+  ) {
+    return "featureFlags.embeddedWalletCreateOnLogin must be off, users-without-wallets, or all-users";
+  }
+
+  return flags;
+}
+
+function normalizeTenantAppClientEmbeddedWallets(
+  value: unknown,
+  clientId: string,
+): TenantAppClient["embeddedWallets"] | string {
+  if (value === undefined) return undefined;
+  if (!isPlainObject(value)) {
+    return `app client "${clientId}" embeddedWallets must be an object`;
+  }
+  const createOnLogin = value.createOnLogin;
+  if (
+    createOnLogin !== undefined &&
+    (typeof createOnLogin !== "string" || !EMBEDDED_WALLET_CREATE_ON_LOGIN.has(createOnLogin))
+  ) {
+    return `app client "${clientId}" embeddedWallets.createOnLogin must be off, users-without-wallets, or all-users`;
+  }
+  return { ...value } as TenantAppClient["embeddedWallets"];
+}
 
 async function snapshotTenantConfigRow(tenantId: string): Promise<TenantConfigRow | null> {
   const [row] = await db
@@ -583,6 +645,10 @@ function buildTenantSecurityChecklist(
     ...(client.allowedOrigins ?? []),
     ...(client.allowedRedirectUrls ?? []),
   ]);
+  const productionNativeClientCount = productionClients.filter(
+    (client) =>
+      (client.allowedBundleIds ?? []).length > 0 || (client.allowedPackageNames ?? []).length > 0,
+  ).length;
   const browserUrls = [...allowedOrigins, ...allowedRedirectUrls, ...productionClientUrls];
   const insecureBrowserUrls = browserUrls.filter(
     (url) => !isHttpsUrl(url) && !hasLocalhostUrl(url),
@@ -701,6 +767,19 @@ function buildTenantSecurityChecklist(
         insecureBrowserUrls.length === 0
           ? undefined
           : "Create an enabled production app client with HTTPS origins and redirect URLs.",
+    },
+    {
+      id: "native-app-allowlists",
+      label: "Native app allowlists",
+      status: productionNativeClientCount > 0 ? "pass" : "warning",
+      description:
+        productionNativeClientCount > 0
+          ? "At least one production app client has explicit iOS bundle ID or Android package allowlists."
+          : "Native mobile app clients should pin iOS bundle IDs and Android package names before using native callbacks.",
+      remediation:
+        productionNativeClientCount > 0
+          ? undefined
+          : "Add allowedBundleIds and allowedPackageNames to each production native app client.",
     },
     {
       id: "dashboard-csp",
@@ -832,6 +911,14 @@ function normalizeTenantAppClients(value: unknown): TenantAppClient[] | string {
     if (typeof allowedRedirectUrls === "string") {
       return `app client "${id}" ${allowedRedirectUrls}`;
     }
+    const allowedBundleIds = normalizeAllowedBundleIds(raw.allowedBundleIds ?? []);
+    if (typeof allowedBundleIds === "string") {
+      return `app client "${id}" ${allowedBundleIds}`;
+    }
+    const allowedPackageNames = normalizeAllowedPackageNames(raw.allowedPackageNames ?? []);
+    if (typeof allowedPackageNames === "string") {
+      return `app client "${id}" ${allowedPackageNames}`;
+    }
 
     let loginMethods: TenantAppClient["loginMethods"] | undefined;
     if (raw.loginMethods !== undefined) {
@@ -840,6 +927,10 @@ function normalizeTenantAppClients(value: unknown): TenantAppClient[] | string {
         return `app client "${id}" ${normalizedAuth}`;
       }
       loginMethods = normalizedAuth.loginMethods;
+    }
+    const embeddedWallets = normalizeTenantAppClientEmbeddedWallets(raw.embeddedWallets, id);
+    if (typeof embeddedWallets === "string") {
+      return embeddedWallets;
     }
 
     const isDefault = raw.isDefault === true;
@@ -864,7 +955,10 @@ function normalizeTenantAppClients(value: unknown): TenantAppClient[] | string {
       isDefault,
       allowedOrigins,
       allowedRedirectUrls,
+      allowedBundleIds,
+      allowedPackageNames,
       ...(loginMethods ? { loginMethods } : {}),
+      ...(embeddedWallets ? { embeddedWallets } : {}),
       globalWalletEnabled: raw.globalWalletEnabled === true,
       globalWalletAllowedScopes,
     });
@@ -887,7 +981,10 @@ function serializeTenantAppClient(row: typeof tenantAppClientsTable.$inferSelect
     isDefault: row.isDefault,
     allowedOrigins: row.allowedOrigins ?? [],
     allowedRedirectUrls: row.allowedRedirectUrls ?? [],
+    allowedBundleIds: row.allowedBundleIds ?? [],
+    allowedPackageNames: row.allowedPackageNames ?? [],
     ...(row.loginMethods ? { loginMethods: row.loginMethods } : {}),
+    ...(row.embeddedWallets ? { embeddedWallets: row.embeddedWallets } : {}),
     globalWalletEnabled: row.globalWalletEnabled,
     globalWalletAllowedScopes: row.globalWalletAllowedScopes ?? [],
     createdAt: row.createdAt,
@@ -1110,6 +1207,55 @@ function normalizeAllowedOrigins(value: unknown): string[] | string {
   }
 
   return [...origins];
+}
+
+function normalizeAllowedBundleIds(value: unknown): string[] | string {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return "allowedBundleIds must be an array";
+  if (value.length > MAX_NATIVE_APP_IDENTIFIERS) {
+    return `allowedBundleIds cannot contain more than ${MAX_NATIVE_APP_IDENTIFIERS} identifiers`;
+  }
+
+  const bundleIds = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") return "allowedBundleIds entries must be strings";
+    const bundleId = entry.trim();
+    if (!bundleId) return "allowedBundleIds entries must be non-empty strings";
+    if (bundleId === "*") return "allowedBundleIds entries cannot be wildcard";
+    if (
+      bundleId.length > 255 ||
+      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)+$/.test(
+        bundleId,
+      )
+    ) {
+      return "allowedBundleIds entries must be explicit iOS bundle identifiers";
+    }
+    bundleIds.add(bundleId);
+  }
+
+  return [...bundleIds];
+}
+
+function normalizeAllowedPackageNames(value: unknown): string[] | string {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) return "allowedPackageNames must be an array";
+  if (value.length > MAX_NATIVE_APP_IDENTIFIERS) {
+    return `allowedPackageNames cannot contain more than ${MAX_NATIVE_APP_IDENTIFIERS} identifiers`;
+  }
+
+  const packageNames = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "string") return "allowedPackageNames entries must be strings";
+    const packageName = entry.trim().toLowerCase();
+    if (!packageName) return "allowedPackageNames entries must be non-empty strings";
+    if (packageName === "*") return "allowedPackageNames entries cannot be wildcard";
+    if (packageName.length > 255 || !/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/.test(packageName)) {
+      return "allowedPackageNames entries must be explicit Android package names";
+    }
+    packageNames.add(packageName);
+  }
+
+  return [...packageNames];
 }
 
 function normalizeTenantTheme(value: unknown): TenantTheme | null | string {
@@ -1455,7 +1601,10 @@ async function persistTenantAppClientsForTenant(
           isDefault: client.isDefault === true,
           allowedOrigins: client.allowedOrigins ?? [],
           allowedRedirectUrls: client.allowedRedirectUrls ?? [],
+          allowedBundleIds: client.allowedBundleIds ?? [],
+          allowedPackageNames: client.allowedPackageNames ?? [],
           loginMethods: client.loginMethods ?? null,
+          embeddedWallets: client.embeddedWallets ?? null,
           globalWalletEnabled: client.globalWalletEnabled === true,
           globalWalletAllowedScopes: client.globalWalletAllowedScopes ?? [
             "eth_accounts",
@@ -2144,6 +2293,63 @@ tenantConfigRoutes.get("/:id/idempotency-metrics", requireTenantId, async (c) =>
     ok: true,
     data: await getTenantIdempotencyMetrics(tenantId),
   });
+});
+
+function idempotencyCsvCell(value: string): string {
+  const safeValue = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return `"${safeValue.replaceAll('"', '""')}"`;
+}
+
+function idempotencyMetricsFilename(tenantId: string): string {
+  return `${tenantId.replace(/[^A-Za-z0-9._-]/g, "_") || "tenant"}-idempotency-metrics.csv`;
+}
+
+tenantConfigRoutes.get("/:id/idempotency-metrics/export", requireTenantId, async (c) => {
+  const mfaResponse = await requireRecentTenantAdminMfa(c, "Idempotency metrics export");
+  if (mfaResponse) return mfaResponse;
+
+  const tenantId = c.req.param("id") as string;
+  const metrics = await getTenantIdempotencyMetrics(tenantId);
+  const headers = [
+    "tenant_id",
+    "generated_at",
+    "window_started_at",
+    "last_seen_at",
+    "ttl_ms",
+    "observed",
+    "reserved",
+    "completed",
+    "replayed",
+    "conflicts",
+    "in_flight_conflicts",
+    "suppressed_auth_responses",
+    "invalid_keys",
+    "store_errors",
+    "skipped_unsafe_context",
+    "released_on_error",
+  ];
+  const row = [
+    metrics.tenantId,
+    metrics.generatedAt,
+    metrics.windowStartedAt,
+    metrics.lastSeenAt ?? "",
+    String(metrics.ttlMs),
+    String(metrics.counters.observed),
+    String(metrics.counters.reserved),
+    String(metrics.counters.completed),
+    String(metrics.counters.replayed),
+    String(metrics.counters.conflicts),
+    String(metrics.counters.inFlightConflicts),
+    String(metrics.counters.suppressedAuthResponses),
+    String(metrics.counters.invalidKeys),
+    String(metrics.counters.storeErrors),
+    String(metrics.counters.skippedUnsafeContext),
+    String(metrics.counters.releasedOnError),
+  ].map(idempotencyCsvCell);
+
+  c.header("Content-Type", "text/csv; charset=utf-8");
+  c.header("Content-Disposition", `attachment; filename="${idempotencyMetricsFilename(tenantId)}"`);
+  return c.body(`${headers.join(",")}\n${row.join(",")}\n`);
 });
 
 // ─── Tenant-admin request signing keys ──────────────────────────────────────
@@ -3375,13 +3581,14 @@ tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
     body.allowedRedirectUrls !== undefined ||
     body.appClients !== undefined ||
     body.gasSponsorshipConfig !== undefined ||
-    body.authAbuseConfig !== undefined;
+    body.authAbuseConfig !== undefined ||
+    body.featureFlags !== undefined;
   if (touchesSecurityConfig && !requireTenantAdminSession(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
         error:
-          "allowedOrigins, allowedRedirectUrls, and authAbuseConfig updates require an owner or admin user session",
+          "allowedOrigins, allowedRedirectUrls, appClients, featureFlags, gasSponsorshipConfig, and authAbuseConfig updates require an owner or admin user session",
       },
       403,
     );
@@ -3431,6 +3638,14 @@ tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
     .where(eq(tenantConfigsTable.tenantId, tenantId));
 
   const defaultConfig = DEFAULT_TENANT_CONFIGS[tenantId] ?? emptyTenantConfig(tenantId);
+  const existingFeatureFlags =
+    (existingConfig?.featureFlags as TenantFeatureFlags | undefined) ??
+    defaultConfig.featureFlags ??
+    {};
+  const featureFlags = normalizeTenantFeatureFlags(body.featureFlags, existingFeatureFlags);
+  if (typeof featureFlags === "string") {
+    return c.json<ApiResponse>({ ok: false, error: featureFlags }, 400);
+  }
   const values = {
     tenantId,
     displayName:
@@ -3461,12 +3676,7 @@ tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
         : ((existingConfig?.approvalConfig as ApprovalConfig | undefined) ??
           defaultConfig.approvalConfig ??
           {}),
-    featureFlags:
-      body.featureFlags !== undefined
-        ? body.featureFlags
-        : ((existingConfig?.featureFlags as TenantFeatureFlags | undefined) ??
-          defaultConfig.featureFlags ??
-          {}),
+    featureFlags: body.featureFlags !== undefined ? featureFlags : existingFeatureFlags,
     theme:
       body.theme !== undefined
         ? theme
@@ -3510,6 +3720,7 @@ tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
       appClientsCount: body.appClients !== undefined ? appClients.length : undefined,
       hasAuthAbuseConfig: Object.keys(values.authAbuseConfig).length > 0,
       gasSponsorshipEnabled: values.gasSponsorshipConfig.enabled === true,
+      embeddedWalletCreateOnLogin: values.featureFlags.embeddedWallets?.createOnLogin,
       hasTheme: !!values.theme,
     },
     ipAddress: c.req.header("x-forwarded-for") ?? null,
@@ -3568,6 +3779,7 @@ tenantConfigRoutes.put("/:id/config", requireTenantId, async (c) => {
         appClientsCount: persistedAppClients.length,
         hasAuthAbuseConfig: Object.keys(values.authAbuseConfig).length > 0,
         gasSponsorshipEnabled: values.gasSponsorshipConfig.enabled === true,
+        embeddedWalletCreateOnLogin: values.featureFlags.embeddedWallets?.createOnLogin,
         hasTheme: !!values.theme,
       },
       ipAddress: c.req.header("x-forwarded-for") ?? null,

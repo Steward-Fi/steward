@@ -1,0 +1,341 @@
+---
+title: "Intents"
+description: "Create, review, approve, execute, and cancel generic wallet and policy-change intents."
+---
+
+# Intents API
+
+Generic intents model Privy-style manual approval workflows for wallet actions
+and control-plane changes. Use them when an operation should be created first,
+reviewed by a human tenant owner/admin, and executed only after authorization.
+
+**Base path:** `/intents`  
+**Auth:** Tenant-level auth for read/create. Lifecycle actions require an
+owner/admin user session with recent MFA.
+
+<Note>
+  The API accepts both Steward-native camelCase fields and Privy-style aliases
+  where implemented: `intentType` or `intent_type`, `agentId` or `wallet_id`,
+  `resourceType` or `resource_type`, `resourceId` or `resource_id`, and
+  `authorizationDetails` or `authorization_details`.
+</Note>
+
+## Intent lifecycle
+
+| Status | Meaning |
+|--------|---------|
+| `pending` | Created and waiting for human review |
+| `authorized` | Approved by an owner/admin with recent MFA |
+| `executing` | Claimed by the executor while typed execution is in progress |
+| `executed` | Typed executor finished successfully |
+| `failed` | Execution or operator finalization failed |
+| `rejected` | Human reviewer rejected the intent |
+| `canceled` | Human reviewer canceled the pending or authorized intent |
+| `expired` | TTL or manual expiry closed the intent |
+
+Control-plane intents such as `wallet_update`, `policy_update`,
+`policy_rule_create`, `policy_rule_delete`, `policy_rule_update`, and
+`quorum_update` must be created by a human owner/admin session, not a tenant API
+key. All lifecycle endpoints require an owner/admin user session with recent
+MFA. The creator cannot authorize their own user-created intent.
+
+When an intent is authorized, Steward snapshots the relevant policy or quorum
+baseline for typed executors that mutate those resources. If the current state
+changes before execution, execution fails with a stale-state conflict and the
+caller should recreate and reauthorize the intent.
+
+## Create Intent
+
+```
+POST /intents
+```
+
+**Auth:** Tenant-level auth. Human control-plane intent types require an
+owner/admin user session.
+
+**Request Body:**
+
+```typescript
+{
+  intentType: "rpc" | "transfer" | "wallet_update" | "policy_update" |
+    "policy_rule_create" | "policy_rule_delete" | "policy_rule_update" |
+    "quorum_update" | "wallet_action";
+  agentId?: string;               // Alias: wallet_id
+  resourceType?: string;          // Alias: resource_type
+  resourceId?: string;            // Alias: resource_id
+  payload?: Record<string, unknown>;
+  authorizationDetails?: Array<Record<string, unknown>>;
+  expiresAt?: string;             // ISO timestamp, alias: expires_at
+  ttlSeconds?: number;            // Max 7 days
+  createdByDisplayName?: string;  // Alias: created_by_display_name
+}
+```
+
+`authorizationDetails` is accepted for schema compatibility, but non-empty
+arrays currently fail closed because multi-approver enforcement is not yet
+implemented on this route.
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "id": "intent_550e8400-...",
+    "intent_id": "intent_550e8400-...",
+    "intentType": "policy_rule_create",
+    "intent_type": "policy_rule_create",
+    "agentId": "treasury-wallet",
+    "wallet_id": "treasury-wallet",
+    "status": "pending",
+    "resourceType": "policy",
+    "resource_id": "spending-limit-1",
+    "payload": {
+      "rule": {
+        "id": "spending-limit-1",
+        "type": "spending-limit",
+        "enabled": true,
+        "config": { "maxPerTransaction": "100000000000000000" }
+      }
+    },
+    "expiresAt": "2026-06-04T18:00:00.000Z",
+    "expires_at": 1780596000000,
+    "createdAt": "2026-06-04T17:00:00.000Z",
+    "created_at": 1780592400000
+  }
+}
+```
+
+<CodeGroup>
+```typescript SDK
+await steward.createIntent({
+  intentType: "policy_rule_create",
+  agentId: "treasury-wallet",
+  resourceType: "policy",
+  resourceId: "spending-limit-1",
+  ttlSeconds: 3600,
+  payload: {
+    rule: {
+      id: "spending-limit-1",
+      type: "spending-limit",
+      enabled: true,
+      config: { maxPerTransaction: "100000000000000000" },
+    },
+  },
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/intents \
+  -H "Authorization: Bearer owner-session-jwt" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: policy-rule-create-spending-limit-v1" \
+  -d '{
+    "intent_type": "policy_rule_create",
+    "wallet_id": "treasury-wallet",
+    "resource_type": "policy",
+    "resource_id": "spending-limit-1",
+    "ttlSeconds": 3600,
+    "payload": {
+      "rule": {
+        "id": "spending-limit-1",
+        "type": "spending-limit",
+        "enabled": true,
+        "config": { "maxPerTransaction": "100000000000000000" }
+      }
+    }
+  }'
+```
+</CodeGroup>
+
+## List Intents
+
+```
+GET /intents
+```
+
+**Auth:** Tenant-level auth
+
+**Query Parameters:**
+
+```typescript
+{
+  status?: "pending" | "authorized" | "executing" | "executed" |
+    "failed" | "rejected" | "canceled" | "expired";
+  intentType?: string; // Aliases: intent_type, type
+  agentId?: string;    // Alias: wallet_id
+  limit?: number;      // Default 50, max 200
+  offset?: number;     // Default 0
+}
+```
+
+```bash
+curl "https://api.steward.fi/intents?status=pending&intent_type=policy_rule_update&wallet_id=treasury-wallet" \
+  -H "X-Steward-Key: your-tenant-key"
+```
+
+## Get Intent
+
+```
+GET /intents/:intentId
+```
+
+**Auth:** Tenant-level auth
+
+```bash
+curl https://api.steward.fi/intents/intent_550e8400-... \
+  -H "X-Steward-Key: your-tenant-key"
+```
+
+## Approve or reject
+
+```
+POST /intents/:intentId/authorize
+POST /intents/:intentId/approve
+POST /intents/:intentId/reject
+```
+
+**Auth:** Owner/admin user session with recent MFA
+
+`/approve` is a Privy-style alias for `/authorize`. The optional `reason` field
+is stored for rejection audit/webhook context.
+
+```bash
+curl -X POST https://api.steward.fi/intents/intent_550e8400-.../approve \
+  -H "Authorization: Bearer owner-session-jwt" \
+  -H "Content-Type: application/json" \
+  -d '{ "reason": "Reviewed in weekly policy change window" }'
+```
+
+## Execute
+
+```
+POST /intents/:intentId/execute
+```
+
+**Auth:** Owner/admin user session with recent MFA
+
+Execution requires the intent to be `authorized`. The response includes
+`executionResult` and `execution_result`; signed transaction artifacts are
+redacted in stored intent rows.
+
+```bash
+curl -X POST https://api.steward.fi/intents/intent_550e8400-.../execute \
+  -H "Authorization: Bearer owner-session-jwt" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: execute-intent-550e8400-v1" \
+  -d '{}'
+```
+
+## Finalize without execution
+
+```
+POST /intents/:intentId/fail
+POST /intents/:intentId/cancel
+POST /intents/:intentId/expire
+```
+
+**Auth:** Owner/admin user session with recent MFA
+
+`fail`, `cancel`, and `expire` can close pending or authorized intents without
+running the typed executor. `fail` can include an `executionResult` object for
+operator-supplied failure metadata.
+
+## Policy rule payload examples
+
+### Create a policy rule
+
+Use `intentType: "policy_rule_create"` with `payload.rule`.
+
+```json
+{
+  "intent_type": "policy_rule_create",
+  "wallet_id": "treasury-wallet",
+  "resource_type": "policy",
+  "resource_id": "approved-addrs-1",
+  "payload": {
+    "rule": {
+      "id": "approved-addrs-1",
+      "type": "approved-addresses",
+      "enabled": true,
+      "config": {
+        "addresses": ["0x1111111254EEB25477B68fb85Ed929f73A960582"]
+      }
+    }
+  }
+}
+```
+
+### Update a policy rule
+
+Use `intentType: "policy_rule_update"` with `payload.action: "update"`,
+`payload.ruleId`, and either `payload.patch` or `payload.rule`.
+
+```json
+{
+  "intentType": "policy_rule_update",
+  "agentId": "treasury-wallet",
+  "resourceType": "policy",
+  "resourceId": "spending-limit-1",
+  "payload": {
+    "action": "update",
+    "ruleId": "spending-limit-1",
+    "patch": {
+      "enabled": true,
+      "config": {
+        "maxPerTransaction": "200000000000000000",
+        "maxPerDay": "1000000000000000000"
+      }
+    }
+  }
+}
+```
+
+### Delete a policy rule
+
+Use `intentType: "policy_rule_delete"` with `payload.ruleId`. Deleting the last
+remaining policy rule requires `allowDeleteLastPolicy: true`.
+
+```json
+{
+  "intent_type": "policy_rule_delete",
+  "wallet_id": "treasury-wallet",
+  "resource_type": "policy",
+  "resource_id": "approved-addrs-1",
+  "payload": {
+    "rule_id": "approved-addrs-1",
+    "allowDeleteLastPolicy": false
+  }
+}
+```
+
+## Other typed payloads
+
+| Intent type | Payload shape |
+|-------------|---------------|
+| `wallet_update` | Updatable wallet fields such as `name`, `displayName`, `platformId`, or `erc8004TokenId` |
+| `policy_update` | `policies: PolicyRule[]`; clearing all policies also requires `allowClearAllPolicies: true` |
+| `quorum_update` | `action: "create" | "update" | "revoke"` plus quorum fields such as `name`, `threshold`, `memberSignerIds`, `permissions`, `metadata`, `status`, or `quorumId` |
+| `transfer` | `to`, `value`, `chainId`, optional `data`, `nonce`, `gasLimit`, and `broadcast` |
+| `rpc` | `method`, optional `params`, and `chainId` for allowed read-only vault RPC methods |
+| `wallet_action` | `action: "transfer"` or `action: "send_calls"` with the same payload used by wallet-action routes |
+
+## Safe idempotency and retry notes
+
+- Use a stable `Idempotency-Key` for intent creation and execution attempts
+  when your deployment accepts or requires sensitive-mutation idempotency.
+- Put your business operation ID in `resourceId`, `resource_id`, or the typed
+  `payload.referenceId` when available so audit events, webhooks, and retries
+  can be correlated.
+- If `POST /execute` returns a network timeout, first fetch the intent by ID
+  before retrying. It may already be `executing`, `executed`, or `failed`.
+- If execution fails with stale-state conflict, recreate the intent from the
+  current policy/quorum state and run the human approval flow again.
+- Do not retry terminal lifecycle actions blindly. `executed`, `failed`,
+  `rejected`, `canceled`, and `expired` are terminal statuses.
+
+## Related
+
+- [Vault API](/api-reference/vault) - Wallet signing and action routes
+- [Policies API](/api-reference/policies) - Policy rule structure
+- [Approvals API](/api-reference/approvals) - Transaction approval queue

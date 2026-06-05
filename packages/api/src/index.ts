@@ -18,7 +18,7 @@ import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
 import { app } from "./app";
 import { initRedis, shutdownRedis } from "./middleware/redis";
-import { initAuthStores } from "./routes/auth";
+import { getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
   API_VERSION,
   type ApiResponse,
@@ -52,16 +52,9 @@ let cancelRetention: (() => void) | undefined;
 let cancelTransactionReceiptPolling: (() => void) | undefined;
 let cancelWebhookRetryScheduler: (() => void) | undefined;
 
-// Bun-only runtime gate: shutdown guard + in-memory IP rate limit.
-//
-// This runs in the `Bun.serve` fetch handler *before* the request reaches the
-// shared Hono `app`, so the in-memory rate-limit log (only safe in a single
-// long-lived process) never gets attached to the `app` instance that other
-// runtimes (Workers, tests) import. Returns a Response to short-circuit, or
-// `undefined` to let the request fall through to `app.fetch`.
-function runtimeGate(request: Request): Response | undefined {
-  const path = new URL(request.url).pathname;
-  if (path === "/health" || path === "/ready") return undefined;
+function runtimeGate(request: Request): Response | null {
+  const url = new URL(request.url);
+  if (url.pathname === "/health" || url.pathname === "/ready") return null;
 
   if (isShuttingDown) {
     return Response.json({ ok: false, error: "Server is shutting down" } satisfies ApiResponse, {
@@ -76,19 +69,21 @@ function runtimeGate(request: Request): Response | undefined {
 
   if (!current || current.resetAt <= now) {
     requestLog.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return undefined;
+    return null;
   }
 
   if (current.count >= RATE_LIMIT_MAX_REQUESTS) {
     return Response.json({ ok: false, error: "Rate limit exceeded" } satisfies ApiResponse, {
       status: 429,
-      headers: { "Retry-After": Math.ceil((current.resetAt - now) / 1000).toString() },
+      headers: {
+        "Retry-After": Math.ceil((current.resetAt - now) / 1000).toString(),
+      },
     });
   }
 
   current.count += 1;
   requestLog.set(ip, current);
-  return undefined;
+  return null;
 }
 
 const requestLogCleanupTimer = setInterval(() => {
@@ -104,7 +99,7 @@ const requestLogCleanupTimer = setInterval(() => {
 // on the Cloudflare control plane for instance health.
 
 app.get("/ready", async (c) => {
-  const checks: Record<string, { ok: boolean; error?: string }> = {};
+  const checks: Record<string, { ok: boolean; error?: string; source?: string }> = {};
 
   checks.migrations = { ok: migrationsRan };
 
@@ -121,6 +116,18 @@ app.get("/ready", async (c) => {
   } else {
     checks.vault = { ok: true };
   }
+
+  const storeSources = getAuthStoreSources();
+  const importSessionMemoryAllowed =
+    process.env.STEWARD_ALLOW_MEMORY_IMPORT_SESSION_STORE === "true" ||
+    process.env.NODE_ENV !== "production";
+  checks.importSessionStore = {
+    ok: storeSources.importSession !== "memory" || importSessionMemoryAllowed,
+    source: storeSources.importSession,
+    ...(storeSources.importSession === "memory" && !importSessionMemoryAllowed
+      ? { error: "Encrypted import sessions are using memory storage in production" }
+      : {}),
+  };
 
   const allOk = Object.values(checks).every((c) => c.ok);
   return c.json(
@@ -183,7 +190,14 @@ initRedis()
   .then((redisOk) => {
     // usePostgres=true when migrations have run, so auth_kv_store table exists.
     const usePostgres = migrationsRan && !redisOk;
-    return initAuthStores(usePostgres);
+    return initAuthStores(usePostgres).then(() => {
+      const { importSession } = getAuthStoreSources();
+      if (importSession === "memory") {
+        console.warn(
+          "[steward] encrypted import sessions are using memory storage; one-time import sessions will not survive restarts or multi-instance routing",
+        );
+      }
+    });
   })
   .catch((err) => {
     console.warn("[steward] Redis/auth store initialization failed, using in-memory stores:", err);

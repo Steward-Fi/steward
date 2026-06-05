@@ -4,7 +4,7 @@
  * Mount: app.route("/intents", intentRoutes)
  */
 
-import { toPersistedPolicyRule } from "@stwd/db";
+import { toPersistedPolicyRule, users, userTenants } from "@stwd/db";
 import type { PolicyRule } from "@stwd/shared";
 import { and, desc, eq, inArray, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
@@ -51,6 +51,8 @@ const INTENT_TYPES = new Set([
   "transfer",
   "wallet_update",
   "policy_update",
+  "policy_rule_create",
+  "policy_rule_delete",
   "policy_rule_update",
   "quorum_update",
   "wallet_action",
@@ -58,6 +60,8 @@ const INTENT_TYPES = new Set([
 const HUMAN_APPROVER_INTENT_TYPES = new Set([
   "wallet_update",
   "policy_update",
+  "policy_rule_create",
+  "policy_rule_delete",
   "policy_rule_update",
   "quorum_update",
 ]);
@@ -115,6 +119,22 @@ function requireHumanIntentApprover(c: Context<{ Variables: AppVariables }>): bo
   );
 }
 
+async function hasCurrentTenantReviewerMembership(
+  tenantId: string,
+  userId: string | undefined,
+): Promise<boolean> {
+  if (!userId) return false;
+  const [membership] = await db
+    .select({ role: userTenants.role, deactivatedAt: users.deactivatedAt })
+    .from(userTenants)
+    .innerJoin(users, eq(users.id, userTenants.userId))
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+  return (
+    (membership?.role === "owner" || membership?.role === "admin") &&
+    membership.deactivatedAt === null
+  );
+}
+
 function hasRecentSessionMfa(c: Context<{ Variables: AppVariables }>, maxAgeMs = 5 * 60_000) {
   const verifiedAt = c.get("sessionMfaVerifiedAt");
   return (
@@ -166,6 +186,22 @@ function normalizeJsonObject(value: unknown, field: string, fallback: Record<str
     throw new Error(`${field} is too large`);
   }
   return value as Record<string, unknown>;
+}
+
+async function parseOptionalJsonObjectBody(
+  c: Context<{ Variables: AppVariables }>,
+): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; error: string }> {
+  const raw = await c.req.text();
+  if (!raw.trim()) return { ok: true, body: {} };
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: false, error: "Request body must be a JSON object" };
+    }
+    return { ok: true, body: parsed as Record<string, unknown> };
+  } catch {
+    return { ok: false, error: "Malformed JSON request body" };
+  }
 }
 
 function normalizeAuthorizationDetails(value: unknown): Array<Record<string, unknown>> {
@@ -912,6 +948,8 @@ async function buildIntentAuthorizationBaseline(
   if (!agentId) return null;
   if (
     row.intentType === "policy_update" ||
+    row.intentType === "policy_rule_create" ||
+    row.intentType === "policy_rule_delete" ||
     row.intentType === "policy_rule_update" ||
     row.intentType === "transfer" ||
     (row.intentType === "wallet_action" &&
@@ -1239,7 +1277,12 @@ async function executePolicyUpdateIntent(row: typeof intents.$inferSelect) {
 async function executePolicyRuleUpdateIntent(row: typeof intents.$inferSelect) {
   const agentId = intentAgentId(row);
   const payload = row.payload;
-  const action = normalizeRequiredText(payload.action, "action", 32);
+  const action =
+    row.intentType === "policy_rule_create"
+      ? "create"
+      : row.intentType === "policy_rule_delete"
+        ? "delete"
+        : normalizeRequiredText(payload.action, "action", 32);
   if (!["create", "update", "delete"].includes(action)) {
     throw new IntentExecutionError(
       "policy_rule_update payload.action must be create, update, or delete",
@@ -1261,7 +1304,7 @@ async function executePolicyRuleUpdateIntent(row: typeof intents.$inferSelect) {
       .delete(policies)
       .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)))
       .returning();
-    return { handler: "policy_rule_update", action, agentId, rule: toPolicyRule(deleted) };
+    return { handler: row.intentType, action, agentId, rule: toPolicyRule(deleted) };
   }
 
   let nextRule: PolicyRule;
@@ -1288,7 +1331,7 @@ async function executePolicyRuleUpdateIntent(row: typeof intents.$inferSelect) {
       enabled: persistedRule.enabled,
       config: persistedRule.config,
     });
-    return { handler: "policy_rule_update", action, agentId, rule: nextRule };
+    return { handler: row.intentType, action, agentId, rule: nextRule };
   }
 
   const ruleId = normalizeRequiredText(payload.ruleId ?? payload.rule_id, "ruleId", 64);
@@ -1316,7 +1359,7 @@ async function executePolicyRuleUpdateIntent(row: typeof intents.$inferSelect) {
     .where(and(eq(policies.agentId, agentId), eq(policies.id, ruleId)))
     .returning();
   if (!updated) throw new IntentExecutionError("Policy rule not found", 404);
-  return { handler: "policy_rule_update", action, agentId, rule: toPolicyRule(updated) };
+  return { handler: row.intentType, action, agentId, rule: toPolicyRule(updated) };
 }
 
 async function executeQuorumUpdateIntent(row: typeof intents.$inferSelect) {
@@ -1434,7 +1477,13 @@ async function executeTypedIntent(
 ): Promise<Record<string, unknown>> {
   if (row.intentType === "wallet_update") return executeWalletUpdateIntent(row);
   if (row.intentType === "policy_update") return executePolicyUpdateIntent(row);
-  if (row.intentType === "policy_rule_update") return executePolicyRuleUpdateIntent(row);
+  if (
+    row.intentType === "policy_rule_create" ||
+    row.intentType === "policy_rule_delete" ||
+    row.intentType === "policy_rule_update"
+  ) {
+    return executePolicyRuleUpdateIntent(row);
+  }
   if (row.intentType === "quorum_update") return executeQuorumUpdateIntent(row);
   if (row.intentType === "transfer") return executeTransferIntent(row);
   if (row.intentType === "rpc") return executeRpcIntent(row);
@@ -1463,11 +1512,11 @@ intentRoutes.get("/", async (c) => {
   if (status && !INTENT_STATUSES.has(status)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid intent status" }, 400);
   }
-  const intentType = c.req.query("intentType") ?? c.req.query("type");
+  const intentType = c.req.query("intentType") ?? c.req.query("intent_type") ?? c.req.query("type");
   if (intentType && !INTENT_TYPES.has(intentType)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid intent type" }, 400);
   }
-  const agentId = c.req.query("agentId");
+  const agentId = c.req.query("agentId") ?? c.req.query("wallet_id");
 
   const conditions: SQL[] = [eq(intents.tenantId, tenantId)];
   if (status) conditions.push(eq(intents.status, status));
@@ -1603,7 +1652,9 @@ async function updateIntentStatus(
   const tenantId = c.get("tenantId");
   const intentId = c.req.param("intentId");
   if (!intentId) return c.json<ApiResponse>({ ok: false, error: "Intent id is required" }, 400);
-  const body = (await safeJsonParse<Record<string, unknown>>(c)) ?? {};
+  const parsedBody = await parseOptionalJsonObjectBody(c);
+  if (!parsedBody.ok) return c.json<ApiResponse>({ ok: false, error: parsedBody.error }, 400);
+  const body = parsedBody.body;
   const [existing] = await db
     .select()
     .from(intents)
@@ -1641,6 +1692,15 @@ async function updateIntentStatus(
           : "authorization";
       return c.json<ApiResponse>(
         { ok: false, error: `Intent ${action} requires recent MFA verification` },
+        403,
+      );
+    }
+    if (!(await hasCurrentTenantReviewerMembership(tenantId, c.get("userId")))) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Intent review requires an active owner or admin tenant membership at review time",
+        },
         403,
       );
     }
@@ -2007,6 +2067,7 @@ async function updateIntentStatus(
 }
 
 intentRoutes.post("/:intentId/authorize", (c) => updateIntentStatus(c, "authorized"));
+intentRoutes.post("/:intentId/approve", (c) => updateIntentStatus(c, "authorized"));
 intentRoutes.post("/:intentId/reject", (c) => updateIntentStatus(c, "rejected"));
 intentRoutes.post("/:intentId/execute", (c) => updateIntentStatus(c, "executed"));
 intentRoutes.post("/:intentId/fail", (c) => updateIntentStatus(c, "failed"));

@@ -26,6 +26,10 @@ const MAX_AUDIT_OFFSET = 1_000_000;
 const MAX_AUDIT_VERIFY_RANGE = 10_000;
 const MAX_AUDIT_EXPORT_RANGE_MS = 31 * 24 * 60 * 60 * 1000;
 const AUDIT_READ_MFA_MAX_AGE_MS = 5 * 60_000;
+const MAX_AUDIT_METADATA_FILTERS = 5;
+const AUDIT_ACTION_FILTER_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
+const AUDIT_METADATA_PATH_PART_PATTERN = /^[A-Za-z0-9_]{1,64}$/;
+const MAX_AUDIT_METADATA_VALUE_LENGTH = 256;
 
 function hasRecentSessionMfa(
   c: Context<{ Variables: AppVariables }>,
@@ -127,6 +131,65 @@ function validateAuditExportRange(
     return "audit export range must not exceed 31 days";
   }
   return null;
+}
+
+function parseAuditActionFilter(raw: string | undefined, name: string): ParsedParam<string | null> {
+  if (!raw) return { ok: true, value: null };
+  if (!AUDIT_ACTION_FILTER_PATTERN.test(raw)) {
+    return { ok: false, error: `${name} contains unsupported characters` };
+  }
+  return { ok: true, value: raw };
+}
+
+function escapeAuditLikePrefix(raw: string): string {
+  return raw.replace(/([%_\\])/g, "\\$1");
+}
+
+function parseAuditMetadataFilters(
+  query: URLSearchParams,
+): ParsedParam<Array<{ path: string[]; value: string }>> {
+  const filters: Array<{ path: string[]; value: string }> = [];
+  for (const [key, value] of query.entries()) {
+    if (!key.startsWith("metadata.")) continue;
+    if (filters.length >= MAX_AUDIT_METADATA_FILTERS) {
+      return {
+        ok: false,
+        error: `metadata filters cannot exceed ${MAX_AUDIT_METADATA_FILTERS}`,
+      };
+    }
+    const path = key.slice("metadata.".length).split(".");
+    if (
+      path.length === 0 ||
+      path.length > 5 ||
+      path.some(
+        (part) =>
+          !AUDIT_METADATA_PATH_PART_PATTERN.test(part) ||
+          part === "__proto__" ||
+          part === "prototype" ||
+          part === "constructor",
+      )
+    ) {
+      return {
+        ok: false,
+        error:
+          "metadata filter keys must use dot-separated alphanumeric/underscore paths up to depth 5",
+      };
+    }
+    if (value.length === 0 || value.length > MAX_AUDIT_METADATA_VALUE_LENGTH) {
+      return {
+        ok: false,
+        error: `metadata filter values must be 1-${MAX_AUDIT_METADATA_VALUE_LENGTH} characters`,
+      };
+    }
+    filters.push({ path, value });
+  }
+  return { ok: true, value: filters };
+}
+
+function auditMetadataPathLiteral(path: string[]): SQL {
+  // Safe because parseAuditMetadataFilters restricts every segment to
+  // [A-Za-z0-9_]{1,64}; keep this as the only raw interpolation for JSON paths.
+  return sql.raw(`'{${path.join(",")}}'`);
 }
 
 function rowsFromExecute<T>(result: unknown): T[] {
@@ -629,7 +692,18 @@ auditRoutes.get("/events", async (c) => {
   const { page, limit, offset } = pagination.value;
   const dateRange = parseAuditDateRange(c.req.query("dateFrom"), c.req.query("dateTo"));
   if (!dateRange.ok) return c.json<ApiResponse>({ ok: false, error: dateRange.error }, 400);
-  const action = c.req.query("action");
+  const actionFilter = parseAuditActionFilter(c.req.query("action"), "action");
+  if (!actionFilter.ok) return c.json<ApiResponse>({ ok: false, error: actionFilter.error }, 400);
+  const actionPrefixFilter = parseAuditActionFilter(c.req.query("actionPrefix"), "actionPrefix");
+  if (!actionPrefixFilter.ok) {
+    return c.json<ApiResponse>({ ok: false, error: actionPrefixFilter.error }, 400);
+  }
+  const metadataFilters = parseAuditMetadataFilters(new URL(c.req.url).searchParams);
+  if (!metadataFilters.ok) {
+    return c.json<ApiResponse>({ ok: false, error: metadataFilters.error }, 400);
+  }
+  const action = actionFilter.value;
+  const actionPrefix = actionPrefixFilter.value;
   const actorType = c.req.query("actorType");
   const actorId = c.req.query("actorId");
   const resourceType = c.req.query("resourceType");
@@ -638,11 +712,17 @@ auditRoutes.get("/events", async (c) => {
 
   const conditions: SQL[] = [sql`tenant_id = ${tenantId}`];
   if (action) conditions.push(sql`action = ${action}`);
+  if (actionPrefix) {
+    conditions.push(sql`action LIKE ${`${escapeAuditLikePrefix(actionPrefix)}%`} ESCAPE '\\'`);
+  }
   if (actorType) conditions.push(sql`actor_type = ${actorType}`);
   if (actorId) conditions.push(sql`actor_id = ${actorId}`);
   if (resourceType) conditions.push(sql`resource_type = ${resourceType}`);
   if (resourceId) conditions.push(sql`resource_id = ${resourceId}`);
   if (requestId) conditions.push(sql`request_id = ${requestId}`);
+  for (const filter of metadataFilters.value) {
+    conditions.push(sql`metadata #>> ${auditMetadataPathLiteral(filter.path)} = ${filter.value}`);
+  }
   if (dateRange.value.dateFrom) conditions.push(sql`created_at >= ${dateRange.value.dateFrom}`);
   if (dateRange.value.dateTo) conditions.push(sql`created_at <= ${dateRange.value.dateTo}`);
   const where = sql.join(conditions, sql` AND `);

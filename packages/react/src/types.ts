@@ -357,6 +357,7 @@ export type { StewardTenantMembership } from "@stwd/sdk";
 
 export type {
   SessionStorage,
+  StewardGuestState,
   StewardProviders as StewardProvidersState,
   StewardSession,
   StewardUser,
@@ -380,7 +381,21 @@ export interface StewardAuthContextValue {
   providers: StewardProvidersState | null;
   /** Whether providers are still loading */
   isProvidersLoading: boolean;
+  /** Current guest lifecycle state, including 30-day expiry messaging. */
+  guestState: import("@stwd/sdk").StewardGuestState;
   signOut: () => void;
+  /** Create a bounded guest account session. */
+  signInAsGuest: (
+    options?: import("@stwd/sdk").StewardGuestSignInOptions,
+  ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  /** Upgrade the current guest with a verified email magic-link token. */
+  upgradeGuestWithEmail: (
+    input: import("@stwd/sdk").StewardGuestUpgradeEmailInput,
+  ) => Promise<
+    import("@stwd/sdk").StewardAuthResult | import("@stwd/sdk").StewardMfaRequiredResult
+  >;
+  /** Delete the current guest account server-side and clear local session state. */
+  deleteGuest: () => Promise<import("@stwd/sdk").StewardGuestDeleteResult>;
   getToken: () => string | null;
   /** Sign in with a passkey (WebAuthn). Browser-only. */
   signInWithPasskey: (
@@ -485,6 +500,8 @@ export interface StewardAuthContextValue {
     challengeId: string,
     recoveryCode: string,
   ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  stepUpWithTotp: (code: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  stepUpWithRecoveryCode: (recoveryCode: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
   getRecoveryCodeStatus: () => Promise<import("@stwd/sdk").StewardRecoveryCodeStatus>;
   regenerateRecoveryCodes: (
     code: string,
@@ -498,6 +515,7 @@ export interface StewardAuthContextValue {
     challengeId: string,
     code: string,
   ) => Promise<import("@stwd/sdk").StewardAuthResult>;
+  stepUpWithSms: (code: string) => Promise<import("@stwd/sdk").StewardAuthResult>;
   completePasskeyMfa: () => Promise<import("@stwd/sdk").StewardAuthResult>;
   unenrollSmsMfa: (code: string) => Promise<{ ok: boolean }>;
   // ─── Multi-Tenant ───
@@ -530,6 +548,19 @@ export interface StewardLoginProps {
   showEmail?: boolean;
   showSms?: boolean;
   showWhatsApp?: boolean;
+  /**
+   * Hosted/default guest lifecycle controls.
+   *
+   * When enabled, signed-out users can start a bounded guest session, and
+   * signed-in guests see expiry, email-token upgrade, and delete controls.
+   */
+  showGuest?: boolean;
+  guestSignInLabel?: string;
+  guestUpgradeLabel?: string;
+  guestDeleteLabel?: string;
+  guestEmailPlaceholder?: string;
+  guestTokenPlaceholder?: string;
+  onGuestDeleted?: (result: import("@stwd/sdk").StewardGuestDeleteResult) => void;
   showSIWE?: boolean;
   /**
    * First-class wallet sign-in (SIWE / SIWS).

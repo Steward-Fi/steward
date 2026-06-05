@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
+import { loginWithMagicLink } from "./fixtures/auth";
 
-const API = process.env.E2E_API_URL ?? "http://localhost:3299";
 const WEB = process.env.E2E_WEB_URL ?? "http://localhost:3499";
 
 type AppClient = {
@@ -26,6 +26,9 @@ type AppClient = {
       github?: boolean;
       twitter?: boolean;
     };
+  };
+  embeddedWallets?: {
+    createOnLogin?: "off" | "users-without-wallets" | "all-users";
   };
   globalWalletEnabled?: boolean;
   globalWalletAllowedScopes?: string[];
@@ -59,8 +62,19 @@ test.describe("Dashboard app client settings", () => {
             twitter: false,
           },
         },
+        embeddedWallets: { createOnLogin: "users-without-wallets" },
         globalWalletEnabled: false,
         globalWalletAllowedScopes: ["eth_accounts", "personal_sign"],
+      },
+      {
+        id: "web-inherit",
+        name: "Inherited Web",
+        environment: "preview",
+        enabled: true,
+        allowedOrigins: ["https://inherit.example.com"],
+        allowedRedirectUrls: ["https://inherit.example.com/auth/callback"],
+        globalWalletEnabled: false,
+        globalWalletAllowedScopes: ["eth_accounts"],
       },
     ];
 
@@ -120,17 +134,7 @@ test.describe("Dashboard app client settings", () => {
       });
     });
 
-    const sendRes = await request.post(`${API}/auth/email/send`, { data: { email } });
-    expect(sendRes.status()).toBe(200);
-
-    const inboxRes = await request.get(`${API}/auth/test/inbox/${encodeURIComponent(email)}`);
-    expect(inboxRes.status()).toBe(200);
-    const inbox = (await inboxRes.json()) as { token: string };
-
-    await page.goto(
-      `${WEB}/auth/callback/email?token=${encodeURIComponent(inbox.token)}&email=${encodeURIComponent(email)}`,
-    );
-    await page.waitForURL(/\/dashboard/, { timeout: 30_000 });
+    await loginWithMagicLink(page, request, email);
 
     await page.goto(`${WEB}/dashboard/settings`);
     const appClientsForm = page.locator("form").filter({
@@ -143,6 +147,11 @@ test.describe("Dashboard app client settings", () => {
     await expect(firstClient.getByLabel("Name")).toHaveValue("Production Web");
     await expect(firstClient.getByLabel("Environment")).toHaveValue("production");
 
+    const inheritedClient = appClientsForm.getByTestId("app-client-row").nth(1);
+    await expect(inheritedClient.getByLabel("Client ID")).toHaveValue("web-inherit");
+    await expect(inheritedClient.getByLabel("Create on Login")).toHaveValue("inherit");
+    await inheritedClient.getByLabel("Name").fill("Inherited Web Updated");
+
     await firstClient.getByLabel("Environment").selectOption("preview");
     await firstClient.getByLabel("Enabled").uncheck();
     await firstClient.getByLabel("Allowed Origins").fill("https://preview.example.com");
@@ -152,6 +161,7 @@ test.describe("Dashboard app client settings", () => {
     await firstClient.getByRole("checkbox", { name: "Twitter/X" }).check();
     await firstClient.getByRole("checkbox", { name: "Global Wallet" }).check();
     await firstClient.getByLabel("Global Wallet Scopes").fill("eth_accounts");
+    await firstClient.getByLabel("Create on Login").selectOption("off");
     await firstClient.getByRole("button", { name: "Rotate Secret" }).click();
     await expect(firstClient.getByTestId("app-client-secret-value")).toContainText(
       "stw_app_created_once",
@@ -161,13 +171,25 @@ test.describe("Dashboard app client settings", () => {
     await expect(firstClient.getByLabel("Name")).toHaveValue("Production Web Updated");
 
     await appClientsForm.getByRole("button", { name: "Add Client" }).click();
-    const secondClient = appClientsForm.getByTestId("app-client-row").nth(1);
+    const secondClient = appClientsForm.getByTestId("app-client-row").nth(2);
+    await expect(secondClient.getByLabel("Create on Login")).toHaveValue("inherit");
     await secondClient.getByLabel("Client ID").fill("mobile-dev");
     await secondClient.getByLabel("Name").fill("Mobile Development");
     await secondClient.getByLabel("Environment").selectOption("development");
     await secondClient.getByLabel("Allowed Origins").fill("http://localhost:3000");
     await secondClient.getByLabel("Redirect URLs").fill("http://localhost:3000/auth/callback");
     await secondClient.getByLabel("Global Wallet Scopes").fill("eth_accounts\npersonal_sign");
+    await expect(secondClient.getByLabel("Create on Login")).toHaveValue("inherit");
+    await secondClient.getByLabel("Create on Login").selectOption("all-users");
+
+    await appClientsForm.getByRole("button", { name: "Add Client" }).click();
+    const thirdClient = appClientsForm.getByTestId("app-client-row").nth(3);
+    await thirdClient.getByLabel("Client ID").fill("server-prod");
+    await thirdClient.getByLabel("Name").fill("Server Production");
+    await thirdClient.getByLabel("Environment").selectOption("production");
+    await thirdClient.getByLabel("Allowed Origins").fill("https://server.example.com");
+    await thirdClient.getByLabel("Redirect URLs").fill("https://server.example.com/auth/callback");
+    await expect(thirdClient.getByLabel("Create on Login")).toHaveValue("inherit");
 
     await appClientsForm.getByRole("button", { name: "Save Clients" }).click();
     await expect(appClientsForm.getByText("Saved")).toBeVisible();
@@ -197,7 +219,35 @@ test.describe("Dashboard app client settings", () => {
             twitter: true,
           },
         },
+        embeddedWallets: { createOnLogin: "off" },
         globalWalletEnabled: true,
+        globalWalletAllowedScopes: ["eth_accounts"],
+      },
+      {
+        id: "web-inherit",
+        name: "Inherited Web Updated",
+        environment: "preview",
+        enabled: true,
+        allowedOrigins: ["https://inherit.example.com"],
+        allowedRedirectUrls: ["https://inherit.example.com/auth/callback"],
+        loginMethods: {
+          passkey: true,
+          email: true,
+          sms: true,
+          whatsapp: true,
+          totp: true,
+          siwe: true,
+          siws: true,
+          telegram: true,
+          farcaster: true,
+          oauth: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: true,
+          },
+        },
+        globalWalletEnabled: false,
         globalWalletAllowedScopes: ["eth_accounts"],
       },
       {
@@ -207,6 +257,34 @@ test.describe("Dashboard app client settings", () => {
         enabled: true,
         allowedOrigins: ["http://localhost:3000"],
         allowedRedirectUrls: ["http://localhost:3000/auth/callback"],
+        loginMethods: {
+          passkey: true,
+          email: true,
+          sms: true,
+          whatsapp: true,
+          totp: true,
+          siwe: true,
+          siws: true,
+          telegram: true,
+          farcaster: true,
+          oauth: {
+            google: true,
+            discord: true,
+            github: true,
+            twitter: true,
+          },
+        },
+        embeddedWallets: { createOnLogin: "all-users" },
+        globalWalletEnabled: false,
+        globalWalletAllowedScopes: ["eth_accounts", "personal_sign"],
+      },
+      {
+        id: "server-prod",
+        name: "Server Production",
+        environment: "production",
+        enabled: true,
+        allowedOrigins: ["https://server.example.com"],
+        allowedRedirectUrls: ["https://server.example.com/auth/callback"],
         loginMethods: {
           passkey: true,
           email: true,

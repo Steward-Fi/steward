@@ -1,4 +1,48 @@
+export type { BitcoinPsbtOutput, SignBitcoinPsbtOptions } from "./bitcoin-psbt";
 export {
+  extractBitcoinPsbtOutputs,
+  parseBitcoinPsbtSigningMetadata,
+  signBitcoinPsbt,
+} from "./bitcoin-psbt";
+export type {
+  Eip7702BroadcastRequest,
+  Eip7702DelegationStatus,
+  Eip7702ParsedTransaction,
+  Eip7702SignedAuthorizationInput,
+  Eip7702TransactionInput,
+  ReadEip7702DelegationOptions,
+} from "./eip7702-auth";
+export {
+  assembleEip7702Transaction,
+  buildEip7702BroadcastRequest,
+  EIP7702_DELEGATION_PREFIX,
+  parseEip7702DelegatedImplementation,
+  parseEip7702Transaction,
+  readEip7702Delegation,
+  serializeEip7702Transaction,
+  toEip7702SignedAuthorization,
+} from "./eip7702-auth";
+export { allocateEvmNonce } from "./evm-nonce-manager";
+export type {
+  ExternalKeyCustodyProvider,
+  ExternalKeyHandleDescriptor,
+  ExternalKeyHandleExportRequest,
+  ExternalKeyHandleImportRequest,
+  ExternalKeyHandleRegistration,
+  ExternalKeySigningAvailability,
+} from "./external-key-custody";
+export {
+  assertNoExternalPrivateKeyMaterial,
+  externalKeyCustodyUnavailableError,
+  externalKeyPrivateExportUnavailableError,
+  externalKeySigningUnavailableError,
+  FailClosedExternalKeyCustodyProvider,
+  InMemoryExternalKeyCustodyProvider,
+  normalizeExternalKeyHandleRegistration,
+} from "./external-key-custody";
+export type { BitcoinAddressType, BitcoinNetwork, DerivedBitcoinKey } from "./hd-wallet";
+export {
+  deriveBitcoinKey,
   deriveEvmKey,
   deriveSolanaKey,
   generateMnemonic,
@@ -26,17 +70,22 @@ export {
 } from "./route-matcher";
 export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
 export { SecretVault } from "./secret-vault";
+export {
+  assertVaultSigningActive,
+  isVaultSigningFrozenError,
+  VaultSigningFrozenError,
+} from "./signing-freeze";
 export type {
   ComputeBudgetEstimate,
   ComputeBudgetOptions,
+  SolanaSplTransferTransaction,
+  SplTokenBalance,
 } from "./solana";
 export {
-  assertSolanaTransferTransactionMatches,
-  buildComputeBudgetInstructions,
-  COMPUTE_BUDGET_BOUNDS,
-  estimateSolanaComputeBudget,
+  buildSolanaSplTransferTransaction,
   generateSolanaKeypair,
   getSolanaBalance,
+  getSplTokenBalances,
   restoreSolanaKeypair,
   signSolanaMessage,
   signSolanaTransaction,
@@ -66,6 +115,7 @@ export type { UserWalletRestoreResult, UserWalletResult } from "./user-wallet";
 export {
   applyUserWalletDefaults,
   getUserWallet,
+  normalizeUserWalletIndex,
   provisionRecoverableUserWallet,
   provisionUserWallet,
   restoreRecoverableUserWallet,
@@ -78,5 +128,13 @@ export {
   getUserOperationHash,
   packUserOperation,
 } from "./userop";
-export type { VaultConfig } from "./vault";
+export type {
+  BitcoinPrivateKeyExport,
+  ExportPrivateKeyAuthorization,
+  ExportPrivateKeyResult,
+  InspectBitcoinPsbtResult,
+  SignBitcoinPsbtRequest,
+  SignBitcoinPsbtResult,
+  VaultConfig,
+} from "./vault";
 export { Vault, Vault as VaultClient } from "./vault";

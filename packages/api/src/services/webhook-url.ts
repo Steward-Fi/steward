@@ -2,7 +2,7 @@ import { isIP } from "node:net";
 
 const ALLOW_INSECURE_WEBHOOK_URLS = process.env.STEWARD_ALLOW_INSECURE_WEBHOOK_URLS === "true";
 
-function isPrivateIpv4(hostname: string): boolean {
+function isNonPublicIpv4(hostname: string): boolean {
   const octets = hostname.split(".").map((part) => Number(part));
   if (
     octets.length !== 4 ||
@@ -12,13 +12,20 @@ function isPrivateIpv4(hostname: string): boolean {
   }
   const [a, b] = octets;
   return (
+    a === 0 ||
     a === 10 ||
     a === 127 ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168) ||
     (a === 100 && b >= 64 && b <= 127) ||
-    a === 0
+    (a === 192 && b === 0 && (octets[2] === 0 || octets[2] === 2)) ||
+    (a === 192 && b === 88 && octets[2] === 99) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && octets[2] === 100) ||
+    (a === 203 && b === 0 && octets[2] === 113) ||
+    a >= 224 ||
+    hostname === "255.255.255.255"
   );
 }
 
@@ -86,21 +93,21 @@ function embeddedIpv4FromIpv6(hostname: string): string | null {
   return null;
 }
 
-function isPrivateIpv6(hostname: string): boolean {
+function isNonPublicIpv6(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
   const ipv4Mapped = mappedIpv4FromIpv6(normalized);
-  if (ipv4Mapped) return isPrivateIpv4(ipv4Mapped);
+  if (ipv4Mapped) return isNonPublicIpv4(ipv4Mapped);
   const ipv4Embedded = embeddedIpv4FromIpv6(normalized);
-  if (ipv4Embedded) return isPrivateIpv4(ipv4Embedded);
+  if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
   const words = expandIpv6Words(normalized);
   if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
+  if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;
   return (
     normalized === "::" ||
     normalized === "::1" ||
     normalized.startsWith("fc") ||
     normalized.startsWith("fd") ||
-    normalized.startsWith("fe80:") ||
     normalized.startsWith("ff")
   );
 }
@@ -129,8 +136,8 @@ export function validateWebhookUrl(url: string): string | null {
     }
 
     const ipVersion = isIP(hostname);
-    if (ipVersion === 4 && isPrivateIpv4(hostname)) return "url host must be public";
-    if (ipVersion === 6 && isPrivateIpv6(hostname)) return "url host must be public";
+    if (ipVersion === 4 && isNonPublicIpv4(hostname)) return "url host must be public";
+    if (ipVersion === 6 && isNonPublicIpv6(hostname)) return "url host must be public";
 
     return null;
   } catch {

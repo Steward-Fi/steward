@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { agents, agentWallets, closeDb, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
@@ -6,6 +6,8 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-account-tenant-${Date.now()}`;
 const AGENT_ID = `agent-account-agent-${Date.now()}`;
+
+setDefaultTimeout(30000);
 
 async function makeApp() {
   const { agentRoutes } = await import("../routes/agents");
@@ -55,6 +57,28 @@ describe("agent account API", () => {
           address: "7cV5Y7R3UKPqJb1x4yQzq8oZsVbGZ3h5m3NkQW2kUZmx",
           purpose: "primary",
         },
+        {
+          agentId: AGENT_ID,
+          chainFamily: "bitcoin",
+          address: "tb1q9x5p7m6d3l0q8s2e4r6t8y0u2i4o6p8a0s2d4f",
+          purpose: "primary",
+          venue: "bitcoin:testnet:p2wpkh:0:0:0",
+          metadata: {
+            bitcoin: {
+              network: "testnet",
+              addressType: "p2wpkh",
+              path: "m/84'/1'/0'/0/0",
+              publicKey: "0x" + "03".repeat(33),
+              privateKey: "0x" + "bb".repeat(32),
+              seedPhrase:
+                "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+              account: 0,
+              change: 0,
+              index: 0,
+              caip2: "bip122:000000000933ea01ad0ee984209779ba",
+            },
+          },
+        },
       ]);
     await getDb()
       .insert(transactions)
@@ -85,11 +109,12 @@ describe("agent account API", () => {
         id: string;
         agentId: string;
         tenantId: string;
-        walletAddresses: { evm?: string; solana?: string };
+        walletAddresses: { evm?: string; solana?: string; bitcoin?: string };
         wallets: Array<{
           chainFamily: string;
           address: string;
           purpose: string | null;
+          metadata?: Record<string, unknown>;
         }>;
         balances: {
           evm: null | {
@@ -134,8 +159,19 @@ describe("agent account API", () => {
     expect(body.data.walletAddresses).toEqual({
       evm: "0x1234567890123456789012345678901234567890",
       solana: "7cV5Y7R3UKPqJb1x4yQzq8oZsVbGZ3h5m3NkQW2kUZmx",
+      bitcoin: "tb1q9x5p7m6d3l0q8s2e4r6t8y0u2i4o6p8a0s2d4f",
     });
-    expect(body.data.wallets.map((wallet) => wallet.chainFamily).sort()).toEqual(["evm", "solana"]);
+    expect(body.data.wallets.map((wallet) => wallet.chainFamily).sort()).toEqual([
+      "bitcoin",
+      "evm",
+      "solana",
+    ]);
+    const serialized = JSON.stringify(body.data);
+    expect(serialized).not.toContain("privateKey");
+    expect(serialized).not.toContain("seedPhrase");
+    expect(serialized).not.toContain(
+      "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    );
     if (body.data.balances.evm) {
       expect(body.data.balances.evm.walletAddress).toBe(
         "0x1234567890123456789012345678901234567890",

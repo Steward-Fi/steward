@@ -45,6 +45,7 @@ export const WEBHOOK_EVENT_TYPES = [
   "mfa.enabled",
   "mfa.disabled",
   "private_key.exported",
+  "wallet.imported",
   "wallet.recovery_setup",
   "wallet.recovered",
   "wallet.raw_signature.created",
@@ -147,7 +148,27 @@ export interface AutoApprovalRuleRecord {
 // ─── Chain Family ───
 
 /** Identifies the blockchain family for a wallet key/address. */
-export type ChainFamily = "evm" | "solana";
+export type ChainFamily = "evm" | "solana" | "bitcoin";
+
+export type BitcoinNetwork = "mainnet" | "testnet";
+export type BitcoinAddressType = "p2wpkh" | "p2tr";
+
+export interface BitcoinWalletMetadata {
+  network: BitcoinNetwork;
+  addressType: BitcoinAddressType;
+  path: string;
+  publicKey: string;
+  xOnlyPublicKey?: string;
+  account: number;
+  change: 0 | 1;
+  index: number;
+  caip2: string;
+}
+
+export interface WalletAddressMetadata {
+  bitcoin?: BitcoinWalletMetadata;
+  [key: string]: unknown;
+}
 
 // ─── Agent Identity ───
 
@@ -161,7 +182,7 @@ export interface AgentIdentity {
    * All addresses for this agent, keyed by chain family.
    * Present for agents created with multi-wallet support.
    */
-  walletAddresses?: { evm?: string; solana?: string };
+  walletAddresses?: { evm?: string; solana?: string; bitcoin?: string };
   erc8004TokenId?: string;
   platformId?: string; // e.g. waifu.fun agent ID
   createdAt: Date;
@@ -176,7 +197,7 @@ export interface AgentIdentity {
 export interface ChainIdentifier {
   caip2: string;
   numericId: number;
-  family: "evm" | "solana";
+  family: ChainFamily;
   name: string;
   symbol: string;
   testnet: boolean;
@@ -619,6 +640,7 @@ export interface ApiResponse<T = unknown> {
 export interface AgentBalance {
   agentId: string;
   walletAddress: string;
+  walletIndex?: number;
   balances: {
     native: string; // wei as string
     nativeFormatted: string; // human-readable (e.g. "0.005")
@@ -682,6 +704,12 @@ export interface ApproverConfig {
   allowedApprovers?: string[];
 }
 
+export type EmbeddedWalletCreateOnLogin = "off" | "users-without-wallets" | "all-users";
+
+export interface TenantEmbeddedWalletFeatureFlags {
+  createOnLogin?: EmbeddedWalletCreateOnLogin;
+}
+
 export interface TenantFeatureFlags {
   showFundingQR?: boolean;
   showTransactionHistory?: boolean;
@@ -692,6 +720,8 @@ export interface TenantFeatureFlags {
   enableSolana?: boolean;
   showChainSelector?: boolean;
   allowAddressExport?: boolean;
+  embeddedWallets?: TenantEmbeddedWalletFeatureFlags;
+  embeddedWalletCreateOnLogin?: EmbeddedWalletCreateOnLogin;
 }
 
 export interface TenantTheme {
@@ -780,12 +810,23 @@ export interface TenantMfaPolicyConfig {
    * Defaults to 300 seconds and is bounded by the API normalizer.
    */
   maxAgeSeconds?: number;
+  maxAgeFor?: {
+    vaultSigning?: number;
+    keyImport?: number;
+    keyExport?: number;
+    recoveryCodes?: number;
+    tenantAdmin?: number;
+  };
   requireFor?: {
     vaultSigning?: boolean;
     keyImport?: boolean;
     keyExport?: boolean;
     recoveryCodes?: boolean;
     tenantAdmin?: boolean;
+  };
+  disableFor?: {
+    keyImport?: boolean;
+    keyExport?: boolean;
   };
   allowDelegatedSignerAutomation?: boolean;
   allowKeyQuorumAutomation?: boolean;
@@ -827,6 +868,11 @@ export interface TenantAuthAbuseConfig {
   wallet?: {
     allowedWallets?: string[];
     blockedWallets?: string[];
+    /**
+     * When enabled, a user can link at most one third-party wallet account
+     * across supported wallet providers.
+     */
+    restrictToOneThirdPartyWallet?: boolean;
   };
   phone?: {
     /**
@@ -844,6 +890,10 @@ export interface TenantAuthAbuseConfig {
 
 export type TenantAppClientEnvironment = "development" | "preview" | "staging" | "production";
 
+export interface TenantAppClientEmbeddedWalletConfig {
+  createOnLogin?: EmbeddedWalletCreateOnLogin;
+}
+
 export interface TenantAppClient {
   id: string;
   name: string;
@@ -852,7 +902,10 @@ export interface TenantAppClient {
   isDefault?: boolean;
   allowedOrigins?: string[];
   allowedRedirectUrls?: string[];
+  allowedBundleIds?: string[];
+  allowedPackageNames?: string[];
   loginMethods?: TenantAuthAbuseConfig["loginMethods"];
+  embeddedWallets?: TenantAppClientEmbeddedWalletConfig;
   globalWalletEnabled?: boolean;
   globalWalletAllowedScopes?: string[];
   createdAt?: Date | string;
@@ -940,7 +993,7 @@ export interface SponsoredGasSpendEntry {
   agentId: string;
   userId?: string | null;
   txId?: string | null;
-  chainFamily: "evm" | "solana";
+  chainFamily: ChainFamily;
   chainId?: number | null;
   caip2?: string | null;
   provider: GasSponsorshipProvider | string;

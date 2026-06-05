@@ -1,16 +1,20 @@
 "use client";
 
-import { useAuth as useStewardAuth } from "@stwd/react";
+import { StewardUserWalletKeyImport, useAuth as useStewardAuth } from "@stwd/react";
 import type {
+  AgentIdentity,
   GlobalWalletConsent,
   StewardRecoveryCodeStatus,
   UserAccountSummary,
   UserAccountsResult,
   UserLinkedAccount,
+  UserWalletRecoveryRestoreResult,
   UserWalletRecoverySetupResult,
+  UserWalletSigner,
 } from "@stwd/sdk";
 import { motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { CopyButton } from "@/components/copy-button";
 import { steward } from "@/lib/api";
 import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
 
@@ -18,10 +22,11 @@ type LoadState = {
   accounts: UserAccountsResult | null;
   summary: UserAccountSummary | null;
   globalWalletConsents: GlobalWalletConsent[];
+  agents: AgentIdentity[];
 };
 
 type PortfolioAsset = NonNullable<UserAccountSummary["portfolio"]["native"]>;
-type RecoverySecretKind = "wallet" | "mfa";
+type RecoverySecretKind = "wallet" | "mfa" | "signer";
 
 type RecoverySecret = {
   kind: RecoverySecretKind;
@@ -39,6 +44,53 @@ type RecoveryAuditEvent = {
   created_at: string;
 };
 
+type PregeneratedInventoryStatus = "unclaimed" | "claimed" | "expired";
+
+type PregeneratedInventoryItem = {
+  agent: AgentIdentity;
+  status: PregeneratedInventoryStatus;
+  tokenHashPrefix: string;
+  claimExpiresAt: Date | null;
+};
+
+type PregeneratedDistribution = {
+  wallets: Array<{
+    agent: AgentIdentity;
+    claimToken: string;
+    claimExpiresAt: string;
+  }>;
+  warning: string;
+  createdAt: string;
+};
+
+type PregeneratedBatchForm = {
+  count: string;
+  namePrefix: string;
+  expiresInDays: string;
+};
+
+type UserWalletSignerForm = {
+  walletIndex: string;
+  subjectType: UserWalletSigner["subjectType"];
+  subjectId: string;
+  label: string;
+  permissions: string;
+  address: string;
+  chainFamily: "" | NonNullable<UserWalletSigner["chainFamily"]>;
+};
+
+const DEFAULT_USER_WALLET_SIGNER_PERMISSIONS = "sign_message, sign_transaction";
+
+const DEFAULT_USER_WALLET_SIGNER_FORM: UserWalletSignerForm = {
+  walletIndex: "0",
+  subjectType: "external",
+  subjectId: "",
+  label: "",
+  permissions: DEFAULT_USER_WALLET_SIGNER_PERMISSIONS,
+  address: "",
+  chainFamily: "",
+};
+
 const RECOVERY_EVENT_ACTIONS = [
   "user.wallet.recovery_setup",
   "mfa.recovery_codes.regenerate",
@@ -46,6 +98,10 @@ const RECOVERY_EVENT_ACTIONS = [
   "mfa.disabled",
   "auth.logout",
 ] as const;
+
+const PREGENERATED_PREFIX = "pregenerated:";
+const CLAIMED_PREGENERATED_PREFIX = "claimed:";
+const EXPIRED_PREGENERATED_PREFIX = "expired:";
 
 const providerLabels: Record<string, string> = {
   discord: "Discord",
@@ -125,6 +181,109 @@ function formatPortfolioAssetValue(asset: PortfolioAsset): string {
   if (asset.usdValueText) return formatUsd(asset.usdValueText);
   if (asset.usdValue !== null) return formatUsd(asset.usdValue);
   return "No USD price";
+}
+
+function formatDurationFromNow(date: Date | null): string {
+  if (!date) return "Legacy token without expiry";
+  const ms = date.getTime() - Date.now();
+  if (ms <= 0) return "Expired";
+  const minutes = Math.ceil(ms / 60_000);
+  if (minutes < 60) return `${minutes}m remaining`;
+  const hours = Math.ceil(minutes / 60);
+  if (hours < 48) return `${hours}h remaining`;
+  return `${Math.ceil(hours / 24)}d remaining`;
+}
+
+function parsePregeneratedInventoryItem(agent: AgentIdentity): PregeneratedInventoryItem | null {
+  const platformId = agent.platformId ?? "";
+
+  if (platformId.startsWith(PREGENERATED_PREFIX)) {
+    const [tokenHash = "", expiresAtMs] = platformId.slice(PREGENERATED_PREFIX.length).split(":");
+    const expiresAt =
+      expiresAtMs && Number.isSafeInteger(Number(expiresAtMs))
+        ? new Date(Number(expiresAtMs))
+        : null;
+    return {
+      agent,
+      status: expiresAt && expiresAt.getTime() <= Date.now() ? "expired" : "unclaimed",
+      tokenHashPrefix: tokenHash.slice(0, 12),
+      claimExpiresAt: expiresAt,
+    };
+  }
+
+  if (platformId.startsWith(CLAIMED_PREGENERATED_PREFIX)) {
+    return {
+      agent,
+      status: "claimed",
+      tokenHashPrefix: platformId.slice(
+        CLAIMED_PREGENERATED_PREFIX.length,
+        CLAIMED_PREGENERATED_PREFIX.length + 12,
+      ),
+      claimExpiresAt: null,
+    };
+  }
+
+  if (platformId.startsWith(EXPIRED_PREGENERATED_PREFIX)) {
+    return {
+      agent,
+      status: "expired",
+      tokenHashPrefix: platformId.slice(
+        EXPIRED_PREGENERATED_PREFIX.length,
+        EXPIRED_PREGENERATED_PREFIX.length + 12,
+      ),
+      claimExpiresAt: null,
+    };
+  }
+
+  return null;
+}
+
+function pregeneratedStatusTone(status: PregeneratedInventoryStatus): string {
+  switch (status) {
+    case "unclaimed":
+      return "border-info/30 text-info";
+    case "claimed":
+      return "border-success/30 text-success";
+    case "expired":
+      return "border-warning/30 text-warning";
+  }
+}
+
+function pregeneratedStatusLabel(status: PregeneratedInventoryStatus): string {
+  switch (status) {
+    case "unclaimed":
+      return "Unclaimed";
+    case "claimed":
+      return "Claimed";
+    case "expired":
+      return "Expired";
+  }
+}
+
+function splitCsv(value: string): string[] {
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseDashboardWalletIndex(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return null;
+  const index = Number(normalized);
+  if (!Number.isSafeInteger(index) || index < 0 || index > 255) return null;
+  return index;
+}
+
+function signerStatusTone(status: UserWalletSigner["status"]): string {
+  switch (status) {
+    case "active":
+      return "border-success/30 text-success";
+    case "paused":
+      return "border-warning/30 text-warning";
+    case "revoked":
+      return "border-border-subtle text-text-tertiary";
+  }
 }
 
 function recoveryEventLabel(action: string): string {
@@ -321,6 +480,7 @@ export default function DashboardAccountPage() {
     accounts: null,
     summary: null,
     globalWalletConsents: [],
+    agents: [],
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -331,8 +491,34 @@ export default function DashboardAccountPage() {
   const [recoverySecret, setRecoverySecret] = useState<RecoverySecret | null>(null);
   const [recoveryBusy, setRecoveryBusy] = useState<string | null>(null);
   const [recoveryMessage, setRecoveryMessage] = useState<string | null>(null);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const [totpCode, setTotpCode] = useState("");
+  const [recoveryWalletIndex, setRecoveryWalletIndex] = useState("0");
+  const [createdRecoveryWalletIndexes, setCreatedRecoveryWalletIndexes] = useState<Set<number>>(
+    () => new Set(),
+  );
   const [recoverySetupConfirmed, setRecoverySetupConfirmed] = useState(false);
+  const [recoveryRestoreMnemonic, setRecoveryRestoreMnemonic] = useState("");
+  const [recoveryRestoreConfirmed, setRecoveryRestoreConfirmed] = useState(false);
+  const [pregeneratedForm, setPregeneratedForm] = useState<PregeneratedBatchForm>({
+    count: "3",
+    namePrefix: "Pregenerated user wallet",
+    expiresInDays: "7",
+  });
+  const [pregeneratedBusy, setPregeneratedBusy] = useState<string | null>(null);
+  const [pregeneratedMessage, setPregeneratedMessage] = useState<string | null>(null);
+  const [pregeneratedError, setPregeneratedError] = useState<string | null>(null);
+  const [pregeneratedDistribution, setPregeneratedDistribution] =
+    useState<PregeneratedDistribution | null>(null);
+  const [userWalletSigners, setUserWalletSigners] = useState<UserWalletSigner[]>([]);
+  const [userWalletSignerForm, setUserWalletSignerForm] = useState<UserWalletSignerForm>(
+    DEFAULT_USER_WALLET_SIGNER_FORM,
+  );
+  const [userWalletSignerError, setUserWalletSignerError] = useState<string | null>(null);
+  const [userWalletSignerMessage, setUserWalletSignerMessage] = useState<string | null>(null);
+  const [userWalletSignerBusy, setUserWalletSignerBusy] = useState<string | null>(null);
+  const [userWalletSignerSecret, setUserWalletSignerSecret] = useState<RecoverySecret | null>(null);
+  const [keyImportMessage, setKeyImportMessage] = useState<string | null>(null);
 
   const loadRecoveryControls = useCallback(
     async (userId?: string | null) => {
@@ -363,11 +549,13 @@ export default function DashboardAccountPage() {
     try {
       setLoading(true);
       setError(null);
-      const [accounts, summaryResult, globalWalletConsents] = await Promise.allSettled([
-        steward.listUserAccounts(),
-        steward.getUserAccount(),
-        steward.listGlobalWalletConsents(),
-      ]);
+      const [accounts, summaryResult, globalWalletConsents, agentsResult] =
+        await Promise.allSettled([
+          steward.listUserAccounts(),
+          steward.getUserAccount(),
+          steward.listGlobalWalletConsents(),
+          steward.listAgents(),
+        ]);
 
       if (accounts.status === "rejected") throw accounts.reason;
 
@@ -377,6 +565,7 @@ export default function DashboardAccountPage() {
         summary: nextSummary,
         globalWalletConsents:
           globalWalletConsents.status === "fulfilled" ? globalWalletConsents.value.consents : [],
+        agents: agentsResult.status === "fulfilled" ? agentsResult.value : [],
       });
       void loadRecoveryControls(nextSummary?.userId ?? null);
     } catch (err) {
@@ -385,6 +574,28 @@ export default function DashboardAccountPage() {
       setLoading(false);
     }
   }, [loadRecoveryControls]);
+
+  const selectedSignerWalletIndex = parseDashboardWalletIndex(userWalletSignerForm.walletIndex);
+
+  const loadUserWalletSigners = useCallback(async () => {
+    const walletIndex = parseDashboardWalletIndex(userWalletSignerForm.walletIndex);
+    if (walletIndex === null) {
+      setUserWalletSigners([]);
+      setUserWalletSignerError("walletIndex must be an integer between 0 and 255");
+      return;
+    }
+
+    try {
+      setUserWalletSignerError(null);
+      const signers = await steward.listUserWalletSigners({ walletIndex });
+      setUserWalletSigners(signers);
+    } catch (err) {
+      setUserWalletSigners([]);
+      setUserWalletSignerError(
+        err instanceof Error ? err.message : "Failed to load user wallet signers",
+      );
+    }
+  }, [userWalletSignerForm.walletIndex]);
 
   useEffect(() => {
     void loadAccount();
@@ -403,8 +614,58 @@ export default function DashboardAccountPage() {
   );
   const canUnlink = primaryMethods.length + unlinkableLinkedAccounts.length > 1;
   const hasEmbeddedWallet = userWallets.length > 0 || Boolean(state.summary?.wallet);
+  const selectedRecoveryWalletIndex = parseDashboardWalletIndex(recoveryWalletIndex);
+  const selectedRecoveryWalletExists =
+    selectedRecoveryWalletIndex !== null &&
+    (createdRecoveryWalletIndexes.has(selectedRecoveryWalletIndex) ||
+      (selectedRecoveryWalletIndex === 0 && hasEmbeddedWallet));
+  const activeUserWalletSigners = userWalletSigners.filter(
+    (signer) => signer.status === "active",
+  ).length;
   const activeGlobalWalletConsents = state.globalWalletConsents.filter(
     (consent) => consent.status === "active",
+  );
+
+  useEffect(() => {
+    if (!state.summary) return;
+    if (!hasEmbeddedWallet) {
+      setUserWalletSigners([]);
+      setUserWalletSignerError(null);
+      return;
+    }
+    void loadUserWalletSigners();
+  }, [state.summary, hasEmbeddedWallet, loadUserWalletSigners]);
+  const pregeneratedInventory = useMemo(
+    () =>
+      state.agents
+        .map(parsePregeneratedInventoryItem)
+        .filter((item): item is PregeneratedInventoryItem => item !== null)
+        .sort((a, b) => {
+          if (a.status !== b.status) {
+            const order: Record<PregeneratedInventoryStatus, number> = {
+              unclaimed: 0,
+              expired: 1,
+              claimed: 2,
+            };
+            return order[a.status] - order[b.status];
+          }
+          return new Date(b.agent.createdAt).getTime() - new Date(a.agent.createdAt).getTime();
+        }),
+    [state.agents],
+  );
+  const pregeneratedCounts = useMemo(
+    () =>
+      pregeneratedInventory.reduce(
+        (acc, item) => {
+          acc[item.status] += 1;
+          return acc;
+        },
+        { unclaimed: 0, claimed: 0, expired: 0 } satisfies Record<
+          PregeneratedInventoryStatus,
+          number
+        >,
+      ),
+    [pregeneratedInventory],
   );
 
   const groupedLinkedAccounts = useMemo(() => {
@@ -443,16 +704,180 @@ export default function DashboardAccountPage() {
     }
   }
 
+  async function createUserWalletSignerCredential() {
+    const walletIndex = parseDashboardWalletIndex(userWalletSignerForm.walletIndex);
+    if (walletIndex === null) {
+      setUserWalletSignerError("walletIndex must be an integer between 0 and 255");
+      return;
+    }
+
+    const subjectId = userWalletSignerForm.subjectId.trim();
+    if (!subjectId) {
+      setUserWalletSignerError("Subject ID is required");
+      return;
+    }
+
+    try {
+      setUserWalletSignerBusy("create");
+      setUserWalletSignerError(null);
+      setUserWalletSignerMessage(null);
+      setUserWalletSignerSecret(null);
+      const created = await steward.createUserWalletSigner({
+        walletIndex,
+        subjectType: userWalletSignerForm.subjectType,
+        subjectId,
+        label: userWalletSignerForm.label.trim() || undefined,
+        permissions: splitCsv(userWalletSignerForm.permissions),
+        address: userWalletSignerForm.address.trim() || undefined,
+        chainFamily: userWalletSignerForm.chainFamily || undefined,
+        metadata: { source: "dashboard", walletIndex },
+      });
+      setUserWalletSignerSecret({
+        kind: "signer",
+        label: "User wallet signer credential",
+        values: [created.credentialSecret],
+        warning:
+          "This delegated signer credential is scoped to the selected user wallet index and the permissions shown in the table.",
+      });
+      setUserWalletSignerForm((prev) => ({
+        ...prev,
+        subjectId: "",
+        label: "",
+        address: "",
+      }));
+      setUserWalletSignerMessage(`Created signer credential for ${created.subjectId}`);
+      await loadUserWalletSigners();
+    } catch (err) {
+      setUserWalletSignerError(
+        err instanceof Error ? err.message : "Failed to create user wallet signer",
+      );
+    } finally {
+      setUserWalletSignerBusy(null);
+    }
+  }
+
+  async function revokeUserWalletSignerCredential(signer: UserWalletSigner) {
+    const walletIndex = parseDashboardWalletIndex(userWalletSignerForm.walletIndex);
+    if (walletIndex === null) {
+      setUserWalletSignerError("walletIndex must be an integer between 0 and 255");
+      return;
+    }
+
+    try {
+      setUserWalletSignerBusy(signer.id);
+      setUserWalletSignerError(null);
+      setUserWalletSignerMessage(null);
+      const revoked = await steward.revokeUserWalletSigner(signer.id, { walletIndex });
+      setUserWalletSigners((current) =>
+        current.map((item) => (item.id === revoked.id ? revoked : item)),
+      );
+      setUserWalletSignerMessage(`Revoked signer credential for ${revoked.subjectId}`);
+    } catch (err) {
+      setUserWalletSignerError(
+        err instanceof Error ? err.message : "Failed to revoke user wallet signer",
+      );
+    } finally {
+      setUserWalletSignerBusy(null);
+    }
+  }
+
+  async function copyPregeneratedDistribution() {
+    if (!pregeneratedDistribution) return;
+    const lines = pregeneratedDistribution.wallets.map((wallet) =>
+      [wallet.agent.id, wallet.agent.walletAddress, wallet.claimToken, wallet.claimExpiresAt].join(
+        "\t",
+      ),
+    );
+    const text = ["agentId\twalletAddress\tclaimToken\tclaimExpiresAt", ...lines].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.setAttribute("readonly", "true");
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      document.body.removeChild(el);
+    }
+    setPregeneratedMessage("Copied distribution table to clipboard");
+  }
+
+  async function createPregeneratedBatch(reason: "create" | "rotate" = "create") {
+    const count = Number(pregeneratedForm.count);
+    const expiresInDays = Number(pregeneratedForm.expiresInDays);
+    const rotationCount = Math.max(1, pregeneratedCounts.unclaimed + pregeneratedCounts.expired);
+    const requestedCount = reason === "rotate" ? rotationCount : count;
+
+    if (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > 100) {
+      setPregeneratedError("Batch count must be between 1 and 100");
+      return;
+    }
+    if (!Number.isFinite(expiresInDays) || expiresInDays <= 0 || expiresInDays > 30) {
+      setPregeneratedError("Expiry must be between 1 and 30 days");
+      return;
+    }
+
+    try {
+      setPregeneratedBusy(reason);
+      setPregeneratedError(null);
+      setPregeneratedMessage(null);
+      const result = await steward.createPregeneratedUserWallets({
+        count: requestedCount,
+        namePrefix:
+          pregeneratedForm.namePrefix.trim() ||
+          (reason === "rotate" ? "Replacement pregenerated wallet" : "Pregenerated user wallet"),
+        claimExpiresInSeconds: Math.round(expiresInDays * 24 * 60 * 60),
+      });
+      setPregeneratedDistribution({
+        wallets: result.wallets,
+        warning: result.warning,
+        createdAt: new Date().toISOString(),
+      });
+      setPregeneratedMessage(
+        reason === "rotate"
+          ? `Created ${result.wallets.length} replacement claim token${
+              result.wallets.length === 1 ? "" : "s"
+            }`
+          : `Created ${result.wallets.length} pregenerated wallet${
+              result.wallets.length === 1 ? "" : "s"
+            }`,
+      );
+      await loadAccount();
+    } catch (err) {
+      setPregeneratedError(
+        err instanceof Error ? err.message : "Failed to create pregenerated wallets",
+      );
+    } finally {
+      setPregeneratedBusy(null);
+    }
+  }
+
   async function setupWalletRecovery() {
+    const walletIndex = parseDashboardWalletIndex(recoveryWalletIndex);
+    if (walletIndex === null) {
+      setRecoveryMessage("walletIndex must be an integer between 0 and 255");
+      return;
+    }
     try {
       setRecoveryBusy("wallet");
       setRecoveryMessage(null);
-      const result: UserWalletRecoverySetupResult = await steward.setupUserWalletRecovery();
+      setRecoveryNotice(null);
+      const result: UserWalletRecoverySetupResult = await steward.setupUserWalletRecovery({
+        walletIndex,
+      });
       setRecoverySecret({
         kind: "wallet",
-        label: "Wallet recovery phrase",
+        label: `Wallet recovery phrase (walletIndex ${result.wallet.walletIndex ?? walletIndex})`,
         values: result.recovery.mnemonic.trim().split(/\s+/g),
         warning: result.recovery.warning,
+      });
+      setCreatedRecoveryWalletIndexes((current) => {
+        const next = new Set(current);
+        next.add(result.wallet.walletIndex ?? walletIndex);
+        return next;
       });
       setRecoverySetupConfirmed(false);
       await loadAccount();
@@ -464,10 +889,50 @@ export default function DashboardAccountPage() {
     }
   }
 
+  async function restoreWalletRecovery() {
+    const walletIndex = parseDashboardWalletIndex(recoveryWalletIndex);
+    if (walletIndex === null) {
+      setRecoveryMessage("walletIndex must be an integer between 0 and 255");
+      return;
+    }
+    try {
+      setRecoveryBusy("restore");
+      setRecoveryMessage(null);
+      setRecoveryNotice(null);
+      const result: UserWalletRecoveryRestoreResult = await steward.restoreUserWalletRecovery({
+        mnemonic: recoveryRestoreMnemonic,
+        walletIndex,
+      });
+      setRecoveryRestoreMnemonic("");
+      setRecoveryRestoreConfirmed(false);
+      setCreatedRecoveryWalletIndexes((current) => {
+        const next = new Set(current);
+        next.add(result.wallet.walletIndex ?? walletIndex);
+        return next;
+      });
+      setRecoveryNotice(
+        result.wallet.restoredExisting
+          ? `Wallet recovery phrase verified and existing wallet restored at walletIndex ${
+              result.wallet.walletIndex ?? walletIndex
+            }`
+          : `Wallet recovery phrase verified and wallet restored at walletIndex ${
+              result.wallet.walletIndex ?? walletIndex
+            }`,
+      );
+      await loadAccount();
+      await loadRecoveryControls(state.summary?.userId ?? null);
+    } catch (err) {
+      setRecoveryMessage(err instanceof Error ? err.message : "Wallet recovery restore failed");
+    } finally {
+      setRecoveryBusy(null);
+    }
+  }
+
   async function regenerateRecoveryCodes() {
     try {
       setRecoveryBusy("mfa");
       setRecoveryMessage(null);
+      setRecoveryNotice(null);
       const result = await regenerateStewardRecoveryCodes(totpCode.trim());
       setRecoverySecret({
         kind: "mfa",
@@ -627,6 +1092,665 @@ export default function DashboardAccountPage() {
       </section>
 
       <section>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-5">
+          <h2 className="font-display text-lg font-600">Private Key Import</h2>
+          <span className="text-xs text-text-tertiary">
+            Client-encrypted import requires recent MFA
+          </span>
+        </div>
+
+        {keyImportMessage && (
+          <div
+            role="status"
+            className="border border-success/30 bg-success/5 px-4 py-3 text-sm mb-5"
+          >
+            <div className="text-success">Wallet import completed</div>
+            <div className="text-text-tertiary mt-1">{keyImportMessage}</div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-px bg-border">
+          <div className="bg-bg p-5">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border mb-5">
+              <Stat
+                label="Default index"
+                value="0"
+                detail={hasEmbeddedWallet ? "Existing wallet slot" : "Empty wallet slot"}
+              />
+              <Stat
+                label="Current wallets"
+                value={userWallets.length}
+                detail={
+                  state.summary?.walletAddress
+                    ? shortenAddress(state.summary.walletAddress, 6)
+                    : "No default wallet"
+                }
+              />
+              <Stat label="Envelope" value="AES-GCM" detail="X25519 / HKDF" />
+            </div>
+            <div className="border border-warning/30 bg-warning/5 p-4">
+              <div className="text-sm text-warning">Sensitive wallet import</div>
+              <p className="text-xs text-text-tertiary mt-2 leading-relaxed">
+                The private key is encrypted in the browser before submission. Steward receives only
+                the encrypted envelope, import session id, and selected wallet index. API policy may
+                require a fresh MFA challenge before the import session is issued.
+              </p>
+            </div>
+          </div>
+
+          <div className="bg-bg p-5">
+            <StewardUserWalletKeyImport
+              className="[--stwd-primary:var(--color-accent)] [--stwd-success:var(--color-success)] [--stwd-error:var(--color-error)] [--stwd-text:var(--color-text)] [--stwd-radius:8px]"
+              labels={{
+                title: "Import encrypted user wallet key",
+                chain: "Chain",
+                walletIndex: "Wallet Index",
+                privateKey: "Private Key",
+                submit: "Import Private Key",
+                submitting: "Encrypting...",
+                signedOut: "Sign in to import",
+                success: "wallet imported",
+              }}
+              onImported={(result) => {
+                setKeyImportMessage(
+                  `Imported ${result.chain.toUpperCase()} wallet ${shortenAddress(
+                    result.walletAddress,
+                    6,
+                  )} at walletIndex ${result.walletIndex}`,
+                );
+                void loadAccount();
+              }}
+              onError={() => setKeyImportMessage(null)}
+            />
+            <p className="text-xs text-text-tertiary leading-relaxed mt-4">
+              Do not paste a key unless you intend to make it this account&apos;s embedded user
+              wallet for the selected index.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-5">
+          <h2 className="font-display text-lg font-600">User Wallet Signer Credentials</h2>
+          <span className="text-xs text-text-tertiary">
+            {selectedSignerWalletIndex === null
+              ? "Invalid walletIndex"
+              : `walletIndex ${selectedSignerWalletIndex}`}
+          </span>
+        </div>
+
+        {userWalletSignerError && (
+          <div role="alert" className="border border-error/30 bg-error/5 px-4 py-3 text-sm mb-5">
+            <div className="text-error">Signer action failed</div>
+            <div className="text-text-tertiary mt-1">{userWalletSignerError}</div>
+          </div>
+        )}
+
+        {userWalletSignerMessage && (
+          <div
+            role="status"
+            className="border border-success/30 bg-success/5 px-4 py-3 text-sm mb-5"
+          >
+            <div className="text-success">Signer action completed</div>
+            <div className="text-text-tertiary mt-1">{userWalletSignerMessage}</div>
+          </div>
+        )}
+
+        {userWalletSignerSecret && (
+          <div className="mb-5">
+            <NoStoreSecretDisplay
+              secret={userWalletSignerSecret}
+              onDismiss={() => setUserWalletSignerSecret(null)}
+            />
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-px bg-border">
+          <div className="bg-bg p-5">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-px bg-border mb-5">
+              <Stat
+                label="Wallet index"
+                value={selectedSignerWalletIndex ?? "--"}
+                detail="0 through 255"
+              />
+              <Stat
+                label="Active signers"
+                value={activeUserWalletSigners}
+                detail="Credential-bearing"
+              />
+              <Stat
+                label="Total signers"
+                value={userWalletSigners.length}
+                detail="Includes revoked"
+              />
+            </div>
+
+            <div className="border-t border-border-subtle" data-testid="user-wallet-signers">
+              {!hasEmbeddedWallet ? (
+                <div className="py-10 text-sm text-text-tertiary">
+                  No embedded user wallet found for this account
+                </div>
+              ) : userWalletSigners.length === 0 ? (
+                <div className="py-10 text-sm text-text-tertiary">
+                  No additional signer credentials for this wallet index
+                </div>
+              ) : (
+                userWalletSigners.map((signer) => (
+                  <div
+                    key={signer.id}
+                    className="grid grid-cols-1 md:grid-cols-[1fr_160px_120px] gap-3 py-4 border-b border-border-subtle last:border-b-0"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-display font-600 text-sm text-text">
+                          {signer.label || signer.subjectId}
+                        </span>
+                        <span
+                          className={`border px-2 py-0.5 text-[11px] uppercase tracking-wider ${signerStatusTone(
+                            signer.status,
+                          )}`}
+                        >
+                          {signer.status}
+                        </span>
+                        <span className="border border-border-subtle px-2 py-0.5 text-[11px] uppercase tracking-wider text-text-tertiary">
+                          {signer.keyType}
+                        </span>
+                      </div>
+                      <div className="font-mono text-xs text-text-tertiary mt-2 break-all">
+                        {signer.subjectType}:{signer.subjectId}
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-2">
+                        {signer.permissions.length > 0
+                          ? signer.permissions.join(", ")
+                          : "No permissions"}
+                        {signer.hasCredential ? " / credential stored" : ""}
+                      </div>
+                      {signer.address && (
+                        <div className="font-mono text-xs text-text-tertiary mt-1 break-all">
+                          address: {signer.address}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                        Created
+                      </div>
+                      <div className="text-sm text-text-secondary mt-1">
+                        {formatDate(signer.createdAt)}
+                      </div>
+                    </div>
+                    <div className="md:text-right">
+                      <button
+                        type="button"
+                        onClick={() => void revokeUserWalletSignerCredential(signer)}
+                        disabled={userWalletSignerBusy === signer.id || signer.status === "revoked"}
+                        className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-error hover:border-error/50 disabled:opacity-40 disabled:hover:text-text-tertiary disabled:hover:border-border transition-colors"
+                      >
+                        {userWalletSignerBusy === signer.id ? "Revoking..." : "Revoke"}
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="bg-bg p-5">
+            <h3 className="font-display text-base font-600">Create Bounded Credential</h3>
+            <p className="text-xs text-text-tertiary mt-1">
+              The signer secret is generated server-side and displayed once after creation.
+            </p>
+
+            <form
+              className="mt-5 space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createUserWalletSignerCredential();
+              }}
+            >
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Wallet Index
+                </span>
+                <input
+                  id="user-wallet-signer-wallet-index"
+                  aria-label="Wallet Index"
+                  value={userWalletSignerForm.walletIndex}
+                  onChange={(event) => {
+                    const walletIndex = event.currentTarget.value;
+                    setUserWalletSignerForm((prev) => ({
+                      ...prev,
+                      walletIndex,
+                    }));
+                  }}
+                  inputMode="numeric"
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Subject Type
+                </span>
+                <select
+                  id="user-wallet-signer-subject-type"
+                  aria-label="Subject Type"
+                  value={userWalletSignerForm.subjectType}
+                  onChange={(event) => {
+                    const subjectType = event.currentTarget
+                      .value as UserWalletSigner["subjectType"];
+                    setUserWalletSignerForm((prev) => ({
+                      ...prev,
+                      subjectType,
+                    }));
+                  }}
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
+                >
+                  <option value="external">External</option>
+                  <option value="user">User</option>
+                  <option value="wallet">Wallet</option>
+                  <option value="api_key">API key</option>
+                </select>
+              </label>
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Subject ID
+                </span>
+                <input
+                  id="user-wallet-signer-subject-id"
+                  aria-label="Subject ID"
+                  value={userWalletSignerForm.subjectId}
+                  onChange={(event) => {
+                    const subjectId = event.currentTarget.value;
+                    setUserWalletSignerForm((prev) => ({
+                      ...prev,
+                      subjectId,
+                    }));
+                  }}
+                  placeholder="device-1"
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">Label</span>
+                <input
+                  id="user-wallet-signer-label"
+                  aria-label="Label"
+                  value={userWalletSignerForm.label}
+                  onChange={(event) => {
+                    const label = event.currentTarget.value;
+                    setUserWalletSignerForm((prev) => ({
+                      ...prev,
+                      label,
+                    }));
+                  }}
+                  placeholder="Mobile app signer"
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Permissions
+                </span>
+                <input
+                  id="user-wallet-signer-permissions"
+                  aria-label="Permissions"
+                  value={userWalletSignerForm.permissions}
+                  onChange={(event) => {
+                    const permissions = event.currentTarget.value;
+                    setUserWalletSignerForm((prev) => ({
+                      ...prev,
+                      permissions,
+                    }));
+                  }}
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                />
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block">
+                  <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                    Address
+                  </span>
+                  <input
+                    id="user-wallet-signer-address"
+                    aria-label="Address"
+                    value={userWalletSignerForm.address}
+                    onChange={(event) => {
+                      const address = event.currentTarget.value;
+                      setUserWalletSignerForm((prev) => ({
+                        ...prev,
+                        address,
+                      }));
+                    }}
+                    placeholder="optional"
+                    className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text placeholder:text-text-tertiary focus:outline-none focus:border-accent"
+                  />
+                </label>
+                <label className="block">
+                  <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                    Chain Family
+                  </span>
+                  <select
+                    id="user-wallet-signer-chain-family"
+                    aria-label="Chain Family"
+                    value={userWalletSignerForm.chainFamily}
+                    onChange={(event) => {
+                      const chainFamily = event.currentTarget
+                        .value as UserWalletSignerForm["chainFamily"];
+                      setUserWalletSignerForm((prev) => ({
+                        ...prev,
+                        chainFamily,
+                      }));
+                    }}
+                    className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
+                  >
+                    <option value="">Any</option>
+                    <option value="evm">EVM</option>
+                    <option value="solana">Solana</option>
+                  </select>
+                </label>
+              </div>
+              <button
+                type="submit"
+                disabled={
+                  !hasEmbeddedWallet ||
+                  userWalletSignerBusy !== null ||
+                  selectedSignerWalletIndex === null ||
+                  userWalletSignerForm.subjectId.trim() === ""
+                }
+                className="w-full px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover disabled:opacity-40 disabled:hover:bg-accent transition-colors"
+              >
+                {userWalletSignerBusy === "create" ? "Creating..." : "Create Signer Credential"}
+              </button>
+              <p className="text-xs text-text-tertiary leading-relaxed">
+                User-wallet signers are limited to signing permissions. Private-key export,
+                recovery, owner, policy, and quorum permissions are rejected by the API.
+              </p>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-5">
+          <h2 className="font-display text-lg font-600">Pregenerated User Wallets</h2>
+          <span className="text-xs text-text-tertiary">
+            One-time claim tokens with expiring distribution
+          </span>
+        </div>
+
+        {pregeneratedError && (
+          <div role="alert" className="border border-error/30 bg-error/5 px-4 py-3 text-sm mb-5">
+            <div className="text-error">Pregenerated wallet action failed</div>
+            <div className="text-text-tertiary mt-1">{pregeneratedError}</div>
+          </div>
+        )}
+
+        {pregeneratedMessage && (
+          <div
+            role="status"
+            className="border border-success/30 bg-success/5 px-4 py-3 text-sm mb-5"
+          >
+            <div className="text-success">Pregenerated wallet action completed</div>
+            <div className="text-text-tertiary mt-1">{pregeneratedMessage}</div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px] gap-px bg-border mb-5">
+          <div className="bg-bg p-5">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-px bg-border mb-5">
+              <Stat label="Inventory" value={pregeneratedInventory.length} detail="Total batches" />
+              <Stat
+                label="Unclaimed"
+                value={pregeneratedCounts.unclaimed}
+                detail="Ready to distribute"
+              />
+              <Stat label="Expired" value={pregeneratedCounts.expired} detail="Needs replacement" />
+              <Stat label="Claimed" value={pregeneratedCounts.claimed} detail="Already consumed" />
+            </div>
+
+            <div className="border-t border-border-subtle" data-testid="pregenerated-inventory">
+              {pregeneratedInventory.length === 0 ? (
+                <div className="py-10 text-sm text-text-tertiary">
+                  No pregenerated user wallets found for this tenant
+                </div>
+              ) : (
+                pregeneratedInventory.slice(0, 12).map((item) => (
+                  <div
+                    key={item.agent.id}
+                    className="grid grid-cols-1 md:grid-cols-[1fr_160px_180px] gap-3 py-4 border-b border-border-subtle last:border-b-0"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`border px-2 py-0.5 text-[11px] uppercase tracking-wider ${pregeneratedStatusTone(
+                            item.status,
+                          )}`}
+                        >
+                          {pregeneratedStatusLabel(item.status)}
+                        </span>
+                        <span className="font-mono text-xs text-text-tertiary">
+                          hash {item.tokenHashPrefix || "legacy"}
+                        </span>
+                      </div>
+                      <div className="font-mono text-sm text-text mt-2 break-all">
+                        {item.agent.id}
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-1">
+                        {item.agent.name} / {shortenAddress(item.agent.walletAddress, 6)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                        Expires
+                      </div>
+                      <div className="text-sm text-text-secondary mt-1">
+                        {item.claimExpiresAt ? formatDate(item.claimExpiresAt) : "Legacy"}
+                      </div>
+                      <div className="text-xs text-text-tertiary mt-1">
+                        {formatDurationFromNow(item.claimExpiresAt)}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                        Created
+                      </div>
+                      <div className="text-sm text-text-secondary mt-1">
+                        {item.agent.createdAt ? formatDate(item.agent.createdAt) : "Unknown"}
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+
+          <div className="bg-bg p-5">
+            <h3 className="font-display text-base font-600">Create Distribution Batch</h3>
+            <p className="text-xs text-text-tertiary mt-1">
+              Claim tokens are displayed once. Store them in your delivery system before leaving
+              this page.
+            </p>
+
+            <form
+              className="mt-5 space-y-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createPregeneratedBatch("create");
+              }}
+            >
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">Count</span>
+                <input
+                  id="pregenerated-count"
+                  aria-label="Count"
+                  value={pregeneratedForm.count}
+                  onChange={(event) => {
+                    const count = event.currentTarget.value;
+                    setPregeneratedForm((prev) => ({
+                      ...prev,
+                      count,
+                    }));
+                  }}
+                  inputMode="numeric"
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Name Prefix
+                </span>
+                <input
+                  id="pregenerated-name-prefix"
+                  aria-label="Name Prefix"
+                  value={pregeneratedForm.namePrefix}
+                  onChange={(event) => {
+                    const namePrefix = event.currentTarget.value;
+                    setPregeneratedForm((prev) => ({
+                      ...prev,
+                      namePrefix,
+                    }));
+                  }}
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm text-text focus:outline-none focus:border-accent"
+                />
+              </label>
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Claim Expiry Days
+                </span>
+                <input
+                  id="pregenerated-claim-expiry-days"
+                  aria-label="Claim Expiry Days"
+                  value={pregeneratedForm.expiresInDays}
+                  onChange={(event) => {
+                    const expiresInDays = event.currentTarget.value;
+                    setPregeneratedForm((prev) => ({
+                      ...prev,
+                      expiresInDays,
+                    }));
+                  }}
+                  inputMode="decimal"
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                {[1, 7, 30].map((days) => (
+                  <button
+                    key={days}
+                    type="button"
+                    onClick={() =>
+                      setPregeneratedForm((prev) => ({
+                        ...prev,
+                        expiresInDays: String(days),
+                      }))
+                    }
+                    className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-text hover:border-text-tertiary transition-colors"
+                  >
+                    {days}d
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => void createPregeneratedBatch("rotate")}
+                  disabled={pregeneratedBusy !== null}
+                  className="px-3 py-2 text-xs border border-warning/40 text-warning hover:border-warning transition-colors disabled:opacity-40"
+                >
+                  {pregeneratedBusy === "rotate" ? "Replacing..." : "Replace stale"}
+                </button>
+              </div>
+              <button
+                type="submit"
+                disabled={pregeneratedBusy !== null}
+                className="w-full px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover disabled:opacity-40 disabled:hover:bg-accent transition-colors"
+              >
+                {pregeneratedBusy === "create" ? "Creating..." : "Create Claim Tokens"}
+              </button>
+            </form>
+          </div>
+        </div>
+
+        {pregeneratedDistribution && (
+          <div
+            role="status"
+            data-testid="pregenerated-distribution"
+            className="border border-warning/40 bg-warning/5 p-4 space-y-4"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-display font-600 text-text">
+                  One-time claim-token distribution
+                </div>
+                <div className="text-xs text-text-tertiary mt-1">
+                  Created {formatDate(pregeneratedDistribution.createdAt)}.{" "}
+                  {pregeneratedDistribution.warning}
+                </div>
+                <div className="text-xs text-warning mt-2">
+                  Tokens below are not recoverable after refresh. Only distribute them over a secure
+                  channel and never paste them into logs or tickets.
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => void copyPregeneratedDistribution()}
+                  className="px-3 py-2 text-xs border border-border text-text-secondary hover:text-text hover:border-text-tertiary transition-colors"
+                >
+                  Copy TSV
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPregeneratedDistribution(null)}
+                  className="px-3 py-2 text-xs border border-border text-text-tertiary hover:text-text transition-colors"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {pregeneratedDistribution.wallets.map((wallet) => (
+                <div
+                  key={wallet.agent.id}
+                  className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_180px] gap-3 border border-border-subtle bg-bg px-3 py-3"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs text-text-tertiary uppercase tracking-wider">Agent</div>
+                    <div className="font-mono text-xs text-text mt-1 break-all">
+                      {wallet.agent.id}
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-1">
+                      {shortenAddress(wallet.agent.walletAddress, 6)}
+                    </div>
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                        Claim Token
+                      </div>
+                      <CopyButton text={wallet.claimToken} />
+                    </div>
+                    <div className="font-mono text-xs text-text mt-1 break-all">
+                      {wallet.claimToken}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs text-text-tertiary uppercase tracking-wider">
+                      Expires
+                    </div>
+                    <div className="text-sm text-text-secondary mt-1">
+                      {formatDate(wallet.claimExpiresAt)}
+                    </div>
+                    <div className="text-xs text-text-tertiary mt-1">
+                      {formatDurationFromNow(new Date(wallet.claimExpiresAt))}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section>
         <div className="flex items-center justify-between mb-5">
           <h2 className="font-display text-lg font-600">Primary Login Methods</h2>
           <span className="text-xs text-text-tertiary">Cannot be removed here</span>
@@ -702,6 +1826,44 @@ export default function DashboardAccountPage() {
           </span>
         </div>
 
+        <div className="mb-5 grid grid-cols-1 md:grid-cols-[220px_1fr] gap-4 border border-border-subtle p-4">
+          <label className="block">
+            <span className="text-xs text-text-tertiary uppercase tracking-wider">
+              Recovery Wallet Index
+            </span>
+            <input
+              aria-label="Recovery Wallet Index"
+              value={recoveryWalletIndex}
+              onChange={(event) => setRecoveryWalletIndex(event.currentTarget.value)}
+              inputMode="numeric"
+              className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+            />
+          </label>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-px bg-border">
+            <Stat
+              label="Selected index"
+              value={selectedRecoveryWalletIndex ?? "--"}
+              detail="0 through 255"
+            />
+            <Stat
+              label="Setup"
+              value={selectedRecoveryWalletExists ? "Locked" : "Available"}
+              detail={
+                selectedRecoveryWalletIndex === null
+                  ? "Invalid selector"
+                  : selectedRecoveryWalletIndex === 0
+                    ? "Default wallet slot"
+                    : "Indexed wallet slot"
+              }
+            />
+            <Stat
+              label="Restore"
+              value={selectedRecoveryWalletIndex === null ? "Blocked" : "Ready"}
+              detail="Mnemonic target"
+            />
+          </div>
+        </div>
+
         {recoveryMessage && (
           <div
             role="alert"
@@ -709,6 +1871,16 @@ export default function DashboardAccountPage() {
           >
             <div className="text-warning">Recovery action did not complete</div>
             <div className="text-text-tertiary mt-1">{recoveryMessage}</div>
+          </div>
+        )}
+
+        {recoveryNotice && (
+          <div
+            role="status"
+            className="border border-success/30 bg-success/5 px-4 py-3 text-sm mb-5"
+          >
+            <div className="text-success">Recovery action completed</div>
+            <div className="text-text-tertiary mt-1">{recoveryNotice}</div>
           </div>
         )}
 
@@ -721,35 +1893,34 @@ export default function DashboardAccountPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-px bg-border mb-5">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-px bg-border mb-5">
           <div className="bg-bg p-5 min-h-[320px]">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h3 className="font-display text-base font-600">Wallet Recovery Setup</h3>
                 <p className="text-xs text-text-tertiary mt-1">
-                  Create a recoverable embedded wallet with a BIP-39 phrase before any user wallet
-                  exists.
+                  Create a recoverable embedded wallet with a BIP-39 phrase for the selected index.
                 </p>
               </div>
               <span
                 className={`border px-2 py-0.5 text-[11px] uppercase tracking-wider ${
-                  hasEmbeddedWallet
+                  selectedRecoveryWalletExists
                     ? "border-warning/30 text-warning"
                     : "border-success/30 text-success"
                 }`}
               >
-                {hasEmbeddedWallet ? "locked" : "available"}
+                {selectedRecoveryWalletExists ? "locked" : "available"}
               </span>
             </div>
 
             <div className="mt-5 space-y-3 text-sm">
-              {hasEmbeddedWallet ? (
+              {selectedRecoveryWalletExists ? (
                 <div className="border border-border-subtle p-4">
                   <div className="text-text-secondary">Existing wallet detected</div>
                   <p className="text-xs text-text-tertiary mt-2 leading-relaxed">
-                    Existing embedded wallets cannot be assigned a new recovery phrase. Use audited
-                    key export for break-glass backup, or create recovery during initial wallet
-                    provisioning for new accounts.
+                    Existing embedded wallets cannot be assigned a new recovery phrase at the same
+                    wallet index. Use audited key export for break-glass backup, restore with the
+                    matching phrase, or choose another empty wallet index.
                   </p>
                 </div>
               ) : (
@@ -769,18 +1940,87 @@ export default function DashboardAccountPage() {
                   <button
                     type="button"
                     onClick={() => void setupWalletRecovery()}
-                    disabled={!recoverySetupConfirmed || recoveryBusy !== null}
+                    disabled={
+                      !recoverySetupConfirmed ||
+                      recoveryBusy !== null ||
+                      selectedRecoveryWalletIndex === null
+                    }
                     className="px-4 py-2 text-sm bg-accent text-bg hover:bg-accent-hover disabled:opacity-40 disabled:hover:bg-accent transition-colors"
                   >
                     {recoveryBusy === "wallet" ? "Creating..." : "Set Up Recoverable Wallet"}
                   </button>
                   <p className="text-xs text-text-tertiary">
-                    Requires a current session with recent MFA. If this fails, complete MFA and try
-                    again.
+                    Requires a current session with recent MFA. The selected index is sent to the
+                    API and must be empty.
                   </p>
                 </>
               )}
             </div>
+          </div>
+
+          <div className="bg-bg p-5 min-h-[320px]">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="font-display text-base font-600">Wallet Recovery Restore</h3>
+                <p className="text-xs text-text-tertiary mt-1">
+                  Restore a mnemonic-backed wallet into the selected wallet index.
+                </p>
+              </div>
+              <span className="border border-info/30 px-2 py-0.5 text-[11px] uppercase tracking-wider text-info">
+                phrase
+              </span>
+            </div>
+
+            <form
+              className="mt-5 space-y-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void restoreWalletRecovery();
+              }}
+            >
+              <label className="block">
+                <span className="text-xs text-text-tertiary uppercase tracking-wider">
+                  Recovery Phrase
+                </span>
+                <textarea
+                  value={recoveryRestoreMnemonic}
+                  onChange={(event) => setRecoveryRestoreMnemonic(event.currentTarget.value)}
+                  rows={4}
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="mt-2 w-full bg-bg-elevated border border-border px-3 py-2 text-sm font-mono text-text focus:outline-none focus:border-accent"
+                  placeholder="twelve or twenty-four words"
+                />
+              </label>
+              <label className="flex items-start gap-3 border border-border-subtle p-4 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={recoveryRestoreConfirmed}
+                  onChange={(event) => setRecoveryRestoreConfirmed(event.currentTarget.checked)}
+                  className="mt-0.5"
+                />
+                <span className="text-xs text-text-secondary leading-relaxed">
+                  I understand this phrase is sent once over the current session and should not be
+                  stored in browser history, logs, or screenshots.
+                </span>
+              </label>
+              <button
+                type="submit"
+                disabled={
+                  recoveryBusy !== null ||
+                  !recoveryRestoreConfirmed ||
+                  selectedRecoveryWalletIndex === null ||
+                  recoveryRestoreMnemonic.trim().split(/\s+/g).length < 12
+                }
+                className="px-4 py-2 text-sm border border-border text-text-secondary hover:text-text hover:border-text-tertiary disabled:opacity-40 transition-colors"
+              >
+                {recoveryBusy === "restore" ? "Restoring..." : "Restore Wallet"}
+              </button>
+              <p className="text-xs text-text-tertiary">
+                Requires recent MFA. Steward sends the phrase and wallet index to the API once and
+                never displays the phrase back.
+              </p>
+            </form>
           </div>
 
           <div className="bg-bg p-5 min-h-[320px]">

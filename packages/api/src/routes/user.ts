@@ -17,7 +17,17 @@
  *       This file exports a Hono route group ready for mounting.
  */
 
-import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
+import {
+  createDecipheriv,
+  createPrivateKey,
+  createPublicKey,
+  diffieHellman,
+  generateKeyPairSync,
+  hkdfSync,
+  type KeyObject,
+  randomBytes,
+  verify as verifySignature,
+} from "node:crypto";
 import {
   ChallengeStore,
   generateApiKey,
@@ -34,6 +44,7 @@ import {
 } from "@stwd/auth";
 import {
   accounts,
+  agentSigners,
   agents,
   agentWallets,
   auditEvents,
@@ -61,12 +72,14 @@ import type {
   ChainFamily,
   PolicyRule,
   SignRequest,
+  TenantAuthAbuseConfig,
 } from "@stwd/shared";
 import {
   applyUserWalletDefaults,
   generateMnemonic,
   getUserWallet,
   isValidMnemonic,
+  normalizeUserWalletIndex,
   provisionRecoverableUserWallet,
   provisionUserWallet,
   restoreRecoverableUserWallet,
@@ -74,7 +87,7 @@ import {
   Vault,
 } from "@stwd/vault";
 import bs58 from "bs58";
-import { and, desc, eq, gte, ilike, isNull, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gte, ilike, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
@@ -83,13 +96,19 @@ import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
 } from "../services/gas-sponsorship";
+import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
 import { lockUserSession } from "../services/session-lock";
+import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
+import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {
   assertAllowedOAuthRedirectUri,
   createSessionToken,
+  decryptImportSessionJson,
+  encryptImportSessionJson,
   encryptOAuthProviderTokens,
   getEmailAuthForTenant,
+  getImportSessionBackend,
   getPhoneAuth,
 } from "./auth";
 
@@ -111,7 +130,13 @@ interface UserSessionPayload {
 type UserVariables = {
   userId: string;
   userSession: UserSessionPayload;
-  authType?: "session-jwt";
+  authType?: "session-jwt" | "user-wallet-signer";
+  userWalletSignerAuth?: {
+    signerId: string;
+    tenantId: string;
+    agentId: string;
+    requiredPermission: string;
+  };
   sessionMfaVerifiedAt?: number;
   sessionMfaMethod?: string;
   requestId?: string;
@@ -145,6 +170,10 @@ type UserPortfolioAsset = {
 };
 
 const MAX_CUSTOM_TOKEN_BALANCES = 25;
+const MAX_USER_WALLET_SIGNER_PERMISSIONS = 16;
+const MAX_USER_WALLET_SIGNER_METADATA_BYTES = 8_192;
+const USER_WALLET_ENCRYPTED_IMPORT_SESSION_TTL_MS = 10 * 60_000;
+const USER_WALLET_ENCRYPTED_IMPORT_MAX_CIPHERTEXT_BYTES = 4096;
 const USER_ACCOUNT_CAPABILITIES = [
   "sign_transaction",
   "sign_message",
@@ -171,12 +200,104 @@ const MAX_TENANT_METADATA_KEYS = 100;
 const MAX_TENANT_METADATA_STRING_BYTES = 4_096;
 const PUSH_PROVIDERS = ["expo", "apns", "fcm"] as const;
 const PUSH_PLATFORMS = ["ios", "android"] as const;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_PUSH_METADATA_BYTES = 8_192;
 const PREGENERATED_USER_WALLET_TYPE = "pregenerated_user";
 const PREGENERATED_CLAIM_PREFIX = "pregenerated:";
+const CLAIMED_PREGENERATED_CLAIM_PREFIX = "claimed:";
+const EXPIRED_PREGENERATED_CLAIM_PREFIX = "expired:";
+const EMBEDDED_WALLET_CREATE_ON_LOGIN = ["off", "users-without-wallets", "all-users"] as const;
+const USER_WALLET_SIGNER_STATUSES = new Set(["active", "paused", "revoked"]);
+const USER_WALLET_SIGNER_SUBJECT_TYPES = new Set(["user", "wallet", "external"]);
+const USER_WALLET_SIGNER_ALLOWED_PERMISSIONS = new Set([
+  "sign_transaction",
+  "sign_message",
+  "sign_typed_data",
+  "sign_user_operation",
+  "sign_authorization",
+  "transfer",
+  "solana_transaction",
+]);
+const USER_WALLET_SIGNER_FORBIDDEN_PERMISSIONS = new Set([
+  "export_private_key",
+  "private_key_export",
+  "export_key",
+  "recovery_setup",
+  "recovery_restore",
+  "restore_recovery",
+  "policy_mutation",
+  "policy_update",
+  "policy_create",
+  "policy_delete",
+  "owner_update",
+  "owner_add",
+  "owner_remove",
+]);
+const RESERVED_SIGNER_METADATA_KEYS = new Set([
+  "credentialHash",
+  "credentialCreatedAt",
+  "credentialLastUsedAt",
+]);
+
+type EmbeddedWalletCreateOnLogin = (typeof EMBEDDED_WALLET_CREATE_ON_LOGIN)[number];
+type EmbeddedWalletLoginConfig = {
+  tenantId: string;
+  clientId?: string;
+  createOnLogin: EmbeddedWalletCreateOnLogin;
+};
+
+function pregeneratedClaimPlatformIdPrefix(claimTokenHash: string): string {
+  return `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+}
+
+function parsePregeneratedClaimPlatformId(
+  platformId: string | null,
+  claimTokenHash: string,
+): { hash: string; expiresAt: Date | null } | null {
+  const prefix = pregeneratedClaimPlatformIdPrefix(claimTokenHash);
+  if (platformId === prefix) return { hash: claimTokenHash, expiresAt: null };
+  if (!platformId?.startsWith(`${prefix}:`)) return null;
+  const expiresAtMs = Number(platformId.slice(prefix.length + 1));
+  if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= 0) return null;
+  return { hash: claimTokenHash, expiresAt: new Date(expiresAtMs) };
+}
 
 type PushProvider = (typeof PUSH_PROVIDERS)[number];
 type PushPlatform = (typeof PUSH_PLATFORMS)[number];
+type UserWalletSignerRow = typeof agentSigners.$inferSelect;
+type UserWalletEncryptedImportSession = {
+  id: string;
+  tenantId: string;
+  userId: string;
+  agentId: string;
+  chain: "evm" | "solana";
+  walletIndex: number;
+  appId: string | null;
+  privateKey: string;
+  publicKey: string;
+  createdAt: number;
+  expiresAt: number;
+};
+
+type TenantMfaPolicyConfig = {
+  maxAgeSeconds?: number;
+  maxAgeFor?: {
+    keyImport?: number;
+    keyExport?: number;
+  };
+  requireFor?: {
+    keyImport?: boolean;
+    keyExport?: boolean;
+  };
+  disableFor?: {
+    keyImport?: boolean;
+    keyExport?: boolean;
+  };
+};
+
+type TenantAuthAbuseConfigWithMfa = TenantAuthAbuseConfig & {
+  mfa?: TenantMfaPolicyConfig;
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -186,6 +307,269 @@ async function safeJsonParse<T>(c: Context): Promise<T | null> {
   } catch {
     return null;
   }
+}
+
+function userWalletAgentId(userId: string, walletIndex = 0): string {
+  return walletIndex === 0 ? `user-wallet-${userId}` : `user-wallet-${userId}-${walletIndex}`;
+}
+
+function base64UrlEncode(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
+}
+
+function base64UrlDecode(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+={0,2}$/u.test(value)) return null;
+  try {
+    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    return Uint8Array.from(atob(padded), (char) => char.charCodeAt(0));
+  } catch {
+    return null;
+  }
+}
+
+function exportImportKeyDerBase64Url(key: KeyObject, type: "spki" | "pkcs8"): string {
+  return base64UrlEncode(key.export({ type, format: "der" }) as Uint8Array);
+}
+
+function userWalletEncryptedImportSessionStoreKey(id: string): string {
+  return `user-wallet:${id}`;
+}
+
+function parseStoredUserWalletEncryptedImportSession(
+  raw: string | null,
+): UserWalletEncryptedImportSession | null {
+  if (!raw) return null;
+  try {
+    const parsed = decryptImportSessionJson<Partial<UserWalletEncryptedImportSession>>(raw);
+    const walletIndex = parsed.walletIndex;
+    const createdAt = parsed.createdAt;
+    const expiresAt = parsed.expiresAt;
+    if (
+      !isNonEmptyString(parsed.id) ||
+      !isNonEmptyString(parsed.tenantId) ||
+      !isNonEmptyString(parsed.userId) ||
+      !isNonEmptyString(parsed.agentId) ||
+      (parsed.chain !== "evm" && parsed.chain !== "solana") ||
+      typeof walletIndex !== "number" ||
+      !Number.isSafeInteger(walletIndex) ||
+      !isNonEmptyString(parsed.privateKey) ||
+      !isNonEmptyString(parsed.publicKey) ||
+      typeof createdAt !== "number" ||
+      !Number.isSafeInteger(createdAt) ||
+      typeof expiresAt !== "number" ||
+      !Number.isSafeInteger(expiresAt)
+    ) {
+      return null;
+    }
+    return {
+      id: parsed.id,
+      tenantId: parsed.tenantId,
+      userId: parsed.userId,
+      agentId: parsed.agentId,
+      chain: parsed.chain,
+      walletIndex,
+      appId: typeof parsed.appId === "string" ? parsed.appId : null,
+      privateKey: parsed.privateKey,
+      publicKey: parsed.publicKey,
+      createdAt,
+      expiresAt,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function createUserWalletEncryptedImportSession(input: {
+  tenantId: string;
+  userId: string;
+  agentId: string;
+  chain: "evm" | "solana";
+  walletIndex: number;
+  appId: string | null;
+}): Promise<UserWalletEncryptedImportSession> {
+  const { publicKey, privateKey } = generateKeyPairSync("x25519");
+  const id = `uwimp_${base64UrlEncode(randomBytes(24))}`;
+  const now = Date.now();
+  const session: UserWalletEncryptedImportSession = {
+    ...input,
+    id,
+    privateKey: exportImportKeyDerBase64Url(privateKey, "pkcs8"),
+    publicKey: exportImportKeyDerBase64Url(publicKey, "spki"),
+    createdAt: now,
+    expiresAt: now + USER_WALLET_ENCRYPTED_IMPORT_SESSION_TTL_MS,
+  };
+  await getImportSessionBackend().set(
+    userWalletEncryptedImportSessionStoreKey(id),
+    encryptImportSessionJson(session),
+    USER_WALLET_ENCRYPTED_IMPORT_SESSION_TTL_MS,
+  );
+  return session;
+}
+
+async function takeUserWalletEncryptedImportSession(
+  id: unknown,
+  expected: {
+    tenantId: string;
+    userId: string;
+    walletIndex: number;
+    appId: string | null;
+  },
+): Promise<UserWalletEncryptedImportSession | null> {
+  if (typeof id !== "string" || !id) return null;
+  const key = userWalletEncryptedImportSessionStoreKey(id);
+  const session = parseStoredUserWalletEncryptedImportSession(
+    await getImportSessionBackend().get(key),
+  );
+  if (!session) return null;
+  if (
+    session.expiresAt <= Date.now() ||
+    session.tenantId !== expected.tenantId ||
+    session.userId !== expected.userId ||
+    session.walletIndex !== expected.walletIndex ||
+    session.appId !== expected.appId
+  ) {
+    return null;
+  }
+  const consumed = parseStoredUserWalletEncryptedImportSession(
+    await getImportSessionBackend().consume(key),
+  );
+  if (
+    !consumed ||
+    consumed.expiresAt <= Date.now() ||
+    consumed.tenantId !== expected.tenantId ||
+    consumed.userId !== expected.userId ||
+    consumed.walletIndex !== expected.walletIndex ||
+    consumed.appId !== expected.appId
+  ) {
+    return null;
+  }
+  return consumed;
+}
+
+function decryptUserWalletEncryptedPrivateKey(
+  session: UserWalletEncryptedImportSession,
+  payload: {
+    ephemeralPublicKey?: unknown;
+    iv?: unknown;
+    ciphertext?: unknown;
+    tag?: unknown;
+  },
+): string {
+  if (
+    typeof payload.ephemeralPublicKey !== "string" ||
+    typeof payload.iv !== "string" ||
+    typeof payload.ciphertext !== "string" ||
+    typeof payload.tag !== "string"
+  ) {
+    throw new Error("Encrypted import envelope is incomplete");
+  }
+  const ephemeralPublicKeyDer = base64UrlDecode(payload.ephemeralPublicKey);
+  const iv = base64UrlDecode(payload.iv);
+  const ciphertext = base64UrlDecode(payload.ciphertext);
+  const tag = base64UrlDecode(payload.tag);
+  if (!ephemeralPublicKeyDer || !iv || !ciphertext || !tag) {
+    throw new Error("Encrypted import envelope is not valid base64url");
+  }
+  if (iv.byteLength !== 12) throw new Error("Encrypted import iv must be 12 bytes");
+  if (tag.byteLength !== 16) throw new Error("Encrypted import tag must be 16 bytes");
+  if (
+    ciphertext.byteLength === 0 ||
+    ciphertext.byteLength > USER_WALLET_ENCRYPTED_IMPORT_MAX_CIPHERTEXT_BYTES
+  ) {
+    throw new Error("Encrypted import ciphertext has an invalid size");
+  }
+  const privateKeyDer = base64UrlDecode(session.privateKey);
+  if (!privateKeyDer) {
+    throw new Error("Encrypted import session is invalid");
+  }
+
+  const clientPublicKey = createPublicKey({
+    key: ephemeralPublicKeyDer as never,
+    type: "spki",
+    format: "der",
+  });
+  const sharedSecret = diffieHellman({
+    privateKey: createPrivateKey({ key: privateKeyDer as never, type: "pkcs8", format: "der" }),
+    publicKey: clientPublicKey,
+  });
+  const info = new TextEncoder().encode(
+    `steward:user-wallet-import:v1:${session.tenantId}:${session.userId}:${session.agentId}:${session.chain}:${session.walletIndex}:${session.appId ?? ""}:${session.id}`,
+  );
+  const derivedKey = hkdfSync("sha256", sharedSecret, new Uint8Array(), info, 32);
+  const decipher = createDecipheriv("aes-256-gcm", derivedKey as never, iv as never);
+  decipher.setAAD(new TextEncoder().encode(session.id) as never);
+  decipher.setAuthTag(tag as never);
+  const plaintext = new Uint8Array([...decipher.update(ciphertext as never), ...decipher.final()]);
+  return new TextDecoder().decode(plaintext);
+}
+
+function parseUserWalletIndex(
+  value: unknown,
+): { ok: true; value: number } | { ok: false; error: string } {
+  try {
+    return { ok: true, value: normalizeUserWalletIndex(value) };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "walletIndex must be valid",
+    };
+  }
+}
+
+function parseUserWalletIndexSelector(
+  walletIndex: unknown,
+  wallet_index: unknown,
+): { ok: true; value: number } | { ok: false; error: string } {
+  const hasCamel = walletIndex !== undefined && walletIndex !== null;
+  const hasSnake = wallet_index !== undefined && wallet_index !== null;
+  if (!hasCamel && !hasSnake) return { ok: true, value: 0 };
+
+  const camel = hasCamel ? parseUserWalletIndex(walletIndex) : null;
+  const snake = hasSnake ? parseUserWalletIndex(wallet_index) : null;
+  if (camel && !camel.ok) return camel;
+  if (snake && !snake.ok) return snake;
+  if (camel && snake && camel.value !== snake.value) {
+    return { ok: false, error: "walletIndex and wallet_index must match when both are provided" };
+  }
+  return camel ?? snake ?? { ok: true, value: 0 };
+}
+
+async function parseOptionalJsonBody<T extends Record<string, unknown>>(
+  c: Context,
+): Promise<{ ok: true; value: T | null } | { ok: false; error: string }> {
+  const contentType = c.req.header("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return { ok: true, value: null };
+  }
+  const rawBody = await c.req.raw.clone().text();
+  if (rawBody.trim() === "") {
+    return { ok: true, value: null };
+  }
+  try {
+    const parsed = JSON.parse(rawBody) as unknown;
+    if (!isPlainObject(parsed)) {
+      return { ok: false, error: "JSON request body must be an object" };
+    }
+    return { ok: true, value: parsed as T };
+  } catch {
+    return { ok: false, error: "Invalid JSON in request body" };
+  }
+}
+
+function walletIndexAuditValue(value: unknown): unknown {
+  if (
+    value === undefined ||
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value ?? null;
+  }
+  return Array.isArray(value) ? "[array]" : `[${typeof value}]`;
 }
 
 function isValidAddress(value: unknown): boolean {
@@ -204,6 +588,30 @@ function isValidTenantId(value: unknown): value is string {
   return typeof value === "string" && /^[a-zA-Z0-9_\-.:]{1,64}$/.test(value);
 }
 
+function normalizePublicClientId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{2,63}$/.test(normalized) ? normalized : undefined;
+}
+
+function parseAppId(value: unknown): { tenantId: string; clientId: string } | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  const index = trimmed.lastIndexOf("/");
+  if (index <= 0 || index === trimmed.length - 1) return null;
+  const tenantId = trimmed.slice(0, index);
+  const clientId = normalizePublicClientId(trimmed.slice(index + 1));
+  if (!isValidTenantId(tenantId) || !clientId) return null;
+  return { tenantId, clientId };
+}
+
+function isEmbeddedWalletCreateOnLogin(value: unknown): value is EmbeddedWalletCreateOnLogin {
+  return (
+    typeof value === "string" &&
+    EMBEDDED_WALLET_CREATE_ON_LOGIN.includes(value as EmbeddedWalletCreateOnLogin)
+  );
+}
+
 function isPushProvider(value: unknown): value is PushProvider {
   return typeof value === "string" && PUSH_PROVIDERS.includes(value as PushProvider);
 }
@@ -218,6 +626,119 @@ function normalizedOptionalString(value: unknown, maxLength: number): string | n
   const trimmed = value.trim();
   if (!trimmed || trimmed.length > maxLength) return null;
   return trimmed;
+}
+
+function normalizeOptionalText(value: unknown, field: string, maxLength: number): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`${field} must be a non-empty string`);
+  }
+  const normalized = value.trim();
+  if (normalized.length > maxLength) throw new Error(`${field} is too long`);
+  return normalized;
+}
+
+function normalizeUserWalletSignerSubjectType(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "external";
+  const subjectType = normalizeOptionalText(value, "subjectType", 32) ?? "";
+  if (!USER_WALLET_SIGNER_SUBJECT_TYPES.has(subjectType)) {
+    throw new Error("subjectType must be one of: user, wallet, external");
+  }
+  return subjectType;
+}
+
+function normalizeUserWalletSignerSubjectId(value: unknown): string {
+  if (value === undefined || value === null || value === "") {
+    return `user-wallet-signer:${crypto.randomUUID()}`;
+  }
+  return normalizeOptionalText(value, "subjectId", 255) as string;
+}
+
+function normalizeUserWalletSignerPermissions(value: unknown): string[] {
+  if (value === undefined) return ["sign_transaction"];
+  if (!Array.isArray(value)) throw new Error("permissions must be an array of strings");
+  if (value.length > MAX_USER_WALLET_SIGNER_PERMISSIONS) {
+    throw new Error(
+      `permissions cannot contain more than ${MAX_USER_WALLET_SIGNER_PERMISSIONS} entries`,
+    );
+  }
+  const permissions = [
+    ...new Set(
+      value.map((permission) => {
+        if (typeof permission !== "string" || !permission.trim()) {
+          throw new Error("permissions must be non-empty strings");
+        }
+        const normalized = permission.trim();
+        if (normalized.length > 128)
+          throw new Error("permissions entries must be 128 chars or less");
+        return normalized;
+      }),
+    ),
+  ];
+  if (permissions.length === 0) throw new Error("permissions must contain at least one entry");
+  for (const permission of permissions) {
+    if (
+      USER_WALLET_SIGNER_FORBIDDEN_PERMISSIONS.has(permission) ||
+      !USER_WALLET_SIGNER_ALLOWED_PERMISSIONS.has(permission)
+    ) {
+      throw new Error(
+        "user wallet signers may only receive signing permissions; private-key export, recovery, policy, and owner permissions are forbidden",
+      );
+    }
+  }
+  return permissions;
+}
+
+function normalizeUserWalletSignerMetadata(value: unknown): Record<string, unknown> {
+  if (value === undefined) return {};
+  if (!isPlainObject(value)) throw new Error("metadata must be an object");
+  if (JSON.stringify(value).length > MAX_USER_WALLET_SIGNER_METADATA_BYTES) {
+    throw new Error(`metadata cannot exceed ${MAX_USER_WALLET_SIGNER_METADATA_BYTES} bytes`);
+  }
+  for (const key of Object.keys(value)) {
+    if (RESERVED_SIGNER_METADATA_KEYS.has(key)) {
+      throw new Error(`metadata.${key} is reserved and cannot be set by clients`);
+    }
+  }
+  return value;
+}
+
+function createUserWalletSignerSecret(): string {
+  return `stwd_signer_${randomBytes(32).toString("hex")}`;
+}
+
+function redactSignerMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const {
+    credentialHash: _credentialHash,
+    credentialCreatedAt: _credentialCreatedAt,
+    credentialLastUsedAt: _credentialLastUsedAt,
+    ...safeMetadata
+  } = metadata;
+  return safeMetadata;
+}
+
+function toUserWalletSignerResponse(row: UserWalletSignerRow) {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    agentId: row.agentId,
+    signerType: row.signerType,
+    subjectType: row.subjectType,
+    subjectId: row.subjectId,
+    keyType: row.keyType,
+    publicKey: row.publicKey,
+    address: row.address,
+    chainFamily: row.chainFamily,
+    label: row.label,
+    permissions: row.permissions,
+    policyIds: row.policyIds,
+    metadata: redactSignerMetadata(row.metadata),
+    hasCredential: typeof row.metadata.credentialHash === "string",
+    status: row.status,
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 function normalizePushToken(token: unknown, provider: PushProvider): string | null {
@@ -391,6 +912,37 @@ async function writeUserAudit(
   });
 }
 
+async function writeInvalidUserWalletIndexAudit(
+  c: Context<{ Variables: UserVariables }>,
+  params: {
+    userId: string;
+    action: string;
+    error: string;
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  },
+): Promise<void> {
+  try {
+    await writeUserAudit(c, {
+      tenantId: `personal-${params.userId}`,
+      actorType: "user",
+      actorId: params.userId,
+      action: params.action,
+      resourceType: "wallet",
+      resourceId: `user-wallet-${params.userId}`,
+      metadata: {
+        rejected: true,
+        reason: "invalid_wallet_index",
+        error: params.error,
+        walletIndex: walletIndexAuditValue(params.walletIndex),
+        wallet_index: walletIndexAuditValue(params.wallet_index),
+      },
+    });
+  } catch (error) {
+    console.warn("[UserWallet] Failed to audit invalid wallet index selector:", error);
+  }
+}
+
 async function restoreUserAccountUnlinkMutation(
   mutation: UserAccountUnlinkMutation,
 ): Promise<void> {
@@ -416,8 +968,75 @@ function hasRecentMfaStepUp(session: UserSessionPayload, maxAgeMs = 5 * 60_000):
   );
 }
 
+async function readPersonalTenantMfaPolicy(tenantId: string): Promise<TenantMfaPolicyConfig> {
+  const [row] = await getDb()
+    .select({ authAbuseConfig: tenantConfigs.authAbuseConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+  return (row?.authAbuseConfig as TenantAuthAbuseConfigWithMfa | undefined)?.mfa ?? {};
+}
+
+function tenantMfaMaxAgeMs(
+  policy: TenantMfaPolicyConfig,
+  action?: keyof NonNullable<TenantMfaPolicyConfig["requireFor"]>,
+): number {
+  const seconds = action
+    ? (policy.maxAgeFor?.[action] ?? policy.maxAgeSeconds)
+    : policy.maxAgeSeconds;
+  return typeof seconds === "number" && Number.isFinite(seconds)
+    ? Math.max(30, Math.min(3600, Math.floor(seconds))) * 1000
+    : 5 * 60_000;
+}
+
+function tenantMfaRequiredFor(
+  policy: TenantMfaPolicyConfig,
+  action: keyof NonNullable<TenantMfaPolicyConfig["requireFor"]>,
+): boolean {
+  return policy.requireFor?.[action] !== false;
+}
+
+function tenantMfaDisabledFor(
+  policy: TenantMfaPolicyConfig,
+  action: keyof NonNullable<TenantMfaPolicyConfig["disableFor"]>,
+): boolean {
+  return policy.disableFor?.[action] === true;
+}
+
+async function requireUserWalletPrivateKeyPolicy(
+  c: Context<{ Variables: UserVariables }>,
+  action: "keyImport" | "keyExport",
+): Promise<Response | null> {
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  const tenantId = personalTenantId(userId);
+  const policy = await readPersonalTenantMfaPolicy(tenantId);
+  if (tenantMfaDisabledFor(policy, action)) {
+    const label = action === "keyImport" ? "import" : "export";
+    return c.json<ApiResponse>(
+      { ok: false, error: `Private key ${label} is disabled by tenant MFA policy` },
+      403,
+    );
+  }
+  if (
+    tenantMfaRequiredFor(policy, action) &&
+    !hasRecentMfaStepUp(session, tenantMfaMaxAgeMs(policy, action))
+  ) {
+    const label = action === "keyImport" ? "import" : "export";
+    return c.json<ApiResponse>(
+      { ok: false, error: `Private key ${label} requires a recent MFA step-up session` },
+      403,
+    );
+  }
+  return null;
+}
+
 function sessionTenantMatches(session: UserSessionPayload, tenantId: string): boolean {
   return typeof session.tenantId === "string" && session.tenantId === tenantId;
+}
+
+function sessionAppClientId(session: UserSessionPayload): string | null {
+  const value = session.appClientId ?? session.clientId ?? session.client_id;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function isTenantAdminRole(role: string | null | undefined): boolean {
@@ -474,6 +1093,10 @@ function parseBoundedOffset(value: string | null): number {
   return Math.min(Math.floor(parsed), 100_000);
 }
 
+function isUuid(value: string): boolean {
+  return UUID_RE.test(value);
+}
+
 async function requireTenantAdmin(userId: string, tenantId: string): Promise<string | null> {
   const db = getDb();
   const [membership] = await db
@@ -503,6 +1126,144 @@ async function ensurePersonalTenant(userId: string, displayName: string): Promis
     .values({ id: tenantId, name: displayName, apiKeyHash: hash })
     .onConflictDoNothing();
   return tenantId;
+}
+
+function embeddedWalletCreateOnLoginFromFeatureFlags(
+  featureFlags: unknown,
+): EmbeddedWalletCreateOnLogin {
+  if (!isPlainObject(featureFlags)) return "off";
+  const embeddedWallets = featureFlags.embeddedWallets;
+  if (
+    isPlainObject(embeddedWallets) &&
+    isEmbeddedWalletCreateOnLogin(embeddedWallets.createOnLogin)
+  ) {
+    return embeddedWallets.createOnLogin;
+  }
+  if (isEmbeddedWalletCreateOnLogin(featureFlags.embeddedWalletCreateOnLogin)) {
+    return featureFlags.embeddedWalletCreateOnLogin;
+  }
+  return "off";
+}
+
+function embeddedWalletCreateOnLoginFromAppClient(
+  embeddedWallets: unknown,
+): EmbeddedWalletCreateOnLogin | undefined {
+  if (!isPlainObject(embeddedWallets)) return undefined;
+  return isEmbeddedWalletCreateOnLogin(embeddedWallets.createOnLogin)
+    ? embeddedWallets.createOnLogin
+    : undefined;
+}
+
+async function readEmbeddedWalletLoginConfigForTenant(
+  userId: string,
+  tenantId: string,
+  clientId?: string,
+): Promise<EmbeddedWalletLoginConfig> {
+  if (!isValidTenantId(tenantId)) {
+    return { tenantId: personalTenantId(userId), createOnLogin: "off" };
+  }
+  const db = getDb();
+  const [membership] = await db
+    .select({ role: userTenants.role })
+    .from(userTenants)
+    .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)));
+  if (!membership) return { tenantId, createOnLogin: "off" };
+
+  const [config] = await db
+    .select({ featureFlags: tenantConfigs.featureFlags })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+  const tenantCreateOnLogin = embeddedWalletCreateOnLoginFromFeatureFlags(config?.featureFlags);
+  const normalizedClientId = normalizePublicClientId(clientId);
+  let resolvedClientId: string | undefined;
+  if (normalizedClientId) {
+    const [appClient] = await db
+      .select({ id: tenantAppClients.id, embeddedWallets: tenantAppClients.embeddedWallets })
+      .from(tenantAppClients)
+      .where(
+        and(
+          eq(tenantAppClients.tenantId, tenantId),
+          eq(tenantAppClients.id, normalizedClientId),
+          eq(tenantAppClients.enabled, true),
+        ),
+      );
+    resolvedClientId = appClient?.id;
+    const appClientCreateOnLogin = embeddedWalletCreateOnLoginFromAppClient(
+      appClient?.embeddedWallets,
+    );
+    if (appClientCreateOnLogin) {
+      return {
+        tenantId,
+        clientId: resolvedClientId,
+        createOnLogin: appClientCreateOnLogin,
+      };
+    }
+  }
+  return {
+    tenantId,
+    ...(resolvedClientId ? { clientId: resolvedClientId } : {}),
+    createOnLogin: tenantCreateOnLogin,
+  };
+}
+
+function resolveEmbeddedWalletLoginClientId(
+  c: Context<{ Variables: UserVariables }>,
+  tenantId: string,
+): string | undefined {
+  const queryClientId =
+    c.req.query("client_id") ??
+    c.req.query("clientId") ??
+    c.req.query("app_client_id") ??
+    c.req.query("appClientId");
+  const normalizedQueryClientId = normalizePublicClientId(queryClientId);
+  if (normalizedQueryClientId) return normalizedQueryClientId;
+
+  const headerClientId = normalizePublicClientId(
+    c.req.header("X-Steward-App-Client-Id") ?? c.req.header("X-Steward-Client-Id"),
+  );
+  if (headerClientId) return headerClientId;
+
+  const appId = parseAppId(c.req.header("X-Steward-App-Id"));
+  if (appId?.tenantId === tenantId) return appId.clientId;
+  return undefined;
+}
+
+async function resolveEmbeddedWalletLoginConfig(
+  c: Context<{ Variables: UserVariables }>,
+  userId: string,
+): Promise<EmbeddedWalletLoginConfig> {
+  const session = c.get("userSession");
+  const requestedTenantId =
+    normalizedOptionalString(c.req.query("tenantId"), 64) ??
+    normalizedOptionalString(c.req.header("X-Steward-Tenant"), 64) ??
+    session.tenantId ??
+    personalTenantId(userId);
+  const requestedClientId = resolveEmbeddedWalletLoginClientId(c, requestedTenantId);
+  return readEmbeddedWalletLoginConfigForTenant(userId, requestedTenantId, requestedClientId);
+}
+
+async function provisionEmbeddedUserWallet(
+  vault: Vault,
+  userId: string,
+  displayName: string,
+  eventTenantId?: string,
+  walletIndex = 0,
+): Promise<AgentIdentity> {
+  const personalTenant = await ensurePersonalTenant(userId, displayName);
+  await provisionUserWallet(vault, userId, displayName, undefined, walletIndex);
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex);
+  if (!wallet) throw new Error("Provision succeeded but agent not found");
+  dispatchWebhook(personalTenant, wallet.id, "user.wallet_created", {
+    userId,
+    walletId: wallet.id,
+    walletAddress: wallet.walletAddress,
+    walletAddresses: wallet.walletAddresses,
+    walletIndex,
+    ...(eventTenantId && eventTenantId !== personalTenant
+      ? { configuredTenantId: eventTenantId }
+      : {}),
+  });
+  return wallet;
 }
 
 /** Build a Vault instance from environment. Same defaults as index.ts. */
@@ -549,6 +1310,55 @@ async function getTransactionStats(agentId: string) {
     .where(
       and(
         eq(transactions.agentId, agentId),
+        sql`${transactions.createdAt} >= ${oneWeekAgo.toISOString()}::timestamptz`,
+        sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
+      ),
+    );
+
+  return {
+    recentTxCount1h: Number(stats?.recentTxCount1h ?? 0),
+    recentTxCount24h: Number(stats?.recentTxCount24h ?? 0),
+    spentToday: BigInt(stats?.spentToday ?? "0"),
+    spentThisWeek: BigInt(stats?.spentThisWeek ?? "0"),
+  };
+}
+
+async function getUserWalletTransactionStats(userId: string) {
+  const db = getDb();
+  const now = new Date();
+  const oneHourAgo = new Date(now.getTime() - 3_600_000);
+  const oneDayAgo = new Date(now.getTime() - 86_400_000);
+  const oneWeekAgo = new Date(now.getTime() - 604_800_000);
+
+  const oneHourAgoStr = oneHourAgo.toISOString();
+  const oneDayAgoStr = oneDayAgo.toISOString();
+  const baseAgentId = `user-wallet-${userId}`;
+  const agentIds = [
+    baseAgentId,
+    ...Array.from({ length: 255 }, (_, index) => `${baseAgentId}-${index + 1}`),
+  ];
+
+  const [stats] = await db
+    .select({
+      recentTxCount1h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneHourAgoStr}::timestamptz)`,
+      recentTxCount24h: sql<number>`count(*) filter (where ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz)`,
+      spentToday: sql<string>`
+        coalesce(
+          sum(
+            case
+              when ${transactions.createdAt} >= ${oneDayAgoStr}::timestamptz then (${transactions.value})::numeric
+              else 0
+            end
+          ),
+          0
+        )::text
+      `,
+      spentThisWeek: sql<string>`coalesce(sum((${transactions.value})::numeric), 0)::text`,
+    })
+    .from(transactions)
+    .where(
+      and(
+        inArray(transactions.agentId, agentIds),
         sql`${transactions.createdAt} >= ${oneWeekAgo.toISOString()}::timestamptz`,
         sql`${transactions.status} in ('signed', 'broadcast', 'confirmed')`,
       ),
@@ -672,6 +1482,7 @@ function userWalletRowsToAccountWallets(
     address: string;
     venue: string | null;
     purpose: string | null;
+    metadata: Record<string, unknown>;
     createdAt: Date;
   }>,
 ) {
@@ -682,6 +1493,7 @@ function userWalletRowsToAccountWallets(
       address: row.address,
       venue: row.venue,
       purpose: row.purpose,
+      metadata: redactWalletMetadataSecrets(row.metadata),
       createdAt: row.createdAt,
     }));
   }
@@ -693,17 +1505,132 @@ function userWalletRowsToAccountWallets(
       address: wallet.walletAddress,
       venue: null,
       purpose: "primary",
+      metadata: {},
       createdAt: wallet.createdAt,
     },
   ];
 }
 
 async function withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  if (process.env.STEWARD_DB_MODE === "pglite" || process.env.STEWARD_PGLITE_MEMORY === "true") {
+    return fn();
+  }
   const db = getDb();
   return db.transaction(async (tx) => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${agentId}))`);
     return fn();
   });
+}
+
+const USER_WALLET_SIGNER_AUTH_REQUIRED_ERROR =
+  "User wallet signer credentials are required for this action";
+
+function userWalletSignerPermissionForPath(path: string): string | null {
+  if (path.endsWith("/me/wallet/sign")) return "sign_transaction";
+  if (path.endsWith("/me/wallet/sign-message")) return "sign_message";
+  return null;
+}
+
+function userWalletSignerHasPermission(permissions: readonly string[], required: string): boolean {
+  const family = required.includes("_") ? `${required.split("_")[0]}:*` : `${required}:*`;
+  return (
+    permissions.includes("*") ||
+    (required.startsWith("sign_") && permissions.includes("sign:*")) ||
+    permissions.includes(required) ||
+    permissions.includes(family)
+  );
+}
+
+function userIdFromPersonalTenantId(tenantId: string): string | null {
+  const prefix = "personal-";
+  if (!tenantId.startsWith(prefix)) return null;
+  const userId = tenantId.slice(prefix.length);
+  return userId ? userId : null;
+}
+
+function getUserWalletSignerAuth(c: Context<{ Variables: UserVariables }>) {
+  return c.get("authType") === "user-wallet-signer" ? c.get("userWalletSignerAuth") : undefined;
+}
+
+function userWalletSignerAuditMetadata(
+  c: Context<{ Variables: UserVariables }>,
+): Record<string, unknown> {
+  const auth = getUserWalletSignerAuth(c);
+  return auth ? { authMode: "user-wallet-signer", signerId: auth.signerId } : {};
+}
+
+function requireUserWalletSignerWalletScope(
+  c: Context<{ Variables: UserVariables }>,
+  walletAgentId: string,
+): Response | null {
+  const auth = getUserWalletSignerAuth(c);
+  if (!auth) return null;
+  if (auth.agentId === walletAgentId) return null;
+  return c.json<ApiResponse>(
+    { ok: false, error: "Signer credential is not authorized for the selected walletIndex" },
+    403,
+  );
+}
+
+async function authenticateUserWalletSigner(
+  c: Context<{ Variables: UserVariables }>,
+  next: Next,
+): Promise<Response | undefined> {
+  const requiredPermission = userWalletSignerPermissionForPath(new URL(c.req.url).pathname);
+  if (!requiredPermission) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Authorization: Bearer <token> header is required" },
+      401,
+    );
+  }
+
+  const signerId = c.req.header("x-steward-signer-id")?.trim();
+  const signerSecret = c.req.header("x-steward-signer-secret");
+  if (!signerId || !signerSecret) {
+    return c.json<ApiResponse>({ ok: false, error: USER_WALLET_SIGNER_AUTH_REQUIRED_ERROR }, 403);
+  }
+
+  const [signer] = await getDb().select().from(agentSigners).where(eq(agentSigners.id, signerId));
+  const credentialHash =
+    signer?.metadata && typeof signer.metadata.credentialHash === "string"
+      ? signer.metadata.credentialHash
+      : null;
+  const userId = signer ? userIdFromPersonalTenantId(signer.tenantId) : null;
+  if (
+    !signer ||
+    signer.status !== "active" ||
+    !userId ||
+    !credentialHash ||
+    !(await verifySignerCredential(signerSecret, credentialHash)) ||
+    !userWalletSignerHasPermission(signer.permissions, requiredPermission)
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: USER_WALLET_SIGNER_AUTH_REQUIRED_ERROR }, 403);
+  }
+
+  const now = new Date();
+  await getDb()
+    .update(agentSigners)
+    .set({
+      metadata: {
+        ...signer.metadata,
+        credentialLastUsedAt: now.toISOString(),
+      },
+      updatedAt: now,
+    })
+    .where(eq(agentSigners.id, signer.id));
+
+  c.set("userId", userId);
+  c.set("userSession", { userId, tenantId: signer.tenantId });
+  c.set("authType", "user-wallet-signer");
+  c.set("userWalletSignerAuth", {
+    signerId: signer.id,
+    tenantId: signer.tenantId,
+    agentId: signer.agentId,
+    requiredPermission,
+  });
+
+  await next();
+  return undefined;
 }
 
 // ─── Session auth middleware ──────────────────────────────────────────────────
@@ -727,6 +1654,9 @@ export async function userSessionAuth(
 
   const authHeader = c.req.header("Authorization");
   if (!authHeader?.startsWith("Bearer ")) {
+    if (c.req.header("x-steward-signer-id") || c.req.header("x-steward-signer-secret")) {
+      return authenticateUserWalletSigner(c, next);
+    }
     return c.json<ApiResponse>(
       { ok: false, error: "Authorization: Bearer <token> header is required" },
       401,
@@ -766,8 +1696,10 @@ export async function userSessionAuth(
 
 const user = new Hono<{ Variables: UserVariables }>();
 const ALLOW_PRIVATE_KEY_EXPORT = process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+const ALLOW_PRIVATE_KEY_IMPORT = process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
 const ALLOW_UNSAFE_MESSAGE_SIGNING = process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
 const ALLOW_USER_PRIVATE_KEY_EXPORT = process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT === "true";
+const ALLOW_USER_PRIVATE_KEY_IMPORT = process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT === "true";
 const ALLOW_USER_UNSAFE_MESSAGE_SIGNING =
   process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING === "true";
 
@@ -950,6 +1882,39 @@ async function solanaWalletAlreadyBelongsToAnotherUser(
     .from(accounts)
     .where(and(eq(accounts.provider, "wallet:solana"), eq(accounts.providerAccountId, publicKey)));
   return Boolean(linkedOwner && linkedOwner.userId !== userId);
+}
+
+async function getTenantWalletPolicyConfig(tenantId: string): Promise<TenantAuthAbuseConfig> {
+  const [config] = await getDb()
+    .select({ authAbuseConfig: tenantConfigs.authAbuseConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+  return config?.authAbuseConfig ?? {};
+}
+
+async function userHasAnyLinkedThirdPartyWallet(userId: string): Promise<boolean> {
+  const [linkedWallet] = await getDb()
+    .select({ id: accounts.id })
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.userId, userId),
+        or(eq(accounts.provider, "wallet:ethereum"), eq(accounts.provider, "wallet:solana")),
+      ),
+    )
+    .limit(1);
+  return Boolean(linkedWallet);
+}
+
+async function enforceSingleThirdPartyWalletPolicy(
+  c: Context<{ Variables: UserVariables }>,
+  userId: string,
+  tenantId: string,
+): Promise<Response | null> {
+  const config = await getTenantWalletPolicyConfig(tenantId);
+  if (config.wallet?.restrictToOneThirdPartyWallet !== true) return null;
+  if (!(await userHasAnyLinkedThirdPartyWallet(userId))) return null;
+  return c.json<ApiResponse>({ ok: false, error: "User already has a linked wallet" }, 409);
 }
 
 function verifySolanaWalletLinkSignature(
@@ -1164,9 +2129,50 @@ user.get("/me", async (c) => {
 
   // Check if the user already has a wallet provisioned
   let walletInfo: { address: string; agentId: string } | null = null;
+  let walletAutoCreated = false;
+  const embeddedWalletConfig = await resolveEmbeddedWalletLoginConfig(c, userId);
   try {
     const vault = getVault();
-    const wallet = await getUserWallet(vault, userId);
+    let wallet = await getUserWallet(vault, userId);
+    if (!wallet && embeddedWalletConfig.createOnLogin !== "off") {
+      const displayName = (session.address as string | undefined) ?? userId;
+      const walletId = `user-wallet-${userId}`;
+      await writeUserAudit(c, {
+        tenantId: personalTenantId(userId),
+        actorType: "user",
+        actorId: userId,
+        action: "user.wallet.create_on_login.authorized",
+        resourceType: "wallet",
+        resourceId: walletId,
+        metadata: {
+          configuredTenantId: embeddedWalletConfig.tenantId,
+          configuredClientId: embeddedWalletConfig.clientId,
+          createOnLogin: embeddedWalletConfig.createOnLogin,
+        },
+      });
+      wallet = await provisionEmbeddedUserWallet(
+        vault,
+        userId,
+        displayName,
+        embeddedWalletConfig.tenantId,
+      );
+      walletAutoCreated = true;
+      writeUserAudit(c, {
+        tenantId: personalTenantId(userId),
+        actorType: "user",
+        actorId: userId,
+        action: "user.wallet.create_on_login",
+        resourceType: "wallet",
+        resourceId: wallet.id,
+        metadata: {
+          configuredTenantId: embeddedWalletConfig.tenantId,
+          configuredClientId: embeddedWalletConfig.clientId,
+          createOnLogin: embeddedWalletConfig.createOnLogin,
+        },
+      }).catch((error) => {
+        console.error("[user] Failed to audit create-on-login wallet success:", error);
+      });
+    }
     if (wallet) {
       walletInfo = { address: wallet.walletAddress, agentId: wallet.id };
     }
@@ -1180,6 +2186,8 @@ user.get("/me", async (c) => {
       address?: string;
       email?: string;
       wallet: { address: string; agentId: string } | null;
+      walletAutoCreated: boolean;
+      embeddedWalletConfig: EmbeddedWalletLoginConfig;
     }>
   >({
     ok: true,
@@ -1188,6 +2196,8 @@ user.get("/me", async (c) => {
       address: session.address as string | undefined,
       email: session.email as string | undefined,
       wallet: walletInfo,
+      walletAutoCreated,
+      embeddedWalletConfig,
     },
   });
 });
@@ -1548,6 +2558,12 @@ user.post("/me/accounts/wallet/ethereum", async (c) => {
       data: { account, isNew: false },
     });
   }
+  const singleWalletPolicyResponse = await enforceSingleThirdPartyWalletPolicy(
+    c,
+    userId,
+    session.tenantId ?? personalTenantId(userId),
+  );
+  if (singleWalletPolicyResponse) return singleWalletPolicyResponse;
 
   const [account] = await getDb()
     .insert(accounts)
@@ -1728,6 +2744,12 @@ user.post("/me/accounts/wallet/solana", async (c) => {
       data: { account, isNew: false },
     });
   }
+  const singleWalletPolicyResponse = await enforceSingleThirdPartyWalletPolicy(
+    c,
+    userId,
+    session.tenantId ?? personalTenantId(userId),
+  );
+  if (singleWalletPolicyResponse) return singleWalletPolicyResponse;
 
   const [account] = await getDb()
     .insert(accounts)
@@ -2723,6 +3745,7 @@ user.get("/me/account", async (c) => {
           address: agentWallets.address,
           venue: agentWallets.venue,
           purpose: agentWallets.purpose,
+          metadata: agentWallets.metadata,
           createdAt: agentWallets.createdAt,
         })
         .from(agentWallets)
@@ -2903,7 +3926,20 @@ user.get("/me/wallet", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const wallet: AgentIdentity | null = await getUserWallet(vault, userId);
+  const walletIndex = parseUserWalletIndexSelector(
+    c.req.query("walletIndex"),
+    c.req.query("wallet_index"),
+  );
+  if (!walletIndex.ok) {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+
+  const wallet: AgentIdentity | null = await getUserWallet(
+    vault,
+    userId,
+    undefined,
+    walletIndex.value,
+  );
   if (!wallet) {
     return c.json<ApiResponse>(
       { ok: false, error: "No wallet found — call POST /me/wallet to provision" },
@@ -2922,6 +3958,7 @@ user.get("/me/wallet", async (c) => {
       data: {
         agentId: wallet.id,
         walletAddress: wallet.walletAddress,
+        walletIndex: walletIndex.value,
         balances: {
           native: balance.native.toString(),
           nativeFormatted: balance.nativeFormatted,
@@ -2950,33 +3987,49 @@ user.post("/me/wallet", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  let wallet: AgentIdentity | null = await getUserWallet(vault, userId);
+  const parsedBody = await parseOptionalJsonBody<{
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  }>(c);
+  if (!parsedBody.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedBody.error }, 400);
+  }
+  const body = parsedBody.value ?? {};
+  const walletIndex = parseUserWalletIndexSelector(body.walletIndex, body.wallet_index);
+  if (!walletIndex.ok) {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+
+  let wallet: AgentIdentity | null = await getUserWallet(
+    vault,
+    userId,
+    undefined,
+    walletIndex.value,
+  );
   if (!wallet) {
     try {
       const session = c.get("userSession");
       const displayName = (session.address as string | undefined) ?? userId;
-      const tenantId = await ensurePersonalTenant(userId, displayName);
-      await provisionUserWallet(vault, userId, displayName);
-      wallet = await getUserWallet(vault, userId);
-      if (!wallet) throw new Error("Provision succeeded but agent not found");
-      dispatchWebhook(tenantId, wallet.id, "user.wallet_created", {
+      wallet = await provisionEmbeddedUserWallet(
+        vault,
         userId,
-        walletId: wallet.id,
-        walletAddress: wallet.walletAddress,
-        walletAddresses: wallet.walletAddresses,
-      });
+        displayName,
+        undefined,
+        walletIndex.value,
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       return c.json<ApiResponse>({ ok: false, error: `Failed to provision wallet: ${msg}` }, 500);
     }
   }
 
-  return c.json<ApiResponse<{ agentId: string; walletAddress: string }>>(
+  return c.json<ApiResponse<{ agentId: string; walletAddress: string; walletIndex: number }>>(
     {
       ok: true,
       data: {
         agentId: wallet.id,
         walletAddress: wallet.walletAddress,
+        walletIndex: walletIndex.value,
       },
     },
     201,
@@ -2998,7 +4051,12 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
     );
   }
 
-  const body = await safeJsonParse<{ tenantId?: unknown; claimToken?: unknown }>(c);
+  const body = await safeJsonParse<{
+    tenantId?: unknown;
+    claimToken?: unknown;
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  }>(c);
   const sourceTenantId = isValidTenantId(body?.tenantId) ? body.tenantId : null;
   const claimToken = typeof body?.claimToken === "string" ? body.claimToken.trim() : "";
   if (!sourceTenantId) {
@@ -3006,6 +4064,17 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
   }
   if (!claimToken || claimToken.length > 160) {
     return c.json<ApiResponse>({ ok: false, error: "claimToken is required" }, 400);
+  }
+  const walletIndex = parseUserWalletIndexSelector(body?.walletIndex, body?.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.pregenerated_claim.rejected",
+      error: walletIndex.error,
+      walletIndex: body?.walletIndex,
+      wallet_index: body?.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
   }
 
   let vault: Vault;
@@ -3015,13 +4084,16 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const existing = await getUserWallet(vault, userId);
+  const existing = await getUserWallet(vault, userId, undefined, walletIndex.value);
   if (existing) {
-    return c.json<ApiResponse>({ ok: false, error: "User already has an embedded wallet" }, 409);
+    return c.json<ApiResponse>(
+      { ok: false, error: "User already has an embedded wallet at the selected walletIndex" },
+      409,
+    );
   }
 
   const claimTokenHash = hashSha256Hex(claimToken);
-  const platformId = `${PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`;
+  const platformIdPrefix = pregeneratedClaimPlatformIdPrefix(claimTokenHash);
   const db = getDb();
   const [claimable] = await db
     .select()
@@ -3030,7 +4102,10 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       and(
         eq(agents.tenantId, sourceTenantId),
         eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
-        eq(agents.platformId, platformId),
+        or(
+          eq(agents.platformId, platformIdPrefix),
+          sql`${agents.platformId} like ${`${platformIdPrefix}:%`}`,
+        ),
       ),
     );
   if (!claimable) {
@@ -3039,30 +4114,62 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       404,
     );
   }
-
-  const displayName = (session.address as string | undefined) ?? session.email ?? userId;
-  const personalTenant = await ensurePersonalTenant(userId, displayName);
-  const targetAgentId = `user-wallet-${userId}`;
-
-  try {
-    const keys = await vault.exportPrivateKey(sourceTenantId, claimable.id, {
-      breakGlass: true,
-      actorId: userId,
-      reason: "claim pregenerated user wallet",
-    });
-    if (!keys.evm?.privateKey) {
-      throw new Error("Pregenerated wallet is missing an EVM key");
-    }
-
-    const [claimed] = await db
+  const claimablePlatformId = claimable.platformId;
+  const claimRecord = parsePregeneratedClaimPlatformId(claimablePlatformId, claimTokenHash);
+  if (!claimablePlatformId || !claimRecord) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Invalid or already claimed wallet token" },
+      404,
+    );
+  }
+  if (claimRecord.expiresAt && claimRecord.expiresAt.getTime() <= Date.now()) {
+    await db
       .update(agents)
-      .set({ platformId: `claimed:${claimTokenHash}`, updatedAt: new Date() })
+      .set({
+        platformId: `${EXPIRED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(agents.id, claimable.id),
           eq(agents.tenantId, sourceTenantId),
           eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
-          eq(agents.platformId, platformId),
+          eq(agents.platformId, claimablePlatformId),
+        ),
+      );
+    return c.json<ApiResponse>({ ok: false, error: "Wallet claim token expired" }, 410);
+  }
+
+  const displayName = (session.address as string | undefined) ?? session.email ?? userId;
+  const personalTenant = await ensurePersonalTenant(userId, displayName);
+  const targetAgentId =
+    walletIndex.value === 0
+      ? `user-wallet-${userId}`
+      : `user-wallet-${userId}-${walletIndex.value}`;
+
+  try {
+    await writeUserAudit(c, {
+      tenantId: personalTenant,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet.pregenerated_claim.authorized",
+      resourceType: "wallet",
+      resourceId: targetAgentId,
+      metadata: { sourceTenantId, sourceAgentId: claimable.id, walletIndex: walletIndex.value },
+    });
+
+    const [claimed] = await db
+      .update(agents)
+      .set({
+        platformId: `${CLAIMED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(agents.id, claimable.id),
+          eq(agents.tenantId, sourceTenantId),
+          eq(agents.walletType, PREGENERATED_USER_WALLET_TYPE),
+          eq(agents.platformId, claimablePlatformId),
         ),
       )
       .returning({ id: agents.id });
@@ -3074,15 +4181,14 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
     }
 
     try {
-      await writeUserAudit(c, {
-        tenantId: personalTenant,
-        actorType: "user",
+      const keys = await vault.exportPrivateKey(sourceTenantId, claimable.id, {
+        breakGlass: true,
         actorId: userId,
-        action: "user.wallet.pregenerated_claim.authorized",
-        resourceType: "wallet",
-        resourceId: targetAgentId,
-        metadata: { sourceTenantId, sourceAgentId: claimable.id, claimTokenHash },
+        reason: "claim pregenerated user wallet",
       });
+      if (!keys.evm?.privateKey) {
+        throw new Error("Pregenerated wallet is missing an EVM key");
+      }
 
       if (keys.solana?.privateKey) {
         await vault.importKey(personalTenant, targetAgentId, keys.solana.privateKey, "solana");
@@ -3104,18 +4210,18 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
     } catch (claimError) {
       await db
         .update(agents)
-        .set({ platformId, updatedAt: new Date() })
+        .set({ platformId: claimablePlatformId, updatedAt: new Date() })
         .where(
           and(
             eq(agents.id, claimable.id),
             eq(agents.tenantId, sourceTenantId),
-            eq(agents.platformId, `claimed:${claimTokenHash}`),
+            eq(agents.platformId, `${CLAIMED_PREGENERATED_CLAIM_PREFIX}${claimTokenHash}`),
           ),
         );
       throw claimError;
     }
 
-    const wallet = await getUserWallet(vault, userId);
+    const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
     if (!wallet) throw new Error("Claim succeeded but wallet could not be fetched");
 
     await writeUserAudit(c, {
@@ -3125,19 +4231,27 @@ user.post("/me/wallet/claim-pregenerated", async (c) => {
       action: "user.wallet.pregenerated_claim",
       resourceType: "wallet",
       resourceId: wallet.id,
-      metadata: { sourceTenantId, sourceAgentId: claimable.id },
+      metadata: { sourceTenantId, sourceAgentId: claimable.id, walletIndex: walletIndex.value },
     });
     dispatchWebhook(personalTenant, wallet.id, "user.wallet_created", {
       userId,
       walletId: wallet.id,
       walletAddress: wallet.walletAddress,
+      walletIndex: walletIndex.value,
       pregenerated: true,
     });
 
-    return c.json<ApiResponse<{ agentId: string; walletAddress: string; claimed: true }>>(
+    return c.json<
+      ApiResponse<{ agentId: string; walletAddress: string; walletIndex: number; claimed: true }>
+    >(
       {
         ok: true,
-        data: { agentId: wallet.id, walletAddress: wallet.walletAddress, claimed: true },
+        data: {
+          agentId: wallet.id,
+          walletAddress: wallet.walletAddress,
+          walletIndex: walletIndex.value,
+          claimed: true,
+        },
       },
       201,
     );
@@ -3168,7 +4282,27 @@ user.post("/me/wallet/recovery/setup", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const existing = await getUserWallet(vault, userId);
+  const parsedBody = await parseOptionalJsonBody<{
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  }>(c);
+  if (!parsedBody.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedBody.error }, 400);
+  }
+  const body = parsedBody.value ?? {};
+  const walletIndex = parseUserWalletIndexSelector(body.walletIndex, body.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.recovery_setup.rejected",
+      error: walletIndex.error,
+      walletIndex: body.walletIndex,
+      wallet_index: body.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+
+  const existing = await getUserWallet(vault, userId, undefined, walletIndex.value);
   if (existing) {
     return c.json<ApiResponse>(
       {
@@ -3191,8 +4325,11 @@ user.post("/me/wallet/recovery/setup", async (c) => {
       actorId: userId,
       action: "user.wallet.recovery_setup.authorized",
       resourceType: "wallet",
-      resourceId: `user-wallet-${userId}`,
-      metadata: { method: "bip39", strength: 256 },
+      resourceId:
+        walletIndex.value === 0
+          ? `user-wallet-${userId}`
+          : `user-wallet-${userId}-${walletIndex.value}`,
+      metadata: { method: "bip39", strength: 256, walletIndex: walletIndex.value },
     });
 
     const wallet = await provisionRecoverableUserWallet(
@@ -3201,6 +4338,7 @@ user.post("/me/wallet/recovery/setup", async (c) => {
       displayName,
       mnemonic,
       tenantId,
+      walletIndex.value,
     );
 
     await writeUserAudit(c, {
@@ -3210,24 +4348,26 @@ user.post("/me/wallet/recovery/setup", async (c) => {
       action: "user.wallet.recovery_setup",
       resourceType: "wallet",
       resourceId: wallet.agentId,
-      metadata: { method: "bip39", strength: 256 },
+      metadata: { method: "bip39", strength: 256, walletIndex: wallet.walletIndex },
     });
     dispatchWebhook(tenantId, wallet.agentId, "user.wallet_created", {
       userId,
       walletId: wallet.agentId,
       walletAddress: wallet.walletAddress,
       recoverable: true,
+      walletIndex: wallet.walletIndex,
     });
     dispatchWebhook(tenantId, wallet.agentId, "wallet.recovery_setup", {
       userId,
       walletId: wallet.agentId,
       method: "bip39",
+      walletIndex: wallet.walletIndex,
     });
 
     setNoStoreHeaders(c);
     return c.json<
       ApiResponse<{
-        wallet: { agentId: string; walletAddress: string; recoverable: true };
+        wallet: { agentId: string; walletAddress: string; recoverable: true; walletIndex: number };
         recovery: { type: "bip39"; mnemonic: string; warning: string };
       }>
     >(
@@ -3238,6 +4378,7 @@ user.post("/me/wallet/recovery/setup", async (c) => {
             agentId: wallet.agentId,
             walletAddress: wallet.walletAddress,
             recoverable: true,
+            walletIndex: wallet.walletIndex,
           },
           recovery: {
             type: "bip39",
@@ -3271,11 +4412,26 @@ user.post("/me/wallet/recovery/restore", async (c) => {
     );
   }
 
-  const body = await safeJsonParse<{ mnemonic?: unknown }>(c);
+  const body = await safeJsonParse<{
+    mnemonic?: unknown;
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  }>(c);
   const mnemonic =
     typeof body?.mnemonic === "string" ? body.mnemonic.trim().replace(/\s+/g, " ") : "";
   if (!mnemonic || !isValidMnemonic(mnemonic)) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid BIP-39 recovery phrase" }, 400);
+  }
+  const walletIndex = parseUserWalletIndexSelector(body?.walletIndex, body?.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.recovery_restore.rejected",
+      error: walletIndex.error,
+      walletIndex: body?.walletIndex,
+      wallet_index: body?.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
   }
 
   let vault: Vault;
@@ -3295,8 +4451,11 @@ user.post("/me/wallet/recovery/restore", async (c) => {
       actorId: userId,
       action: "user.wallet.recovery_restore.authorized",
       resourceType: "wallet",
-      resourceId: `user-wallet-${userId}`,
-      metadata: { method: "bip39" },
+      resourceId:
+        walletIndex.value === 0
+          ? `user-wallet-${userId}`
+          : `user-wallet-${userId}-${walletIndex.value}`,
+      metadata: { method: "bip39", walletIndex: walletIndex.value },
     });
 
     const wallet = await restoreRecoverableUserWallet(
@@ -3305,6 +4464,7 @@ user.post("/me/wallet/recovery/restore", async (c) => {
       displayName,
       mnemonic,
       tenantId,
+      walletIndex.value,
     );
 
     await writeUserAudit(c, {
@@ -3314,7 +4474,11 @@ user.post("/me/wallet/recovery/restore", async (c) => {
       action: "user.wallet.recovered",
       resourceType: "wallet",
       resourceId: wallet.agentId,
-      metadata: { method: "bip39", restoredExisting: wallet.restoredExisting },
+      metadata: {
+        method: "bip39",
+        restoredExisting: wallet.restoredExisting,
+        walletIndex: wallet.walletIndex,
+      },
     });
     dispatchWebhook(tenantId, wallet.agentId, "wallet.recovered", {
       userId,
@@ -3322,6 +4486,7 @@ user.post("/me/wallet/recovery/restore", async (c) => {
       walletAddress: wallet.walletAddress,
       method: "bip39",
       restoredExisting: wallet.restoredExisting,
+      walletIndex: wallet.walletIndex,
     });
     if (!wallet.restoredExisting) {
       dispatchWebhook(tenantId, wallet.agentId, "user.wallet_created", {
@@ -3329,6 +4494,7 @@ user.post("/me/wallet/recovery/restore", async (c) => {
         walletId: wallet.agentId,
         walletAddress: wallet.walletAddress,
         recoverable: true,
+        walletIndex: wallet.walletIndex,
       });
     }
 
@@ -3339,6 +4505,7 @@ user.post("/me/wallet/recovery/restore", async (c) => {
           walletAddress: string;
           recoverable: true;
           restoredExisting: boolean;
+          walletIndex: number;
         };
         recovery: { type: "bip39"; restored: true };
       }>
@@ -3351,6 +4518,7 @@ user.post("/me/wallet/recovery/restore", async (c) => {
             walletAddress: wallet.walletAddress,
             recoverable: true,
             restoredExisting: wallet.restoredExisting,
+            walletIndex: wallet.walletIndex,
           },
           recovery: { type: "bip39", restored: true },
         },
@@ -3363,6 +4531,378 @@ user.post("/me/wallet/recovery/restore", async (c) => {
   }
 });
 
+// ─── User wallet additional signers ───────────────────────────────────────────
+
+user.get("/me/wallet/signers", async (c) => {
+  setNoStoreHeaders(c);
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  if (!hasRecentMfaStepUp(session)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "User wallet signer inventory requires a recent MFA step-up session" },
+      403,
+    );
+  }
+
+  const status = c.req.query("status");
+  if (status && !USER_WALLET_SIGNER_STATUSES.has(status)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid signer status filter" }, 400);
+  }
+  const walletIndex = parseUserWalletIndexSelector(
+    c.req.query("walletIndex"),
+    c.req.query("wallet_index"),
+  );
+  if (!walletIndex.ok) {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+
+  let vault: Vault;
+  try {
+    vault = getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
+  if (!wallet) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "No wallet found — call POST /me/wallet first to provision" },
+      404,
+    );
+  }
+
+  const tenantId = personalTenantId(userId);
+  const conditions = [eq(agentSigners.tenantId, tenantId), eq(agentSigners.agentId, wallet.id)];
+  if (status) conditions.push(eq(agentSigners.status, status));
+  const rows = await getDb()
+    .select()
+    .from(agentSigners)
+    .where(and(...conditions))
+    .orderBy(agentSigners.createdAt);
+
+  return c.json<ApiResponse<{ signers: ReturnType<typeof toUserWalletSignerResponse>[] }>>({
+    ok: true,
+    data: { signers: rows.map(toUserWalletSignerResponse) },
+  });
+});
+
+user.post("/me/wallet/signers", async (c) => {
+  setNoStoreHeaders(c);
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  if (!hasRecentMfaStepUp(session)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "User wallet signer creation requires a recent MFA step-up session" },
+      403,
+    );
+  }
+
+  const body = await safeJsonParse<Record<string, unknown>>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (
+    body.credentialSecret !== undefined &&
+    body.credentialSecret !== null &&
+    body.credentialSecret !== ""
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "credentialSecret is server-generated for user wallet signers" },
+      400,
+    );
+  }
+  if (body.policyIds !== undefined) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "policyIds are not supported on user wallet signers" },
+      400,
+    );
+  }
+  if (body.signerType !== undefined && body.signerType !== "delegated") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "user wallet signers must use signerType delegated" },
+      400,
+    );
+  }
+  if (body.keyType !== undefined && body.keyType !== "hmac") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "user wallet signer credentials currently support keyType hmac only" },
+      400,
+    );
+  }
+  if (body.publicKey !== undefined && body.publicKey !== null && body.publicKey !== "") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "publicKey is not supported for user wallet signer credentials" },
+      400,
+    );
+  }
+
+  const walletIndex = parseUserWalletIndexSelector(body.walletIndex, body.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.signer.create.rejected",
+      error: walletIndex.error,
+      walletIndex: body.walletIndex,
+      wallet_index: body.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+
+  let vault: Vault;
+  try {
+    vault = getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
+  if (!wallet) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "No wallet found — call POST /me/wallet first to provision" },
+      404,
+    );
+  }
+
+  let subjectType: string;
+  let subjectId: string;
+  let address: string | null;
+  let chainFamily: "evm" | "solana" | null;
+  let label: string | null;
+  let permissions: string[];
+  let metadata: Record<string, unknown>;
+  try {
+    subjectType = normalizeUserWalletSignerSubjectType(body.subjectType);
+    subjectId = normalizeUserWalletSignerSubjectId(body.subjectId);
+    address = normalizeOptionalText(body.address, "address", 128);
+    if (
+      address &&
+      !/^0x[a-fA-F0-9]{40}$/.test(address) &&
+      !/^[1-9A-HJ-NP-Za-km-z]{32,64}$/.test(address)
+    ) {
+      throw new Error("address must be an EVM or Solana address");
+    }
+    chainFamily =
+      body.chainFamily === undefined || body.chainFamily === null
+        ? null
+        : body.chainFamily === "evm" || body.chainFamily === "solana"
+          ? body.chainFamily
+          : (() => {
+              throw new Error("chainFamily must be evm or solana");
+            })();
+    label = normalizeOptionalText(body.label, "label", 255);
+    permissions = normalizeUserWalletSignerPermissions(body.permissions);
+    metadata = normalizeUserWalletSignerMetadata(body.metadata);
+  } catch (error) {
+    return c.json<ApiResponse>(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid signer payload" },
+      400,
+    );
+  }
+
+  const tenantId = personalTenantId(userId);
+  const [existingSigner] = await getDb()
+    .select({ id: agentSigners.id })
+    .from(agentSigners)
+    .where(
+      and(
+        eq(agentSigners.tenantId, tenantId),
+        eq(agentSigners.agentId, wallet.id),
+        eq(agentSigners.subjectType, subjectType),
+        eq(agentSigners.subjectId, subjectId),
+      ),
+    );
+  if (existingSigner) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Signer already exists for this wallet and subject" },
+      409,
+    );
+  }
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "user.wallet.signer.create.authorized",
+    resourceType: "wallet",
+    resourceId: wallet.id,
+    metadata: { subjectType, subjectId, permissions, walletIndex: walletIndex.value },
+  });
+
+  const credentialSecret = createUserWalletSignerSecret();
+  try {
+    const [row] = await getDb()
+      .insert(agentSigners)
+      .values({
+        tenantId,
+        agentId: wallet.id,
+        signerType: "delegated",
+        subjectType,
+        subjectId,
+        keyType: "hmac",
+        publicKey: null,
+        address,
+        chainFamily,
+        label,
+        permissions,
+        policyIds: [],
+        metadata: {
+          ...metadata,
+          credentialHash: await createSignerCredentialHash(credentialSecret),
+          credentialCreatedAt: new Date().toISOString(),
+        },
+        status: "active",
+        createdBy: userId,
+      })
+      .returning();
+
+    try {
+      await writeUserAudit(c, {
+        tenantId,
+        actorType: "user",
+        actorId: userId,
+        action: "user.wallet.signer.create",
+        resourceType: "agent_signer",
+        resourceId: row.id,
+        metadata: { agentId: wallet.id, subjectType, subjectId, walletIndex: walletIndex.value },
+      });
+    } catch (error) {
+      await getDb().delete(agentSigners).where(eq(agentSigners.id, row.id));
+      throw error;
+    }
+
+    return c.json<
+      ApiResponse<ReturnType<typeof toUserWalletSignerResponse> & { credentialSecret: string }>
+    >(
+      {
+        ok: true,
+        data: { ...toUserWalletSignerResponse(row), credentialSecret },
+      },
+      201,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Internal server error";
+    const duplicateSigner =
+      message.includes("agent_signers_agent_subject_idx") ||
+      message.toLowerCase().includes("duplicate key") ||
+      message.toLowerCase().includes("unique constraint");
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: duplicateSigner ? "Signer already exists for this wallet and subject" : message,
+      },
+      duplicateSigner ? 409 : 500,
+    );
+  }
+});
+
+user.delete("/me/wallet/signers/:signerId", async (c) => {
+  setNoStoreHeaders(c);
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  const userId = c.get("userId");
+  const session = c.get("userSession");
+  if (!hasRecentMfaStepUp(session)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "User wallet signer revocation requires a recent MFA step-up session" },
+      403,
+    );
+  }
+
+  const parsedBody = await parseOptionalJsonBody<{
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  }>(c);
+  if (!parsedBody.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedBody.error }, 400);
+  }
+  const body = parsedBody.value ?? {};
+  const walletIndex = parseUserWalletIndexSelector(
+    body.walletIndex ?? c.req.query("walletIndex"),
+    body.wallet_index ?? c.req.query("wallet_index"),
+  );
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.signer.revoke.rejected",
+      error: walletIndex.error,
+      walletIndex: body.walletIndex ?? c.req.query("walletIndex"),
+      wallet_index: body.wallet_index ?? c.req.query("wallet_index"),
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+
+  let vault: Vault;
+  try {
+    vault = getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
+  if (!wallet) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "No wallet found — call POST /me/wallet first to provision" },
+      404,
+    );
+  }
+
+  const tenantId = personalTenantId(userId);
+  const signerId = c.req.param("signerId");
+  const [existingSigner] = await getDb()
+    .select()
+    .from(agentSigners)
+    .where(
+      and(
+        eq(agentSigners.id, signerId),
+        eq(agentSigners.tenantId, tenantId),
+        eq(agentSigners.agentId, wallet.id),
+      ),
+    );
+  if (!existingSigner) {
+    return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+  }
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "user.wallet.signer.revoke.authorized",
+    resourceType: "agent_signer",
+    resourceId: signerId,
+    metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
+  });
+
+  const [row] = await getDb()
+    .update(agentSigners)
+    .set({ status: "revoked" })
+    .where(
+      and(
+        eq(agentSigners.id, signerId),
+        eq(agentSigners.tenantId, tenantId),
+        eq(agentSigners.agentId, wallet.id),
+      ),
+    )
+    .returning();
+
+  if (!row) return c.json<ApiResponse>({ ok: false, error: "Signer not found" }, 404);
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "user.wallet.signer.revoke",
+    resourceType: "agent_signer",
+    resourceId: row.id,
+    metadata: { agentId: wallet.id, walletIndex: walletIndex.value },
+  });
+
+  return c.json<ApiResponse<ReturnType<typeof toUserWalletSignerResponse>>>({
+    ok: true,
+    data: toUserWalletSignerResponse(row),
+  });
+});
+
 // ─── POST /me/wallet/sign ─────────────────────────────────────────────────────
 
 user.post("/me/wallet/sign", async (c) => {
@@ -3370,7 +4910,8 @@ user.post("/me/wallet/sign", async (c) => {
   if (personalSessionResponse) return personalSessionResponse;
   const userId = c.get("userId");
   const session = c.get("userSession");
-  if (!hasRecentMfaStepUp(session)) {
+  const signerAuth = getUserWalletSignerAuth(c);
+  if (!signerAuth && !hasRecentMfaStepUp(session)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Wallet transaction signing requires a recent MFA step-up session" },
       403,
@@ -3384,7 +4925,27 @@ user.post("/me/wallet/sign", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const wallet = await getUserWallet(vault, userId);
+  const body = await safeJsonParse<
+    Omit<SignRequest, "agentId" | "tenantId"> & {
+      walletIndex?: unknown;
+      wallet_index?: unknown;
+    }
+  >(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  const walletIndex = parseUserWalletIndexSelector(body.walletIndex, body.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.sign.rejected",
+      error: walletIndex.error,
+      walletIndex: body.walletIndex,
+      wallet_index: body.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
   if (!wallet) {
     return c.json<ApiResponse>(
       {
@@ -3394,11 +4955,9 @@ user.post("/me/wallet/sign", async (c) => {
       404,
     );
   }
-
-  const body = await safeJsonParse<Omit<SignRequest, "agentId" | "tenantId">>(c);
-  if (!body) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
-  }
+  const signerScopeResponse = requireUserWalletSignerWalletScope(c, wallet.id);
+  if (signerScopeResponse) return signerScopeResponse;
+  const { walletIndex: _walletIndex, wallet_index: _wallet_index, ...signBody } = body;
   const shouldBroadcast = body.broadcast !== false;
   if (shouldBroadcast && !isNonEmptyString(c.req.header("Idempotency-Key"))) {
     return c.json<ApiResponse>(
@@ -3407,10 +4966,10 @@ user.post("/me/wallet/sign", async (c) => {
     );
   }
 
-  if (!isNonEmptyString(body.to)) {
+  if (!isNonEmptyString(signBody.to)) {
     return c.json<ApiResponse>({ ok: false, error: "'to' address is required" }, 400);
   }
-  if (!isValidAddress(body.to)) {
+  if (!isValidAddress(signBody.to)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3419,13 +4978,13 @@ user.post("/me/wallet/sign", async (c) => {
       400,
     );
   }
-  if (body.value === undefined || body.value === null) {
+  if (signBody.value === undefined || signBody.value === null) {
     return c.json<ApiResponse>(
       { ok: false, error: "'value' is required (wei amount as string)" },
       400,
     );
   }
-  if (!isUint256DecimalString(body.value)) {
+  if (!isUint256DecimalString(signBody.value)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3434,11 +4993,11 @@ user.post("/me/wallet/sign", async (c) => {
       400,
     );
   }
-  if (body.chainId !== undefined) {
+  if (signBody.chainId !== undefined) {
     if (
-      typeof body.chainId !== "number" ||
-      !Number.isSafeInteger(body.chainId) ||
-      body.chainId <= 0
+      typeof signBody.chainId !== "number" ||
+      !Number.isSafeInteger(signBody.chainId) ||
+      signBody.chainId <= 0
     ) {
       return c.json<ApiResponse>(
         { ok: false, error: "'chainId' must be a positive integer when provided" },
@@ -3446,7 +5005,7 @@ user.post("/me/wallet/sign", async (c) => {
       );
     }
   }
-  if (hasCalldata((body as { data?: unknown }).data)) {
+  if (hasCalldata((signBody as { data?: unknown }).data)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3456,7 +5015,7 @@ user.post("/me/wallet/sign", async (c) => {
       403,
     );
   }
-  if ((body as { gasLimit?: unknown }).gasLimit !== undefined) {
+  if ((signBody as { gasLimit?: unknown }).gasLimit !== undefined) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3469,12 +5028,12 @@ user.post("/me/wallet/sign", async (c) => {
 
   const tenantId = `personal-${userId}`;
   const agentId = wallet.id;
-  const chainId = body.chainId ?? parseInt(process.env.CHAIN_ID || "84532", 10);
+  const chainId = signBody.chainId ?? parseInt(process.env.CHAIN_ID || "84532", 10);
   let codeResponse: Awaited<ReturnType<Vault["rpcPassthrough"]>>;
   try {
     codeResponse = await vault.rpcPassthrough({
       method: "eth_getCode",
-      params: [getAddress(body.to), "latest"],
+      params: [getAddress(signBody.to), "latest"],
       chainId,
     });
   } catch {
@@ -3513,7 +5072,7 @@ user.post("/me/wallet/sign", async (c) => {
       403,
     );
   }
-  const signRequest: SignRequest = { ...body, tenantId, agentId, chainId };
+  const signRequest: SignRequest = { ...signBody, tenantId, agentId, chainId };
 
   // Fetch active policies
   const db = getDb();
@@ -3525,24 +5084,47 @@ user.post("/me/wallet/sign", async (c) => {
   let completedResult: { txId: string; txHash: string } | undefined;
 
   try {
-    const result: UserWalletSignResult = await withAgentSpendLock(agentId, async () => {
-      const stats = await getTransactionStats(agentId);
-      const engine = new PolicyEngine();
-      const evaluation = await engine.evaluate(policySet, {
-        request: signRequest,
-        recentTxCount1h: stats.recentTxCount1h,
-        recentTxCount24h: stats.recentTxCount24h,
-        spentToday: stats.spentToday,
-        spentThisWeek: stats.spentThisWeek,
-      });
+    const result: UserWalletSignResult = await withAgentSpendLock(
+      `user-wallet-${userId}`,
+      async () => {
+        const stats = await getUserWalletTransactionStats(userId);
+        const engine = new PolicyEngine();
+        const evaluation = await engine.evaluate(policySet, {
+          request: signRequest,
+          recentTxCount1h: stats.recentTxCount1h,
+          recentTxCount24h: stats.recentTxCount24h,
+          spentToday: stats.spentToday,
+          spentThisWeek: stats.spentThisWeek,
+        });
 
-      if (!evaluation.approved) {
+        if (!evaluation.approved) {
+          const txId = crypto.randomUUID();
+          await writeUserAudit(c, {
+            tenantId,
+            actorType: "user",
+            actorId: userId,
+            action: "user.wallet.sign.rejected_by_policy",
+            resourceType: "wallet_transaction",
+            resourceId: txId,
+            metadata: {
+              agentId,
+              to: signRequest.to,
+              value: signRequest.value,
+              chainId: signRequest.chainId,
+              walletIndex: walletIndex.value,
+              ...userWalletSignerAuditMetadata(c),
+              policyResults: evaluation.results,
+            },
+          });
+          return { approved: false, results: evaluation.results };
+        }
+
         const txId = crypto.randomUUID();
         await writeUserAudit(c, {
           tenantId,
           actorType: "user",
           actorId: userId,
-          action: "user.wallet.sign.rejected_by_policy",
+          action: "user.wallet.sign.authorized",
           resourceType: "wallet_transaction",
           resourceId: txId,
           metadata: {
@@ -3550,50 +5132,36 @@ user.post("/me/wallet/sign", async (c) => {
             to: signRequest.to,
             value: signRequest.value,
             chainId: signRequest.chainId,
-            policyResults: evaluation.results,
+            walletIndex: walletIndex.value,
+            ...userWalletSignerAuditMetadata(c),
           },
         });
-        return { approved: false, results: evaluation.results };
-      }
-
-      const txId = crypto.randomUUID();
-      await writeUserAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: userId,
-        action: "user.wallet.sign.authorized",
-        resourceType: "wallet_transaction",
-        resourceId: txId,
-        metadata: {
-          agentId,
-          to: signRequest.to,
-          value: signRequest.value,
-          chainId: signRequest.chainId,
-        },
-      });
-      const txHash = await vault.signTransaction(signRequest, {
-        txId,
-        policyResults: evaluation.results,
-        status: shouldBroadcast ? "broadcast" : "signed",
-      });
-      completedResult = { txId, txHash };
-      await writeUserAudit(c, {
-        tenantId,
-        actorType: "user",
-        actorId: userId,
-        action: "user.wallet.sign",
-        resourceType: "wallet_transaction",
-        resourceId: txId,
-        metadata: {
-          agentId,
-          to: signRequest.to,
-          value: signRequest.value,
-          chainId: signRequest.chainId,
-          txHash,
-        },
-      });
-      return { approved: true, txId, txHash };
-    });
+        const txHash = await vault.signTransaction(signRequest, {
+          txId,
+          policyResults: evaluation.results,
+          status: shouldBroadcast ? "broadcast" : "signed",
+        });
+        completedResult = { txId, txHash };
+        await writeUserAudit(c, {
+          tenantId,
+          actorType: "user",
+          actorId: userId,
+          action: "user.wallet.sign",
+          resourceType: "wallet_transaction",
+          resourceId: txId,
+          metadata: {
+            agentId,
+            to: signRequest.to,
+            value: signRequest.value,
+            chainId: signRequest.chainId,
+            txHash,
+            walletIndex: walletIndex.value,
+            ...userWalletSignerAuditMetadata(c),
+          },
+        });
+        return { approved: true, txId, txHash };
+      },
+    );
 
     if (!result.approved) {
       return c.json<ApiResponse>(
@@ -3631,7 +5199,7 @@ user.post("/me/wallet/sign", async (c) => {
         action: "user.wallet.sign.failed",
         resourceType: "wallet",
         resourceId: wallet.id,
-        metadata: { error: msg },
+        metadata: { error: msg, walletIndex: walletIndex.value },
       });
     } catch (auditErr) {
       console.error(`[UserWallet] Failed to audit signing failure for user "${userId}":`, auditErr);
@@ -3654,7 +5222,14 @@ user.get("/me/wallet/history", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const wallet = await getUserWallet(vault, userId);
+  const walletIndex = parseUserWalletIndexSelector(
+    c.req.query("walletIndex"),
+    c.req.query("wallet_index"),
+  );
+  if (!walletIndex.ok) {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
   if (!wallet) {
     return c.json<ApiResponse<[]>>({ ok: true, data: [] });
   }
@@ -3697,7 +5272,14 @@ user.get("/me/wallet/policies", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const wallet = await getUserWallet(vault, userId);
+  const walletIndex = parseUserWalletIndexSelector(
+    c.req.query("walletIndex"),
+    c.req.query("wallet_index"),
+  );
+  if (!walletIndex.ok) {
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
   if (!wallet) {
     // No wallet yet — return the defaults so the user can preview them
     return c.json<ApiResponse<PolicyRule[]>>({
@@ -3733,7 +5315,8 @@ user.post("/me/wallet/sign-message", async (c) => {
 
   const userId = c.get("userId");
   const session = c.get("userSession");
-  if (!hasRecentMfaStepUp(session)) {
+  const signerAuth = getUserWalletSignerAuth(c);
+  if (!signerAuth && !hasRecentMfaStepUp(session)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3750,18 +5333,11 @@ user.post("/me/wallet/sign-message", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const wallet = await getUserWallet(vault, userId);
-  if (!wallet) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "No wallet found — call POST /me/wallet first to provision",
-      },
-      404,
-    );
-  }
-
-  const body = await safeJsonParse<{ message: string }>(c);
+  const body = await safeJsonParse<{
+    message: string;
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  }>(c);
   if (!body || !isNonEmptyString(body.message)) {
     return c.json<ApiResponse>(
       {
@@ -3777,6 +5353,29 @@ user.post("/me/wallet/sign-message", async (c) => {
       403,
     );
   }
+  const walletIndex = parseUserWalletIndexSelector(body.walletIndex, body.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.sign_message.rejected",
+      error: walletIndex.error,
+      walletIndex: body.walletIndex,
+      wallet_index: body.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
+  if (!wallet) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "No wallet found — call POST /me/wallet first to provision",
+      },
+      404,
+    );
+  }
+  const signerScopeResponse = requireUserWalletSignerWalletScope(c, wallet.id);
+  if (signerScopeResponse) return signerScopeResponse;
 
   try {
     await writeAuditEvent({
@@ -3786,7 +5385,12 @@ user.post("/me/wallet/sign-message", async (c) => {
       action: "user.wallet.sign_message.authorized",
       resourceType: "wallet",
       resourceId: wallet.id,
-      metadata: { messageLength: body.message.length, unsafeCompatibilityMode: true },
+      metadata: {
+        messageLength: body.message.length,
+        unsafeCompatibilityMode: true,
+        walletIndex: walletIndex.value,
+        ...userWalletSignerAuditMetadata(c),
+      },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
@@ -3799,7 +5403,12 @@ user.post("/me/wallet/sign-message", async (c) => {
       action: "user.wallet.sign_message",
       resourceType: "wallet",
       resourceId: wallet.id,
-      metadata: { messageLength: body.message.length, unsafeCompatibilityMode: true },
+      metadata: {
+        messageLength: body.message.length,
+        unsafeCompatibilityMode: true,
+        walletIndex: walletIndex.value,
+        ...userWalletSignerAuditMetadata(c),
+      },
       ipAddress: c.req.header("x-forwarded-for") ?? null,
       userAgent: c.req.header("user-agent") ?? null,
       requestId: c.get("requestId") ?? null,
@@ -3813,6 +5422,292 @@ user.post("/me/wallet/sign-message", async (c) => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";
     console.error(`[UserWallet] sign-message failed for user "${userId}":`, e);
+    return c.json<ApiResponse>({ ok: false, error: msg }, 500);
+  }
+});
+
+// ─── POST /me/wallet/import/init ─────────────────────────────────────────────
+
+user.post("/me/wallet/import/init", async (c) => {
+  setNoStoreHeaders(c);
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  if (!ALLOW_PRIVATE_KEY_IMPORT || !ALLOW_USER_PRIVATE_KEY_IMPORT) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Private key import is disabled. Set STEWARD_ALLOW_PRIVATE_KEY_IMPORT=true and STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT=true only for audited import operations.",
+      },
+      403,
+    );
+  }
+
+  const userId = c.get("userId");
+  const policyResponse = await requireUserWalletPrivateKeyPolicy(c, "keyImport");
+  if (policyResponse) return policyResponse;
+  const session = c.get("userSession");
+
+  try {
+    getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+
+  const body = await safeJsonParse<{
+    chain?: unknown;
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  }>(c);
+  if (body?.chain !== "evm" && body?.chain !== "solana") {
+    return c.json<ApiResponse>({ ok: false, error: "chain must be evm or solana" }, 400);
+  }
+  const walletIndex = parseUserWalletIndexSelector(body?.walletIndex, body?.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.private_key_import.rejected",
+      error: walletIndex.error,
+      walletIndex: body?.walletIndex,
+      wallet_index: body?.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+
+  const displayName = (session.address as string | undefined) ?? session.email ?? userId;
+  const tenantId = await ensurePersonalTenant(userId, displayName);
+  const agentId = userWalletAgentId(userId, walletIndex.value);
+  const appId = sessionAppClientId(session);
+  const importSession = await createUserWalletEncryptedImportSession({
+    tenantId,
+    userId,
+    agentId,
+    chain: body.chain,
+    walletIndex: walletIndex.value,
+    appId,
+  });
+
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: userId,
+    action: "user.wallet.private_key_import.initialized",
+    resourceType: "wallet",
+    resourceId: agentId,
+    metadata: {
+      chain: body.chain,
+      walletIndex: walletIndex.value,
+      appClientId: appId,
+      importSessionId: importSession.id,
+      expiresAt: new Date(importSession.expiresAt).toISOString(),
+    },
+  });
+
+  return c.json<
+    ApiResponse<{
+      importSessionId: string;
+      publicKey: string;
+      algorithm: "X25519-HKDF-SHA256-AES-256-GCM";
+      expiresAt: string;
+      aad: {
+        importSessionId: string;
+        tenantId: string;
+        userId: string;
+        agentId: string;
+        chain: "evm" | "solana";
+        walletIndex: number;
+        appClientId: string | null;
+      };
+    }>
+  >({
+    ok: true,
+    data: {
+      importSessionId: importSession.id,
+      publicKey: importSession.publicKey,
+      algorithm: "X25519-HKDF-SHA256-AES-256-GCM",
+      expiresAt: new Date(importSession.expiresAt).toISOString(),
+      aad: {
+        importSessionId: importSession.id,
+        tenantId,
+        userId,
+        agentId,
+        chain: importSession.chain,
+        walletIndex: importSession.walletIndex,
+        appClientId: appId,
+      },
+    },
+  });
+});
+
+// ─── POST /me/wallet/import/submit ───────────────────────────────────────────
+
+user.post("/me/wallet/import/submit", async (c) => {
+  setNoStoreHeaders(c);
+  const personalSessionResponse = requirePersonalUserSession(c);
+  if (personalSessionResponse) return personalSessionResponse;
+  if (!ALLOW_PRIVATE_KEY_IMPORT || !ALLOW_USER_PRIVATE_KEY_IMPORT) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Private key import is disabled. Set STEWARD_ALLOW_PRIVATE_KEY_IMPORT=true and STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT=true only for audited import operations.",
+      },
+      403,
+    );
+  }
+
+  const userId = c.get("userId");
+  const policyResponse = await requireUserWalletPrivateKeyPolicy(c, "keyImport");
+  if (policyResponse) return policyResponse;
+  const session = c.get("userSession");
+
+  const body = await safeJsonParse<{
+    importSessionId?: unknown;
+    ephemeralPublicKey?: unknown;
+    iv?: unknown;
+    ciphertext?: unknown;
+    tag?: unknown;
+    privateKey?: unknown;
+    walletIndex?: unknown;
+    wallet_index?: unknown;
+  }>(c);
+  if (!body || !isPlainObject(body)) {
+    return c.json<ApiResponse>({ ok: false, error: "JSON request body must be an object" }, 400);
+  }
+  if ("privateKey" in body) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Submit the encrypted import envelope; plaintext privateKey is rejected",
+      },
+      400,
+    );
+  }
+
+  const walletIndex = parseUserWalletIndexSelector(body.walletIndex, body.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.private_key_import.rejected",
+      error: walletIndex.error,
+      walletIndex: body.walletIndex,
+      wallet_index: body.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
+  }
+
+  const tenantId = personalTenantId(userId);
+  const importSession = await takeUserWalletEncryptedImportSession(body.importSessionId, {
+    tenantId,
+    userId,
+    walletIndex: walletIndex.value,
+    appId: sessionAppClientId(session),
+  });
+  if (!importSession) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Encrypted import session is invalid or expired" },
+      400,
+    );
+  }
+
+  let vault: Vault;
+  try {
+    vault = getVault();
+  } catch {
+    return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
+  }
+
+  let privateKey: string;
+  try {
+    privateKey = decryptUserWalletEncryptedPrivateKey(importSession, body);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : "Encrypted import failed";
+    return c.json<ApiResponse>({ ok: false, error: msg }, 400);
+  }
+
+  const existingWallet = await getUserWallet(vault, userId, tenantId, importSession.walletIndex);
+
+  try {
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet.private_key_import.authorized",
+      resourceType: "wallet",
+      resourceId: importSession.agentId,
+      metadata: {
+        chain: importSession.chain,
+        walletIndex: importSession.walletIndex,
+        appClientId: importSession.appId,
+        importSessionId: importSession.id,
+        replacingExisting: Boolean(existingWallet),
+      },
+    });
+
+    const imported = await vault.importKey(
+      tenantId,
+      importSession.agentId,
+      privateKey,
+      importSession.chain,
+    );
+    await applyUserWalletDefaults(userId, tenantId, importSession.walletIndex);
+
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: userId,
+      action: "user.wallet.private_key_import",
+      resourceType: "wallet",
+      resourceId: importSession.agentId,
+      metadata: {
+        chain: importSession.chain,
+        walletIndex: importSession.walletIndex,
+        appClientId: importSession.appId,
+        importSessionId: importSession.id,
+        replacingExisting: Boolean(existingWallet),
+        walletAddress: imported.walletAddress,
+      },
+    });
+    if (!existingWallet) {
+      dispatchWebhook(tenantId, importSession.agentId, "user.wallet_created", {
+        userId,
+        walletId: importSession.agentId,
+        walletAddress: imported.walletAddress,
+        imported: true,
+        chain: importSession.chain,
+        walletIndex: importSession.walletIndex,
+      });
+    }
+    dispatchWebhook(tenantId, importSession.agentId, "wallet.imported", {
+      userId,
+      walletId: importSession.agentId,
+      walletAddress: imported.walletAddress,
+      chain: importSession.chain,
+      walletIndex: importSession.walletIndex,
+      replacingExisting: Boolean(existingWallet),
+    });
+
+    return c.json<
+      ApiResponse<{
+        agentId: string;
+        walletAddress: string;
+        chain: "evm" | "solana";
+        walletIndex: number;
+        imported: true;
+      }>
+    >({
+      ok: true,
+      data: {
+        agentId: importSession.agentId,
+        walletAddress: imported.walletAddress,
+        chain: importSession.chain,
+        walletIndex: importSession.walletIndex,
+        imported: true,
+      },
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Unknown error";
+    console.error(`[UserWallet] encrypted import failed for user "${userId}":`, e);
     return c.json<ApiResponse>({ ok: false, error: msg }, 500);
   }
 });
@@ -3834,51 +5729,30 @@ user.post("/me/wallet/export", async (c) => {
   }
 
   const userId = c.get("userId");
-  const session = c.get("userSession");
-  if (!hasRecentMfaStepUp(session)) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Private key export requires a recent MFA step-up session",
-      },
-      403,
-    );
-  }
+  const policyResponse = await requireUserWalletPrivateKeyPolicy(c, "keyExport");
+  if (policyResponse) return policyResponse;
 
-  const allowExport =
-    process.env.STEWARD_ALLOW_KEY_EXPORT !== undefined
-      ? process.env.STEWARD_ALLOW_KEY_EXPORT === "true"
-      : process.env.NODE_ENV !== "production";
-  if (!allowExport) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Key export is disabled by STEWARD_ALLOW_KEY_EXPORT" },
-      403,
-    );
+  const parsedBody = await parseOptionalJsonBody<
+    { walletIndex?: unknown; wallet_index?: unknown } & Record<string, unknown>
+  >(c);
+  if (!parsedBody.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedBody.error }, 400);
   }
-
-  const verifiedAt = session.sessionMfaVerifiedAt ?? session.mfaVerifiedAt;
-  const verifiedAtMs =
-    typeof verifiedAt === "number"
-      ? verifiedAt < 10_000_000_000
-        ? verifiedAt * 1000
-        : verifiedAt
-      : typeof verifiedAt === "string"
-        ? Date.parse(verifiedAt)
-        : Number.NaN;
-  const hasRecentMfa = Number.isFinite(verifiedAtMs) && Date.now() - verifiedAtMs <= 5 * 60 * 1000;
-  if (!hasRecentMfa) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Key export requires recent MFA or passkey step-up" },
-      403,
-    );
+  const body = parsedBody.value;
+  const plaintextGateError = plaintextKeyExportResponseGateError(body);
+  if (plaintextGateError) {
+    return c.json<ApiResponse>({ ok: false, error: plaintextGateError }, 403);
   }
-
-  const body = await safeJsonParse<{ reason: string }>(c);
-  if (!body || !isNonEmptyString(body.reason)) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Key export requires a non-empty audited reason" },
-      400,
-    );
+  const walletIndex = parseUserWalletIndexSelector(body?.walletIndex, body?.wallet_index);
+  if (!walletIndex.ok) {
+    await writeInvalidUserWalletIndexAudit(c, {
+      userId,
+      action: "user.wallet.private_key_export.rejected",
+      error: walletIndex.error,
+      walletIndex: body?.walletIndex,
+      wallet_index: body?.wallet_index,
+    });
+    return c.json<ApiResponse>({ ok: false, error: walletIndex.error }, 400);
   }
 
   let vault: Vault;
@@ -3888,7 +5762,7 @@ user.post("/me/wallet/export", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: "Vault not configured" }, 503);
   }
 
-  const wallet = await getUserWallet(vault, userId);
+  const wallet = await getUserWallet(vault, userId, undefined, walletIndex.value);
   if (!wallet) {
     return c.json<ApiResponse>(
       {
@@ -3909,7 +5783,7 @@ user.post("/me/wallet/export", async (c) => {
       action: "user.wallet.private_key_export.authorized",
       resourceType: "wallet",
       resourceId: wallet.id,
-      metadata: { breakGlass: true },
+      metadata: { breakGlass: true, walletIndex: walletIndex.value },
     });
     const keys = await vault.exportPrivateKey(personalTenantId, wallet.id, {
       breakGlass: true,
@@ -3923,12 +5797,13 @@ user.post("/me/wallet/export", async (c) => {
       action: "user.wallet.private_key_export.succeeded",
       resourceType: "wallet",
       resourceId: wallet.id,
-      metadata: { breakGlass: true },
+      metadata: { breakGlass: true, walletIndex: walletIndex.value },
     });
     dispatchWebhook(personalTenantId, wallet.id, "private_key.exported", {
       userId,
       walletId: wallet.id,
       breakGlass: true,
+      walletIndex: walletIndex.value,
     });
 
     c.header("Cache-Control", "no-store, max-age=0");
@@ -4217,6 +6092,7 @@ user.post("/me/tenants/switch", async (c) => {
     authMethod: "tenant_switch",
   });
 
+  setNoStoreHeaders(c);
   return c.json<
     ApiResponse<{ token: string; tenantId: string; activeTenantId: string; role: string }>
   >({
@@ -4300,6 +6176,39 @@ type TenantAdminUserEventRow = {
   createdAt: string;
 };
 
+type TenantThirdPartyWalletViolation = {
+  userId: string;
+  email: string | null;
+  name: string | null;
+  role: string;
+  walletCount: number;
+  wallets: Array<{
+    accountId: string;
+    provider: "wallet:ethereum" | "wallet:solana";
+    providerAccountId: string;
+  }>;
+};
+
+const TENANT_WALLET_POLICY_BULK_REMEDIATION_LIMIT = 50;
+
+type TenantWalletPolicyRemediationSuccess = {
+  deleted: true;
+  accountId: string;
+  provider: "wallet:ethereum" | "wallet:solana";
+  providerAccountId: string;
+  issuedBefore: number;
+};
+
+type TenantWalletPolicyBulkRemediationResult =
+  | ({ ok: true; targetUserId: string } & TenantWalletPolicyRemediationSuccess)
+  | {
+      ok: false;
+      targetUserId: string;
+      accountId: string;
+      status: number;
+      error: string;
+    };
+
 function tenantAdminUserSelection() {
   return {
     userId: users.id,
@@ -4363,6 +6272,149 @@ async function requireTenantAdminMfa(
     };
   }
   return { ok: true, userId: requesterId, role: requesterRole };
+}
+
+async function remediateTenantWalletPolicyAccount(
+  c: Context<{ Variables: UserVariables }>,
+  params: { tenantId: string; targetUserId: string; accountId: string; adminUserId: string },
+): Promise<
+  | { ok: true; data: TenantWalletPolicyRemediationSuccess }
+  | { ok: false; status: number; error: string }
+> {
+  const { tenantId, targetUserId, accountId, adminUserId } = params;
+  const db = getDb();
+  const [targetMembership] = await db
+    .select({ userId: userTenants.userId })
+    .from(userTenants)
+    .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
+  if (!targetMembership) {
+    return { ok: false, status: 404, error: "Tenant user not found" };
+  }
+
+  const [initialAccount] = await db
+    .select({
+      id: accounts.id,
+      userId: accounts.userId,
+      provider: accounts.provider,
+      providerAccountId: accounts.providerAccountId,
+      expiresAt: accounts.expiresAt,
+    })
+    .from(accounts)
+    .where(and(eq(accounts.id, accountId), eq(accounts.userId, targetUserId)));
+  if (
+    !initialAccount ||
+    (initialAccount.provider !== "wallet:ethereum" && initialAccount.provider !== "wallet:solana")
+  ) {
+    return { ok: false, status: 404, error: "Linked wallet account not found" };
+  }
+
+  const [targetUser] = await db
+    .select({ id: users.id, email: users.email, walletAddress: users.walletAddress })
+    .from(users)
+    .where(eq(users.id, targetUserId));
+  if (!targetUser) return { ok: false, status: 404, error: "Tenant user not found" };
+  const targetAccounts = await db.select().from(accounts).where(eq(accounts.userId, targetUserId));
+  const targetPasskeys = await db
+    .select({ id: authenticators.id })
+    .from(authenticators)
+    .where(eq(authenticators.userId, targetUserId));
+  const remainingLoginMethodCount =
+    primaryLoginMethods(targetUser).length + targetAccounts.length + targetPasskeys.length - 1;
+  if (remainingLoginMethodCount < 1) {
+    return { ok: false, status: 409, error: "Cannot unlink the user's last login method" };
+  }
+
+  const issuedBefore = Math.floor(Date.now() / 1000) + 1;
+  await writeUserAudit(c, {
+    tenantId,
+    actorType: "user",
+    actorId: adminUserId,
+    action: "tenant.wallet_policy.remediation.authorized",
+    resourceType: "user",
+    resourceId: targetUserId,
+    metadata: {
+      accountId: initialAccount.id,
+      provider: initialAccount.provider,
+      providerAccountId: initialAccount.providerAccountId,
+      issuedBefore,
+    },
+  });
+
+  const refreshTokenSnapshot = await db
+    .select()
+    .from(refreshTokens)
+    .where(eq(refreshTokens.userId, targetUserId));
+  const [deleted] = await db
+    .delete(accounts)
+    .where(
+      and(
+        eq(accounts.id, accountId),
+        eq(accounts.userId, targetUserId),
+        or(eq(accounts.provider, "wallet:ethereum"), eq(accounts.provider, "wallet:solana")),
+      ),
+    )
+    .returning();
+  if (!deleted) {
+    return { ok: false, status: 409, error: "Linked wallet account changed" };
+  }
+
+  try {
+    await revocationStore.revokeUserTokens(targetUserId, issuedBefore);
+    await db.delete(refreshTokens).where(eq(refreshTokens.userId, targetUserId));
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: adminUserId,
+      action: "tenant.wallet_policy.remediation",
+      resourceType: "user",
+      resourceId: targetUserId,
+      metadata: {
+        accountId: deleted.id,
+        provider: deleted.provider,
+        providerAccountId: deleted.providerAccountId,
+        issuedBefore,
+      },
+    });
+  } catch (error) {
+    await db.insert(accounts).values({
+      id: deleted.id,
+      userId: deleted.userId,
+      provider: deleted.provider,
+      providerAccountId: deleted.providerAccountId,
+      accessTokenEncrypted: deleted.accessTokenEncrypted,
+      accessTokenIv: deleted.accessTokenIv,
+      accessTokenTag: deleted.accessTokenTag,
+      accessTokenSalt: deleted.accessTokenSalt,
+      refreshTokenEncrypted: deleted.refreshTokenEncrypted,
+      refreshTokenIv: deleted.refreshTokenIv,
+      refreshTokenTag: deleted.refreshTokenTag,
+      refreshTokenSalt: deleted.refreshTokenSalt,
+      expiresAt: deleted.expiresAt,
+    });
+    if (refreshTokenSnapshot.length > 0)
+      await db.insert(refreshTokens).values(refreshTokenSnapshot);
+    throw error;
+  }
+
+  dispatchWebhook(tenantId, targetUserId, "user.unlinked_account", {
+    userId: targetUserId,
+    provider: deleted.provider,
+    accountId: deleted.id,
+    remediatedByUserId: adminUserId,
+    remediation: "tenant_wallet_policy",
+    redacted: true,
+  });
+
+  return {
+    ok: true,
+    data: {
+      deleted: true,
+      accountId: deleted.id,
+      provider: deleted.provider as "wallet:ethereum" | "wallet:solana",
+      providerAccountId: deleted.providerAccountId,
+      issuedBefore,
+    },
+  };
 }
 
 async function requireTenantUserDirectoryReaderMfa(
@@ -4561,6 +6613,9 @@ user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
       id: tenantInvitations.id,
       email: tenantInvitations.email,
       role: tenantInvitations.role,
+      status: tenantInvitations.status,
+      revokedAt: tenantInvitations.revokedAt,
+      updatedAt: tenantInvitations.updatedAt,
     })
     .from(tenantInvitations)
     .where(
@@ -4598,6 +6653,28 @@ user.delete("/me/tenants/:tenantId/invitations/:invitationId", async (c) => {
     .returning(tenantAdminInvitationSelection());
   if (!invitation) {
     return c.json<ApiResponse>({ ok: false, error: "Pending invitation not found" }, 404);
+  }
+
+  try {
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: admin.userId,
+      action: "tenant.invitation.revoke",
+      resourceType: "tenant_invitation",
+      resourceId: invitation.id,
+      metadata: { email: invitation.email, role: invitation.role },
+    });
+  } catch (error) {
+    await db
+      .update(tenantInvitations)
+      .set({
+        status: candidate.status,
+        revokedAt: candidate.revokedAt,
+        updatedAt: candidate.updatedAt,
+      })
+      .where(and(eq(tenantInvitations.tenantId, tenantId), eq(tenantInvitations.id, invitationId)));
+    throw error;
   }
 
   return c.json<ApiResponse>({ ok: true });
@@ -4647,6 +6724,240 @@ user.get("/me/tenants/:tenantId/users", async (c) => {
     data: { users: rows, limit, offset },
   });
 });
+
+/**
+ * GET /me/tenants/:tenantId/users/wallet-policy/violations
+ * Read-only remediation report for tenants that want to enforce the
+ * one-third-party-wallet policy after users may already have multiple wallets.
+ */
+user.get("/me/tenants/:tenantId/users/wallet-policy/violations", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  const reader = await requireTenantUserDirectoryReaderMfa(
+    c,
+    tenantId,
+    "Tenant wallet policy reports require recent MFA verification",
+  );
+  if (!reader.ok) return reader.response;
+
+  const limit = clampLimit(c.req.query("limit") ?? null);
+  const offset = parseBoundedOffset(c.req.query("offset") ?? null);
+  const db = getDb();
+  const [config] = await db
+    .select({ authAbuseConfig: tenantConfigs.authAbuseConfig })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+  const rows = await db
+    .select({
+      userId: userTenants.userId,
+      email: users.email,
+      name: users.name,
+      role: userTenants.role,
+      accountId: accounts.id,
+      provider: accounts.provider,
+      providerAccountId: accounts.providerAccountId,
+    })
+    .from(userTenants)
+    .innerJoin(users, eq(userTenants.userId, users.id))
+    .innerJoin(accounts, eq(accounts.userId, userTenants.userId))
+    .where(
+      and(
+        eq(userTenants.tenantId, tenantId),
+        or(eq(accounts.provider, "wallet:ethereum"), eq(accounts.provider, "wallet:solana")),
+      ),
+    )
+    .orderBy(userTenants.userId, accounts.provider, accounts.providerAccountId);
+
+  const byUser = new Map<string, TenantThirdPartyWalletViolation>();
+  for (const row of rows) {
+    const provider =
+      row.provider === "wallet:ethereum" || row.provider === "wallet:solana" ? row.provider : null;
+    if (!provider) continue;
+    const entry =
+      byUser.get(row.userId) ??
+      ({
+        userId: row.userId,
+        email: row.email,
+        name: row.name,
+        role: row.role,
+        walletCount: 0,
+        wallets: [],
+      } satisfies TenantThirdPartyWalletViolation);
+    entry.wallets.push({
+      accountId: row.accountId,
+      provider,
+      providerAccountId: row.providerAccountId,
+    });
+    entry.walletCount = entry.wallets.length;
+    byUser.set(row.userId, entry);
+  }
+
+  const allViolations = [...byUser.values()].filter((entry) => entry.wallets.length > 1);
+  const violations = allViolations.slice(offset, offset + limit);
+
+  return c.json<
+    ApiResponse<{
+      tenantId: string;
+      policyEnabled: boolean;
+      violations: TenantThirdPartyWalletViolation[];
+      total: number;
+      limit: number;
+      offset: number;
+    }>
+  >({
+    ok: true,
+    data: {
+      tenantId,
+      policyEnabled: config?.authAbuseConfig?.wallet?.restrictToOneThirdPartyWallet === true,
+      violations,
+      total: allViolations.length,
+      limit,
+      offset,
+    },
+  });
+});
+
+/**
+ * POST /me/tenants/:tenantId/users/wallet-policy/remediations
+ * Audited tenant-admin bulk remediation for selected linked third-party
+ * wallets. Returns per-item results so callers can review partial failures.
+ */
+user.post("/me/tenants/:tenantId/users/wallet-policy/remediations", async (c) => {
+  const tenantId = c.req.param("tenantId");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+  const admin = await requireTenantAdminMfa(
+    c,
+    tenantId,
+    "Tenant wallet policy remediation requires recent MFA verification",
+  );
+  if (!admin.ok) return admin.response;
+
+  const body = await safeJsonParse<{ wallets?: unknown; items?: unknown }>(c);
+  const rawItems = Array.isArray(body?.wallets)
+    ? body.wallets
+    : Array.isArray(body?.items)
+      ? body.items
+      : null;
+  if (!rawItems || rawItems.length < 1) {
+    return c.json<ApiResponse>({ ok: false, error: "wallets must be a non-empty array" }, 400);
+  }
+  if (rawItems.length > TENANT_WALLET_POLICY_BULK_REMEDIATION_LIMIT) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `wallets is limited to ${TENANT_WALLET_POLICY_BULK_REMEDIATION_LIMIT} items`,
+      },
+      400,
+    );
+  }
+
+  const results: TenantWalletPolicyBulkRemediationResult[] = [];
+  const seen = new Set<string>();
+  for (const rawItem of rawItems) {
+    const item =
+      rawItem && typeof rawItem === "object" ? (rawItem as Record<string, unknown>) : null;
+    const targetUserId = typeof item?.userId === "string" ? item.userId : "";
+    const accountId = typeof item?.accountId === "string" ? item.accountId : "";
+    if (!isUuid(targetUserId) || !isUuid(accountId)) {
+      results.push({
+        ok: false,
+        targetUserId,
+        accountId,
+        status: 400,
+        error: "Invalid user or account id format",
+      });
+      continue;
+    }
+    const dedupeKey = `${targetUserId}:${accountId}`;
+    if (seen.has(dedupeKey)) {
+      results.push({
+        ok: false,
+        targetUserId,
+        accountId,
+        status: 409,
+        error: "Duplicate remediation item",
+      });
+      continue;
+    }
+    seen.add(dedupeKey);
+
+    const result = await remediateTenantWalletPolicyAccount(c, {
+      tenantId,
+      targetUserId,
+      accountId,
+      adminUserId: admin.userId,
+    });
+    if (result.ok) {
+      results.push({ ok: true, targetUserId, ...result.data });
+    } else {
+      results.push({
+        ok: false,
+        targetUserId,
+        accountId,
+        status: result.status,
+        error: result.error,
+      });
+    }
+  }
+
+  const succeeded = results.filter((result) => result.ok).length;
+  return c.json<
+    ApiResponse<{
+      tenantId: string;
+      results: TenantWalletPolicyBulkRemediationResult[];
+      succeeded: number;
+      failed: number;
+    }>
+  >({
+    ok: true,
+    data: { tenantId, results, succeeded, failed: results.length - succeeded },
+  });
+});
+
+/**
+ * DELETE /me/tenants/:tenantId/users/:userId/wallet-policy/wallets/:accountId
+ * Audited tenant-admin remediation for existing users with multiple linked
+ * third-party wallets after the one-wallet policy is enabled.
+ */
+user.delete(
+  "/me/tenants/:tenantId/users/:targetUserId/wallet-policy/wallets/:accountId",
+  async (c) => {
+    const tenantId = c.req.param("tenantId");
+    const targetUserId = c.req.param("targetUserId");
+    const accountId = c.req.param("accountId");
+    if (!isValidTenantId(tenantId)) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+    }
+    if (!isUuid(targetUserId) || !isUuid(accountId)) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid user or account id format" }, 400);
+    }
+    const admin = await requireTenantAdminMfa(
+      c,
+      tenantId,
+      "Tenant wallet policy remediation requires recent MFA verification",
+    );
+    if (!admin.ok) return admin.response;
+
+    const result = await remediateTenantWalletPolicyAccount(c, {
+      tenantId,
+      targetUserId,
+      accountId,
+      adminUserId: admin.userId,
+    });
+    if (!result.ok) {
+      return c.json<ApiResponse>({ ok: false, error: result.error }, result.status as 400);
+    }
+
+    return c.json<ApiResponse<TenantWalletPolicyRemediationSuccess>>({
+      ok: true,
+      data: result.data,
+    });
+  },
+);
 
 /**
  * GET /me/tenants/:tenantId/users/export
@@ -5256,12 +7567,36 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
     metadata: { role: member.role },
   });
 
-  let deleted: { role: string } | null = null;
+  let deleted: {
+    membership: {
+      id: string;
+      userId: string;
+      tenantId: string;
+      role: string;
+      customMetadata: Record<string, unknown>;
+      createdAt: Date;
+    };
+    refreshTokens: Array<{
+      id: string;
+      userId: string;
+      tenantId: string;
+      tokenHash: string;
+      expiresAt: Date;
+      createdAt: Date;
+    }>;
+  } | null = null;
   try {
     deleted = await db.transaction(async (tx) => {
       await lockTenantOwnerLifecycle(tx, tenantId);
       const [current] = await tx
-        .select({ role: userTenants.role })
+        .select({
+          id: userTenants.id,
+          userId: userTenants.userId,
+          tenantId: userTenants.tenantId,
+          role: userTenants.role,
+          customMetadata: userTenants.customMetadata,
+          createdAt: userTenants.createdAt,
+        })
         .from(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)));
       if (!current) return null;
@@ -5270,14 +7605,25 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
           throw new Error("Cannot remove the sole owner");
         }
       }
-      const [row] = await tx
+      const tokenSnapshot = await tx
+        .select({
+          id: refreshTokens.id,
+          userId: refreshTokens.userId,
+          tenantId: refreshTokens.tenantId,
+          tokenHash: refreshTokens.tokenHash,
+          expiresAt: refreshTokens.expiresAt,
+          createdAt: refreshTokens.createdAt,
+        })
+        .from(refreshTokens)
+        .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
+      await tx
         .delete(userTenants)
         .where(and(eq(userTenants.tenantId, tenantId), eq(userTenants.userId, targetUserId)))
         .returning({ role: userTenants.role });
       await tx
         .delete(refreshTokens)
         .where(and(eq(refreshTokens.tenantId, tenantId), eq(refreshTokens.userId, targetUserId)));
-      return row ?? null;
+      return { membership: current, refreshTokens: tokenSnapshot };
     });
   } catch (err) {
     if (err instanceof Error && err.message === "Cannot remove the sole owner") {
@@ -5288,15 +7634,31 @@ user.delete("/me/tenants/:tenantId/users/:targetUserId", async (c) => {
   if (!deleted) return c.json<ApiResponse>({ ok: false, error: "User not found in tenant" }, 404);
 
   const revokedBefore = await revocationStore.revokeUserTokens(targetUserId);
-  await writeUserAudit(c, {
-    tenantId,
-    actorType: "user",
-    actorId: admin.userId,
-    action: "tenant.member.remove",
-    resourceType: "user",
-    resourceId: targetUserId,
-    metadata: { role: deleted.role, revokedUserTokensIssuedBefore: revokedBefore },
-  });
+  try {
+    await writeUserAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: admin.userId,
+      action: "tenant.member.remove",
+      resourceType: "user",
+      resourceId: targetUserId,
+      metadata: { role: deleted.membership.role, revokedUserTokensIssuedBefore: revokedBefore },
+    });
+  } catch (error) {
+    await db.transaction(async (tx) => {
+      await tx
+        .insert(userTenants)
+        .values(deleted.membership)
+        .onConflictDoNothing({ target: [userTenants.userId, userTenants.tenantId] });
+      if (deleted.refreshTokens.length > 0) {
+        await tx
+          .insert(refreshTokens)
+          .values(deleted.refreshTokens)
+          .onConflictDoNothing({ target: refreshTokens.tokenHash });
+      }
+    });
+    throw error;
+  }
 
   dispatchWebhook(tenantId, targetUserId, "user.updated_account", {
     userId: targetUserId,

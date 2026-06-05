@@ -2,7 +2,27 @@
 // These mirror @stwd/shared but are bundled here for npm distribution
 
 /** Identifies the blockchain family for a wallet key/address. */
-export type ChainFamily = "evm" | "solana";
+export type ChainFamily = "evm" | "solana" | "bitcoin";
+
+export type BitcoinNetwork = "mainnet" | "testnet";
+export type BitcoinAddressType = "p2wpkh" | "p2tr";
+
+export interface BitcoinWalletMetadata {
+  network: BitcoinNetwork;
+  addressType: BitcoinAddressType;
+  path: string;
+  publicKey: string;
+  xOnlyPublicKey?: string;
+  account: number;
+  change: 0 | 1;
+  index: number;
+  caip2: string;
+}
+
+export interface WalletAddressMetadata {
+  bitcoin?: BitcoinWalletMetadata;
+  [key: string]: unknown;
+}
 
 export interface AgentIdentity {
   id: string;
@@ -14,7 +34,7 @@ export interface AgentIdentity {
    * All addresses for this agent, keyed by chain family.
    * Present for agents created with multi-wallet support.
    */
-  walletAddresses?: { evm?: string; solana?: string };
+  walletAddresses?: { evm?: string; solana?: string; bitcoin?: string };
   erc8004TokenId?: string;
   platformId?: string;
   createdAt: Date;
@@ -96,6 +116,12 @@ export interface PlatformLinkedAccount {
   expiresAt: number | null;
 }
 
+export interface PlatformWalletExternalId {
+  id: string;
+  tenantId: string;
+  walletExternalId: string;
+}
+
 export interface PlatformTenantUser {
   userId: string;
   tenantId: string;
@@ -151,6 +177,61 @@ export interface TenantAdminUserEventsResult {
   total: number;
 }
 
+export interface TenantThirdPartyWalletViolation {
+  userId: string;
+  email: string | null;
+  name: string | null;
+  role: TenantTeamRole | string;
+  walletCount: number;
+  wallets: Array<{
+    accountId: string;
+    provider: "wallet:ethereum" | "wallet:solana";
+    providerAccountId: string;
+  }>;
+}
+
+export interface TenantWalletPolicyViolationReport {
+  tenantId: string;
+  policyEnabled: boolean;
+  violations: TenantThirdPartyWalletViolation[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface TenantWalletPolicyRemediationResult {
+  deleted: true;
+  accountId: string;
+  provider: "wallet:ethereum" | "wallet:solana";
+  providerAccountId: string;
+  issuedBefore: number;
+}
+
+export type TenantWalletPolicyBulkRemediationItem = {
+  userId: string;
+  accountId: string;
+};
+
+export type TenantWalletPolicyBulkRemediationResult =
+  | ({
+      ok: true;
+      targetUserId: string;
+    } & TenantWalletPolicyRemediationResult)
+  | {
+      ok: false;
+      targetUserId: string;
+      accountId: string;
+      status: number;
+      error: string;
+    };
+
+export interface TenantWalletPolicyBulkRemediationResponse {
+  tenantId: string;
+  results: TenantWalletPolicyBulkRemediationResult[];
+  succeeded: number;
+  failed: number;
+}
+
 export interface PlatformUserIdentity {
   userId: string;
   email: string | null;
@@ -165,6 +246,51 @@ export interface PlatformUserIdentity {
   updatedAt: Date;
   tenantIds: string[];
   linkedAccounts: PlatformLinkedAccount[];
+  walletExternalIds?: PlatformWalletExternalId[];
+}
+
+export interface PlatformUserCreateInput {
+  email: string;
+  emailVerified?: boolean;
+  name?: string;
+  customMetadata?: Record<string, unknown>;
+  tenantId?: string;
+  walletExternalId?: string;
+}
+
+export interface PlatformUserCreateResult {
+  userId: string;
+  isNew: boolean;
+  tenantId?: string;
+  walletExternalId?: string;
+}
+
+export interface PlatformWalletExternalIdAssignInput {
+  tenantId: string;
+  walletExternalId: string;
+}
+
+export interface PlatformWalletExternalIdAssignResult {
+  userId: string;
+  tenantId: string;
+  walletExternalId: string;
+  field: "walletExternalId";
+}
+
+export interface PlatformWalletExternalIdConnectOrCreateInput {
+  tenantId: string;
+  walletExternalId: string;
+  email?: string;
+  emailVerified?: boolean;
+  name?: string;
+  customMetadata?: Record<string, unknown>;
+}
+
+export interface PlatformWalletExternalIdConnectOrCreateResult {
+  userId: string;
+  isNew: boolean;
+  tenantId: string;
+  walletExternalId: string;
 }
 
 export interface PlatformUserLookupResult {
@@ -175,6 +301,264 @@ export interface PlatformUserSearchResult {
   users: PlatformTenantUser[];
   limit: number;
   offset: number;
+}
+
+export interface DigitalAssetAccountWallet {
+  id: string;
+  walletId: string;
+  membershipId: string;
+  name: string | null;
+  ownerUserId?: string | null;
+  owner_user_id?: string | null;
+  walletType?: string | null;
+  wallet_type?: string | null;
+  custody?: {
+    type: "server" | "user_embedded" | string;
+    ownerUserId?: string | null;
+    owner_user_id?: string | null;
+  };
+  signing?: {
+    signerCount: number;
+    activeSignerCount: number;
+    quorumCount: number;
+    activeQuorumCount: number;
+  };
+  capabilities: DigitalAssetAccountCapability[];
+  capabilityMetadata: DigitalAssetAccountWalletCapabilityMetadata;
+  capability_metadata?: DigitalAssetAccountWalletCapabilityMetadata;
+  chainType: "ethereum" | "solana" | "bitcoin";
+  chainFamily: ChainFamily;
+  address: string | null;
+  purpose?: string | null;
+  venue?: string | null;
+  metadata?: WalletAddressMetadata;
+  createdAt?: Date | string | null;
+}
+
+export type DigitalAssetAccountCapability =
+  | "sign_transaction"
+  | "sign_message"
+  | "sign_typed_data"
+  | "sign_user_operation"
+  | "sign_authorization"
+  | "send_calls"
+  | "transfer"
+  | "solana_transaction"
+  | "export_private_key";
+
+export interface DigitalAssetAccountWalletCapabilityMetadata {
+  custody: {
+    type: "server" | "user_embedded" | string;
+    ownerUserId?: string | null;
+    owner_user_id?: string | null;
+    serverManaged: boolean;
+    server_managed?: boolean;
+    userOwned: boolean;
+    user_owned?: boolean;
+  };
+  signing: {
+    mode: "server" | "user" | "delegated" | "quorum" | string;
+    signerCount: number;
+    signer_count?: number;
+    activeSignerCount: number;
+    active_signer_count?: number;
+    quorumCount: number;
+    quorum_count?: number;
+    activeQuorumCount: number;
+    active_quorum_count?: number;
+    hasDelegatedSigners: boolean;
+    has_delegated_signers?: boolean;
+    hasActiveDelegatedSigners: boolean;
+    has_active_delegated_signers?: boolean;
+    hasKeyQuorums: boolean;
+    has_key_quorums?: boolean;
+    hasActiveKeyQuorums: boolean;
+    has_active_key_quorums?: boolean;
+  };
+  operations: {
+    readBalance: boolean;
+    read_balance?: boolean;
+    transfer: boolean;
+    signTransaction: boolean;
+    sign_transaction?: boolean;
+    signMessage: boolean;
+    sign_message?: boolean;
+    signTypedData: boolean;
+    sign_typed_data?: boolean;
+    signUserOperation: boolean;
+    sign_user_operation?: boolean;
+    signAuthorization: boolean;
+    sign_authorization?: boolean;
+    sendCalls: boolean;
+    send_calls?: boolean;
+    solanaTransaction: boolean;
+    solana_transaction?: boolean;
+    exportPrivateKey: boolean;
+    export_private_key?: boolean;
+  };
+}
+
+export interface DigitalAssetAccountCapabilityMetadata {
+  walletCount: number;
+  wallet_count?: number;
+  walletIds: string[];
+  wallet_ids?: string[];
+  chainFamilies: ChainFamily[];
+  chain_families?: ChainFamily[];
+  custodyTypes: string[];
+  custody_types?: string[];
+  walletTypes: string[];
+  wallet_types?: string[];
+  hasServerWallets: boolean;
+  has_server_wallets?: boolean;
+  hasUserEmbeddedWallets: boolean;
+  has_user_embedded_wallets?: boolean;
+  hasDelegatedSigners: boolean;
+  has_delegated_signers?: boolean;
+  hasActiveDelegatedSigners: boolean;
+  has_active_delegated_signers?: boolean;
+  hasKeyQuorums: boolean;
+  has_key_quorums?: boolean;
+  hasActiveKeyQuorums: boolean;
+  has_active_key_quorums?: boolean;
+}
+
+export interface DigitalAssetAccount {
+  id: string;
+  tenantId: string;
+  displayName: string | null;
+  display_name?: string | null;
+  metadata: Record<string, unknown>;
+  ownerUserIds?: string[];
+  owner_user_ids?: string[];
+  additionalSignerIds?: string[];
+  additional_signer_ids?: string[];
+  signerPolicyIds?: string[];
+  signer_policy_ids?: string[];
+  walletIds: string[];
+  wallet_ids?: string[];
+  wallets: DigitalAssetAccountWallet[];
+  capabilities: DigitalAssetAccountCapability[];
+  capabilityMetadata: DigitalAssetAccountCapabilityMetadata;
+  capability_metadata?: DigitalAssetAccountCapabilityMetadata;
+  createdAt: Date | string;
+  created_at?: Date | string;
+  updatedAt: Date | string;
+  updated_at?: Date | string;
+}
+
+export interface DigitalAssetAccountWalletConfiguration {
+  chain_type?: "ethereum" | "evm" | "solana" | "bitcoin";
+  chainType?: "ethereum" | "evm" | "solana" | "bitcoin";
+  name?: string;
+  wallet_id?: string;
+  walletId?: string;
+}
+
+export interface DigitalAssetAccountMutationInput {
+  id?: string;
+  display_name?: string | null;
+  displayName?: string | null;
+  metadata?: Record<string, unknown>;
+  owner_user_ids?: string[];
+  ownerUserIds?: string[];
+  additional_signer_ids?: string[];
+  additionalSignerIds?: string[];
+  signer_policy_ids?: string[];
+  signerPolicyIds?: string[];
+  wallet_ids?: string[];
+  walletIds?: string[];
+  user_wallet_ids?: string[];
+  userWalletIds?: string[];
+  wallets_configuration?: DigitalAssetAccountWalletConfiguration[];
+  walletsConfiguration?: DigitalAssetAccountWalletConfiguration[];
+}
+
+export interface DigitalAssetAccountListResult {
+  accounts: DigitalAssetAccount[];
+}
+
+export interface DigitalAssetAccountAggregation {
+  id: string;
+  accountId: string;
+  account_id?: string;
+  tenantId: string;
+  displayName: string | null;
+  display_name?: string | null;
+  walletIds: string[];
+  wallet_ids?: string[];
+  chainFamilies: ChainFamily[];
+  chain_families?: ChainFamily[];
+  metadata: Record<string, unknown>;
+  createdAt: Date | string;
+  created_at?: Date | string;
+  updatedAt: Date | string;
+  updated_at?: Date | string;
+}
+
+export interface DigitalAssetAccountAggregationMutationInput {
+  id?: string;
+  display_name?: string | null;
+  displayName?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface DigitalAssetAccountAggregationListResult {
+  aggregations: DigitalAssetAccountAggregation[];
+}
+
+export interface DigitalAssetAccountAggregationDeleteResult {
+  id: string;
+  deleted: boolean;
+}
+
+export interface DigitalAssetAccountBalance {
+  id: string;
+  accountId: string;
+  account_id?: string;
+  wallets: DigitalAssetAccountWallet[];
+  capabilities: DigitalAssetAccountCapability[];
+  capabilityMetadata: DigitalAssetAccountCapabilityMetadata;
+  capability_metadata?: DigitalAssetAccountCapabilityMetadata;
+  balances?: Array<{
+    walletId: string;
+    chainFamily: ChainFamily;
+    chainId: number | null;
+    symbol: string | null;
+    native: string | null;
+    nativeFormatted: string | null;
+    walletAddress: string | null;
+    unavailableReason?: string;
+  }>;
+  tokenBalances?: Array<{
+    walletId: string;
+    chainId: number;
+    token: string;
+    symbol: string;
+    balance: string;
+    formatted: string;
+    decimals: number;
+    unavailableReason?: string;
+  }>;
+  rollups?: {
+    native: Array<{
+      chainId: number;
+      symbol: string;
+      native: string;
+    }>;
+    tokens?: Array<{
+      chainId: number;
+      token: string;
+      symbol: string;
+      balance: string;
+      decimals: number;
+    }>;
+  };
+}
+
+export interface DigitalAssetAccountDeleteResult {
+  id: string;
+  deleted: boolean;
 }
 
 export interface PlatformTenantInvitation {
@@ -224,6 +608,7 @@ export interface PlatformUserDeactivateResult {
 export interface AgentBalance {
   agentId: string;
   walletAddress: string;
+  walletIndex?: number;
   balances: {
     native: string;
     nativeFormatted: string;
@@ -476,6 +861,7 @@ export interface TenantAuthAbuseConfig {
   wallet?: {
     allowedWallets?: string[];
     blockedWallets?: string[];
+    restrictToOneThirdPartyWallet?: boolean;
   };
   phone?: {
     blockVoip?: boolean;
@@ -504,6 +890,10 @@ export interface TenantAccessAllowlistEntryInput {
 
 export type TenantAppClientEnvironment = "development" | "preview" | "staging" | "production";
 
+export interface TenantAppClientEmbeddedWalletConfig {
+  createOnLogin?: EmbeddedWalletCreateOnLogin;
+}
+
 export interface TenantAppClient {
   id: string;
   name: string;
@@ -512,7 +902,10 @@ export interface TenantAppClient {
   isDefault?: boolean;
   allowedOrigins?: string[];
   allowedRedirectUrls?: string[];
+  allowedBundleIds?: string[];
+  allowedPackageNames?: string[];
   loginMethods?: TenantAuthAbuseConfig["loginMethods"];
+  embeddedWallets?: TenantAppClientEmbeddedWalletConfig;
   globalWalletEnabled?: boolean;
   globalWalletAllowedScopes?: string[];
   createdAt?: Date | string;
@@ -649,6 +1042,26 @@ export interface SponsoredGasSpendSummary {
   entries: SponsoredGasSpendEntry[];
 }
 
+export type EmbeddedWalletCreateOnLogin = "off" | "users-without-wallets" | "all-users";
+
+export interface TenantEmbeddedWalletFeatureFlags {
+  createOnLogin?: EmbeddedWalletCreateOnLogin;
+}
+
+export interface TenantFeatureFlags extends Record<string, unknown> {
+  showFundingQR?: boolean;
+  showTransactionHistory?: boolean;
+  showSpendDashboard?: boolean;
+  showPolicyControls?: boolean;
+  showApprovalQueue?: boolean;
+  showSecretManager?: boolean;
+  enableSolana?: boolean;
+  showChainSelector?: boolean;
+  allowAddressExport?: boolean;
+  embeddedWallets?: TenantEmbeddedWalletFeatureFlags;
+  embeddedWalletCreateOnLogin?: EmbeddedWalletCreateOnLogin;
+}
+
 export interface TenantControlPlaneConfig {
   tenantId: string;
   displayName?: string;
@@ -656,7 +1069,7 @@ export interface TenantControlPlaneConfig {
   policyTemplates?: Array<{ id: string; name: string; policies: PolicyRule[] }>;
   secretRoutePresets?: Array<{ id: string; name: string; path: string }>;
   approvalConfig?: Record<string, unknown>;
-  featureFlags?: Record<string, boolean>;
+  featureFlags?: TenantFeatureFlags;
   oidcProviders?: TenantOidcProviderConfig[];
   samlSso?: TenantSamlSsoConfig;
   authAbuseConfig?: TenantAuthAbuseConfig;
@@ -783,6 +1196,7 @@ export interface AgentAccountWallet {
   address: string;
   venue: string | null;
   purpose: string | null;
+  metadata: WalletAddressMetadata;
   createdAt: Date | string;
 }
 
@@ -859,6 +1273,7 @@ export interface UserAccountWallet {
   address: string;
   venue: string | null;
   purpose: string | null;
+  metadata: WalletAddressMetadata;
   createdAt: Date | string;
 }
 
@@ -973,6 +1388,7 @@ export interface UserPushSubscriptionListResult {
 export type AgentSignerType = "owner" | "delegated" | "service" | "quorum_member";
 export type AgentSignerSubjectType = "user" | "wallet" | "api_key" | "external";
 export type AgentSignerStatus = "active" | "paused" | "revoked";
+export type AgentSignerKeyType = "hmac" | "p256";
 
 export interface AgentSigner {
   id: string;
@@ -981,10 +1397,14 @@ export interface AgentSigner {
   signerType: AgentSignerType;
   subjectType: AgentSignerSubjectType;
   subjectId: string;
+  keyType: AgentSignerKeyType;
+  /** Registered P-256 public key for Privy-style asymmetric authorization keys. */
+  publicKey: string | null;
   address: string | null;
   chainFamily: ChainFamily | null;
   label: string | null;
   permissions: string[];
+  policyIds: string[];
   metadata: Record<string, unknown>;
   hasCredential?: boolean;
   status: AgentSignerStatus;
@@ -997,10 +1417,15 @@ export interface AgentSignerCreate {
   signerType: AgentSignerType;
   subjectType: AgentSignerSubjectType;
   subjectId: string;
+  /** Defaults to hmac. Use p256 to register a Privy-style asymmetric authorization key. */
+  keyType?: AgentSignerKeyType;
+  /** Required when keyType is p256. Accepts SPKI base64, raw point, or JWK encodings server-side. */
+  publicKey?: string | null;
   address?: string | null;
   chainFamily?: ChainFamily | null;
   label?: string | null;
   permissions?: string[];
+  policyIds?: string[];
   metadata?: Record<string, unknown>;
   /** Provide a caller-generated credential secret. Stored server-side as a hash only. */
   credentialSecret?: string;
@@ -1015,11 +1440,25 @@ export type AgentSignerCreateResult = AgentSigner & {
 export type AgentSignerUpdate = Partial<
   Pick<
     AgentSignerCreate,
-    "signerType" | "address" | "chainFamily" | "label" | "permissions" | "metadata"
+    | "signerType"
+    | "keyType"
+    | "publicKey"
+    | "address"
+    | "chainFamily"
+    | "label"
+    | "permissions"
+    | "policyIds"
+    | "metadata"
   >
 > & {
   status?: AgentSignerStatus;
 };
+
+/** Privy-style authorization-key aliases for Steward's agent signer resources. */
+export type AuthorizationKey = AgentSigner;
+export type AuthorizationKeyCreate = AgentSignerCreate;
+export type AuthorizationKeyCreateResult = AgentSignerCreateResult;
+export type AuthorizationKeyUpdate = AgentSignerUpdate;
 
 export type AgentKeyQuorumStatus = "active" | "paused" | "revoked";
 
@@ -1030,6 +1469,7 @@ export interface AgentKeyQuorum {
   name: string;
   threshold: number;
   memberSignerIds: string[];
+  memberQuorumIds: string[];
   permissions: string[];
   metadata: Record<string, unknown>;
   status: AgentKeyQuorumStatus;
@@ -1042,12 +1482,16 @@ export interface AgentKeyQuorumCreate {
   name: string;
   threshold: number;
   memberSignerIds: string[];
+  memberQuorumIds?: string[];
   permissions?: string[];
   metadata?: Record<string, unknown>;
 }
 
 export type AgentKeyQuorumUpdate = Partial<
-  Pick<AgentKeyQuorumCreate, "name" | "threshold" | "memberSignerIds" | "permissions" | "metadata">
+  Pick<
+    AgentKeyQuorumCreate,
+    "name" | "threshold" | "memberSignerIds" | "memberQuorumIds" | "permissions" | "metadata"
+  >
 > & {
   status?: AgentKeyQuorumStatus;
 };
@@ -1104,6 +1548,8 @@ export type IntentType =
   | "transfer"
   | "wallet_update"
   | "policy_update"
+  | "policy_rule_create"
+  | "policy_rule_delete"
   | "policy_rule_update"
   | "quorum_update"
   | "wallet_action";
@@ -1162,21 +1608,31 @@ export interface Intent {
 }
 
 export interface IntentCreate {
-  intentType: IntentType | string;
+  intentType?: IntentType | string;
+  intent_type?: IntentType | string;
   agentId?: string | null;
+  wallet_id?: string | null;
   resourceType?: string | null;
+  resource_type?: string | null;
   resourceId?: string | null;
+  resource_id?: string | null;
   authorizationDetails?: Array<Record<string, unknown>>;
+  authorization_details?: Array<Record<string, unknown>>;
   payload?: Record<string, unknown>;
   createdByDisplayName?: string | null;
+  created_by_display_name?: string | null;
   expiresAt?: string | null;
+  expires_at?: string | null;
   ttlSeconds?: number;
+  ttl_seconds?: number;
 }
 
 export interface IntentListOptions {
   status?: IntentStatus;
   intentType?: IntentType | string;
+  intent_type?: IntentType | string;
   agentId?: string;
+  wallet_id?: string;
   limit?: number;
   offset?: number;
 }
@@ -1200,6 +1656,7 @@ export const WEBHOOK_EVENT_TYPES = [
   "mfa.enabled",
   "mfa.disabled",
   "private_key.exported",
+  "wallet.imported",
   "wallet.recovery_setup",
   "wallet.recovered",
   "wallet.raw_signature.created",
@@ -1289,7 +1746,7 @@ export const SUPPORTED_CHAINS = {
 export interface ChainIdentifier {
   caip2: string;
   numericId: number;
-  family: "evm" | "solana";
+  family: ChainFamily;
   name: string;
   symbol: string;
   testnet: boolean;
@@ -1300,10 +1757,79 @@ export interface AllowedChainsConfig {
 }
 
 /** Result of exporting private keys from a vault agent or user wallet. */
+export interface BitcoinPrivateKeyExport {
+  privateKey: string;
+  address: string;
+  venue: string | null;
+  purpose: string | null;
+  metadata: WalletAddressMetadata;
+}
+
 export interface ExportKeyResult {
   evm?: { privateKey: string; address: string };
   solana?: { privateKey: string; address: string };
+  bitcoin?: BitcoinPrivateKeyExport[];
   warning: string;
+}
+
+export interface EncryptedAgentKeyImportInitResult {
+  importSessionId: string;
+  publicKey: string;
+  algorithm: "X25519-HKDF-SHA256-AES-256-GCM";
+  expiresAt: string;
+  aad: {
+    importSessionId: string;
+    tenantId: string;
+    agentId: string;
+    chain: "evm" | "solana";
+  };
+}
+
+export interface EncryptedAgentKeyImportSubmitInput {
+  importSessionId: string;
+  ephemeralPublicKey: string;
+  iv: string;
+  ciphertext: string;
+  tag: string;
+}
+
+export interface EncryptedAgentKeyImportResult {
+  agentId: string;
+  walletAddress: string;
+  chain: "evm" | "solana" | string;
+}
+
+export interface EncryptedUserWalletKeyImportInitResult {
+  importSessionId: string;
+  publicKey: string;
+  algorithm: "X25519-HKDF-SHA256-AES-256-GCM";
+  expiresAt: string;
+  aad: {
+    importSessionId: string;
+    tenantId: string;
+    userId: string;
+    agentId: string;
+    chain: "evm" | "solana";
+    walletIndex: number;
+    appClientId: string | null;
+  };
+}
+
+export interface EncryptedUserWalletKeyImportSubmitInput {
+  importSessionId: string;
+  ephemeralPublicKey: string;
+  iv: string;
+  ciphertext: string;
+  tag: string;
+  walletIndex?: number;
+}
+
+export interface EncryptedUserWalletKeyImportResult {
+  agentId: string;
+  walletAddress: string;
+  chain: "evm" | "solana" | string;
+  walletIndex: number;
+  imported: true;
 }
 
 export interface UserWalletRecoverySetupResult {
@@ -1311,6 +1837,7 @@ export interface UserWalletRecoverySetupResult {
     agentId: string;
     walletAddress: string;
     recoverable: true;
+    walletIndex?: number;
   };
   recovery: {
     type: "bip39";
@@ -1325,6 +1852,7 @@ export interface UserWalletRecoveryRestoreResult {
     walletAddress: string;
     recoverable: true;
     restoredExisting: boolean;
+    walletIndex?: number;
   };
   recovery: {
     type: "bip39";
@@ -1332,10 +1860,52 @@ export interface UserWalletRecoveryRestoreResult {
   };
 }
 
+export interface UserWalletCreateResult {
+  agentId: string;
+  walletAddress: string;
+  walletIndex?: number;
+}
+
+export interface UserWalletSignResult {
+  txId: string;
+  txHash: string;
+}
+
+export interface UserWalletSignMessageResult {
+  signature: string;
+  address: string;
+}
+
+export interface UserWalletHistoryResult {
+  transactions: TxRecord[];
+  limit: number;
+  offset: number;
+}
+
+export type UserWalletSigner = AgentSigner;
+
+export type UserWalletSignerCreate = Partial<
+  Pick<
+    AgentSignerCreate,
+    "subjectType" | "subjectId" | "address" | "chainFamily" | "label" | "permissions" | "metadata"
+  >
+> & {
+  walletIndex?: number;
+};
+
+export type UserWalletSignerCreateResult = UserWalletSigner & {
+  credentialSecret: string;
+};
+
+export interface UserWalletSignerListResult {
+  signers: UserWalletSigner[];
+}
+
 export interface PregeneratedUserWalletCreateResult {
   wallets: Array<{
     agent: AgentIdentity;
     claimToken: string;
+    claimExpiresAt: string;
   }>;
   warning: string;
 }
@@ -1343,6 +1913,7 @@ export interface PregeneratedUserWalletCreateResult {
 export interface PregeneratedUserWalletClaimResult {
   agentId: string;
   walletAddress: string;
+  walletIndex: number;
   claimed: true;
 }
 
@@ -1576,6 +2147,14 @@ export interface ConditionSetItemInput {
   value: string;
   label?: string | null;
   metadata?: Record<string, unknown>;
+}
+
+export type ConditionSetItemUpdate = Partial<ConditionSetItemInput>;
+
+export interface ConditionSetItemListResult {
+  items: ConditionSetItem[];
+  limit: number;
+  offset: number;
 }
 
 /**

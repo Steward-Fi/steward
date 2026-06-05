@@ -119,6 +119,13 @@ async function ensureWorkerInit(env: Env): Promise<void> {
     await initAuthStores(false).catch((err) => {
       console.warn("[steward:workers] initAuthStores failed; auth flows may degrade:", err);
     });
+    const { getAuthStoreSources } = await import("./routes/auth");
+    const { importSession } = getAuthStoreSources();
+    if (importSession === "memory") {
+      console.warn(
+        "[steward:workers] encrypted import sessions are using memory storage; configure Redis for durable one-time import sessions across isolates",
+      );
+    }
     if (!redisOk) {
       console.warn(
         "[steward:workers] Redis not initialized — passkey/magic-link/SIWE flows will use in-memory backend per isolate",

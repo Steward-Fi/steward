@@ -71,7 +71,7 @@ function shouldRetry(statusCode?: number): boolean {
   return statusCode === undefined || statusCode >= 500;
 }
 
-function isPrivateIpv4(address: string): boolean {
+function isNonPublicIpv4(address: string): boolean {
   const octets = address.split(".").map((part) => Number(part));
   if (
     octets.length !== 4 ||
@@ -89,7 +89,10 @@ function isPrivateIpv4(address: string): boolean {
     (a === 192 && b === 168) ||
     (a === 100 && b >= 64 && b <= 127) ||
     (a === 192 && b === 0) ||
+    (a === 192 && b === 88 && octets[2] === 99) ||
     (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && octets[2] === 100) ||
+    (a === 203 && b === 0 && octets[2] === 113) ||
     a >= 224
   );
 }
@@ -156,13 +159,14 @@ function embeddedIpv4FromIpv6(address: string): string | null {
   return null;
 }
 
-function isPrivateIpv6(address: string): boolean {
+function isNonPublicIpv6(address: string): boolean {
   const normalized = address.toLowerCase();
   const ipv4Mapped = mappedIpv4FromIpv6(normalized);
-  if (ipv4Mapped) return isPrivateIpv4(ipv4Mapped);
+  if (ipv4Mapped) return isNonPublicIpv4(ipv4Mapped);
   const ipv4Embedded = embeddedIpv4FromIpv6(normalized);
-  if (ipv4Embedded) return isPrivateIpv4(ipv4Embedded);
+  if (ipv4Embedded) return isNonPublicIpv4(ipv4Embedded);
   const words = expandIpv6Words(normalized);
+  if (words?.[0] === 0x2001 && (words[1] === 0 || words[1] === 0xdb8)) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfe80) return true;
   if (words?.[0] !== undefined && (words[0] & 0xffc0) === 0xfec0) return true;
   return (
@@ -170,8 +174,7 @@ function isPrivateIpv6(address: string): boolean {
     normalized === "::1" ||
     normalized.startsWith("fc") ||
     normalized.startsWith("fd") ||
-    normalized.startsWith("ff") ||
-    normalized.startsWith("2001:db8:")
+    normalized.startsWith("ff")
   );
 }
 
@@ -187,19 +190,19 @@ function assertPublicWebhookHostname(hostname: string): void {
   }
 
   const literalVersion = isIP(hostname);
-  if (literalVersion === 4 && isPrivateIpv4(hostname)) {
+  if (literalVersion === 4 && isNonPublicIpv4(hostname)) {
     throw new Error("Webhook host must resolve to a public address");
   }
-  if (literalVersion === 6 && isPrivateIpv6(hostname)) {
+  if (literalVersion === 6 && isNonPublicIpv6(hostname)) {
     throw new Error("Webhook host must resolve to a public address");
   }
 }
 
 function assertPublicAddress(address: string, family?: number): void {
   if (
-    (family === 4 && isPrivateIpv4(address)) ||
-    (family === 6 && isPrivateIpv6(address)) ||
-    (family !== 4 && family !== 6 && (isPrivateIpv4(address) || isPrivateIpv6(address)))
+    (family === 4 && isNonPublicIpv4(address)) ||
+    (family === 6 && isNonPublicIpv6(address)) ||
+    (family !== 4 && family !== 6 && (isNonPublicIpv4(address) || isNonPublicIpv6(address)))
   ) {
     throw new Error("Webhook host must resolve to a public address");
   }

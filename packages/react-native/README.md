@@ -31,6 +31,12 @@ The SDK expects synchronous session storage, while React Native storage is
 async. `createStewardNativeAuth()` hydrates the async store first, then passes a
 synchronous cache into `StewardAuth`.
 
+After a hydrated or newly-created session, native helpers call `/user/me` with
+the configured tenant context so tenant automatic embedded-wallet creation can
+run during login. Bootstrap errors are swallowed so auth results remain usable;
+set `bootstrapCurrentUser: false` only for specialized tests or apps that call
+`bootstrapNativeCurrentUser(auth)` themselves.
+
 ## Email and OTP
 
 ```tsx

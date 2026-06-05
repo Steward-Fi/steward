@@ -44,6 +44,12 @@ describe("secret route validation", () => {
     );
   });
 
+  it("rejects invalid injected header names before persistence", () => {
+    expect(secretsRouteSource).toContain("const HTTP_HEADER_NAME =");
+    expect(secretsRouteSource).toContain("!HTTP_HEADER_NAME.test(key)");
+    expect(secretsRouteSource).toContain("injectKey is invalid");
+  });
+
   it("marks secret inventory and route topology responses as non-cacheable", () => {
     expect(secretsRouteSource).toContain("setNoStoreHeaders");
     expect(secretsRouteSource).toContain('secretsRoutes.use("*"');

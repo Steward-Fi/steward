@@ -1,0 +1,552 @@
+---
+title: "Platform Users"
+description: "Provision users, look up identities, and manage wallet external IDs."
+---
+
+# Platform Users API
+
+Platform user routes let operators provision users across tenants, resolve
+identity records, and attach immutable tenant-scoped wallet external IDs. They
+require a platform key and route scopes when scoped platform keys are enabled.
+
+```bash
+curl https://api.steward.fi/platform/users/lookup \
+  -H "X-Steward-Platform-Key: your-platform-key"
+```
+
+## Platform User Object
+
+```typescript
+{
+  userId: string;
+  email: string | null;
+  emailVerified: boolean | null;
+  name: string | null;
+  image: string | null;
+  walletAddress: string | null;
+  walletChain: string | null;
+  customMetadata: Record<string, unknown>;
+  deactivatedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  tenantIds: string[];
+  linkedAccounts: Array<{
+    id: string;
+    provider: string;
+    providerAccountId: string;
+    expiresAt: number | null;
+  }>;
+  walletExternalIds: Array<{
+    tenantId: string;
+    externalId: string;
+  }>;
+}
+```
+
+<Note>
+  Wallet external IDs are write-once per user and tenant. Once assigned, the
+  value cannot be changed to a different external ID for that same user in that
+  tenant.
+</Note>
+
+## Create or Pre-Provision User
+
+Creates a user record without sending email or requiring an interactive login.
+If the email already exists, Steward returns the existing user with
+`isNew: false`.
+
+```
+POST /platform/users
+```
+
+**Auth:** Platform key with `platform:user:write`
+
+**Request Body:**
+
+```typescript
+{
+  email: string;
+  emailVerified?: boolean;
+  name?: string;
+  customMetadata?: Record<string, unknown>;
+  tenantId?: string;
+  walletExternalId?: string; // or externalId
+}
+```
+
+When `walletExternalId` is supplied, `tenantId` is required. Steward links the
+user into that tenant and assigns the immutable wallet external ID in the same
+operation.
+
+<CodeGroup>
+```typescript SDK
+const user = await steward.platformUsers.create({
+  email: "ada@example.com",
+  emailVerified: true,
+  tenantId: "app-prod",
+  walletExternalId: "wallet_ada_001",
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/platform/users \
+  -H "X-Steward-Platform-Key: your-platform-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "ada@example.com",
+    "emailVerified": true,
+    "tenantId": "app-prod",
+    "walletExternalId": "wallet_ada_001"
+  }'
+```
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "userId": "usr_123",
+    "isNew": true,
+    "tenantId": "app-prod",
+    "walletExternalId": "wallet_ada_001"
+  }
+}
+```
+
+## Lookup User
+
+Looks up a user by a supported identity. `walletExternalId` lookup requires
+`tenantId` because external IDs are tenant-scoped.
+
+```
+GET /platform/users/lookup
+```
+
+**Auth:** Platform key with `platform:user:read`
+
+**Query Parameters:**
+
+```typescript
+{
+  email?: string;
+  phone?: string;          // E.164
+  walletAddress?: string;
+  walletExternalId?: string;
+  smartWalletId?: string;
+  customAuthId?: string;
+  provider?: string;
+  providerAccountId?: string;
+  tenantId?: string;
+}
+```
+
+<CodeGroup>
+```typescript SDK
+const { user } = await steward.platformUsers.lookup({
+  tenantId: "app-prod",
+  walletExternalId: "wallet_ada_001",
+});
+
+const sameUser = await steward.platformUsers.getUserByWalletExternalId(
+  "wallet_ada_001",
+  { tenantId: "app-prod" }
+);
+```
+
+```bash cURL
+curl "https://api.steward.fi/platform/users/lookup?tenantId=app-prod&walletExternalId=wallet_ada_001" \
+  -H "X-Steward-Platform-Key: your-platform-key"
+```
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "user": {
+      "userId": "usr_123",
+      "tenantIds": ["app-prod"],
+      "linkedAccounts": [],
+      "walletExternalIds": [
+        { "tenantId": "app-prod", "externalId": "wallet_ada_001" }
+      ]
+    }
+  }
+}
+```
+
+## Lookup Aliases
+
+These POST aliases accept JSON bodies and return the same shape as
+`GET /platform/users/lookup`.
+
+| Endpoint | Body |
+| --- | --- |
+| `POST /platform/users/email/address` | `{ "email": string, "tenantId"?: string }` |
+| `POST /platform/users/phone/number` | `{ "phone": string, "tenantId"?: string }` |
+| `POST /platform/users/wallet/address` | `{ "walletAddress": string, "tenantId"?: string }` |
+| `POST /platform/users/wallet/external-id` | `{ "walletExternalId": string, "tenantId": string }` |
+| `POST /platform/users/smart-wallet/address` | `{ "smartWalletId": string, "tenantId"?: string }` |
+
+## Assign Wallet External ID
+
+Assigns a write-once wallet external ID to an existing user in a tenant.
+
+```
+POST /platform/users/:userId/wallet/external-id
+```
+
+**Auth:** Platform key with `platform:user:write`
+
+```typescript
+{
+  tenantId: string;
+  walletExternalId: string; // or externalId
+}
+```
+
+<CodeGroup>
+```typescript SDK
+await steward.platformUsers.assignWalletExternalId("usr_123", {
+  tenantId: "app-prod",
+  walletExternalId: "wallet_ada_001",
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/platform/users/usr_123/wallet/external-id \
+  -H "X-Steward-Platform-Key: your-platform-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "tenantId": "app-prod", "walletExternalId": "wallet_ada_001" }'
+```
+</CodeGroup>
+
+Conflicts return `409` when the external ID belongs to another user in the same
+tenant or when the target user already has a different external ID in that
+tenant.
+
+## Resolve Wallet External ID
+
+Resolves a tenant-scoped wallet external ID.
+
+```
+POST /platform/users/wallet/external-id
+```
+
+**Auth:** Platform key with `platform:user:read`
+
+```typescript
+{
+  tenantId: string;
+  walletExternalId: string; // or externalId
+}
+```
+
+<CodeGroup>
+```typescript SDK
+const { user } = await steward.platformUsers.resolveWalletExternalId({
+  tenantId: "app-prod",
+  walletExternalId: "wallet_ada_001",
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/platform/users/wallet/external-id \
+  -H "X-Steward-Platform-Key: your-platform-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "tenantId": "app-prod", "walletExternalId": "wallet_ada_001" }'
+```
+</CodeGroup>
+
+## Connect or Create by Wallet External ID
+
+Resolves a wallet external ID to an existing user. If no mapping exists, Steward
+can create a user or connect an existing email user to the tenant, then assign
+the external ID.
+
+```
+POST /platform/users/wallet/external-id/connect-or-create
+```
+
+**Auth:** Platform key with `platform:user:write`
+
+```typescript
+{
+  tenantId: string;
+  walletExternalId: string; // or externalId
+  email?: string;
+  emailVerified?: boolean;
+  name?: string;
+  customMetadata?: Record<string, unknown>;
+  role?: "owner" | "admin" | "member";
+}
+```
+
+<CodeGroup>
+```typescript SDK
+const result = await steward.platformUsers.connectOrCreateByWalletExternalId({
+  tenantId: "app-prod",
+  walletExternalId: "wallet_ada_001",
+  email: "ada@example.com",
+  emailVerified: true,
+});
+```
+
+```bash cURL
+curl -X POST https://api.steward.fi/platform/users/wallet/external-id/connect-or-create \
+  -H "X-Steward-Platform-Key: your-platform-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tenantId": "app-prod",
+    "walletExternalId": "wallet_ada_001",
+    "email": "ada@example.com",
+    "emailVerified": true
+  }'
+```
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "userId": "usr_123",
+    "isNew": false,
+    "createdExternalId": true,
+    "tenantId": "app-prod",
+    "walletExternalId": "wallet_ada_001",
+    "user": {
+      "userId": "usr_123",
+      "tenantIds": ["app-prod"],
+      "walletExternalIds": [
+        { "tenantId": "app-prod", "externalId": "wallet_ada_001" }
+      ]
+    }
+  }
+}
+```
+
+## Search Tenant Users by External ID
+
+Tenant-scoped user search supports direct wallet external ID filtering.
+
+```
+GET /platform/tenants/:tenantId/users?walletExternalId=wallet_ada_001
+```
+
+**Auth:** Platform key with `platform:tenant-user:read`
+
+<CodeGroup>
+```typescript SDK
+const result = await steward.platformUsers.search("app-prod", {
+  walletExternalId: "wallet_ada_001",
+});
+```
+
+```bash cURL
+curl "https://api.steward.fi/platform/tenants/app-prod/users?walletExternalId=wallet_ada_001" \
+  -H "X-Steward-Platform-Key: your-platform-key"
+```
+</CodeGroup>
+
+Tenant admins with a user session can use the same filter through the
+user-authenticated directory route:
+
+```typescript SDK
+const result = await steward.listTenantUsers("app-prod", {
+  walletExternalId: "wallet_ada_001",
+});
+```
+
+## Third-Party Wallet Policy Violations
+
+When `restrictToOneThirdPartyWallet` is enabled after existing users already
+linked multiple EVM/Solana third-party wallets, tenant admins can review the
+violation report and remove one selected wallet from a tenant member.
+
+```
+GET /user/me/tenants/:tenantId/users/wallet-policy/violations
+```
+
+**Auth:** User bearer token for a tenant admin, with recent MFA.
+
+<CodeGroup>
+```typescript SDK
+const report = await steward.getTenantWalletPolicyViolations("app-prod", {
+  limit: 50,
+});
+```
+
+```bash cURL
+curl "https://api.steward.fi/user/me/tenants/app-prod/users/wallet-policy/violations?limit=50" \
+  -H "Authorization: Bearer user-session-jwt"
+```
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "tenantId": "app-prod",
+    "policyEnabled": true,
+    "violations": [
+      {
+        "userId": "usr_123",
+        "email": "ada@example.com",
+        "name": "Ada",
+        "role": "member",
+        "walletCount": 2,
+        "wallets": [
+          {
+            "accountId": "acct_1",
+            "provider": "wallet:ethereum",
+            "providerAccountId": "0x1111111111111111111111111111111111111111"
+          },
+          {
+            "accountId": "acct_2",
+            "provider": "wallet:solana",
+            "providerAccountId": "So11111111111111111111111111111111111111112"
+          }
+        ]
+      }
+    ],
+    "total": 1,
+    "limit": 50,
+    "offset": 0
+  }
+}
+```
+
+<Note>
+  The report is read-only. Use the remediation endpoint below when an owner/admin
+  has chosen the wallet identity to remove.
+</Note>
+
+### Remediate a Violation
+
+```
+DELETE /user/me/tenants/:tenantId/users/:userId/wallet-policy/wallets/:accountId
+```
+
+**Auth:** User bearer token for a tenant owner/admin, with recent MFA and a
+session scoped to the tenant.
+
+The endpoint only removes linked EVM/Solana third-party wallets, refuses to
+remove the user's last remaining login method, revokes the remediated user's
+refresh tokens, writes authorized and final audit events, and sends a redacted
+`user.unlinked_account` webhook.
+
+<CodeGroup>
+```typescript SDK
+const result = await steward.remediateTenantWalletPolicyViolation(
+  "app-prod",
+  "usr_123",
+  "acct_2",
+);
+```
+
+```bash cURL
+curl -X DELETE \
+  "https://api.steward.fi/user/me/tenants/app-prod/users/usr_123/wallet-policy/wallets/acct_2" \
+  -H "Authorization: Bearer user-session-jwt"
+```
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "deleted": true,
+    "accountId": "acct_2",
+    "provider": "wallet:solana",
+    "providerAccountId": "So11111111111111111111111111111111111111112",
+    "issuedBefore": 1780613242000
+  }
+}
+```
+
+### Bulk Remediate Violations
+
+```
+POST /user/me/tenants/:tenantId/users/wallet-policy/remediations
+```
+
+**Auth:** User bearer token for a tenant owner/admin, with recent MFA and a
+session scoped to the tenant.
+
+The request accepts up to 50 selected wallet accounts. Each item is processed
+with the same checks as the single-wallet endpoint: tenant membership, EVM or
+Solana wallet provider, last-login-method protection, refresh-token revocation,
+authorized/final audit events, and redacted `user.unlinked_account` webhooks.
+The response is intentionally per-item so operators can retry only failed
+selections.
+
+<CodeGroup>
+```typescript SDK
+const result = await steward.bulkRemediateTenantWalletPolicyViolations(
+  "app-prod",
+  [
+    { userId: "usr_123", accountId: "acct_2" },
+    { userId: "usr_456", accountId: "acct_7" },
+  ],
+);
+```
+
+```bash cURL
+curl -X POST \
+  "https://api.steward.fi/user/me/tenants/app-prod/users/wallet-policy/remediations" \
+  -H "Authorization: Bearer user-session-jwt" \
+  -H "Content-Type: application/json" \
+  -d '{"wallets":[{"userId":"usr_123","accountId":"acct_2"},{"userId":"usr_456","accountId":"acct_7"}]}'
+```
+</CodeGroup>
+
+**Response:**
+
+```json
+{
+  "ok": true,
+  "data": {
+    "tenantId": "app-prod",
+    "succeeded": 1,
+    "failed": 1,
+    "results": [
+      {
+        "ok": true,
+        "targetUserId": "usr_123",
+        "deleted": true,
+        "accountId": "acct_2",
+        "provider": "wallet:solana",
+        "providerAccountId": "So11111111111111111111111111111111111111112",
+        "issuedBefore": 1780613242
+      },
+      {
+        "ok": false,
+        "targetUserId": "usr_456",
+        "accountId": "acct_7",
+        "status": 409,
+        "error": "Cannot unlink the user's last login method"
+      }
+    ]
+  }
+}
+```
+
+## Wallet External ID Rules
+
+- `tenantId` is required for wallet external ID lookup and assignment.
+- External IDs are trimmed, validated, and tenant-scoped.
+- The same external ID cannot belong to multiple users in one tenant.
+- A user cannot replace an existing wallet external ID with a different value in
+  the same tenant.
+- The reserved backing provider used to store wallet external IDs is hidden
+  from `linkedAccounts` and exposed through `walletExternalIds`.
