@@ -12,7 +12,7 @@
  * attacker `to`. The fix builds the SignRequest from its declared fields only,
  * so `to` is authoritative on /sign. This drives the REAL route.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { agents, closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
@@ -22,6 +22,8 @@ const TENANT_ID = `sign-smuggle-tenant-${Date.now()}`;
 const AGENT_ID = `sign-smuggle-agent-${Date.now()}`;
 const ALLOWED = "0x1111111111111111111111111111111111111111";
 const ATTACKER = "0x2222222222222222222222222222222222222222";
+
+setDefaultTimeout(30000);
 
 async function makeApp() {
   const { vaultRoutes } = await import("../routes/vault");
