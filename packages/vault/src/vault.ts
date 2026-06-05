@@ -82,7 +82,9 @@ import {
 } from "./solana";
 import {
   assertParsedSolanaTransferMatches,
+  assertSolanaPriorityFeeWithinCap,
   isVersionedTransactionBytes,
+  parseSolanaTransaction,
 } from "./solana-instructions";
 import { getTokenBalances as fetchTokenBalances, type TokenBalance } from "./tokens";
 import {
@@ -2297,6 +2299,7 @@ export class Vault {
     let signedBytes: Uint8Array;
     if (isVersionedTransactionBytes(txBytes)) {
       const vtx = VersionedTransaction.deserialize(txBytes);
+      assertSolanaPriorityFeeWithinCap(parseSolanaTransaction(request.transaction));
       const envelope = requireEnvelope();
       if (envelope) {
         // The byte-level legacy assertion can't read a v0 message; verify the
@@ -2307,6 +2310,7 @@ export class Vault {
       signedBytes = vtx.serialize();
     } else {
       const tx = SolTransaction.from(txBytes);
+      assertSolanaPriorityFeeWithinCap(parseSolanaTransaction(request.transaction));
       const envelope = requireEnvelope();
       if (envelope) {
         assertSolanaTransferTransactionMatches(tx, {
