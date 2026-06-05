@@ -382,8 +382,8 @@ export class WebhookDispatcher {
       };
     }
 
-    // Stable delivery id (nonce) + first-send timestamp are fixed here and reused
-    // across retries so a receiver can dedup a retry vs. a fresh event.
+    // Stable delivery id is fixed here and reused across retries so a receiver
+    // can dedup a retry vs. a fresh event.
     const eventWithMeta = event as WebhookEvent & { deliveryId?: unknown; signedAt?: unknown };
     const deliveryId =
       typeof eventWithMeta.deliveryId === "string" && eventWithMeta.deliveryId.trim()
@@ -399,11 +399,6 @@ export class WebhookDispatcher {
     eventWithMeta.signedAt = Number(timestamp);
 
     const body = JSON.stringify(event);
-    // Signature is computed once over the canonical material and reused on every attempt.
-    const signature = `${SIGNATURE_SCHEME}=${await signPayload(
-      canonicalSignedPayload(timestamp, deliveryId, event.type, body),
-      config.secret,
-    )}`;
     let attempts = 0;
     let lastStatusCode: number | undefined;
     let lastError: string | undefined;
@@ -411,22 +406,20 @@ export class WebhookDispatcher {
     while (attempts <= this.maxRetries) {
       attempts += 1;
 
-      // `X-Steward-Timestamp` (signed) + `X-Steward-Delivery-Id` are fixed across
-      // retries so receivers can verify the byte-stable signature and dedup a
-      // retry against the original event. But the signed timestamp also drives
-      // the SDK verifier's freshness window (default 300s); reusing it on a slow
-      // retry would be rejected as stale. So we additionally emit an unsigned,
-      // per-attempt `X-Steward-Sent-At` (unix seconds) with the actual send time.
-      // Freshness-checking receivers should check `X-Steward-Sent-At` for
-      // transport recency and dedup on `X-Steward-Delivery-Id`.
+      // Sign the per-attempt freshness timestamp while keeping the delivery id
+      // stable for idempotent receivers.
       const sentAt = Math.floor(Date.now() / 1000).toString();
+      const signature = `${SIGNATURE_SCHEME}=${await signPayload(
+        canonicalSignedPayload(sentAt, deliveryId, event.type, body),
+        config.secret,
+      )}`;
 
       try {
         const response = await postWebhook(config.url, {
           headers: {
             "Content-Type": "application/json",
             "X-Steward-Event": event.type,
-            "X-Steward-Timestamp": timestamp,
+            "X-Steward-Timestamp": sentAt,
             "X-Steward-Sent-At": sentAt,
             "X-Steward-Signature": signature,
             "X-Steward-Delivery-Id": deliveryId,

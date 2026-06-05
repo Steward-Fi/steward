@@ -56,6 +56,8 @@ export const COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget1111111111111111111111111
 export const MEMO_PROGRAM_ID = "MemoSq4gq4ko9d4Cu9d4mGmFEKQ8L7sBoP7HfHGv5";
 
 const SPL_TOKEN_PROGRAM_IDS = new Set<string>([TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID]);
+const COMPUTE_BUDGET_MAX_UNIT_LIMIT = 1_400_000;
+const COMPUTE_BUDGET_MAX_PRIORITY_FEE_LAMPORTS = 500_000n;
 
 // ─── Result types ────────────────────────────────────────────────────────────
 
@@ -291,6 +293,7 @@ const POLICY_SUPPORTED_INSTRUCTION_TYPES = new Set<SolanaInstructionType>([
   "spl-token:Transfer",
   "spl-token:TransferChecked",
   "compute-budget:SetComputeUnitLimit",
+  "compute-budget:SetComputeUnitPrice",
   "compute-budget",
   "memo",
 ]);
@@ -359,14 +362,9 @@ function decodeComputeBudgetInstruction(index: number, data: Uint8Array): Parsed
     case COMPUTE_BUDGET_IX.SetComputeUnitPrice: {
       if (data.length < 9) return unparsed("SetComputeUnitPrice data too short");
       const microLamports = readU64LE(data, 1);
-      if (microLamports > 0n) {
-        return unparsed(
-          "SetComputeUnitPrice sets a nonzero priority fee; no Solana priority-fee policy is configured",
-        );
-      }
       return base({
         instructionType: "compute-budget:SetComputeUnitPrice",
-        fields: { microLamports: "0" },
+        fields: { microLamports: microLamports.toString() },
       });
     }
     case COMPUTE_BUDGET_IX.RequestUnitsDeprecated:
@@ -378,6 +376,49 @@ function decodeComputeBudgetInstruction(index: number, data: Uint8Array): Parsed
     default:
       return unparsed(`unsupported Compute Budget instruction discriminator ${disc}`);
   }
+}
+
+function isParsedComputeBudgetInstruction(instruction: ParsedInstruction): boolean {
+  return (
+    instruction.programId === COMPUTE_BUDGET_PROGRAM_ID &&
+    instruction.unparsed === false &&
+    (instruction.instructionType === "compute-budget:SetComputeUnitLimit" ||
+      instruction.instructionType === "compute-budget:SetComputeUnitPrice")
+  );
+}
+
+function assertParsedComputeBudgetWithinCap(instructions: ParsedInstruction[]): void {
+  let explicitUnitLimit: number | undefined;
+  let microLamportsPerCu = 0n;
+
+  for (const instruction of instructions) {
+    if (instruction.instructionType === "compute-budget:SetComputeUnitLimit") {
+      const units = instruction.fields.computeUnitLimit;
+      if (typeof units === "number") explicitUnitLimit = units;
+    }
+    if (instruction.instructionType === "compute-budget:SetComputeUnitPrice") {
+      const price = instruction.fields.microLamports;
+      if (typeof price === "string") microLamportsPerCu = BigInt(price);
+    }
+  }
+
+  if (microLamportsPerCu === 0n) return;
+  const valueInstructionCount = Math.max(
+    1,
+    instructions.filter((instruction) => !isParsedComputeBudgetInstruction(instruction)).length,
+  );
+  const effectiveUnitLimit =
+    explicitUnitLimit ?? Math.min(COMPUTE_BUDGET_MAX_UNIT_LIMIT, 200_000 * valueInstructionCount);
+  const projectedLamports = (BigInt(effectiveUnitLimit) * microLamportsPerCu) / 1_000_000n;
+  if (projectedLamports > COMPUTE_BUDGET_MAX_PRIORITY_FEE_LAMPORTS) {
+    throw new Error(
+      `Solana priority fee (${projectedLamports} lamports) exceeds the allowed maximum of ${COMPUTE_BUDGET_MAX_PRIORITY_FEE_LAMPORTS} lamports`,
+    );
+  }
+}
+
+export function assertSolanaPriorityFeeWithinCap(summary: ParsedTransactionSummary): void {
+  assertParsedComputeBudgetWithinCap(summary.instructions);
 }
 
 // ─── System Program decoding ─────────────────────────────────────────────────
@@ -976,11 +1017,15 @@ export function assertParsedSolanaTransferMatches(
       "Solana transaction is not fully parseable; cannot verify it against the policy envelope",
     );
   }
-  if (summary.instructions.length !== 1) {
+  const valueInstructions = summary.instructions.filter(
+    (instruction) => !isParsedComputeBudgetInstruction(instruction),
+  );
+  assertParsedComputeBudgetWithinCap(summary.instructions);
+  if (valueInstructions.length !== 1) {
     throw new Error("Solana signing only supports a single policy-checked transfer instruction");
   }
 
-  const [instruction] = summary.instructions;
+  const [instruction] = valueInstructions;
   if (instruction.instructionType !== "system:Transfer") {
     throw new Error("Solana transaction instruction must be a SystemProgram transfer");
   }

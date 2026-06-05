@@ -69,8 +69,8 @@ function hmac(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload).digest("hex");
 }
 
-// v2 signature scheme: HMAC over length-prefixed timestamp + deliveryId + event
-// type + body, with a `v2=` prefix on the header value.
+// v2 signature scheme: HMAC over length-prefixed freshness timestamp,
+// deliveryId, event type, and body, with a `v2=` prefix on the header value.
 function canonicalSignedPayload(
   timestamp: string,
   deliveryId: string,
@@ -81,7 +81,7 @@ function canonicalSignedPayload(
 }
 
 function expectedSignature(request: CapturedRequest, secret: string): string {
-  const timestamp = String(request.headers["x-steward-timestamp"]);
+  const timestamp = String(request.headers["x-steward-sent-at"]);
   const deliveryId = String(request.headers["x-steward-delivery-id"]);
   const eventType = String(request.headers["x-steward-event"]);
   return `v2=${hmac(
@@ -119,13 +119,42 @@ describe("WebhookDispatcher HMAC signing", () => {
   it("proves the signature rejects a tampered payload and a wrong secret", async () => {
     const server = await withWebhookServer((request) => {
       const signature = String(request.headers["x-steward-signature"]);
-      const timestamp = String(request.headers["x-steward-timestamp"]);
+      const timestamp = String(request.headers["x-steward-sent-at"]);
       const deliveryId = String(request.headers["x-steward-delivery-id"]);
       const tamperedBody = request.bodyText.replace("0xabc", "0xdef");
       expect(signature).not.toBe(
         `v2=${hmac(canonicalSignedPayload(timestamp, deliveryId, "tx_signed", tamperedBody), SECRET)}`,
       );
       expect(signature).not.toBe(expectedSignature(request, "wrong-secret"));
+      return { status: signature === expectedSignature(request, SECRET) ? 200 : 401 };
+    });
+
+    try {
+      const dispatcher = new WebhookDispatcher({
+        maxRetries: 0,
+        timeoutMs: 1_000,
+        allowPrivateNetwork: true,
+        allowInsecureHttp: true,
+      });
+      const result = await dispatcher.dispatch(makeEvent(), { url: server.url, secret: SECRET });
+
+      expect(result.success).toBe(true);
+      expect(server.requests).toHaveLength(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects a tampered X-Steward-Sent-At freshness timestamp", async () => {
+    const server = await withWebhookServer((request) => {
+      const signature = String(request.headers["x-steward-signature"]);
+      const sentAt = String(request.headers["x-steward-sent-at"]);
+      const deliveryId = String(request.headers["x-steward-delivery-id"]);
+      const eventType = String(request.headers["x-steward-event"]);
+      const tamperedSentAt = String(Number(sentAt) + 60);
+      expect(signature).not.toBe(
+        `v2=${hmac(canonicalSignedPayload(tamperedSentAt, deliveryId, eventType, request.bodyText), SECRET)}`,
+      );
       return { status: signature === expectedSignature(request, SECRET) ? 200 : 401 };
     });
 

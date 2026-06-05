@@ -28,6 +28,7 @@ describe("sign-solana — parser-derived policy wiring", () => {
     expect(vaultSource).toContain("parseSolanaTransaction");
     expect(vaultSource).toContain("deriveSolanaPolicyFields");
     expect(vaultSource).toContain("detectSolanaPolicyConflicts");
+    expect(vaultSource).toContain("assertSolanaPriorityFeeWithinCap");
   });
 
   it("no longer has the blanket disable function", () => {
@@ -84,6 +85,16 @@ describe("sign-solana — parser-derived policy wiring", () => {
     // The catch around parseSolanaTransaction must gate on the blind flag too.
     const tryParse = route.indexOf("try {\n    const summary = parseSolanaTransaction");
     expect(tryParse).toBeGreaterThanOrEqual(0);
+  });
+
+  it("enforces the parsed priority-fee cap before signing", () => {
+    const route = routeSlice();
+    const parse = route.indexOf("parseSolanaTransaction(body.transaction)");
+    const cap = route.indexOf("assertSolanaPriorityFeeWithinCap(summary)");
+    const signCall = route.indexOf("vault.signSolanaTransaction(");
+    expect(cap).toBeGreaterThan(parse);
+    expect(cap).toBeLessThan(signCall);
+    expect(route).toContain("Solana priority fee exceeds cap");
   });
 
   it("defines the blind-sign flag default-off, mirroring other unsafe flags", () => {

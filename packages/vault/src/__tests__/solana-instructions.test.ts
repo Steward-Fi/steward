@@ -504,7 +504,7 @@ describe("recognised value-neutral programs", () => {
     expect(summary.totalLamports).toBe("0");
   });
 
-  test("nonzero compute unit price fails closed because priority fees spend SOL", () => {
+  test("nonzero compute unit price is recognised and does not move funds", () => {
     const payer = Keypair.generate().publicKey;
     const computeBudget = new PublicKey("ComputeBudget111111111111111111111111111111");
     const data = new Uint8Array(9);
@@ -514,10 +514,11 @@ describe("recognised value-neutral programs", () => {
     const tx = new Transaction({ feePayer: payer, recentBlockhash: RECENT_BLOCKHASH }).add(ix);
     const summary = parseSolanaTransaction(legacyToBase64(tx));
 
-    expect(summary.fullyParsed).toBe(false);
-    expect(summary.instructions[0].unparsed).toBe(true);
-    expect(summary.instructions[0].reason).toContain("priority fee");
-    expect(deriveSolanaPolicyFields(summary).fullyParsed).toBe(false);
+    expect(summary.fullyParsed).toBe(true);
+    expect(summary.instructions[0].unparsed).toBe(false);
+    expect(summary.instructions[0].instructionType).toBe("compute-budget:SetComputeUnitPrice");
+    expect(summary.totalLamports).toBe("0");
+    expect(deriveSolanaPolicyFields(summary).fullyParsed).toBe(true);
   });
 });
 

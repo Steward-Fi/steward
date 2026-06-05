@@ -54,18 +54,17 @@ async function withWebhookServer(statuses: number[]) {
   };
 }
 
-// Regression for Steward-Fi/steward#103: a slow retry must carry a FRESH
-// per-attempt freshness header so a standard freshness-checking receiver does
-// not reject it as stale — while the signed timestamp / signature / delivery id
-// stay byte-stable across retries so the receiver can still verify and dedup.
+// Regression for Steward-Fi/steward#103 and #115: a slow retry must carry a
+// fresh per-attempt timestamp, and that freshness value must be signed while
+// the delivery id stays stable for deduplication.
 describe("WebhookDispatcher per-attempt sent-at freshness", () => {
-  it("emits X-Steward-Sent-At on every attempt while keeping the signed timestamp stable", async () => {
+  it("emits a fresh signed X-Steward-Sent-At on retry while keeping the delivery id stable", async () => {
     const server = await withWebhookServer([500, 200]);
 
     try {
       const dispatcher = new WebhookDispatcher({
         maxRetries: 1,
-        retryDelayMs: 5,
+        retryDelayMs: 1_100,
         timeoutMs: 1_000,
         allowPrivateNetwork: true,
         allowInsecureHttp: true,
@@ -82,16 +81,15 @@ describe("WebhookDispatcher per-attempt sent-at freshness", () => {
       expect(firstSentAt).toMatch(/^\d+$/);
       expect(secondSentAt).toMatch(/^\d+$/);
 
-      // Dedup material stays byte-stable across the retry.
-      expect(first?.headers["x-steward-timestamp"]).toBe(second?.headers["x-steward-timestamp"]);
-      expect(first?.headers["x-steward-signature"]).toBe(second?.headers["x-steward-signature"]);
+      expect(first?.headers["x-steward-timestamp"]).toBe(firstSentAt);
+      expect(second?.headers["x-steward-timestamp"]).toBe(secondSentAt);
       expect(first?.headers["x-steward-delivery-id"]).toBe(
         second?.headers["x-steward-delivery-id"],
       );
 
-      // Sent-at is a real send-time clock, never older than the signed timestamp.
-      const signedTs = Number(first?.headers["x-steward-timestamp"]);
-      expect(Number(firstSentAt)).toBeGreaterThanOrEqual(signedTs);
+      expect(first?.headers["x-steward-signature"]).not.toBe(
+        second?.headers["x-steward-signature"],
+      );
       expect(Number(secondSentAt)).toBeGreaterThanOrEqual(Number(firstSentAt));
     } finally {
       await server.close();

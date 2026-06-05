@@ -99,6 +99,7 @@ export type {
 } from "./solana-instructions";
 export {
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  assertSolanaPriorityFeeWithinCap,
   COMPUTE_BUDGET_PROGRAM_ID,
   deriveSolanaPolicyFields,
   deserializeSolanaMessage,

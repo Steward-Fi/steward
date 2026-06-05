@@ -187,6 +187,22 @@ const HL_MAX_DEPOSIT_USDC = 2000;
 const HL_MAX_WITHDRAW_USDC = 2000;
 const USDC_DECIMALS = 6;
 const ERC20_TRANSFER_SELECTOR = "0xa9059cbb";
+const USDC_AMOUNT_RE = /^\d+(?:\.(\d+))?$/;
+
+function parseUsdcBaseUnits(amount: string | number): bigint | null {
+  const raw = typeof amount === "number" ? String(amount) : amount.trim();
+  if (!USDC_AMOUNT_RE.test(raw)) return null;
+  const [, fractional = ""] = raw.match(USDC_AMOUNT_RE) ?? [];
+  if (fractional.length > USDC_DECIMALS) return null;
+  const [whole, fraction = ""] = raw.split(".");
+  return BigInt(whole) * 10n ** BigInt(USDC_DECIMALS) + BigInt(fraction.padEnd(USDC_DECIMALS, "0"));
+}
+
+function hasTooManyUsdcDecimals(amount: string | number): boolean {
+  const raw = typeof amount === "number" ? String(amount) : amount.trim();
+  const [, fractional = ""] = raw.match(USDC_AMOUNT_RE) ?? [];
+  return fractional.length > USDC_DECIMALS;
+}
 
 /**
  * Encode an ERC-20 `transfer(address,uint256)` call as calldata.
@@ -461,23 +477,25 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
   // amount: reject non-finite/NaN/<=0, enforce a per-call max cap, and reject
   // sub-cent/over-precision values the 6-decimal conversion can't represent.
   // (The no-amount path resolves the full withdrawable balance below.)
+  let explicitAmountBaseUnits: bigint | null = null;
   if (body.amount !== undefined) {
-    const amountNum = Number(body.amount);
-    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+    if (hasTooManyUsdcDecimals(body.amount)) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "amount has more than 6 decimal places" },
+        400,
+      );
+    }
+    explicitAmountBaseUnits = parseUsdcBaseUnits(body.amount);
+    if (explicitAmountBaseUnits === null || explicitAmountBaseUnits <= 0n) {
       return c.json<ApiResponse>({ ok: false, error: "amount must be a positive number" }, 400);
     }
+    const amountNum = Number(body.amount);
     if (amountNum > HL_MAX_WITHDRAW_USDC) {
       return c.json<ApiResponse>(
         {
           ok: false,
           error: `amount exceeds the per-withdraw maximum of ${HL_MAX_WITHDRAW_USDC} USDC; split into smaller withdraws`,
         },
-        400,
-      );
-    }
-    if (!Number.isInteger(amountNum * 10 ** USDC_DECIMALS)) {
-      return c.json<ApiResponse>(
-        { ok: false, error: "amount has more than 6 decimal places" },
         400,
       );
     }
@@ -494,14 +512,35 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
     );
   }
 
-  // Resolve amount BEFORE the policy gate so the real notional is policy-checked:
-  // explicit (already validated above), or the full withdrawable balance.
+  const explicitIdempotencyAmount =
+    explicitAmountBaseUnits !== null ? explicitAmountBaseUnits.toString() : null;
+  const idempotency = getOperatorIdempotency(`${tenantId}:withdraw`, body.idempotencyKey, {
+    agentId,
+    venue,
+    destination,
+    amount: explicitIdempotencyAmount,
+  });
+  if (idempotency.conflict) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
+  }
+  if (idempotency.response) {
+    return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+  }
+
+  // Resolve amount after the idempotency cache lookup, so a retry for a
+  // previous full-balance withdraw returns the cached success before reading a
+  // changed live balance.
   // `amount` stays human-readable for signing; `amountBaseUnits` (USDC 6-decimal
   // base units, a uint256 integer string) is what the policy spend-cap sees.
   let amount = body.amount;
+  let amountBaseUnits = explicitAmountBaseUnits;
   if (amount === undefined) {
     const withdrawable = await fetchWithdrawable(walletAddress);
-    if (!withdrawable || Number(withdrawable) <= 0) {
+    amountBaseUnits = withdrawable ? parseUsdcBaseUnits(withdrawable) : null;
+    if (!withdrawable || amountBaseUnits === null || amountBaseUnits <= 0n) {
       return c.json<ApiResponse>(
         { ok: false, error: "No withdrawable balance and no amount specified" },
         400,
@@ -509,15 +548,9 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
     }
     amount = withdrawable;
   }
-  // Convert the resolved amount to USDC base units for the policy gate. The
-  // explicit path is exact (validated to <= 6 decimals above); the fallback
-  // (venue's own decimal string) is floored — used only for the policy `value`,
-  // never for signing.
-  const amountBaseUnits = (() => {
-    const n = Number(amount);
-    if (!Number.isFinite(n) || n <= 0) return 0n;
-    return BigInt(Math.floor(n * 10 ** USDC_DECIMALS));
-  })();
+  if (amountBaseUnits === null) {
+    return c.json<ApiResponse>({ ok: false, error: "amount must be a positive number" }, 400);
+  }
 
   // ── Policy gate (BEFORE signing) ─────────────────────────────────────────────
   // The withdraw destination must be on the agent's approved list AND the amount
@@ -532,7 +565,7 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
       tenantId,
       to: destination,
       value: amountBaseUnits.toString(),
-      chainId: 42161, // Arbitrum — HL withdraw destination chain
+      chainId: 42161, // Arbitrum HL withdraw destination chain
     },
     // `venue` must be top-level on the evaluation context: the engine reads
     // `ctx.venue` (engine.ts) for the venue-allowlist evaluator. Nesting it
@@ -554,24 +587,6 @@ operatorRecoveryRoutes.post("/:venue/withdraw", async (c) => {
       reason,
     });
     return c.json({ code: "policy-violation", reason }, 400);
-  }
-
-  // Idempotency keyed on (agent, destination, amount). Computed after the policy
-  // gate so a rejected withdraw is never cached as a success.
-  const idempotency = getOperatorIdempotency(`${tenantId}:withdraw`, body.idempotencyKey, {
-    agentId,
-    venue,
-    destination,
-    amount: body.amount ?? null,
-  });
-  if (idempotency.conflict) {
-    return c.json<ApiResponse>(
-      { ok: false, error: "Idempotency key reused with a different body" },
-      409,
-    );
-  }
-  if (idempotency.response) {
-    return c.json<ApiResponse>({ ok: true, data: idempotency.response });
   }
 
   const adapter = buildAdapter(tenantId, agentId, walletAddress);

@@ -117,6 +117,7 @@ const MAX_SIMULATION_VALUE_DIGITS = 78; // uint256 decimal length
 const MAX_SIMULATION_DATA_BYTES = 32_768;
 const ALLOWED_SIMULATION_PROXY_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const DEFAULT_SIMULATION_CHAIN_ID = 84532;
 
 function rowToTemplate(row: any): PolicyTemplate {
   return {
@@ -361,7 +362,7 @@ function normalizeSimulationRequest(body: SimulateBody): SimRequest | null {
       body: "body" in request ? request.body : undefined,
       data: "data" in request ? request.data : undefined,
       value: proxyValue !== undefined ? String(proxyValue) : undefined,
-      chainId: typeof request.chainId === "number" ? request.chainId : undefined,
+      chainId: typeof request.chainId === "number" ? request.chainId : DEFAULT_SIMULATION_CHAIN_ID,
     };
   }
 
