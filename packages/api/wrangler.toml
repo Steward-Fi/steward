@@ -60,3 +60,10 @@ name = "steward-api-prod"
 SKIP_MIGRATIONS = "1"
 DATABASE_DRIVER = "neon-http"
 REDIS_DRIVER = "upstash"
+# OAuth redirect_uri allowlist for the Eliza Cloud SPA. The frontend builds
+# redirect_uri as `${NEXT_PUBLIC_APP_URL}/login`; prod app url is
+# https://elizacloud.ai and OAuth from preview deploys is routed through
+# https://staging.elizacloud.ai. Without this (or a per-tenant
+# allowedRedirectUrls) every OAuth authorize 400s with
+# "OAuth redirect_uri allowlist is not configured for this tenant".
+STEWARD_OAUTH_ALLOWED_REDIRECTS = "https://elizacloud.ai/login,https://staging.elizacloud.ai/login"
