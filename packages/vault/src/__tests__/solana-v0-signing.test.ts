@@ -3,17 +3,19 @@
  *
  * The sign-solana policy gate deserializes with VersionedTransaction (handles v0),
  * but the vault sign path used legacy `Transaction.from()`, which throws on a
- * versioned message — so every v0 tx (the modern default, mandatory for ALT DeFi
+ * versioned message, so every v0 tx (the modern default, mandatory for ALT DeFi
  * like Jupiter) passed policy then 500'd at signing. The fix branches on the
  * version byte and verifies the v0 transfer envelope via the version-aware parser
  * (assertParsedSolanaTransferMatches) since the legacy byte assertion can't read v0.
  */
 import { describe, expect, test } from "bun:test";
 import {
+  ComputeBudgetProgram,
   Keypair,
   PublicKey,
   SystemProgram,
   Transaction,
+  type TransactionInstruction,
   TransactionMessage,
   VersionedTransaction,
 } from "@solana/web3.js";
@@ -26,6 +28,18 @@ const RECENT_BLOCKHASH = new PublicKey(new Uint8Array(32).fill(7)).toBase58();
 
 function v0TransferBytes(from: Keypair, to: PublicKey, lamports: number): Uint8Array {
   return v0TransferSetBytes(from, [{ to, lamports }]);
+}
+
+function v0TransferWithInstructionsBytes(
+  from: Keypair,
+  instructions: TransactionInstruction[],
+): Uint8Array {
+  const msg = new TransactionMessage({
+    payerKey: from.publicKey,
+    recentBlockhash: RECENT_BLOCKHASH,
+    instructions,
+  }).compileToV0Message();
+  return new VersionedTransaction(msg).serialize();
 }
 
 function v0TransferSetBytes(
@@ -68,6 +82,24 @@ describe("v0 (versioned) Solana signing", () => {
     const b64 = toBase64(v0TransferBytes(from, to, 5000));
     expect(() =>
       assertParsedSolanaTransferMatches(b64, { to: to.toBase58(), lamports: 5000n }),
+    ).not.toThrow();
+  });
+
+  test("assertParsedSolanaTransferMatches accepts a v0 transfer with a prepended compute budget limit", () => {
+    const from = Keypair.generate();
+    const to = Keypair.generate().publicKey;
+    const b64 = toBase64(
+      v0TransferWithInstructionsBytes(from, [
+        ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }),
+        SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports: 5000 }),
+      ]),
+    );
+    expect(() =>
+      assertParsedSolanaTransferMatches(b64, {
+        from: from.publicKey.toBase58(),
+        to: to.toBase58(),
+        lamports: 5000n,
+      }),
     ).not.toThrow();
   });
 

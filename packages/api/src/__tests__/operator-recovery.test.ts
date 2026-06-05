@@ -1,5 +1,5 @@
 /**
- * operator-recovery.test.ts — Operator close-all + withdraw endpoint tests.
+ * operator-recovery.test.ts: Operator close-all + withdraw endpoint tests.
  *
  * Covers:
  *   - auth: no key → 401, wrong platform key → 403, valid platform key → proceeds
@@ -143,7 +143,7 @@ async function buildApp() {
   return app;
 }
 
-describe("operator recovery — auth", () => {
+describe("operator recovery auth", () => {
   it("rejects close-all with no auth (401)", async () => {
     const app = await buildApp();
     const res = await app.request("/v1/trade/hyperliquid/close-all", {
@@ -168,7 +168,7 @@ describe("operator recovery — auth", () => {
   });
 });
 
-describe("operator recovery — close-all", () => {
+describe("operator recovery close-all", () => {
   it("closes all positions with a valid platform key and audits each close", async () => {
     const tenantId = `tenant-close-${Date.now()}`;
     const agentId = `agent-close-${Date.now()}`;
@@ -194,7 +194,7 @@ describe("operator recovery — close-all", () => {
   });
 });
 
-describe("operator recovery — withdraw", () => {
+describe("operator recovery withdraw", () => {
   it("rejects a withdraw to a destination NOT in approved-addresses", async () => {
     const tenantId = `tenant-wd-bad-${Date.now()}`;
     const agentId = `agent-wd-bad-${Date.now()}`;
@@ -247,5 +247,59 @@ describe("operator recovery — withdraw", () => {
     expect(signWithdrawCalls.length).toBe(1);
     expect(signWithdrawCalls[0]).toMatchObject({ amount: "100", destination: approved });
     expect(submitWithdrawCalls.length).toBe(1);
+  });
+
+  it("returns cached success for a no-amount withdraw retry before reading a changed live balance", async () => {
+    const tenantId = `tenant-wd-idem-${Date.now()}`;
+    const agentId = `agent-wd-idem-${Date.now()}`;
+    const approved = "0x4444444444444444444444444444444444444444";
+    await seedAgent({ tenantId, agentId, approvedAddresses: [approved] });
+    signWithdrawCalls.length = 0;
+    submitWithdrawCalls.length = 0;
+
+    const originalFetch = globalThis.fetch;
+    let fetchCalls = 0;
+    globalThis.fetch = (async () => {
+      fetchCalls += 1;
+      return new Response(JSON.stringify({ withdrawable: fetchCalls === 1 ? "42" : "0" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    try {
+      const app = await buildApp();
+      const headers = {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": `idem-${Date.now()}`,
+      };
+      const body = JSON.stringify({ agentId, destination: approved });
+
+      const first = await app.request("/v1/trade/hyperliquid/withdraw", {
+        method: "POST",
+        headers,
+        body,
+      });
+      expect(first.status).toBe(200);
+      const firstJson = (await first.json()) as { ok: boolean; data: { amount: string } };
+      expect(firstJson.ok).toBe(true);
+      expect(firstJson.data.amount).toBe("42");
+
+      const retry = await app.request("/v1/trade/hyperliquid/withdraw", {
+        method: "POST",
+        headers,
+        body,
+      });
+      expect(retry.status).toBe(200);
+      const retryJson = (await retry.json()) as { ok: boolean; data: { amount: string } };
+      expect(retryJson).toEqual(firstJson);
+      expect(fetchCalls).toBe(1);
+      expect(signWithdrawCalls.length).toBe(1);
+      expect(submitWithdrawCalls.length).toBe(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

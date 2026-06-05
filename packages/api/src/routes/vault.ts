@@ -24,6 +24,7 @@ import {
   toCaip2,
 } from "@stwd/shared";
 import {
+  assertSolanaPriorityFeeWithinCap,
   type DerivedSolanaPolicyFields,
   deriveSolanaPolicyFields,
   detectSolanaPolicyConflicts,
@@ -6457,6 +6458,17 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
   let derived: DerivedSolanaPolicyFields;
   try {
     const summary = parseSolanaTransaction(body.transaction);
+    try {
+      assertSolanaPriorityFeeWithinCap(summary);
+    } catch (feeErr) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: feeErr instanceof Error ? feeErr.message : "Solana priority fee exceeds cap",
+        },
+        422,
+      );
+    }
     derived = deriveSolanaPolicyFields(summary);
   } catch (parseErr) {
     // The payload could not even be deserialized into a transaction. Fail closed

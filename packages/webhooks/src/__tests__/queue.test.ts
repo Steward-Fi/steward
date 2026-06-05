@@ -246,12 +246,12 @@ describe("RetryQueue", () => {
     }
   });
 
-  it("reuses a stable delivery id, timestamp, and signature across in-process retries", async () => {
+  it("reuses a stable delivery id but signs each in-process retry timestamp", async () => {
     const server = await startWebhookServer([500, 200]);
     try {
       const dispatcher = new WebhookDispatcher({
         maxRetries: 1,
-        retryDelayMs: 1,
+        retryDelayMs: 1_100,
         allowPrivateNetwork: true,
         allowInsecureHttp: true,
       });
@@ -260,10 +260,10 @@ describe("RetryQueue", () => {
       expect(result.success).toBe(true);
       expect(server.requests).toHaveLength(2);
       const [a, b] = server.requests;
-      // A retry must look identical to the first send so a receiver can dedup it.
       expect(a?.headers["x-steward-delivery-id"]).toBe(b?.headers["x-steward-delivery-id"]);
-      expect(a?.headers["x-steward-timestamp"]).toBe(b?.headers["x-steward-timestamp"]);
-      expect(a?.headers["x-steward-signature"]).toBe(b?.headers["x-steward-signature"]);
+      expect(a?.headers["x-steward-timestamp"]).toBe(a?.headers["x-steward-sent-at"]);
+      expect(b?.headers["x-steward-timestamp"]).toBe(b?.headers["x-steward-sent-at"]);
+      expect(a?.headers["x-steward-signature"]).not.toBe(b?.headers["x-steward-signature"]);
       expect(a?.bodyText).toBe(b?.bodyText);
     } finally {
       await server.close();

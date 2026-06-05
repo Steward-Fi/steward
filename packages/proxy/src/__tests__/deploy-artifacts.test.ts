@@ -141,6 +141,16 @@ describe("#111 deploy/provision-steward-node.sh does not leak secrets", () => {
     expect(echoesKey).toBe(false);
   });
 
+  test("the proxy request signing secret value is never echoed to stdout", () => {
+    const agentConfigLine = lines.find(
+      (l) => /^\s*echo\b/.test(l) && /STEWARD_PROXY_REQUEST_SIGNING_SECRETS=/.test(l),
+    );
+    expect(agentConfigLine).toBeDefined();
+    expect(agentConfigLine).not.toContain("${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}");
+    expect(agentConfigLine).toContain("retrieve from ${REMOTE_DIR}/deploy/.env on the node");
+    expect(script).toContain("the node-side .env is mode 0600");
+  });
+
   test(".env is rendered locally and piped over ssh stdin", () => {
     // The fixed flow writes a local temp env file and streams it to the node.
     expect(/LOCAL_ENV_FILE/.test(script)).toBe(true);

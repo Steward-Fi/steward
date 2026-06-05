@@ -4,7 +4,7 @@
  * points at an arbitrary address.
  *
  * The approved-addresses evaluator treats an envelope `destination` (and
- * `action.destination` / `withdraw.destination`) as authoritative over `to` —
+ * `action.destination` / `withdraw.destination`) as authoritative over `to`;
  * this is intentional for the server-built operator-withdraw flow. The /sign
  * route, however, used to spread the raw request body into the SignRequest, so a
  * body { to: <attacker>, destination: <whitelisted> } was evaluated against the
@@ -12,9 +12,10 @@
  * attacker `to`. The fix builds the SignRequest from its declared fields only,
  * so `to` is authoritative on /sign. This drives the REAL route.
  */
-import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout, spyOn } from "bun:test";
 import { agents, closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { Vault } from "@stwd/vault";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -45,6 +46,7 @@ type SignBody = { ok: boolean; error?: string; data?: { results?: PolicyResult[]
 
 describe("approved-addresses /sign destination-smuggle guard (real route)", () => {
   let app: Awaited<ReturnType<typeof makeApp>>;
+  let rpcSpy: { mockRestore: () => void } | undefined;
 
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -74,9 +76,15 @@ describe("approved-addresses /sign destination-smuggle guard (real route)", () =
         config: { addresses: [ALLOWED], mode: "whitelist" },
       });
     app = await makeApp();
+    rpcSpy = spyOn(Vault.prototype, "rpcPassthrough").mockResolvedValue({
+      jsonrpc: "2.0",
+      id: 1,
+      result: "0x",
+    } as Awaited<ReturnType<Vault["rpcPassthrough"]>>);
   });
 
   afterAll(async () => {
+    rpcSpy?.mockRestore();
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
@@ -90,11 +98,11 @@ describe("approved-addresses /sign destination-smuggle guard (real route)", () =
     });
   }
 
-  it("does not let a smuggled `destination` satisfy the allowlist — `to` is authoritative", async () => {
+  it("does not let a smuggled `destination` satisfy the allowlist; `to` is authoritative", async () => {
     const res = await postSign({ to: ATTACKER, destination: ALLOWED });
     const body = (await res.json()) as SignBody;
 
-    // Must NOT be authorized. (403 hard-deny or 202 pending-approval — either way
+    // Must NOT be authorized. (403 hard-deny or 202 pending-approval; either way
     // the smuggle did not pass; pre-fix this returned an authorized/sign path.)
     expect(body.ok).toBe(false);
     // The approved-addresses policy must have FAILED, evaluated against `to`.
@@ -115,8 +123,8 @@ describe("approved-addresses /sign destination-smuggle guard (real route)", () =
   it("a genuinely whitelisted `to` is NOT rejected by the allowlist (positive control)", async () => {
     const res = await postSign({ to: ALLOWED });
     const body = (await res.json()) as SignBody;
-    // It passes the allowlist (it may fail later for unrelated reasons — no key is
-    // provisioned — but it is NOT a policy rejection).
+    // It passes the allowlist (it may fail later for unrelated reasons, since no
+    // key is provisioned, but it is NOT a policy rejection).
     expect(body.error).not.toBe("Transaction rejected by policy");
   });
 });

@@ -412,6 +412,10 @@ jobs:
           STEWARD_PLATFORM_KEYS: "ci-platform-key"
           STEWARD_JWT_SECRET: "ci-jwt-secret-must-be-at-least-32-chars-long"
           STEWARD_KDF_SALT: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+          # docker compose interpolates the full compose env even for logs/down,
+          # so every required variable from the up step must be present here too
+          # or the teardown fails (exit 1) despite all tests passing.
+          STEWARD_AUDIT_HMAC_KEY: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
           POSTGRES_DB: "steward_test"
           POSTGRES_USER: "steward"
           POSTGRES_PASSWORD: "steward_ci"

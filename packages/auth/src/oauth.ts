@@ -45,13 +45,9 @@ export interface OAuthProvider {
    */
   clientIdParam?: string;
   /**
-   * Asserts that this provider only ever returns a confirmed/verified account
-   * email, even though its userinfo response carries no per-response
-   * verification flag (and it has no emailUrl fallback). Spotify is the
-   * canonical case: /v1/me returns the account's confirmed email but no
-   * `verified`/`email_verified` field, so without this the account-takeover
-   * gate in provisionOAuthUser() would reject every Spotify login. When true
-   * and a non-empty email is returned, getUserInfo() marks verified_email.
+   * Asserts that this provider returns a confirmed/verified account email even
+   * though its userinfo response carries no per-response verification flag.
+   * Only set this when the provider's contract proves email verification.
    */
   assertsEmailVerified?: boolean;
   /**
@@ -415,11 +411,9 @@ export function getProviderConfig(provider: string): OAuthProvider {
         tokenUrl: "https://accounts.spotify.com/api/token",
         userInfoUrl: "https://api.spotify.com/v1/me",
         scopes: ["user-read-email"],
-        // Spotify requires the account email to be confirmed before the account
-        // can be used, but /v1/me returns no per-response verification flag.
-        // Trust the returned email as verified so the OAuth sign-in gate can be
-        // satisfied (otherwise Spotify login fails closed with 403 forever).
-        assertsEmailVerified: true,
+        // Spotify /v1/me returns an email but no per-response verification flag.
+        // Do not assert verification, so the takeover gate remains fail-closed.
+        assertsEmailVerified: false,
         profileMap: {
           id: "id",
           email: "email",
@@ -739,9 +733,8 @@ export class OAuthClient {
       }
     }
 
-    // Providers that only ever return a confirmed account email (e.g. Spotify)
-    // expose no per-response verification flag. Treat a non-empty email from
-    // such a provider as verified so the OAuth sign-in gate is satisfiable.
+    // Providers that only ever return a confirmed account email can opt in to
+    // treating a non-empty email as verified.
     if (this.provider.assertsEmailVerified && userInfo.email) {
       userInfo.verified_email = true;
     }

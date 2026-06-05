@@ -1,5 +1,5 @@
 /**
- * operator-recovery-withdraw-validation.test.ts — Regression tests for issue #109.
+ * operator-recovery-withdraw-validation.test.ts: Regression tests for issue #109.
  *
  * Without the fix, POST /v1/trade/:venue/withdraw (operator fund-recovery):
  *   - accepts an unvalidated explicit `amount` (negative / NaN / non-finite /
@@ -164,7 +164,7 @@ async function postWithdraw(
   });
 }
 
-describe("operator recovery — withdraw amount validation (issue #109)", () => {
+describe("operator recovery withdraw amount validation (issue #109)", () => {
   const approved = "0x4444444444444444444444444444444444444444";
 
   // Each bad amount must be rejected 400 and signWithdraw must NEVER be called.
@@ -210,9 +210,28 @@ describe("operator recovery — withdraw amount validation (issue #109)", () => 
     expect(bodyJson.error ?? "").toContain("maximum");
     expect(signWithdrawCalls.length).toBe(0);
   });
+
+  it("accepts a valid 6-decimal USDC amount without floating-point rejection", async () => {
+    const tenantId = `tenant-wd-six-dec-${Date.now()}`;
+    const agentId = `agent-wd-six-dec-${Date.now()}`;
+    await seedAgent({ tenantId, agentId, approvedAddresses: [approved] });
+    signWithdrawCalls.length = 0;
+    submitWithdrawCalls.length = 0;
+
+    const app = await buildApp();
+    const res = await postWithdraw(app, tenantId, {
+      agentId,
+      amount: "1.000001",
+      destination: approved,
+    });
+
+    expect(res.status).toBe(200);
+    expect(signWithdrawCalls.length).toBe(1);
+    expect(signWithdrawCalls[0]).toMatchObject({ amount: "1.000001", destination: approved });
+  });
 });
 
-describe("operator recovery — withdraw spend-cap enforcement (issue #109)", () => {
+describe("operator recovery withdraw spend-cap enforcement (issue #109)", () => {
   const approved = "0x5555555555555555555555555555555555555555";
 
   it("rejects an in-bounds amount that exceeds the spend-cap, even to an approved destination", async () => {
