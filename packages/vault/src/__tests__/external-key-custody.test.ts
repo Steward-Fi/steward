@@ -1,10 +1,13 @@
 import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { agentWallets, encryptedChainKeys, eq, getDb, tenants } from "@stwd/db";
+import { agentWallets, encryptedChainKeys, eq, getDb, tenants, transactions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type {
   ExternalKeyCustodyProvider,
   ExternalKeyHandleImportRequest,
   ExternalKeyHandleRegistration,
+  ExternalKeySigningAvailability,
+  ExternalKeySignTransactionRequest,
+  ExternalKeySignTransactionResult,
 } from "../external-key-custody";
 import { Vault } from "../vault";
 
@@ -18,6 +21,14 @@ const openClients: Array<{ close: () => Promise<void> }> = [];
 class TestExternalKeyProvider implements ExternalKeyCustodyProvider {
   id = "test-external-key-provider";
   registerCalls: ExternalKeyHandleImportRequest[] = [];
+  signCalls: ExternalKeySignTransactionRequest[] = [];
+
+  constructor(
+    private readonly signingAvailability: ExternalKeySigningAvailability = "not-supported",
+    private readonly signer?: (
+      request: ExternalKeySignTransactionRequest,
+    ) => Promise<ExternalKeySignTransactionResult>,
+  ) {}
 
   async registerKeyHandle(
     request: ExternalKeyHandleImportRequest,
@@ -35,8 +46,18 @@ class TestExternalKeyProvider implements ExternalKeyCustodyProvider {
       metadata: request.metadata ?? {},
       registeredAt: new Date("2026-06-05T00:00:00.000Z"),
       exportablePrivateKey: false,
-      signingAvailability: "not-supported",
+      signingAvailability: this.signingAvailability,
     };
+  }
+
+  async signTransaction(
+    request: ExternalKeySignTransactionRequest,
+  ): Promise<ExternalKeySignTransactionResult> {
+    this.signCalls.push(request);
+    if (!this.signer) {
+      throw new Error("test signer not installed");
+    }
+    return this.signer(request);
   }
 }
 
@@ -213,6 +234,48 @@ describe("external key custody seam", () => {
         broadcast: false,
       }),
     ).rejects.toThrow("External key custody signing provider is not configured for this wallet");
+  });
+
+  test("delegates transaction signing to a provider without private key material", async () => {
+    const provider = new TestExternalKeyProvider("provider-signing", async (request) => {
+      expect(request.handle).toEqual({
+        providerId: "test-hsm",
+        keyId: "key-1",
+        version: "1",
+        region: "us-east-1",
+      });
+      expect(request.address).toBe("0x1111111111111111111111111111111111111111");
+      expect(JSON.stringify(request).toLowerCase()).not.toContain("privatekey");
+      return { result: "0xsigned-by-external-provider", broadcast: false };
+    });
+    vault = await freshVault(provider);
+    await vault.createAgent(TENANT_ID, "agent-external", "External Agent");
+    await vault.importExternalKeyHandle(externalHandleRequest());
+
+    const signed = await vault.signTransaction(
+      {
+        tenantId: TENANT_ID,
+        agentId: "agent-external",
+        chainId: 8453,
+        to: "0x2222222222222222222222222222222222222222",
+        value: "1",
+        data: "0x",
+        venue: "hsm-primary",
+        broadcast: false,
+      },
+      { txId: "external-tx-1" },
+    );
+
+    expect(signed).toBe("0xsigned-by-external-provider");
+    expect(provider.signCalls).toHaveLength(1);
+
+    const [tx] = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, "external-tx-1"));
+    expect(tx?.agentId).toBe("agent-external");
+    expect(tx?.status).toBe("signed");
+    expect(tx?.txHash).toBeNull();
   });
 
   test("break-glass private key export refuses agents with external custody wallets", async () => {

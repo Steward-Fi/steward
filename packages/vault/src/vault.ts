@@ -1037,7 +1037,48 @@ export class Vault {
             );
           }
         }
-        throw externalKeySigningUnavailableError();
+        if (
+          externalWallet.metadata.externalKey.signingAvailability !== "provider-signing" ||
+          !this.externalKeyCustodyProvider?.signTransaction
+        ) {
+          throw externalKeySigningUnavailableError();
+        }
+        const rpcUrl = isSolana
+          ? (this.config.rpcUrl ?? resolveSolanaRpc(chainId))
+          : (CHAIN_RPCS[chainId] ?? this.config.rpcUrl);
+        const signed = await this.externalKeyCustodyProvider.signTransaction({
+          tenantId: request.tenantId,
+          agentId: request.agentId,
+          chainFamily: chainFamilyToUse,
+          address: externalWallet.address,
+          handle: {
+            providerId: externalWallet.metadata.externalKey.providerId,
+            keyId: externalWallet.metadata.externalKey.keyId,
+            version: externalWallet.metadata.externalKey.version,
+            region: externalWallet.metadata.externalKey.region,
+          },
+          venue,
+          chainId,
+          to: request.to,
+          value: request.value,
+          data: request.data,
+          gasLimit: request.gasLimit,
+          nonce: request.nonce,
+          broadcast: shouldBroadcast,
+          rpcUrl,
+        });
+        assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
+        if (signed.broadcast !== shouldBroadcast) {
+          throw new Error("External key custody signer returned an unexpected broadcast mode");
+        }
+        await this.recordSignedTransaction(
+          request,
+          chainId,
+          shouldBroadcast,
+          signed.result,
+          options,
+        );
+        return signed.result;
       }
       if (venue) {
         throw missingSigningKeyError(request.agentId, chainFamilyToUse, venue);

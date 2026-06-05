@@ -128,9 +128,9 @@ function getOAuthCallbackParams(url: URL): { code?: string; state?: string; erro
   const fragment = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
   if (fragment) {
     const hashParams = new URLSearchParams(fragment);
-    for (const [key, value] of hashParams) {
+    hashParams.forEach((value, key) => {
       if (!params.has(key)) params.set(key, value);
-    }
+    });
   }
   return {
     code: params.get("code") ?? undefined,
