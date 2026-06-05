@@ -186,11 +186,32 @@ describe("webhook signed delivery (real dispatcher → local HTTP sink)", () => 
 
     expect(result.success).toBe(true);
     expect(captured.length).toBeGreaterThanOrEqual(3);
+    // The delivery id is stable across retries so receivers can dedupe. The
+    // signed timestamp (X-Steward-Timestamp) and its signature are re-computed
+    // per attempt so the freshness value a receiver checks is always inside the
+    // signed material (see the per-attempt freshness fix). We therefore assert a
+    // single delivery id, and that every signature correctly binds its own
+    // attempt's timestamp (rather than asserting the signature stays constant,
+    // which would reintroduce the unsigned-freshness gap and also flake when
+    // attempts straddle a one-second boundary).
     const ids = new Set(captured.map((d) => d.headers["x-steward-delivery-id"]));
-    const sigs = new Set(captured.map((d) => d.headers["x-steward-signature"]));
-    const timestamps = new Set(captured.map((d) => d.headers["x-steward-timestamp"]));
     expect(ids.size).toBe(1);
-    expect(sigs.size).toBe(1);
-    expect(timestamps.size).toBe(1);
+    for (const d of captured) {
+      const ts = d.headers["x-steward-timestamp"];
+      const sentAt = d.headers["x-steward-sent-at"];
+      const sig = d.headers["x-steward-signature"];
+      const eventType = d.headers["x-steward-event"];
+      const deliveryId = d.headers["x-steward-delivery-id"];
+      expect(ts).toBeDefined();
+      expect(sig?.startsWith(`${SIGNATURE_SCHEME}=`)).toBe(true);
+      // The timestamp used for freshness must equal the one bound into the
+      // signature for this attempt.
+      expect(sentAt).toBe(ts);
+      const expectedHex = await hmacHex(
+        canonicalSignedPayload(ts, deliveryId, eventType, d.rawBody),
+        SECRET,
+      );
+      expect(sig).toBe(`${SIGNATURE_SCHEME}=${expectedHex}`);
+    }
   });
 });

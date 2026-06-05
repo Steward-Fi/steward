@@ -409,7 +409,11 @@ function assertParsedComputeBudgetWithinCap(instructions: ParsedInstruction[]): 
   );
   const effectiveUnitLimit =
     explicitUnitLimit ?? Math.min(COMPUTE_BUDGET_MAX_UNIT_LIMIT, 200_000 * valueInstructionCount);
-  const projectedLamports = (BigInt(effectiveUnitLimit) * microLamportsPerCu) / 1_000_000n;
+  // Solana charges the priority fee rounded UP to the next lamport, so use
+  // ceiling division here. Flooring would let a fee of e.g. 500,001 lamports
+  // (product 500,000.x) slip past a 500,000 cap. Fail closed.
+  const feeNumerator = BigInt(effectiveUnitLimit) * microLamportsPerCu;
+  const projectedLamports = (feeNumerator + 999_999n) / 1_000_000n;
   if (projectedLamports > COMPUTE_BUDGET_MAX_PRIORITY_FEE_LAMPORTS) {
     throw new Error(
       `Solana priority fee (${projectedLamports} lamports) exceeds the allowed maximum of ${COMPUTE_BUDGET_MAX_PRIORITY_FEE_LAMPORTS} lamports`,
