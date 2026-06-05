@@ -16,9 +16,11 @@ import { Hono } from "hono";
 
 setDefaultTimeout(30000);
 
+const auditHmacKey = "trade-policy-audit-test-audit-hmac-key-0123456789abcdef";
+
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
-  process.env.STEWARD_AUDIT_HMAC_KEY ??= "trade-policy-audit-test-audit-hmac-key-0123456789abcdef";
+  process.env.STEWARD_AUDIT_HMAC_KEY ??= auditHmacKey;
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
