@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Steward API",
-    "version": "0.3.0",
+    "version": "0.4.4",
     "description": "Generated OpenAPI contract for implemented Steward API surfaces. This contract includes Privy-parity account resources, wallet external IDs, gas spend filtering, transaction reference filtering, and request-hardening inventory markers for sensitive mutating routes."
   },
   "servers": [
@@ -120,6 +120,48 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "TradeTokenStatus": {
+        "type": "object",
+        "required": [
+          "agentId",
+          "status",
+          "exp",
+          "observedAt",
+          "expiresInSeconds"
+        ],
+        "properties": {
+          "agentId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "observed"
+            ]
+          },
+          "exp": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "observedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expiresInSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
       }
     }
   },
@@ -73276,44 +73318,7 @@
                       "const": true
                     },
                     "data": {
-                      "type": "object",
-                      "required": [
-                        "agentId",
-                        "status",
-                        "exp",
-                        "observedAt",
-                        "expiresInSeconds"
-                      ],
-                      "properties": {
-                        "agentId": {
-                          "type": "string"
-                        },
-                        "status": {
-                          "type": "string",
-                          "enum": [
-                            "unknown",
-                            "observed"
-                          ]
-                        },
-                        "exp": {
-                          "type": [
-                            "integer",
-                            "null"
-                          ]
-                        },
-                        "observedAt": {
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "expiresInSeconds": {
-                          "type": [
-                            "integer",
-                            "null"
-                          ]
-                        }
-                      }
+                      "$ref": "#/components/schemas/TradeTokenStatus"
                     }
                   }
                 }
@@ -75781,44 +75786,7 @@
                       "const": true
                     },
                     "data": {
-                      "type": "object",
-                      "required": [
-                        "agentId",
-                        "status",
-                        "exp",
-                        "observedAt",
-                        "expiresInSeconds"
-                      ],
-                      "properties": {
-                        "agentId": {
-                          "type": "string"
-                        },
-                        "status": {
-                          "type": "string",
-                          "enum": [
-                            "unknown",
-                            "observed"
-                          ]
-                        },
-                        "exp": {
-                          "type": [
-                            "integer",
-                            "null"
-                          ]
-                        },
-                        "observedAt": {
-                          "type": [
-                            "string",
-                            "null"
-                          ]
-                        },
-                        "expiresInSeconds": {
-                          "type": [
-                            "integer",
-                            "null"
-                          ]
-                        }
-                      }
+                      "$ref": "#/components/schemas/TradeTokenStatus"
                     }
                   }
                 }

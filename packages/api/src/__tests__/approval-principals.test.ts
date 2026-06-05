@@ -196,7 +196,8 @@ describe.skipIf(SKIP)("approval principal tracking and 4-eyes enforcement", () =
     // The vault route resolves the queue entry to "approved" and records the
     // authenticated approver (the body-supplied "spoofed-approver" is ignored).
     expect(approval.status).toBe("approved");
-    expect(approval.resolvedBy).toBe(APPROVER_USER_ID);
+    expect(approval.resolvedBy).toBe(`user:${APPROVER_USER_ID}`);
+    expect(approval.resolvedById).toBe(APPROVER_USER_ID);
     expect(approval.resolvedBy).not.toBe("spoofed-approver");
   });
 });

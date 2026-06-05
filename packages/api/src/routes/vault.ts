@@ -121,6 +121,7 @@ async function writeVaultAudit(
 // Fail-closed by construction: anything other than the exact string "true"
 // (unset, "false", "1", etc.) yields false, i.e. signing disabled.
 const allowPrivateKeyExport = (): boolean =>
+  process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
   process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
 const allowVaultPrivateKeyExport = (): boolean =>
   process.env.STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT === "true";
@@ -1780,10 +1781,17 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     if (gasGuard) return gasGuard;
   }
   const signRequest: SignRequest = {
-    ...request,
     tenantId,
     agentId,
+    to: request.to,
+    value: request.value,
+    data: request.data,
     chainId: resolvedChainId,
+    nonce: request.nonce,
+    gasLimit: request.gasLimit,
+    broadcast: request.broadcast,
+    venue: request.venue,
+    walletAddress: request.walletAddress,
   };
   const shouldBroadcast = signRequest.broadcast !== false;
   if (shouldBroadcast && !isNonEmptyString(c.req.header("Idempotency-Key"))) {
@@ -7227,7 +7235,7 @@ vaultRoutes.post("/:agentId/export", async (c) => {
       {
         ok: false,
         error:
-          "Private key export is disabled. Set STEWARD_ALLOW_PRIVATE_KEY_EXPORT=true and STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT=true only for audited break-glass operations.",
+          "Private key export is disabled. Set STEWARD_ALLOW_KEY_EXPORT=true, STEWARD_ALLOW_PRIVATE_KEY_EXPORT=true, and STEWARD_ALLOW_VAULT_PRIVATE_KEY_EXPORT=true only for audited break-glass operations.",
       },
       403,
     );

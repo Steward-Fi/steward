@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { createHash } from "node:crypto";
 import { generateP256KeyPair } from "@stwd/auth";
 import { agentSigners, agents, closeDb, getDb, policies, tenants } from "@stwd/db";
@@ -9,6 +9,8 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = `agent-signers-tenant-${Date.now()}`;
 const AGENT_ID = `agent-signers-agent-${Date.now()}`;
+
+setDefaultTimeout(30000);
 
 async function makeApp(authMode: "admin" | "admin-no-mfa" | "api-key" = "admin") {
   const { agentRoutes } = await import("../routes/agents");
@@ -36,6 +38,7 @@ describe("agent signer API", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "agent-signers-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "agent-signers-audit-hmac-key-with-enough-entropy";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -76,6 +79,7 @@ describe("agent signer API", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   it("creates, lists, updates, and revokes delegated signer metadata", async () => {

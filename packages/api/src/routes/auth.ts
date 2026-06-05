@@ -315,6 +315,21 @@ async function getTenantAuthAbuseConfig(tenantId: string) {
   return row?.authAbuseConfig ?? {};
 }
 
+function validateUserAuthAbusePolicy(
+  userId: string,
+  config: TenantAuthAbuseConfig & {
+    user?: { allowedUserIds?: string[]; blockedUserIds?: string[] };
+  },
+): string | null {
+  const userConfig = config.user;
+  if (!userConfig) return null;
+  if (userConfig.blockedUserIds?.includes(userId)) return "user id is blocked";
+  if (userConfig.allowedUserIds?.length && !userConfig.allowedUserIds.includes(userId)) {
+    return "user id is not allowed";
+  }
+  return null;
+}
+
 async function getTenantAppClientLoginMethods(
   tenantId: string,
   clientId: string | undefined,
@@ -3377,6 +3392,10 @@ async function completeEmailAuth(
   const emailPolicyError = validateEmailAbusePolicy(email, authAbuseConfig);
   if (emailPolicyError) {
     return { ok: false, status: 403, error: emailPolicyError };
+  }
+  const userPolicyError = validateUserAuthAbusePolicy(user.id, authAbuseConfig);
+  if (userPolicyError) {
+    return { ok: false, status: 403, error: userPolicyError };
   }
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
     c,

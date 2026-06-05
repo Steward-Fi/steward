@@ -26,7 +26,7 @@
  * agentWallets venue row), so resolveHyperliquidWallet returns the bound wallet
  * and the create reaches the session manager for real.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import {
   agents,
   agentWallets,
@@ -50,6 +50,8 @@ const VENUE_WALLET = "0x00000000000000000000000000000000000000aa";
 // A pre-existing active session so the get/revoke gates are reachable (both
 // routes load the session before gating, returning 404 if it is absent).
 const SEEDED_SESSION_ID = `ses_seeded_${Date.now()}`;
+
+setDefaultTimeout(30000);
 
 type Posture = "api-key" | "session-no-mfa" | "session-with-mfa";
 

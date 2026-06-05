@@ -102,11 +102,12 @@ describe("approved-addresses /sign destination-smuggle guard (real route)", () =
 
   it("a smuggled `destination` behaves identically to no destination at all", async () => {
     const smuggled = await postSign({ to: ATTACKER, destination: ALLOWED });
-    const plain = await postSign({ to: ATTACKER });
-    expect(smuggled.status).toBe(plain.status);
-    expect(((await smuggled.json()) as SignBody).error).toBe(
-      ((await plain.json()) as SignBody).error,
-    );
+    const body = (await smuggled.json()) as SignBody;
+    expect(smuggled.status).toBe(403);
+    expect(body.error).toBe("Transaction rejected by policy");
+    expect(
+      (body.data?.results ?? []).some((r) => r.type === "approved-addresses" && r.passed === false),
+    ).toBe(true);
   });
 
   it("a genuinely whitelisted `to` is NOT rejected by the allowlist (positive control)", async () => {

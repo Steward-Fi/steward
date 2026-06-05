@@ -133,12 +133,21 @@ describe("gas sponsorship config", () => {
       vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer"'),
       vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"'),
     );
-    const pendingInsert = transferRoute.indexOf('status: "pending"');
+    const pendingDecision = transferRoute.indexOf(
+      'const status = evaluation.requiresManualApproval ? "pending" : "rejected"',
+    );
+    const pendingInsert = transferRoute.indexOf("db.insert(transactions).values", pendingDecision);
     const pendingReservation = transferRoute.indexOf('status: "reserved"', pendingInsert);
-    const queuedAudit = transferRoute.indexOf("wallet_action.transfer.queued_for_approval");
+    const queuedAudit = transferRoute.indexOf(
+      "wallet_action.transfer.queued_for_approval",
+      pendingInsert,
+    );
+    expect(pendingDecision).toBeGreaterThanOrEqual(0);
     expect(pendingInsert).toBeGreaterThanOrEqual(0);
+    expect(pendingInsert).toBeGreaterThan(pendingDecision);
     expect(pendingReservation).toBeGreaterThan(pendingInsert);
-    expect(pendingReservation).toBeLessThan(queuedAudit);
+    expect(queuedAudit).toBeGreaterThan(pendingInsert);
+    expect(queuedAudit).toBeGreaterThan(pendingReservation);
     expect(transferRoute).toContain("db.delete(transactions).where(eq(transactions.id, actionId))");
     expect(transferRoute).toContain('status: "failed"');
 

@@ -1695,12 +1695,18 @@ export async function userSessionAuth(
 // ─── Route group ──────────────────────────────────────────────────────────────
 
 const user = new Hono<{ Variables: UserVariables }>();
-const ALLOW_PRIVATE_KEY_EXPORT = process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
-const ALLOW_PRIVATE_KEY_IMPORT = process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
-const ALLOW_UNSAFE_MESSAGE_SIGNING = process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
-const ALLOW_USER_PRIVATE_KEY_EXPORT = process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT === "true";
-const ALLOW_USER_PRIVATE_KEY_IMPORT = process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT === "true";
-const ALLOW_USER_UNSAFE_MESSAGE_SIGNING =
+const allowPrivateKeyExport = (): boolean =>
+  process.env.STEWARD_ALLOW_KEY_EXPORT !== "false" &&
+  process.env.STEWARD_ALLOW_PRIVATE_KEY_EXPORT === "true";
+const allowPrivateKeyImport = (): boolean =>
+  process.env.STEWARD_ALLOW_PRIVATE_KEY_IMPORT === "true";
+const allowUnsafeMessageSigning = (): boolean =>
+  process.env.STEWARD_ALLOW_UNSAFE_MESSAGE_SIGNING === "true";
+const allowUserPrivateKeyExport = (): boolean =>
+  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT === "true";
+const allowUserPrivateKeyImport = (): boolean =>
+  process.env.STEWARD_ALLOW_USER_PRIVATE_KEY_IMPORT === "true";
+const allowUserUnsafeMessageSigning = (): boolean =>
   process.env.STEWARD_ALLOW_USER_UNSAFE_MESSAGE_SIGNING === "true";
 
 // Apply session auth to all routes in this group
@@ -5302,7 +5308,7 @@ user.get("/me/wallet/policies", async (c) => {
 user.post("/me/wallet/sign-message", async (c) => {
   const personalSessionResponse = requirePersonalUserSession(c);
   if (personalSessionResponse) return personalSessionResponse;
-  if (!ALLOW_UNSAFE_MESSAGE_SIGNING || !ALLOW_USER_UNSAFE_MESSAGE_SIGNING) {
+  if (!allowUnsafeMessageSigning() || !allowUserUnsafeMessageSigning()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5432,7 +5438,7 @@ user.post("/me/wallet/import/init", async (c) => {
   setNoStoreHeaders(c);
   const personalSessionResponse = requirePersonalUserSession(c);
   if (personalSessionResponse) return personalSessionResponse;
-  if (!ALLOW_PRIVATE_KEY_IMPORT || !ALLOW_USER_PRIVATE_KEY_IMPORT) {
+  if (!allowPrivateKeyImport() || !allowUserPrivateKeyImport()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5545,7 +5551,7 @@ user.post("/me/wallet/import/submit", async (c) => {
   setNoStoreHeaders(c);
   const personalSessionResponse = requirePersonalUserSession(c);
   if (personalSessionResponse) return personalSessionResponse;
-  if (!ALLOW_PRIVATE_KEY_IMPORT || !ALLOW_USER_PRIVATE_KEY_IMPORT) {
+  if (!allowPrivateKeyImport() || !allowUserPrivateKeyImport()) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -5717,12 +5723,12 @@ user.post("/me/wallet/import/submit", async (c) => {
 user.post("/me/wallet/export", async (c) => {
   const personalSessionResponse = requirePersonalUserSession(c);
   if (personalSessionResponse) return personalSessionResponse;
-  if (!ALLOW_PRIVATE_KEY_EXPORT || !ALLOW_USER_PRIVATE_KEY_EXPORT) {
+  if (!allowPrivateKeyExport() || !allowUserPrivateKeyExport()) {
     return c.json<ApiResponse>(
       {
         ok: false,
         error:
-          "Private key export is disabled. Set STEWARD_ALLOW_PRIVATE_KEY_EXPORT=true and STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT=true only for audited break-glass operations.",
+          "Private key export is disabled. Set STEWARD_ALLOW_KEY_EXPORT=true, STEWARD_ALLOW_PRIVATE_KEY_EXPORT=true, and STEWARD_ALLOW_USER_PRIVATE_KEY_EXPORT=true only for audited break-glass operations.",
       },
       403,
     );

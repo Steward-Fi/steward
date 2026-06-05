@@ -35,12 +35,24 @@ describe("tenant config partial update hardening", () => {
       expect(
         tenantConfigSource.indexOf(`body.${field} !== undefined`, valuesStart),
       ).toBeGreaterThan(valuesStart);
-      expect(tenantConfigSource.indexOf(`existingConfig?.${field}`, valuesStart)).toBeGreaterThan(
-        valuesStart,
-      );
-      expect(tenantConfigSource.indexOf(`defaultConfig.${field}`, valuesStart)).toBeGreaterThan(
-        valuesStart,
-      );
+      if (field === "featureFlags") {
+        expect(tenantConfigSource.indexOf("existingFeatureFlags", valuesStart)).toBeGreaterThan(
+          valuesStart,
+        );
+      } else {
+        expect(tenantConfigSource.indexOf(`existingConfig?.${field}`, valuesStart)).toBeGreaterThan(
+          valuesStart,
+        );
+      }
+      if (field === "featureFlags") {
+        expect(
+          tenantConfigSource.indexOf("defaultConfig.featureFlags", existingSelect),
+        ).toBeLessThan(valuesStart);
+      } else {
+        expect(tenantConfigSource.indexOf(`defaultConfig.${field}`, valuesStart)).toBeGreaterThan(
+          valuesStart,
+        );
+      }
     }
 
     expect(tenantConfigSource.indexOf("body.policyTemplates ?? []", routeStart)).toBe(-1);

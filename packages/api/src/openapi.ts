@@ -5281,15 +5281,7 @@ function tradePaths(prefix = ""): Record<string, unknown> {
         responses: {
           "200": jsonResponse(
             apiResponse({
-              type: "object",
-              required: ["agentId", "status", "exp", "observedAt", "expiresInSeconds"],
-              properties: {
-                agentId: stringSchema,
-                status: { type: "string", enum: ["unknown", "observed"] },
-                exp: { type: ["integer", "null"] },
-                observedAt: nullableStringSchema,
-                expiresInSeconds: { type: ["integer", "null"] },
-              },
+              $ref: "#/components/schemas/TradeTokenStatus",
             }),
           ),
           ...errorResponses(),
@@ -5543,7 +5535,7 @@ export function getOpenApiSpec() {
     openapi: "3.1.0",
     info: {
       title: "Steward API",
-      version: "0.3.0",
+      version: "0.4.4",
       description:
         "Generated OpenAPI contract for implemented Steward API surfaces. This contract includes Privy-parity account resources, wallet external IDs, gas spend filtering, transaction reference filtering, and request-hardening inventory markers for sensitive mutating routes.",
     },
@@ -5577,6 +5569,19 @@ export function getOpenApiSpec() {
         tenantApiKey: { type: "apiKey", in: "header", name: "X-Steward-API-Key" },
         platformKey: { type: "apiKey", in: "header", name: "X-Steward-Platform-Key" },
         bearerAuth: { type: "http", scheme: "bearer" },
+      },
+      schemas: {
+        TradeTokenStatus: {
+          type: "object",
+          required: ["agentId", "status", "exp", "observedAt", "expiresInSeconds"],
+          properties: {
+            agentId: stringSchema,
+            status: { type: "string", enum: ["unknown", "observed"] },
+            exp: { type: ["integer", "null"] },
+            observedAt: nullableStringSchema,
+            expiresInSeconds: { type: ["integer", "null"] },
+          },
+        },
       },
     },
     paths: {
@@ -6021,3 +6026,12 @@ export function getOpenApiSpec() {
     },
   } as const);
 }
+
+export function isOpenApiHttpEnabled(): boolean {
+  const explicit = process.env.STEWARD_OPENAPI_ENABLED;
+  if (explicit === "1" || explicit === "true") return true;
+  if (explicit === "0" || explicit === "false") return false;
+  return process.env.NODE_ENV !== undefined && process.env.NODE_ENV !== "production";
+}
+
+export const OPENAPI_DOC = getOpenApiSpec();

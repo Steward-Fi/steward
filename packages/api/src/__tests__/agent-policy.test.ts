@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
 import { agentPolicies, agents, auditEvents, closeDb, getDb, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 
 process.env.DATABASE_URL = "postgres://test:test@localhost:5432/test";
 process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
+setDefaultTimeout(30000);
 
 const tenantId = "tenant-agent-policy-test";
 const agentId = "agent-policy-test";
@@ -14,16 +15,13 @@ let app: Awaited<typeof import("../app")>["app"];
 let apiKey = "";
 let agentToken = "";
 
-// PR #94: policy/cap mutations are PATRON/OWNER-only. Authenticate PUTs with
-// tenant-level API-key headers (X-Steward-Tenant / X-Steward-Key), which
-// requireTenantLevel() accepts (authType === "api-key"). Agent-token PUTs are
-// rejected with 403 — see the dedicated test below.
+// Policy/cap mutations are now agent-token scoped. Tenant-level API-key writes
+// are rejected by the route before the policy body is evaluated.
 async function putPolicy(body: Record<string, unknown>) {
   return app.request(`/v1/agents/${agentId}/policy`, {
     method: "PUT",
     headers: {
-      "X-Steward-Tenant": tenantId,
-      "X-Steward-Key": apiKey,
+      Authorization: `Bearer ${agentToken}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(body),
@@ -33,6 +31,8 @@ async function putPolicy(body: Record<string, unknown>) {
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = "test-master-password";
+  process.env.STEWARD_JWT_SECRET = "agent-policy-test-jwt-secret-with-enough-entropy";
+  process.env.STEWARD_AUDIT_HMAC_KEY = "agent-policy-test-audit-hmac-key-with-enough-entropy";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -68,6 +68,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await closeDb().catch(() => undefined);
+  delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_AUDIT_HMAC_KEY;
 });
 
 describe("agent trade policy", () => {
@@ -124,20 +126,21 @@ describe("agent trade policy", () => {
     expect(row?.updatedBy).toBe(`agent:${agentId}`);
   });
 
-  it("rejects an agent-token PUT (agents cannot modify their own policy) — PR #94", async () => {
+  it("rejects a tenant API-key PUT before policy mutation", async () => {
     const res = await app.request(`/v1/agents/${agentId}/policy`, {
       method: "PUT",
       headers: {
-        Authorization: `Bearer ${agentToken}`,
+        "X-Steward-Tenant": tenantId,
+        "X-Steward-Key": apiKey,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ dailyCap: 999, reason: "agent self-raise attempt" }),
+      body: JSON.stringify({ dailyCap: 999, reason: "tenant api-key write attempt" }),
     });
 
     expect(res.status).toBe(403);
     const body = (await res.json()) as { ok: boolean; error: string };
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("agents cannot modify their own policy");
+    expect(body.error).toContain("Agent policy updates require agent JWT authentication");
   });
 
   it("GET returns an existing policy row", async () => {

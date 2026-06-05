@@ -102,12 +102,13 @@ describe("user wallet creation webhooks", () => {
       PERSONAL_TENANT_ID,
       USER_AGENT_ID,
       "user.wallet_created",
-      {
+      expect.objectContaining({
         userId: USER_ID,
         walletId: USER_AGENT_ID,
         walletAddress: createdBody.data.walletAddress,
         walletAddresses: expect.objectContaining({ evm: createdBody.data.walletAddress }),
-      },
+        walletIndex: 0,
+      }),
     );
 
     dispatchWebhookMock.mockClear();

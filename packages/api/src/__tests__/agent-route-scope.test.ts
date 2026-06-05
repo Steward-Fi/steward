@@ -226,10 +226,7 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(writeOwnRes.status).toBe(403);
     const writeOwnBody = (await writeOwnRes.json()) as { ok: boolean; error: string };
     expect(writeOwnBody.ok).toBe(false);
-    // PR #94: agent-token writes are rejected by the dedicated agent-token guard
-    // (checked before the tenant-admin-session check), so the error is the
-    // "agents cannot modify their own policies" message, not "owner or admin session".
-    expect(writeOwnBody.error).toContain("agents cannot modify their own policies");
+    expect(writeOwnBody.error).toContain("owner or admin session");
 
     const writeOtherRes = await app.request(`/agents/${AGENT_B}/policies`, {
       method: "PUT",
@@ -244,6 +241,6 @@ describeWithDatabase("agent route scope enforcement", () => {
     expect(writeOtherRes.status).toBe(403);
     const writeOtherBody = (await writeOtherRes.json()) as { ok: boolean; error: string };
     expect(writeOtherBody.ok).toBe(false);
-    expect(writeOtherBody.error).toContain("agents cannot modify their own policies");
+    expect(writeOtherBody.error).toContain("owner or admin session");
   });
 });

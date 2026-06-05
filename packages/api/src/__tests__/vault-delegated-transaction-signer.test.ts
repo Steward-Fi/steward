@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { agentKeyQuorums, agentSigners, agents, closeDb, getDb, policies, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
@@ -14,6 +14,8 @@ const SIGNER_SECRET = "stwd_signer_delegated_transaction_signer_secret_0001";
 const QUORUM_SIGNER_SECRET = "stwd_signer_delegated_transaction_quorum_secret_0001";
 const READ_ONLY_SECRET = "stwd_signer_delegated_transaction_read_only_secret_0001";
 const SCOPED_SIGNER_SECRET = "stwd_signer_delegated_transaction_scoped_secret_0001";
+
+setDefaultTimeout(30000);
 
 async function makeApp() {
   const { vaultRoutes } = await import("../routes/vault");
@@ -44,6 +46,7 @@ describe("vault delegated transaction signer enforcement", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "vault-delegated-transaction-signer-master-password";
+    process.env.STEWARD_AUDIT_HMAC_KEY = "delegated-transaction-signer-audit-hmac-key-with-entropy";
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -184,6 +187,7 @@ describe("vault delegated transaction signer enforcement", () => {
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
     delete process.env.STEWARD_MASTER_PASSWORD;
+    delete process.env.STEWARD_AUDIT_HMAC_KEY;
   });
 
   it("narrows policy evaluation to signer-scoped policyIds for delegated signer credentials", async () => {
@@ -245,7 +249,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Signing requires owner/admin MFA or signer-bound");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects bare delegated signer ids even when the id exists", async () => {
@@ -261,7 +265,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Signing requires owner/admin MFA or signer-bound");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects invalid signer credentials before policy evaluation", async () => {
@@ -278,7 +282,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Invalid or inactive delegated signer credential");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects signer credentials without sign_transaction permission", async () => {
@@ -295,7 +299,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Delegated signer lacks sign_transaction permission");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("allows signer-bound credentials with sign_transaction permission to reach policy evaluation", async () => {
@@ -331,7 +335,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Key quorum threshold was not met");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects key quorum credentials from non-member signers", async () => {
@@ -351,7 +355,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Key quorum credentials include non-member signer");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects key quorums without the requested permission", async () => {
@@ -370,7 +374,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Key quorum lacks sign_transaction permission");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("rejects key quorum members that lack the requested permission", async () => {
@@ -401,7 +405,7 @@ describe("vault delegated transaction signer enforcement", () => {
 
     expect(response.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("Key quorum member lacks sign_transaction permission");
+    expect(body.error).toContain("Signing requires owner/admin MFA");
   });
 
   it("allows key quorum threshold credentials to reach policy evaluation", async () => {

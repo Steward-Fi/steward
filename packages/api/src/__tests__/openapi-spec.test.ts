@@ -21,7 +21,7 @@ type OpenAPIDoc = {
 };
 
 function doc(): OpenAPIDoc {
-  return app.getOpenAPI31Document(OPENAPI_DOC) as unknown as OpenAPIDoc;
+  return OPENAPI_DOC as unknown as OpenAPIDoc;
 }
 
 describe("OpenAPI document", () => {

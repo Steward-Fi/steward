@@ -79,11 +79,11 @@ describe("vault unsafe signing hardening", () => {
     const approvalStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/approve/:txId"');
     expect(approvalStart).toBeGreaterThanOrEqual(0);
     const disabledCheck = vaultSource.indexOf(
-      'transaction.actionType === "send_calls"',
+      'transactionRow.actionType === "send_calls"',
       approvalStart,
     );
     const userOpDisabledCheck = vaultSource.indexOf(
-      'transaction.actionType === "user_operation"',
+      'transactionRow.actionType === "user_operation"',
       approvalStart,
     );
     const signTransaction = vaultSource.indexOf("vault.signTransaction", approvalStart);

@@ -240,9 +240,9 @@ describe("vault MFA-sensitive actions", () => {
 
     expect(res.status).toBe(403);
     expect(body.ok).toBe(false);
-    // API-key auth carries no Bearer session, so the export handler rejects it
-    // at the first MFA gate before reaching the tenant-admin-session check.
-    expect(body.error).toContain("recent MFA or passkey step-up");
+    // API-key auth must not reach the MFA-only export path; private-key export
+    // requires an authenticated tenant admin session first.
+    expect(body.error).toContain("tenant admin session authentication");
   });
 
   it("rejects tenant admin session export without recent MFA", async () => {
@@ -255,7 +255,7 @@ describe("vault MFA-sensitive actions", () => {
 
     expect(res.status).toBe(403);
     expect(body.ok).toBe(false);
-    expect(body.error).toContain("recent MFA or passkey step-up");
+    expect(body.error).toContain("recent MFA");
     expect(dispatchWebhookMock).not.toHaveBeenCalled();
   });
 

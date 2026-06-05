@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, mock, setDefaultTimeout } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -14,8 +14,12 @@ import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 
+setDefaultTimeout(30000);
+
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
+  process.env.STEWARD_AUDIT_HMAC_KEY ??=
+    "trade-policy-audit-test-audit-hmac-key-0123456789abcdef";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -28,6 +32,7 @@ afterAll(async () => {
   mock.restore();
   globalThis.fetch = originalFetch;
   await closeDb();
+  delete process.env.STEWARD_AUDIT_HMAC_KEY;
 });
 
 describe("trade policy audit", () => {

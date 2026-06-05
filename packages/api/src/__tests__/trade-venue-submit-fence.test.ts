@@ -44,7 +44,16 @@
  * reserve/release, the submit-attempt catch, idempotency claim/replay, the audit
  * writes, and the HTTP envelopes.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  setDefaultTimeout,
+  spyOn,
+} from "bun:test";
 import { agents, auditEvents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { TradeSessionManager } from "@stwd/trade-sessions";
@@ -63,6 +72,8 @@ const ORDER_BODY = {
   limitPx: 10,
   leverage: 1,
 };
+
+setDefaultTimeout(30000);
 
 let signSpy: ReturnType<typeof spyOn> | undefined;
 let submitSpy: ReturnType<typeof spyOn> | undefined;

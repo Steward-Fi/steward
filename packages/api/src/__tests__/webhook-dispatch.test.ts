@@ -36,6 +36,7 @@ const insertedDeliveries: Record<string, unknown>[] = [];
 const updatedDeliveries: Record<string, unknown>[] = [];
 const dispatches: DispatchRecord[] = [];
 const dispatcherOptions: DispatcherOptions[] = [];
+const tenantConfigs = new Map<string, { webhookUrl?: string }>();
 let nextDispatchResult: DispatchResult = {
   success: true,
   attempts: 1,
@@ -77,7 +78,7 @@ const db = {
 
 // webhook-dispatch.ts imports `{ db, tenantConfigs }` from context — the mock
 // must provide both, or the named-export load fails.
-mock.module("../services/context", () => ({ db, tenantConfigs: new Map() }));
+mock.module("../services/context", () => ({ db, tenantConfigs }));
 mock.module("@stwd/db", () => ({
   and: () => true,
   eq: () => true,
@@ -117,6 +118,7 @@ beforeEach(() => {
   updatedDeliveries.length = 0;
   dispatches.length = 0;
   dispatcherOptions.length = 0;
+  tenantConfigs.clear();
   nextDispatchResult = {
     success: true,
     attempts: 1,
