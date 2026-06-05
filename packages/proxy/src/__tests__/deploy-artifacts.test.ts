@@ -142,8 +142,8 @@ describe("#111 deploy/provision-steward-node.sh does not leak secrets", () => {
   });
 
   test("the proxy request signing secret value is never echoed to stdout", () => {
-    const agentConfigLine = lines.find((l) =>
-      /^\s*echo\b/.test(l) && /STEWARD_PROXY_REQUEST_SIGNING_SECRETS=/.test(l),
+    const agentConfigLine = lines.find(
+      (l) => /^\s*echo\b/.test(l) && /STEWARD_PROXY_REQUEST_SIGNING_SECRETS=/.test(l),
     );
     expect(agentConfigLine).toBeDefined();
     expect(agentConfigLine).not.toContain("${STEWARD_PROXY_REQUEST_SIGNING_SECRETS}");
