@@ -78,10 +78,17 @@ function buildMagicLink(
   callbackPath: string,
   token: string,
   email: string,
+  tenantId?: string,
 ): string {
   const url = new URL(callbackPath, baseUrl);
   url.searchParams.set("token", token);
   url.searchParams.set("email", email);
+  // Carry the tenant so GET /auth/callback/email resolves the SAME tenant the
+  // token was minted for (mirrors buildInvitationLink). Without it the callback
+  // falls back to the default tenant, the verify tenant guard fires
+  // tenant_mismatch, and the issued exchange-code is stored with the wrong
+  // tenant -> the SPA's /oauth/exchange then 401s code_tenant_mismatch.
+  if (tenantId) url.searchParams.set("tenantId", tenantId);
   return url.toString();
 }
 
@@ -178,7 +185,13 @@ export class EmailAuth {
     );
 
     // Build and send the email
-    const magicLink = buildMagicLink(this.baseUrl, this.callbackPath, token, email);
+    const magicLink = buildMagicLink(
+      this.baseUrl,
+      this.callbackPath,
+      token,
+      email,
+      context.tenantId,
+    );
     const rendered = this.templateRenderer(this.templateId, {
       magicLink,
       email,
