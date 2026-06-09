@@ -39,6 +39,39 @@ describe("EmailAuth.sendMagicLink", () => {
     auth.destroy();
   });
 
+  it("binds the tenant into the magic link for non-default tenants (and omits it otherwise)", async () => {
+    const sent = mock(async () => undefined);
+    const templateRenderer = mock(() => ({
+      subject: "subject",
+      text: "text",
+      html: "<p>html</p>",
+    }));
+    const provider: EmailProvider = { send: sent };
+    const auth = new EmailAuth({
+      from: "login@steward.fi",
+      baseUrl: "https://steward.fi",
+      provider,
+      templateId: "elizacloud",
+      tokenTtlMs: 10 * 60 * 1000,
+      templateRenderer,
+    });
+
+    // Non-default tenant: the emailed link must carry ?tenantId so
+    // GET /auth/callback/email resolves the SAME tenant the token was minted
+    // for (otherwise the verify guard fires tenant_mismatch and the exchange
+    // code is stored under the wrong tenant).
+    await auth.sendMagicLink("user@example.com", { tenantId: "elizacloud" });
+    const [, withTenant] = templateRenderer.mock.calls[0]!;
+    expect(withTenant.magicLink).toContain("tenantId=elizacloud");
+
+    // No tenant context: byte-for-byte back-compat — no tenantId param at all.
+    await auth.sendMagicLink("user@example.com");
+    const [, withoutTenant] = templateRenderer.mock.calls[1]!;
+    expect(withoutTenant.magicLink).not.toContain("tenantId");
+
+    auth.destroy();
+  });
+
   it("sends tenant invitation emails with a one-time accept link", async () => {
     const sent = mock(async () => undefined);
     const provider: EmailProvider = { send: sent };
