@@ -83,6 +83,13 @@ const submitOrderSchema = z
     // policy audit trail.
     leverage: z.number().positive().default(1),
     reduceOnly: z.boolean().default(false),
+    // Time-in-force for limit orders. Default Ioc (immediate-or-cancel) keeps
+    // existing marketable-order behavior; Gtc lets callers REST a resting
+    // take-profit/limit order (e.g. a reduce-only sell above market that must
+    // not cross the book); Alo = post-only.
+    orderType: z
+      .object({ limit: z.object({ tif: z.enum(["Alo", "Ioc", "Gtc"]) }).optional() })
+      .optional(),
     idempotencyKey: z.string().min(1).max(256).optional(),
   })
   .refine((value) => value.coin ?? value.asset, "coin is required");
@@ -95,6 +102,9 @@ const hyperliquidOrderSchema = z.object({
   limitPx: z.union([z.string(), z.number()]),
   leverage: z.number().int().positive().default(1),
   reduceOnly: z.boolean().default(false),
+  orderType: z
+    .object({ limit: z.object({ tif: z.enum(["Alo", "Ioc", "Gtc"]) }).optional() })
+    .optional(),
 });
 
 type TradeIdempotencyResponse = {
@@ -747,6 +757,7 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
         limitPx: policyLimitPx,
         leverage: body.leverage,
         reduceOnly: body.reduceOnly,
+        ...(body.orderType ? { orderType: body.orderType } : {}),
       };
       hyperliquidOrderSchema.safeParse(order);
       const signed = await adapter.signOrder(order);
