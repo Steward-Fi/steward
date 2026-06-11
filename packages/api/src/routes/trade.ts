@@ -368,7 +368,9 @@ tradeRoutes.post("/sessions", async (c) => {
   // human act); an agent cannot self-authorize without an explicit policy.
   if (createByAgentSelf && !createByHumanAdmin && !agentPolicy) {
     return c.json(
-      policyViolation("agent has no trade policy; a human must set agent caps before self-service trading"),
+      policyViolation(
+        "agent has no trade policy; a human must set agent caps before self-service trading",
+      ),
       403,
     );
   }

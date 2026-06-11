@@ -28,8 +28,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import {
-  agents,
   agentPolicies,
+  agents,
   agentWallets,
   auditEvents,
   closeDb,
@@ -139,19 +139,21 @@ describe("trade session control-plane gates (real routes)", () => {
     });
     // Seed a policy so the agent-self happy-path has caps to operate within.
     // The agent-self path fails closed without a policy (tested separately).
-    await getDb().insert(agentPolicies).values({
-      agentId: AGENT_ID,
-      tenantId: TENANT_ID,
-      dailyCapUsd: "100",
-      perOrderCapUsd: "50",
-      leverageCap: "2",
-      // Include the schema's default allowedAssets so a bare create (which
-      // defaults to [BTC,ETH,BNB]) is not rejected by the asset allowlist.
-      allowedAssets: ["BTC", "ETH", "BNB"],
-      allowedVenues: ["hyperliquid"],
-      updatedBy: ACTOR_ID,
-      updatedReason: "test seed",
-    });
+    await getDb()
+      .insert(agentPolicies)
+      .values({
+        agentId: AGENT_ID,
+        tenantId: TENANT_ID,
+        dailyCapUsd: "100",
+        perOrderCapUsd: "50",
+        leverageCap: "2",
+        // Include the schema's default allowedAssets so a bare create (which
+        // defaults to [BTC,ETH,BNB]) is not rejected by the asset allowlist.
+        allowedAssets: ["BTC", "ETH", "BNB"],
+        allowedVenues: ["hyperliquid"],
+        updatedBy: ACTOR_ID,
+        updatedReason: "test seed",
+      });
     await getDb()
       .insert(tradeSessions)
       .values({
