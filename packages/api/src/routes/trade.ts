@@ -124,6 +124,23 @@ function canManageTradeSession(c: Context<{ Variables: AppVariables }>): boolean
   );
 }
 
+// An agent's own bearer (authType "agent-token", carrying agentScope) may
+// open/read/revoke a trade session FOR ITSELF only. This is the autonomous-agent
+// path: the order route already accepts agent-token, and session creation
+// already clamps every requested cap to the agent's stored agent_policies
+// ceilings (reject-if-over, then Math.min, plus asset/venue allowlist), so an
+// agent self-session can never exceed the caps a human set out-of-band in
+// agent_policies. Cross-agent management still requires a human owner/admin
+// session. No withdraw surface is touched here.
+function canAgentSelfManageSession(
+  c: Context<{ Variables: AppVariables }>,
+  targetAgentId: string | null | undefined,
+): boolean {
+  if (c.get("authType") !== "agent-token") return false;
+  const scoped = callerAgentId(c);
+  return Boolean(scoped) && scoped === targetAgentId;
+}
+
 function responseData<T>(data: T): ApiResponse<T> {
   return { ok: true, data };
 }
@@ -306,13 +323,18 @@ tradeRoutes.post("/sessions", async (c) => {
   if (!agentId) {
     return c.json<ApiResponse>({ ok: false, error: "Agent id required" }, 400);
   }
-  if (!canManageTradeSession(c)) {
+  const createByHumanAdmin = canManageTradeSession(c);
+  const createByAgentSelf = canAgentSelfManageSession(c, agentId);
+  if (!createByHumanAdmin && !createByAgentSelf) {
     return c.json<ApiResponse>(
       { ok: false, error: "Forbidden: insufficient access to create a session for this agent" },
       403,
     );
   }
-  if (!c.get("sessionMfaVerifiedAt")) {
+  // MFA recency is a human-session protection. The agent-self path has no human
+  // session to MFA; its protection is the agent_policies cap clamp below + the
+  // per-order policy evaluation on submission. Only enforce MFA on the human path.
+  if (createByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
     return c.json<ApiResponse>(
       { ok: false, error: "Trade session management requires recent MFA verification" },
       403,
@@ -337,6 +359,21 @@ tradeRoutes.post("/sessions", async (c) => {
     .select()
     .from(agentPolicies)
     .where(eq(agentPolicies.agentId, agentId));
+
+  // Fail-closed for the autonomous agent-self path: an agent may only open a
+  // session if a human has set an agent_policies row defining its ceilings.
+  // Without a policy there is nothing to clamp against, so a policy-less agent
+  // could otherwise self-grant caps up to the schema maximums. A human
+  // owner/admin may still create sessions for a policy-less agent (a deliberate
+  // human act); an agent cannot self-authorize without an explicit policy.
+  if (createByAgentSelf && !createByHumanAdmin && !agentPolicy) {
+    return c.json(
+      policyViolation(
+        "agent has no trade policy; a human must set agent caps before self-service trading",
+      ),
+      403,
+    );
+  }
 
   let sessionDailyCap = dailyCap;
   let sessionPerOrderCap = perOrderCap;
@@ -463,13 +500,15 @@ tradeRoutes.get("/sessions/:id", async (c) => {
   const tenantId = c.get("tenantId");
   const session = await getSessionManager().getSession({ tenantId, id: c.req.param("id") });
   if (!session) return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
-  if (!canManageTradeSession(c)) {
+  const readByHumanAdmin = canManageTradeSession(c);
+  const readByAgentSelf = canAgentSelfManageSession(c, session.agentId);
+  if (!readByHumanAdmin && !readByAgentSelf) {
     return c.json<ApiResponse>(
       { ok: false, error: "Forbidden: insufficient access to this session" },
       403,
     );
   }
-  if (!c.get("sessionMfaVerifiedAt")) {
+  if (readByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
     return c.json<ApiResponse>(
       { ok: false, error: "Trade session management requires recent MFA verification" },
       403,
@@ -496,13 +535,18 @@ tradeRoutes.get("/sessions/:id", async (c) => {
 tradeRoutes.post("/sessions/:id/revoke", async (c) => {
   const tenantId = c.get("tenantId");
   const existing = await getSessionManager().getSession({ tenantId, id: c.req.param("id") });
-  if (!canManageTradeSession(c)) {
+  const revokeByHumanAdmin = canManageTradeSession(c);
+  // Agent-self may revoke only its OWN existing session. If the session is
+  // missing we fall through to the human-admin requirement (no agent-self bypass
+  // on a non-existent/again-another-agent session).
+  const revokeByAgentSelf = Boolean(existing) && canAgentSelfManageSession(c, existing?.agentId);
+  if (!revokeByHumanAdmin && !revokeByAgentSelf) {
     return c.json<ApiResponse>(
       { ok: false, error: "Forbidden: insufficient access to revoke this session" },
       403,
     );
   }
-  if (!c.get("sessionMfaVerifiedAt")) {
+  if (revokeByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
     return c.json<ApiResponse>(
       { ok: false, error: "Trade session management requires recent MFA verification" },
       403,
