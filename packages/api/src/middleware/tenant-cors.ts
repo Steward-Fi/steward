@@ -72,6 +72,52 @@ async function getTenantOrigins(tenantId: string): Promise<string[]> {
 /** Evict a tenant's origin list from cache (call after updating tenant config). */
 export function invalidateTenantCorsCache(tenantId: string): void {
   originsCache.delete(tenantId);
+  globalOriginsCache = null;
+}
+
+// ─── Global origin set (header-less requests) ────────────────────────────────
+//
+// Browsers NEVER send custom headers (X-Steward-Tenant) on CORS preflight
+// OPTIONS requests, and several SDK flows (e.g. passkey login/options) carry
+// the tenant in the BODY, not the header. Keying CORS exclusively off the
+// header therefore breaks every real browser in production (no ACAO headers →
+// "failed to fetch"). For requests without a tenant header we fall back to
+// checking the Origin against the union of ALL tenants' allowed origins —
+// the Origin is the actual security principal for CORS, the tenant header is
+// only a routing hint.
+
+interface GlobalOriginsCacheEntry {
+  origins: Set<string>;
+  expiresAt: number;
+}
+
+let globalOriginsCache: GlobalOriginsCacheEntry | null = null;
+
+async function getAllAllowedOrigins(): Promise<Set<string>> {
+  const now = Date.now();
+  if (globalOriginsCache && globalOriginsCache.expiresAt > now) {
+    return globalOriginsCache.origins;
+  }
+
+  const db = getDb();
+  const tenantRows = await db
+    .select({ allowedOrigins: tenantConfigsTable.allowedOrigins })
+    .from(tenantConfigsTable);
+  const clientRows = await db
+    .select({ allowedOrigins: tenantAppClientsTable.allowedOrigins })
+    .from(tenantAppClientsTable)
+    .where(eq(tenantAppClientsTable.enabled, true));
+
+  const origins = new Set<string>();
+  for (const row of tenantRows) {
+    for (const origin of row.allowedOrigins ?? []) origins.add(origin);
+  }
+  for (const row of clientRows) {
+    for (const origin of row.allowedOrigins ?? []) origins.add(origin);
+  }
+
+  globalOriginsCache = { origins, expiresAt: now + CACHE_TTL_MS };
+  return origins;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -90,7 +136,31 @@ export async function tenantCors(c: Context, next: Next): Promise<Response | und
 
   let allowOrigin = process.env.NODE_ENV === "production" ? "" : "*";
 
-  if (tenantId && origin) {
+  if (!tenantId && origin) {
+    // No tenant header (true for ALL browser preflights and any SDK call that
+    // carries the tenant in the body). Allow the request iff the Origin is in
+    // any tenant's allowlist.
+    try {
+      const allOrigins = await getAllAllowedOrigins();
+      if (allOrigins.has(origin)) {
+        allowOrigin = origin;
+      } else if (process.env.NODE_ENV === "production") {
+        if (c.req.method === "OPTIONS") {
+          return c.newResponse(null, 403);
+        }
+        await next();
+        return;
+      }
+      // unknown origin outside production → wildcard fallback below (dev mode)
+    } catch (err) {
+      console.warn("[tenant-cors] Failed to load global origins, denying CORS:", err);
+      if (c.req.method === "OPTIONS") {
+        return c.newResponse(null, 403);
+      }
+      await next();
+      return;
+    }
+  } else if (tenantId && origin) {
     try {
       const origins = await getTenantOrigins(tenantId);
       if (origins.length > 0) {
