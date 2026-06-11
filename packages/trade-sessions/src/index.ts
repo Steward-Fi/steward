@@ -300,7 +300,7 @@ export class TradeSessionManager {
           eq(tradeSessions.id, input.id),
           eq(tradeSessions.tenantId, input.tenantId),
           eq(tradeSessions.status, "active"),
-          sql`${tradeSessions.expiresAt} > ${this.now()}`,
+          sql`${tradeSessions.expiresAt} > ${this.now().toISOString()}`,
           sql`${tradeSessions.dailySpendUsd} + ${String(input.amountUsd)}::numeric <= ${tradeSessions.dailyCapUsd}`,
         ),
       )
@@ -327,7 +327,7 @@ export class TradeSessionManager {
             eq(tradeSessions.id, input.id),
             eq(tradeSessions.tenantId, input.tenantId),
             eq(tradeSessions.status, "active"),
-            sql`${tradeSessions.expiresAt} > ${this.now()}`,
+            sql`${tradeSessions.expiresAt} > ${this.now().toISOString()}`,
           ),
         );
       if (!row) return null;
