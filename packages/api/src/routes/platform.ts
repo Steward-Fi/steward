@@ -1204,6 +1204,125 @@ platform.get("/tenants/:tenantId/email-config", async (c) => {
   });
 });
 
+/**
+ * GET /tenants/:tenantId/join-mode
+ * Returns the tenant's join_mode ('open' | 'invite' | 'closed'; null when no
+ * tenant_configs row exists — the join gate then treats it as not self-joinable).
+ */
+platform.get("/tenants/:tenantId/join-mode", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:read");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("tenantId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  if (!(await getTenantOr404(tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const [config] = await db
+    .select({ joinMode: tenantConfigs.joinMode })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  return c.json<ApiResponse<{ tenantId: string; joinMode: string | null }>>({
+    ok: true,
+    data: { tenantId, joinMode: config?.joinMode ?? null },
+  });
+});
+
+/**
+ * PATCH /tenants/:tenantId/join-mode
+ * Sets how users may join the tenant: 'open' (anyone authenticating with this
+ * tenantId is auto-linked), 'invite' (existing user_tenants link required), or
+ * 'closed' (no new members).
+ *
+ * This is the ONLY write surface for join_mode: the column was previously
+ * settable by nothing but raw SQL, so the 0048 hardening backfill (every
+ * 'open' tenant force-flipped to 'invite') left public-product tenants —
+ * e.g. a consumer cloud's primary tenant — silently rejecting all NEW signups
+ * after any fresh-environment migration replay, with no operator remedy short
+ * of psql. Mirrors the email-config PATCH (scope gate, audit pair,
+ * snapshot/restore on audit failure, update-or-insert).
+ */
+platform.patch("/tenants/:tenantId/join-mode", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-join-mode:write");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("tenantId");
+
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  if (!(await getTenantOr404(tenantId))) {
+    return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{ joinMode: string }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+
+  const joinMode = typeof body.joinMode === "string" ? body.joinMode.trim() : "";
+  if (!["open", "invite", "closed"].includes(joinMode)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "joinMode must be one of 'open', 'invite', 'closed'" },
+      400,
+    );
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.join_mode.update.authorized",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { joinMode },
+    ...auditCtx(c),
+  });
+
+  const previousConfigRow = await snapshotPlatformTenantConfigRow(tenantId);
+  const [existingConfig] = await db
+    .select({ tenantId: tenantConfigs.tenantId })
+    .from(tenantConfigs)
+    .where(eq(tenantConfigs.tenantId, tenantId));
+
+  if (existingConfig) {
+    await db
+      .update(tenantConfigs)
+      .set({ joinMode, updatedAt: new Date() })
+      .where(eq(tenantConfigs.tenantId, tenantId));
+  } else {
+    await db.insert(tenantConfigs).values({ tenantId, joinMode });
+  }
+
+  try {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "platform",
+      action: "tenant.join_mode.update",
+      resourceType: "tenant",
+      resourceId: tenantId,
+      metadata: { joinMode },
+      ...auditCtx(c),
+    });
+  } catch (error) {
+    await restorePlatformTenantConfigRow(tenantId, previousConfigRow);
+    throw error;
+  }
+
+  return c.json<ApiResponse<{ tenantId: string; joinMode: string }>>({
+    ok: true,
+    data: { tenantId, joinMode },
+  });
+});
+
 platform.get("/tenants/:tenantId/oidc-providers", async (c) => {
   const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-oidc:read");
   if (scopeResponse) return scopeResponse;
