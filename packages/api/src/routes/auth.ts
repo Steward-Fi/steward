@@ -1024,6 +1024,12 @@ export async function initAuthStores(usePostgres = false): Promise<void> {
     backend: challengeBackend,
     ttlMs: OAUTH_CODE_TTL_MS,
   });
+  // Verified-email grants share the challenge backend (Redis-backed in prod)
+  // so an OTP verified on one worker can register a passkey on another.
+  _emailGrantStore = new ChallengeStore({
+    backend: challengeBackend,
+    ttlMs: EMAIL_GRANT_TTL_MS,
+  });
   _importSessionBackend = importSessionBackend;
 
   // Reset singletons so they pick up the new stores on next use
@@ -1041,6 +1047,68 @@ function getChallengeStore(): ChallengeStore {
 function getOAuthCodeStore(): ChallengeStore {
   _oauthCodeStore ??= new ChallengeStore({ ttlMs: OAUTH_CODE_TTL_MS });
   return _oauthCodeStore;
+}
+
+// ── Verified-email grants (Privy-style OTP signup) ──────────────────────────
+//
+// POST /email/otp/verify exchanges a correct 6-digit code for a short-lived,
+// single-use grant proving ownership of {email, tenantId}. The passkey
+// register endpoints accept this grant in place of a session so a BRAND-NEW
+// user can go email -> code -> Touch ID without ever holding a session,
+// while keeping unverified registration (account pre-hijack) impossible.
+
+const EMAIL_GRANT_TTL_MS = 5 * 60 * 1000;
+let _emailGrantStore: ChallengeStore | null = null;
+
+function getEmailGrantStore(): ChallengeStore {
+  _emailGrantStore ??= new ChallengeStore({ ttlMs: EMAIL_GRANT_TTL_MS });
+  return _emailGrantStore;
+}
+
+function emailGrantKey(grant: string): string {
+  return `email-otp-grant:${hashSha256Hex(grant)}`;
+}
+
+async function issueEmailGrant(email: string, tenantId: string): Promise<string> {
+  const grantBytes = new Uint8Array(32);
+  crypto.getRandomValues(grantBytes);
+  const grant = uint8ArrayToBase64url(grantBytes);
+  await getEmailGrantStore().set(emailGrantKey(grant), JSON.stringify({ email, tenantId }));
+  return grant;
+}
+
+/** Consume (single-use) a grant and return its bound identity, or null. */
+async function consumeEmailGrant(
+  grant: string,
+  email: string,
+  tenantId: string,
+): Promise<boolean> {
+  if (!grant || grant.length > 256) return false;
+  const stored = await getEmailGrantStore().consume(emailGrantKey(grant));
+  if (!stored) return false;
+  try {
+    const payload = JSON.parse(stored) as { email?: string; tenantId?: string };
+    return payload.email === email && payload.tenantId === tenantId;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Peek (non-consuming) at a grant for the options phase. The grant is only
+ * CONSUMED at register/verify so a failed/cancelled WebAuthn ceremony does
+ * not burn the user's verification.
+ */
+async function peekEmailGrant(grant: string, email: string, tenantId: string): Promise<boolean> {
+  if (!grant || grant.length > 256) return false;
+  const stored = await getEmailGrantStore().get(emailGrantKey(grant));
+  if (!stored) return false;
+  try {
+    const payload = JSON.parse(stored) as { email?: string; tenantId?: string };
+    return payload.email === email && payload.tenantId === tenantId;
+  } catch {
+    return false;
+  }
 }
 
 const OAUTH_CODE_REDEEM_LOCK_TTL_MS = 10 * 1000;
@@ -7349,58 +7417,93 @@ auth.delete("/sessions", async (c) => {
  * Finds or creates user, returns WebAuthn registration options.
  */
 auth.post("/passkey/register/options", async (c) => {
-  const session = await requireSession(c);
-  if (!session.ok) return session.response;
-  const sessionMethodResponse = await requireTenantLoginMethodAllowed(
-    c,
-    session.payload.tenantId,
-    "passkey",
-  );
-  if (sessionMethodResponse) return sessionMethodResponse;
-
+  // Pre-auth reachable via the email-grant path — rate limit like the other
+  // pre-auth passkey endpoints.
+  const optionsRl = await checkAuthRateLimit(c, "passkey-register-options", 60_000, 20);
+  if (!optionsRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
   const body = await safeJsonParse<{
     email: string;
     authenticatorAttachment?: "platform" | "cross-platform";
+    emailGrant?: string;
+    tenantId?: string;
   }>(c);
   if (!body?.email) {
     return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
   }
-
   const email = body.email.toLowerCase().trim();
   const db = getDb();
-  const [user] = await db.select().from(users).where(eq(users.id, session.payload.userId));
-  if (!user || user.email?.toLowerCase().trim() !== email) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Passkey registration requires an authenticated matching email session",
-      },
-      403,
+
+  // Two ways in: an authenticated session (add-passkey for logged-in users)
+  // or a verified-email grant from /email/otp/verify (Privy-style signup:
+  // email → 6-digit code → Touch ID, no session required). The grant proves
+  // ownership of the email, which is what blocks account pre-hijack.
+  let userId: string;
+  let userEmail: string | null;
+  let ssoTenantId: string;
+
+  if (typeof body.emailGrant === "string" && body.emailGrant.length > 0) {
+    const resolvedTenantId =
+      c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || _DEFAULT_TENANT_ID;
+    const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "passkey");
+    if (methodResponse) return methodResponse;
+    // Peek (not consume): the grant is only burned at register/verify so a
+    // cancelled Touch ID prompt doesn't cost the user their verification.
+    const grantOk = await peekEmailGrant(body.emailGrant, email, resolvedTenantId);
+    if (!grantOk) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
+    }
+    const { user } = await findOrCreateUserWithStatus(email);
+    userId = user.id;
+    userEmail = user.email;
+    ssoTenantId = resolvedTenantId;
+  } else {
+    const session = await requireSession(c);
+    if (!session.ok) return session.response;
+    const sessionMethodResponse = await requireTenantLoginMethodAllowed(
+      c,
+      session.payload.tenantId,
+      "passkey",
     );
+    if (sessionMethodResponse) return sessionMethodResponse;
+
+    const [user] = await db.select().from(users).where(eq(users.id, session.payload.userId));
+    if (!user || user.email?.toLowerCase().trim() !== email) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Passkey registration requires an authenticated matching email session",
+        },
+        403,
+      );
+    }
+    if (!user.emailVerified) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Email must be verified before registering a passkey",
+        },
+        403,
+      );
+    }
+    const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
+    if (stepUpResponse) return stepUpResponse;
+    userId = user.id;
+    userEmail = user.email;
+    ssoTenantId = session.payload.tenantId;
   }
-  if (!user.emailVerified) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Email must be verified before registering a passkey",
-      },
-      403,
-    );
-  }
-  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
-    c,
-    session.payload.tenantId,
-    email,
-    "Passkey",
-  );
+
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, ssoTenantId, email, "Passkey");
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
   const existingCreds = await db
     .select({ credentialId: authenticators.credentialId })
     .from(authenticators)
-    .where(eq(authenticators.userId, user.id));
-  const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
-  if (stepUpResponse) return stepUpResponse;
+    .where(eq(authenticators.userId, userId));
 
   const attachment =
     body.authenticatorAttachment === "platform" || body.authenticatorAttachment === "cross-platform"
@@ -7408,8 +7511,8 @@ auth.post("/passkey/register/options", async (c) => {
       : undefined;
 
   const options = await getPasskeyAuth(c.req.header("origin")).generateRegistrationOptions(
-    user.id,
-    email,
+    userId,
+    userEmail ?? email,
     existingCreds.map((cred) => cred.credentialId),
     attachment ? { authenticatorAttachment: attachment } : undefined,
   );
@@ -7424,9 +7527,6 @@ auth.post("/passkey/register/options", async (c) => {
  * Verifies registration, stores credential, provisions wallet, returns JWT.
  */
 auth.post("/passkey/register/verify", async (c) => {
-  const session = await requireSession(c);
-  if (!session.ok) return session.response;
-
   const rl = await checkAuthRateLimit(c, "passkey-verify", 60_000, 10);
   if (!rl.allowed) {
     return c.json<ApiResponse>(
@@ -7438,6 +7538,7 @@ auth.post("/passkey/register/verify", async (c) => {
     email: string;
     response: Record<string, unknown>;
     tenantId?: string;
+    emailGrant?: string;
   }>(c);
 
   if (!body?.email || !body?.response) {
@@ -7445,26 +7546,70 @@ auth.post("/passkey/register/verify", async (c) => {
   }
 
   const db = getDb();
-
-  const [user] = await db.select().from(users).where(eq(users.id, session.payload.userId));
   const email = body.email.toLowerCase().trim();
-  if (!user || user.email?.toLowerCase().trim() !== email || !user.emailVerified) {
-    return c.json<ApiResponse>(
-      {
-        ok: false,
-        error: "Passkey registration requires an authenticated verified email session",
-      },
-      403,
-    );
-  }
-  const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
-  if (stepUpResponse) return stepUpResponse;
 
+  // Session path (logged-in add-passkey) or verified-email-grant path
+  // (Privy-style signup). The grant is CONSUMED here — single use — and
+  // proves email ownership, so completing registration also marks the
+  // email verified.
+  let user: typeof users.$inferSelect | undefined;
+  const usingGrant = typeof body.emailGrant === "string" && body.emailGrant.length > 0;
+
+  let grantTenantId: string | null = null;
+  if (usingGrant) {
+    // PEEK only here. The grant is consumed AFTER the WebAuthn ceremony
+    // succeeds (below) so a failed/cancelled ceremony doesn't burn the
+    // user's OTP verification, while consumption before any state change
+    // keeps it strictly single-use.
+    grantTenantId =
+      c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || _DEFAULT_TENANT_ID;
+    const grantOk = await peekEmailGrant(body.emailGrant as string, email, grantTenantId);
+    if (!grantOk) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
+    }
+    const found = await findOrCreateUserWithStatus(email);
+    user = found.user;
+  } else {
+    const session = await requireSession(c);
+    if (!session.ok) return session.response;
+    const [sessionUser] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, session.payload.userId));
+    if (
+      !sessionUser ||
+      sessionUser.email?.toLowerCase().trim() !== email ||
+      !sessionUser.emailVerified
+    ) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Passkey registration requires an authenticated verified email session",
+        },
+        403,
+      );
+    }
+    const stepUpResponse = await requireRecentFactorEnrollmentStepUp(c, session);
+    if (stepUpResponse) return stepUpResponse;
+    user = sessionUser;
+  }
+
+  // Tenant resolution uses the SAME join_mode-gated path as oauth and
+  // magic-link signup (resolveAndValidateTenant). The email grant proves
+  // address ownership — it must NOT also become a side door around
+  // invite-only tenants. Open-signup tenants set join_mode=open in config.
   const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
   if (!tenantResult.ok) {
     return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
   }
-  const { tenantId } = tenantResult;
+  const tenantId = tenantResult.tenantId;
+  if (usingGrant && tenantId !== grantTenantId) {
+    // The grant is bound to ONE {email, tenant} pair. If tenant resolution
+    // lands anywhere other than the grant-bound tenant, refuse — a grant
+    // proving ownership for tenant A must never complete registration (and
+    // session issuance) under tenant B.
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
+  }
   const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "passkey");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, tenantId, email, "Passkey");
@@ -7488,6 +7633,19 @@ auth.post("/passkey/register/verify", async (c) => {
 
   if (!verification.verified || !verification.registrationInfo) {
     return c.json<ApiResponse>({ ok: false, error: "Registration verification failed" }, 400);
+  }
+
+  if (usingGrant && grantTenantId) {
+    // Ceremony succeeded — NOW consume the grant (atomic single-use gate
+    // before any state is written). A replayed request with the same grant
+    // fails here even if it carries a valid ceremony response.
+    const consumed = await consumeEmailGrant(body.emailGrant as string, email, grantTenantId);
+    if (!consumed) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
+    }
+    // The OTP proved address ownership.
+    await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
+    user = { ...user, emailVerified: true };
   }
 
   const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;
@@ -7949,6 +8107,137 @@ auth.post("/email/verify", async (c) => {
   }
 
   return authExchangeJson(c, authResult.response);
+});
+
+// ── Email OTP (Privy-style verified signup) ───────────────────────────────
+//
+// POST /auth/email/otp/send    — email a 6-digit one-time code.
+// POST /auth/email/otp/verify  — exchange a correct code for a short-lived
+//                                single-use verified-email GRANT. The grant
+//                                unlocks passkey registration for that exact
+//                                {email, tenant} without a session, enabling
+//                                email → code → Touch ID signup while keeping
+//                                unverified registration (pre-hijack) closed.
+
+auth.post("/email/otp/send", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-otp-send", 60_000, 3);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+  const body = await safeJsonParse<{ email: string; tenantId?: string; captchaToken?: string }>(c);
+  if (!body?.email) {
+    return c.json<ApiResponse>({ ok: false, error: "email is required" }, 400);
+  }
+
+  const email = body.email.toLowerCase().trim();
+  const headerTenantId = c.req.header("X-Steward-Tenant")?.trim();
+  const bodyTenantId = body.tenantId?.trim();
+  const resolvedTenantId = headerTenantId || bodyTenantId || _DEFAULT_TENANT_ID;
+  const tenantHintError = await validateExplicitAuthTenantHint(
+    resolvedTenantId,
+    Boolean(headerTenantId || bodyTenantId),
+  );
+  if (tenantHintError) {
+    return c.json<ApiResponse>({ ok: false, error: tenantHintError }, 404);
+  }
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
+  if (methodResponse) return methodResponse;
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    resolvedTenantId,
+    email,
+    "Email",
+  );
+  if (ssoRequiredResponse) return ssoRequiredResponse;
+  const authAbuseConfig = await getTenantAuthAbuseConfig(resolvedTenantId);
+  const emailPolicyError = validateEmailAbusePolicy(email, authAbuseConfig);
+  if (emailPolicyError) {
+    return c.json<ApiResponse>({ ok: false, error: emailPolicyError }, 400);
+  }
+  const captcha = await verifyCaptchaToken(
+    authAbuseConfig,
+    "email_otp",
+    body.captchaToken,
+    trustedRemoteIp(c),
+  );
+  if (!captcha.ok) {
+    return c.json<ApiResponse>(
+      { ok: false, error: captcha.error },
+      captcha.status as 400 | 502 | 503,
+    );
+  }
+  const emailRl = await checkAuthRateLimit(c, "email-otp-send-destination", 10 * 60_000, 5, email);
+  if (!emailRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const { expiresAt } = await emailAuth.sendOtp(email, { tenantId: resolvedTenantId });
+
+  return c.json<ApiResponse<{ expiresAt: string }>>({
+    ok: true,
+    data: { expiresAt: expiresAt.toISOString() },
+  });
+});
+
+auth.post("/email/otp/verify", async (c) => {
+  const rl = await checkAuthRateLimit(c, "email-otp-verify", 60_000, 10);
+  if (!rl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many verification attempts. Try again later." },
+      429,
+    );
+  }
+
+  const body = await safeJsonParse<{ email: string; code: string; tenantId?: string }>(c);
+  if (!body?.email || !body?.code) {
+    return c.json<ApiResponse>({ ok: false, error: "email and code are required" }, 400);
+  }
+
+  const email = body.email.toLowerCase().trim();
+  const code = body.code.trim();
+  const resolvedTenantId = c.req.header("X-Steward-Tenant") || body.tenantId || _DEFAULT_TENANT_ID;
+  const methodResponse = await requireTenantLoginMethodAllowed(c, resolvedTenantId, "email");
+  if (methodResponse) return methodResponse;
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    resolvedTenantId,
+    email,
+    "Email",
+  );
+  if (ssoRequiredResponse) return ssoRequiredResponse;
+  // Per-{email,tenant} attempt limiter so 6 digits can't be brute-forced:
+  // 5 attempts / 10 min regardless of source IP.
+  const attemptRl = await checkAuthRateLimit(
+    c,
+    "email-otp-verify-target",
+    10 * 60_000,
+    5,
+    `${resolvedTenantId}:${email}`,
+  );
+  if (!attemptRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many verification attempts. Try again later." },
+      429,
+    );
+  }
+
+  const emailAuth = await getEmailAuthForTenant(resolvedTenantId);
+  const valid = await emailAuth.verifyOtp(email, code, resolvedTenantId);
+  if (!valid) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired code" }, 401);
+  }
+
+  const grant = await issueEmailGrant(email, resolvedTenantId);
+  return c.json<ApiResponse<{ emailGrant: string; expiresInSeconds: number }>>({
+    ok: true,
+    data: { emailGrant: grant, expiresInSeconds: Math.floor(EMAIL_GRANT_TTL_MS / 1000) },
+  });
 });
 
 // ── Guest (ephemeral / anonymous) accounts — Privy parity ─────────────────────
