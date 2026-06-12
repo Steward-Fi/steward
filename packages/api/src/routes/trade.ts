@@ -260,14 +260,14 @@ function getIdempotency(
   };
 }
 
-async function resolvePolicyLimitPx(
+export async function resolvePolicyLimitPx(
   asset: z.infer<typeof hyperliquidAssetSchema>,
   side: "buy" | "sell",
   limitPx: string | number | undefined,
 ): Promise<string | number> {
-  if (side !== "sell") return limitPx ?? (await getMarketableLimitPx(asset, true));
+  if (limitPx !== undefined) return limitPx;
   try {
-    return await getMarketableLimitPx(asset, false);
+    return await getMarketableLimitPx(asset, side === "buy");
   } catch (error) {
     const response = await fetch("https://api.hyperliquid.xyz/info");
     const prices = (await response.json()) as Record<string, unknown>;

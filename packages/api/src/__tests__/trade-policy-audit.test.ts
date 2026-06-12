@@ -192,7 +192,7 @@ describe("trade policy audit", () => {
     });
   });
 
-  it("uses live mids for sell-order notional so low limits cannot bypass caps", async () => {
+  it("honors explicit sell limitPx for policy notional instead of forcing marketable price", async () => {
     const tenantId = `tenant-trade-notional-${Date.now()}`;
     const agentId = `agent-trade-notional-${Date.now()}`;
     const sessionId = `ses_${crypto.randomUUID()}`;
@@ -229,10 +229,7 @@ describe("trade policy audit", () => {
       });
 
     globalThis.fetch = mock(async () => {
-      return new Response(JSON.stringify({ BTC: "60000", ETH: "3000" }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      throw new Error("explicit sell limitPx should not fetch a marketable price");
     }) as unknown as typeof fetch;
 
     process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
@@ -260,7 +257,7 @@ describe("trade policy audit", () => {
         asset: "BTC",
         side: "sell",
         size: 1,
-        limitPx: 1,
+        limitPx: 60,
         leverage: 1,
       }),
     });
@@ -268,7 +265,7 @@ describe("trade policy audit", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
       code: "policy-violation",
-      reason: "per-order-cap: order $60000 exceeds cap $50",
+      reason: "per-order-cap: order $60 exceeds cap $50",
     });
   });
 
