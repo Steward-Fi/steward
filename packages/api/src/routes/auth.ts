@@ -7417,6 +7417,15 @@ auth.delete("/sessions", async (c) => {
  * Finds or creates user, returns WebAuthn registration options.
  */
 auth.post("/passkey/register/options", async (c) => {
+  // Pre-auth reachable via the email-grant path — rate limit like the other
+  // pre-auth passkey endpoints.
+  const optionsRl = await checkAuthRateLimit(c, "passkey-register-options", 60_000, 20);
+  if (!optionsRl.allowed) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Too many requests. Please try again later." },
+      429,
+    );
+  }
   const body = await safeJsonParse<{
     email: string;
     authenticatorAttachment?: "platform" | "cross-platform";
@@ -7546,18 +7555,20 @@ auth.post("/passkey/register/verify", async (c) => {
   let user: typeof users.$inferSelect | undefined;
   const usingGrant = typeof body.emailGrant === "string" && body.emailGrant.length > 0;
 
+  let grantTenantId: string | null = null;
   if (usingGrant) {
-    const resolvedTenantId =
+    // PEEK only here. The grant is consumed AFTER the WebAuthn ceremony
+    // succeeds (below) so a failed/cancelled ceremony doesn't burn the
+    // user's OTP verification, while consumption before any state change
+    // keeps it strictly single-use.
+    grantTenantId =
       c.req.header("X-Steward-Tenant")?.trim() || body.tenantId?.trim() || _DEFAULT_TENANT_ID;
-    const grantOk = await consumeEmailGrant(body.emailGrant as string, email, resolvedTenantId);
+    const grantOk = await peekEmailGrant(body.emailGrant as string, email, grantTenantId);
     if (!grantOk) {
       return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
     }
     const found = await findOrCreateUserWithStatus(email);
     user = found.user;
-    // The OTP proved address ownership.
-    await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
-    user = { ...user, emailVerified: true };
   } else {
     const session = await requireSession(c);
     if (!session.ok) return session.response;
@@ -7583,11 +7594,15 @@ auth.post("/passkey/register/verify", async (c) => {
     user = sessionUser;
   }
 
+  // Tenant resolution uses the SAME join_mode-gated path as oauth and
+  // magic-link signup (resolveAndValidateTenant). The email grant proves
+  // address ownership — it must NOT also become a side door around
+  // invite-only tenants. Open-signup tenants set join_mode=open in config.
   const tenantResult = await resolveAndValidateTenant(c, user.id, body.tenantId);
   if (!tenantResult.ok) {
     return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
   }
-  const { tenantId } = tenantResult;
+  const tenantId = tenantResult.tenantId;
   const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "passkey");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, tenantId, email, "Passkey");
@@ -7611,6 +7626,19 @@ auth.post("/passkey/register/verify", async (c) => {
 
   if (!verification.verified || !verification.registrationInfo) {
     return c.json<ApiResponse>({ ok: false, error: "Registration verification failed" }, 400);
+  }
+
+  if (usingGrant && grantTenantId) {
+    // Ceremony succeeded — NOW consume the grant (atomic single-use gate
+    // before any state is written). A replayed request with the same grant
+    // fails here even if it carries a valid ceremony response.
+    const consumed = await consumeEmailGrant(body.emailGrant as string, email, grantTenantId);
+    if (!consumed) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
+    }
+    // The OTP proved address ownership.
+    await db.update(users).set({ emailVerified: true }).where(eq(users.id, user.id));
+    user = { ...user, emailVerified: true };
   }
 
   const { credential, credentialDeviceType, credentialBackedUp } = verification.registrationInfo;

@@ -157,14 +157,27 @@ describe("OTP route security invariants", () => {
     expect(body).toContain("requireSession");
   });
 
-  it("register/verify CONSUMES the grant (single use) and marks email verified", () => {
+  it("register/verify peeks pre-ceremony and CONSUMES only after WebAuthn succeeds", () => {
     const start = authSource.indexOf('auth.post("/passkey/register/verify"');
     const end = authSource.indexOf('auth.post("/passkey/login/options"', start);
     const body = authSource.slice(start, end);
-    expect(body).toContain("consumeEmailGrant");
+    // peek happens before the ceremony (cheap reject), consume after success
+    const peekIdx = body.indexOf("peekEmailGrant");
+    const ceremonyIdx = body.indexOf("verifyRegistration");
+    const consumeIdx = body.indexOf("consumeEmailGrant");
+    expect(peekIdx).toBeGreaterThan(-1);
+    expect(consumeIdx).toBeGreaterThan(ceremonyIdx);
+    expect(ceremonyIdx).toBeGreaterThan(peekIdx);
     expect(body).toContain("emailVerified: true");
     // grant-less path still requires a session
     expect(body).toContain("requireSession");
+    // tenant joining stays join_mode-gated (no invite bypass via grant)
+    expect(body).toContain("resolveAndValidateTenant");
+  });
+
+  it("register/options is rate limited (pre-auth reachable)", () => {
+    const body = routeBody('auth.post("/passkey/register/options"', 'auth.post("/passkey/register/verify"');
+    expect(body).toContain("passkey-register-options");
   });
 
   it("grants are single-purpose: issued only by otp/verify", () => {
