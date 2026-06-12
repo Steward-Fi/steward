@@ -173,6 +173,8 @@ describe("OTP route security invariants", () => {
     expect(body).toContain("requireSession");
     // tenant joining stays join_mode-gated (no invite bypass via grant)
     expect(body).toContain("resolveAndValidateTenant");
+    // resolved tenant must equal the grant-bound tenant (no tenant pivot)
+    expect(body).toContain("tenantId !== grantTenantId");
   });
 
   it("register/options is rate limited (pre-auth reachable)", () => {

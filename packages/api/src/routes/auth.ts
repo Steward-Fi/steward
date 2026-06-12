@@ -7603,6 +7603,13 @@ auth.post("/passkey/register/verify", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: tenantResult.error }, tenantResult.status);
   }
   const tenantId = tenantResult.tenantId;
+  if (usingGrant && tenantId !== grantTenantId) {
+    // The grant is bound to ONE {email, tenant} pair. If tenant resolution
+    // lands anywhere other than the grant-bound tenant, refuse — a grant
+    // proving ownership for tenant A must never complete registration (and
+    // session issuance) under tenant B.
+    return c.json<ApiResponse>({ ok: false, error: "Invalid or expired email grant" }, 401);
+  }
   const methodResponse = await requireTenantLoginMethodAllowed(c, tenantId, "passkey");
   if (methodResponse) return methodResponse;
   const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, tenantId, email, "Passkey");
