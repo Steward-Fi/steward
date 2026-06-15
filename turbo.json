@@ -1,6 +1,6 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalPassThroughEnv": [
+  "globalEnv": [
     "DATABASE_URL",
     "FAKE_OAUTH_PORT",
     "MILADY_SKIP_STEWARD_FI_LIVE_SMOKE",

@@ -23,9 +23,9 @@ setDefaultTimeout(30000);
 const TENANT_ID = "test-agent-route-scope";
 const AGENT_A = "test-ars-agent-a";
 const AGENT_B = "test-ars-agent-b";
-const OWNER_USER_ID = "test-ars-owner";
-const ADMIN_USER_ID = "test-ars-admin";
-const MEMBER_USER_ID = "test-ars-member";
+const OWNER_USER_ID = "00000000-0000-4000-8000-0000000000a1";
+const ADMIN_USER_ID = "00000000-0000-4000-8000-0000000000a2";
+const MEMBER_USER_ID = "00000000-0000-4000-8000-0000000000a3";
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
