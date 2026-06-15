@@ -406,14 +406,15 @@ describe("trade policy audit", () => {
     expect(((await res.json()) as { error: string }).error).toContain("insufficient access");
   });
 
-  it("does not allow agent tokens to mint their own trade sessions", () => {
+  it("keeps tenant-admin trade session management from accepting agent tokens", () => {
     const tradeSource = readFileSync(join(import.meta.dir, "..", "routes", "trade.ts"), "utf8");
     const helperStart = tradeSource.indexOf("function canManageTradeSession");
     expect(helperStart).toBeGreaterThanOrEqual(0);
-    const helperEnd = tradeSource.indexOf("function responseData", helperStart);
+    const helperEnd = tradeSource.indexOf("function canAgentSelfManageSession", helperStart);
     const helperSource = tradeSource.slice(helperStart, helperEnd);
-    expect(helperSource).toContain('c.get("authType") === "session-jwt"');
-    expect(helperSource).not.toContain("scopedAgent === agentId");
+    expect(helperSource).toContain('authType === "session-jwt"');
+    expect(helperSource).toContain('authType === "api-key"');
+    expect(helperSource).not.toContain('authType === "agent-token"');
   });
 
   it("deletes newly created trade sessions if the final creation audit fails", () => {

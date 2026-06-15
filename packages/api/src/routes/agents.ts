@@ -220,10 +220,12 @@ async function writeAgentAudit(
     metadata?: Record<string, unknown>;
   },
 ): Promise<void> {
+  const authType = c.get("authType");
   await writeAuditEvent({
     tenantId: event.tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? c.get("authType") ?? event.tenantId,
+    actorType: authType === "api-key" ? "api-key" : "user",
+    actorId:
+      authType === "api-key" ? event.tenantId : (c.get("userId") ?? authType ?? event.tenantId),
     action: event.action,
     resourceType: event.resourceType,
     resourceId: event.resourceId,
@@ -266,6 +268,11 @@ function parseListOffset(value: string | undefined): number {
 function requireTenantAdminSession(c: Parameters<typeof requireTenantLevel>[0]): boolean {
   const role = c.get("tenantRole");
   return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
+}
+
+function requireTenantAdminOrApiKey(c: Parameters<typeof requireTenantLevel>[0]): boolean {
+  if (c.get("authType") === "api-key") return true;
+  return requireTenantAdminSession(c);
 }
 
 function generateAgentId(): string {
@@ -540,6 +547,9 @@ function hasRecentSessionMfa(c: Parameters<typeof requireTenantLevel>[0], maxAge
 }
 
 function requireRecentAdminMfa(c: Parameters<typeof requireTenantLevel>[0], reason: string) {
+  // Tenant API keys are root machine credentials, not human sessions, so they
+  // cannot perform a session MFA step-up. Session JWT callers still require MFA.
+  if (c.get("authType") === "api-key") return null;
   if (hasRecentSessionMfa(c)) return null;
   return c.json<ApiResponse>(
     { ok: false, error: `${reason} requires recent MFA verification` },
@@ -864,7 +874,7 @@ function hasBuilderPerpAsset(assets: readonly string[]): boolean {
 // ─── Create agent ─────────────────────────────────────────────────────────────
 
 agentRoutes.post("/", async (c) => {
-  if (!requireTenantAdminSession(c)) {
+  if (!requireTenantAdminOrApiKey(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -947,7 +957,7 @@ agentRoutes.post("/", async (c) => {
 // ─── Create user-claimable pregenerated wallets ──────────────────────────────
 
 agentRoutes.post("/pregenerated", async (c) => {
-  if (!requireTenantAdminSession(c)) {
+  if (!requireTenantAdminOrApiKey(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -1200,7 +1210,7 @@ agentRoutes.get("/pregenerated", async (c) => {
 
 agentRoutes.post("/pregenerated/:agentId/claim-token/rotate", async (c) => {
   setNoStoreHeaders(c);
-  if (!requireTenantAdminSession(c)) {
+  if (!requireTenantAdminOrApiKey(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -1305,7 +1315,7 @@ agentRoutes.post("/:agentId/token", async (c) => {
   const tenantId = c.get("tenantId");
   const agentId = c.req.param("agentId");
 
-  if (!requireTenantAdminSession(c)) {
+  if (!requireTenantAdminOrApiKey(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -1399,7 +1409,7 @@ agentRoutes.post("/:agentId/token", async (c) => {
 // Tenant-level auth required (provisions wallets, not Sol's own JWT).
 
 agentRoutes.post("/:agentId/wallets", async (c) => {
-  if (!requireTenantAdminSession(c)) {
+  if (!requireTenantAdminOrApiKey(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -1736,7 +1746,7 @@ agentRoutes.get("/:agentId", async (c) => {
 // ─── Delete agent ─────────────────────────────────────────────────────────────
 
 agentRoutes.delete("/:agentId", async (c) => {
-  if (!requireTenantAdminSession(c)) {
+  if (!requireTenantAdminOrApiKey(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3036,7 +3046,7 @@ agentRoutes.delete("/:agentId/key-quorums/:quorumId", async (c) => {
 // ─── Batch create agents ──────────────────────────────────────────────────────
 
 export async function createAgentBatch(c: Context<{ Variables: AppVariables }>) {
-  if (!requireTenantAdminSession(c)) {
+  if (!requireTenantAdminOrApiKey(c)) {
     return c.json<ApiResponse>(
       {
         ok: false,
@@ -3239,7 +3249,7 @@ agentRoutes.get("/:agentId/policies", async (c) => {
 // ─── Update agent policies ────────────────────────────────────────────────────
 
 agentRoutes.put("/:agentId/policies", async (c) => {
-  if (!requireTenantAdminSession(c)) {
+  if (!requireTenantAdminOrApiKey(c)) {
     return c.json<ApiResponse>(
       { ok: false, error: "Policy updates require owner or admin session" },
       403,

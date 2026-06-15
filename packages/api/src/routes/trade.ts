@@ -125,9 +125,21 @@ function callerAgentId(c: Context<{ Variables: AppVariables }>): string | null {
   return c.get("agentScope") ?? null;
 }
 
+function controlPlaneAuditActor(c: Context<{ Variables: AppVariables }>): {
+  actorType: "user" | "api-key";
+  actorId: string;
+} {
+  if (c.get("authType") === "api-key") {
+    return { actorType: "api-key", actorId: c.get("tenantId") ?? "api-key" };
+  }
+  return { actorType: "user", actorId: c.get("userId") ?? c.get("authType") ?? "session-jwt" };
+}
+
 function canManageTradeSession(c: Context<{ Variables: AppVariables }>): boolean {
+  const authType = c.get("authType");
+  if (authType === "api-key") return true;
   return (
-    c.get("authType") === "session-jwt" &&
+    authType === "session-jwt" &&
     (c.get("tenantRole") === "owner" || c.get("tenantRole") === "admin")
   );
 }
@@ -177,12 +189,16 @@ async function auditTradeEvent(
     | "trade.order.policy-rejected"
     | "trade.order.canceled",
   details: Record<string, unknown>,
+  actor: { actorType: "agent" | "user" | "api-key"; actorId: string } = {
+    actorType: "agent",
+    actorId: agentId,
+  },
 ): Promise<void> {
   const correlationId = typeof details.sessionId === "string" ? details.sessionId : undefined;
   await writeAuditEvent({
     tenantId,
-    actorType: "agent",
-    actorId: agentId,
+    actorType: actor.actorType,
+    actorId: actor.actorId,
     action: event,
     resourceType: "trade",
     resourceId: correlationId ?? agentId,
@@ -342,7 +358,7 @@ tradeRoutes.post("/sessions", async (c) => {
   // MFA recency is a human-session protection. The agent-self path has no human
   // session to MFA; its protection is the agent_policies cap clamp below + the
   // per-order policy evaluation on submission. Only enforce MFA on the human path.
-  if (createByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
+  if (c.get("authType") === "session-jwt" && createByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
     return c.json<ApiResponse>(
       { ok: false, error: "Trade session management requires recent MFA verification" },
       403,
@@ -463,10 +479,11 @@ tradeRoutes.post("/sessions", async (c) => {
     );
   }
 
+  const auditActor = controlPlaneAuditActor(c);
   await writeAuditEvent({
     tenantId,
-    actorType: "user",
-    actorId: c.get("userId") ?? c.get("authType") ?? "session-jwt",
+    actorType: auditActor.actorType,
+    actorId: auditActor.actorId,
     action: "trade.session.create.authorized",
     resourceType: "trade",
     resourceId: agentId,
@@ -489,8 +506,8 @@ tradeRoutes.post("/sessions", async (c) => {
   try {
     await writeAuditEvent({
       tenantId,
-      actorType: "user",
-      actorId: c.get("userId") ?? c.get("authType") ?? "session-jwt",
+      actorType: auditActor.actorType,
+      actorId: auditActor.actorId,
       action: "trade.session.created",
       resourceType: "trade",
       resourceId: session.id,
@@ -531,7 +548,7 @@ tradeRoutes.get("/sessions/:id", async (c) => {
       403,
     );
   }
-  if (readByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
+  if (c.get("authType") === "session-jwt" && readByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
     return c.json<ApiResponse>(
       { ok: false, error: "Trade session management requires recent MFA verification" },
       403,
@@ -569,7 +586,7 @@ tradeRoutes.post("/sessions/:id/revoke", async (c) => {
       403,
     );
   }
-  if (revokeByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
+  if (c.get("authType") === "session-jwt" && revokeByHumanAdmin && !c.get("sessionMfaVerifiedAt")) {
     return c.json<ApiResponse>(
       { ok: false, error: "Trade session management requires recent MFA verification" },
       403,
@@ -589,10 +606,20 @@ tradeRoutes.post("/sessions/:id/revoke", async (c) => {
   });
   if (!revoked) return c.json<ApiResponse>({ ok: false, error: "Session not found" }, 404);
 
-  await auditTradeEvent(tenantId, revoked.agentId, "trade.session.revoked", {
-    sessionId: revoked.id,
-    revokedBy: callerAgentId(c) ?? c.get("authType") ?? "api-key",
-  });
+  const scopedAgentId = callerAgentId(c);
+  const revokeActor = scopedAgentId
+    ? { actorType: "agent" as const, actorId: scopedAgentId }
+    : controlPlaneAuditActor(c);
+  await auditTradeEvent(
+    tenantId,
+    revoked.agentId,
+    "trade.session.revoked",
+    {
+      sessionId: revoked.id,
+      revokedBy: scopedAgentId ?? revokeActor.actorId,
+    },
+    revokeActor,
+  );
   return c.json(
     responseData({
       sessionId: revoked.id,
