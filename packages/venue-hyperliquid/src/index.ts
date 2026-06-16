@@ -492,12 +492,16 @@ function tokenIdFromSpotToken(entry: unknown): string | null {
   const rawName = typeof record.name === "string" ? record.name : "";
   const name = rawName.toUpperCase();
   if (name !== "USDC" && name !== "USD COIN") return null;
-  const index = record.index;
-  if (typeof index === "number" && Number.isInteger(index) && index >= 0) return `${name === "USD COIN" ? "USDC" : rawName}:${index}`;
-  if (typeof index === "string" && /^\d+$/.test(index)) return `${name === "USD COIN" ? "USDC" : rawName}:${index}`;
-  for (const key of ["token", "id", "tokenId"]) {
+  const display = name === "USD COIN" ? "USDC" : rawName;
+  // HL sendAsset token string is `NAME:tokenId` where tokenId is the HEX token
+  // id from spotMeta (verified live 2026-06-15: USDC = `USDC:0x6d1e7cde53ba9467b783cb7c530ce054`),
+  // exactly like the docs' `PURR:0xc4bf...` example. NOT the numeric spot index.
+  const tokenId = record.tokenId;
+  if (typeof tokenId === "string" && /^0x[0-9a-fA-F]+$/.test(tokenId)) return `${display}:${tokenId}`;
+  // Already-formatted `NAME:0x...` passthrough.
+  for (const key of ["token", "id"]) {
     const value = record[key];
-    if (typeof value === "string" && /^USDC:\d+$/.test(value)) return value;
+    if (typeof value === "string" && /^[A-Za-z0-9]+:0x[0-9a-fA-F]+$/.test(value)) return value;
   }
   return null;
 }

@@ -246,7 +246,7 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       extra?.onBody?.(body);
       if (body.type === "spotMeta") {
-        return new Response(JSON.stringify({ tokens: [{ name: "USDC", index: 0, tokenId: "0xnot-sendasset-token" }] }), { status: 200 });
+        return new Response(JSON.stringify({ tokens: [{ name: "USDC", index: 0, tokenId: "0x6d1e7cde53ba9467b783cb7c530ce054" }] }), { status: 200 });
       }
       if (body.action && (body.action as Record<string, unknown>).type === "sendAsset") {
         return new Response(JSON.stringify(extra?.exchangeRaw ?? { status: "ok" }), { status: 200 });
@@ -280,7 +280,7 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
       destination: WALLET.toLowerCase(),
       sourceDex: "",
       destinationDex: "xyz",
-      token: "USDC:0",
+      token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
       amount: "2000",
       nonce: NONCE,
     });
@@ -293,7 +293,7 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
         usdcTokenId: "configured-usdc",
         transport: {
           async fetch() {
-            return new Response(JSON.stringify({ tokens: [{ name: "PURR", tokenId: "PURR:0" }] }), { status: 200 });
+            return new Response(JSON.stringify({ tokens: [{ name: "PURR", index: 1, tokenId: "0xc1fb593aeffbeb02f85e0308e9956a90" }] }), { status: 200 });
           },
         },
       },
@@ -338,13 +338,13 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
     const actions = posted
       .map((body) => body.action as Record<string, unknown> | undefined)
       .filter(Boolean);
-    expect(actions[0]).toMatchObject({ sourceDex: "", destinationDex: "xyz", destination: WALLET.toLowerCase(), token: "USDC:0", amount: "10" });
-    expect(actions[1]).toMatchObject({ sourceDex: "xyz", destinationDex: "", destination: WALLET.toLowerCase(), token: "USDC:0", amount: "5" });
+    expect(actions[0]).toMatchObject({ sourceDex: "", destinationDex: "xyz", destination: WALLET.toLowerCase(), token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "10" });
+    expect(actions[1]).toMatchObject({ sourceDex: "xyz", destinationDex: "", destination: WALLET.toLowerCase(), token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "5" });
   });
 
   test("submitSendAsset posts signed L1 payload to /exchange", async () => {
     let posted: unknown;
-    const signed = await signSendAsset(PRIVATE_KEY, { destination: WALLET, sourceDex: "", destinationDex: "xyz", token: "USDC:0", amount: "1" }, { nonce: NONCE, isMainnet: false });
+    const signed = await signSendAsset(PRIVATE_KEY, { destination: WALLET, sourceDex: "", destinationDex: "xyz", token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "1" }, { nonce: NONCE, isMainnet: false });
     const result = await submitSendAsset(signed, {
       transport: {
         async fetch(_input, init) {
