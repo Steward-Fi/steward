@@ -13,10 +13,13 @@ import {
   resolveAssetId,
   signOrder,
   signSendAsset,
+  signUpdateIsolatedMargin,
   submitOrder,
   submitSendAsset,
+  submitUpdateIsolatedMargin,
   toExchangeAction,
   toSendAssetAction,
+  toUpdateIsolatedMarginAction,
   toWithdrawAction,
 } from "./index";
 
@@ -257,6 +260,93 @@ describe("Hyperliquid HIP-3 builder perps", () => {
       ],
       grouping: "na",
     });
+  });
+});
+
+describe("Hyperliquid isolated margin updates", () => {
+  test("builds updateIsolatedMargin for xyz:SPCX with micro-USDC ntli", async () => {
+    const action = await toUpdateIsolatedMarginAction(
+      { coin: "xyz:SPCX", amountUsdc: "12.345678" },
+      { transport: xyzSpcxTransport(), baseUrl: "https://fixture-margin.hyperliquid.test" },
+    );
+    expect(action).toEqual({
+      type: "updateIsolatedMargin",
+      asset: 110076,
+      isBuy: true,
+      ntli: 12_345_678,
+    });
+  });
+
+  test("signUpdateIsolatedMargin uses the L1 Exchange signing path", async () => {
+    const signed = await signUpdateIsolatedMargin(
+      PRIVATE_KEY,
+      { coin: "xyz:SPCX", amountUsdc: 25, nonce: NONCE },
+      {
+        nonce: NONCE,
+        isMainnet: false,
+        baseUrl: "https://fixture-margin-sign.hyperliquid.test",
+        transport: xyzSpcxTransport(),
+      },
+    );
+    expect(signed.nonce).toBe(NONCE);
+    expect(signed.action).toEqual({
+      type: "updateIsolatedMargin",
+      asset: 110076,
+      isBuy: true,
+      ntli: 25_000_000,
+    });
+  });
+
+  test("submitUpdateIsolatedMargin throws on Hyperliquid status err", async () => {
+    const signed = await signUpdateIsolatedMargin(
+      PRIVATE_KEY,
+      { coin: "BTC", amountUsdc: 1 },
+      { nonce: NONCE, isMainnet: false },
+    );
+    await expect(
+      submitUpdateIsolatedMargin(signed, {
+        transport: {
+          async fetch() {
+            return new Response(
+              JSON.stringify({ status: "err", response: "insufficient margin" }),
+              { status: 200 },
+            );
+          },
+        },
+      }),
+    ).rejects.toThrow("hyperliquid updateIsolatedMargin rejected: insufficient margin");
+  });
+
+  test("updateLeverage throws on Hyperliquid status err", async () => {
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const adapter = new HyperliquidAdapter(
+      {
+        signTypedData(input) {
+          return account.signTypedData({
+            domain: input.domain,
+            types: input.types,
+            primaryType: input.primaryType,
+            message: input.value,
+          });
+        },
+      },
+      "sol",
+      WALLET,
+      {
+        isMainnet: false,
+        transport: {
+          async fetch() {
+            return new Response(
+              JSON.stringify({ status: "err", response: "cannot decrease leverage" }),
+              { status: 200 },
+            );
+          },
+        },
+      },
+    );
+    await expect(adapter.updateLeverage({ coin: "BTC", leverage: 3, isCross: false })).rejects.toThrow(
+      "hyperliquid updateLeverage rejected: cannot decrease leverage",
+    );
   });
 });
 

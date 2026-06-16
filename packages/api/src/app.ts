@@ -163,7 +163,8 @@ const isOperatorRecoveryPath = (path: string): boolean =>
   path.endsWith("/close-all") ||
   path.endsWith("/withdraw") ||
   path.endsWith("/transfer") ||
-  path.endsWith("/leverage");
+  path.endsWith("/leverage") ||
+  path.endsWith("/add-margin");
 
 app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));

@@ -2,7 +2,7 @@ import { concatBytes, type Hex, keccak256, parseSignature, toBytes } from "viem"
 import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 
-const hyperliquidCoreAssetSchema = z.enum([
+export const hyperliquidCoreAssetSchema = z.enum([
   "BTC",
   "ETH",
   "BNB",
@@ -15,7 +15,7 @@ const hyperliquidCoreAssetSchema = z.enum([
   "ZEC",
   "XMR",
 ]);
-const builderPerpSymbolSchema = z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/);
+export const builderPerpSymbolSchema = z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/);
 export const hyperliquidAssetSchema = z.union([
   hyperliquidCoreAssetSchema,
   builderPerpSymbolSchema,
@@ -101,6 +101,12 @@ export type LeverageUpdateInput = {
   asset?: HyperliquidAsset;
   leverage: number;
   isCross?: boolean;
+  nonce?: number;
+};
+export type AddIsolatedMarginInput = {
+  coin?: HyperliquidAsset;
+  asset?: HyperliquidAsset;
+  amountUsdc: string | number;
   nonce?: number;
 };
 export type SignOptions = {
@@ -190,6 +196,13 @@ export const sendAssetResultSchema = z.object({
   raw: z.unknown().optional(),
 });
 export type SendAssetResult = z.infer<typeof sendAssetResultSchema>;
+export const updateIsolatedMarginResultSchema = z.object({
+  status: z.string(),
+  raw: z.unknown().optional(),
+});
+export type UpdateIsolatedMarginResult = z.infer<typeof updateIsolatedMarginResultSchema>;
+export const signedUpdateIsolatedMarginSchema = signedOrderSchema;
+export type SignedUpdateIsolatedMargin = SignedOrder;
 
 export interface VaultSignTypedDataInput {
   agentId: string;
@@ -451,6 +464,40 @@ function normalizedLeverageUpdate(input: LeverageUpdateInput) {
     nonce: p.nonce,
   };
 }
+const USDC_MICRO_DECIMALS = 6;
+const USDC_DECIMAL_RE = /^\d+(?:\.(\d+))?$/;
+function amountUsdcToMicroInt(amount: string | number): number {
+  const raw = typeof amount === "number" ? String(amount) : amount.trim();
+  if (!USDC_DECIMAL_RE.test(raw)) throw new Error("amountUsdc must be a positive decimal");
+  const [, fractional = ""] = raw.match(USDC_DECIMAL_RE) ?? [];
+  if (fractional.length > USDC_MICRO_DECIMALS)
+    throw new Error("amountUsdc has more than 6 decimal places");
+  const [whole, fraction = ""] = raw.split(".");
+  const micro =
+    BigInt(whole) * 10n ** BigInt(USDC_MICRO_DECIMALS) +
+    BigInt(fraction.padEnd(USDC_MICRO_DECIMALS, "0"));
+  if (micro <= 0n) throw new Error("amountUsdc must be positive");
+  if (micro > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("amountUsdc is too large");
+  return Number(micro);
+}
+function normalizedAddIsolatedMargin(input: AddIsolatedMarginInput) {
+  const p = z
+    .object({
+      coin: hyperliquidAssetSchema.optional(),
+      asset: hyperliquidAssetSchema.optional(),
+      amountUsdc: z.union([z.string(), z.number()]),
+      nonce: z.number().int().positive().optional(),
+    })
+    .parse(input);
+  const coin = p.coin ?? p.asset;
+  if (!coin) throw new Error("coin is required");
+  return {
+    coin,
+    amountUsdc: p.amountUsdc,
+    ntli: amountUsdcToMicroInt(p.amountUsdc),
+    nonce: p.nonce,
+  };
+}
 function exchangeActionFromNormalized(
   o: ReturnType<typeof normalized>,
   asset: AssetResolution,
@@ -496,6 +543,14 @@ async function toResolvedUpdateLeverageAction(
   const o = normalizedLeverageUpdate(input);
   const asset = await resolveAsset(o.coin, options);
   return { type: "updateLeverage", asset: asset.assetId, isCross: o.isCross, leverage: o.leverage };
+}
+export async function toUpdateIsolatedMarginAction(
+  input: AddIsolatedMarginInput,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<Record<string, unknown>> {
+  const o = normalizedAddIsolatedMargin(input);
+  const asset = await resolveAsset(o.coin, options);
+  return { type: "updateIsolatedMargin", asset: asset.assetId, isBuy: true, ntli: o.ntli };
 }
 async function toResolvedCancelAction(
   input: CancelOrderInput,
@@ -830,6 +885,19 @@ export const signOrder = async (
     nonce: options.nonce ?? order.nonce,
   });
 };
+export const signUpdateIsolatedMargin = async (
+  walletPrivateKey: Hex,
+  input: AddIsolatedMarginInput,
+  options: SignOptions & { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<SignedUpdateIsolatedMargin> => {
+  const parsed = normalizedAddIsolatedMargin(input);
+  return signedUpdateIsolatedMarginSchema.parse(
+    await signAction(walletPrivateKey, await toUpdateIsolatedMarginAction(parsed, options), {
+      ...options,
+      nonce: options.nonce ?? parsed.nonce,
+    }),
+  );
+};
 async function postExchange(signed: SignedOrder, transport: HyperliquidTransport, baseUrl: string) {
   const r = await transport.fetch(
     `${baseUrl}/exchange`,
@@ -842,6 +910,16 @@ async function postExchange(signed: SignedOrder, transport: HyperliquidTransport
   const j = await r.json().catch(() => null);
   if (!r.ok) throw new Error(`Hyperliquid exchange returned ${r.status}: ${JSON.stringify(j)}`);
   return j;
+}
+function throwIfExchangeRejected(raw: unknown, actionName: string): string {
+  const status = String((raw as { status?: unknown })?.status ?? "");
+  if (status === "err") {
+    const detail = (raw as { response?: unknown })?.response;
+    throw new Error(
+      `hyperliquid ${actionName} rejected: ${typeof detail === "string" ? detail : JSON.stringify(detail ?? raw)}`,
+    );
+  }
+  return status;
 }
 export async function submitOrder(
   signedOrder: SignedOrder,
@@ -868,14 +946,20 @@ export async function submitSendAsset(
   // rejected exchange action. Surface that as a thrown error so the /transfer
   // route audits it as FAILED (not submitted) and the idempotency key is not
   // poisoned with a success that never moved collateral.
-  const status = String((raw as { status?: unknown })?.status ?? "");
-  if (status === "err") {
-    const detail = (raw as { response?: unknown })?.response;
-    throw new Error(
-      `hyperliquid sendAsset rejected: ${typeof detail === "string" ? detail : JSON.stringify(detail ?? raw)}`,
-    );
-  }
+  const status = throwIfExchangeRejected(raw, "sendAsset");
   return sendAssetResultSchema.parse({ status: status || "submitted", raw });
+}
+export async function submitUpdateIsolatedMargin(
+  signed: SignedUpdateIsolatedMargin,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<UpdateIsolatedMarginResult> {
+  const raw = await postExchange(
+    signedUpdateIsolatedMarginSchema.parse(signed),
+    options.transport ?? { fetch },
+    options.baseUrl ?? DEFAULT_BASE_URL,
+  );
+  const status = throwIfExchangeRejected(raw, "updateIsolatedMargin");
+  return updateIsolatedMarginResultSchema.parse({ status: status || "submitted", raw });
 }
 export async function getOpenOrders(
   userAddress: string,
@@ -989,6 +1073,37 @@ export class HyperliquidAdapter {
   submitSendAsset(signed: SignedSendAsset) {
     return submitSendAsset(signed, { transport: this.transport, baseUrl: this.baseUrl });
   }
+  async signUpdateIsolatedMargin(input: AddIsolatedMarginInput): Promise<SignedUpdateIsolatedMargin> {
+    const parsed = normalizedAddIsolatedMargin(input);
+    const nonce = parsed.nonce ?? nextNonce();
+    const action = await toUpdateIsolatedMarginAction(parsed, {
+      transport: this.transport,
+      baseUrl: this.baseUrl,
+    });
+    const td = createL1TypedData(
+      action,
+      nonce,
+      this.isMainnet,
+      this.options.vaultAddress,
+      this.options.expiresAfter,
+    );
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
+    return signedUpdateIsolatedMarginSchema.parse({
+      action,
+      nonce,
+      signature: { r: s.r, s: s.s, v: Number(s.v) },
+      vaultAddress: this.options.vaultAddress,
+      expiresAfter: this.options.expiresAfter,
+    });
+  }
+  submitUpdateIsolatedMargin(signed: SignedUpdateIsolatedMargin) {
+    return submitUpdateIsolatedMargin(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  async addIsolatedMargin(input: AddIsolatedMarginInput): Promise<UpdateIsolatedMarginResult> {
+    const signed = await this.signUpdateIsolatedMargin(input);
+    return this.submitUpdateIsolatedMargin(signed);
+  }
   async transferToBuilderDex(dex: string, amountUsdc: string | number): Promise<SendAssetResult> {
     const signed = await this.signSendAsset({
       destination: this.walletAddress,
@@ -1034,7 +1149,8 @@ export class HyperliquidAdapter {
       this.transport,
       this.baseUrl,
     );
-    return leverageUpdateResultSchema.parse({ status: "ok", raw });
+    const status = throwIfExchangeRejected(raw, "updateLeverage");
+    return leverageUpdateResultSchema.parse({ status: status || "ok", raw });
   }
   getOpenOrders(userAddress = this.walletAddress) {
     return getOpenOrders(userAddress, { transport: this.transport, baseUrl: this.baseUrl });
