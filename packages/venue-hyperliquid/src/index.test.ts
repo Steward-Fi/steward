@@ -26,7 +26,10 @@ const xyzSpcxTransport = (extra?: { onBody?: (body: Record<string, unknown>) => 
     extra?.onBody?.(body);
     if (body.type === "perpDexs") return new Response(JSON.stringify({ xyz: 1 }), { status: 200 });
     if (body.type === "meta" && body.dex === "xyz") {
-      const universe = Array.from({ length: 77 }, (_, index) => ({ name: index === 76 ? "SPCX" : `DUMMY${index}`, szDecimals: index === 76 ? 2 : 4 }));
+      // HL's live meta{dex:xyz} names markets with the FULL `xyz:COIN` form
+      // (verified live 2026-06-15: xyz:SPCX at index 76). Mirror that here so the
+      // fixture guards the real-world keying, not a bare-symbol assumption.
+      const universe = Array.from({ length: 77 }, (_, index) => ({ name: index === 76 ? "xyz:SPCX" : `xyz:DUMMY${index}`, szDecimals: index === 76 ? 2 : 4 }));
       return new Response(JSON.stringify({ universe }), { status: 200 });
     }
     if (body.type === "allMids" && body.dex === "xyz") return new Response(JSON.stringify({ SPCX: "400" }), { status: 200 });

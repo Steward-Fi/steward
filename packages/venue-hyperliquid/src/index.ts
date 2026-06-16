@@ -257,7 +257,11 @@ async function resolveAsset(coin: HyperliquidAsset, options: { transport?: Hyper
   if (!parsed) throw new Error(`unsupported Hyperliquid asset: ${coin}`);
   const dexIndex = (await getPerpDexIndices(options)).get(parsed.dex);
   if (dexIndex === undefined) throw new Error(`unknown Hyperliquid builder perp dex: ${parsed.dex}`);
-  const market = (await getDexMeta(parsed.dex, options)).get(parsed.symbol);
+  const dexMeta = await getDexMeta(parsed.dex, options);
+  // HL's meta{dex} universe names markets as the FULL `dex:COIN` (e.g. `xyz:SPCX`).
+  // Some builders/historical responses use the bare `COIN`. Accept both so a
+  // `xyz:SPCX` symbol resolves whether meta is keyed full or bare.
+  const market = dexMeta.get(coin) ?? dexMeta.get(parsed.symbol);
   if (!market) throw new Error(`unknown Hyperliquid builder perp market: ${coin}`);
   return { assetId: BUILDER_PERP_ASSET_ID_OFFSET + dexIndex * BUILDER_PERP_DEX_STRIDE + market.index, builderPerp: true, dex: parsed.dex, symbol: parsed.symbol, szDecimals: market.szDecimals };
 }
