@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "turbo dev",
     "build": "turbo build",
-    "lint": "bunx @biomejs/biome check packages web scripts package.json turbo.json",
+    "lint": "biome check packages web scripts package.json turbo.json",
     "lint:fix": "bunx @biomejs/biome check --write packages web scripts package.json turbo.json",
     "format": "bunx @biomejs/biome format --write packages web scripts package.json turbo.json",
     "format:check": "bunx @biomejs/biome format packages web scripts package.json turbo.json",
