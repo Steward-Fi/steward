@@ -5179,8 +5179,13 @@ function fiatPaths(prefix = ""): Record<string, unknown> {
 
 function tradePaths(prefix = ""): Record<string, unknown> {
   const hyperliquidAssetSchema: JsonSchema = {
-    type: "string",
-    enum: ["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP", "NEAR", "HYPE", "ZEC", "XMR"],
+    anyOf: [
+      {
+        type: "string",
+        enum: ["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP", "NEAR", "HYPE", "ZEC", "XMR"],
+      },
+      { type: "string", pattern: "^[a-z0-9]+:[A-Z0-9]+$", examples: ["xyz:SPCX"] },
+    ],
   };
   const tradeSessionSchema: JsonSchema = {
     type: "object",
@@ -5260,6 +5265,7 @@ function tradePaths(prefix = ""): Record<string, unknown> {
       filledQty: { type: "number" },
       avgPrice: { type: "number" },
       txHash: nullableStringSchema,
+      builderPerp: { type: "boolean" },
     },
   };
   const recoveryInputProperties: Record<string, JsonSchema> = {

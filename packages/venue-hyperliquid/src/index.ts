@@ -2,7 +2,7 @@ import { concatBytes, type Hex, keccak256, parseSignature, toBytes } from "viem"
 import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 
-export const hyperliquidAssetSchema = z.enum([
+const hyperliquidCoreAssetSchema = z.enum([
   "BTC",
   "ETH",
   "BNB",
@@ -15,12 +15,15 @@ export const hyperliquidAssetSchema = z.enum([
   "ZEC",
   "XMR",
 ]);
+const builderPerpSymbolSchema = z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/);
+export const hyperliquidAssetSchema = z.union([hyperliquidCoreAssetSchema, builderPerpSymbolSchema]);
+export type HyperliquidCoreAsset = z.infer<typeof hyperliquidCoreAssetSchema>;
 export type HyperliquidAsset = z.infer<typeof hyperliquidAssetSchema>;
 // HL perp universe indices. Verified live 2026-05-27:
 // 0=BTC, 1=ETH, 5=SOL, 6=AVAX, 7=BNB, 9=OP, 11=ARB,
 // 74=NEAR, 159=HYPE, 214=ZEC, 224=XMR.
 // Source: POST api.hyperliquid.xyz/info {"type":"meta"}.universe
-const ASSET_INDEX: Record<HyperliquidAsset, number> = {
+const ASSET_INDEX: Record<HyperliquidCoreAsset, number> = {
   BTC: 0,
   ETH: 1,
   SOL: 5,
@@ -40,6 +43,23 @@ const WITHDRAW_SIGNATURE_CHAIN_ID = "0xa4b1";
 const withdrawActionType = ["with", "draw3"].join("");
 const withdrawPrimaryType = ["HyperliquidTransaction:", "With", "draw"].join("");
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
+
+const BUILDER_PERP_ASSET_ID_OFFSET = 100_000;
+const BUILDER_PERP_DEX_STRIDE = 10_000;
+const BUILDER_META_TTL_MS = 5 * 60_000;
+type AssetResolution = { assetId: number; builderPerp: boolean; dex?: string; symbol: string; szDecimals?: number };
+type CacheEntry<T> = { expiresAt: number; value: T };
+const perpDexIndexCache = new Map<string, CacheEntry<Map<string, number>>>();
+const dexMetaCache = new Map<string, CacheEntry<Map<string, { index: number; szDecimals?: number }>>>();
+export function isBuilderPerpSymbol(coin: string): boolean { return builderPerpSymbolSchema.safeParse(coin).success; }
+function parseBuilderPerpSymbol(coin: string): { dex: string; symbol: string } | null {
+  if (!isBuilderPerpSymbol(coin)) return null;
+  const [dex, symbol] = coin.split(":", 2);
+  return { dex, symbol };
+}
+function coreAssetId(coin: string): number | undefined {
+  return hyperliquidCoreAssetSchema.safeParse(coin).success ? ASSET_INDEX[coin as HyperliquidCoreAsset] : undefined;
+}
 
 export const hyperliquidOrderSchema = z.object({
   coin: hyperliquidAssetSchema.optional(),
@@ -179,6 +199,75 @@ function withTimeoutSignal(init: RequestInit): RequestInit {
   return { ...init, signal: AbortSignal.timeout(DEFAULT_FETCH_TIMEOUT_MS) };
 }
 
+async function postInfo(body: Record<string, unknown>, options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<unknown> {
+  const r = await (options.transport ?? { fetch }).fetch(`${options.baseUrl ?? DEFAULT_BASE_URL}/info`, withTimeoutSignal({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
+  return j;
+}
+function cached<T>(entry: CacheEntry<T> | undefined): T | null { return entry && entry.expiresAt > Date.now() ? entry.value : null; }
+function dexNameFromEntry(entry: unknown): string | null {
+  if (typeof entry === "string") return entry;
+  if (!entry || typeof entry !== "object") return null;
+  const record = entry as Record<string, unknown>;
+  for (const key of ["name", "dex", "dexName"]) if (typeof record[key] === "string") return record[key] as string;
+  return null;
+}
+async function getPerpDexIndices(options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<Map<string, number>> {
+  const cacheKey = options.baseUrl ?? DEFAULT_BASE_URL;
+  const hit = cached(perpDexIndexCache.get(cacheKey));
+  if (hit) return hit;
+  const raw = await postInfo({ type: "perpDexs" }, options);
+  const out = new Map<string, number>();
+  if (Array.isArray(raw)) raw.forEach((entry, index) => {
+    const name = dexNameFromEntry(entry);
+    if (!name) return;
+    const record = entry && typeof entry === "object" ? (entry as Record<string, unknown>) : null;
+    const explicitIndex = Number(record?.index ?? record?.perpDexIndex ?? record?.perp_dex_index ?? record?.dexIndex);
+    out.set(name, Number.isInteger(explicitIndex) && explicitIndex >= 0 ? explicitIndex : index);
+  });
+  else if (raw && typeof raw === "object") for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    const n = Number(value); if (Number.isInteger(n) && n >= 0) out.set(name, n);
+  }
+  perpDexIndexCache.set(cacheKey, { expiresAt: Date.now() + BUILDER_META_TTL_MS, value: out });
+  return out;
+}
+async function getDexMeta(dex: string, options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<Map<string, { index: number; szDecimals?: number }>> {
+  const cacheKey = `${options.baseUrl ?? DEFAULT_BASE_URL}:${dex}`;
+  const hit = cached(dexMetaCache.get(cacheKey));
+  if (hit) return hit;
+  const universe = ((await postInfo({ type: "meta", dex }, options)) as { universe?: unknown }).universe;
+  if (!Array.isArray(universe)) throw new Error(`Hyperliquid meta for dex ${dex} missing universe`);
+  const out = new Map<string, { index: number; szDecimals?: number }>();
+  universe.forEach((entry, index) => {
+    const record = entry as Record<string, unknown>;
+    if (typeof record.name === "string") {
+      const szDecimals = Number(record.szDecimals);
+      out.set(record.name, { index, szDecimals: Number.isInteger(szDecimals) && szDecimals >= 0 ? szDecimals : undefined });
+    }
+  });
+  dexMetaCache.set(cacheKey, { expiresAt: Date.now() + BUILDER_META_TTL_MS, value: out });
+  return out;
+}
+export async function resolveAssetId(coin: HyperliquidAsset, options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<number> { return (await resolveAsset(coin, options)).assetId; }
+async function resolveAsset(coin: HyperliquidAsset, options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<AssetResolution> {
+  const core = coreAssetId(coin);
+  if (core !== undefined) return { assetId: core, builderPerp: false, symbol: coin };
+  const parsed = parseBuilderPerpSymbol(coin);
+  if (!parsed) throw new Error(`unsupported Hyperliquid asset: ${coin}`);
+  const dexIndex = (await getPerpDexIndices(options)).get(parsed.dex);
+  if (dexIndex === undefined) throw new Error(`unknown Hyperliquid builder perp dex: ${parsed.dex}`);
+  const market = (await getDexMeta(parsed.dex, options)).get(parsed.symbol);
+  if (!market) throw new Error(`unknown Hyperliquid builder perp market: ${coin}`);
+  return { assetId: BUILDER_PERP_ASSET_ID_OFFSET + dexIndex * BUILDER_PERP_DEX_STRIDE + market.index, builderPerp: true, dex: parsed.dex, symbol: parsed.symbol, szDecimals: market.szDecimals };
+}
+function formatSizeForAsset(size: string, asset: AssetResolution): string {
+  if (!asset.builderPerp || asset.szDecimals === undefined) return size;
+  const n = Number(size);
+  if (!Number.isFinite(n) || n <= 0) throw new Error("invalid size");
+  return n.toFixed(asset.szDecimals).replace(/\.0+$/, "").replace(/(\.\d*?)0+$/, "$1");
+}
+
 function dec(v: unknown, fallback?: string) {
   if (v == null) {
     if (fallback !== undefined) return fallback;
@@ -212,15 +301,15 @@ export async function getMarketableLimitPx(
   isBuy: boolean,
   options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
 ): Promise<string> {
-  const transport = options.transport ?? { fetch };
-  const r = await transport.fetch(`${options.baseUrl ?? DEFAULT_BASE_URL}/info`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "l2Book", coin }),
-  });
-  const j = await r.json().catch(() => null);
-  if (!r.ok) throw new Error(`Hyperliquid info returned ${r.status}`);
-  const levels = (j as { levels?: unknown })?.levels;
+  const builder = parseBuilderPerpSymbol(coin);
+  if (builder) {
+    const mids = await postInfo({ type: "allMids", dex: builder.dex }, options);
+    const rawMid = (mids as Record<string, unknown>)[builder.symbol] ?? (mids as Record<string, unknown>)[coin];
+    const mid = Number(rawMid);
+    if (!Number.isFinite(mid) || mid <= 0) throw new Error(`missing Hyperliquid mid for ${coin}`);
+    return roundMarketablePx(isBuy ? mid * 1.005 : mid * 0.995, isBuy);
+  }
+  const levels = ((await postInfo({ type: "l2Book", coin }, options)) as { levels?: unknown })?.levels;
   const px = isBuy ? bestBookPrice(levels, "ask") * 1.005 : bestBookPrice(levels, "bid") * 0.995;
   return roundMarketablePx(px, isBuy);
 }
@@ -271,34 +360,37 @@ function normalizedLeverageUpdate(input: LeverageUpdateInput) {
     nonce: p.nonce,
   };
 }
+function exchangeActionFromNormalized(o: ReturnType<typeof normalized>, asset: AssetResolution): Record<string, unknown> {
+  return { type: "order", orders: [{ a: asset.assetId, b: o.isBuy, p: o.limitPx, s: formatSizeForAsset(o.sz, asset), r: o.reduceOnly, t: { limit: { tif: o.tif } } }], grouping: "na" };
+}
 export function toExchangeAction(order: HyperliquidOrder): Record<string, unknown> {
   const o = normalized(order);
-  return {
-    type: "order",
-    orders: [
-      {
-        a: ASSET_INDEX[o.coin],
-        b: o.isBuy,
-        p: o.limitPx,
-        s: o.sz,
-        r: o.reduceOnly,
-        t: { limit: { tif: o.tif } },
-      },
-    ],
-    grouping: "na",
-  };
+  const assetId = coreAssetId(o.coin);
+  if (assetId === undefined) throw new Error("builder perp assets require async asset resolution");
+  return exchangeActionFromNormalized(o, { assetId, builderPerp: false, symbol: o.coin });
+}
+async function toResolvedExchangeAction(order: HyperliquidOrder, options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<Record<string, unknown>> {
+  const o = normalized(order);
+  return exchangeActionFromNormalized(o, await resolveAsset(o.coin, options));
 }
 export function toUpdateLeverageAction(input: LeverageUpdateInput): Record<string, unknown> {
   const o = normalizedLeverageUpdate(input);
-  return {
-    type: "updateLeverage",
-    asset: ASSET_INDEX[o.coin],
-    isCross: o.isCross,
-    leverage: o.leverage,
-  };
+  const assetId = coreAssetId(o.coin);
+  if (assetId === undefined) throw new Error("builder perp assets require async asset resolution");
+  return { type: "updateLeverage", asset: assetId, isCross: o.isCross, leverage: o.leverage };
+}
+async function toResolvedUpdateLeverageAction(input: LeverageUpdateInput, options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<Record<string, unknown>> {
+  const o = normalizedLeverageUpdate(input);
+  const asset = await resolveAsset(o.coin, options);
+  return { type: "updateLeverage", asset: asset.assetId, isCross: o.isCross, leverage: o.leverage };
 }
 function toCancelAction(input: CancelOrderInput): Record<string, unknown> {
-  return { type: "cancel", cancels: [{ a: ASSET_INDEX[input.coin], o: Number(input.orderId) }] };
+  const assetId = coreAssetId(input.coin);
+  if (assetId === undefined) throw new Error("builder perp assets require async asset resolution");
+  return { type: "cancel", cancels: [{ a: assetId, o: Number(input.orderId) }] };
+}
+async function toResolvedCancelAction(input: CancelOrderInput, options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<Record<string, unknown>> {
+  return { type: "cancel", cancels: [{ a: await resolveAssetId(input.coin, options), o: Number(input.orderId) }] };
 }
 
 const u8 = (...b: number[]) => new Uint8Array(b);
@@ -477,7 +569,7 @@ export const signOrder = async (
   options: SignOptions & { transport?: HyperliquidTransport; baseUrl?: string } = {},
 ) => {
   const resolved = await withMarketableLimitPx(order, options);
-  return signAction(walletPrivateKey, toExchangeAction(resolved), {
+  return signAction(walletPrivateKey, await toResolvedExchangeAction(resolved, options), {
     ...options,
     nonce: options.nonce ?? order.nonce,
   });
@@ -561,7 +653,7 @@ export class HyperliquidAdapter {
       transport: this.transport,
       baseUrl: this.baseUrl,
     });
-    const action = toExchangeAction(resolved);
+    const action = await toResolvedExchangeAction(resolved, { transport: this.transport, baseUrl: this.baseUrl });
     const td = createL1TypedData(
       action,
       nonce,
@@ -585,7 +677,7 @@ export class HyperliquidAdapter {
   async updateLeverage(input: LeverageUpdateInput): Promise<LeverageUpdateResult> {
     const parsed = normalizedLeverageUpdate(input);
     const nonce = parsed.nonce ?? nextNonce();
-    const action = toUpdateLeverageAction(parsed);
+    const action = await toResolvedUpdateLeverageAction(parsed, { transport: this.transport, baseUrl: this.baseUrl });
     const td = createL1TypedData(
       action,
       nonce,
@@ -613,7 +705,7 @@ export class HyperliquidAdapter {
   }
   async cancelOrder(input: CancelOrderInput) {
     const nonce = input.nonce ?? nextNonce();
-    const action = toCancelAction(input);
+    const action = await toResolvedCancelAction(input, { transport: this.transport, baseUrl: this.baseUrl });
     const td = createL1TypedData(
       action,
       nonce,
@@ -691,7 +783,7 @@ export class HyperliquidAdapter {
     const results: CloseAllResult[] = [];
     for (const pos of positions) {
       if (pos.szi === 0) continue;
-      const coin = pos.coin as HyperliquidAsset;
+      const coin = hyperliquidAssetSchema.parse(pos.coin);
       const result = await this.marketClosePosition(coin);
       results.push({ coin, result });
     }
