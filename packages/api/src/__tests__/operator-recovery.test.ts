@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import { agents, agentWallets, closeDb, getDb, policies as policiesTable, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
+import { z } from "zod";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
 
@@ -23,6 +24,7 @@ const closeAllCalls: number[] = [];
 const signWithdrawCalls: Array<{ amount: string | number; destination: string }> = [];
 const submitWithdrawCalls: unknown[] = [];
 const updateLeverageCalls: Array<{ coin: string; leverage: number; isCross?: boolean }> = [];
+const addIsolatedMarginCalls: Array<{ coin: string; amountUsdc: string | number }> = [];
 
 class MockHyperliquidAdapter {
   constructor(
@@ -57,10 +59,20 @@ class MockHyperliquidAdapter {
     updateLeverageCalls.push(params);
     return { status: "ok", raw: { response: { type: "default" } } };
   }
+
+  async addIsolatedMargin(params: { coin: string; amountUsdc: string | number }) {
+    addIsolatedMarginCalls.push(params);
+    return { status: "ok", raw: { response: { type: "default" } } };
+  }
 }
 
 mock.module("@stwd/venue-hyperliquid", () => ({
   HyperliquidAdapter: MockHyperliquidAdapter,
+  hyperliquidAssetSchema: z.union([
+    z.enum(["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP", "NEAR", "HYPE", "ZEC", "XMR"]),
+    z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/),
+  ]),
+  isBuilderPerpSymbol: (coin: string) => /^[a-z0-9]+:[A-Z0-9]+$/.test(coin),
 }));
 
 beforeAll(async () => {
@@ -208,6 +220,47 @@ describe("operator recovery leverage", () => {
     expect(body.data.leverage).toBe(3);
     expect(body.data.isCross).toBe(false);
     expect(updateLeverageCalls).toEqual([{ coin: "xyz:SPCX", leverage: 3, isCross: false }]);
+  });
+});
+
+describe("operator recovery add-margin", () => {
+  it("rejects add-margin without a valid platform key", async () => {
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/add-margin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: "agent-x", coin: "xyz:SPCX", amountUsdc: "25" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("adds isolated margin through the platform-gated adapter path", async () => {
+    const tenantId = `tenant-margin-ok-${Date.now()}`;
+    const agentId = `agent-margin-ok-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    addIsolatedMarginCalls.length = 0;
+
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/add-margin", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+      },
+      body: JSON.stringify({ agentId, coin: "xyz:SPCX", amountUsdc: "25.5" }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { coin: string; amountUsdc: string; amountBaseUnits: string };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.coin).toBe("xyz:SPCX");
+    expect(body.data.amountUsdc).toBe("25.5");
+    expect(body.data.amountBaseUnits).toBe("25500000");
+    expect(addIsolatedMarginCalls).toEqual([{ coin: "xyz:SPCX", amountUsdc: "25.5" }]);
   });
 });
 

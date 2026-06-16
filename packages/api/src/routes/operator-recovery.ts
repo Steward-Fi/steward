@@ -189,6 +189,13 @@ const leverageSchema = z.object({
   idempotencyKey: z.string().min(1).max(256).optional(),
 });
 
+const addMarginSchema = z.object({
+  agentId: z.string().min(1),
+  coin: hyperliquidAssetSchema,
+  amountUsdc: z.union([z.string(), z.number()]),
+  idempotencyKey: z.string().min(1).max(256).optional(),
+});
+
 // ── Deposit constants (Hyperliquid on Arbitrum) ────────────────────────────────
 // HL credits the SENDING address, so the deposit MUST originate from the agent's
 // own venue wallet. We sign an ERC-20 transfer(bridge, amount) from that wallet.
@@ -478,6 +485,126 @@ operatorRecoveryRoutes.post("/:venue/leverage", async (c) => {
     requestedLeverage: body.leverage,
     isCross,
     builderPerp,
+    result,
+  };
+  idempotency.store?.(response);
+  return c.json<ApiResponse>({ ok: true, data: response });
+});
+
+// ── POST /v1/trade/:venue/add-margin ───────────────────────────────────────────
+// Platform-key recovery lever for adding USDC margin to an existing isolated
+// Hyperliquid position before lowering isolated leverage.
+operatorRecoveryRoutes.post("/:venue/add-margin", async (c) => {
+  const tenantId = c.get("tenantId");
+  const venue = c.req.param("venue");
+  if (venue !== "hyperliquid") {
+    return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
+  }
+  if (c.get("authType") !== "platform") {
+    return c.json<ApiResponse>({ ok: false, error: "Platform key required for margin update" }, 403);
+  }
+
+  const raw = await safeJsonParse(c);
+  const parsed = addMarginSchema.safeParse(raw);
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const body = {
+    ...parsed.data,
+    idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+  };
+  const { agentId, coin } = body;
+
+  if (hasTooManyUsdcDecimals(body.amountUsdc)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "amountUsdc has more than 6 decimal places" },
+      400,
+    );
+  }
+  const amountBaseUnits = parseUsdcBaseUnits(body.amountUsdc);
+  if (amountBaseUnits === null || amountBaseUnits <= 0n) {
+    return c.json<ApiResponse>({ ok: false, error: "amountUsdc must be a positive number" }, 400);
+  }
+  const amountNum = Number(body.amountUsdc);
+  if (!Number.isFinite(amountNum) || amountNum <= 0) {
+    return c.json<ApiResponse>({ ok: false, error: "amountUsdc must be a positive number" }, 400);
+  }
+  if (amountNum > HL_MAX_WITHDRAW_USDC) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `amountUsdc exceeds the per-margin-update maximum of ${HL_MAX_WITHDRAW_USDC} USDC; split into smaller updates`,
+      },
+      400,
+    );
+  }
+
+  const idempotency = getOperatorIdempotency(`${tenantId}:add-margin`, body.idempotencyKey, {
+    agentId,
+    venue,
+    coin,
+    amount: amountBaseUnits.toString(),
+  });
+  if (idempotency.conflict) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
+  }
+  if (idempotency.response) {
+    return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+  }
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const walletAddress = await resolveVenueWallet(tenantId, agentId, venue);
+  if (!walletAddress) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Hyperliquid venue wallet not found for agent" },
+      404,
+    );
+  }
+
+  const adapter = buildAdapter(tenantId, agentId, walletAddress);
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.add-margin.requested", {
+    venue,
+    walletAddress,
+    coin,
+    amountUsdc: String(body.amountUsdc),
+    amountBaseUnits: amountBaseUnits.toString(),
+  });
+
+  let result: unknown;
+  try {
+    result = await adapter.addIsolatedMargin({ coin, amountUsdc: body.amountUsdc });
+  } catch (err) {
+    await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.add-margin.failed", {
+      venue,
+      walletAddress,
+      coin,
+      amountUsdc: String(body.amountUsdc),
+      amountBaseUnits: amountBaseUnits.toString(),
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json<ApiResponse>({ ok: false, error: "Failed to add isolated margin" }, 502);
+  }
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.add-margin.submitted", {
+    venue,
+    walletAddress,
+    coin,
+    amountUsdc: String(body.amountUsdc),
+    amountBaseUnits: amountBaseUnits.toString(),
+  });
+
+  const response = {
+    venue,
+    walletAddress,
+    coin,
+    amountUsdc: String(body.amountUsdc),
+    amountBaseUnits: amountBaseUnits.toString(),
     result,
   };
   idempotency.store?.(response);
