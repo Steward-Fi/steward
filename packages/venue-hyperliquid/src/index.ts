@@ -763,7 +763,16 @@ export async function submitSendAsset(
     options.transport ?? { fetch },
     options.baseUrl ?? DEFAULT_BASE_URL,
   );
-  return sendAssetResultSchema.parse({ status: String((raw as { status?: unknown })?.status ?? "submitted"), raw });
+  // Hyperliquid returns HTTP 200 with { status: "err", response: <msg> } on a
+  // rejected exchange action. Surface that as a thrown error so the /transfer
+  // route audits it as FAILED (not submitted) and the idempotency key is not
+  // poisoned with a success that never moved collateral.
+  const status = String((raw as { status?: unknown })?.status ?? "");
+  if (status === "err") {
+    const detail = (raw as { response?: unknown })?.response;
+    throw new Error(`hyperliquid sendAsset rejected: ${typeof detail === "string" ? detail : JSON.stringify(detail ?? raw)}`);
+  }
+  return sendAssetResultSchema.parse({ status: status || "submitted", raw });
 }
 export async function getOpenOrders(
   userAddress: string,
