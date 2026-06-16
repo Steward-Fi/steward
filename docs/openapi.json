@@ -73500,19 +73500,30 @@
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                      "type": "string",
-                      "enum": [
-                        "BTC",
-                        "ETH",
-                        "BNB",
-                        "SOL",
-                        "AVAX",
-                        "ARB",
-                        "OP",
-                        "NEAR",
-                        "HYPE",
-                        "ZEC",
-                        "XMR"
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BTC",
+                            "ETH",
+                            "BNB",
+                            "SOL",
+                            "AVAX",
+                            "ARB",
+                            "OP",
+                            "NEAR",
+                            "HYPE",
+                            "ZEC",
+                            "XMR"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                          "examples": [
+                            "xyz:SPCX"
+                          ]
+                        }
                       ]
                     },
                     "default": [
@@ -73871,19 +73882,30 @@
                         "allowedAssets": {
                           "type": "array",
                           "items": {
-                            "type": "string",
-                            "enum": [
-                              "BTC",
-                              "ETH",
-                              "BNB",
-                              "SOL",
-                              "AVAX",
-                              "ARB",
-                              "OP",
-                              "NEAR",
-                              "HYPE",
-                              "ZEC",
-                              "XMR"
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "BTC",
+                                  "ETH",
+                                  "BNB",
+                                  "SOL",
+                                  "AVAX",
+                                  "ARB",
+                                  "OP",
+                                  "NEAR",
+                                  "HYPE",
+                                  "ZEC",
+                                  "XMR"
+                                ]
+                              },
+                              {
+                                "type": "string",
+                                "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                                "examples": [
+                                  "xyz:SPCX"
+                                ]
+                              }
                             ]
                           }
                         },
@@ -74342,35 +74364,57 @@
                     "type": "string"
                   },
                   "coin": {
-                    "type": "string",
-                    "enum": [
-                      "BTC",
-                      "ETH",
-                      "BNB",
-                      "SOL",
-                      "AVAX",
-                      "ARB",
-                      "OP",
-                      "NEAR",
-                      "HYPE",
-                      "ZEC",
-                      "XMR"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
                     ]
                   },
                   "asset": {
-                    "type": "string",
-                    "enum": [
-                      "BTC",
-                      "ETH",
-                      "BNB",
-                      "SOL",
-                      "AVAX",
-                      "ARB",
-                      "OP",
-                      "NEAR",
-                      "HYPE",
-                      "ZEC",
-                      "XMR"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
                     ]
                   },
                   "side": {
@@ -74476,6 +74520,9 @@
                             "string",
                             "null"
                           ]
+                        },
+                        "builderPerp": {
+                          "type": "boolean"
                         }
                       }
                     }
@@ -75392,6 +75439,404 @@
         }
       }
     },
+    "/trade/{venue}/leverage": {
+      "parameters": [
+        {
+          "name": "venue",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "hyperliquid"
+            ]
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Trading"
+        ],
+        "summary": "Operator update Hyperliquid leverage for an agent position",
+        "description": "Operator recovery endpoint. Auth deliberately accepts platform operators or tenant admins and must not require an agent JWT, so humans can recover funds when the agent token is expired. Raw signing keys never leave the vault; all recovery actions are audited and idempotency-protected. Builder-perp symbols such as xyz:SPCX are forced to isolated margin and capped at 3x before submitting Hyperliquid's separate updateLeverage action.",
+        "security": [
+          {
+            "platformKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "agentId",
+                  "coin",
+                  "leverage"
+                ],
+                "properties": {
+                  "agentId": {
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "coin": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
+                    ]
+                  },
+                  "leverage": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "isCross": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "venue": {
+                          "type": "string",
+                          "const": "hyperliquid"
+                        },
+                        "walletAddress": {
+                          "type": "string"
+                        },
+                        "coin": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "BTC",
+                                "ETH",
+                                "BNB",
+                                "SOL",
+                                "AVAX",
+                                "ARB",
+                                "OP",
+                                "NEAR",
+                                "HYPE",
+                                "ZEC",
+                                "XMR"
+                              ]
+                            },
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                              "examples": [
+                                "xyz:SPCX"
+                              ]
+                            }
+                          ]
+                        },
+                        "leverage": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "requestedLeverage": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "isCross": {
+                          "type": "boolean"
+                        },
+                        "builderPerp": {
+                          "type": "boolean"
+                        },
+                        "result": {
+                          "type": "object",
+                          "additionalProperties": true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/trade",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
     "/trade/{venue}/withdraw": {
       "parameters": [
         {
@@ -75968,19 +76413,30 @@
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                      "type": "string",
-                      "enum": [
-                        "BTC",
-                        "ETH",
-                        "BNB",
-                        "SOL",
-                        "AVAX",
-                        "ARB",
-                        "OP",
-                        "NEAR",
-                        "HYPE",
-                        "ZEC",
-                        "XMR"
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BTC",
+                            "ETH",
+                            "BNB",
+                            "SOL",
+                            "AVAX",
+                            "ARB",
+                            "OP",
+                            "NEAR",
+                            "HYPE",
+                            "ZEC",
+                            "XMR"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                          "examples": [
+                            "xyz:SPCX"
+                          ]
+                        }
                       ]
                     },
                     "default": [
@@ -76339,19 +76795,30 @@
                         "allowedAssets": {
                           "type": "array",
                           "items": {
-                            "type": "string",
-                            "enum": [
-                              "BTC",
-                              "ETH",
-                              "BNB",
-                              "SOL",
-                              "AVAX",
-                              "ARB",
-                              "OP",
-                              "NEAR",
-                              "HYPE",
-                              "ZEC",
-                              "XMR"
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "BTC",
+                                  "ETH",
+                                  "BNB",
+                                  "SOL",
+                                  "AVAX",
+                                  "ARB",
+                                  "OP",
+                                  "NEAR",
+                                  "HYPE",
+                                  "ZEC",
+                                  "XMR"
+                                ]
+                              },
+                              {
+                                "type": "string",
+                                "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                                "examples": [
+                                  "xyz:SPCX"
+                                ]
+                              }
                             ]
                           }
                         },
@@ -76810,35 +77277,57 @@
                     "type": "string"
                   },
                   "coin": {
-                    "type": "string",
-                    "enum": [
-                      "BTC",
-                      "ETH",
-                      "BNB",
-                      "SOL",
-                      "AVAX",
-                      "ARB",
-                      "OP",
-                      "NEAR",
-                      "HYPE",
-                      "ZEC",
-                      "XMR"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
                     ]
                   },
                   "asset": {
-                    "type": "string",
-                    "enum": [
-                      "BTC",
-                      "ETH",
-                      "BNB",
-                      "SOL",
-                      "AVAX",
-                      "ARB",
-                      "OP",
-                      "NEAR",
-                      "HYPE",
-                      "ZEC",
-                      "XMR"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
                     ]
                   },
                   "side": {
@@ -76944,6 +77433,9 @@
                             "string",
                             "null"
                           ]
+                        },
+                        "builderPerp": {
+                          "type": "boolean"
                         }
                       }
                     }
@@ -77616,6 +78108,404 @@
                             "type": "object",
                             "additionalProperties": true
                           }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v1/trade",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v1/trade/{venue}/leverage": {
+      "parameters": [
+        {
+          "name": "venue",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "hyperliquid"
+            ]
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Trading"
+        ],
+        "summary": "Operator update Hyperliquid leverage for an agent position",
+        "description": "Operator recovery endpoint. Auth deliberately accepts platform operators or tenant admins and must not require an agent JWT, so humans can recover funds when the agent token is expired. Raw signing keys never leave the vault; all recovery actions are audited and idempotency-protected. Builder-perp symbols such as xyz:SPCX are forced to isolated margin and capped at 3x before submitting Hyperliquid's separate updateLeverage action.",
+        "security": [
+          {
+            "platformKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "agentId",
+                  "coin",
+                  "leverage"
+                ],
+                "properties": {
+                  "agentId": {
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "coin": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
+                    ]
+                  },
+                  "leverage": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100
+                  },
+                  "isCross": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "venue": {
+                          "type": "string",
+                          "const": "hyperliquid"
+                        },
+                        "walletAddress": {
+                          "type": "string"
+                        },
+                        "coin": {
+                          "anyOf": [
+                            {
+                              "type": "string",
+                              "enum": [
+                                "BTC",
+                                "ETH",
+                                "BNB",
+                                "SOL",
+                                "AVAX",
+                                "ARB",
+                                "OP",
+                                "NEAR",
+                                "HYPE",
+                                "ZEC",
+                                "XMR"
+                              ]
+                            },
+                            {
+                              "type": "string",
+                              "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                              "examples": [
+                                "xyz:SPCX"
+                              ]
+                            }
+                          ]
+                        },
+                        "leverage": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "requestedLeverage": {
+                          "type": "integer",
+                          "minimum": 1
+                        },
+                        "isCross": {
+                          "type": "boolean"
+                        },
+                        "builderPerp": {
+                          "type": "boolean"
+                        },
+                        "result": {
+                          "type": "object",
+                          "additionalProperties": true
                         }
                       }
                     }

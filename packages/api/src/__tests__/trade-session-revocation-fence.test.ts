@@ -53,16 +53,22 @@ describe("trade session revocation fence", () => {
     expect(hyperliquidSource).toContain("withTimeoutSignal({");
   });
 
-  it("does not mutate venue leverage during order submission", () => {
+  it("sets builder-perp venue leverage before signing the order", () => {
     const submitStart = tradeRouteSource.indexOf('tradeRoutes.post("/hyperliquid/order"');
     const routeEnd = tradeRouteSource.indexOf(
       'tradeRoutes.post("/hyperliquid/session',
       submitStart + 1,
     );
     const orderRoute = tradeRouteSource.slice(submitStart, routeEnd === -1 ? undefined : routeEnd);
+    const safeParse = orderRoute.indexOf("hyperliquidOrderSchema.safeParse(order)");
+    const updateLeverage = orderRoute.indexOf("adapter.updateLeverage", safeParse);
+    const signOrder = orderRoute.indexOf("adapter.signOrder(order)", updateLeverage);
 
-    expect(orderRoute).not.toContain("adapter.updateLeverage");
-    expect(tradeRouteSource).toContain("hyperliquidOrderSchema.safeParse(order)");
+    expect(updateLeverage).toBeGreaterThan(safeParse);
+    expect(signOrder).toBeGreaterThan(updateLeverage);
+    expect(orderRoute).toContain("if (builderPerp)");
+    expect(orderRoute).toContain("isCross: false");
+    expect(orderRoute).toContain('"trade.order.leverage.set"');
     expect(tradeRouteSource).toContain("leverage: z.number().int().positive().default(1)");
     expect(hyperliquidSource).toContain('type: "updateLeverage"');
     expect(hyperliquidSource).toContain("export function toUpdateLeverageAction");

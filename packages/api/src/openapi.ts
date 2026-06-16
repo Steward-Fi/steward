@@ -5422,6 +5422,44 @@ function tradePaths(prefix = ""): Record<string, unknown> {
         },
       },
     },
+    [`${prefix}/trade/{venue}/leverage`]: {
+      parameters: [parameter("venue", "path", { type: "string", enum: ["hyperliquid"] })],
+      post: {
+        tags: ["Trading"],
+        summary: "Operator update Hyperliquid leverage for an agent position",
+        description: `${tradeRecoveryDescription} Builder-perp symbols such as xyz:SPCX are forced to isolated margin and capped at 3x before submitting Hyperliquid's separate updateLeverage action.`,
+        security: [{ platformKey: [] }],
+        requestBody: jsonRequestBody({
+          type: "object",
+          required: ["agentId", "coin", "leverage"],
+          properties: {
+            ...recoveryInputProperties,
+            coin: hyperliquidAssetSchema,
+            leverage: { type: "integer", minimum: 1, maximum: 100 },
+            isCross: { type: "boolean", default: false },
+          },
+        }),
+        responses: {
+          "200": jsonResponse(
+            apiResponse({
+              type: "object",
+              properties: {
+                venue: { type: "string", const: "hyperliquid" },
+                walletAddress: stringSchema,
+                coin: hyperliquidAssetSchema,
+                leverage: { type: "integer", minimum: 1 },
+                requestedLeverage: { type: "integer", minimum: 1 },
+                isCross: { type: "boolean" },
+                builderPerp: { type: "boolean" },
+                result: { type: "object", additionalProperties: true },
+              },
+            }),
+          ),
+          "502": jsonResponse(errorResponse()),
+          ...errorResponses(),
+        },
+      },
+    },
     [`${prefix}/trade/{venue}/withdraw`]: {
       parameters: [parameter("venue", "path", { type: "string", enum: ["hyperliquid"] })],
       post: {

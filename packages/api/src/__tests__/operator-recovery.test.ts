@@ -22,6 +22,7 @@ const PLATFORM_KEY = "stw_platform_test_operator_key";
 const closeAllCalls: number[] = [];
 const signWithdrawCalls: Array<{ amount: string | number; destination: string }> = [];
 const submitWithdrawCalls: unknown[] = [];
+const updateLeverageCalls: Array<{ coin: string; leverage: number; isCross?: boolean }> = [];
 
 class MockHyperliquidAdapter {
   constructor(
@@ -50,6 +51,11 @@ class MockHyperliquidAdapter {
   async submitWithdraw(signed: unknown) {
     submitWithdrawCalls.push(signed);
     return { status: "ok", response: { type: "default" } };
+  }
+
+  async updateLeverage(params: { coin: string; leverage: number; isCross?: boolean }) {
+    updateLeverageCalls.push(params);
+    return { status: "ok", raw: { response: { type: "default" } } };
   }
 }
 
@@ -165,6 +171,43 @@ describe("operator recovery auth", () => {
       body: JSON.stringify({ agentId: "agent-x" }),
     });
     expect(res.status).toBe(403);
+  });
+});
+
+describe("operator recovery leverage", () => {
+  it("rejects leverage updates without a valid platform key", async () => {
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/leverage", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: "agent-x", coin: "xyz:SPCX", leverage: 10 }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("clamps builder-perp leverage to 3x isolated and returns the adapter result", async () => {
+    const tenantId = `tenant-lev-ok-${Date.now()}`;
+    const agentId = `agent-lev-ok-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    updateLeverageCalls.length = 0;
+
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/leverage", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+      },
+      body: JSON.stringify({ agentId, coin: "xyz:SPCX", leverage: 10, isCross: true }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean; data: { leverage: number; isCross: boolean } };
+    expect(body.ok).toBe(true);
+    expect(body.data.leverage).toBe(3);
+    expect(body.data.isCross).toBe(false);
+    expect(updateLeverageCalls).toEqual([{ coin: "xyz:SPCX", leverage: 3, isCross: false }]);
   });
 });
 
