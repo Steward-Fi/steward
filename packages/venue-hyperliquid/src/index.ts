@@ -42,6 +42,7 @@ const WITHDRAW_CHAIN_ID = 42161;
 const WITHDRAW_SIGNATURE_CHAIN_ID = "0xa4b1";
 const withdrawActionType = ["with", "draw3"].join("");
 const withdrawPrimaryType = ["HyperliquidTransaction:", "With", "draw"].join("");
+const sendAssetPrimaryType = "HyperliquidTransaction:SendAsset";
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
 
 const BUILDER_PERP_ASSET_ID_OFFSET = 100_000;
@@ -162,7 +163,9 @@ export type SendAssetParams = {
   destinationDex: string;
   token?: string;
   amount: string | number;
+  fromSubAccount?: string;
   nonce?: number;
+  hyperliquidChain?: "Mainnet" | "Testnet";
 };
 export const signedSendAssetSchema = signedOrderSchema;
 export type SignedSendAsset = SignedOrder;
@@ -469,19 +472,26 @@ function normalizeWithdrawParams(params: WithdrawParams) {
 }
 
 function normalizeSendAssetParams(params: SendAssetParams, token: string, nonce: number) {
+  const hyperliquidChain = params.hyperliquidChain ?? "Mainnet";
   const destination = String(params.destination).toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(destination))
     throw new Error(`invalid sendAsset destination: ${params.destination}`);
+  const fromSubAccount = String(params.fromSubAccount ?? "").toLowerCase();
+  if (fromSubAccount && !/^0x[0-9a-f]{40}$/.test(fromSubAccount))
+    throw new Error(`invalid sendAsset fromSubAccount: ${params.fromSubAccount}`);
   const sourceDex = String(params.sourceDex ?? "");
   const destinationDex = String(params.destinationDex ?? "");
   if (sourceDex === destinationDex) throw new Error("sourceDex and destinationDex must differ");
   return {
     type: "sendAsset",
+    hyperliquidChain,
+    signatureChainId: WITHDRAW_SIGNATURE_CHAIN_ID,
     destination,
     sourceDex,
     destinationDex,
     token,
     amount: dec(params.amount),
+    fromSubAccount,
     nonce,
   };
 }
@@ -529,6 +539,43 @@ export async function toSendAssetAction(
   const nonce = params.nonce ?? nextNonce();
   const token = params.token ?? (await resolveUsdcTokenId(options));
   return normalizeSendAssetParams(params, token, nonce);
+}
+
+export function createSendAssetTypedData(
+  params: SendAssetParams & { token: string; nonce: number },
+): Omit<VaultSignTypedDataInput, "agentId"> {
+  const n = normalizeSendAssetParams(params, params.token, params.nonce);
+  return {
+    domain: {
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: Number.parseInt(String(n.signatureChainId), 16),
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    },
+    types: {
+      [sendAssetPrimaryType]: [
+        { name: "hyperliquidChain", type: "string" },
+        { name: "destination", type: "string" },
+        { name: "sourceDex", type: "string" },
+        { name: "destinationDex", type: "string" },
+        { name: "token", type: "string" },
+        { name: "amount", type: "string" },
+        { name: "fromSubAccount", type: "string" },
+        { name: "nonce", type: "uint64" },
+      ],
+    },
+    primaryType: sendAssetPrimaryType,
+    value: {
+      hyperliquidChain: n.hyperliquidChain,
+      destination: n.destination,
+      sourceDex: n.sourceDex,
+      destinationDex: n.destinationDex,
+      token: n.token,
+      amount: n.amount,
+      fromSubAccount: n.fromSubAccount,
+      nonce: n.nonce,
+    },
+  };
 }
 
 // HL withdraw is a USER-SIGNED action (not an L1 agent action). It uses the
@@ -652,8 +699,23 @@ export const signSendAsset = async (
   options: SignOptions & { transport?: HyperliquidTransport; baseUrl?: string; usdcTokenId?: string } = {},
 ): Promise<SignedSendAsset> => {
   const nonce = options.nonce ?? params.nonce ?? nextNonce();
-  const action = await toSendAssetAction({ ...params, nonce }, options);
-  return signAction(walletPrivateKey, action, { ...options, nonce });
+  const hyperliquidChain = params.hyperliquidChain ?? (options.isMainnet === false ? "Testnet" : "Mainnet");
+  const token = params.token ?? (await resolveUsdcTokenId(options));
+  const normalizedParams = { ...params, token, nonce, hyperliquidChain };
+  const action = normalizeSendAssetParams(normalizedParams, token, nonce);
+  const td = createSendAssetTypedData(normalizedParams);
+  const hex = await privateKeyToAccount(walletPrivateKey).signTypedData({
+    domain: td.domain,
+    types: td.types,
+    primaryType: td.primaryType,
+    message: td.value,
+  } as never);
+  const s = parseSignature(hex);
+  return signedSendAssetSchema.parse({
+    action,
+    nonce,
+    signature: { r: s.r, s: s.s, v: Number(s.v) },
+  });
 };
 
 export const signOrder = async (
@@ -795,22 +857,16 @@ export class HyperliquidAdapter {
       baseUrl: this.baseUrl,
       usdcTokenId: this.options.usdcTokenId,
     }));
-    const action = normalizeSendAssetParams(params, token, nonce);
-    const td = createL1TypedData(
-      action,
-      nonce,
-      this.isMainnet,
-      this.options.vaultAddress,
-      this.options.expiresAfter,
-    );
+    const hyperliquidChain = params.hyperliquidChain ?? (this.isMainnet ? "Mainnet" : "Testnet");
+    const normalizedParams = { ...params, token, nonce, hyperliquidChain };
+    const action = normalizeSendAssetParams(normalizedParams, token, nonce);
+    const td = createSendAssetTypedData(normalizedParams);
     const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
     const s = parseSignature(hex as Hex);
     return signedSendAssetSchema.parse({
       action,
       nonce,
       signature: { r: s.r, s: s.s, v: Number(s.v) },
-      vaultAddress: this.options.vaultAddress,
-      expiresAfter: this.options.expiresAfter,
     });
   }
   submitSendAsset(signed: SignedSendAsset) {

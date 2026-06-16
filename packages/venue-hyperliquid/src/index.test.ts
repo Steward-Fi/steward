@@ -4,6 +4,7 @@ import {
   actionHash,
   cancelOrder,
   createL1TypedData,
+  createSendAssetTypedData,
   createWithdrawTypedData,
   getMarketableLimitPx,
   getOpenOrders,
@@ -277,11 +278,53 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
     expect(signed.nonce).toBe(NONCE);
     expect(signed.action).toEqual({
       type: "sendAsset",
+      hyperliquidChain: "Testnet",
+      signatureChainId: "0xa4b1",
       destination: WALLET.toLowerCase(),
       sourceDex: "",
       destinationDex: "xyz",
       token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
       amount: "2000",
+      fromSubAccount: "",
+      nonce: NONCE,
+    });
+  });
+
+  test("createSendAssetTypedData produces the HL user-signed SendAsset EIP-712 structure", () => {
+    const td = createSendAssetTypedData({
+      destination: WALLET,
+      sourceDex: "",
+      destinationDex: "xyz",
+      token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+      amount: "2000",
+      nonce: NONCE,
+      hyperliquidChain: "Mainnet",
+    });
+    expect(td.domain).toEqual({
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: 42161,
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    });
+    expect(td.primaryType).toBe("HyperliquidTransaction:SendAsset");
+    expect(td.types["HyperliquidTransaction:SendAsset"]).toEqual([
+      { name: "hyperliquidChain", type: "string" },
+      { name: "destination", type: "string" },
+      { name: "sourceDex", type: "string" },
+      { name: "destinationDex", type: "string" },
+      { name: "token", type: "string" },
+      { name: "amount", type: "string" },
+      { name: "fromSubAccount", type: "string" },
+      { name: "nonce", type: "uint64" },
+    ]);
+    expect(td.value).toEqual({
+      hyperliquidChain: "Mainnet",
+      destination: WALLET.toLowerCase(),
+      sourceDex: "",
+      destinationDex: "xyz",
+      token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+      amount: "2000",
+      fromSubAccount: "",
       nonce: NONCE,
     });
   });
@@ -300,11 +343,14 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
     );
     expect(action).toEqual({
       type: "sendAsset",
+      hyperliquidChain: "Mainnet",
+      signatureChainId: "0xa4b1",
       destination: WALLET.toLowerCase(),
       sourceDex: "xyz",
       destinationDex: "",
       token: "configured-usdc",
       amount: "125.5",
+      fromSubAccount: "",
       nonce: NONCE,
     });
   });
@@ -312,9 +358,11 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
   test("adapter convenience methods submit the correct core-to-builder and builder-to-core directions", async () => {
     const posted: Record<string, unknown>[] = [];
     const account = privateKeyToAccount(PRIVATE_KEY);
+    const signedTypedData: Array<{ domain: unknown; primaryType: string; value: Record<string, unknown> }> = [];
     const adapter = new HyperliquidAdapter(
       {
         async signTypedData(input) {
+          signedTypedData.push({ domain: input.domain, primaryType: input.primaryType, value: input.value });
           return account.signTypedData({
             domain: input.domain,
             types: input.types,
@@ -338,11 +386,15 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
     const actions = posted
       .map((body) => body.action as Record<string, unknown> | undefined)
       .filter(Boolean);
-    expect(actions[0]).toMatchObject({ sourceDex: "", destinationDex: "xyz", destination: WALLET.toLowerCase(), token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "10" });
-    expect(actions[1]).toMatchObject({ sourceDex: "xyz", destinationDex: "", destination: WALLET.toLowerCase(), token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "5" });
+    expect(actions[0]).toMatchObject({ type: "sendAsset", hyperliquidChain: "Testnet", signatureChainId: "0xa4b1", sourceDex: "", destinationDex: "xyz", destination: WALLET.toLowerCase(), token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "10", fromSubAccount: "" });
+    expect(actions[1]).toMatchObject({ type: "sendAsset", hyperliquidChain: "Testnet", signatureChainId: "0xa4b1", sourceDex: "xyz", destinationDex: "", destination: WALLET.toLowerCase(), token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "5", fromSubAccount: "" });
+    expect(signedTypedData).toHaveLength(2);
+    expect(signedTypedData[0]?.domain).toMatchObject({ name: "HyperliquidSignTransaction", chainId: 42161 });
+    expect(signedTypedData[0]?.primaryType).toBe("HyperliquidTransaction:SendAsset");
+    expect(signedTypedData[0]?.value).toMatchObject({ hyperliquidChain: "Testnet", sourceDex: "", destinationDex: "xyz", fromSubAccount: "" });
   });
 
-  test("submitSendAsset posts signed L1 payload to /exchange", async () => {
+  test("submitSendAsset posts signed user-signed payload to /exchange", async () => {
     let posted: unknown;
     const signed = await signSendAsset(PRIVATE_KEY, { destination: WALLET, sourceDex: "", destinationDex: "xyz", token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "1" }, { nonce: NONCE, isMainnet: false });
     const result = await submitSendAsset(signed, {
