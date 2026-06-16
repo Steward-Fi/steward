@@ -42,6 +42,7 @@ const WITHDRAW_CHAIN_ID = 42161;
 const WITHDRAW_SIGNATURE_CHAIN_ID = "0xa4b1";
 const withdrawActionType = ["with", "draw3"].join("");
 const withdrawPrimaryType = ["HyperliquidTransaction:", "With", "draw"].join("");
+const sendAssetPrimaryType = "HyperliquidTransaction:SendAsset";
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
 
 const BUILDER_PERP_ASSET_ID_OFFSET = 100_000;
@@ -156,6 +157,23 @@ export const leverageUpdateResultSchema = z.object({
   raw: z.unknown().optional(),
 });
 export type LeverageUpdateResult = z.infer<typeof leverageUpdateResultSchema>;
+export type SendAssetParams = {
+  destination: string;
+  sourceDex: string;
+  destinationDex: string;
+  token?: string;
+  amount: string | number;
+  fromSubAccount?: string;
+  nonce?: number;
+  hyperliquidChain?: "Mainnet" | "Testnet";
+};
+export const signedSendAssetSchema = signedOrderSchema;
+export type SignedSendAsset = SignedOrder;
+export const sendAssetResultSchema = z.object({
+  status: z.string(),
+  raw: z.unknown().optional(),
+});
+export type SendAssetResult = z.infer<typeof sendAssetResultSchema>;
 
 export interface VaultSignTypedDataInput {
   agentId: string;
@@ -183,6 +201,12 @@ export interface HyperliquidAdapterOptions {
   isMainnet?: boolean;
   vaultAddress?: string;
   expiresAfter?: number;
+  /**
+   * Optional fallback for HIP-3 collateral transfers when spotMeta cannot
+   * resolve the canonical USDC token id. Do not hardcode this in callers; set
+   * it from operator config after verifying Hyperliquid metadata.
+   */
+  usdcTokenId?: string;
 }
 
 // Monotonic nonce source. Date.now() alone collides for two orders in the same
@@ -447,6 +471,113 @@ function normalizeWithdrawParams(params: WithdrawParams) {
   return { hyperliquidChain, amount, destination, time };
 }
 
+function normalizeSendAssetParams(params: SendAssetParams, token: string, nonce: number) {
+  const hyperliquidChain = params.hyperliquidChain ?? "Mainnet";
+  const destination = String(params.destination).toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(destination))
+    throw new Error(`invalid sendAsset destination: ${params.destination}`);
+  const fromSubAccount = String(params.fromSubAccount ?? "").toLowerCase();
+  if (fromSubAccount && !/^0x[0-9a-f]{40}$/.test(fromSubAccount))
+    throw new Error(`invalid sendAsset fromSubAccount: ${params.fromSubAccount}`);
+  const sourceDex = String(params.sourceDex ?? "");
+  const destinationDex = String(params.destinationDex ?? "");
+  if (sourceDex === destinationDex) throw new Error("sourceDex and destinationDex must differ");
+  return {
+    type: "sendAsset",
+    hyperliquidChain,
+    signatureChainId: WITHDRAW_SIGNATURE_CHAIN_ID,
+    destination,
+    sourceDex,
+    destinationDex,
+    token,
+    amount: dec(params.amount),
+    fromSubAccount,
+    nonce,
+  };
+}
+
+function tokenIdFromSpotToken(entry: unknown): string | null {
+  if (!entry || typeof entry !== "object") return null;
+  const record = entry as Record<string, unknown>;
+  const rawName = typeof record.name === "string" ? record.name : "";
+  const name = rawName.toUpperCase();
+  if (name !== "USDC" && name !== "USD COIN") return null;
+  const display = name === "USD COIN" ? "USDC" : rawName;
+  // HL sendAsset token string is `NAME:tokenId` where tokenId is the HEX token
+  // id from spotMeta (verified live 2026-06-15: USDC = `USDC:0x6d1e7cde53ba9467b783cb7c530ce054`),
+  // exactly like the docs' `PURR:0xc4bf...` example. NOT the numeric spot index.
+  const tokenId = record.tokenId;
+  if (typeof tokenId === "string" && /^0x[0-9a-fA-F]+$/.test(tokenId)) return `${display}:${tokenId}`;
+  // Already-formatted `NAME:0x...` passthrough.
+  for (const key of ["token", "id"]) {
+    const value = record[key];
+    if (typeof value === "string" && /^[A-Za-z0-9]+:0x[0-9a-fA-F]+$/.test(value)) return value;
+  }
+  return null;
+}
+
+export async function resolveUsdcTokenId(options: { transport?: HyperliquidTransport; baseUrl?: string; usdcTokenId?: string } = {}): Promise<string> {
+  const raw = await postInfo({ type: "spotMeta" }, options).catch((err) => {
+    if (options.usdcTokenId) return null;
+    throw err;
+  });
+  const tokens = (raw as { tokens?: unknown })?.tokens;
+  if (Array.isArray(tokens)) {
+    for (const token of tokens) {
+      const id = tokenIdFromSpotToken(token);
+      if (id) return id;
+    }
+  }
+  if (options.usdcTokenId) return options.usdcTokenId;
+  throw new Error("unable to resolve Hyperliquid USDC token id from spotMeta; configure usdcTokenId");
+}
+
+export async function toSendAssetAction(
+  params: SendAssetParams,
+  options: { transport?: HyperliquidTransport; baseUrl?: string; usdcTokenId?: string } = {},
+): Promise<Record<string, unknown>> {
+  const nonce = params.nonce ?? nextNonce();
+  const token = params.token ?? (await resolveUsdcTokenId(options));
+  return normalizeSendAssetParams(params, token, nonce);
+}
+
+export function createSendAssetTypedData(
+  params: SendAssetParams & { token: string; nonce: number },
+): Omit<VaultSignTypedDataInput, "agentId"> {
+  const n = normalizeSendAssetParams(params, params.token, params.nonce);
+  return {
+    domain: {
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: Number.parseInt(String(n.signatureChainId), 16),
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    },
+    types: {
+      [sendAssetPrimaryType]: [
+        { name: "hyperliquidChain", type: "string" },
+        { name: "destination", type: "string" },
+        { name: "sourceDex", type: "string" },
+        { name: "destinationDex", type: "string" },
+        { name: "token", type: "string" },
+        { name: "amount", type: "string" },
+        { name: "fromSubAccount", type: "string" },
+        { name: "nonce", type: "uint64" },
+      ],
+    },
+    primaryType: sendAssetPrimaryType,
+    value: {
+      hyperliquidChain: n.hyperliquidChain,
+      destination: n.destination,
+      sourceDex: n.sourceDex,
+      destinationDex: n.destinationDex,
+      token: n.token,
+      amount: n.amount,
+      fromSubAccount: n.fromSubAccount,
+      nonce: n.nonce,
+    },
+  };
+}
+
 // HL withdraw is a USER-SIGNED action (not an L1 agent action). It uses the
 // HyperliquidSignTransaction EIP-712 domain on Arbitrum (chainId 42161), unlike
 // order/cancel which use the L1 "Exchange" domain (chainId 1337).
@@ -562,6 +693,31 @@ async function signAction(
     expiresAfter: opts.expiresAfter,
   });
 }
+export const signSendAsset = async (
+  walletPrivateKey: Hex,
+  params: SendAssetParams,
+  options: SignOptions & { transport?: HyperliquidTransport; baseUrl?: string; usdcTokenId?: string } = {},
+): Promise<SignedSendAsset> => {
+  const nonce = options.nonce ?? params.nonce ?? nextNonce();
+  const hyperliquidChain = params.hyperliquidChain ?? (options.isMainnet === false ? "Testnet" : "Mainnet");
+  const token = params.token ?? (await resolveUsdcTokenId(options));
+  const normalizedParams = { ...params, token, nonce, hyperliquidChain };
+  const action = normalizeSendAssetParams(normalizedParams, token, nonce);
+  const td = createSendAssetTypedData(normalizedParams);
+  const hex = await privateKeyToAccount(walletPrivateKey).signTypedData({
+    domain: td.domain,
+    types: td.types,
+    primaryType: td.primaryType,
+    message: td.value,
+  } as never);
+  const s = parseSignature(hex);
+  return signedSendAssetSchema.parse({
+    action,
+    nonce,
+    signature: { r: s.r, s: s.s, v: Number(s.v) },
+  });
+};
+
 export const signOrder = async (
   walletPrivateKey: Hex,
   order: HyperliquidOrder,
@@ -597,6 +753,26 @@ export async function submitOrder(
       options.baseUrl ?? DEFAULT_BASE_URL,
     ),
   );
+}
+export async function submitSendAsset(
+  signed: SignedSendAsset,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<SendAssetResult> {
+  const raw = await postExchange(
+    signedSendAssetSchema.parse(signed),
+    options.transport ?? { fetch },
+    options.baseUrl ?? DEFAULT_BASE_URL,
+  );
+  // Hyperliquid returns HTTP 200 with { status: "err", response: <msg> } on a
+  // rejected exchange action. Surface that as a thrown error so the /transfer
+  // route audits it as FAILED (not submitted) and the idempotency key is not
+  // poisoned with a success that never moved collateral.
+  const status = String((raw as { status?: unknown })?.status ?? "");
+  if (status === "err") {
+    const detail = (raw as { response?: unknown })?.response;
+    throw new Error(`hyperliquid sendAsset rejected: ${typeof detail === "string" ? detail : JSON.stringify(detail ?? raw)}`);
+  }
+  return sendAssetResultSchema.parse({ status: status || "submitted", raw });
 }
 export async function getOpenOrders(
   userAddress: string,
@@ -682,6 +858,46 @@ export class HyperliquidAdapter {
   }
   submitOrder(signed: SignedOrder) {
     return submitOrder(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  async signSendAsset(params: SendAssetParams): Promise<SignedSendAsset> {
+    const nonce = params.nonce ?? nextNonce();
+    const token = params.token ?? (await resolveUsdcTokenId({
+      transport: this.transport,
+      baseUrl: this.baseUrl,
+      usdcTokenId: this.options.usdcTokenId,
+    }));
+    const hyperliquidChain = params.hyperliquidChain ?? (this.isMainnet ? "Mainnet" : "Testnet");
+    const normalizedParams = { ...params, token, nonce, hyperliquidChain };
+    const action = normalizeSendAssetParams(normalizedParams, token, nonce);
+    const td = createSendAssetTypedData(normalizedParams);
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
+    return signedSendAssetSchema.parse({
+      action,
+      nonce,
+      signature: { r: s.r, s: s.s, v: Number(s.v) },
+    });
+  }
+  submitSendAsset(signed: SignedSendAsset) {
+    return submitSendAsset(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  async transferToBuilderDex(dex: string, amountUsdc: string | number): Promise<SendAssetResult> {
+    const signed = await this.signSendAsset({
+      destination: this.walletAddress,
+      sourceDex: "",
+      destinationDex: dex,
+      amount: amountUsdc,
+    });
+    return this.submitSendAsset(signed);
+  }
+  async transferFromBuilderDex(dex: string, amountUsdc: string | number): Promise<SendAssetResult> {
+    const signed = await this.signSendAsset({
+      destination: this.walletAddress,
+      sourceDex: dex,
+      destinationDex: "",
+      amount: amountUsdc,
+    });
+    return this.submitSendAsset(signed);
   }
   async updateLeverage(input: LeverageUpdateInput): Promise<LeverageUpdateResult> {
     const parsed = normalizedLeverageUpdate(input);
