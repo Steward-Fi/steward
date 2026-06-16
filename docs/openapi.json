@@ -73500,19 +73500,30 @@
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                      "type": "string",
-                      "enum": [
-                        "BTC",
-                        "ETH",
-                        "BNB",
-                        "SOL",
-                        "AVAX",
-                        "ARB",
-                        "OP",
-                        "NEAR",
-                        "HYPE",
-                        "ZEC",
-                        "XMR"
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BTC",
+                            "ETH",
+                            "BNB",
+                            "SOL",
+                            "AVAX",
+                            "ARB",
+                            "OP",
+                            "NEAR",
+                            "HYPE",
+                            "ZEC",
+                            "XMR"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                          "examples": [
+                            "xyz:SPCX"
+                          ]
+                        }
                       ]
                     },
                     "default": [
@@ -73871,19 +73882,30 @@
                         "allowedAssets": {
                           "type": "array",
                           "items": {
-                            "type": "string",
-                            "enum": [
-                              "BTC",
-                              "ETH",
-                              "BNB",
-                              "SOL",
-                              "AVAX",
-                              "ARB",
-                              "OP",
-                              "NEAR",
-                              "HYPE",
-                              "ZEC",
-                              "XMR"
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "BTC",
+                                  "ETH",
+                                  "BNB",
+                                  "SOL",
+                                  "AVAX",
+                                  "ARB",
+                                  "OP",
+                                  "NEAR",
+                                  "HYPE",
+                                  "ZEC",
+                                  "XMR"
+                                ]
+                              },
+                              {
+                                "type": "string",
+                                "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                                "examples": [
+                                  "xyz:SPCX"
+                                ]
+                              }
                             ]
                           }
                         },
@@ -74342,35 +74364,57 @@
                     "type": "string"
                   },
                   "coin": {
-                    "type": "string",
-                    "enum": [
-                      "BTC",
-                      "ETH",
-                      "BNB",
-                      "SOL",
-                      "AVAX",
-                      "ARB",
-                      "OP",
-                      "NEAR",
-                      "HYPE",
-                      "ZEC",
-                      "XMR"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
                     ]
                   },
                   "asset": {
-                    "type": "string",
-                    "enum": [
-                      "BTC",
-                      "ETH",
-                      "BNB",
-                      "SOL",
-                      "AVAX",
-                      "ARB",
-                      "OP",
-                      "NEAR",
-                      "HYPE",
-                      "ZEC",
-                      "XMR"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
                     ]
                   },
                   "side": {
@@ -74476,6 +74520,9 @@
                             "string",
                             "null"
                           ]
+                        },
+                        "builderPerp": {
+                          "type": "boolean"
                         }
                       }
                     }
@@ -75968,19 +76015,30 @@
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                      "type": "string",
-                      "enum": [
-                        "BTC",
-                        "ETH",
-                        "BNB",
-                        "SOL",
-                        "AVAX",
-                        "ARB",
-                        "OP",
-                        "NEAR",
-                        "HYPE",
-                        "ZEC",
-                        "XMR"
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "enum": [
+                            "BTC",
+                            "ETH",
+                            "BNB",
+                            "SOL",
+                            "AVAX",
+                            "ARB",
+                            "OP",
+                            "NEAR",
+                            "HYPE",
+                            "ZEC",
+                            "XMR"
+                          ]
+                        },
+                        {
+                          "type": "string",
+                          "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                          "examples": [
+                            "xyz:SPCX"
+                          ]
+                        }
                       ]
                     },
                     "default": [
@@ -76339,19 +76397,30 @@
                         "allowedAssets": {
                           "type": "array",
                           "items": {
-                            "type": "string",
-                            "enum": [
-                              "BTC",
-                              "ETH",
-                              "BNB",
-                              "SOL",
-                              "AVAX",
-                              "ARB",
-                              "OP",
-                              "NEAR",
-                              "HYPE",
-                              "ZEC",
-                              "XMR"
+                            "anyOf": [
+                              {
+                                "type": "string",
+                                "enum": [
+                                  "BTC",
+                                  "ETH",
+                                  "BNB",
+                                  "SOL",
+                                  "AVAX",
+                                  "ARB",
+                                  "OP",
+                                  "NEAR",
+                                  "HYPE",
+                                  "ZEC",
+                                  "XMR"
+                                ]
+                              },
+                              {
+                                "type": "string",
+                                "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                                "examples": [
+                                  "xyz:SPCX"
+                                ]
+                              }
                             ]
                           }
                         },
@@ -76810,35 +76879,57 @@
                     "type": "string"
                   },
                   "coin": {
-                    "type": "string",
-                    "enum": [
-                      "BTC",
-                      "ETH",
-                      "BNB",
-                      "SOL",
-                      "AVAX",
-                      "ARB",
-                      "OP",
-                      "NEAR",
-                      "HYPE",
-                      "ZEC",
-                      "XMR"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
                     ]
                   },
                   "asset": {
-                    "type": "string",
-                    "enum": [
-                      "BTC",
-                      "ETH",
-                      "BNB",
-                      "SOL",
-                      "AVAX",
-                      "ARB",
-                      "OP",
-                      "NEAR",
-                      "HYPE",
-                      "ZEC",
-                      "XMR"
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "enum": [
+                          "BTC",
+                          "ETH",
+                          "BNB",
+                          "SOL",
+                          "AVAX",
+                          "ARB",
+                          "OP",
+                          "NEAR",
+                          "HYPE",
+                          "ZEC",
+                          "XMR"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]+:[A-Z0-9]+$",
+                        "examples": [
+                          "xyz:SPCX"
+                        ]
+                      }
                     ]
                   },
                   "side": {
@@ -76944,6 +77035,9 @@
                             "string",
                             "null"
                           ]
+                        },
+                        "builderPerp": {
+                          "type": "boolean"
                         }
                       }
                     }
