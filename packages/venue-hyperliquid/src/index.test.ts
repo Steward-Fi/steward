@@ -24,7 +24,9 @@ const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef012345678
 const WALLET = privateKeyToAccount(PRIVATE_KEY).address;
 const NONCE = 1_700_000_000_000;
 
-const xyzSpcxTransport = (extra?: { onBody?: (body: Record<string, unknown>) => void }): HyperliquidTransport => ({
+const xyzSpcxTransport = (extra?: {
+  onBody?: (body: Record<string, unknown>) => void;
+}): HyperliquidTransport => ({
   async fetch(_input, init) {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     extra?.onBody?.(body);
@@ -33,10 +35,14 @@ const xyzSpcxTransport = (extra?: { onBody?: (body: Record<string, unknown>) => 
       // HL's live meta{dex:xyz} names markets with the FULL `xyz:COIN` form
       // (verified live 2026-06-15: xyz:SPCX at index 76). Mirror that here so the
       // fixture guards the real-world keying, not a bare-symbol assumption.
-      const universe = Array.from({ length: 77 }, (_, index) => ({ name: index === 76 ? "xyz:SPCX" : `xyz:DUMMY${index}`, szDecimals: index === 76 ? 2 : 4 }));
+      const universe = Array.from({ length: 77 }, (_, index) => ({
+        name: index === 76 ? "xyz:SPCX" : `xyz:DUMMY${index}`,
+        szDecimals: index === 76 ? 2 : 4,
+      }));
       return new Response(JSON.stringify({ universe }), { status: 200 });
     }
-    if (body.type === "allMids" && body.dex === "xyz") return new Response(JSON.stringify({ SPCX: "400" }), { status: 200 });
+    if (body.type === "allMids" && body.dex === "xyz")
+      return new Response(JSON.stringify({ SPCX: "400" }), { status: 200 });
     return new Response(JSON.stringify({ error: "unexpected body", body }), { status: 500 });
   },
 });
@@ -220,10 +226,12 @@ describe("Hyperliquid L1 signing", () => {
   });
 });
 
-
 describe("Hyperliquid HIP-3 builder perps", () => {
   test("accepts builder symbols and resolves xyz:SPCX to HIP-3 asset id 110076", async () => {
-    const assetId = await resolveAssetId("xyz:SPCX", { transport: xyzSpcxTransport(), baseUrl: "https://fixture.hyperliquid.test" });
+    const assetId = await resolveAssetId("xyz:SPCX", {
+      transport: xyzSpcxTransport(),
+      baseUrl: "https://fixture.hyperliquid.test",
+    });
     expect(assetId).toBe(110076);
   });
 
@@ -232,25 +240,46 @@ describe("Hyperliquid HIP-3 builder perps", () => {
     const signed = await signOrder(
       PRIVATE_KEY,
       { coin: "xyz:SPCX", side: "sell", size: 1.234, nonce: NONCE },
-      { nonce: NONCE, isMainnet: false, baseUrl: "https://fixture-2.hyperliquid.test", transport: xyzSpcxTransport({ onBody: (body) => bodies.push(body) }) },
+      {
+        nonce: NONCE,
+        isMainnet: false,
+        baseUrl: "https://fixture-2.hyperliquid.test",
+        transport: xyzSpcxTransport({ onBody: (body) => bodies.push(body) }),
+      },
     );
     expect(bodies).toContainEqual({ type: "allMids", dex: "xyz" });
     expect(bodies).toContainEqual({ type: "perpDexs" });
     expect(bodies).toContainEqual({ type: "meta", dex: "xyz" });
-    expect(signed.action).toMatchObject({ type: "order", orders: [{ a: 110076, b: false, p: "398", s: "1.23", r: false, t: { limit: { tif: "Ioc" } } }], grouping: "na" });
+    expect(signed.action).toMatchObject({
+      type: "order",
+      orders: [
+        { a: 110076, b: false, p: "398", s: "1.23", r: false, t: { limit: { tif: "Ioc" } } },
+      ],
+      grouping: "na",
+    });
   });
 });
 
 describe("Hyperliquid HIP-3 collateral sendAsset", () => {
-  const spotMetaTransport = (extra?: { onBody?: (body: Record<string, unknown>) => void; exchangeRaw?: unknown }): HyperliquidTransport => ({
+  const spotMetaTransport = (extra?: {
+    onBody?: (body: Record<string, unknown>) => void;
+    exchangeRaw?: unknown;
+  }): HyperliquidTransport => ({
     async fetch(_input, init) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       extra?.onBody?.(body);
       if (body.type === "spotMeta") {
-        return new Response(JSON.stringify({ tokens: [{ name: "USDC", index: 0, tokenId: "0x6d1e7cde53ba9467b783cb7c530ce054" }] }), { status: 200 });
+        return new Response(
+          JSON.stringify({
+            tokens: [{ name: "USDC", index: 0, tokenId: "0x6d1e7cde53ba9467b783cb7c530ce054" }],
+          }),
+          { status: 200 },
+        );
       }
       if (body.action && (body.action as Record<string, unknown>).type === "sendAsset") {
-        return new Response(JSON.stringify(extra?.exchangeRaw ?? { status: "ok" }), { status: 200 });
+        return new Response(JSON.stringify(extra?.exchangeRaw ?? { status: "ok" }), {
+          status: 200,
+        });
       }
       return new Response(JSON.stringify({ error: "unexpected body", body }), { status: 500 });
     },
@@ -336,7 +365,12 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
         usdcTokenId: "configured-usdc",
         transport: {
           async fetch() {
-            return new Response(JSON.stringify({ tokens: [{ name: "PURR", index: 1, tokenId: "0xc1fb593aeffbeb02f85e0308e9956a90" }] }), { status: 200 });
+            return new Response(
+              JSON.stringify({
+                tokens: [{ name: "PURR", index: 1, tokenId: "0xc1fb593aeffbeb02f85e0308e9956a90" }],
+              }),
+              { status: 200 },
+            );
           },
         },
       },
@@ -358,11 +392,19 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
   test("adapter convenience methods submit the correct core-to-builder and builder-to-core directions", async () => {
     const posted: Record<string, unknown>[] = [];
     const account = privateKeyToAccount(PRIVATE_KEY);
-    const signedTypedData: Array<{ domain: unknown; primaryType: string; value: Record<string, unknown> }> = [];
+    const signedTypedData: Array<{
+      domain: unknown;
+      primaryType: string;
+      value: Record<string, unknown>;
+    }> = [];
     const adapter = new HyperliquidAdapter(
       {
         async signTypedData(input) {
-          signedTypedData.push({ domain: input.domain, primaryType: input.primaryType, value: input.value });
+          signedTypedData.push({
+            domain: input.domain,
+            primaryType: input.primaryType,
+            value: input.value,
+          });
           return account.signTypedData({
             domain: input.domain,
             types: input.types,
@@ -386,17 +428,55 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
     const actions = posted
       .map((body) => body.action as Record<string, unknown> | undefined)
       .filter(Boolean);
-    expect(actions[0]).toMatchObject({ type: "sendAsset", hyperliquidChain: "Testnet", signatureChainId: "0xa4b1", sourceDex: "", destinationDex: "xyz", destination: WALLET.toLowerCase(), token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "10", fromSubAccount: "" });
-    expect(actions[1]).toMatchObject({ type: "sendAsset", hyperliquidChain: "Testnet", signatureChainId: "0xa4b1", sourceDex: "xyz", destinationDex: "", destination: WALLET.toLowerCase(), token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "5", fromSubAccount: "" });
+    expect(actions[0]).toMatchObject({
+      type: "sendAsset",
+      hyperliquidChain: "Testnet",
+      signatureChainId: "0xa4b1",
+      sourceDex: "",
+      destinationDex: "xyz",
+      destination: WALLET.toLowerCase(),
+      token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+      amount: "10",
+      fromSubAccount: "",
+    });
+    expect(actions[1]).toMatchObject({
+      type: "sendAsset",
+      hyperliquidChain: "Testnet",
+      signatureChainId: "0xa4b1",
+      sourceDex: "xyz",
+      destinationDex: "",
+      destination: WALLET.toLowerCase(),
+      token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+      amount: "5",
+      fromSubAccount: "",
+    });
     expect(signedTypedData).toHaveLength(2);
-    expect(signedTypedData[0]?.domain).toMatchObject({ name: "HyperliquidSignTransaction", chainId: 42161 });
+    expect(signedTypedData[0]?.domain).toMatchObject({
+      name: "HyperliquidSignTransaction",
+      chainId: 42161,
+    });
     expect(signedTypedData[0]?.primaryType).toBe("HyperliquidTransaction:SendAsset");
-    expect(signedTypedData[0]?.value).toMatchObject({ hyperliquidChain: "Testnet", sourceDex: "", destinationDex: "xyz", fromSubAccount: "" });
+    expect(signedTypedData[0]?.value).toMatchObject({
+      hyperliquidChain: "Testnet",
+      sourceDex: "",
+      destinationDex: "xyz",
+      fromSubAccount: "",
+    });
   });
 
   test("submitSendAsset posts signed user-signed payload to /exchange", async () => {
     let posted: unknown;
-    const signed = await signSendAsset(PRIVATE_KEY, { destination: WALLET, sourceDex: "", destinationDex: "xyz", token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054", amount: "1" }, { nonce: NONCE, isMainnet: false });
+    const signed = await signSendAsset(
+      PRIVATE_KEY,
+      {
+        destination: WALLET,
+        sourceDex: "",
+        destinationDex: "xyz",
+        token: "USDC:0x6d1e7cde53ba9467b783cb7c530ce054",
+        amount: "1",
+      },
+      { nonce: NONCE, isMainnet: false },
+    );
     const result = await submitSendAsset(signed, {
       transport: {
         async fetch(_input, init) {
@@ -405,11 +485,14 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
         },
       },
     });
-    expect(posted).toMatchObject({ action: signed.action, nonce: NONCE, signature: signed.signature });
+    expect(posted).toMatchObject({
+      action: signed.action,
+      nonce: NONCE,
+      signature: signed.signature,
+    });
     expect(result.status).toBe("ok");
   });
 });
-
 
 describe("Hyperliquid withdraw (user-signed action)", () => {
   test("createWithdrawTypedData produces the exact HL EIP-712 structure", () => {

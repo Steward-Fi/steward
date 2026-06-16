@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { generateApiKey, signAgentToken } from "@stwd/auth";
-import { agents, getDb, tenants } from "@stwd/db";
-import { eq } from "drizzle-orm";
+import { agents, auditEvents, getDb, tenants, users, userTenants } from "@stwd/db";
+import { and, desc, eq } from "drizzle-orm";
 
 setDefaultTimeout(30000);
 
@@ -23,16 +23,24 @@ setDefaultTimeout(30000);
 const TENANT_ID = "test-agent-route-scope";
 const AGENT_A = "test-ars-agent-a";
 const AGENT_B = "test-ars-agent-b";
+const OWNER_USER_ID = "00000000-0000-4000-8000-0000000000a1";
+const ADMIN_USER_ID = "00000000-0000-4000-8000-0000000000a2";
+const MEMBER_USER_ID = "00000000-0000-4000-8000-0000000000a3";
 const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDatabaseUrl ? describe : describe.skip;
 
 let apiKey = "";
 let app: typeof import("../app")["app"];
+let createSessionToken: typeof import("../routes/auth").createSessionToken;
+let ownerSessionToken = "";
+let adminSessionToken = "";
+let memberSessionToken = "";
 
 beforeAll(async () => {
   if (!hasDatabaseUrl) return;
 
   ({ app } = await import("../app"));
+  ({ createSessionToken } = await import("../routes/auth"));
 
   const apiKeyPair = generateApiKey();
   apiKey = apiKeyPair.key;
@@ -45,10 +53,56 @@ beforeAll(async () => {
     })
     .onConflictDoNothing();
 
-  // Agent creation now requires an owner/admin session (Shaw's hardening),
-  // not tenant API-key auth, so we seed the agents directly. This test is
-  // about agent-token scope on existing agents, not the creation path, so a
-  // direct insert is the correct fixture.
+  await getDb()
+    .insert(users)
+    .values([
+      { id: OWNER_USER_ID, email: "test-ars-owner@example.test", emailVerified: true },
+      { id: ADMIN_USER_ID, email: "test-ars-admin@example.test", emailVerified: true },
+      { id: MEMBER_USER_ID, email: "test-ars-member@example.test", emailVerified: true },
+    ])
+    .onConflictDoNothing();
+  await getDb()
+    .insert(userTenants)
+    .values([
+      { userId: OWNER_USER_ID, tenantId: TENANT_ID, role: "owner" },
+      { userId: ADMIN_USER_ID, tenantId: TENANT_ID, role: "admin" },
+      { userId: MEMBER_USER_ID, tenantId: TENANT_ID, role: "member" },
+    ])
+    .onConflictDoNothing();
+
+  ownerSessionToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000001",
+    TENANT_ID,
+    {
+      userId: OWNER_USER_ID,
+      email: "test-ars-owner@example.test",
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
+  );
+  adminSessionToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000002",
+    TENANT_ID,
+    {
+      userId: ADMIN_USER_ID,
+      email: "test-ars-admin@example.test",
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
+  );
+  memberSessionToken = await createSessionToken(
+    "0x0000000000000000000000000000000000000003",
+    TENANT_ID,
+    {
+      userId: MEMBER_USER_ID,
+      email: "test-ars-member@example.test",
+      mfaVerifiedAt: Date.now(),
+      mfaMethod: "totp",
+    },
+  );
+
+  // Seed agents directly so this test remains focused on agent-token scope and
+  // agent-token minting gates, not the agent creation payload validators.
   for (const agentId of [AGENT_A, AGENT_B]) {
     await getDb()
       .insert(agents)
@@ -70,6 +124,22 @@ afterAll(async () => {
   // Clean up the test tenant; the db connection itself is shared across the
   // package-wide test run and must NOT be closed here.
   const db = getDb();
+  await db
+    .delete(userTenants)
+    .where(eq(userTenants.tenantId, TENANT_ID))
+    .catch(() => {});
+  await db
+    .delete(users)
+    .where(eq(users.id, OWNER_USER_ID))
+    .catch(() => {});
+  await db
+    .delete(users)
+    .where(eq(users.id, ADMIN_USER_ID))
+    .catch(() => {});
+  await db
+    .delete(users)
+    .where(eq(users.id, MEMBER_USER_ID))
+    .catch(() => {});
   await db
     .delete(tenants)
     .where(eq(tenants.id, TENANT_ID))
@@ -172,6 +242,107 @@ describeWithDatabase("agent route scope enforcement", () => {
     // assert containment rather than exact equality.
     expect(ids).toContain(AGENT_A);
     expect(ids).toContain(AGENT_B);
+  });
+
+  it("lets the tenant root API key mint an agent token without session MFA", async () => {
+    const res = await app.request(`/agents/${AGENT_A}/token`, {
+      method: "POST",
+      headers: {
+        "X-Steward-Tenant": TENANT_ID,
+        "X-Steward-Key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { token: string; agentId: string; tenantId: string; scope: string; scopes: string[] };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.token).toBeDefined();
+    expect(body.data.agentId).toBe(AGENT_A);
+    expect(body.data.tenantId).toBe(TENANT_ID);
+    expect(body.data.scope).toBe("agent");
+    expect(body.data.scopes).toEqual(["agent"]);
+
+    const [audit] = await getDb()
+      .select({ actorType: auditEvents.actorType, actorId: auditEvents.actorId })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.resourceId, AGENT_A),
+          eq(auditEvents.action, "agent.token.create.authorized"),
+        ),
+      )
+      .orderBy(desc(auditEvents.seq));
+    expect(audit).toEqual({ actorType: "api-key", actorId: TENANT_ID });
+  });
+
+  it("keeps owner and admin sessions authorized to mint agent tokens", async () => {
+    for (const token of [ownerSessionToken, adminSessionToken]) {
+      const res = await app.request(`/agents/${AGENT_A}/token`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { ok: boolean; data: { agentId: string } };
+      expect(body.ok).toBe(true);
+      expect(body.data.agentId).toBe(AGENT_A);
+    }
+  });
+
+  it("rejects agent-token, member session, missing credentials, and invalid API key for agent token minting", async () => {
+    const agentToken = await signAgentToken({ agentId: AGENT_A, tenantId: TENANT_ID }, "1h");
+    const cases: Array<{
+      name: string;
+      headers?: Record<string, string>;
+      expectedStatus: number;
+    }> = [
+      {
+        name: "agent-token",
+        headers: { Authorization: `Bearer ${agentToken}`, "Content-Type": "application/json" },
+        expectedStatus: 403,
+      },
+      {
+        name: "member-session",
+        headers: {
+          Authorization: `Bearer ${memberSessionToken}`,
+          "Content-Type": "application/json",
+        },
+        expectedStatus: 403,
+      },
+      {
+        name: "missing-credentials",
+        headers: { "Content-Type": "application/json" },
+        expectedStatus: 403,
+      },
+      {
+        name: "invalid-api-key",
+        headers: {
+          "X-Steward-Tenant": TENANT_ID,
+          "X-Steward-Key": "stwd_invalid_key",
+          "Content-Type": "application/json",
+        },
+        expectedStatus: 403,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const res = await app.request(`/agents/${AGENT_A}/token`, {
+        method: "POST",
+        headers: testCase.headers,
+        body: JSON.stringify({}),
+      });
+      expect(res.status, testCase.name).toBe(testCase.expectedStatus);
+    }
   });
 
   it("blocks agent tokens from batch-creating agents", async () => {

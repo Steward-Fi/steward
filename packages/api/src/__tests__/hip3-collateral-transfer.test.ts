@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const apiRoot = join(import.meta.dir, "..");
-const operatorRecoverySource = readFileSync(join(apiRoot, "routes", "operator-recovery.ts"), "utf8");
+const operatorRecoverySource = readFileSync(
+  join(apiRoot, "routes", "operator-recovery.ts"),
+  "utf8",
+);
 const appSource = readFileSync(join(apiRoot, "app.ts"), "utf8");
 
 describe("HIP-3 collateral transfer route hardening", () => {
@@ -15,7 +18,7 @@ describe("HIP-3 collateral transfer route hardening", () => {
   test("requires a platform key and rejects tenant/admin operator auth for transfers", () => {
     const route = operatorRecoverySource.slice(
       operatorRecoverySource.indexOf('operatorRecoveryRoutes.post("/:venue/transfer"'),
-      operatorRecoverySource.indexOf('// ── POST /v1/trade/:venue/close-all'),
+      operatorRecoverySource.indexOf("// ── POST /v1/trade/:venue/close-all"),
     );
     expect(route).toContain('c.get("authType") !== "platform"');
     expect(route).toContain("Platform key required for collateral transfer");

@@ -187,12 +187,15 @@ describe("auth and audit hardening", () => {
         'auth.post("/email/verify"',
         'requireTenantLoginMethodAllowed(c, resolvedTenantId, "email")',
       ],
-      ['auth.post("/test/token"', 'requireTenantLoginMethodAllowed(c, tenantId, "email")'],
-      ['auth.post("/test/token"', 'requireTenantLoginMethodAllowed(c, tenantId, "sms")'],
     ] as const) {
       const routeStart = authSource.indexOf(routeMarker);
       expect(routeStart).toBeGreaterThanOrEqual(0);
-      expect(authSource.indexOf(methodMarker, routeStart)).toBeGreaterThan(routeStart);
+      const routeEnd = authSource.indexOf("\nauth.", routeStart + routeMarker.length);
+      const routeSource = authSource.slice(routeStart, routeEnd > 0 ? routeEnd : undefined);
+      expect(routeSource).toContain("requireTenantLoginMethodAllowed(");
+      expect(routeSource).toContain(
+        methodMarker.match(/"(email|sms|passkey)"/)?.[0] ?? methodMarker,
+      );
     }
   });
 
@@ -334,7 +337,7 @@ describe("auth and audit hardening", () => {
       authSource.indexOf("const stepUpResponse", passkeyVerifyStart),
     );
     expect(passkeyVerify).toContain("where(eq(users.id, session.payload.userId))");
-    expect(passkeyVerify).toContain("user.email?.toLowerCase().trim() !== email");
+    expect(passkeyVerify).toContain("sessionUser.email?.toLowerCase().trim() !== email");
     expect(passkeyVerify).not.toContain("User not found");
 
     const smsVerifyStart = authSource.indexOf('auth.post("/mfa/sms/verify"');

@@ -20,8 +20,12 @@ function expectAdminBeforeTenantLevel(source: string, marker: string) {
   const start = routeStart(source, marker);
   expect(start).toBeGreaterThanOrEqual(0);
   const adminCheck = source.indexOf("requireTenantAdminSession(c)", start);
+  const adminOrApiKeyCheck = source.indexOf("requireTenantAdminOrApiKey(c)", start);
   const mfaAdminCheck = source.indexOf("requireRecentTenantAdminMfa(c", start);
-  const boundaryCheck = adminCheck >= 0 ? adminCheck : mfaAdminCheck;
+  const boundaryCheck =
+    [adminCheck, adminOrApiKeyCheck, mfaAdminCheck]
+      .filter((index) => index >= 0)
+      .sort((a, b) => a - b)[0] ?? -1;
   const tenantLevelCheck = source.indexOf("requireTenantLevel(c)", start);
   expect(boundaryCheck).toBeGreaterThan(start);
   expect(tenantLevelCheck === -1 || boundaryCheck < tenantLevelCheck).toBe(true);
@@ -101,7 +105,7 @@ describe("API key control-plane boundary", () => {
     }
   });
 
-  it("does not allow tenant API keys to create agents, mint agent tokens, or replace policies", () => {
+  it("keeps agent admin routes behind the tenant-admin gate before tenant-level fallback", () => {
     for (const marker of [
       'agentRoutes.post("/")',
       'agentRoutes.post("/:agentId/token")',

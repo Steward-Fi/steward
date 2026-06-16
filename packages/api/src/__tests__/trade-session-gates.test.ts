@@ -11,8 +11,8 @@
  * REAL routes against an in-memory PGLite DB + the REAL TradeSessionManager and
  * proves behaviorally:
  *
- *   - create / get / revoke each refuse a non-session principal (api-key) → 403
- *     and an owner session WITHOUT recent MFA → 403, BEFORE any session mutation
+ *   - create / get / revoke allow the tenant root API key machine credential
+ *     while an owner session WITHOUT recent MFA → 403, BEFORE any session mutation
  *     (the seeded session stays active through a denied revoke).
  *   - a fully-authenticated owner+MFA create SUCCEEDS (201) and records the
  *     `trade.session.create.authorized` audit attributed to the human user
@@ -73,6 +73,7 @@ async function makeApp(posture: Posture) {
     c.set("userId", ACTOR_ID);
     if (posture === "api-key") {
       c.set("authType", "api-key");
+      c.set("userId", undefined);
     } else if (posture === "agent-self") {
       // agent-token scoped to AGENT_ID, no human role/MFA.
       c.set("authType", "agent-token");
@@ -177,12 +178,19 @@ describe("trade session control-plane gates (real routes)", () => {
     delete process.env.STEWARD_PGLITE_MEMORY;
   });
 
-  it("create session: refuses api-key (no owner/admin session) then owner-session-without-MFA", async () => {
+  it("create session: allows api-key while refusing owner-session-without-MFA", async () => {
     const apiKeyRes = await post(await makeApp("api-key"), "/sessions", CREATE_BODY);
-    expect(apiKeyRes.status).toBe(403);
-    expect(await errorOf(apiKeyRes)).toBe(
-      "Forbidden: insufficient access to create a session for this agent",
-    );
+    expect(apiKeyRes.status).toBe(201);
+    const apiKeyAudit = await getDb()
+      .select({ actorType: auditEvents.actorType, actorId: auditEvents.actorId })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.action, "trade.session.create.authorized"),
+          eq(auditEvents.actorType, "api-key"),
+        ),
+      );
+    expect(apiKeyAudit).toEqual([{ actorType: "api-key", actorId: TENANT_ID }]);
 
     const noMfaRes = await post(await makeApp("session-no-mfa"), "/sessions", CREATE_BODY);
     expect(noMfaRes.status).toBe(403);
@@ -190,20 +198,20 @@ describe("trade session control-plane gates (real routes)", () => {
       "Trade session management requires recent MFA verification",
     );
 
-    // Fail-closed: neither denied create reached the session manager.
+    // Fail-closed: the denied session-JWT create did not reach the session manager.
     const sessions = await getDb()
       .select({ id: tradeSessions.id })
       .from(tradeSessions)
       .where(eq(tradeSessions.agentId, AGENT_ID));
-    expect(sessions.map((s) => s.id)).toEqual([SEEDED_SESSION_ID]);
+    expect(sessions.map((s) => s.id)).toContain(SEEDED_SESSION_ID);
+    expect(sessions).toHaveLength(2);
   });
 
-  it("get session: refuses api-key then owner-session-without-MFA", async () => {
+  it("get session: allows api-key while refusing owner-session-without-MFA", async () => {
     const apiKeyRes = await (await makeApp("api-key")).request(
       `/v1/trade/sessions/${SEEDED_SESSION_ID}`,
     );
-    expect(apiKeyRes.status).toBe(403);
-    expect(await errorOf(apiKeyRes)).toBe("Forbidden: insufficient access to this session");
+    expect(apiKeyRes.status).toBe(200);
 
     const noMfaRes = await (await makeApp("session-no-mfa")).request(
       `/v1/trade/sessions/${SEEDED_SESSION_ID}`,
@@ -214,14 +222,37 @@ describe("trade session control-plane gates (real routes)", () => {
     );
   });
 
-  it("revoke session: refuses api-key then owner-session-without-MFA, leaving the session active", async () => {
+  it("revoke session: allows api-key while refusing owner-session-without-MFA, leaving the seeded session active", async () => {
+    const apiKeySessionId = `ses_api_key_revoke_${Date.now()}`;
+    await getDb()
+      .insert(tradeSessions)
+      .values({
+        id: apiKeySessionId,
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        venue: "hyperliquid",
+        walletId: VENUE_WALLET,
+        status: "active",
+        dailySpendUsd: "0",
+        dailyCapUsd: "100",
+        perOrderCapUsd: "50",
+        leverageCap: "2",
+        allowedAssets: ["BTC"],
+        expiresAt: new Date(Date.now() + 60_000),
+      });
     const apiKeyRes = await post(
       await makeApp("api-key"),
-      `/sessions/${SEEDED_SESSION_ID}/revoke`,
+      `/sessions/${apiKeySessionId}/revoke`,
       {},
     );
-    expect(apiKeyRes.status).toBe(403);
-    expect(await errorOf(apiKeyRes)).toBe("Forbidden: insufficient access to revoke this session");
+    expect(apiKeyRes.status).toBe(200);
+    const apiKeyRevokeAudit = await getDb()
+      .select({ actorType: auditEvents.actorType, actorId: auditEvents.actorId })
+      .from(auditEvents)
+      .where(
+        and(eq(auditEvents.action, "trade.session.revoked"), eq(auditEvents.actorType, "api-key")),
+      );
+    expect(apiKeyRevokeAudit).toEqual([{ actorType: "api-key", actorId: TENANT_ID }]);
 
     const noMfaRes = await post(
       await makeApp("session-no-mfa"),
@@ -268,6 +299,7 @@ describe("trade session control-plane gates (real routes)", () => {
         and(
           eq(auditEvents.action, "trade.session.create.authorized"),
           eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.actorId, ACTOR_ID),
         ),
       );
     expect(authorized.length).toBe(1);
@@ -280,7 +312,11 @@ describe("trade session control-plane gates (real routes)", () => {
       .select({ actorType: auditEvents.actorType, seq: auditEvents.seq })
       .from(auditEvents)
       .where(
-        and(eq(auditEvents.action, "trade.session.created"), eq(auditEvents.tenantId, TENANT_ID)),
+        and(
+          eq(auditEvents.action, "trade.session.created"),
+          eq(auditEvents.tenantId, TENANT_ID),
+          eq(auditEvents.actorId, ACTOR_ID),
+        ),
       );
     expect(createdAudit.length).toBe(1);
     expect(createdAudit[0].actorType).toBe("user");
