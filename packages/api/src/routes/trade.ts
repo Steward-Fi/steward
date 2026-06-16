@@ -186,6 +186,8 @@ async function auditTradeEvent(
     | "trade.session.revoked"
     | "trade.order.submitted"
     | "trade.order.submit.authorized"
+    | "trade.order.leverage.set"
+    | "trade.order.leverage.failed"
     | "trade.order.policy-rejected"
     | "trade.order.canceled",
   details: Record<string, unknown>,
@@ -812,6 +814,46 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
         ...(body.orderType ? { orderType: body.orderType } : {}),
       };
       hyperliquidOrderSchema.safeParse(order);
+      if (builderPerp) {
+        try {
+          await adapter.updateLeverage({
+            coin: parsedAsset.data,
+            leverage: effectiveLeverage,
+            isCross: false,
+          });
+        } catch (err) {
+          // Leverage must be set BEFORE the order or the position opens at the
+          // dex default (e.g. 10x). If updateLeverage fails, abort the order and
+          // release the reserved session spend so the daily cap isn't consumed
+          // for an order that never signed/submitted.
+          await getSessionManager().releaseSpend({ tenantId, id: session.id, amountUsd: sizeUsd });
+          await auditTradeEvent(tenantId, agentId, "trade.order.leverage.failed", {
+            sessionId: session.id,
+            venue: "hyperliquid",
+            asset: parsedAsset.data,
+            leverage: effectiveLeverage,
+            requestedLeverage: body.leverage,
+            isCross: false,
+            builderPerp,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          const envelope: TradeIdempotencyResponse = {
+            status: 502,
+            body: { ok: false, error: "Failed to set leverage before order; order not submitted" },
+          };
+          idempotency.store?.(envelope);
+          return envelope;
+        }
+        await auditTradeEvent(tenantId, agentId, "trade.order.leverage.set", {
+          sessionId: session.id,
+          venue: "hyperliquid",
+          asset: parsedAsset.data,
+          leverage: effectiveLeverage,
+          requestedLeverage: body.leverage,
+          isCross: false,
+          builderPerp,
+        });
+      }
       const signed = await adapter.signOrder(order);
       const activeAfterSign = await getSessionManager().getActive(tenantId, session.id);
       if (!activeAfterSign) {

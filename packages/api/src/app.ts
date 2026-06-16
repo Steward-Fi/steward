@@ -160,7 +160,10 @@ app.use("/v1/condition_sets/*", (c, next) => tenantAuth(c, next));
 // Operator fund-recovery endpoints use the operator gate (platform key OR
 // tenant-admin), NOT requireAgentJwt. See middleware/operator-auth.ts.
 const isOperatorRecoveryPath = (path: string): boolean =>
-  path.endsWith("/close-all") || path.endsWith("/withdraw") || path.endsWith("/transfer");
+  path.endsWith("/close-all") ||
+  path.endsWith("/withdraw") ||
+  path.endsWith("/transfer") ||
+  path.endsWith("/leverage");
 
 app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
 app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));

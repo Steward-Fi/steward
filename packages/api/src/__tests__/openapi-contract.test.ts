@@ -126,7 +126,9 @@ describe("generated OpenAPI contract", () => {
     expect(spec.paths).toHaveProperty("/trade/hyperliquid/order");
     expect(spec.paths).toHaveProperty("/trade/{venue}/deposit");
     expect(spec.paths).toHaveProperty("/trade/{venue}/close-all");
+    expect(spec.paths).toHaveProperty("/trade/{venue}/leverage");
     expect(spec.paths).toHaveProperty("/trade/{venue}/withdraw");
+    expect(spec.paths).toHaveProperty("/v1/trade/{venue}/leverage");
     expect(spec.paths).toHaveProperty("/v1/trade/{venue}/withdraw");
     expect(spec.paths).toHaveProperty("/tenants/config");
     expect(spec.paths).toHaveProperty("/tenants/{id}/config");
@@ -600,6 +602,9 @@ describe("generated OpenAPI contract", () => {
     ).toEqual([{ type: "string" }, { type: "number" }]);
     const recoveryCloseAll = spec.paths["/trade/{venue}/close-all"].post;
     expect(recoveryCloseAll.description).toContain("Every per-coin close result is audited");
+    const recoveryLeverage = spec.paths["/trade/{venue}/leverage"].post;
+    expect(recoveryLeverage.description).toContain("updateLeverage");
+    expect(recoveryLeverage.description).toContain("capped at 3x");
     const recoveryWithdraw = spec.paths["/trade/{venue}/withdraw"].post;
     expect(recoveryWithdraw.description).toContain("approved-addresses policy gate");
     expect(recoveryWithdraw.description).toContain("fails closed when unavailable");
@@ -766,8 +771,10 @@ describe("generated OpenAPI contract", () => {
     expectHardening(spec.paths["/trade/hyperliquid/order"].post, "/trade");
     expectHardening(spec.paths["/trade/{venue}/deposit"].post, "/trade");
     expectHardening(spec.paths["/trade/{venue}/close-all"].post, "/trade");
+    expectHardening(spec.paths["/trade/{venue}/leverage"].post, "/trade");
     expectHardening(spec.paths["/trade/{venue}/withdraw"].post, "/trade");
     expectHardening(spec.paths["/v1/trade/hyperliquid/order"].post, "/v1/trade");
+    expectHardening(spec.paths["/v1/trade/{venue}/leverage"].post, "/v1/trade");
     expectHardening(spec.paths["/v1/trade/{venue}/withdraw"].post, "/v1/trade");
     expectHardening(spec.paths["/tenants/{id}/config"].put, "/tenants");
     expectHardening(spec.paths["/tenants/{id}/config/templates/{name}/apply"].post, "/tenants");

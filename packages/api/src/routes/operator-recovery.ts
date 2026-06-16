@@ -27,7 +27,11 @@
  */
 
 import { proxyAuditLog } from "@stwd/db";
-import { HyperliquidAdapter } from "@stwd/venue-hyperliquid";
+import {
+  HyperliquidAdapter,
+  hyperliquidAssetSchema,
+  isBuilderPerpSymbol,
+} from "@stwd/venue-hyperliquid";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -176,6 +180,14 @@ const transferSchema = z
     idempotencyKey: z.string().min(1).max(256).optional(),
   })
   .refine((v) => v.sourceDex !== v.destinationDex, "sourceDex and destinationDex must differ");
+
+const leverageSchema = z.object({
+  agentId: z.string().min(1),
+  coin: hyperliquidAssetSchema,
+  leverage: z.number().int().positive().max(100),
+  isCross: z.boolean().optional(),
+  idempotencyKey: z.string().min(1).max(256).optional(),
+});
 
 // ── Deposit constants (Hyperliquid on Arbitrum) ────────────────────────────────
 // HL credits the SENDING address, so the deposit MUST originate from the agent's
@@ -358,6 +370,115 @@ operatorRecoveryRoutes.post("/:venue/deposit", async (c) => {
     amountUsdc: amountNum,
     amountBaseUnits: amountBaseUnits.toString(),
     txHash,
+  };
+  idempotency.store?.(response);
+  return c.json<ApiResponse>({ ok: true, data: response });
+});
+
+// ── POST /v1/trade/:venue/leverage ─────────────────────────────────────────────
+// Platform-key recovery lever for already-open Hyperliquid positions. Builder
+// perps are isolated-only and capped at 3x here, matching the order path.
+operatorRecoveryRoutes.post("/:venue/leverage", async (c) => {
+  const tenantId = c.get("tenantId");
+  const venue = c.req.param("venue");
+  if (venue !== "hyperliquid") {
+    return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
+  }
+  if (c.get("authType") !== "platform") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Platform key required for leverage update" },
+      403,
+    );
+  }
+
+  const raw = await safeJsonParse(c);
+  const parsed = leverageSchema.safeParse(raw);
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const body = {
+    ...parsed.data,
+    idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+  };
+  const { agentId, coin } = body;
+  const builderPerp = isBuilderPerpSymbol(coin);
+  const effectiveLeverage = builderPerp ? Math.min(body.leverage, 3) : body.leverage;
+  const isCross = builderPerp ? false : body.isCross ?? false;
+
+  const idempotency = getOperatorIdempotency(`${tenantId}:leverage`, body.idempotencyKey, {
+    agentId,
+    venue,
+    coin,
+    leverage: effectiveLeverage,
+    requestedLeverage: body.leverage,
+    isCross,
+  });
+  if (idempotency.conflict) {
+    return c.json<ApiResponse>({ ok: false, error: "Idempotency key reused with a different body" }, 409);
+  }
+  if (idempotency.response) {
+    return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+  }
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const walletAddress = await resolveVenueWallet(tenantId, agentId, venue);
+  if (!walletAddress) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Hyperliquid venue wallet not found for agent" },
+      404,
+    );
+  }
+
+  const adapter = buildAdapter(tenantId, agentId, walletAddress);
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.leverage.requested", {
+    venue,
+    walletAddress,
+    coin,
+    leverage: effectiveLeverage,
+    requestedLeverage: body.leverage,
+    isCross,
+    builderPerp,
+  });
+
+  let result: unknown;
+  try {
+    result = await adapter.updateLeverage({ coin, leverage: effectiveLeverage, isCross });
+  } catch (err) {
+    await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.leverage.failed", {
+      venue,
+      walletAddress,
+      coin,
+      leverage: effectiveLeverage,
+      requestedLeverage: body.leverage,
+      isCross,
+      builderPerp,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json<ApiResponse>({ ok: false, error: "Failed to update leverage" }, 502);
+  }
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.leverage.submitted", {
+    venue,
+    walletAddress,
+    coin,
+    leverage: effectiveLeverage,
+    requestedLeverage: body.leverage,
+    isCross,
+    builderPerp,
+  });
+
+  const response = {
+    venue,
+    walletAddress,
+    coin,
+    leverage: effectiveLeverage,
+    requestedLeverage: body.leverage,
+    isCross,
+    builderPerp,
+    result,
   };
   idempotency.store?.(response);
   return c.json<ApiResponse>({ ok: true, data: response });

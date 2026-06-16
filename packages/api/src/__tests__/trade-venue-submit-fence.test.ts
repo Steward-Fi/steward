@@ -63,7 +63,7 @@ import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
 // size 1 @ limitPx 10 (a BUY, so estimateHyperliquidOrderUsd needs no price
-// fetch) → sizeUsd 10: under perOrderCap 50 and dailyCap 100, leverage 1 ≤ 2.
+// fetch) → sizeUsd 10: under perOrderCap 50 and dailyCap 100, leverage within cap.
 const SIZE_USD = 10;
 const ORDER_BODY = {
   asset: "BTC" as const,
@@ -77,9 +77,12 @@ setDefaultTimeout(30000);
 
 let signSpy: ReturnType<typeof spyOn> | undefined;
 let submitSpy: ReturnType<typeof spyOn> | undefined;
+let updateLeverageSpy: ReturnType<typeof spyOn> | undefined;
 let fenceSpy: ReturnType<typeof spyOn> | undefined;
 
-async function seedSession(): Promise<{ tenantId: string; agentId: string; sessionId: string }> {
+async function seedSession(
+  allowedAssets: string[] = ["BTC"],
+): Promise<{ tenantId: string; agentId: string; sessionId: string }> {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const tenantId = `venue-fence-tenant-${suffix}`;
   const agentId = `venue-fence-agent-${suffix}`;
@@ -105,8 +108,8 @@ async function seedSession(): Promise<{ tenantId: string; agentId: string; sessi
       dailySpendUsd: "0",
       dailyCapUsd: "100",
       perOrderCapUsd: "50",
-      leverageCap: "2",
-      allowedAssets: ["BTC"],
+      leverageCap: "5",
+      allowedAssets,
       expiresAt: new Date(Date.now() + 60_000),
     });
   return { tenantId, agentId, sessionId };
@@ -124,11 +127,11 @@ function makeApp(tenantId: string, agentId: string, routes: Hono) {
   return app;
 }
 
-function postOrder(app: Hono, sessionId: string, idempotencyKey: string) {
+function postOrder(app: Hono, sessionId: string, idempotencyKey: string, body: Record<string, unknown> = ORDER_BODY) {
   return app.request("/v1/trade/hyperliquid/order", {
     method: "POST",
     headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
-    body: JSON.stringify({ sessionId, ...ORDER_BODY }),
+    body: JSON.stringify({ sessionId, ...body }),
   });
 }
 
@@ -184,8 +187,10 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
   afterEach(() => {
     signSpy?.mockRestore();
     submitSpy?.mockRestore();
+    updateLeverageSpy?.mockRestore();
     signSpy = undefined;
     submitSpy = undefined;
+    updateLeverageSpy = undefined;
   });
 
   it("releases spend and cancels (no submitted audit) when the venue rejects the order", async () => {
@@ -324,5 +329,52 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(authorized[0].actorType).toBe("agent");
     expect(authorized[0].actorId).toBe(agentId);
     expect(authorized[0].seq).toBeLessThan(submitted[0].seq);
+  });
+
+  it("sets clamped isolated leverage before signing builder-perp orders", async () => {
+    const builderAsset = "xyz:SPCX";
+    const { tenantId, agentId, sessionId } = await seedSession([builderAsset]);
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    const callOrder: string[] = [];
+    updateLeverageSpy = spyOn(HyperliquidAdapter.prototype, "updateLeverage").mockImplementation(
+      async () => {
+        callOrder.push("updateLeverage");
+        return { status: "ok", raw: { response: { type: "default" } } } as Awaited<
+          ReturnType<HyperliquidAdapter["updateLeverage"]>
+        >;
+      },
+    );
+    signSpy = spyOn(HyperliquidAdapter.prototype, "signOrder").mockImplementation(async () => {
+      callOrder.push("sign");
+      return {} as Awaited<ReturnType<HyperliquidAdapter["signOrder"]>>;
+    });
+    submitSpy = spyOn(HyperliquidAdapter.prototype, "submitOrder").mockImplementation(async () => {
+      callOrder.push("submit");
+      return {
+        orderId: "hl-builder-ok-1",
+        status: "filled",
+        filledQty: 1,
+        avgPrice: 10,
+      } as Awaited<ReturnType<HyperliquidAdapter["submitOrder"]>>;
+    });
+
+    const key = crypto.randomUUID();
+    const res = await postOrder(app, sessionId, key, {
+      asset: builderAsset,
+      side: "buy",
+      size: 1,
+      limitPx: 10,
+      leverage: 10,
+    });
+
+    expect(res.status).toBe(200);
+    expect(callOrder).toEqual(["updateLeverage", "sign", "submit"]);
+    expect(updateLeverageSpy).toHaveBeenCalledTimes(1);
+    expect(updateLeverageSpy).toHaveBeenCalledWith({ coin: builderAsset, leverage: 3, isCross: false });
+    expect(signSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ asset: builderAsset, leverage: 3 }),
+    );
+    expect(await auditCount(tenantId, "trade.order.leverage.set")).toBe(1);
   });
 });
