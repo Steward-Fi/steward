@@ -197,11 +197,15 @@ describe("agent trade policy", () => {
     expect(body.error).toContain("dailyCap exceeds platform ceiling 50000");
   });
 
-
   it("requires allowBuilderPerps before adding builder symbols to allowedAssets", async () => {
-    const rejected = await putPolicy({ allowedAssets: ["xyz:SPCX"], reason: "try builder without explicit opt-in" });
+    const rejected = await putPolicy({
+      allowedAssets: ["xyz:SPCX"],
+      reason: "try builder without explicit opt-in",
+    });
     expect(rejected.status).toBe(400);
-    expect(((await rejected.json()) as { error: string }).error).toContain("allowBuilderPerps=true");
+    expect(((await rejected.json()) as { error: string }).error).toContain(
+      "allowBuilderPerps=true",
+    );
 
     const accepted = await putPolicy({
       allowedAssets: ["BTC", "xyz:SPCX"],
@@ -209,7 +213,9 @@ describe("agent trade policy", () => {
       reason: "explicitly allow Trade.xyz SPCX builder perp",
     });
     expect(accepted.status).toBe(200);
-    const body = (await accepted.json()) as { data: { policy: { allowedAssets: string[]; allowBuilderPerps: boolean } } };
+    const body = (await accepted.json()) as {
+      data: { policy: { allowedAssets: string[]; allowBuilderPerps: boolean } };
+    };
     expect(body.data.policy.allowedAssets).toEqual(["BTC", "xyz:SPCX"]);
     expect(body.data.policy.allowBuilderPerps).toBe(true);
   });

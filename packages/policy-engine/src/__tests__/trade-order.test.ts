@@ -128,11 +128,16 @@ describe("trade-order evaluators", () => {
   });
 });
 
-
 it("requires explicit builder-perp opt-in and clamps builder leverage to 3x", () => {
   expect(
     evaluateTradeOrder(
-      { venue: "hyperliquid", allowedVenues: ["hyperliquid"], allowedAssets: ["xyz:SPCX"], leverageCap: 10, perOrderCapUsd: 500 },
+      {
+        venue: "hyperliquid",
+        allowedVenues: ["hyperliquid"],
+        allowedAssets: ["xyz:SPCX"],
+        leverageCap: 10,
+        perOrderCapUsd: 500,
+      },
       { venue: "hyperliquid", asset: "xyz:SPCX", leverage: 1, estimatedOrderUsd: 100 },
     ),
   ).toEqual({
@@ -142,8 +147,19 @@ it("requires explicit builder-perp opt-in and clamps builder leverage to 3x", ()
   });
   expect(
     evaluateTradeOrder(
-      { venue: "hyperliquid", allowedVenues: ["hyperliquid"], allowedAssets: ["xyz:SPCX"], allowBuilderPerps: true, leverageCap: 10, perOrderCapUsd: 500 },
+      {
+        venue: "hyperliquid",
+        allowedVenues: ["hyperliquid"],
+        allowedAssets: ["xyz:SPCX"],
+        allowBuilderPerps: true,
+        leverageCap: 10,
+        perOrderCapUsd: 500,
+      },
       { venue: "hyperliquid", asset: "xyz:SPCX", leverage: 4, estimatedOrderUsd: 100 },
     ),
-  ).toEqual({ allow: false, reason: "leverage-cap: leverage 4 exceeds cap 3", failedEvaluator: "leverageCapEvaluator" });
+  ).toEqual({
+    allow: false,
+    reason: "leverage-cap: leverage 4 exceeds cap 3",
+    failedEvaluator: "leverageCapEvaluator",
+  });
 });

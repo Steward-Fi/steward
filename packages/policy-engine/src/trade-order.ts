@@ -62,7 +62,9 @@ export const venueAllowlistEvaluator: TradeOrderEvaluator = (session, order) => 
 
 export const leverageCapEvaluator: TradeOrderEvaluator = (session, order) => {
   const sessionCap = finiteNumber(session.leverageCap, DEFAULT_LEVERAGE_CAP);
-  const cap = isBuilderPerpAsset(order.asset) ? Math.min(sessionCap, BUILDER_PERP_LEVERAGE_CAP) : sessionCap;
+  const cap = isBuilderPerpAsset(order.asset)
+    ? Math.min(sessionCap, BUILDER_PERP_LEVERAGE_CAP)
+    : sessionCap;
   const leverage = finiteNumber(order.leverage, 1);
   if (leverage > cap) {
     return { allow: false, reason: `leverage-cap: leverage ${leverage} exceeds cap ${cap}` };

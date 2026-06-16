@@ -415,7 +415,9 @@ tradeRoutes.post("/sessions", async (c) => {
     const requestedBuilderAsset = allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
     if (requestedBuilderAsset && !agentPolicy.allowBuilderPerps) {
       return c.json(
-        policyViolation(`builder perp ${requestedBuilderAsset} requires allowBuilderPerps in agent policy`),
+        policyViolation(
+          `builder perp ${requestedBuilderAsset} requires allowBuilderPerps in agent policy`,
+        ),
         400,
       );
     }
@@ -461,7 +463,9 @@ tradeRoutes.post("/sessions", async (c) => {
     const requestedBuilderAsset = allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
     if (requestedBuilderAsset) {
       return c.json(
-        policyViolation(`builder perp ${requestedBuilderAsset} requires an agent policy with allowBuilderPerps`),
+        policyViolation(
+          `builder perp ${requestedBuilderAsset} requires an agent policy with allowBuilderPerps`,
+        ),
         400,
       );
     }

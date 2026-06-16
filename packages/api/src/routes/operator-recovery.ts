@@ -377,7 +377,10 @@ operatorRecoveryRoutes.post("/:venue/transfer", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
   }
   if (c.get("authType") !== "platform") {
-    return c.json<ApiResponse>({ ok: false, error: "Platform key required for collateral transfer" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Platform key required for collateral transfer" },
+      403,
+    );
   }
 
   const raw = await safeJsonParse(c);
@@ -392,7 +395,10 @@ operatorRecoveryRoutes.post("/:venue/transfer", async (c) => {
   const { agentId, sourceDex, destinationDex } = body;
 
   if (hasTooManyUsdcDecimals(body.amountUsdc)) {
-    return c.json<ApiResponse>({ ok: false, error: "amountUsdc has more than 6 decimal places" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "amountUsdc has more than 6 decimal places" },
+      400,
+    );
   }
   const amountBaseUnits = parseUsdcBaseUnits(body.amountUsdc);
   if (amountBaseUnits === null || amountBaseUnits <= 0n) {
@@ -421,7 +427,10 @@ operatorRecoveryRoutes.post("/:venue/transfer", async (c) => {
     token: body.token ?? null,
   });
   if (idempotency.conflict) {
-    return c.json<ApiResponse>({ ok: false, error: "Idempotency key reused with a different body" }, 409);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
   }
   if (idempotency.response) {
     return c.json<ApiResponse>({ ok: true, data: idempotency.response });
@@ -432,7 +441,10 @@ operatorRecoveryRoutes.post("/:venue/transfer", async (c) => {
 
   const walletAddress = await resolveVenueWallet(tenantId, agentId, venue);
   if (!walletAddress) {
-    return c.json<ApiResponse>({ ok: false, error: "Hyperliquid venue wallet not found for agent" }, 404);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Hyperliquid venue wallet not found for agent" },
+      404,
+    );
   }
 
   const adapter = buildAdapter(tenantId, agentId, walletAddress);
@@ -480,7 +492,14 @@ operatorRecoveryRoutes.post("/:venue/transfer", async (c) => {
     action,
   });
 
-  const response = { venue, walletAddress, sourceDex, destinationDex, amountUsdc: String(body.amountUsdc), result };
+  const response = {
+    venue,
+    walletAddress,
+    sourceDex,
+    destinationDex,
+    amountUsdc: String(body.amountUsdc),
+    result,
+  };
   idempotency.store?.(response);
   return c.json<ApiResponse>({ ok: true, data: response });
 });
