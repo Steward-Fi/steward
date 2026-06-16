@@ -1633,6 +1633,7 @@ export const agentPolicies = pgTable(
     leverageCap: numeric("leverage_cap").notNull().default("10"),
     allowedAssets: text("allowed_assets").array().notNull().default(["BTC", "ETH", "BNB"]),
     allowedVenues: text("allowed_venues").array().notNull().default(["hyperliquid"]),
+    allowBuilderPerps: boolean("allow_builder_perps").notNull().default(false),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     updatedBy: text("updated_by").notNull(),
     updatedReason: text("updated_reason"),

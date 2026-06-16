@@ -748,6 +748,7 @@ const TRADE_POLICY_DEFAULTS = {
   leverageCap: 10,
   allowedAssets: ["BTC", "ETH", "BNB"],
   allowedVenues: ["hyperliquid"],
+  allowBuilderPerps: false,
 } as const;
 
 const TRADE_POLICY_LAYER_1_MAX = {
@@ -763,6 +764,7 @@ type AgentTradePolicyResponse = {
   leverageCap: number;
   allowedAssets: string[];
   allowedVenues: string[];
+  allowBuilderPerps: boolean;
   updatedAt: string;
   updatedBy: string;
   updatedReason: string | null;
@@ -779,6 +781,7 @@ type AgentTradePolicyPatch = {
   leverageCap?: unknown;
   allowedAssets?: unknown;
   allowedVenues?: unknown;
+  allowBuilderPerps?: unknown;
   reason?: unknown;
   multisigApproval?: unknown;
 };
@@ -795,6 +798,7 @@ function policyRowToResponse(row: typeof agentPolicies.$inferSelect): AgentTrade
     leverageCap: parseNumericPolicyValue(row.leverageCap),
     allowedAssets: row.allowedAssets,
     allowedVenues: row.allowedVenues,
+    allowBuilderPerps: row.allowBuilderPerps,
     updatedAt: row.updatedAt.toISOString(),
     updatedBy: row.updatedBy,
     updatedReason: row.updatedReason ?? null,
@@ -809,6 +813,7 @@ function defaultPolicySnapshot(agentId: string): AgentTradePolicySnapshot {
     leverageCap: TRADE_POLICY_DEFAULTS.leverageCap,
     allowedAssets: [...TRADE_POLICY_DEFAULTS.allowedAssets],
     allowedVenues: [...TRADE_POLICY_DEFAULTS.allowedVenues],
+    allowBuilderPerps: TRADE_POLICY_DEFAULTS.allowBuilderPerps,
   };
 }
 
@@ -819,6 +824,7 @@ function policyDiff(before: AgentTradePolicySnapshot, after: AgentTradePolicyRes
     leverageCap: { before: before.leverageCap, after: after.leverageCap },
     allowedAssets: { before: before.allowedAssets, after: after.allowedAssets },
     allowedVenues: { before: before.allowedVenues, after: after.allowedVenues },
+    allowBuilderPerps: { before: before.allowBuilderPerps, after: after.allowBuilderPerps },
   };
 }
 
@@ -844,6 +850,15 @@ function validatePolicyStringArray(name: string, value: unknown): string[] | str
     return `${name} must be a non-empty string array`;
   }
   return [...new Set(value)];
+}
+
+function validateOptionalBoolean(name: string, value: unknown): boolean | string {
+  if (typeof value !== "boolean") return `${name} must be a boolean`;
+  return value;
+}
+
+function hasBuilderPerpAsset(assets: readonly string[]): boolean {
+  return assets.some((asset) => /^[a-z0-9]+:[A-Z0-9]+$/.test(asset));
 }
 
 // ─── Create agent ─────────────────────────────────────────────────────────────
@@ -1599,6 +1614,10 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     body.allowedVenues === undefined
       ? before.allowedVenues
       : validatePolicyStringArray("allowedVenues", body.allowedVenues);
+  const nextAllowBuilderPerps =
+    body.allowBuilderPerps === undefined
+      ? before.allowBuilderPerps
+      : validateOptionalBoolean("allowBuilderPerps", body.allowBuilderPerps);
 
   const validationError = [
     nextDailyCap,
@@ -1606,6 +1625,7 @@ agentRoutes.put("/:agentId/policy", async (c) => {
     nextLeverageCap,
     nextAllowedAssets,
     nextAllowedVenues,
+    nextAllowBuilderPerps,
   ].find((value) => typeof value === "string");
   if (typeof validationError === "string") {
     return c.json<ApiResponse>({ ok: false, error: validationError }, 400);
@@ -1616,6 +1636,14 @@ agentRoutes.put("/:agentId/policy", async (c) => {
   const leverageCapValue = nextLeverageCap as number;
   const allowedAssetsValue = nextAllowedAssets as string[];
   const allowedVenuesValue = nextAllowedVenues as string[];
+  const allowBuilderPerpsValue = nextAllowBuilderPerps as boolean;
+
+  if (hasBuilderPerpAsset(allowedAssetsValue) && !allowBuilderPerpsValue) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "builder perp assets require allowBuilderPerps=true" },
+      400,
+    );
+  }
 
   if (perOrderCapValue > dailyCapValue) {
     return c.json<ApiResponse>({ ok: false, error: "perOrderCap cannot exceed dailyCap" }, 400);
@@ -1633,6 +1661,7 @@ agentRoutes.put("/:agentId/policy", async (c) => {
       leverageCap: String(leverageCapValue),
       allowedAssets: allowedAssetsValue,
       allowedVenues: allowedVenuesValue,
+      allowBuilderPerps: allowBuilderPerpsValue,
       updatedAt: new Date(),
       updatedBy,
       updatedReason,
@@ -1645,6 +1674,7 @@ agentRoutes.put("/:agentId/policy", async (c) => {
         leverageCap: String(leverageCapValue),
         allowedAssets: allowedAssetsValue,
         allowedVenues: allowedVenuesValue,
+        allowBuilderPerps: allowBuilderPerpsValue,
         updatedAt: new Date(),
         updatedBy,
         updatedReason,

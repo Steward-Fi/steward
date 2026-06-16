@@ -9,6 +9,7 @@ import {
   getOpenOrders,
   HyperliquidAdapter,
   type HyperliquidTransport,
+  resolveAssetId,
   signOrder,
   submitOrder,
   toExchangeAction,
@@ -18,6 +19,23 @@ import {
 const PRIVATE_KEY = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" as const;
 const WALLET = privateKeyToAccount(PRIVATE_KEY).address;
 const NONCE = 1_700_000_000_000;
+
+const xyzSpcxTransport = (extra?: { onBody?: (body: Record<string, unknown>) => void }): HyperliquidTransport => ({
+  async fetch(_input, init) {
+    const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    extra?.onBody?.(body);
+    if (body.type === "perpDexs") return new Response(JSON.stringify({ xyz: 1 }), { status: 200 });
+    if (body.type === "meta" && body.dex === "xyz") {
+      // HL's live meta{dex:xyz} names markets with the FULL `xyz:COIN` form
+      // (verified live 2026-06-15: xyz:SPCX at index 76). Mirror that here so the
+      // fixture guards the real-world keying, not a bare-symbol assumption.
+      const universe = Array.from({ length: 77 }, (_, index) => ({ name: index === 76 ? "xyz:SPCX" : `xyz:DUMMY${index}`, szDecimals: index === 76 ? 2 : 4 }));
+      return new Response(JSON.stringify({ universe }), { status: 200 });
+    }
+    if (body.type === "allMids" && body.dex === "xyz") return new Response(JSON.stringify({ SPCX: "400" }), { status: 200 });
+    return new Response(JSON.stringify({ error: "unexpected body", body }), { status: 500 });
+  },
+});
 
 describe("Hyperliquid L1 signing", () => {
   test("builds the documented wire action and deterministic L1 typed data", async () => {
@@ -195,6 +213,27 @@ describe("Hyperliquid L1 signing", () => {
       { nonce: NONCE, isMainnet: false },
     );
     expect(signed.nonce).toBe(NONCE);
+  });
+});
+
+
+describe("Hyperliquid HIP-3 builder perps", () => {
+  test("accepts builder symbols and resolves xyz:SPCX to HIP-3 asset id 110076", async () => {
+    const assetId = await resolveAssetId("xyz:SPCX", { transport: xyzSpcxTransport(), baseUrl: "https://fixture.hyperliquid.test" });
+    expect(assetId).toBe(110076);
+  });
+
+  test("signs xyz:SPCX with dex-scoped meta, dex-scoped mids, HIP-3 asset id, and szDecimals", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const signed = await signOrder(
+      PRIVATE_KEY,
+      { coin: "xyz:SPCX", side: "sell", size: 1.234, nonce: NONCE },
+      { nonce: NONCE, isMainnet: false, baseUrl: "https://fixture-2.hyperliquid.test", transport: xyzSpcxTransport({ onBody: (body) => bodies.push(body) }) },
+    );
+    expect(bodies).toContainEqual({ type: "allMids", dex: "xyz" });
+    expect(bodies).toContainEqual({ type: "perpDexs" });
+    expect(bodies).toContainEqual({ type: "meta", dex: "xyz" });
+    expect(signed.action).toMatchObject({ type: "order", orders: [{ a: 110076, b: false, p: "398", s: "1.23", r: false, t: { limit: { tif: "Ioc" } } }], grouping: "na" });
   });
 });
 

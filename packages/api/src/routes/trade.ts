@@ -7,6 +7,7 @@ import {
   HyperliquidAdapter,
   type HyperliquidOrder,
   hyperliquidAssetSchema,
+  isBuilderPerpSymbol,
 } from "@stwd/venue-hyperliquid";
 import type { Context } from "hono";
 import { Hono } from "hono";
@@ -62,10 +63,7 @@ const createSessionSchema = z.object({
   dailyCap: z.number().positive().max(50_000).default(300),
   perOrderCap: z.number().positive().max(10_000).default(100),
   leverageCap: z.number().positive().max(50).default(5),
-  allowedAssets: z
-    .array(z.enum(["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP", "NEAR", "HYPE", "ZEC", "XMR"]))
-    .min(1)
-    .default(["BTC", "ETH", "BNB"]),
+  allowedAssets: z.array(hyperliquidAssetSchema).min(1).default(["BTC", "ETH", "BNB"]),
   ttlSeconds: z.number().int().positive().max(86_400).default(3_600),
 });
 
@@ -398,6 +396,13 @@ tradeRoutes.post("/sessions", async (c) => {
     const policyDailyCap = Number(agentPolicy.dailyCapUsd);
     const policyPerOrderCap = Number(agentPolicy.perOrderCapUsd);
     const policyLeverageCap = Number(agentPolicy.leverageCap);
+    const requestedBuilderAsset = allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
+    if (requestedBuilderAsset && !agentPolicy.allowBuilderPerps) {
+      return c.json(
+        policyViolation(`builder perp ${requestedBuilderAsset} requires allowBuilderPerps in agent policy`),
+        400,
+      );
+    }
 
     if (hasOwnBodyValue(raw, "dailyCap") && dailyCap > policyDailyCap) {
       return c.json(
@@ -436,6 +441,14 @@ tradeRoutes.post("/sessions", async (c) => {
     sessionAllowedAssets = allowedAssets.filter((asset) =>
       agentPolicy.allowedAssets.includes(asset),
     );
+  } else {
+    const requestedBuilderAsset = allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
+    if (requestedBuilderAsset) {
+      return c.json(
+        policyViolation(`builder perp ${requestedBuilderAsset} requires an agent policy with allowBuilderPerps`),
+        400,
+      );
+    }
   }
 
   const walletAddress =
@@ -647,11 +660,15 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     return c.json({ code: "policy-violation", reason }, 400);
   }
 
+  const builderPerp = isBuilderPerpSymbol(parsedAsset.data);
+  const effectiveLeverage = builderPerp ? Math.min(body.leverage, 3) : body.leverage;
+
   const sessionPolicy = {
     venue: session.venue,
     allowedVenues: [session.venue],
     leverageCap: session.leverageCap,
     allowedAssets: session.allowedAssets,
+    allowBuilderPerps: session.allowedAssets.some((asset) => isBuilderPerpSymbol(asset)),
     dailySpendUsd: session.dailySpendUsd,
     dailyCapUsd: session.dailyCapUsd,
     perOrderCapUsd: session.perOrderCapUsd,
@@ -660,7 +677,7 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     evaluateTradeOrder(sessionPolicy, {
       venue: "hyperliquid",
       asset: coin,
-      leverage: body.leverage,
+      leverage: effectiveLeverage,
       estimatedOrderUsd,
     });
   const rejectPolicy = async (reason: string, sizeUsd: number, limitPx?: string | number) => {
@@ -668,7 +685,9 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
       sessionId: session.id,
       venue: "hyperliquid",
       asset: coin,
-      leverage: body.leverage,
+      leverage: effectiveLeverage,
+      requestedLeverage: body.leverage,
+      builderPerp,
       size: body.size,
       limitPx,
       sizeUsd,
@@ -740,7 +759,9 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
         sessionId: session.id,
         venue: "hyperliquid",
         asset: parsedAsset.data,
-        leverage: body.leverage,
+        leverage: effectiveLeverage,
+        requestedLeverage: body.leverage,
+        builderPerp,
         size: body.size,
         sizeUsd,
       });
@@ -755,7 +776,7 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
         side: body.side,
         size: body.size,
         limitPx: policyLimitPx,
-        leverage: body.leverage,
+        leverage: effectiveLeverage,
         reduceOnly: body.reduceOnly,
         ...(body.orderType ? { orderType: body.orderType } : {}),
       };
@@ -801,7 +822,9 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
           sessionId: session.id,
           venue: "hyperliquid",
           asset: parsedAsset.data,
-          leverage: body.leverage,
+          leverage: effectiveLeverage,
+          requestedLeverage: body.leverage,
+          builderPerp,
           size: body.size,
           sizeUsd,
           orderId: result.orderId ?? null,
@@ -817,6 +840,7 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
         filledQty: result.filledQty ?? 0,
         avgPrice: result.avgPrice ?? 0,
         txHash: result.txHash ?? null,
+        builderPerp,
       };
       const envelope: TradeIdempotencyResponse = {
         status: 200,
@@ -827,7 +851,9 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
           sessionId: session.id,
           venue: "hyperliquid",
           asset: parsedAsset.data,
-          leverage: body.leverage,
+          leverage: effectiveLeverage,
+          requestedLeverage: body.leverage,
+          builderPerp,
           size: body.size,
           sizeUsd,
           orderId: response.orderId,

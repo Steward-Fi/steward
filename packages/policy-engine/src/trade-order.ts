@@ -3,6 +3,7 @@ export interface TradePolicySession {
   allowedVenues?: readonly string[];
   leverageCap?: number;
   allowedAssets?: readonly string[];
+  allowBuilderPerps?: boolean;
   dailySpendUsd?: number;
   dailyCapUsd?: number;
   perOrderCapUsd?: number;
@@ -28,6 +29,11 @@ export type TradeOrderEvaluator = (
 const DEFAULT_LEVERAGE_CAP = 2;
 const DEFAULT_ALLOWED_ASSETS = ["BTC", "ETH"] as const;
 const DEFAULT_PER_ORDER_CAP_USD = 50;
+const BUILDER_PERP_LEVERAGE_CAP = 3;
+const BUILDER_PERP_SYMBOL_RE = /^[a-z0-9]+:[A-Z0-9]+$/;
+function isBuilderPerpAsset(asset: string | undefined): boolean {
+  return typeof asset === "string" && BUILDER_PERP_SYMBOL_RE.test(asset);
+}
 
 function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -55,7 +61,8 @@ export const venueAllowlistEvaluator: TradeOrderEvaluator = (session, order) => 
 };
 
 export const leverageCapEvaluator: TradeOrderEvaluator = (session, order) => {
-  const cap = finiteNumber(session.leverageCap, DEFAULT_LEVERAGE_CAP);
+  const sessionCap = finiteNumber(session.leverageCap, DEFAULT_LEVERAGE_CAP);
+  const cap = isBuilderPerpAsset(order.asset) ? Math.min(sessionCap, BUILDER_PERP_LEVERAGE_CAP) : sessionCap;
   const leverage = finiteNumber(order.leverage, 1);
   if (leverage > cap) {
     return { allow: false, reason: `leverage-cap: leverage ${leverage} exceeds cap ${cap}` };
@@ -70,6 +77,12 @@ export const assetAllowlistEvaluator: TradeOrderEvaluator = (session, order) => 
   }
   if (!order.asset) {
     return { allow: false, reason: "asset-allowlist: order asset is missing" };
+  }
+  if (isBuilderPerpAsset(order.asset) && session.allowBuilderPerps !== true) {
+    return {
+      allow: false,
+      reason: `builder-perp: builder perp ${order.asset} requires allowBuilderPerps policy opt-in`,
+    };
   }
   if (!allowed.includes(order.asset)) {
     return {
