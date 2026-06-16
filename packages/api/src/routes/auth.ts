@@ -1078,11 +1078,7 @@ async function issueEmailGrant(email: string, tenantId: string): Promise<string>
 }
 
 /** Consume (single-use) a grant and return its bound identity, or null. */
-async function consumeEmailGrant(
-  grant: string,
-  email: string,
-  tenantId: string,
-): Promise<boolean> {
+async function consumeEmailGrant(grant: string, email: string, tenantId: string): Promise<boolean> {
   if (!grant || grant.length > 256) return false;
   const stored = await getEmailGrantStore().consume(emailGrantKey(grant));
   if (!stored) return false;
@@ -7497,7 +7493,12 @@ auth.post("/passkey/register/options", async (c) => {
     ssoTenantId = session.payload.tenantId;
   }
 
-  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(c, ssoTenantId, email, "Passkey");
+  const ssoRequiredResponse = await requireNonSsoEmailLoginAllowed(
+    c,
+    ssoTenantId,
+    email,
+    "Passkey",
+  );
   if (ssoRequiredResponse) return ssoRequiredResponse;
 
   const existingCreds = await db
@@ -7572,10 +7573,7 @@ auth.post("/passkey/register/verify", async (c) => {
   } else {
     const session = await requireSession(c);
     if (!session.ok) return session.response;
-    const [sessionUser] = await db
-      .select()
-      .from(users)
-      .where(eq(users.id, session.payload.userId));
+    const [sessionUser] = await db.select().from(users).where(eq(users.id, session.payload.userId));
     if (
       !sessionUser ||
       sessionUser.email?.toLowerCase().trim() !== email ||

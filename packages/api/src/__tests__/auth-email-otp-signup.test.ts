@@ -135,7 +135,7 @@ function routeBody(start: string, end: string): string {
 
 describe("OTP route security invariants", () => {
   it("otp/verify enforces a per-{email,tenant} brute-force limiter", () => {
-    const body = routeBody('auth.post("/email/otp/verify"', '// ── Guest');
+    const body = routeBody('auth.post("/email/otp/verify"', "// ── Guest");
     expect(body).toContain("email-otp-verify-target");
     expect(body).toContain("${resolvedTenantId}:${email}");
   });
@@ -150,7 +150,10 @@ describe("OTP route security invariants", () => {
   });
 
   it("register/options PEEKS the grant (non-consuming) so cancelled prompts don't burn it", () => {
-    const body = routeBody('auth.post("/passkey/register/options"', 'auth.post("/passkey/register/verify"');
+    const body = routeBody(
+      'auth.post("/passkey/register/options"',
+      'auth.post("/passkey/register/verify"',
+    );
     expect(body).toContain("peekEmailGrant");
     expect(body).not.toContain("consumeEmailGrant");
     // session path must remain for logged-in add-passkey
@@ -178,7 +181,10 @@ describe("OTP route security invariants", () => {
   });
 
   it("register/options is rate limited (pre-auth reachable)", () => {
-    const body = routeBody('auth.post("/passkey/register/options"', 'auth.post("/passkey/register/verify"');
+    const body = routeBody(
+      'auth.post("/passkey/register/options"',
+      'auth.post("/passkey/register/verify"',
+    );
     expect(body).toContain("passkey-register-options");
   });
 

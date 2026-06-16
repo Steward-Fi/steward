@@ -1,5 +1,20 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  "globalPassThroughEnv": [
+    "DATABASE_URL",
+    "FAKE_OAUTH_PORT",
+    "MILADY_SKIP_STEWARD_FI_LIVE_SMOKE",
+    "PLATFORM_KEY",
+    "STEWARD_ALLOW_INSECURE_DB",
+    "STEWARD_AUDIT_HMAC_KEY",
+    "STEWARD_JWT_SECRET",
+    "STEWARD_KDF_SALT",
+    "STEWARD_MASTER_PASSWORD",
+    "STEWARD_PLATFORM_KEY",
+    "STEWARD_PLATFORM_KEYS",
+    "STEWARD_SESSION_SECRET",
+    "STEWARD_URL"
+  ],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -46,6 +61,8 @@
       "persistent": true
     },
     "lint": {},
-    "test": { "cache": false }
+    "test": {
+      "cache": false
+    }
   }
 }
