@@ -388,11 +388,6 @@ async function toResolvedUpdateLeverageAction(input: LeverageUpdateInput, option
   const asset = await resolveAsset(o.coin, options);
   return { type: "updateLeverage", asset: asset.assetId, isCross: o.isCross, leverage: o.leverage };
 }
-function toCancelAction(input: CancelOrderInput): Record<string, unknown> {
-  const assetId = coreAssetId(input.coin);
-  if (assetId === undefined) throw new Error("builder perp assets require async asset resolution");
-  return { type: "cancel", cancels: [{ a: assetId, o: Number(input.orderId) }] };
-}
 async function toResolvedCancelAction(input: CancelOrderInput, options: { transport?: HyperliquidTransport; baseUrl?: string } = {}): Promise<Record<string, unknown>> {
   return { type: "cancel", cancels: [{ a: await resolveAssetId(input.coin, options), o: Number(input.orderId) }] };
 }
@@ -626,11 +621,21 @@ export async function cancelOrder(
   input: CancelOrderInput,
   options: SignOptions & { transport?: HyperliquidTransport; baseUrl?: string } = {},
 ) {
+  // Use the async resolver so builder-perp symbols (e.g. `xyz:SPCX`) can be
+  // canceled via this exported helper, matching what signOrder/the adapter accept.
+  // Core symbols still resolve synchronously inside resolveAsset's fast path.
   const raw = await postExchange(
-    await signAction(walletPrivateKey, toCancelAction(input), {
-      ...options,
-      nonce: options.nonce ?? input.nonce,
-    }),
+    await signAction(
+      walletPrivateKey,
+      await toResolvedCancelAction(input, {
+        transport: options.transport,
+        baseUrl: options.baseUrl,
+      }),
+      {
+        ...options,
+        nonce: options.nonce ?? input.nonce,
+      },
+    ),
     options.transport ?? { fetch },
     options.baseUrl ?? DEFAULT_BASE_URL,
   );
