@@ -166,6 +166,17 @@ const withdrawSchema = z.object({
   idempotencyKey: z.string().min(1).max(256).optional(),
 });
 
+const transferSchema = z
+  .object({
+    agentId: z.string().min(1),
+    sourceDex: z.string(),
+    destinationDex: z.string(),
+    amountUsdc: z.union([z.string(), z.number()]),
+    token: z.string().min(1).optional(),
+    idempotencyKey: z.string().min(1).max(256).optional(),
+  })
+  .refine((v) => v.sourceDex !== v.destinationDex, "sourceDex and destinationDex must differ");
+
 // ── Deposit constants (Hyperliquid on Arbitrum) ────────────────────────────────
 // HL credits the SENDING address, so the deposit MUST originate from the agent's
 // own venue wallet. We sign an ERC-20 transfer(bridge, amount) from that wallet.
@@ -348,6 +359,128 @@ operatorRecoveryRoutes.post("/:venue/deposit", async (c) => {
     amountBaseUnits: amountBaseUnits.toString(),
     txHash,
   };
+  idempotency.store?.(response);
+  return c.json<ApiResponse>({ ok: true, data: response });
+});
+
+// ── POST /v1/trade/:venue/transfer ─────────────────────────────────────────────
+// Platform-key only capital movement between Hyperliquid collateral buckets. This
+// does NOT withdraw funds, but it can strand core withdrawable USDC on an
+// isolated HIP-3 builder dex, so it is gated like operator recovery and audited
+// before/after signing. Exit story: close any builder-dex position first, call
+// transferFromBuilderDex (sourceDex "xyz" → destinationDex "") to pull USDC back
+// to core, then use the existing core-only withdraw route.
+operatorRecoveryRoutes.post("/:venue/transfer", async (c) => {
+  const tenantId = c.get("tenantId");
+  const venue = c.req.param("venue");
+  if (venue !== "hyperliquid") {
+    return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
+  }
+  if (c.get("authType") !== "platform") {
+    return c.json<ApiResponse>({ ok: false, error: "Platform key required for collateral transfer" }, 403);
+  }
+
+  const raw = await safeJsonParse(c);
+  const parsed = transferSchema.safeParse(raw);
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const body = {
+    ...parsed.data,
+    idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+  };
+  const { agentId, sourceDex, destinationDex } = body;
+
+  if (hasTooManyUsdcDecimals(body.amountUsdc)) {
+    return c.json<ApiResponse>({ ok: false, error: "amountUsdc has more than 6 decimal places" }, 400);
+  }
+  const amountBaseUnits = parseUsdcBaseUnits(body.amountUsdc);
+  if (amountBaseUnits === null || amountBaseUnits <= 0n) {
+    return c.json<ApiResponse>({ ok: false, error: "amountUsdc must be a positive number" }, 400);
+  }
+  const amountNum = Number(body.amountUsdc);
+  if (!Number.isFinite(amountNum) || amountNum <= 0) {
+    return c.json<ApiResponse>({ ok: false, error: "amountUsdc must be a positive number" }, 400);
+  }
+  if (amountNum > HL_MAX_WITHDRAW_USDC) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `amountUsdc exceeds the per-transfer maximum of ${HL_MAX_WITHDRAW_USDC} USDC; split into smaller transfers`,
+      },
+      400,
+    );
+  }
+
+  const idempotency = getOperatorIdempotency(`${tenantId}:transfer`, body.idempotencyKey, {
+    agentId,
+    venue,
+    sourceDex,
+    destinationDex,
+    amount: amountBaseUnits.toString(),
+    token: body.token ?? null,
+  });
+  if (idempotency.conflict) {
+    return c.json<ApiResponse>({ ok: false, error: "Idempotency key reused with a different body" }, 409);
+  }
+  if (idempotency.response) {
+    return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+  }
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const walletAddress = await resolveVenueWallet(tenantId, agentId, venue);
+  if (!walletAddress) {
+    return c.json<ApiResponse>({ ok: false, error: "Hyperliquid venue wallet not found for agent" }, 404);
+  }
+
+  const adapter = buildAdapter(tenantId, agentId, walletAddress);
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.requested", {
+    venue,
+    walletAddress,
+    sourceDex,
+    destinationDex,
+    amountUsdc: String(body.amountUsdc),
+    amountBaseUnits: amountBaseUnits.toString(),
+  });
+
+  let result: unknown;
+  let action: unknown;
+  try {
+    const signed = await adapter.signSendAsset({
+      destination: walletAddress,
+      sourceDex,
+      destinationDex,
+      token: body.token,
+      amount: body.amountUsdc,
+    });
+    action = signed.action;
+    result = await adapter.submitSendAsset(signed);
+  } catch (err) {
+    await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.failed", {
+      venue,
+      walletAddress,
+      sourceDex,
+      destinationDex,
+      amountUsdc: String(body.amountUsdc),
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json<ApiResponse>({ ok: false, error: "Failed to submit collateral transfer" }, 502);
+  }
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.transfer.submitted", {
+    venue,
+    walletAddress,
+    sourceDex,
+    destinationDex,
+    amountUsdc: String(body.amountUsdc),
+    amountBaseUnits: amountBaseUnits.toString(),
+    action,
+  });
+
+  const response = { venue, walletAddress, sourceDex, destinationDex, amountUsdc: String(body.amountUsdc), result };
   idempotency.store?.(response);
   return c.json<ApiResponse>({ ok: true, data: response });
 });

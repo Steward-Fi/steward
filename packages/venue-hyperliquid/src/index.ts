@@ -156,6 +156,21 @@ export const leverageUpdateResultSchema = z.object({
   raw: z.unknown().optional(),
 });
 export type LeverageUpdateResult = z.infer<typeof leverageUpdateResultSchema>;
+export type SendAssetParams = {
+  destination: string;
+  sourceDex: string;
+  destinationDex: string;
+  token?: string;
+  amount: string | number;
+  nonce?: number;
+};
+export const signedSendAssetSchema = signedOrderSchema;
+export type SignedSendAsset = SignedOrder;
+export const sendAssetResultSchema = z.object({
+  status: z.string(),
+  raw: z.unknown().optional(),
+});
+export type SendAssetResult = z.infer<typeof sendAssetResultSchema>;
 
 export interface VaultSignTypedDataInput {
   agentId: string;
@@ -183,6 +198,12 @@ export interface HyperliquidAdapterOptions {
   isMainnet?: boolean;
   vaultAddress?: string;
   expiresAfter?: number;
+  /**
+   * Optional fallback for HIP-3 collateral transfers when spotMeta cannot
+   * resolve the canonical USDC token id. Do not hardcode this in callers; set
+   * it from operator config after verifying Hyperliquid metadata.
+   */
+  usdcTokenId?: string;
 }
 
 // Monotonic nonce source. Date.now() alone collides for two orders in the same
@@ -447,6 +468,65 @@ function normalizeWithdrawParams(params: WithdrawParams) {
   return { hyperliquidChain, amount, destination, time };
 }
 
+function normalizeSendAssetParams(params: SendAssetParams, token: string, nonce: number) {
+  const destination = String(params.destination).toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(destination))
+    throw new Error(`invalid sendAsset destination: ${params.destination}`);
+  const sourceDex = String(params.sourceDex ?? "");
+  const destinationDex = String(params.destinationDex ?? "");
+  if (sourceDex === destinationDex) throw new Error("sourceDex and destinationDex must differ");
+  return {
+    type: "sendAsset",
+    destination,
+    sourceDex,
+    destinationDex,
+    token,
+    amount: dec(params.amount),
+    nonce,
+  };
+}
+
+function tokenIdFromSpotToken(entry: unknown): string | null {
+  if (!entry || typeof entry !== "object") return null;
+  const record = entry as Record<string, unknown>;
+  const rawName = typeof record.name === "string" ? record.name : "";
+  const name = rawName.toUpperCase();
+  if (name !== "USDC" && name !== "USD COIN") return null;
+  const index = record.index;
+  if (typeof index === "number" && Number.isInteger(index) && index >= 0) return `${name === "USD COIN" ? "USDC" : rawName}:${index}`;
+  if (typeof index === "string" && /^\d+$/.test(index)) return `${name === "USD COIN" ? "USDC" : rawName}:${index}`;
+  for (const key of ["token", "id", "tokenId"]) {
+    const value = record[key];
+    if (typeof value === "string" && /^USDC:\d+$/.test(value)) return value;
+  }
+  return null;
+}
+
+export async function resolveUsdcTokenId(options: { transport?: HyperliquidTransport; baseUrl?: string; usdcTokenId?: string } = {}): Promise<string> {
+  const raw = await postInfo({ type: "spotMeta" }, options).catch((err) => {
+    if (options.usdcTokenId) return null;
+    throw err;
+  });
+  const tokens = (raw as { tokens?: unknown })?.tokens;
+  if (Array.isArray(tokens)) {
+    for (const token of tokens) {
+      const id = tokenIdFromSpotToken(token);
+      if (id) return id;
+    }
+  }
+  if (options.usdcTokenId) return options.usdcTokenId;
+  throw new Error("unable to resolve Hyperliquid USDC token id from spotMeta; configure usdcTokenId");
+}
+
+export async function toSendAssetAction(
+  params: SendAssetParams,
+  options: { transport?: HyperliquidTransport; baseUrl?: string; usdcTokenId?: string } = {},
+): Promise<Record<string, unknown>> {
+  const nonce = params.nonce ?? nextNonce();
+  const token = params.token ?? (await resolveUsdcTokenId(options));
+  return normalizeSendAssetParams(params, token, nonce);
+}
+
 // HL withdraw is a USER-SIGNED action (not an L1 agent action). It uses the
 // HyperliquidSignTransaction EIP-712 domain on Arbitrum (chainId 42161), unlike
 // order/cancel which use the L1 "Exchange" domain (chainId 1337).
@@ -562,6 +642,16 @@ async function signAction(
     expiresAfter: opts.expiresAfter,
   });
 }
+export const signSendAsset = async (
+  walletPrivateKey: Hex,
+  params: SendAssetParams,
+  options: SignOptions & { transport?: HyperliquidTransport; baseUrl?: string; usdcTokenId?: string } = {},
+): Promise<SignedSendAsset> => {
+  const nonce = options.nonce ?? params.nonce ?? nextNonce();
+  const action = await toSendAssetAction({ ...params, nonce }, options);
+  return signAction(walletPrivateKey, action, { ...options, nonce });
+};
+
 export const signOrder = async (
   walletPrivateKey: Hex,
   order: HyperliquidOrder,
@@ -597,6 +687,17 @@ export async function submitOrder(
       options.baseUrl ?? DEFAULT_BASE_URL,
     ),
   );
+}
+export async function submitSendAsset(
+  signed: SignedSendAsset,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<SendAssetResult> {
+  const raw = await postExchange(
+    signedSendAssetSchema.parse(signed),
+    options.transport ?? { fetch },
+    options.baseUrl ?? DEFAULT_BASE_URL,
+  );
+  return sendAssetResultSchema.parse({ status: String((raw as { status?: unknown })?.status ?? "submitted"), raw });
 }
 export async function getOpenOrders(
   userAddress: string,
@@ -682,6 +783,52 @@ export class HyperliquidAdapter {
   }
   submitOrder(signed: SignedOrder) {
     return submitOrder(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  async signSendAsset(params: SendAssetParams): Promise<SignedSendAsset> {
+    const nonce = params.nonce ?? nextNonce();
+    const token = params.token ?? (await resolveUsdcTokenId({
+      transport: this.transport,
+      baseUrl: this.baseUrl,
+      usdcTokenId: this.options.usdcTokenId,
+    }));
+    const action = normalizeSendAssetParams(params, token, nonce);
+    const td = createL1TypedData(
+      action,
+      nonce,
+      this.isMainnet,
+      this.options.vaultAddress,
+      this.options.expiresAfter,
+    );
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
+    return signedSendAssetSchema.parse({
+      action,
+      nonce,
+      signature: { r: s.r, s: s.s, v: Number(s.v) },
+      vaultAddress: this.options.vaultAddress,
+      expiresAfter: this.options.expiresAfter,
+    });
+  }
+  submitSendAsset(signed: SignedSendAsset) {
+    return submitSendAsset(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  async transferToBuilderDex(dex: string, amountUsdc: string | number): Promise<SendAssetResult> {
+    const signed = await this.signSendAsset({
+      destination: this.walletAddress,
+      sourceDex: "",
+      destinationDex: dex,
+      amount: amountUsdc,
+    });
+    return this.submitSendAsset(signed);
+  }
+  async transferFromBuilderDex(dex: string, amountUsdc: string | number): Promise<SendAssetResult> {
+    const signed = await this.signSendAsset({
+      destination: this.walletAddress,
+      sourceDex: dex,
+      destinationDex: "",
+      amount: amountUsdc,
+    });
+    return this.submitSendAsset(signed);
   }
   async updateLeverage(input: LeverageUpdateInput): Promise<LeverageUpdateResult> {
     const parsed = normalizedLeverageUpdate(input);

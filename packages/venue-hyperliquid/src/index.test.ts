@@ -11,8 +11,11 @@ import {
   type HyperliquidTransport,
   resolveAssetId,
   signOrder,
+  signSendAsset,
   submitOrder,
+  submitSendAsset,
   toExchangeAction,
+  toSendAssetAction,
   toWithdrawAction,
 } from "./index";
 
@@ -236,6 +239,125 @@ describe("Hyperliquid HIP-3 builder perps", () => {
     expect(signed.action).toMatchObject({ type: "order", orders: [{ a: 110076, b: false, p: "398", s: "1.23", r: false, t: { limit: { tif: "Ioc" } } }], grouping: "na" });
   });
 });
+
+describe("Hyperliquid HIP-3 collateral sendAsset", () => {
+  const spotMetaTransport = (extra?: { onBody?: (body: Record<string, unknown>) => void; exchangeRaw?: unknown }): HyperliquidTransport => ({
+    async fetch(_input, init) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      extra?.onBody?.(body);
+      if (body.type === "spotMeta") {
+        return new Response(JSON.stringify({ tokens: [{ name: "USDC", index: 0, tokenId: "0xnot-sendasset-token" }] }), { status: 200 });
+      }
+      if (body.action && (body.action as Record<string, unknown>).type === "sendAsset") {
+        return new Response(JSON.stringify(extra?.exchangeRaw ?? { status: "ok" }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ error: "unexpected body", body }), { status: 500 });
+    },
+  });
+
+  test("builds and signs sendAsset core to xyz with USDC resolved from spotMeta", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const signed = await signSendAsset(
+      PRIVATE_KEY,
+      {
+        destination: WALLET,
+        sourceDex: "",
+        destinationDex: "xyz",
+        amount: "2000",
+      },
+      {
+        nonce: NONCE,
+        isMainnet: false,
+        baseUrl: "https://fixture-sendasset.hyperliquid.test",
+        transport: spotMetaTransport({ onBody: (body) => bodies.push(body) }),
+      },
+    );
+
+    expect(bodies).toContainEqual({ type: "spotMeta" });
+    expect(signed.nonce).toBe(NONCE);
+    expect(signed.action).toEqual({
+      type: "sendAsset",
+      destination: WALLET.toLowerCase(),
+      sourceDex: "",
+      destinationDex: "xyz",
+      token: "USDC:0",
+      amount: "2000",
+      nonce: NONCE,
+    });
+  });
+
+  test("falls back to configured USDC token id when spotMeta cannot resolve it", async () => {
+    const action = await toSendAssetAction(
+      { destination: WALLET, sourceDex: "xyz", destinationDex: "", amount: 125.5, nonce: NONCE },
+      {
+        usdcTokenId: "configured-usdc",
+        transport: {
+          async fetch() {
+            return new Response(JSON.stringify({ tokens: [{ name: "PURR", tokenId: "PURR:0" }] }), { status: 200 });
+          },
+        },
+      },
+    );
+    expect(action).toEqual({
+      type: "sendAsset",
+      destination: WALLET.toLowerCase(),
+      sourceDex: "xyz",
+      destinationDex: "",
+      token: "configured-usdc",
+      amount: "125.5",
+      nonce: NONCE,
+    });
+  });
+
+  test("adapter convenience methods submit the correct core-to-builder and builder-to-core directions", async () => {
+    const posted: Record<string, unknown>[] = [];
+    const account = privateKeyToAccount(PRIVATE_KEY);
+    const adapter = new HyperliquidAdapter(
+      {
+        async signTypedData(input) {
+          return account.signTypedData({
+            domain: input.domain,
+            types: input.types,
+            primaryType: input.primaryType,
+            message: input.value,
+          });
+        },
+      },
+      "sol",
+      WALLET,
+      {
+        transport: spotMetaTransport({ onBody: (body) => posted.push(body) }),
+        baseUrl: "https://fixture-adapter-sendasset.hyperliquid.test",
+        isMainnet: false,
+      },
+    );
+
+    await adapter.transferToBuilderDex("xyz", "10");
+    await adapter.transferFromBuilderDex("xyz", "5");
+
+    const actions = posted
+      .map((body) => body.action as Record<string, unknown> | undefined)
+      .filter(Boolean);
+    expect(actions[0]).toMatchObject({ sourceDex: "", destinationDex: "xyz", destination: WALLET.toLowerCase(), token: "USDC:0", amount: "10" });
+    expect(actions[1]).toMatchObject({ sourceDex: "xyz", destinationDex: "", destination: WALLET.toLowerCase(), token: "USDC:0", amount: "5" });
+  });
+
+  test("submitSendAsset posts signed L1 payload to /exchange", async () => {
+    let posted: unknown;
+    const signed = await signSendAsset(PRIVATE_KEY, { destination: WALLET, sourceDex: "", destinationDex: "xyz", token: "USDC:0", amount: "1" }, { nonce: NONCE, isMainnet: false });
+    const result = await submitSendAsset(signed, {
+      transport: {
+        async fetch(_input, init) {
+          posted = JSON.parse(String(init?.body));
+          return new Response(JSON.stringify({ status: "ok" }), { status: 200 });
+        },
+      },
+    });
+    expect(posted).toMatchObject({ action: signed.action, nonce: NONCE, signature: signed.signature });
+    expect(result.status).toBe("ok");
+  });
+});
+
 
 describe("Hyperliquid withdraw (user-signed action)", () => {
   test("createWithdrawTypedData produces the exact HL EIP-712 structure", () => {
