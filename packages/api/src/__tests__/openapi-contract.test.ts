@@ -41,6 +41,18 @@ describe("generated OpenAPI contract", () => {
     expect(operation.responses).toHaveProperty("408");
   }
 
+  function expectHyperliquidAssetSchema(schema: Record<string, unknown>) {
+    expect(schema).toHaveProperty("anyOf");
+    const variants = schema.anyOf as Array<Record<string, unknown>>;
+    expect(variants[0].enum).toContain("HYPE");
+    expect(variants[0].enum).toContain("XMR");
+    expect(variants[1]).toMatchObject({
+      type: "string",
+      pattern: "^[a-z0-9]+:[A-Z0-9]+$",
+      examples: ["xyz:SPCX"],
+    });
+  }
+
   it("covers the current Privy-parity account and external-id surfaces", () => {
     const spec = getOpenApiSpec();
 
@@ -552,10 +564,10 @@ describe("generated OpenAPI contract", () => {
     const tradeSessionCreate = spec.paths["/trade/sessions"].post;
     expect(tradeSessionCreate.description).toContain("policy cap intersection");
     expect(tradeSessionCreate.description).toContain("asset allowlist checks");
-    expect(
+    expectHyperliquidAssetSchema(
       tradeSessionCreate.requestBody.content["application/json"].schema.properties.allowedAssets
-        .items.enum,
-    ).toContain("HYPE");
+        .items,
+    );
     const tradeOrder = spec.paths["/trade/hyperliquid/order"].post;
     expect(tradeOrder.security).toEqual([{ bearerAuth: [] }]);
     expect(tradeOrder.description).toContain("Requires an agent JWT");
@@ -565,6 +577,16 @@ describe("generated OpenAPI contract", () => {
       { required: ["coin"] },
       { required: ["asset"] },
     ]);
+    expectHyperliquidAssetSchema(
+      tradeOrder.requestBody.content["application/json"].schema.properties.coin,
+    );
+    expectHyperliquidAssetSchema(
+      tradeOrder.requestBody.content["application/json"].schema.properties.asset,
+    );
+    expect(
+      tradeOrder.responses["200"].content["application/json"].schema.properties.data.properties
+        .builderPerp,
+    ).toEqual({ type: "boolean" });
     const recoveryDeposit = spec.paths["/trade/{venue}/deposit"].post;
     expect(recoveryDeposit.security).toEqual([
       { platformKey: [] },
