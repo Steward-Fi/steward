@@ -5460,6 +5460,41 @@ function tradePaths(prefix = ""): Record<string, unknown> {
         },
       },
     },
+
+    [`${prefix}/trade/{venue}/usd-send`]: {
+      parameters: [parameter("venue", "path", { type: "string", enum: ["hyperliquid"] })],
+      post: {
+        tags: ["Trading"],
+        summary: "Transfer internal USDC between Hyperliquid accounts",
+        description: `${tradeRecoveryDescription} Platform-key only route that submits Hyperliquid's user-signed usdSend action for internal USDC transfers between Hyperliquid accounts. The transfer is signed by the sending agent's master Hyperliquid wallet.`,
+        security: [{ platformKey: [] }],
+        requestBody: jsonRequestBody({
+          type: "object",
+          required: ["agentId", "destination", "amount"],
+          properties: {
+            ...recoveryInputProperties,
+            destination: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+            amount: { type: "string", pattern: "^\\d+(?:\\.\\d+)?$" },
+          },
+        }),
+        responses: {
+          "200": jsonResponse(
+            apiResponse({
+              type: "object",
+              properties: {
+                venue: { type: "string", const: "hyperliquid" },
+                walletAddress: stringSchema,
+                destination: stringSchema,
+                amount: { type: "string" },
+                result: { type: "object", additionalProperties: true },
+              },
+            }),
+          ),
+          "502": jsonResponse(errorResponse()),
+          ...errorResponses(),
+        },
+      },
+    },
     [`${prefix}/trade/{venue}/approve-builder`]: {
       parameters: [parameter("venue", "path", { type: "string", enum: ["hyperliquid"] })],
       post: {
