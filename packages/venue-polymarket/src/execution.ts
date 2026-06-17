@@ -319,9 +319,11 @@ export class PolymarketExecutionAdapter {
 
     const reqAmount = Number.parseFloat(String(req.amount));
     const reqPrice = Number.parseFloat(String(req.price));
-    // The rounded/signed order size (shares) for this side — what we'd report as
-    // the requested size in the no-amounts ACCEPTED case.
-    const signedSize = roundOrderSize(req.side, reqAmount, reqPrice);
+    // The size the SDK actually signs (shares). roundOrderSize applies the
+    // per-side precision (BUY 2dp / SELL 5dp), but the clob-client re-rounds the
+    // signed maker amount to sdkEffectiveSize (2dp). Report what is ACTUALLY
+    // signed so the no-amounts ACCEPTED fallback matches the on-chain order.
+    const signedSize = sdkEffectiveSize(roundOrderSize(req.side, reqAmount, reqPrice));
 
     let actualAmount: number | undefined;
     let actualPrice: number | undefined;
