@@ -196,6 +196,13 @@ const addMarginSchema = z.object({
   idempotencyKey: z.string().min(1).max(256).optional(),
 });
 
+const approveBuilderSchema = z.object({
+  agentId: z.string().min(1),
+  builder: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  maxFeeRate: z.string().min(1),
+  idempotencyKey: z.string().min(1).max(256).optional(),
+});
+
 // ── Deposit constants (Hyperliquid on Arbitrum) ────────────────────────────────
 // HL credits the SENDING address, so the deposit MUST originate from the agent's
 // own venue wallet. We sign an ERC-20 transfer(bridge, amount) from that wallet.
@@ -613,6 +620,96 @@ operatorRecoveryRoutes.post("/:venue/add-margin", async (c) => {
     amountBaseUnits: amountBaseUnits.toString(),
     result,
   };
+  idempotency.store?.(response);
+  return c.json<ApiResponse>({ ok: true, data: response });
+});
+
+// ── POST /v1/trade/:venue/approve-builder ─────────────────────────────────────
+// Platform-key only approval for Hyperliquid builder-code fees. This is a
+// user-signed action and must be signed by the agent/vault master HL wallet.
+operatorRecoveryRoutes.post("/:venue/approve-builder", async (c) => {
+  const tenantId = c.get("tenantId");
+  const venue = c.req.param("venue");
+  if (venue !== "hyperliquid") {
+    return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
+  }
+  if (c.get("authType") !== "platform") {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Platform key required for builder fee approval" },
+      403,
+    );
+  }
+
+  const raw = await safeJsonParse(c);
+  const parsed = approveBuilderSchema.safeParse(raw);
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const body = {
+    ...parsed.data,
+    builder: parsed.data.builder.toLowerCase(),
+    idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+  };
+  const { agentId, builder, maxFeeRate } = body;
+
+  const idempotency = getOperatorIdempotency(`${tenantId}:approve-builder`, body.idempotencyKey, {
+    agentId,
+    venue,
+    builder,
+    maxFeeRate,
+  });
+  if (idempotency.conflict) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
+  }
+  if (idempotency.response) {
+    return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+  }
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const walletAddress = await resolveVenueWallet(tenantId, agentId, venue);
+  if (!walletAddress) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Hyperliquid venue wallet not found for agent" },
+      404,
+    );
+  }
+
+  const adapter = buildAdapter(tenantId, agentId, walletAddress);
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.builder.approve.requested", {
+    venue,
+    walletAddress,
+    builder,
+    maxFeeRate,
+  });
+
+  let result: unknown;
+  try {
+    result = await adapter.approveBuilderFee({ builder, maxFeeRate });
+  } catch (err) {
+    await auditRecoveryEvent(c, tenantId, agentId, "trade.builder.approve.failed", {
+      venue,
+      walletAddress,
+      builder,
+      maxFeeRate,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json<ApiResponse>({ ok: false, error: "Failed to approve builder fee" }, 502);
+  }
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.builder.approved", {
+    venue,
+    walletAddress,
+    builder,
+    maxFeeRate,
+  });
+
+  const response = { venue, walletAddress, builder, maxFeeRate, result };
   idempotency.store?.(response);
   return c.json<ApiResponse>({ ok: true, data: response });
 });

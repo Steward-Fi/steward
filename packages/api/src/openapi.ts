@@ -5460,6 +5460,40 @@ function tradePaths(prefix = ""): Record<string, unknown> {
         },
       },
     },
+    [`${prefix}/trade/{venue}/approve-builder`]: {
+      parameters: [parameter("venue", "path", { type: "string", enum: ["hyperliquid"] })],
+      post: {
+        tags: ["Trading"],
+        summary: "Approve Hyperliquid builder-code fee cap for an agent",
+        description: `${tradeRecoveryDescription} Platform-key only route that submits Hyperliquid's user-signed approveBuilderFee action. The approval must be signed by the agent's master Hyperliquid wallet, not an API/agent wallet.`,
+        security: [{ platformKey: [] }],
+        requestBody: jsonRequestBody({
+          type: "object",
+          required: ["agentId", "builder", "maxFeeRate"],
+          properties: {
+            ...recoveryInputProperties,
+            builder: { type: "string", pattern: "^0x[0-9a-fA-F]{40}$" },
+            maxFeeRate: { type: "string", examples: ["0.1%"] },
+          },
+        }),
+        responses: {
+          "200": jsonResponse(
+            apiResponse({
+              type: "object",
+              properties: {
+                venue: { type: "string", const: "hyperliquid" },
+                walletAddress: stringSchema,
+                builder: stringSchema,
+                maxFeeRate: { type: "string" },
+                result: { type: "object", additionalProperties: true },
+              },
+            }),
+          ),
+          "502": jsonResponse(errorResponse()),
+          ...errorResponses(),
+        },
+      },
+    },
     [`${prefix}/trade/{venue}/withdraw`]: {
       parameters: [parameter("venue", "path", { type: "string", enum: ["hyperliquid"] })],
       post: {

@@ -189,6 +189,8 @@ async function auditTradeEvent(
     | "trade.order.leverage.set"
     | "trade.order.leverage.failed"
     | "trade.order.policy-rejected"
+    | "trade.order.builder.stamped"
+    | "trade.builder.approved"
     | "trade.order.canceled",
   details: Record<string, unknown>,
   actor: { actorType: "agent" | "user" | "api-key"; actorId: string } = {

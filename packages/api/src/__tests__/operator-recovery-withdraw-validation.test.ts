@@ -17,6 +17,7 @@ import { afterAll, beforeAll, describe, expect, it, mock } from "bun:test";
 import { agents, agentWallets, closeDb, getDb, policies as policiesTable, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { Hono } from "hono";
+import { z } from "zod";
 
 const PLATFORM_KEY = "stw_platform_test_operator_key";
 
@@ -52,6 +53,11 @@ class MockHyperliquidAdapter {
 
 mock.module("@stwd/venue-hyperliquid", () => ({
   HyperliquidAdapter: MockHyperliquidAdapter,
+  hyperliquidAssetSchema: z.union([
+    z.enum(["BTC", "ETH", "BNB", "SOL", "AVAX", "ARB", "OP", "NEAR", "HYPE", "ZEC", "XMR"]),
+    z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/),
+  ]),
+  isBuilderPerpSymbol: (coin: string) => /^[a-z0-9]+:[A-Z0-9]+$/.test(coin),
 }));
 
 beforeAll(async () => {

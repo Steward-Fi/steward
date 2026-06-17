@@ -127,8 +127,10 @@ describe("generated OpenAPI contract", () => {
     expect(spec.paths).toHaveProperty("/trade/{venue}/deposit");
     expect(spec.paths).toHaveProperty("/trade/{venue}/close-all");
     expect(spec.paths).toHaveProperty("/trade/{venue}/leverage");
+    expect(spec.paths).toHaveProperty("/trade/{venue}/approve-builder");
     expect(spec.paths).toHaveProperty("/trade/{venue}/withdraw");
     expect(spec.paths).toHaveProperty("/v1/trade/{venue}/leverage");
+    expect(spec.paths).toHaveProperty("/v1/trade/{venue}/approve-builder");
     expect(spec.paths).toHaveProperty("/v1/trade/{venue}/withdraw");
     expect(spec.paths).toHaveProperty("/tenants/config");
     expect(spec.paths).toHaveProperty("/tenants/{id}/config");
@@ -772,9 +774,11 @@ describe("generated OpenAPI contract", () => {
     expectHardening(spec.paths["/trade/{venue}/deposit"].post, "/trade");
     expectHardening(spec.paths["/trade/{venue}/close-all"].post, "/trade");
     expectHardening(spec.paths["/trade/{venue}/leverage"].post, "/trade");
+    expectHardening(spec.paths["/trade/{venue}/approve-builder"].post, "/trade");
     expectHardening(spec.paths["/trade/{venue}/withdraw"].post, "/trade");
     expectHardening(spec.paths["/v1/trade/hyperliquid/order"].post, "/v1/trade");
     expectHardening(spec.paths["/v1/trade/{venue}/leverage"].post, "/v1/trade");
+    expectHardening(spec.paths["/v1/trade/{venue}/approve-builder"].post, "/v1/trade");
     expectHardening(spec.paths["/v1/trade/{venue}/withdraw"].post, "/v1/trade");
     expectHardening(spec.paths["/tenants/{id}/config"].put, "/tenants");
     expectHardening(spec.paths["/tenants/{id}/config/templates/{name}/apply"].post, "/tenants");
