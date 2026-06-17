@@ -211,7 +211,7 @@ export function createDefaultDeps(config: SweepConfig): SweepDeps {
         message: typedData.value,
       } as never);
       const parsed = parseSignature(signature);
-      return submitWithdraw(
+      const resp = await submitWithdraw(
         {
           action,
           nonce: time,
@@ -219,6 +219,18 @@ export function createDefaultDeps(config: SweepConfig): SweepDeps {
         },
         { transport, baseUrl: config.hlBaseUrl },
       );
+      // HL can reject with HTTP 200 + { status: "err" }. Throw so the sweep does
+      // not falsely treat a rejected withdrawal as submitted and proceed to transfer.
+      const status =
+        resp && typeof resp === "object" && "status" in resp
+          ? (resp as { status?: unknown }).status
+          : undefined;
+      if (status === "err") {
+        throw new Error(
+          `Hyperliquid withdraw rejected: ${JSON.stringify(resp)}`,
+        );
+      }
+      return resp;
     },
     loadPrivateKey: readBuilderPrivateKey,
     sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),

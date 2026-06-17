@@ -182,6 +182,14 @@ fi
 # ---------------------------------------------------------------------------
 # Step 3: Health check
 # ---------------------------------------------------------------------------
+# Skip when no health URL is configured; otherwise a deployer who only set the
+# required service/env IDs would have the service image updated and THEN see the
+# deploy marked failed against a bare "/health" URL.
+if [[ -z "$HEALTH_URL" ]]; then
+  ok "Service image updated. Skipping health check (RAILWAY_HEALTH_URL not set)."
+  exit 0
+fi
+
 log "Verifying health endpoint: ${HEALTH_URL}/health"
 
 # Give the service a moment to start accepting traffic
