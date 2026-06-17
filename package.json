@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@stwd/venue-hyperliquid": "workspace:*",
+    "@stwd/venue-polymarket": "workspace:*",
     "ioredis": "^5.10.1",
     "jose": "^6.2.1",
     "siwe": "^3.0.0",
