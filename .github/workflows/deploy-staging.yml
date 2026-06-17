@@ -1,0 +1,101 @@
+# Auto-deploy to Railway STAGING
+#
+# Branch strategy:
+#   develop  ──(this workflow, auto)──▶  STAGING
+#   main     ──(deploy-railway.yml, manual/gated)──▶  PRODUCTION
+#
+# This runs automatically after the Docker image for `develop` is built +
+# pushed, then points the Railway staging steward-api service at that image.
+# Staging therefore always tracks the latest green develop, so it can never
+# silently drift behind (the failure mode that stranded staging on a stale
+# pre-#129 build and broke the cloud→Steward auth-gate).
+#
+# Production is deliberately NOT auto-deployed — it is promoted manually from
+# `main` via deploy-railway.yml (workflow_dispatch). Prod should rarely change.
+name: Deploy Staging
+
+on:
+  # Run after the Docker build+push workflow completes successfully on develop.
+  # Gating on workflow_run (not push) means we only ship an image that actually
+  # built + passed the Docker workflow — no half-built staging.
+  workflow_run:
+    workflows: ["Docker"]
+    types: [completed]
+    branches: [develop]
+
+  # Allow manual staging redeploys (e.g. to re-point at a specific tag).
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy to staging (default: develop)"
+        required: false
+        type: string
+        default: "develop"
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    # On workflow_run, only proceed if the upstream Docker build succeeded.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: resolve
+        env:
+          DISPATCH_TAG: ${{ inputs.image_tag }}
+        run: |
+          # Manual dispatch may override the tag; auto runs always use `develop`.
+          TAG="${DISPATCH_TAG:-develop}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Staging image tag: ${TAG}"
+
+      - name: Create GitHub deployment (staging)
+        id: deployment
+        uses: chrnorm/deployment-action@v2
+        with:
+          token: ${{ github.token }}
+          environment: staging
+          ref: ${{ github.sha }}
+          description: "Deploy ghcr.io/steward-fi/steward:${{ steps.resolve.outputs.tag }} to Railway staging"
+
+      - name: Deploy to Railway staging
+        id: deploy
+        # Instance-specific targets come from the DEPLOYER's repo config, never
+        # hardcoded in this sovereign OSS repo. A self-hoster sets their own
+        # STAGING_RAILWAY_* repo variables (or this job no-ops via the guard in
+        # railway-deploy.sh). Eliza cloud (one self-hoster) sets its own values.
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          RAILWAY_SERVICE_ID: ${{ vars.STAGING_RAILWAY_SERVICE_ID }}
+          RAILWAY_ENV_ID: ${{ vars.STAGING_RAILWAY_ENV_ID }}
+          RAILWAY_HEALTH_URL: ${{ vars.STAGING_RAILWAY_HEALTH_URL }}
+          RESOLVED_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          chmod +x scripts/railway-deploy.sh
+          ./scripts/railway-deploy.sh "$RESOLVED_TAG"
+
+      - name: Update deployment status (success)
+        if: success()
+        uses: chrnorm/deployment-status@v2
+        with:
+          token: ${{ github.token }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          state: success
+          environment-url: ${{ vars.STAGING_RAILWAY_HEALTH_URL }}
+
+      - name: Update deployment status (failure)
+        if: failure()
+        uses: chrnorm/deployment-status@v2
+        with:
+          token: ${{ github.token }}
+          deployment-id: ${{ steps.deployment.outputs.deployment_id }}
+          state: failure

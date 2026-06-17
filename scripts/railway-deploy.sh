@@ -12,10 +12,11 @@ set -euo pipefail
 #
 # Environment variables:
 #   RAILWAY_TOKEN       (required) Railway API bearer token
-#   RAILWAY_SERVICE_ID  (optional) default: e89b2241-ac31-464a-aa2a-161daf6fb4d4
-#   RAILWAY_ENV_ID      (optional) default: 500ae04d-f140-4a8d-9104-563b1f004f30
-#   RAILWAY_IMAGE_REPO  (optional) default: ghcr.io/steward-fi/steward
-#   RAILWAY_HEALTH_URL  (optional) default: https://steward-api-production-115d.up.railway.app
+#   RAILWAY_SERVICE_ID  (REQUIRED) the deployer's own Railway service id
+#   RAILWAY_ENV_ID      (REQUIRED) the deployer's own Railway environment id
+#   RAILWAY_IMAGE_REPO  (optional) default: ghcr.io/steward-fi/steward (the
+#                                  canonical published OSS image)
+#   RAILWAY_HEALTH_URL  (optional) the deployer's own /health URL to verify
 #   DEPLOY_TIMEOUT      (optional) max seconds to wait for deploy, default: 300
 # =============================================================================
 
@@ -33,15 +34,27 @@ fail() { echo -e "${RED}[railway]${RESET} $*" >&2; }
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-SERVICE_ID="${RAILWAY_SERVICE_ID:-e89b2241-ac31-464a-aa2a-161daf6fb4d4}"
-ENV_ID="${RAILWAY_ENV_ID:-500ae04d-f140-4a8d-9104-563b1f004f30}"
+# Steward is sovereign + self-hostable: this script ships the deploy MECHANISM,
+# but every instance-specific value (which Railway project/service/env, which
+# health URL) belongs to the DEPLOYER's own infra, not to this OSS repo. Set
+# them via env (CI secrets/vars). No deployment target is baked into source.
+SERVICE_ID="${RAILWAY_SERVICE_ID:-}"
+ENV_ID="${RAILWAY_ENV_ID:-}"
 IMAGE_REPO="${RAILWAY_IMAGE_REPO:-ghcr.io/steward-fi/steward}"
-HEALTH_URL="${RAILWAY_HEALTH_URL:-https://steward-api-production-115d.up.railway.app}"
+HEALTH_URL="${RAILWAY_HEALTH_URL:-}"
 TIMEOUT="${DEPLOY_TIMEOUT:-300}"
 API="https://backboard.railway.com/graphql/v2"
 
 DRY_RUN=false
 IMAGE_TAG=""
+
+# Fail loudly if the deployer hasn't pointed this at THEIR instance.
+if [[ -z "$SERVICE_ID" || -z "$ENV_ID" ]]; then
+  echo "[railway] RAILWAY_SERVICE_ID and RAILWAY_ENV_ID are required (set them to" >&2
+  echo "          your own Railway service/environment). Steward does not ship a" >&2
+  echo "          default deployment target." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Args

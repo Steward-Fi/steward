@@ -1,9 +1,21 @@
-# Deploy to Railway
+# Deploy to Railway PRODUCTION (gated)
+#
+# Branch strategy:
+#   develop ──(deploy-staging.yml, auto)──▶ STAGING
+#   main    ──(THIS workflow, manual/gated)──▶ PRODUCTION
+#
+# Production is promoted DELIBERATELY, never auto-deployed. Promotion = merge
+# develop -> main (reviewed), then a maintainer dispatches this workflow with
+# the image tag to ship (`main` or a `v*` release tag). The `production` GitHub
+# environment can carry required-reviewer protection for a second gate. Prod
+# should rarely change.
+#
 # Triggers:
 #   1. Manual dispatch (workflow_dispatch) with image tag input
-#   2. Reusable workflow (workflow_call) from other repos (e.g. milady)
-#   3. Automatically after Docker workflow completes on develop/tags
-name: Deploy Railway
+#   2. Reusable workflow (workflow_call) for downstream consumers that embed
+#      Steward as a dependency (Steward is a standalone, self-hostable OSS
+#      product; consumers integrate via its API, they do not own it).
+name: Deploy Railway (Production)
 
 on:
   # Manual trigger from Actions tab
@@ -19,7 +31,7 @@ on:
         type: boolean
         default: false
 
-  # Reusable workflow (callable from milady or other repos)
+  # Reusable workflow (callable by downstream consumers embedding Steward)
   workflow_call:
     inputs:
       image_tag:
@@ -42,6 +54,12 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Bind to the `production` GitHub environment so required-reviewer / wait
+    # timer protection rules (configured in repo Settings → Environments) gate
+    # the prod deploy. This is the second gate on top of "only from main".
+    environment:
+      name: Production
+      url: ${{ vars.PRODUCTION_RAILWAY_HEALTH_URL }}
 
     steps:
       - name: Checkout
@@ -81,6 +99,12 @@ jobs:
         id: deploy
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          # Instance-specific deploy target comes from the DEPLOYER's own repo
+          # config (a self-hoster sets PRODUCTION_RAILWAY_* vars for their own
+          # Railway). Nothing about any specific instance is baked into source.
+          RAILWAY_SERVICE_ID: ${{ vars.PRODUCTION_RAILWAY_SERVICE_ID }}
+          RAILWAY_ENV_ID: ${{ vars.PRODUCTION_RAILWAY_ENV_ID }}
+          RAILWAY_HEALTH_URL: ${{ vars.PRODUCTION_RAILWAY_HEALTH_URL }}
           # Step outputs derive from the caller-supplied image_tag input, so they
           # are still tainted — pass via env instead of inlining into the script.
           RESOLVED_TAG: ${{ steps.resolve.outputs.tag }}
@@ -101,7 +125,7 @@ jobs:
           token: ${{ github.token }}
           deployment-id: ${{ steps.deployment.outputs.deployment_id }}
           state: success
-          environment-url: https://steward-api-production-115d.up.railway.app
+          environment-url: ${{ vars.PRODUCTION_RAILWAY_HEALTH_URL }}
 
       # Update deployment status on failure
       - name: Update deployment status (failure)
