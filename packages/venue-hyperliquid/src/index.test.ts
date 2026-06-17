@@ -6,6 +6,7 @@ import {
   createApproveBuilderFeeTypedData,
   createL1TypedData,
   createSendAssetTypedData,
+  createUsdSendTypedData,
   createWithdrawTypedData,
   getMarketableLimitPx,
   getOpenOrders,
@@ -16,13 +17,16 @@ import {
   signOrder,
   signSendAsset,
   signUpdateIsolatedMargin,
+  signUsdSend,
   submitApproveBuilderFee,
   submitOrder,
   submitSendAsset,
   submitUpdateIsolatedMargin,
+  submitUsdSend,
   toExchangeAction,
   toSendAssetAction,
   toUpdateIsolatedMarginAction,
+  toUsdSendAction,
   toWithdrawAction,
 } from "./index";
 
@@ -632,6 +636,89 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
       signature: signed.signature,
     });
     expect(result.status).toBe("ok");
+  });
+});
+
+describe("Hyperliquid usdSend (user-signed action)", () => {
+  const DESTINATION = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+
+  test("createUsdSendTypedData produces the exact HL EIP-712 structure", () => {
+    const td = createUsdSendTypedData({
+      destination: DESTINATION,
+      amount: "100.5",
+      nonce: NONCE,
+    });
+    expect(td).toEqual({
+      domain: {
+        name: "HyperliquidSignTransaction",
+        version: "1",
+        chainId: 42161,
+        verifyingContract: "0x0000000000000000000000000000000000000000",
+      },
+      types: {
+        "HyperliquidTransaction:UsdSend": [
+          { name: "hyperliquidChain", type: "string" },
+          { name: "destination", type: "string" },
+          { name: "amount", type: "string" },
+          { name: "time", type: "uint64" },
+        ],
+      },
+      primaryType: "HyperliquidTransaction:UsdSend",
+      value: {
+        hyperliquidChain: "Mainnet",
+        destination: DESTINATION.toLowerCase(),
+        amount: "100.5",
+        time: NONCE,
+      },
+    });
+  });
+
+  test("signUsdSend builds the documented wire action", async () => {
+    const signed = await signUsdSend(
+      PRIVATE_KEY,
+      { destination: DESTINATION, amount: "100.5" },
+      { nonce: NONCE },
+    );
+    expect(signed.action).toEqual({
+      type: "usdSend",
+      hyperliquidChain: "Mainnet",
+      signatureChainId: "0xa4b1",
+      destination: DESTINATION.toLowerCase(),
+      amount: "100.5",
+      time: NONCE,
+    });
+    expect(toUsdSendAction({ destination: DESTINATION, amount: "1", nonce: NONCE })).toEqual({
+      type: "usdSend",
+      hyperliquidChain: "Mainnet",
+      signatureChainId: "0xa4b1",
+      destination: DESTINATION.toLowerCase(),
+      amount: "1",
+      time: NONCE,
+    });
+    expect(signed.nonce).toBe(NONCE);
+    expect([27, 28]).toContain(signed.signature.v);
+  });
+
+  test("submitUsdSend throws on HTTP-200 status err", async () => {
+    const signed = await signUsdSend(
+      PRIVATE_KEY,
+      { destination: DESTINATION, amount: "100.5" },
+      { nonce: NONCE },
+    );
+    await expect(
+      submitUsdSend(signed, {
+        transport: {
+          async fetch() {
+            return new Response(
+              JSON.stringify({ status: "err", response: "Insufficient balance" }),
+              {
+                status: 200,
+              },
+            );
+          },
+        },
+      }),
+    ).rejects.toThrow("hyperliquid usdSend rejected: Insufficient balance");
   });
 });
 
