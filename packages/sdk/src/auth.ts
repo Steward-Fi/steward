@@ -24,6 +24,8 @@ import type {
   StewardDeviceTokenPendingResult,
   StewardDeviceVerifyResult,
   StewardEmailResult,
+  StewardEmailOtpResult,
+  StewardEmailGrantResult,
   StewardFarcasterLoginConfig,
   StewardFarcasterLoginPayload,
   StewardGuestDeleteResult,
@@ -754,7 +756,10 @@ export class StewardAuth {
    * Requires a browser environment and `@simplewebauthn/browser` installed.
    * Throws `StewardApiError` otherwise.
    */
-  async addPasskey(email: string): Promise<StewardAuthResult | StewardMfaRequiredResult> {
+  async addPasskey(
+    email: string,
+    options: { emailGrant?: string } = {},
+  ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
     if (!isBrowser()) {
       throw new StewardApiError("Passkeys require a browser environment.", 0);
     }
@@ -767,7 +772,7 @@ export class StewardAuth {
         0,
       );
     }
-    return this.completePasskeyRegister(email, browserLib);
+    return this.completePasskeyRegister(email, browserLib, options.emailGrant);
   }
 
   private async completePasskeyLogin(
@@ -820,8 +825,13 @@ export class StewardAuth {
   private async completePasskeyRegister(
     email: string,
     lib: Pick<SimpleWebAuthnBrowser, "startRegistration">,
+    emailGrant?: string,
   ): Promise<StewardAuthResult | StewardMfaRequiredResult> {
-    // Fetch registration options
+    // Fetch registration options. When an `emailGrant` is supplied (from
+    // `verifyEmailOtp`), Steward accepts it in place of a session so a
+    // brand-new, signed-out user can register their FIRST passkey — the
+    // grant proves ownership of the email. Without it, register/options
+    // requires an authenticated session.
     const regOptsRes = await authRequest<Record<string, unknown>>(
       this.baseUrl,
       "/auth/passkey/register/options",
@@ -829,6 +839,7 @@ export class StewardAuth {
         method: "POST",
         body: JSON.stringify({
           email,
+          ...(emailGrant ? { emailGrant } : {}),
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
       },
@@ -859,6 +870,7 @@ export class StewardAuth {
         body: JSON.stringify({
           email,
           response: regResponse,
+          ...(emailGrant ? { emailGrant } : {}),
           ...(this.tenantId ? { tenantId: this.tenantId } : {}),
         }),
       },
@@ -1005,6 +1017,78 @@ export class StewardAuth {
     }
 
     return this.storeExchangeResponse(res.data);
+  }
+
+  // ─── Email OTP (Privy-style verified signup) ──────────────────────────
+
+  /**
+   * Email a 6-digit one-time code (Privy-style signup). Unlike
+   * `signInWithEmail` (magic link), this issues a code the user types back
+   * via `verifyEmailOtp` to obtain an `emailGrant`. The grant lets a
+   * brand-new, signed-out user register their first passkey with
+   * `addPasskey(email, { emailGrant })` — no prior session required.
+   */
+  async sendEmailOtp(email: string, captchaToken?: string): Promise<StewardEmailOtpResult> {
+    // authRequest returns the raw `{ ok, data }` envelope; the send route's
+    // payload (e.g. { expiresAt }) is nested under `data`.
+    const res = await authRequest<{ ok: boolean; data?: { expiresAt?: string } }>(
+      this.baseUrl,
+      "/auth/email/otp/send",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          email,
+          ...(captchaToken ? { captchaToken } : {}),
+          ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+        }),
+      },
+    );
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    return { ok: true, expiresAt: res.data?.data?.expiresAt };
+  }
+
+  /**
+   * Exchange the 6-digit code from `sendEmailOtp` for a short-lived,
+   * single-use `emailGrant` proving ownership of the email. Pass the grant
+   * to `addPasskey(email, { emailGrant })`.
+   *
+   * NOTE: this does NOT sign the user in by itself — it returns proof of
+   * email ownership, intentionally decoupled so the caller drives the
+   * passkey registration step.
+   */
+  async verifyEmailOtp(email: string, code: string): Promise<StewardEmailGrantResult> {
+    // The verify route returns { ok, data: { emailGrant, expiresInSeconds } }
+    // and authRequest hands back the raw envelope, so unwrap `.data`.
+    const res = await authRequest<{
+      ok: boolean;
+      data?: { emailGrant?: string; expiresInSeconds?: number };
+    }>(this.baseUrl, "/auth/email/otp/verify", {
+      method: "POST",
+      body: JSON.stringify({
+        email,
+        code,
+        ...(this.tenantId ? { tenantId: this.tenantId } : {}),
+      }),
+    });
+
+    if (!res.ok) {
+      throw new StewardApiError(res.error, res.status);
+    }
+
+    const grant = res.data?.data?.emailGrant;
+    if (typeof grant !== "string" || grant.length === 0) {
+      throw new StewardApiError("Email OTP verify did not return a grant.", res.status);
+    }
+
+    return {
+      ok: true,
+      emailGrant: grant,
+      expiresInSeconds: res.data?.data?.expiresInSeconds ?? 0,
+    };
   }
 
   async getTestAccessToken(
