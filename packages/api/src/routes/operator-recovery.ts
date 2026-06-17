@@ -410,7 +410,7 @@ operatorRecoveryRoutes.post("/:venue/leverage", async (c) => {
   const { agentId, coin } = body;
   const builderPerp = isBuilderPerpSymbol(coin);
   const effectiveLeverage = builderPerp ? Math.min(body.leverage, 3) : body.leverage;
-  const isCross = builderPerp ? false : body.isCross ?? false;
+  const isCross = builderPerp ? false : (body.isCross ?? false);
 
   const idempotency = getOperatorIdempotency(`${tenantId}:leverage`, body.idempotencyKey, {
     agentId,
@@ -421,7 +421,10 @@ operatorRecoveryRoutes.post("/:venue/leverage", async (c) => {
     isCross,
   });
   if (idempotency.conflict) {
-    return c.json<ApiResponse>({ ok: false, error: "Idempotency key reused with a different body" }, 409);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
   }
   if (idempotency.response) {
     return c.json<ApiResponse>({ ok: true, data: idempotency.response });
@@ -501,7 +504,10 @@ operatorRecoveryRoutes.post("/:venue/add-margin", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
   }
   if (c.get("authType") !== "platform") {
-    return c.json<ApiResponse>({ ok: false, error: "Platform key required for margin update" }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: "Platform key required for margin update" },
+      403,
+    );
   }
 
   const raw = await safeJsonParse(c);

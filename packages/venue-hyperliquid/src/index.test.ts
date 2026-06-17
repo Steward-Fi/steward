@@ -344,9 +344,9 @@ describe("Hyperliquid isolated margin updates", () => {
         },
       },
     );
-    await expect(adapter.updateLeverage({ coin: "BTC", leverage: 3, isCross: false })).rejects.toThrow(
-      "hyperliquid updateLeverage rejected: cannot decrease leverage",
-    );
+    await expect(
+      adapter.updateLeverage({ coin: "BTC", leverage: 3, isCross: false }),
+    ).rejects.toThrow("hyperliquid updateLeverage rejected: cannot decrease leverage");
   });
 });
 

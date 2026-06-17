@@ -215,7 +215,10 @@ describe("operator recovery leverage", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; data: { leverage: number; isCross: boolean } };
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { leverage: number; isCross: boolean };
+    };
     expect(body.ok).toBe(true);
     expect(body.data.leverage).toBe(3);
     expect(body.data.isCross).toBe(false);
