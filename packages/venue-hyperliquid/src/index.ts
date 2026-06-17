@@ -1073,7 +1073,9 @@ export class HyperliquidAdapter {
   submitSendAsset(signed: SignedSendAsset) {
     return submitSendAsset(signed, { transport: this.transport, baseUrl: this.baseUrl });
   }
-  async signUpdateIsolatedMargin(input: AddIsolatedMarginInput): Promise<SignedUpdateIsolatedMargin> {
+  async signUpdateIsolatedMargin(
+    input: AddIsolatedMarginInput,
+  ): Promise<SignedUpdateIsolatedMargin> {
     const parsed = normalizedAddIsolatedMargin(input);
     const nonce = parsed.nonce ?? nextNonce();
     const action = await toUpdateIsolatedMarginAction(parsed, {

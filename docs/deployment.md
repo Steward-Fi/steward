@@ -133,6 +133,31 @@ Run the proxy as a separate Railway service/process using the same image and com
 
 A hosted instance at `api.steward.fi` is run by the project for trusted testers. Self-hosted deployments should not depend on it for operator workflows.
 
+### Automated Railway deploys via GitHub Actions (optional)
+
+The repo ships reference deploy workflows (`deploy-staging.yml`, `deploy-railway.yml`)
+but **bakes no deployment target into source** — Steward is sovereign and
+self-hostable, so every instance points the workflows at its **own** Railway via
+repo configuration. To use them on your own fork/instance, set these GitHub repo
+**variables** (Settings → Secrets and variables → Actions → Variables) and the
+`RAILWAY_TOKEN` **secret**:
+
+| name | kind | meaning |
+| --- | --- | --- |
+| `RAILWAY_TOKEN` | secret | Railway API token for your project |
+| `STAGING_RAILWAY_SERVICE_ID` / `_ENV_ID` / `_HEALTH_URL` | vars | your staging service/env/health URL |
+| `PRODUCTION_RAILWAY_SERVICE_ID` / `_ENV_ID` / `_HEALTH_URL` | vars | your production service/env/health URL |
+
+Branch model the workflows assume: `develop` auto-deploys to **staging** (after a
+green Docker build); `main` is promoted to **production** manually via the gated
+`Deploy Railway (Production)` workflow (bind a protected `Production` GitHub
+environment with required reviewers). If the variables are unset, the deploy
+script fails closed rather than shipping to a default target.
+
+Downstream consumers (e.g. an eliza-cloud deployment) run their **own** instance
+this way with their own Railway + variables; they do not deploy from or depend on
+any other operator's instance.
+
 ## Environment variable reference
 
 | Variable | Purpose | Default | Validation / production rule |

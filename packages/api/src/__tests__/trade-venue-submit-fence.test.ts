@@ -127,7 +127,12 @@ function makeApp(tenantId: string, agentId: string, routes: Hono) {
   return app;
 }
 
-function postOrder(app: Hono, sessionId: string, idempotencyKey: string, body: Record<string, unknown> = ORDER_BODY) {
+function postOrder(
+  app: Hono,
+  sessionId: string,
+  idempotencyKey: string,
+  body: Record<string, unknown> = ORDER_BODY,
+) {
   return app.request("/v1/trade/hyperliquid/order", {
     method: "POST",
     headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
@@ -371,7 +376,11 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     expect(res.status).toBe(200);
     expect(callOrder).toEqual(["updateLeverage", "sign", "submit"]);
     expect(updateLeverageSpy).toHaveBeenCalledTimes(1);
-    expect(updateLeverageSpy).toHaveBeenCalledWith({ coin: builderAsset, leverage: 3, isCross: false });
+    expect(updateLeverageSpy).toHaveBeenCalledWith({
+      coin: builderAsset,
+      leverage: 3,
+      isCross: false,
+    });
     expect(signSpy).toHaveBeenCalledWith(
       expect.objectContaining({ asset: builderAsset, leverage: 3 }),
     );
