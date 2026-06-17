@@ -15,6 +15,7 @@ import {
   parseMaybeJsonArray,
   resolveBuilderConfig,
   roundOrderSize,
+  signEndpointUrl,
   toClobCompatibleSigner,
 } from "./index";
 import { getBatchPriceHistory, getOrderbooks, getPriceHistory, getPrices } from "./marketdata";
@@ -217,6 +218,32 @@ describe("Gamma JSON-string parsing", () => {
 // ---------------------------------------------------------------------------
 // Builder attribution — OFF / 0 by default (the revenue rail, inert until enabled)
 // ---------------------------------------------------------------------------
+
+describe("signEndpointUrl normalization", () => {
+  test("appends /sign to a bare base url", () => {
+    expect(signEndpointUrl("https://signer.example.com")).toBe("https://signer.example.com/sign");
+  });
+  test("strips trailing slash then appends /sign", () => {
+    expect(signEndpointUrl("https://signer.example.com/")).toBe("https://signer.example.com/sign");
+  });
+  test("leaves an already-/sign url intact", () => {
+    expect(signEndpointUrl("https://signer.example.com/sign")).toBe("https://signer.example.com/sign");
+  });
+  test("preserves query string on a /sign url", () => {
+    expect(signEndpointUrl("https://signer.example.com/sign?env=prod")).toBe(
+      "https://signer.example.com/sign?env=prod",
+    );
+  });
+  test("appends /sign to a base url with a query string", () => {
+    expect(signEndpointUrl("https://signer.example.com?env=prod")).toBe(
+      "https://signer.example.com/sign?env=prod",
+    );
+  });
+  test("handles undefined/empty as bare /sign", () => {
+    expect(signEndpointUrl(undefined)).toBe("/sign");
+    expect(signEndpointUrl("")).toBe("/sign");
+  });
+});
 
 describe("builder attribution defaults OFF", () => {
   test("resolveBuilderConfig with no input/env defaults disabled, feeBps 0", () => {

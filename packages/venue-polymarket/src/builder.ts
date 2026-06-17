@@ -78,8 +78,31 @@ export async function createPolymarketBuilderConfig(
   const { BuilderConfig } = await import("@polymarket/builder-signing-sdk");
   return new BuilderConfig({
     remoteBuilderConfig: {
-      url: `${config.signingServerUrl}`,
+      url: signEndpointUrl(config.signingServerUrl),
       token: config.signingServerToken,
     },
   });
+}
+
+/**
+ * Normalize the signing-server base URL to the `/sign` endpoint. Accepts either
+ * a bare base (`https://host`) or one already ending in `/sign`, so an operator
+ * setting POLYMARKET_SIGNING_SERVER_URL to the host root still hits the right
+ * route (matches matchr's `BASE + '/sign'` convention). Trailing slashes ok.
+ */
+export function signEndpointUrl(base: string | undefined): string {
+  const trimmed = (base ?? "").trim();
+  if (trimmed === "") return "/sign";
+  // Parse so query strings / fragments are preserved and the /sign check looks
+  // at the PATH only (e.g. `https://h/sign?env=prod` must not become `.../sign?env=prod/sign`).
+  try {
+    const u = new URL(trimmed);
+    const path = u.pathname.replace(/\/+$/, "");
+    u.pathname = /\/sign$/.test(path) ? path : `${path}/sign`;
+    return u.toString();
+  } catch {
+    // Not an absolute URL (relative path/host fragment) — fall back to string handling.
+    const noTrailing = trimmed.replace(/\/+$/, "");
+    return /\/sign$/.test(noTrailing) ? noTrailing : `${noTrailing}/sign`;
+  }
 }
