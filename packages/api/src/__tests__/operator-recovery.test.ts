@@ -25,6 +25,7 @@ const signWithdrawCalls: Array<{ amount: string | number; destination: string }>
 const submitWithdrawCalls: unknown[] = [];
 const updateLeverageCalls: Array<{ coin: string; leverage: number; isCross?: boolean }> = [];
 const addIsolatedMarginCalls: Array<{ coin: string; amountUsdc: string | number }> = [];
+const approveBuilderFeeCalls: Array<{ builder: string; maxFeeRate: string }> = [];
 
 class MockHyperliquidAdapter {
   constructor(
@@ -64,6 +65,11 @@ class MockHyperliquidAdapter {
     addIsolatedMarginCalls.push(params);
     return { status: "ok", raw: { response: { type: "default" } } };
   }
+
+  async approveBuilderFee(params: { builder: string; maxFeeRate: string }) {
+    approveBuilderFeeCalls.push(params);
+    return { status: "ok", raw: { response: { type: "default" } } };
+  }
 }
 
 mock.module("@stwd/venue-hyperliquid", () => ({
@@ -73,6 +79,7 @@ mock.module("@stwd/venue-hyperliquid", () => ({
     z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/),
   ]),
   isBuilderPerpSymbol: (coin: string) => /^[a-z0-9]+:[A-Z0-9]+$/.test(coin),
+  getMarketableLimitPx: async () => "1",
 }));
 
 beforeAll(async () => {
@@ -80,6 +87,7 @@ beforeAll(async () => {
   process.env.STEWARD_PLATFORM_KEYS = PLATFORM_KEY;
   process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
   process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
+  process.env.STEWARD_AUDIT_HMAC_KEY ??= "test-audit-hmac-key-operator-recovery";
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
@@ -215,11 +223,66 @@ describe("operator recovery leverage", () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { ok: boolean; data: { leverage: number; isCross: boolean } };
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { leverage: number; isCross: boolean };
+    };
     expect(body.ok).toBe(true);
     expect(body.data.leverage).toBe(3);
     expect(body.data.isCross).toBe(false);
     expect(updateLeverageCalls).toEqual([{ coin: "xyz:SPCX", leverage: 3, isCross: false }]);
+  });
+});
+
+describe("operator recovery approve-builder", () => {
+  it("rejects approve-builder without a valid platform key", async () => {
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/approve-builder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId: "agent-x",
+        builder: "0xabcdef0123456789abcdef0123456789abcdef01",
+        maxFeeRate: "0.1%",
+      }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("approves a builder fee through the platform-gated adapter path", async () => {
+    const tenantId = `tenant-builder-ok-${Date.now()}`;
+    const agentId = `agent-builder-ok-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    approveBuilderFeeCalls.length = 0;
+
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/approve-builder", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": "builder-approve-once",
+      },
+      body: JSON.stringify({
+        agentId,
+        builder: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+        maxFeeRate: "0.1%",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { builder: string; maxFeeRate: string; result: { status: string } };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.builder).toBe("0xabcdef0123456789abcdef0123456789abcdef01");
+    expect(body.data.maxFeeRate).toBe("0.1%");
+    expect(body.data.result.status).toBe("ok");
+    expect(approveBuilderFeeCalls).toEqual([
+      { builder: "0xabcdef0123456789abcdef0123456789abcdef01", maxFeeRate: "0.1%" },
+    ]);
   });
 });
 

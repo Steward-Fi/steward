@@ -46,6 +46,7 @@ const WITHDRAW_SIGNATURE_CHAIN_ID = "0xa4b1";
 const withdrawActionType = ["with", "draw3"].join("");
 const withdrawPrimaryType = ["HyperliquidTransaction:", "With", "draw"].join("");
 const sendAssetPrimaryType = "HyperliquidTransaction:SendAsset";
+const approveBuilderFeePrimaryType = "HyperliquidTransaction:ApproveBuilderFee";
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
 
 const BUILDER_PERP_ASSET_ID_OFFSET = 100_000;
@@ -78,6 +79,12 @@ function coreAssetId(coin: string): number | undefined {
     : undefined;
 }
 
+export const builderFeeSchema = z.object({
+  address: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  feeTenthsBps: z.number().int().min(0).max(100),
+});
+export type HyperliquidBuilderFee = z.infer<typeof builderFeeSchema>;
+
 export const hyperliquidOrderSchema = z.object({
   coin: hyperliquidAssetSchema.optional(),
   asset: hyperliquidAssetSchema.optional(),
@@ -93,6 +100,7 @@ export const hyperliquidOrderSchema = z.object({
   reduceOnly: z.boolean().default(false),
   leverage: z.number().positive().max(50).optional(),
   nonce: z.number().int().positive().optional(),
+  builder: builderFeeSchema.optional(),
 });
 export type HyperliquidOrder = z.input<typeof hyperliquidOrderSchema>;
 export type CancelOrderInput = { coin: HyperliquidAsset; orderId: number | string; nonce?: number };
@@ -196,6 +204,19 @@ export const sendAssetResultSchema = z.object({
   raw: z.unknown().optional(),
 });
 export type SendAssetResult = z.infer<typeof sendAssetResultSchema>;
+export type ApproveBuilderFeeParams = {
+  builder: string;
+  maxFeeRate: string;
+  nonce?: number;
+  hyperliquidChain?: "Mainnet" | "Testnet";
+};
+export const signedApproveBuilderFeeSchema = signedOrderSchema;
+export type SignedApproveBuilderFee = SignedOrder;
+export const approveBuilderFeeResultSchema = z.object({
+  status: z.string(),
+  raw: z.unknown().optional(),
+});
+export type ApproveBuilderFeeResult = z.infer<typeof approveBuilderFeeResultSchema>;
 export const updateIsolatedMarginResultSchema = z.object({
   status: z.string(),
   raw: z.unknown().optional(),
@@ -429,6 +450,14 @@ async function withMarketableLimitPx(
   if (isBuy === undefined) throw new Error("side is required");
   return { ...order, limitPx: await getMarketableLimitPx(coin, isBuy, options) };
 }
+function configuredBuilderFee(): HyperliquidBuilderFee | undefined {
+  const address = process.env.HL_BUILDER_ADDRESS;
+  const rawFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
+  if (!address || rawFee === undefined || rawFee === "") return undefined;
+  const feeTenthsBps = Number(rawFee);
+  return builderFeeSchema.parse({ address, feeTenthsBps });
+}
+
 function normalized(order: HyperliquidOrder) {
   const p = hyperliquidOrderSchema.parse(order);
   const coin = p.coin ?? p.asset;
@@ -443,6 +472,7 @@ function normalized(order: HyperliquidOrder) {
     reduceOnly: p.reduceOnly ?? false,
     tif: p.orderType?.limit?.tif ?? "Ioc",
     nonce: p.nonce,
+    builder: p.builder,
   };
 }
 function normalizedLeverageUpdate(input: LeverageUpdateInput) {
@@ -501,8 +531,9 @@ function normalizedAddIsolatedMargin(input: AddIsolatedMarginInput) {
 function exchangeActionFromNormalized(
   o: ReturnType<typeof normalized>,
   asset: AssetResolution,
+  builder = o.builder ?? configuredBuilderFee(),
 ): Record<string, unknown> {
-  return {
+  const action: Record<string, unknown> = {
     type: "order",
     orders: [
       {
@@ -516,6 +547,8 @@ function exchangeActionFromNormalized(
     ],
     grouping: "na",
   };
+  if (builder) action.builder = { b: builder.address.toLowerCase(), f: builder.feeTenthsBps };
+  return action;
 }
 export function toExchangeAction(order: HyperliquidOrder): Record<string, unknown> {
   const o = normalized(order);
@@ -729,6 +762,55 @@ export function createSendAssetTypedData(
   };
 }
 
+function normalizeApproveBuilderFeeParams(params: ApproveBuilderFeeParams, nonce: number) {
+  const builder = String(params.builder).toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(builder))
+    throw new Error(`invalid approveBuilderFee builder: ${params.builder}`);
+  return {
+    type: "approveBuilderFee",
+    hyperliquidChain: params.hyperliquidChain ?? "Mainnet",
+    signatureChainId: WITHDRAW_SIGNATURE_CHAIN_ID,
+    maxFeeRate: String(params.maxFeeRate),
+    builder,
+    nonce,
+  };
+}
+
+export function toApproveBuilderFeeAction(
+  params: ApproveBuilderFeeParams,
+): Record<string, unknown> {
+  return normalizeApproveBuilderFeeParams(params, params.nonce ?? nextNonce());
+}
+
+export function createApproveBuilderFeeTypedData(
+  params: ApproveBuilderFeeParams & { nonce: number },
+): Omit<VaultSignTypedDataInput, "agentId"> {
+  const n = normalizeApproveBuilderFeeParams(params, params.nonce);
+  return {
+    domain: {
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: Number.parseInt(String(n.signatureChainId), 16),
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    },
+    types: {
+      [approveBuilderFeePrimaryType]: [
+        { name: "hyperliquidChain", type: "string" },
+        { name: "maxFeeRate", type: "string" },
+        { name: "builder", type: "address" },
+        { name: "nonce", type: "uint64" },
+      ],
+    },
+    primaryType: approveBuilderFeePrimaryType,
+    value: {
+      hyperliquidChain: n.hyperliquidChain,
+      maxFeeRate: n.maxFeeRate,
+      builder: n.builder,
+      nonce: n.nonce,
+    },
+  };
+}
+
 // HL withdraw is a USER-SIGNED action (not an L1 agent action). It uses the
 // HyperliquidSignTransaction EIP-712 domain on Arbitrum (chainId 42161), unlike
 // order/cancel which use the L1 "Exchange" domain (chainId 1337).
@@ -874,6 +956,31 @@ export const signSendAsset = async (
   });
 };
 
+export const signApproveBuilderFee = async (
+  walletPrivateKey: Hex,
+  params: ApproveBuilderFeeParams,
+  options: SignOptions = {},
+): Promise<SignedApproveBuilderFee> => {
+  const nonce = options.nonce ?? params.nonce ?? nextNonce();
+  const hyperliquidChain =
+    params.hyperliquidChain ?? (options.isMainnet === false ? "Testnet" : "Mainnet");
+  const normalizedParams = { ...params, nonce, hyperliquidChain };
+  const action = normalizeApproveBuilderFeeParams(normalizedParams, nonce);
+  const td = createApproveBuilderFeeTypedData(normalizedParams);
+  const hex = await privateKeyToAccount(walletPrivateKey).signTypedData({
+    domain: td.domain,
+    types: td.types,
+    primaryType: td.primaryType,
+    message: td.value,
+  } as never);
+  const s = parseSignature(hex);
+  return signedApproveBuilderFeeSchema.parse({
+    action,
+    nonce,
+    signature: { r: s.r, s: s.s, v: Number(s.v) },
+  });
+};
+
 export const signOrder = async (
   walletPrivateKey: Hex,
   order: HyperliquidOrder,
@@ -948,6 +1055,18 @@ export async function submitSendAsset(
   // poisoned with a success that never moved collateral.
   const status = throwIfExchangeRejected(raw, "sendAsset");
   return sendAssetResultSchema.parse({ status: status || "submitted", raw });
+}
+export async function submitApproveBuilderFee(
+  signed: SignedApproveBuilderFee,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<ApproveBuilderFeeResult> {
+  const raw = await postExchange(
+    signedApproveBuilderFeeSchema.parse(signed),
+    options.transport ?? { fetch },
+    options.baseUrl ?? DEFAULT_BASE_URL,
+  );
+  const status = throwIfExchangeRejected(raw, "approveBuilderFee");
+  return approveBuilderFeeResultSchema.parse({ status: status || "submitted", raw });
 }
 export async function submitUpdateIsolatedMargin(
   signed: SignedUpdateIsolatedMargin,
@@ -1073,7 +1192,41 @@ export class HyperliquidAdapter {
   submitSendAsset(signed: SignedSendAsset) {
     return submitSendAsset(signed, { transport: this.transport, baseUrl: this.baseUrl });
   }
-  async signUpdateIsolatedMargin(input: AddIsolatedMarginInput): Promise<SignedUpdateIsolatedMargin> {
+  async signApproveBuilderFee(params: ApproveBuilderFeeParams): Promise<SignedApproveBuilderFee> {
+    const nonce = params.nonce ?? nextNonce();
+    const hyperliquidChain = params.hyperliquidChain ?? (this.isMainnet ? "Mainnet" : "Testnet");
+    const normalizedParams = { ...params, nonce, hyperliquidChain };
+    const action = normalizeApproveBuilderFeeParams(normalizedParams, nonce);
+    const td = createApproveBuilderFeeTypedData(normalizedParams);
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
+    return signedApproveBuilderFeeSchema.parse({
+      action,
+      nonce,
+      signature: { r: s.r, s: s.s, v: Number(s.v) },
+    });
+  }
+  submitApproveBuilderFee(signed: SignedApproveBuilderFee) {
+    return submitApproveBuilderFee(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  async approveBuilderFee(params: ApproveBuilderFeeParams): Promise<ApproveBuilderFeeResult> {
+    const signed = await this.signApproveBuilderFee(params);
+    return this.submitApproveBuilderFee(signed);
+  }
+  async maxBuilderFee(params: { user?: string; builder: string }): Promise<unknown> {
+    const builder = String(params.builder).toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(builder))
+      throw new Error(`invalid maxBuilderFee builder: ${params.builder}`);
+    const user = String(params.user ?? this.walletAddress).toLowerCase();
+    if (!/^0x[0-9a-f]{40}$/.test(user)) throw new Error(`invalid maxBuilderFee user: ${user}`);
+    return postInfo(
+      { type: "maxBuilderFee", user, builder },
+      { transport: this.transport, baseUrl: this.baseUrl },
+    );
+  }
+  async signUpdateIsolatedMargin(
+    input: AddIsolatedMarginInput,
+  ): Promise<SignedUpdateIsolatedMargin> {
     const parsed = normalizedAddIsolatedMargin(input);
     const nonce = parsed.nonce ?? nextNonce();
     const action = await toUpdateIsolatedMarginAction(parsed, {

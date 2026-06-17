@@ -1,10 +1,13 @@
 # Build and push Docker image to GitHub Container Registry (GHCR)
-# Triggers on pushes to develop branch and version tags (v*)
+# Triggers on pushes to develop + main branches and version tags (v*)
+#   develop -> :develop image (auto-deployed to STAGING by deploy-staging.yml)
+#   main    -> :main image (promoted to PRODUCTION manually via deploy-railway.yml)
+#   v*      -> :<semver> image (tagged release for production)
 name: Docker
 
 on:
   push:
-    branches: [develop]
+    branches: [develop, main]
     tags: ["v*"]
   pull_request:
     branches: [develop, main]

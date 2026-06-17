@@ -3,6 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   actionHash,
   cancelOrder,
+  createApproveBuilderFeeTypedData,
   createL1TypedData,
   createSendAssetTypedData,
   createWithdrawTypedData,
@@ -11,9 +12,11 @@ import {
   HyperliquidAdapter,
   type HyperliquidTransport,
   resolveAssetId,
+  signApproveBuilderFee,
   signOrder,
   signSendAsset,
   signUpdateIsolatedMargin,
+  submitApproveBuilderFee,
   submitOrder,
   submitSendAsset,
   submitUpdateIsolatedMargin,
@@ -96,6 +99,54 @@ describe("Hyperliquid L1 signing", () => {
     expect(signed.signature.r).toMatch(/^0x[0-9a-f]{64}$/);
     expect(signed.signature.s).toMatch(/^0x[0-9a-f]{64}$/);
     expect([27, 28]).toContain(signed.signature.v);
+  });
+
+  test("omits builder field when HL builder env is unset", () => {
+    const oldAddress = process.env.HL_BUILDER_ADDRESS;
+    const oldFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
+    delete process.env.HL_BUILDER_ADDRESS;
+    delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+    try {
+      expect(toExchangeAction({ coin: "BTC", side: "buy", size: 0.02, limitPx: "30000" })).toEqual({
+        type: "order",
+        orders: [{ a: 0, b: true, p: "30000", s: "0.02", r: false, t: { limit: { tif: "Ioc" } } }],
+        grouping: "na",
+      });
+    } finally {
+      if (oldAddress === undefined) delete process.env.HL_BUILDER_ADDRESS;
+      else process.env.HL_BUILDER_ADDRESS = oldAddress;
+      if (oldFee === undefined) delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+      else process.env.HL_BUILDER_FEE_TENTHS_BP = oldFee;
+    }
+  });
+
+  test("adds builder field only when configured and validates fee", () => {
+    const oldAddress = process.env.HL_BUILDER_ADDRESS;
+    const oldFee = process.env.HL_BUILDER_FEE_TENTHS_BP;
+    try {
+      process.env.HL_BUILDER_ADDRESS = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10";
+      expect(
+        toExchangeAction({ coin: "BTC", side: "buy", size: 0.02, limitPx: "30000" }),
+      ).toMatchObject({
+        builder: { b: "0xabcdef0123456789abcdef0123456789abcdef01", f: 10 },
+      });
+
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "101";
+      expect(() =>
+        toExchangeAction({ coin: "BTC", side: "buy", size: 0.02, limitPx: "30000" }),
+      ).toThrow();
+
+      process.env.HL_BUILDER_FEE_TENTHS_BP = "10.5";
+      expect(() =>
+        toExchangeAction({ coin: "BTC", side: "buy", size: 0.02, limitPx: "30000" }),
+      ).toThrow();
+    } finally {
+      if (oldAddress === undefined) delete process.env.HL_BUILDER_ADDRESS;
+      else process.env.HL_BUILDER_ADDRESS = oldAddress;
+      if (oldFee === undefined) delete process.env.HL_BUILDER_FEE_TENTHS_BP;
+      else process.env.HL_BUILDER_FEE_TENTHS_BP = oldFee;
+    }
   });
 
   test("uses explicit limit price without fetching the book", async () => {
@@ -344,9 +395,9 @@ describe("Hyperliquid isolated margin updates", () => {
         },
       },
     );
-    await expect(adapter.updateLeverage({ coin: "BTC", leverage: 3, isCross: false })).rejects.toThrow(
-      "hyperliquid updateLeverage rejected: cannot decrease leverage",
-    );
+    await expect(
+      adapter.updateLeverage({ coin: "BTC", leverage: 3, isCross: false }),
+    ).rejects.toThrow("hyperliquid updateLeverage rejected: cannot decrease leverage");
   });
 });
 
@@ -581,6 +632,79 @@ describe("Hyperliquid HIP-3 collateral sendAsset", () => {
       signature: signed.signature,
     });
     expect(result.status).toBe("ok");
+  });
+});
+
+describe("Hyperliquid approveBuilderFee (user-signed action)", () => {
+  const BUILDER = "0xABCDEF0123456789abcdef0123456789ABCDEF01";
+
+  test("createApproveBuilderFeeTypedData produces the exact HL EIP-712 structure", () => {
+    const td = createApproveBuilderFeeTypedData({
+      builder: BUILDER,
+      maxFeeRate: "0.1%",
+      nonce: NONCE,
+    });
+    expect(td).toEqual({
+      domain: {
+        name: "HyperliquidSignTransaction",
+        version: "1",
+        chainId: 42161,
+        verifyingContract: "0x0000000000000000000000000000000000000000",
+      },
+      types: {
+        "HyperliquidTransaction:ApproveBuilderFee": [
+          { name: "hyperliquidChain", type: "string" },
+          { name: "maxFeeRate", type: "string" },
+          { name: "builder", type: "address" },
+          { name: "nonce", type: "uint64" },
+        ],
+      },
+      primaryType: "HyperliquidTransaction:ApproveBuilderFee",
+      value: {
+        hyperliquidChain: "Mainnet",
+        maxFeeRate: "0.1%",
+        builder: BUILDER.toLowerCase(),
+        nonce: NONCE,
+      },
+    });
+  });
+
+  test("signApproveBuilderFee builds the documented wire action", async () => {
+    const signed = await signApproveBuilderFee(
+      PRIVATE_KEY,
+      { builder: BUILDER, maxFeeRate: "0.1%" },
+      { nonce: NONCE },
+    );
+    expect(signed.action).toEqual({
+      type: "approveBuilderFee",
+      hyperliquidChain: "Mainnet",
+      signatureChainId: "0xa4b1",
+      maxFeeRate: "0.1%",
+      builder: BUILDER.toLowerCase(),
+      nonce: NONCE,
+    });
+    expect(signed.nonce).toBe(NONCE);
+    expect([27, 28]).toContain(signed.signature.v);
+  });
+
+  test("submitApproveBuilderFee throws on HTTP-200 status err", async () => {
+    const signed = await signApproveBuilderFee(
+      PRIVATE_KEY,
+      { builder: BUILDER, maxFeeRate: "0.1%" },
+      { nonce: NONCE },
+    );
+    await expect(
+      submitApproveBuilderFee(signed, {
+        transport: {
+          async fetch() {
+            return new Response(
+              JSON.stringify({ status: "err", response: "Builder fee exceeds max" }),
+              { status: 200 },
+            );
+          },
+        },
+      }),
+    ).rejects.toThrow("hyperliquid approveBuilderFee rejected: Builder fee exceeds max");
   });
 });
 

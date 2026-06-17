@@ -29,13 +29,17 @@
   "packageManager": "bun@1.3.9",
   "devDependencies": {
     "@biomejs/biome": "2.5.0",
+    "@types/bun": "latest",
+    "@types/node": "^25.5.0",
     "turbo": "^2.9.14",
     "typescript": "^5.8.0"
   },
   "dependencies": {
+    "@stwd/venue-hyperliquid": "workspace:*",
     "ioredis": "^5.10.1",
     "jose": "^6.2.1",
-    "siwe": "^3.0.0"
+    "siwe": "^3.0.0",
+    "viem": "^2.30.0"
   },
   "//overrides": "Transitive CVE pins. Each entry corresponds to one or more GHSA advisories surfaced by `bun audit`; bump (or remove) once upstream parents publish fixed releases. See docs/security/threat-model.mdx#known-accepted-cves for details.",
   "overrides": {
