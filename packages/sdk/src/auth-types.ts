@@ -151,6 +151,29 @@ export interface StewardWhatsAppOtpResult {
   expiresAt: string;
 }
 
+/**
+ * Result of `sendEmailOtp` — a 6-digit code was emailed (Privy-style signup).
+ * The actual proof-of-ownership is obtained via `verifyEmailOtp`.
+ */
+export interface StewardEmailOtpResult {
+  ok: boolean;
+  /** ISO timestamp the emailed code expires at, when the server provides it. */
+  expiresAt?: string;
+}
+
+/**
+ * Result of `verifyEmailOtp` — a short-lived, single-use grant proving
+ * ownership of the email. Pass `emailGrant` to `addPasskey({ emailGrant })`
+ * so a brand-new, signed-out user can register a passkey WITHOUT a session.
+ */
+export interface StewardEmailGrantResult {
+  ok: boolean;
+  /** Single-use grant token bound to {email, tenant}. Expires shortly. */
+  emailGrant: string;
+  /** Seconds until the grant expires (server-provided). */
+  expiresInSeconds: number;
+}
+
 export interface StewardTestAccountLoginOptions {
   tenantId?: string;
   email?: string;

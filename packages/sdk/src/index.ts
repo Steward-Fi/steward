@@ -11,6 +11,8 @@ export type {
   StewardDeviceTokenPendingResult,
   StewardDeviceVerifyResult,
   StewardEmailResult,
+  StewardEmailOtpResult,
+  StewardEmailGrantResult,
   StewardEmbeddedWalletLoginConfig,
   StewardFarcasterLoginConfig,
   StewardFarcasterLoginPayload,
