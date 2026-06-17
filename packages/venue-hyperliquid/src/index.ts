@@ -46,6 +46,7 @@ const WITHDRAW_SIGNATURE_CHAIN_ID = "0xa4b1";
 const withdrawActionType = ["with", "draw3"].join("");
 const withdrawPrimaryType = ["HyperliquidTransaction:", "With", "draw"].join("");
 const sendAssetPrimaryType = "HyperliquidTransaction:SendAsset";
+const usdSendPrimaryType = "HyperliquidTransaction:UsdSend";
 const approveBuilderFeePrimaryType = "HyperliquidTransaction:ApproveBuilderFee";
 const DEFAULT_FETCH_TIMEOUT_MS = Number(process.env.HYPERLIQUID_FETCH_TIMEOUT_MS ?? 10_000);
 
@@ -204,6 +205,28 @@ export const sendAssetResultSchema = z.object({
   raw: z.unknown().optional(),
 });
 export type SendAssetResult = z.infer<typeof sendAssetResultSchema>;
+export type UsdSendParams = {
+  destination: string;
+  amount: string | number;
+  nonce?: number;
+  hyperliquidChain?: "Mainnet" | "Testnet";
+};
+export const signedUsdSendSchema = signedOrderSchema;
+export type SignedUsdSend = SignedOrder;
+export const usdSendResultSchema = z.object({
+  status: z.string(),
+  raw: z.unknown().optional(),
+});
+export type UsdSendResult = z.infer<typeof usdSendResultSchema>;
+export const usdSendParamsSchema = z.object({
+  destination: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  amount: z
+    .union([z.string(), z.number()])
+    .refine((v) => /^\d+(?:\.\d+)?$/.test(typeof v === "number" ? String(v) : v.trim()), {
+      message: "amount must be a decimal string",
+    })
+    .refine((v) => Number(v) > 0, { message: "amount must be positive" }),
+});
 export type ApproveBuilderFeeParams = {
   builder: string;
   maxFeeRate: string;
@@ -762,6 +785,60 @@ export function createSendAssetTypedData(
   };
 }
 
+function normalizeUsdSendAmount(amount: string | number): string {
+  const raw = typeof amount === "number" ? String(amount) : amount.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(raw)) throw new Error(`invalid usdSend amount: ${amount}`);
+  if (Number(raw) <= 0) throw new Error(`invalid usdSend amount: ${amount}`);
+  return raw;
+}
+
+function normalizeUsdSendParams(params: UsdSendParams, nonce: number) {
+  const destination = String(params.destination).toLowerCase();
+  if (!/^0x[0-9a-f]{40}$/.test(destination))
+    throw new Error(`invalid usdSend destination: ${params.destination}`);
+  return {
+    type: "usdSend",
+    hyperliquidChain: params.hyperliquidChain ?? "Mainnet",
+    signatureChainId: WITHDRAW_SIGNATURE_CHAIN_ID,
+    destination,
+    amount: normalizeUsdSendAmount(params.amount),
+    time: nonce,
+  };
+}
+
+export function toUsdSendAction(params: UsdSendParams): Record<string, unknown> {
+  return normalizeUsdSendParams(params, params.nonce ?? nextNonce());
+}
+
+export function createUsdSendTypedData(
+  params: UsdSendParams & { nonce: number },
+): Omit<VaultSignTypedDataInput, "agentId"> {
+  const n = normalizeUsdSendParams(params, params.nonce);
+  return {
+    domain: {
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: Number.parseInt(String(n.signatureChainId), 16),
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    },
+    types: {
+      [usdSendPrimaryType]: [
+        { name: "hyperliquidChain", type: "string" },
+        { name: "destination", type: "string" },
+        { name: "amount", type: "string" },
+        { name: "time", type: "uint64" },
+      ],
+    },
+    primaryType: usdSendPrimaryType,
+    value: {
+      hyperliquidChain: n.hyperliquidChain,
+      destination: n.destination,
+      amount: n.amount,
+      time: n.time,
+    },
+  };
+}
+
 function normalizeApproveBuilderFeeParams(params: ApproveBuilderFeeParams, nonce: number) {
   const builder = String(params.builder).toLowerCase();
   if (!/^0x[0-9a-f]{40}$/.test(builder))
@@ -956,6 +1033,31 @@ export const signSendAsset = async (
   });
 };
 
+export const signUsdSend = async (
+  walletPrivateKey: Hex,
+  params: UsdSendParams,
+  options: SignOptions = {},
+): Promise<SignedUsdSend> => {
+  const nonce = options.nonce ?? params.nonce ?? nextNonce();
+  const hyperliquidChain =
+    params.hyperliquidChain ?? (options.isMainnet === false ? "Testnet" : "Mainnet");
+  const normalizedParams = { ...params, nonce, hyperliquidChain };
+  const action = normalizeUsdSendParams(normalizedParams, nonce);
+  const td = createUsdSendTypedData(normalizedParams);
+  const hex = await privateKeyToAccount(walletPrivateKey).signTypedData({
+    domain: td.domain,
+    types: td.types,
+    primaryType: td.primaryType,
+    message: td.value,
+  } as never);
+  const s = parseSignature(hex);
+  return signedUsdSendSchema.parse({
+    action,
+    nonce,
+    signature: { r: s.r, s: s.s, v: Number(s.v) },
+  });
+};
+
 export const signApproveBuilderFee = async (
   walletPrivateKey: Hex,
   params: ApproveBuilderFeeParams,
@@ -1056,6 +1158,19 @@ export async function submitSendAsset(
   const status = throwIfExchangeRejected(raw, "sendAsset");
   return sendAssetResultSchema.parse({ status: status || "submitted", raw });
 }
+export async function submitUsdSend(
+  signed: SignedUsdSend,
+  options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
+): Promise<UsdSendResult> {
+  const raw = await postExchange(
+    signedUsdSendSchema.parse(signed),
+    options.transport ?? { fetch },
+    options.baseUrl ?? DEFAULT_BASE_URL,
+  );
+  const status = throwIfExchangeRejected(raw, "usdSend");
+  return usdSendResultSchema.parse({ status: status || "submitted", raw });
+}
+
 export async function submitApproveBuilderFee(
   signed: SignedApproveBuilderFee,
   options: { transport?: HyperliquidTransport; baseUrl?: string } = {},
@@ -1191,6 +1306,28 @@ export class HyperliquidAdapter {
   }
   submitSendAsset(signed: SignedSendAsset) {
     return submitSendAsset(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+
+  async signUsdSend(params: UsdSendParams): Promise<SignedUsdSend> {
+    const nonce = params.nonce ?? nextNonce();
+    const hyperliquidChain = params.hyperliquidChain ?? (this.isMainnet ? "Mainnet" : "Testnet");
+    const normalizedParams = { ...params, nonce, hyperliquidChain };
+    const action = normalizeUsdSendParams(normalizedParams, nonce);
+    const td = createUsdSendTypedData(normalizedParams);
+    const hex = await this.vault.signTypedData({ ...td, agentId: this.agentId });
+    const s = parseSignature(hex as Hex);
+    return signedUsdSendSchema.parse({
+      action,
+      nonce,
+      signature: { r: s.r, s: s.s, v: Number(s.v) },
+    });
+  }
+  submitUsdSend(signed: SignedUsdSend) {
+    return submitUsdSend(signed, { transport: this.transport, baseUrl: this.baseUrl });
+  }
+  async usdSend(params: UsdSendParams): Promise<UsdSendResult> {
+    const signed = await this.signUsdSend(params);
+    return this.submitUsdSend(signed);
   }
   async signApproveBuilderFee(params: ApproveBuilderFeeParams): Promise<SignedApproveBuilderFee> {
     const nonce = params.nonce ?? nextNonce();

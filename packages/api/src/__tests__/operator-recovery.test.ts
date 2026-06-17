@@ -26,6 +26,7 @@ const submitWithdrawCalls: unknown[] = [];
 const updateLeverageCalls: Array<{ coin: string; leverage: number; isCross?: boolean }> = [];
 const addIsolatedMarginCalls: Array<{ coin: string; amountUsdc: string | number }> = [];
 const approveBuilderFeeCalls: Array<{ builder: string; maxFeeRate: string }> = [];
+const usdSendCalls: Array<{ destination: string; amount: string }> = [];
 
 class MockHyperliquidAdapter {
   constructor(
@@ -68,6 +69,11 @@ class MockHyperliquidAdapter {
 
   async approveBuilderFee(params: { builder: string; maxFeeRate: string }) {
     approveBuilderFeeCalls.push(params);
+    return { status: "ok", raw: { response: { type: "default" } } };
+  }
+
+  async usdSend(params: { destination: string; amount: string }) {
+    usdSendCalls.push(params);
     return { status: "ok", raw: { response: { type: "default" } } };
   }
 }
@@ -231,6 +237,58 @@ describe("operator recovery leverage", () => {
     expect(body.data.leverage).toBe(3);
     expect(body.data.isCross).toBe(false);
     expect(updateLeverageCalls).toEqual([{ coin: "xyz:SPCX", leverage: 3, isCross: false }]);
+  });
+});
+
+describe("operator recovery usd-send", () => {
+  it("rejects usd-send without a valid platform key", async () => {
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/usd-send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agentId: "agent-x",
+        destination: "0xabcdef0123456789abcdef0123456789abcdef01",
+        amount: "100",
+      }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("submits usdSend through the platform-gated adapter path", async () => {
+    const tenantId = `tenant-usdsend-ok-${Date.now()}`;
+    const agentId = `agent-usdsend-ok-${Date.now()}`;
+    await seedAgent({ tenantId, agentId });
+    usdSendCalls.length = 0;
+
+    const app = await buildApp();
+    const res = await app.request("/v1/trade/hyperliquid/usd-send", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Steward-Platform-Key": PLATFORM_KEY,
+        "X-Steward-Tenant": tenantId,
+        "Idempotency-Key": "usd-send-once",
+      },
+      body: JSON.stringify({
+        agentId,
+        destination: "0xABCDEF0123456789abcdef0123456789ABCDEF01",
+        amount: "100",
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { destination: string; amount: string; result: { status: string } };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.destination).toBe("0xabcdef0123456789abcdef0123456789abcdef01");
+    expect(body.data.amount).toBe("100");
+    expect(body.data.result.status).toBe("ok");
+    expect(usdSendCalls).toEqual([
+      { destination: "0xabcdef0123456789abcdef0123456789abcdef01", amount: "100" },
+    ]);
   });
 });
 

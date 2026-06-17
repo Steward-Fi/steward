@@ -75837,6 +75837,341 @@
         }
       }
     },
+    "/trade/{venue}/usd-send": {
+      "parameters": [
+        {
+          "name": "venue",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "hyperliquid"
+            ]
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Trading"
+        ],
+        "summary": "Transfer internal USDC between Hyperliquid accounts",
+        "description": "Operator recovery endpoint. Auth deliberately accepts platform operators or tenant admins and must not require an agent JWT, so humans can recover funds when the agent token is expired. Raw signing keys never leave the vault; all recovery actions are audited and idempotency-protected. Platform-key only route that submits Hyperliquid's user-signed usdSend action for internal USDC transfers between Hyperliquid accounts. The transfer is signed by the sending agent's master Hyperliquid wallet.",
+        "security": [
+          {
+            "platformKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "agentId",
+                  "destination",
+                  "amount"
+                ],
+                "properties": {
+                  "agentId": {
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{40}$"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+(?:\\.\\d+)?$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "venue": {
+                          "type": "string",
+                          "const": "hyperliquid"
+                        },
+                        "walletAddress": {
+                          "type": "string"
+                        },
+                        "destination": {
+                          "type": "string"
+                        },
+                        "amount": {
+                          "type": "string"
+                        },
+                        "result": {
+                          "type": "object",
+                          "additionalProperties": true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/trade",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
     "/trade/{venue}/approve-builder": {
       "parameters": [
         {
@@ -78839,6 +79174,341 @@
                         },
                         "builderPerp": {
                           "type": "boolean"
+                        },
+                        "result": {
+                          "type": "object",
+                          "additionalProperties": true
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "error"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": false
+                    },
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "X-Steward-Request-Timestamp",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO timestamp. Sensitive mutating routes require this or X-Steward-Request-Expires-At when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Request-Expires-At",
+            "in": "header",
+            "required": false,
+            "description": "Unix seconds, Unix milliseconds, or HTTP/ISO expiry time. Sensitive mutating routes require this or X-Steward-Request-Timestamp when request-expiry or request signatures are enforced.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signature",
+            "in": "header",
+            "required": false,
+            "description": "Authorization signature for sensitive mutating routes when STEWARD_REQUIRE_AUTH_SIGNATURE=true or production enforcement is enabled. Use v1=<hmac-sha256> or p256=<signature>.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "X-Steward-Signing-Key-Id",
+            "in": "header",
+            "required": false,
+            "description": "Optional tenant request-signing key id used to select a managed HMAC signing key.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "Required for signed sensitive requests and recommended for all sensitive mutating requests. Replays are scoped to authenticated or explicitly signed contexts.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "x-steward-hardening": {
+          "sensitive": true,
+          "sensitivePrefix": "/v1/trade",
+          "requestExpiry": {
+            "requiredWhen": "STEWARD_REQUIRE_REQUEST_EXPIRY=true or production without STEWARD_ALLOW_STALE_SENSITIVE_REQUESTS=true",
+            "acceptedHeaders": [
+              "X-Steward-Request-Timestamp",
+              "X-Steward-Request-Expires-At"
+            ]
+          },
+          "authorizationSignature": {
+            "requiredWhen": "STEWARD_REQUIRE_AUTH_SIGNATURE=true or NODE_ENV=production",
+            "header": "X-Steward-Signature",
+            "schemes": [
+              "v1=hmac-sha256",
+              "p256=ecdsa-secp256r1"
+            ],
+            "optionalSigningKeyHeader": "X-Steward-Signing-Key-Id"
+          },
+          "idempotency": {
+            "header": "Idempotency-Key",
+            "requiredForSignedRequests": true,
+            "replayStorage": "enabled when callers provide a key in a replay-safe authenticated context"
+          }
+        }
+      }
+    },
+    "/v1/trade/{venue}/usd-send": {
+      "parameters": [
+        {
+          "name": "venue",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "hyperliquid"
+            ]
+          }
+        }
+      ],
+      "post": {
+        "tags": [
+          "Trading"
+        ],
+        "summary": "Transfer internal USDC between Hyperliquid accounts",
+        "description": "Operator recovery endpoint. Auth deliberately accepts platform operators or tenant admins and must not require an agent JWT, so humans can recover funds when the agent token is expired. Raw signing keys never leave the vault; all recovery actions are audited and idempotency-protected. Platform-key only route that submits Hyperliquid's user-signed usdSend action for internal USDC transfers between Hyperliquid accounts. The transfer is signed by the sending agent's master Hyperliquid wallet.",
+        "security": [
+          {
+            "platformKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "agentId",
+                  "destination",
+                  "amount"
+                ],
+                "properties": {
+                  "agentId": {
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  },
+                  "destination": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-fA-F]{40}$"
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^\\d+(?:\\.\\d+)?$"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "JSON response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "venue": {
+                          "type": "string",
+                          "const": "hyperliquid"
+                        },
+                        "walletAddress": {
+                          "type": "string"
+                        },
+                        "destination": {
+                          "type": "string"
+                        },
+                        "amount": {
+                          "type": "string"
                         },
                         "result": {
                           "type": "object",

@@ -203,6 +203,16 @@ const approveBuilderSchema = z.object({
   idempotencyKey: z.string().min(1).max(256).optional(),
 });
 
+const usdSendSchema = z.object({
+  agentId: z.string().min(1),
+  destination: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  amount: z
+    .string()
+    .regex(/^\d+(?:\.\d+)?$/)
+    .refine((v) => Number(v) > 0, "amount must be positive"),
+  idempotencyKey: z.string().min(1).max(256).optional(),
+});
+
 // ── Deposit constants (Hyperliquid on Arbitrum) ────────────────────────────────
 // HL credits the SENDING address, so the deposit MUST originate from the agent's
 // own venue wallet. We sign an ERC-20 transfer(bridge, amount) from that wallet.
@@ -620,6 +630,93 @@ operatorRecoveryRoutes.post("/:venue/add-margin", async (c) => {
     amountBaseUnits: amountBaseUnits.toString(),
     result,
   };
+  idempotency.store?.(response);
+  return c.json<ApiResponse>({ ok: true, data: response });
+});
+
+// ── POST /v1/trade/:venue/usd-send ───────────────────────────────────────────
+// Platform-key only internal USDC transfer between Hyperliquid accounts. This is
+// a user-signed action and must be signed by the sending agent/vault master HL wallet.
+operatorRecoveryRoutes.post("/:venue/usd-send", async (c) => {
+  const tenantId = c.get("tenantId");
+  const venue = c.req.param("venue");
+  if (venue !== "hyperliquid") {
+    return c.json<ApiResponse>({ ok: false, error: `Unsupported venue: ${venue}` }, 400);
+  }
+  if (c.get("authType") !== "platform") {
+    return c.json<ApiResponse>({ ok: false, error: "Platform key required for usdSend" }, 403);
+  }
+
+  const raw = await safeJsonParse(c);
+  const parsed = usdSendSchema.safeParse(raw);
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const body = {
+    ...parsed.data,
+    destination: parsed.data.destination.toLowerCase(),
+    idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+  };
+  const { agentId, destination, amount } = body;
+
+  const idempotency = getOperatorIdempotency(`${tenantId}:usd-send`, body.idempotencyKey, {
+    agentId,
+    venue,
+    destination,
+    amount,
+  });
+  if (idempotency.conflict) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
+  }
+  if (idempotency.response) {
+    return c.json<ApiResponse>({ ok: true, data: idempotency.response });
+  }
+
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+
+  const walletAddress = await resolveVenueWallet(tenantId, agentId, venue);
+  if (!walletAddress) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Hyperliquid venue wallet not found for agent" },
+      404,
+    );
+  }
+
+  const adapter = buildAdapter(tenantId, agentId, walletAddress);
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.requested", {
+    venue,
+    walletAddress,
+    destination,
+    amount,
+  });
+
+  let result: unknown;
+  try {
+    result = await adapter.usdSend({ destination, amount });
+  } catch (err) {
+    await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.failed", {
+      venue,
+      walletAddress,
+      destination,
+      amount,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return c.json<ApiResponse>({ ok: false, error: "Failed to submit usdSend" }, 502);
+  }
+
+  await auditRecoveryEvent(c, tenantId, agentId, "trade.usdsend.completed", {
+    venue,
+    walletAddress,
+    destination,
+    amount,
+  });
+
+  const response = { venue, walletAddress, destination, amount, result };
   idempotency.store?.(response);
   return c.json<ApiResponse>({ ok: true, data: response });
 });
