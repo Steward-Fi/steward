@@ -63,16 +63,40 @@ tradeRoutes.get("/token-status", async (c) => {
   );
 });
 
-const createSessionSchema = z.object({
-  agentId: z.string().min(1).optional(),
-  venue: z.literal("hyperliquid"),
-  walletAddress: z.string().min(1).optional(),
-  dailyCap: z.number().positive().max(50_000).default(300),
-  perOrderCap: z.number().positive().max(10_000).default(100),
-  leverageCap: z.number().positive().max(50).default(5),
-  allowedAssets: z.array(hyperliquidAssetSchema).min(1).default(["BTC", "ETH", "BNB"]),
-  ttlSeconds: z.number().int().positive().max(86_400).default(3_600),
-});
+// Prediction-market session asset: pm:<tokenId> (a single outcome token) or
+// pm:cond:<conditionId> (a whole market). Mirrors @stwd/trade-sessions'
+// predictionMarketAssetSchema so a Polymarket session can be created through the
+// public route (not just seeded out of band).
+const sessionPredictionMarketAssetSchema = z
+  .string()
+  .regex(/^pm:(cond:0x[0-9a-fA-F]{1,64}|[0-9]{1,128})$/);
+
+const createSessionSchema = z
+  .object({
+    agentId: z.string().min(1).optional(),
+    venue: z.enum(["hyperliquid", "polymarket"]).default("hyperliquid"),
+    walletAddress: z.string().min(1).optional(),
+    dailyCap: z.number().positive().max(50_000).default(300),
+    perOrderCap: z.number().positive().max(10_000).default(100),
+    // Leverage is a perp concept; Polymarket has none. It defaults and is
+    // ignored for polymarket sessions (kept for HL compatibility).
+    leverageCap: z.number().positive().max(50).default(5),
+    // HL assets (BTC/ETH/...) OR prediction-market identifiers (pm:<...>). The
+    // venue-appropriate subset is validated in the handler. Optional so the
+    // per-venue default below applies.
+    allowedAssets: z
+      .array(z.union([hyperliquidAssetSchema, sessionPredictionMarketAssetSchema]))
+      .min(1)
+      .optional(),
+    ttlSeconds: z.number().int().positive().max(86_400).default(3_600),
+  })
+  .transform((data) => ({
+    ...data,
+    // Default allowlist per venue: HL gets the majors; polymarket has no sensible
+    // default market, so it must be supplied explicitly (empty -> handler 400).
+    allowedAssets:
+      data.allowedAssets ?? (data.venue === "hyperliquid" ? ["BTC", "ETH", "BNB"] : []),
+  }));
 
 const submitOrderSchema = z
   .object({
@@ -345,6 +369,18 @@ async function resolveHyperliquidWallet(
   );
 }
 
+// Resolve the agent's polymarket venue wallet address for session creation. The
+// session binds to this address (walletId); the per-order route separately
+// resolves the same wallet + its funder Safe + L2 creds at submit time.
+async function resolvePolymarketWallet(agentId: string): Promise<string | null> {
+  try {
+    const wallet = await vault.getWallet({ agentId, venue: "polymarket" });
+    return wallet.address;
+  } catch {
+    return null;
+  }
+}
+
 tradeRoutes.post("/sessions", async (c) => {
   const tenantId = c.get("tenantId");
   const raw = await safeJsonParse(c);
@@ -376,6 +412,7 @@ tradeRoutes.post("/sessions", async (c) => {
     );
   }
   const { venue, dailyCap, perOrderCap, leverageCap, allowedAssets, ttlSeconds } = parsed.data;
+  const isPolymarket = venue === "polymarket";
 
   if (!canAccessAgent(c, agentId)) {
     return c.json<ApiResponse>(
@@ -385,6 +422,31 @@ tradeRoutes.post("/sessions", async (c) => {
   }
   if (perOrderCap > dailyCap) {
     return c.json<ApiResponse>({ ok: false, error: "perOrderCap cannot exceed dailyCap" }, 400);
+  }
+  // Polymarket has no default market; the allowlist must be supplied. Also reject
+  // a venue/asset namespace mismatch up front (pm: assets on HL or vice versa).
+  if (isPolymarket) {
+    if (allowedAssets.length === 0) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "polymarket sessions require an explicit allowedAssets (pm:<...>)" },
+        400,
+      );
+    }
+    const nonPmAsset = allowedAssets.find((a) => !a.startsWith("pm:"));
+    if (nonPmAsset) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `polymarket session asset must be a pm: identifier, got ${nonPmAsset}` },
+        400,
+      );
+    }
+  } else {
+    const pmAsset = allowedAssets.find((a) => a.startsWith("pm:"));
+    if (pmAsset) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `hyperliquid session cannot allowlist a prediction market ${pmAsset}` },
+        400,
+      );
+    }
   }
 
   const agent = await ensureAgentForTenant(tenantId, agentId);
@@ -423,7 +485,11 @@ tradeRoutes.post("/sessions", async (c) => {
     const policyDailyCap = Number(agentPolicy.dailyCapUsd);
     const policyPerOrderCap = Number(agentPolicy.perOrderCapUsd);
     const policyLeverageCap = Number(agentPolicy.leverageCap);
-    const requestedBuilderAsset = allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
+    // Builder-perp gating is Hyperliquid-only (isBuilderPerpSymbol matches HL
+    // namespaced perps, never pm: assets).
+    const requestedBuilderAsset = isPolymarket
+      ? undefined
+      : allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
     if (requestedBuilderAsset && !agentPolicy.allowBuilderPerps) {
       return c.json(
         policyViolation(
@@ -454,23 +520,29 @@ tradeRoutes.post("/sessions", async (c) => {
     if (!agentPolicy.allowedVenues.includes(venue)) {
       return c.json(policyViolation(`venue ${venue} is not allowed by agent policy`), 400);
     }
-    const disallowedAsset = allowedAssets.find(
-      (asset) => !agentPolicy.allowedAssets.includes(asset),
-    );
-    if (disallowedAsset) {
-      return c.json(
-        policyViolation(`asset ${disallowedAsset} is not allowed by agent policy`),
-        400,
+    // The agent-policy asset allowlist gates HL symbols. Prediction markets are
+    // identified per-token and are gated by the session-level pm: allowlist +
+    // the per-order checkOrderAllowed gate, not the (HL-symbol) policy allowlist,
+    // so we don't intersect pm: assets against agentPolicy.allowedAssets here.
+    if (!isPolymarket) {
+      const disallowedAsset = allowedAssets.find(
+        (asset) => !agentPolicy.allowedAssets.includes(asset),
       );
+      if (disallowedAsset) {
+        return c.json(
+          policyViolation(`asset ${disallowedAsset} is not allowed by agent policy`),
+          400,
+        );
+      }
     }
 
     sessionDailyCap = Math.min(dailyCap, policyDailyCap);
     sessionPerOrderCap = Math.min(perOrderCap, policyPerOrderCap);
     sessionLeverageCap = Math.min(leverageCap, policyLeverageCap);
-    sessionAllowedAssets = allowedAssets.filter((asset) =>
-      agentPolicy.allowedAssets.includes(asset),
-    );
-  } else {
+    sessionAllowedAssets = isPolymarket
+      ? allowedAssets
+      : allowedAssets.filter((asset) => agentPolicy.allowedAssets.includes(asset));
+  } else if (!isPolymarket) {
     const requestedBuilderAsset = allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
     if (requestedBuilderAsset) {
       return c.json(
@@ -482,13 +554,15 @@ tradeRoutes.post("/sessions", async (c) => {
     }
   }
 
-  const walletAddress =
-    (await resolveHyperliquidWallet(agentId, agent)) ?? parsed.data.walletAddress;
+  const venueWallet = isPolymarket
+    ? await resolvePolymarketWallet(agentId)
+    : await resolveHyperliquidWallet(agentId, agent);
+  const walletAddress = venueWallet ?? parsed.data.walletAddress;
   if (!walletAddress) {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Hyperliquid venue wallet not found. Create a venue-scoped wallet before trading.",
+        error: `${venue} venue wallet not found. Create a venue-scoped wallet before trading.`,
       },
       404,
     );
@@ -1352,8 +1426,9 @@ tradeRoutes.post("/polymarket/order", async (c) => {
       // PRE-SUBMIT phase: build + sign the order (resolves tickSize/negRisk +
       // applies CLOB rounding). Any throw here means NOTHING reached the venue,
       // so the reserved spend MUST be released — these never burn the daily cap.
+      let signedOrder: unknown;
       try {
-        await adapter.buildSignedOrder(orderRequest);
+        signedOrder = await adapter.buildSignedOrder(orderRequest);
       } catch (err) {
         await getSessionManager().releaseSpend({
           tenantId,
@@ -1377,11 +1452,13 @@ tradeRoutes.post("/polymarket/order", async (c) => {
         return envelope;
       }
 
-      // SUBMIT phase: post to the venue. A throw HERE means the order may have
+      // SUBMIT phase: post the ALREADY-built signed order. submitSignedOrder does
+      // NOT rebuild/re-sign (no second CLOB metadata or signer round-trip), so a
+      // throw HERE genuinely means the POST was attempted and the order may have
       // landed — status unknown, so we do NOT release spend (mirrors HL's 502).
-      let result: Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>;
+      let result: Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>;
       try {
-        result = await adapter.submitOrder(orderRequest);
+        result = await adapter.submitSignedOrder(signedOrder, orderRequest);
       } catch (err) {
         await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
           sessionId: session.id,

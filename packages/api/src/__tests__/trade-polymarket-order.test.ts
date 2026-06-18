@@ -168,39 +168,47 @@ async function auditCount(tenantId: string, action: string): Promise<number> {
   return rows.length;
 }
 
+// Module-level DB + fence setup shared by both describe blocks. The api suite
+// runs all test files in one process; a per-describe closeDb() would tear down
+// PGLite before the second describe's beforeAll re-imports routes.
+let sharedTradeRoutes: Hono;
+beforeAll(async () => {
+  process.env.STEWARD_PGLITE_MEMORY = "true";
+  process.env.STEWARD_MASTER_PASSWORD ??= "pm-order-master-password";
+  process.env.STEWARD_AUDIT_HMAC_KEY ??= "pm-order-test-audit-hmac-key-0123456789abcdef0";
+  const { db, client } = await createPGLiteDb("memory://");
+  setPGLiteOverride(db, async () => {
+    await client.close();
+  });
+  // Faithful pass-through for the fence's DB-transaction wrapper. The real
+  // wrapper opens getDb().transaction() + an advisory lock and re-selects the
+  // active session; under single-connection PGLite the callback's own base-
+  // connection queries (reserveSpend + audit writes) deadlock against the outer
+  // transaction (production runs them on a pooled connection). The advisory-lock
+  // atomicity is a @stwd/trade-sessions concern; the spend/audit invariants the
+  // route owns run for real inside the callback. Returns null when the session
+  // is not active so the route's revoke-race 409 path is exercised.
+  fenceSpy = spyOn(TradeSessionManager.prototype, "withActiveSubmissionFence").mockImplementation(
+    (async (input: { tenantId: string; id: string }, cb: () => Promise<unknown>) => {
+      const active = await new TradeSessionManager().getActive(input.tenantId, input.id);
+      if (!active) return null;
+      return cb();
+    }) as never,
+  );
+  ({ tradeRoutes: sharedTradeRoutes } = await import("../routes/trade"));
+});
+
+afterAll(async () => {
+  fenceSpy?.mockRestore();
+  await closeDb();
+  delete process.env.STEWARD_PGLITE_MEMORY;
+});
+
 describe("POST /v1/trade/polymarket/order", () => {
   let tradeRoutes: Hono;
 
-  beforeAll(async () => {
-    process.env.STEWARD_PGLITE_MEMORY = "true";
-    process.env.STEWARD_MASTER_PASSWORD ??= "pm-order-master-password";
-    process.env.STEWARD_AUDIT_HMAC_KEY ??= "pm-order-test-audit-hmac-key-0123456789abcdef0";
-    const { db, client } = await createPGLiteDb("memory://");
-    setPGLiteOverride(db, async () => {
-      await client.close();
-    });
-    // Faithful pass-through for the fence's DB-transaction wrapper. The real
-    // wrapper opens getDb().transaction() + an advisory lock and re-selects the
-    // active session; under single-connection PGLite the callback's own base-
-    // connection queries (reserveSpend + audit writes) deadlock against the outer
-    // transaction (production runs them on a pooled connection). The advisory-lock
-    // atomicity is a @stwd/trade-sessions concern; the spend/audit invariants the
-    // route owns run for real inside the callback. Returns null when the session
-    // is not active so the route's revoke-race 409 path is exercised.
-    fenceSpy = spyOn(TradeSessionManager.prototype, "withActiveSubmissionFence").mockImplementation(
-      (async (input: { tenantId: string; id: string }, cb: () => Promise<unknown>) => {
-        const active = await new TradeSessionManager().getActive(input.tenantId, input.id);
-        if (!active) return null;
-        return cb();
-      }) as never,
-    );
-    ({ tradeRoutes } = await import("../routes/trade"));
-  });
-
-  afterAll(async () => {
-    fenceSpy?.mockRestore();
-    await closeDb();
-    delete process.env.STEWARD_PGLITE_MEMORY;
+  beforeAll(() => {
+    tradeRoutes = sharedTradeRoutes;
   });
 
   afterEach(() => {
@@ -339,7 +347,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
       {} as never,
     );
-    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockResolvedValue({
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
       venue: "polymarket" as const,
       orderId: "pm-ok-1",
       status: "matched",
@@ -348,7 +356,7 @@ describe("POST /v1/trade/polymarket/order", () => {
       takingAmount: "20",
       actualAmount: 20,
       actualPrice: 0.5,
-    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>);
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
 
     try {
       const res = await postOrder(app, sessionId, crypto.randomUUID());
@@ -381,13 +389,13 @@ describe("POST /v1/trade/polymarket/order", () => {
     buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
       {} as never,
     );
-    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockResolvedValue({
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
       venue: "polymarket" as const,
       orderId: "pm-rej-1",
       success: false,
       errorMsg: "order rejected by book",
       actualAmount: 0,
-    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>);
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
 
     try {
       const res = await postOrder(app, sessionId, crypto.randomUUID());
@@ -416,9 +424,9 @@ describe("POST /v1/trade/polymarket/order", () => {
     buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockRejectedValue(
       new Error("could not resolve tickSize"),
     );
-    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockResolvedValue({
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
       venue: "polymarket" as const,
-    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>);
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
 
     try {
       const res = await postOrder(app, sessionId, crypto.randomUUID());
@@ -444,7 +452,7 @@ describe("POST /v1/trade/polymarket/order", () => {
     );
     // The build succeeded; the POST faults -> the order may have landed. Spend
     // stays reserved (mirrors HL's 502 path).
-    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockRejectedValue(
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockRejectedValue(
       new Error("socket hang up"),
     );
 
@@ -471,12 +479,12 @@ describe("POST /v1/trade/polymarket/order", () => {
     buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
       {} as never,
     );
-    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockResolvedValue({
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
       venue: "polymarket" as const,
       orderId: "pm-should-not-run",
       success: true,
       actualAmount: 20,
-    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>);
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
 
     // Simulate the revoke landing in the fence window: revoke the session right
     // after the policy gate but before the fence runs its active recheck. The
@@ -497,5 +505,109 @@ describe("POST /v1/trade/polymarket/order", () => {
     } finally {
       delete process.env.STEWARD_PM_TEST_CREDS;
     }
+  });
+});
+
+describe("POST /v1/trade/sessions (polymarket)", () => {
+  let tradeRoutes: Hono;
+
+  beforeAll(() => {
+    tradeRoutes = sharedTradeRoutes;
+  });
+
+  afterEach(() => {
+    getWalletSpy?.mockRestore();
+    getWalletSpy = undefined;
+  });
+
+  async function seedAgent(): Promise<{ tenantId: string; agentId: string }> {
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const tenantId = `pm-sess-tenant-${suffix}`;
+    const agentId = `pm-sess-agent-${suffix}`;
+    await getDb()
+      .insert(tenants)
+      .values({ id: tenantId, name: "PM Sess Tenant", apiKeyHash: `hash-${tenantId}` });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: "PM Sess Agent",
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    });
+    return { tenantId, agentId };
+  }
+
+  function makeHumanApp(tenantId: string, routes: Hono) {
+    const app = new Hono<{ Variables: AppVariables }>();
+    app.use("*", async (c, next) => {
+      c.set("tenantId", tenantId);
+      c.set("authType", "api-key"); // tenant-level api-key can manage sessions
+      await next();
+    });
+    app.route("/v1/trade", routes);
+    return app;
+  }
+
+  it("creates a polymarket session with a pm: allowlist through the public route", async () => {
+    const { tenantId, agentId } = await seedAgent();
+    stubWallet(true);
+    const app = makeHumanApp(tenantId, tradeRoutes);
+
+    const res = await app.request("/v1/trade/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        venue: "polymarket",
+        dailyCap: 100,
+        perOrderCap: 50,
+        allowedAssets: [`pm:${TOKEN_ID}`, `pm:cond:${COND_ID}`],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { ok: boolean; data: { sessionId: string } };
+    expect(body.ok).toBe(true);
+    expect(body.data.sessionId).toMatch(/^ses_/);
+
+    // The persisted session is bound to the polymarket wallet + pm: allowlist.
+    const [row] = await getDb()
+      .select()
+      .from(tradeSessions)
+      .where(eq(tradeSessions.id, body.data.sessionId));
+    expect(row.venue).toBe("polymarket");
+    expect(row.walletId).toBe(WALLET);
+    expect(row.allowedAssets).toContain(`pm:${TOKEN_ID}`);
+    expect(row.allowedAssets).toContain(`pm:cond:${COND_ID}`);
+  });
+
+  it("rejects a polymarket session with no allowlist (400)", async () => {
+    const { tenantId, agentId } = await seedAgent();
+    stubWallet(true);
+    const app = makeHumanApp(tenantId, tradeRoutes);
+
+    const res = await app.request("/v1/trade/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentId, venue: "polymarket", dailyCap: 100, perOrderCap: 50 }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error?: string }).error).toContain("require an explicit");
+  });
+
+  it("rejects a hyperliquid session that allowlists a pm: market (400)", async () => {
+    const { tenantId, agentId } = await seedAgent();
+    const app = makeHumanApp(tenantId, tradeRoutes);
+
+    const res = await app.request("/v1/trade/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        venue: "hyperliquid",
+        dailyCap: 100,
+        perOrderCap: 50,
+        allowedAssets: [`pm:${TOKEN_ID}`],
+      }),
+    });
+    expect(res.status).toBe(400);
   });
 });

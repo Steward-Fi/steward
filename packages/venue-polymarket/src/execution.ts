@@ -305,10 +305,30 @@ export class PolymarketExecutionAdapter {
   /**
    * Build + post an order. market/FOK -> FOK (marketable limit at supplied
    * price), otherwise GTC. Returns the venue-neutral result with actual fill.
+   *
+   * For callers that need to separate the BUILD/sign phase (no network reaches
+   * the venue) from the POST phase (the order may land), call buildSignedOrder()
+   * then submitSignedOrder() instead — a build failure then never gets confused
+   * with a post failure (e.g. for spend-accounting fail-safety).
    */
   async submitOrder(input: PolymarketOrderRequest): Promise<PolymarketPostOrderResult> {
     const req = orderRequestSchema.parse(input);
     const signed = await this.buildSignedOrder(req);
+    return this.submitSignedOrder(signed, req);
+  }
+
+  /**
+   * POST-ONLY phase: post an ALREADY-built signed order to the venue. Splitting
+   * this from buildSignedOrder lets a caller attribute failures precisely — a
+   * throw from THIS method means the post was attempted (the order may have
+   * landed), whereas a throw from buildSignedOrder means nothing was submitted.
+   * Does NOT rebuild/re-sign, so it never re-touches CLOB metadata or the signer.
+   */
+  async submitSignedOrder(
+    signed: unknown,
+    input: PolymarketOrderRequest,
+  ): Promise<PolymarketPostOrderResult> {
+    const req = orderRequestSchema.parse(input);
     const { client, OrderType } = await this.createClobClient();
 
     const isMarketable = req.orderType === "market" || req.orderType === "FOK";
