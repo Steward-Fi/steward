@@ -233,8 +233,14 @@ export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, n
         403,
       );
     }
+    // Platform binding: when the token carries a platform_id it MUST match the
+    // agent's registered platform (prevents a token scoped to platform A from
+    // acting as the agent on platform B). When the trusted issuer omits the claim
+    // (the eliza-cloud minter does not embed platform_id), we do NOT reject — the
+    // agent identity is already established via the JWKS-verified sub + the
+    // tenant→agent registration check above. Symmetric with the tenant_id handling.
     const tokenPlatformId = stringClaim(payload, "platform_id", "platformId");
-    if (agent.platformId && tokenPlatformId !== agent.platformId) {
+    if (agent.platformId && tokenPlatformId && tokenPlatformId !== agent.platformId) {
       return invalid(c, "invalid platform claims");
     }
 
