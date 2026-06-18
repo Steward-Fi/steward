@@ -406,6 +406,39 @@ describe("POST /v1/trade/polymarket/order", () => {
     }
   });
 
+  it("no funder metadata -> EOA funder path still executes (sigType 0, funder=wallet)", async () => {
+    // v1 EOA custody: when no funder Safe is recorded, the delegate EOA is its
+    // own funder. The order should still flow end-to-end (sigType selection is
+    // internal; we assert the path reaches submit + fills).
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(false); // NO funder metadata -> EOA path
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
+      {} as never,
+    );
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue({
+      venue: "polymarket" as const,
+      orderId: "pm-eoa-1",
+      status: "matched",
+      success: true,
+      makingAmount: "10",
+      takingAmount: "20",
+      actualAmount: 20,
+      actualPrice: 0.5,
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>);
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      expect(res.status).toBe(200);
+      expect(submitSpy).toHaveBeenCalledTimes(1);
+      expect(await dailySpendOf(sessionId)).toBe(10);
+    } finally {
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
   it("wallet-binding mismatch (rotated wallet) -> 409 fail-closed, no spend, no submit", async () => {
     // Session bound to a DIFFERENT wallet than the one the vault now resolves
     // (simulates a rotation/reprovision after the session was created).

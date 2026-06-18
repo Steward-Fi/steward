@@ -10,8 +10,13 @@ import {
   isBuilderPerpSymbol,
 } from "@stwd/venue-hyperliquid";
 import {
+  clobApiCredentialsSchema,
+  deriveApiCredentials,
   type EthersSignerLike,
   isPolymarketPostNotAttempted,
+  isPolymarketUnauthorized,
+  POLY_EOA_SIGNATURE_TYPE,
+  POLY_GNOSIS_SAFE_SIGNATURE_TYPE,
   type PolymarketAccount,
   PolymarketExecutionAdapter,
   type PolymarketOrderRequest,
@@ -1154,8 +1159,14 @@ function pmPolicyRejectStatus(reason: string): 400 | 403 {
  * not be resolved. The route FAILS CLOSED on any non-ok result.
  */
 type PolymarketCredsResolution =
-  | { ok: true; apiCredentials: PolymarketAccount["apiCredentials"]; funderAddress: string; walletAddress: string }
-  | { ok: false; reason: "wallet-not-found" | "creds-not-provisioned" };
+  | {
+      ok: true;
+      apiCredentials: PolymarketAccount["apiCredentials"];
+      funderAddress: string;
+      walletAddress: string;
+      signatureType: number;
+    }
+  | { ok: false; reason: "wallet-not-found" | "creds-not-provisioned" | "derive-failed" };
 
 /**
  * Resolve the agent's Polymarket L2 CLOB credentials + funder Safe.
@@ -1171,40 +1182,95 @@ type PolymarketCredsResolution =
  * returns `creds-not-provisioned` and the route fails closed — we NEVER invent
  * or default credentials.
  */
+// L2 CLOB creds are derived from the L1 delegate signer and cached. They are
+// SECRET; cache them only in Redis with a TTL (never in the DB here). The same
+// signer deterministically yields the same creds, so a cache miss safely
+// re-derives. TTL bounds exposure + tolerates a CLOB key rotation.
+const PM_CREDS_CACHE_TTL_SECONDS = 6 * 60 * 60; // 6h
+function pmCredsCacheKey(tenantId: string, agentId: string, walletAddress: string): string {
+  return `pm:clob-l2:${tenantId}:${agentId}:${walletAddress.toLowerCase()}`;
+}
+
+/**
+ * Invalidate cached L2 CLOB creds so the NEXT order re-derives from L1. Called
+ * when the venue returns 401 (the cached creds were rotated/revoked CLOB-side).
+ * Best-effort; the current request still fails, the next self-heals.
+ */
+async function invalidatePolymarketCredsCache(
+  tenantId: string,
+  agentId: string,
+  walletAddress: string,
+): Promise<void> {
+  const redis = getRedisClient();
+  if (!redis) return;
+  await redis.del(pmCredsCacheKey(tenantId, agentId, walletAddress)).catch(() => 0);
+}
+
 async function resolvePolymarketCreds(
   tenantId: string,
   agentId: string,
 ): Promise<PolymarketCredsResolution> {
-  // 1) Venue wallet (signer address + funder Safe in non-secret metadata).
+  // 1) Venue wallet (the L1 delegate signer address + optional funder Safe).
   let walletAddress: string;
-  let funderAddress: string | undefined;
+  let funderMeta: string | undefined;
   try {
     const wallet = await vault.getWallet({ agentId, venue: "polymarket" });
     walletAddress = wallet.address;
     const meta = wallet.metadata as { funderAddress?: unknown } | undefined;
-    funderAddress = typeof meta?.funderAddress === "string" ? meta.funderAddress : undefined;
+    funderMeta = typeof meta?.funderAddress === "string" ? meta.funderAddress : undefined;
   } catch {
     return { ok: false, reason: "wallet-not-found" };
   }
 
-  // 2) L2 CLOB apiCredentials — SECRET, provisioned in Phase C. Not yet wired.
-  // Resolve from the secret vault here once provisioning seals them. For now we
-  // have no path, so fail closed.
-  // TODO(phase-c): const apiCredentials = await secretVault.get({ tenantId, agentId, venue: "polymarket", name: "clob-l2" });
-  let apiCredentials: PolymarketAccount["apiCredentials"] | null = null;
+  // Funder + signatureType:
+  //  - If a funder Safe is recorded in wallet metadata → sigType 2 (Safe funder).
+  //  - Else (v1) the delegate EOA is its own funder → sigType 0 (EOA holds USDC).
+  const funderAddress = funderMeta ?? walletAddress;
+  const signatureType = funderMeta ? POLY_GNOSIS_SAFE_SIGNATURE_TYPE : POLY_EOA_SIGNATURE_TYPE;
 
-  // Test-only seam: lets the route's happy path be exercised deterministically
-  // before Phase C provisioning exists. NEVER active in production (the env var
-  // is unset). When Phase C lands, delete this block and read from secretVault.
+  // 2) L2 CLOB apiCredentials. Test-only deterministic seam first (inert in prod).
   if (process.env.STEWARD_PM_TEST_CREDS === "1") {
-    apiCredentials = { key: "test-key", secret: "test-secret", passphrase: "test-pass" };
+    return {
+      ok: true,
+      apiCredentials: { key: "test-key", secret: "test-secret", passphrase: "test-pass" },
+      funderAddress,
+      walletAddress,
+      signatureType,
+    };
   }
 
-  if (!apiCredentials || !funderAddress) {
-    return { ok: false, reason: "creds-not-provisioned" };
+  // 2a) Redis cache.
+  const redis = getRedisClient();
+  const cacheKey = pmCredsCacheKey(tenantId, agentId, walletAddress);
+  if (redis) {
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cached));
+        if (parsed.success) {
+          return { ok: true, apiCredentials: parsed.data, funderAddress, walletAddress, signatureType };
+        }
+      }
+    } catch {
+      // cache read failure is non-fatal — fall through to derive.
+    }
   }
 
-  return { ok: true, apiCredentials, funderAddress, walletAddress };
+  // 2b) Derive L2 creds from the L1 delegate signer (idempotent), then cache.
+  let apiCredentials: PolymarketAccount["apiCredentials"];
+  try {
+    const signer = buildPolymarketVaultSigner(tenantId, agentId, walletAddress);
+    apiCredentials = await deriveApiCredentials(signer);
+  } catch {
+    return { ok: false, reason: "derive-failed" };
+  }
+  if (redis) {
+    await redis
+      .setex(cacheKey, PM_CREDS_CACHE_TTL_SECONDS, JSON.stringify(apiCredentials))
+      .catch(() => undefined);
+  }
+
+  return { ok: true, apiCredentials, funderAddress, walletAddress, signatureType };
 }
 
 /**
@@ -1251,6 +1317,14 @@ function buildPolymarketVaultSigner(
       value: value as Record<string, unknown>,
     });
   };
+  // createOrDeriveApiKey's L1 auth + order signing both use _signTypedData
+  // (ClobAuth / order EIP-712), which we scope to venue:"polymarket" so the
+  // signature recovers to walletAddress. We intentionally do NOT expose
+  // signMessage: vault.signMessage signs with the agent's DEFAULT (null-venue)
+  // EVM key, which would NOT recover to the venue-scoped polymarket wallet and
+  // would silently break derivation/submission for agents whose polymarket
+  // wallet differs from their default. If a clob-client path ever requires
+  // personal-sign, add a venue-scoped vault.signMessage overload first.
   return {
     address: walletAddress,
     async getAddress() {
@@ -1415,7 +1489,7 @@ tradeRoutes.post("/polymarket/order", async (c) => {
     apiCredentials: creds.apiCredentials,
     funderAddress: creds.funderAddress,
     signer,
-    signatureType: 2,
+    signatureType: creds.signatureType,
   };
   const adapter = new PolymarketExecutionAdapter(account, { builder: resolveBuilderConfig() });
 
@@ -1476,6 +1550,11 @@ tradeRoutes.post("/polymarket/order", async (c) => {
           id: session.id,
           amountUsd: notionalUsd,
         });
+        // A 401 here means the cached L2 creds were rotated/revoked CLOB-side.
+        // Drop them so the NEXT order re-derives from L1 (self-healing).
+        if (isPolymarketUnauthorized(err)) {
+          await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+        }
         await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
           sessionId: session.id,
           venue: "polymarket",
@@ -1501,6 +1580,12 @@ tradeRoutes.post("/polymarket/order", async (c) => {
       try {
         result = await adapter.submitSignedOrder(signedOrder, orderRequest);
       } catch (err) {
+        // A 401 anywhere in submit (client construction or the POST) means the
+        // cached L2 creds were rotated/revoked — drop them so the next order
+        // re-derives from L1 (self-healing), regardless of attempted-vs-not.
+        if (isPolymarketUnauthorized(err)) {
+          await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+        }
         // A not-attempted failure (CLOB client/builder construction threw before
         // any POST) means nothing reached the venue → RELEASE spend, return 400.
         if (isPolymarketPostNotAttempted(err)) {
@@ -1556,6 +1641,14 @@ tradeRoutes.post("/polymarket/order", async (c) => {
           id: session.id,
           amountUsd: notionalUsd,
         });
+        // If the venue rejected with an auth error (returned, not thrown), the
+        // cached L2 creds are stale → drop them so the next order re-derives.
+        if (
+          isPolymarketUnauthorized(result) ||
+          /\b401\b|unauthor|invalid api|invalid.*key|api key/i.test(result.errorMsg ?? "")
+        ) {
+          await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+        }
         await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
           sessionId: session.id,
           venue: "polymarket",
