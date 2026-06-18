@@ -43,6 +43,7 @@ import {
 } from "bun:test";
 import { agents, auditEvents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { TradeSessionManager } from "@stwd/trade-sessions";
 import { PolymarketExecutionAdapter } from "@stwd/venue-polymarket";
 import { Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
@@ -58,6 +59,8 @@ const WALLET = "0x1111111111111111111111111111111111111111";
 
 let submitSpy: ReturnType<typeof spyOn> | undefined;
 let getWalletSpy: ReturnType<typeof spyOn> | undefined;
+let buildSpy: ReturnType<typeof spyOn> | undefined;
+let fenceSpy: ReturnType<typeof spyOn> | undefined;
 
 // Inject a polymarket venue wallet WITH funder metadata so the creds resolver
 // gets past the wallet step. Whether the L2 creds resolve (Phase C) is toggled
@@ -176,10 +179,26 @@ describe("POST /v1/trade/polymarket/order", () => {
     setPGLiteOverride(db, async () => {
       await client.close();
     });
+    // Faithful pass-through for the fence's DB-transaction wrapper. The real
+    // wrapper opens getDb().transaction() + an advisory lock and re-selects the
+    // active session; under single-connection PGLite the callback's own base-
+    // connection queries (reserveSpend + audit writes) deadlock against the outer
+    // transaction (production runs them on a pooled connection). The advisory-lock
+    // atomicity is a @stwd/trade-sessions concern; the spend/audit invariants the
+    // route owns run for real inside the callback. Returns null when the session
+    // is not active so the route's revoke-race 409 path is exercised.
+    fenceSpy = spyOn(TradeSessionManager.prototype, "withActiveSubmissionFence").mockImplementation(
+      (async (input: { tenantId: string; id: string }, cb: () => Promise<unknown>) => {
+        const active = await new TradeSessionManager().getActive(input.tenantId, input.id);
+        if (!active) return null;
+        return cb();
+      }) as never,
+    );
     ({ tradeRoutes } = await import("../routes/trade"));
   });
 
   afterAll(async () => {
+    fenceSpy?.mockRestore();
     await closeDb();
     delete process.env.STEWARD_PGLITE_MEMORY;
   });
@@ -187,8 +206,10 @@ describe("POST /v1/trade/polymarket/order", () => {
   afterEach(() => {
     submitSpy?.mockRestore();
     getWalletSpy?.mockRestore();
+    buildSpy?.mockRestore();
     submitSpy = undefined;
     getWalletSpy = undefined;
+    buildSpy = undefined;
   });
 
   it("rejects an order whose market is not allowlisted (400 policy-violation, no spend)", async () => {
@@ -315,6 +336,9 @@ describe("POST /v1/trade/polymarket/order", () => {
     // clob-client / signing runs.
     process.env.STEWARD_PM_TEST_CREDS = "1";
     stubWallet(true);
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
+      {} as never,
+    );
     submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockResolvedValue({
       venue: "polymarket" as const,
       orderId: "pm-ok-1",
@@ -354,6 +378,9 @@ describe("POST /v1/trade/polymarket/order", () => {
 
     process.env.STEWARD_PM_TEST_CREDS = "1";
     stubWallet(true);
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
+      {} as never,
+    );
     submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockResolvedValue({
       venue: "polymarket" as const,
       orderId: "pm-rej-1",
@@ -371,6 +398,101 @@ describe("POST /v1/trade/polymarket/order", () => {
       // Reserved spend was released back to 0 on rejection.
       expect(await dailySpendOf(sessionId)).toBe(0);
       expect(await auditCount(tenantId, "trade.order.canceled")).toBe(1);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+    } finally {
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("pre-submit build failure -> 400, RELEASES spend, never calls submitOrder", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    // buildSignedOrder throws BEFORE anything reaches the venue (e.g. tickSize
+    // resolution failure / CLOB rounding rejection). submitOrder must NOT run
+    // and the reserved spend MUST be released (this never burns the daily cap).
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockRejectedValue(
+      new Error("could not resolve tickSize"),
+    );
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockResolvedValue({
+      venue: "polymarket" as const,
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>);
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error?: string }).error).toContain("could not be built");
+      expect(submitSpy).toHaveBeenCalledTimes(0);
+      // Pre-submit failures release the reserved spend.
+      expect(await dailySpendOf(sessionId)).toBe(0);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+    } finally {
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("submit-status-unknown (adapter throws post-submit) -> 502, KEEPS spend reserved", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
+      {} as never,
+    );
+    // The build succeeded; the POST faults -> the order may have landed. Spend
+    // stays reserved (mirrors HL's 502 path).
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockRejectedValue(
+      new Error("socket hang up"),
+    );
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      expect(res.status).toBe(502);
+      expect(((await res.json()) as { error?: string }).error).toContain(
+        "Trade submission status unknown",
+      );
+      // The order may have landed -> spend is NOT released.
+      expect(await dailySpendOf(sessionId)).toBe(10);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
+    } finally {
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("revoke race: session revoked before the submit fence -> 409, never submits", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    buildSpy = spyOn(PolymarketExecutionAdapter.prototype, "buildSignedOrder").mockResolvedValue(
+      {} as never,
+    );
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitOrder").mockResolvedValue({
+      venue: "polymarket" as const,
+      orderId: "pm-should-not-run",
+      success: true,
+      actualAmount: 20,
+    } as Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>);
+
+    // Simulate the revoke landing in the fence window: revoke the session right
+    // after the policy gate but before the fence runs its active recheck. The
+    // fence stub re-reads getActive() and returns null -> route fails closed.
+    await getDb()
+      .update(tradeSessions)
+      .set({ status: "revoked", revokedAt: new Date() })
+      .where(eq(tradeSessions.id, sessionId));
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      // The pre-fence checkActiveOrder also sees it revoked -> 403; either way
+      // the order is NOT submitted and no spend is consumed.
+      expect([403, 409]).toContain(res.status);
+      expect(submitSpy).toHaveBeenCalledTimes(0);
+      expect(await dailySpendOf(sessionId)).toBe(0);
       expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
     } finally {
       delete process.env.STEWARD_PM_TEST_CREDS;

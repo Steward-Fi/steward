@@ -1292,36 +1292,9 @@ tradeRoutes.post("/polymarket/order", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: reason }, 409);
   }
 
-  // Reserve spend (atomic; also re-checks session active + cap). Release on any
-  // downstream failure — mirrors the HL path.
-  const reserved = await getSessionManager().reserveSpend({
-    tenantId,
-    id: session.id,
-    amountUsd: notionalUsd,
-  });
-  if (!reserved) {
-    const envelope: TradeIdempotencyResponse = {
-      status: 400,
-      body: { ok: false, error: "Trade session cap exceeded" },
-    };
-    idempotency.store?.(envelope);
-    return c.json(envelope.body, envelope.status);
-  }
-
-  await auditTradeEvent(tenantId, agentId, "trade.order.submit.authorized", {
-    sessionId: session.id,
-    venue: "polymarket",
-    tokenId: body.tokenId,
-    conditionId: body.conditionId ?? null,
-    side: body.side,
-    amount,
-    price,
-    notionalUsd,
-  });
-
-  // Build the vault→ethers-signer bridge + the Polymarket account, then the
-  // adapter. Builder attribution is resolved from env (default OFF) — never
-  // hardcoded.
+  // Build the vault→ethers-signer bridge + the Polymarket account + adapter
+  // BEFORE entering the fence. Builder attribution is resolved from env
+  // (default OFF) — never hardcoded.
   const signer = buildPolymarketVaultSigner(tenantId, agentId, creds.walletAddress);
   const account: PolymarketAccount = {
     apiCredentials: creds.apiCredentials,
@@ -1341,87 +1314,164 @@ tradeRoutes.post("/polymarket/order", async (c) => {
     ...(typeof body.negRisk === "boolean" ? { negRisk: body.negRisk } : {}),
   };
 
-  let result: Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>;
-  try {
-    result = await adapter.submitOrder(orderRequest);
-  } catch (err) {
-    // Submission status unknown — the order may have landed at the venue. Do NOT
-    // release spend (mirrors HL's 502 path). Record nothing as filled.
-    await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
-      sessionId: session.id,
-      venue: "polymarket",
-      tokenId: body.tokenId,
-      conditionId: body.conditionId ?? null,
-      notionalUsd,
-      reason: "submit-status-unknown",
-      error: err instanceof Error ? err.message : String(err),
-    });
+  const manager = getSessionManager();
+  // Fence reserve→submit against concurrent revocation (mirrors HL's
+  // withActiveSubmissionFence): the spend reservation and the venue submit run
+  // under an advisory lock that the revoke path also takes, so a revoke that
+  // commits before this block cannot interleave with an in-flight submit.
+  const fenced = await manager.withActiveSubmissionFence(
+    { tenantId, id: session.id },
+    async () => {
+      // Re-confirm active inside the fence, then reserve spend (atomic; also
+      // re-checks active + cap).
+      const reserved = await getSessionManager().reserveSpend({
+        tenantId,
+        id: session.id,
+        amountUsd: notionalUsd,
+      });
+      if (!reserved) {
+        const envelope: TradeIdempotencyResponse = {
+          status: 400,
+          body: { ok: false, error: "Trade session cap exceeded" },
+        };
+        idempotency.store?.(envelope);
+        return envelope;
+      }
+
+      await auditTradeEvent(tenantId, agentId, "trade.order.submit.authorized", {
+        sessionId: session.id,
+        venue: "polymarket",
+        tokenId: body.tokenId,
+        conditionId: body.conditionId ?? null,
+        side: body.side,
+        amount,
+        price,
+        notionalUsd,
+      });
+
+      // PRE-SUBMIT phase: build + sign the order (resolves tickSize/negRisk +
+      // applies CLOB rounding). Any throw here means NOTHING reached the venue,
+      // so the reserved spend MUST be released — these never burn the daily cap.
+      try {
+        await adapter.buildSignedOrder(orderRequest);
+      } catch (err) {
+        await getSessionManager().releaseSpend({
+          tenantId,
+          id: session.id,
+          amountUsd: notionalUsd,
+        });
+        await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+          sessionId: session.id,
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          conditionId: body.conditionId ?? null,
+          notionalUsd,
+          reason: "pre-submit-build-failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        const envelope: TradeIdempotencyResponse = {
+          status: 400,
+          body: { ok: false, error: "Order could not be built; not submitted" },
+        };
+        idempotency.store?.(envelope);
+        return envelope;
+      }
+
+      // SUBMIT phase: post to the venue. A throw HERE means the order may have
+      // landed — status unknown, so we do NOT release spend (mirrors HL's 502).
+      let result: Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>;
+      try {
+        result = await adapter.submitOrder(orderRequest);
+      } catch (err) {
+        await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+          sessionId: session.id,
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          conditionId: body.conditionId ?? null,
+          notionalUsd,
+          reason: "submit-status-unknown",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        const envelope: TradeIdempotencyResponse = {
+          status: 502,
+          body: { ok: false, error: "Trade submission status unknown" },
+        };
+        idempotency.store?.(envelope);
+        return envelope;
+      }
+
+      // The adapter reports rejection as success:false / errorMsg / actualAmount 0.
+      const rejected =
+        result.success === false ||
+        Boolean(result.errorMsg) ||
+        (result.actualAmount !== undefined && result.actualAmount <= 0);
+      if (rejected) {
+        // The order was NOT accepted → release the reserved spend.
+        await getSessionManager().releaseSpend({
+          tenantId,
+          id: session.id,
+          amountUsd: notionalUsd,
+        });
+        await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+          sessionId: session.id,
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          conditionId: body.conditionId ?? null,
+          side: body.side,
+          amount,
+          price,
+          notionalUsd,
+          orderId: result.orderId ?? null,
+          reason: result.errorMsg ?? "Trade order rejected",
+        });
+        const envelope: TradeIdempotencyResponse = {
+          status: 400,
+          body: {
+            ok: false,
+            error: result.errorMsg ?? "Trade order rejected",
+            data: { status: result.status ?? "rejected" },
+          },
+        };
+        idempotency.store?.(envelope);
+        return envelope;
+      }
+
+      const response = {
+        orderId: result.orderId ?? crypto.randomUUID(),
+        status: result.status ?? "filled",
+        filledQty: result.actualAmount ?? 0,
+        avgPrice: result.actualPrice ?? Number(price),
+        notionalUsd,
+      };
+      await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
+        sessionId: session.id,
+        venue: "polymarket",
+        tokenId: body.tokenId,
+        conditionId: body.conditionId ?? null,
+        side: body.side,
+        amount,
+        price,
+        notionalUsd,
+        orderId: response.orderId,
+      });
+      const envelope: TradeIdempotencyResponse = {
+        status: 200,
+        body: responseData(response),
+      };
+      idempotency.store?.(envelope);
+      return envelope;
+    },
+  );
+
+  // The fence returns null when the session is no longer active (revoked/expired
+  // before the lock was taken) — fail closed without submitting.
+  if (!fenced) {
     const envelope: TradeIdempotencyResponse = {
-      status: 502,
-      body: { ok: false, error: "Trade submission status unknown" },
+      status: 409,
+      body: { ok: false, error: "Trade session was revoked before order submission" },
     };
     idempotency.store?.(envelope);
     return c.json(envelope.body, envelope.status);
   }
-
-  // The adapter reports rejection as success:false / errorMsg / actualAmount 0.
-  const rejected =
-    result.success === false ||
-    Boolean(result.errorMsg) ||
-    (result.actualAmount !== undefined && result.actualAmount <= 0);
-  if (rejected) {
-    // The order was NOT accepted → release the reserved spend.
-    await getSessionManager().releaseSpend({
-      tenantId,
-      id: session.id,
-      amountUsd: notionalUsd,
-    });
-    await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
-      sessionId: session.id,
-      venue: "polymarket",
-      tokenId: body.tokenId,
-      conditionId: body.conditionId ?? null,
-      side: body.side,
-      amount,
-      price,
-      notionalUsd,
-      orderId: result.orderId ?? null,
-      reason: result.errorMsg ?? "Trade order rejected",
-    });
-    const envelope: TradeIdempotencyResponse = {
-      status: 400,
-      body: {
-        ok: false,
-        error: result.errorMsg ?? "Trade order rejected",
-        data: { status: result.status ?? "rejected" },
-      },
-    };
-    idempotency.store?.(envelope);
-    return c.json(envelope.body, envelope.status);
-  }
-
-  const response = {
-    orderId: result.orderId ?? crypto.randomUUID(),
-    status: result.status ?? "filled",
-    filledQty: result.actualAmount ?? 0,
-    avgPrice: result.actualPrice ?? Number(price),
-    notionalUsd,
-  };
-  const envelope: TradeIdempotencyResponse = {
-    status: 200,
-    body: responseData(response),
-  };
-  await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
-    sessionId: session.id,
-    venue: "polymarket",
-    tokenId: body.tokenId,
-    conditionId: body.conditionId ?? null,
-    side: body.side,
-    amount,
-    price,
-    notionalUsd,
-    orderId: response.orderId,
-  });
-  idempotency.store?.(envelope);
-  return c.json(responseData(response));
+  return c.json(fenced.body, fenced.status);
 });
