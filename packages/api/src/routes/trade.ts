@@ -9,6 +9,13 @@ import {
   hyperliquidAssetSchema,
   isBuilderPerpSymbol,
 } from "@stwd/venue-hyperliquid";
+import {
+  type EthersSignerLike,
+  type PolymarketAccount,
+  PolymarketExecutionAdapter,
+  type PolymarketOrderRequest,
+  resolveBuilderConfig,
+} from "@stwd/venue-polymarket";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -952,4 +959,469 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
   }
   if (fenced instanceof Response) return fenced;
   return c.json(fenced.body, fenced.status);
+});
+
+// ===========================================================================
+// POST /v1/trade/polymarket/order
+//
+// Place a Polymarket CLOB order through the rail. Mirrors the Hyperliquid order
+// handler above: agent-JWT guard, order rate-limit, Idempotency-Key (required,
+// conflict 409 + replay), active session fetch + ownership + venue check, the
+// prediction-market policy gate (checkActiveOrder), spend reserve→release-on-
+// failure, the vault→ethers-signer bridge, the venue adapter call, audit events.
+//
+// Phase C creds-provisioning is NOT wired yet: the L2 CLOB apiCredentials +
+// funder Safe are resolved from the agent's polymarket venue wallet. Until
+// provisioning writes them, resolvePolymarketAccount returns null and the route
+// FAILS CLOSED with a typed 409 ("polymarket creds not provisioned"). We never
+// invent credentials.
+// ===========================================================================
+
+const pmSubmitOrderSchema = z.object({
+  sessionId: z.string().min(1),
+  // CLOB token id — the executable unit (a long numeric string).
+  tokenId: z.string().regex(/^[0-9]{1,128}$/, "tokenId must be a numeric string"),
+  // Optional condition id — when allowlisted as pm:cond:<id> it grants the whole
+  // market (both YES/NO outcomes) without a per-token entry.
+  conditionId: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{1,64}$/, "conditionId must be a 0x-hex string")
+    .optional(),
+  side: z.enum(["buy", "sell"]),
+  // BUY: amount is USD notional to spend. SELL: amount is shares.
+  amount: z.union([z.string(), z.number()]),
+  // Limit price in (0,1).
+  price: z.union([z.string(), z.number()]),
+  tickSize: z.enum(["0.1", "0.01", "0.001", "0.0001"]).optional(),
+  negRisk: z.boolean().optional(),
+  idempotencyKey: z.string().min(1).max(256).optional(),
+});
+
+type PmSubmitOrderBody = z.infer<typeof pmSubmitOrderSchema>;
+
+const pmMemoryIdempotency = new Map<
+  string,
+  { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }
+>();
+
+// Idempotency for the Polymarket body shape. Mirrors getIdempotency() but keyed
+// for PmSubmitOrderBody so the two routes never collide on a shared map type.
+function getPmIdempotency(
+  tenantId: string,
+  agentId: string,
+  key: string | undefined,
+  body: PmSubmitOrderBody,
+): {
+  conflict?: boolean;
+  response?: TradeIdempotencyResponse;
+  store?: (response: TradeIdempotencyResponse) => void;
+} {
+  if (!key) return {};
+  const now = Date.now();
+  const mapKey = `${tenantId}:${agentId}:pm:${key}`;
+  const bodyHash = hashBody({ ...body, idempotencyKey: undefined });
+  const existing = pmMemoryIdempotency.get(mapKey);
+  if (existing && existing.expiresAt > now) {
+    if (existing.bodyHash !== bodyHash) return { conflict: true };
+    return { response: existing.response };
+  }
+  return {
+    store(response: TradeIdempotencyResponse) {
+      pmMemoryIdempotency.set(mapKey, {
+        bodyHash,
+        response,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+      });
+    },
+  };
+}
+
+async function enforcePolymarketOrderRateLimit(
+  agentId: string,
+): Promise<{ allowed: boolean; resetMs: number }> {
+  const redis = getRedisClient();
+  if (redis) {
+    const result = await checkRateLimit(`ratelimit:trade:polymarket:${agentId}:1000`, 1000, 10);
+    return { allowed: result.allowed, resetMs: result.resetMs };
+  }
+  const now = Date.now();
+  const current = memoryRateLimit.get(`pm:${agentId}`);
+  if (!current || current.resetAt <= now) {
+    memoryRateLimit.set(`pm:${agentId}`, { count: 1, resetAt: now + 1000 });
+    return { allowed: true, resetMs: 1000 };
+  }
+  if (current.count >= 10) return { allowed: false, resetMs: current.resetAt - now };
+  current.count += 1;
+  return { allowed: true, resetMs: current.resetAt - now };
+}
+
+// Notional USD of a Polymarket order. BUY: amount IS the USD spent. SELL: amount
+// is shares, so notional = shares * price. The policy gate caps on this value.
+function polymarketNotionalUsd(side: "buy" | "sell", amount: number, price: number): number {
+  return side === "buy" ? amount : amount * price;
+}
+
+// Map a structured checkOrderAllowed reason to its HTTP status. Allowlist/cap
+// rejections are client errors (400); a non-active session is a 403 (mirrors the
+// HL "Active session required" 403).
+function pmPolicyRejectStatus(reason: string): 400 | 403 {
+  return reason === "session-not-active" ? 403 : 400;
+}
+
+/**
+ * Resolved Polymarket credentials for an agent, or a typed reason why they could
+ * not be resolved. The route FAILS CLOSED on any non-ok result.
+ */
+type PolymarketCredsResolution =
+  | { ok: true; apiCredentials: PolymarketAccount["apiCredentials"]; funderAddress: string; walletAddress: string }
+  | { ok: false; reason: "wallet-not-found" | "creds-not-provisioned" };
+
+/**
+ * Resolve the agent's Polymarket L2 CLOB credentials + funder Safe.
+ *
+ * The funder Safe address is the NON-SECRET `funderAddress` on the agent's
+ * polymarket venue wallet metadata. The L2 apiCredentials { key, secret,
+ * passphrase } are SECRETS and live in the secret vault — a path Phase C
+ * provisioning has not wired yet.
+ *
+ * TODO(phase-c): read the L2 CLOB apiCredentials from the secret vault
+ * (SecretVault scoped to (tenantId, agentId, venue="polymarket")) once the
+ * provisioning daemon derives them from L1 and seals them. Until then this
+ * returns `creds-not-provisioned` and the route fails closed — we NEVER invent
+ * or default credentials.
+ */
+async function resolvePolymarketCreds(
+  tenantId: string,
+  agentId: string,
+): Promise<PolymarketCredsResolution> {
+  // 1) Venue wallet (signer address + funder Safe in non-secret metadata).
+  let walletAddress: string;
+  let funderAddress: string | undefined;
+  try {
+    const wallet = await vault.getWallet({ agentId, venue: "polymarket" });
+    walletAddress = wallet.address;
+    const meta = wallet.metadata as { funderAddress?: unknown } | undefined;
+    funderAddress = typeof meta?.funderAddress === "string" ? meta.funderAddress : undefined;
+  } catch {
+    return { ok: false, reason: "wallet-not-found" };
+  }
+
+  // 2) L2 CLOB apiCredentials — SECRET, provisioned in Phase C. Not yet wired.
+  // Resolve from the secret vault here once provisioning seals them. For now we
+  // have no path, so fail closed.
+  // TODO(phase-c): const apiCredentials = await secretVault.get({ tenantId, agentId, venue: "polymarket", name: "clob-l2" });
+  let apiCredentials: PolymarketAccount["apiCredentials"] | null = null;
+
+  // Test-only seam: lets the route's happy path be exercised deterministically
+  // before Phase C provisioning exists. NEVER active in production (the env var
+  // is unset). When Phase C lands, delete this block and read from secretVault.
+  if (process.env.STEWARD_PM_TEST_CREDS === "1") {
+    apiCredentials = { key: "test-key", secret: "test-secret", passphrase: "test-pass" };
+  }
+
+  if (!apiCredentials || !funderAddress) {
+    return { ok: false, reason: "creds-not-provisioned" };
+  }
+
+  return { ok: true, apiCredentials, funderAddress, walletAddress };
+}
+
+/**
+ * The vault→ethers-signer bridge.
+ *
+ * @stwd/venue-polymarket's clob-client needs an `EthersSignerLike` delegate that
+ * exposes `_signTypedData(domain, types, value)` (ethers v5) + `getAddress()`.
+ * The steward vault signs EIP-712 typed data via
+ * `vault.signTypedData({ tenantId, venue, agentId, domain, types, primaryType,
+ * value })` and returns a hex signature string — a different method shape.
+ *
+ * This wraps the vault into the EthersSignerLike the venue package expects:
+ *   - `_signTypedData(domain, types, value)` derives the EIP-712 primaryType
+ *     from the types map (the single non-`EIP712Domain` key — Polymarket's CTF
+ *     exchange order is a single-struct payload) and delegates to
+ *     vault.signTypedData with the polymarket venue scope, so the key never
+ *     leaves the vault.
+ *   - `getAddress()` / `.address` returns the agent's resolved polymarket wallet
+ *     address.
+ */
+function buildPolymarketVaultSigner(
+  tenantId: string,
+  agentId: string,
+  walletAddress: string,
+): EthersSignerLike {
+  const _signTypedData = async (...args: unknown[]): Promise<string> => {
+    const [domain, types, value] = args as [
+      Record<string, unknown>,
+      Record<string, Array<{ name: string; type: string }>>,
+      Record<string, unknown>,
+    ];
+    // ethers' _signTypedData omits the EIP712Domain entry from `types`; the
+    // single remaining struct is the primaryType (the order). Pick it out so we
+    // can hand vault.signTypedData a fully-specified EIP-712 request.
+    const primaryType =
+      Object.keys(types).find((name) => name !== "EIP712Domain") ?? Object.keys(types)[0];
+    return vault.signTypedData({
+      tenantId,
+      venue: "polymarket",
+      agentId,
+      domain: domain as Parameters<typeof vault.signTypedData>[0]["domain"],
+      types: types as Parameters<typeof vault.signTypedData>[0]["types"],
+      primaryType,
+      value: value as Record<string, unknown>,
+    });
+  };
+  return {
+    address: walletAddress,
+    async getAddress() {
+      return walletAddress;
+    },
+    _signTypedData,
+  };
+}
+
+tradeRoutes.post("/polymarket/order", async (c) => {
+  const tenantId = c.get("tenantId");
+  const agentId = callerAgentId(c);
+  if (!agentId) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent JWT required for trading" }, 403);
+  }
+
+  const rate = await enforcePolymarketOrderRateLimit(agentId);
+  if (!rate.allowed) {
+    c.header("Retry-After", String(Math.ceil(rate.resetMs / 1000)));
+    return c.json<ApiResponse>({ ok: false, error: "Trade order rate limit exceeded" }, 429);
+  }
+
+  const raw = await safeJsonParse(c);
+  const parsed = pmSubmitOrderSchema.safeParse(raw);
+  if (!parsed.success) {
+    return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+  }
+  const body = {
+    ...parsed.data,
+    idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+  };
+  if (!body.idempotencyKey) {
+    return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
+  }
+
+  const idempotency = getPmIdempotency(tenantId, agentId, body.idempotencyKey, body);
+  if (idempotency.conflict) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Idempotency key reused with a different body" },
+      409,
+    );
+  }
+  if (idempotency.response) {
+    return tradeReplayResponse(c, idempotency.response);
+  }
+
+  // Validate price + amount as positive finite numbers up front (the policy gate
+  // needs the notional; the adapter re-validates the (0,1) price range).
+  const amount = Number(body.amount);
+  const price = Number(body.price);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return c.json<ApiResponse>({ ok: false, error: "amount must be a positive finite number" }, 400);
+  }
+  if (!Number.isFinite(price) || price <= 0 || price >= 1) {
+    return c.json<ApiResponse>({ ok: false, error: "price must be in the open interval (0,1)" }, 400);
+  }
+  const notionalUsd = polymarketNotionalUsd(body.side, amount, price);
+
+  // Session fetch + ownership + venue check + the prediction-market policy gate,
+  // all in one pass. checkActiveOrder loads the session and runs checkOrderAllowed
+  // against the pm:<tokenId>/pm:cond:<conditionId> allowlist + per-order/daily caps.
+  const { session, check } = await getSessionManager().checkActiveOrder({
+    tenantId,
+    id: body.sessionId,
+    order: {
+      tokenId: body.tokenId,
+      conditionId: body.conditionId,
+      notionalUsd,
+    },
+  });
+
+  // Ownership + venue binding: the session must belong to THIS agent and be a
+  // polymarket session. A mismatch is treated as "no active session" (403) — we
+  // never leak another agent's session existence.
+  if (session.agentId !== agentId || session.venue !== "polymarket") {
+    return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
+  }
+
+  if (!check.allowed) {
+    const status = pmPolicyRejectStatus(check.reason);
+    await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+      sessionId: session.id,
+      venue: "polymarket",
+      tokenId: body.tokenId,
+      conditionId: body.conditionId ?? null,
+      side: body.side,
+      amount,
+      price,
+      notionalUsd,
+      reason: check.reason,
+    });
+    if (status === 403) {
+      // 403s are not stored for idempotent replay (session state can change to
+      // active and a retry should re-evaluate) — mirrors HL's session-required 403.
+      return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
+    }
+    const envelope: TradeIdempotencyResponse = {
+      status: 400,
+      body: { code: "policy-violation", reason: check.reason },
+    };
+    idempotency.store?.(envelope);
+    return c.json(envelope.body, envelope.status);
+  }
+
+  // Resolve creds BEFORE reserving spend so a fail-closed creds gap never
+  // consumes the daily cap. FAIL CLOSED: no creds → 409, no order.
+  const creds = await resolvePolymarketCreds(tenantId, agentId);
+  if (!creds.ok) {
+    const reason =
+      creds.reason === "wallet-not-found"
+        ? "Polymarket venue wallet not found. Provision a polymarket wallet before trading."
+        : "Polymarket credentials are not provisioned for this agent.";
+    await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+      sessionId: session.id,
+      venue: "polymarket",
+      tokenId: body.tokenId,
+      conditionId: body.conditionId ?? null,
+      reason: creds.reason,
+    });
+    return c.json<ApiResponse>({ ok: false, error: reason }, 409);
+  }
+
+  // Reserve spend (atomic; also re-checks session active + cap). Release on any
+  // downstream failure — mirrors the HL path.
+  const reserved = await getSessionManager().reserveSpend({
+    tenantId,
+    id: session.id,
+    amountUsd: notionalUsd,
+  });
+  if (!reserved) {
+    const envelope: TradeIdempotencyResponse = {
+      status: 400,
+      body: { ok: false, error: "Trade session cap exceeded" },
+    };
+    idempotency.store?.(envelope);
+    return c.json(envelope.body, envelope.status);
+  }
+
+  await auditTradeEvent(tenantId, agentId, "trade.order.submit.authorized", {
+    sessionId: session.id,
+    venue: "polymarket",
+    tokenId: body.tokenId,
+    conditionId: body.conditionId ?? null,
+    side: body.side,
+    amount,
+    price,
+    notionalUsd,
+  });
+
+  // Build the vault→ethers-signer bridge + the Polymarket account, then the
+  // adapter. Builder attribution is resolved from env (default OFF) — never
+  // hardcoded.
+  const signer = buildPolymarketVaultSigner(tenantId, agentId, creds.walletAddress);
+  const account: PolymarketAccount = {
+    apiCredentials: creds.apiCredentials,
+    funderAddress: creds.funderAddress,
+    signer,
+    signatureType: 2,
+  };
+  const adapter = new PolymarketExecutionAdapter(account, { builder: resolveBuilderConfig() });
+
+  const orderRequest: PolymarketOrderRequest = {
+    tokenId: body.tokenId,
+    side: body.side,
+    amount,
+    price,
+    orderType: "market",
+    ...(body.tickSize ? { tickSize: body.tickSize } : {}),
+    ...(typeof body.negRisk === "boolean" ? { negRisk: body.negRisk } : {}),
+  };
+
+  let result: Awaited<ReturnType<PolymarketExecutionAdapter["submitOrder"]>>;
+  try {
+    result = await adapter.submitOrder(orderRequest);
+  } catch (err) {
+    // Submission status unknown — the order may have landed at the venue. Do NOT
+    // release spend (mirrors HL's 502 path). Record nothing as filled.
+    await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+      sessionId: session.id,
+      venue: "polymarket",
+      tokenId: body.tokenId,
+      conditionId: body.conditionId ?? null,
+      notionalUsd,
+      reason: "submit-status-unknown",
+      error: err instanceof Error ? err.message : String(err),
+    });
+    const envelope: TradeIdempotencyResponse = {
+      status: 502,
+      body: { ok: false, error: "Trade submission status unknown" },
+    };
+    idempotency.store?.(envelope);
+    return c.json(envelope.body, envelope.status);
+  }
+
+  // The adapter reports rejection as success:false / errorMsg / actualAmount 0.
+  const rejected =
+    result.success === false ||
+    Boolean(result.errorMsg) ||
+    (result.actualAmount !== undefined && result.actualAmount <= 0);
+  if (rejected) {
+    // The order was NOT accepted → release the reserved spend.
+    await getSessionManager().releaseSpend({
+      tenantId,
+      id: session.id,
+      amountUsd: notionalUsd,
+    });
+    await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+      sessionId: session.id,
+      venue: "polymarket",
+      tokenId: body.tokenId,
+      conditionId: body.conditionId ?? null,
+      side: body.side,
+      amount,
+      price,
+      notionalUsd,
+      orderId: result.orderId ?? null,
+      reason: result.errorMsg ?? "Trade order rejected",
+    });
+    const envelope: TradeIdempotencyResponse = {
+      status: 400,
+      body: {
+        ok: false,
+        error: result.errorMsg ?? "Trade order rejected",
+        data: { status: result.status ?? "rejected" },
+      },
+    };
+    idempotency.store?.(envelope);
+    return c.json(envelope.body, envelope.status);
+  }
+
+  const response = {
+    orderId: result.orderId ?? crypto.randomUUID(),
+    status: result.status ?? "filled",
+    filledQty: result.actualAmount ?? 0,
+    avgPrice: result.actualPrice ?? Number(price),
+    notionalUsd,
+  };
+  const envelope: TradeIdempotencyResponse = {
+    status: 200,
+    body: responseData(response),
+  };
+  await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
+    sessionId: session.id,
+    venue: "polymarket",
+    tokenId: body.tokenId,
+    conditionId: body.conditionId ?? null,
+    side: body.side,
+    amount,
+    price,
+    notionalUsd,
+    orderId: response.orderId,
+  });
+  idempotency.store?.(envelope);
+  return c.json(responseData(response));
 });
