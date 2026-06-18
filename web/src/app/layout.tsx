@@ -44,9 +44,9 @@ const metadataBase = (() => {
 
 export const metadata: Metadata = {
   metadataBase,
-  title: "Steward — Agent Wallet Infrastructure",
+  title: "Steward: wallets and policy for humans and agents",
   description:
-    "Managed wallets for AI agents with policy enforcement, multi-tenant isolation, and webhook-driven approvals. Self-hosted.",
+    "The open, self-hostable wallet and governance rail for humans and agents. Embedded wallets, a policy engine with spend caps and kill-switch, and a proxy gateway. MIT-licensed, no per-transaction toll.",
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "32x32" },
@@ -57,8 +57,9 @@ export const metadata: Metadata = {
   },
   manifest: "/site.webmanifest",
   openGraph: {
-    title: "Steward — Agent Wallet Infrastructure",
-    description: "Managed wallets for AI agents. Policy enforcement. Self-hosted.",
+    title: "Steward: wallets and policy for humans and agents",
+    description:
+      "The open, self-hostable wallet and governance rail for humans and agents. MIT-licensed, no per-transaction toll. Own your keys, policies, and data.",
     type: "website",
     images: [
       {

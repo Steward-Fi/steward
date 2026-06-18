@@ -103,7 +103,7 @@ function Hero() {
               </span>
               <span className="text-text font-medium">Waifu</span>
               <span className="w-px h-3.5 bg-border" />
-              <span className="text-text font-medium">Eliza Cloud</span>
+              <span className="text-text font-medium">Consumer apps</span>
               <span className="w-px h-3.5 bg-border" />
               <span className="text-text font-medium">Tokenized assets</span>
             </div>
@@ -573,7 +573,7 @@ function PlatformsSection() {
     },
     {
       name: "Apps & Agent Platforms",
-      desc: "Consumer apps and frameworks like ElizaOS that need embedded wallets and secure API access for users and agents alike",
+      desc: "Consumer apps and agent frameworks that need embedded wallets and secure API access for users and agents alike",
     },
     {
       name: "Treasuries & Rewards",

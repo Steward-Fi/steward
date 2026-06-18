@@ -25,10 +25,13 @@ custom_domain = true
 [observability]
 enabled = true
 
-# Public build-time vars. The API origin is a separate service (Steward API on
-# Railway). eliza.steward.fi is the live, proven origin ({"name":"steward"}).
-# Note: api.steward.fi has no DNS record yet, so it is NOT used (the in-code
-# default of https://api.steward.fi is currently dead). Follow-up: add
-# api.steward.fi -> Railway and switch this to the vanity hostname.
+# Public build-time var: the dashboard API origin (Steward API on Railway, a
+# separate service). This is the only LIVE origin right now ({"name":"steward"}
+# responds there); it is build-time only and not rendered in any user-facing UI.
+#
+# TODO: move this to a vanity api.steward.fi once that DNS record exists and
+# points at the Railway service. Do not swap the value before then: api.steward.fi
+# has no DNS record yet (the in-code default of https://api.steward.fi is
+# currently dead), so changing it now would break the live dashboard's API calls.
 [vars]
 NEXT_PUBLIC_STEWARD_API_URL = "https://eliza.steward.fi"

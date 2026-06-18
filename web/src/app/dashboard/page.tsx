@@ -106,7 +106,7 @@ export default function DashboardOverview() {
       {/* Header */}
       <div>
         <h1 className="font-display text-2xl font-700 tracking-tight">Overview</h1>
-        <p className="text-sm text-text-tertiary mt-1">Agent wallet infrastructure</p>
+        <p className="text-sm text-text-tertiary mt-1">Wallets and policy for humans and agents</p>
       </div>
 
       {/* Key Stats */}
