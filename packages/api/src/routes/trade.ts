@@ -1580,6 +1580,12 @@ tradeRoutes.post("/polymarket/order", async (c) => {
       try {
         result = await adapter.submitSignedOrder(signedOrder, orderRequest);
       } catch (err) {
+        // A 401 anywhere in submit (client construction or the POST) means the
+        // cached L2 creds were rotated/revoked — drop them so the next order
+        // re-derives from L1 (self-healing), regardless of attempted-vs-not.
+        if (isPolymarketUnauthorized(err)) {
+          await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+        }
         // A not-attempted failure (CLOB client/builder construction threw before
         // any POST) means nothing reached the venue → RELEASE spend, return 400.
         if (isPolymarketPostNotAttempted(err)) {
