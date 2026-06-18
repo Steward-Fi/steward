@@ -3,16 +3,32 @@ export function shortenAddress(addr: string, chars = 4): string {
   return `${addr.slice(0, chars + 2)}...${addr.slice(-chars)}`;
 }
 
+const WEI_PER_ETH = 10n ** 18n;
+
+function formatWeiValue(value: bigint): string {
+  if (value === 0n) return "0";
+
+  const sign = value < 0n ? "-" : "";
+  const absolute = value < 0n ? -value : value;
+
+  if (absolute > 0n && absolute < 100_000_000_000_000n) {
+    return `${sign}<0.0001`;
+  }
+
+  const scale = WEI_PER_ETH / 10_000n;
+  const scaled = absolute / scale;
+  const whole = scaled / 10_000n;
+  const fraction = (scaled % 10_000n).toString().padStart(4, "0");
+  return `${sign}${whole}.${fraction}`;
+}
+
 export function formatWei(wei: string, symbol?: string): string {
   if (!wei) return "0";
   try {
-    const eth = Number(BigInt(wei)) / 1e18;
-    const formatted = eth === 0 ? "0" : eth < 0.0001 ? "<0.0001" : eth.toFixed(4);
+    const formatted = formatWeiValue(BigInt(wei));
     return symbol ? `${formatted} ${symbol}` : formatted;
   } catch {
-    const eth = Number(wei) / 1e18;
-    const formatted = eth === 0 ? "0" : eth < 0.0001 ? "<0.0001" : eth.toFixed(4);
-    return symbol ? `${formatted} ${symbol}` : formatted;
+    return symbol ? `0 ${symbol}` : "0";
   }
 }
 
