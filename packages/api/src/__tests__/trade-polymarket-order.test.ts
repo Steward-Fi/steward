@@ -41,7 +41,15 @@ import {
   setDefaultTimeout,
   spyOn,
 } from "bun:test";
-import { agents, auditEvents, closeDb, getDb, tenants, tradeSessions } from "@stwd/db";
+import {
+  agentPolicies,
+  agents,
+  auditEvents,
+  closeDb,
+  getDb,
+  tenants,
+  tradeSessions,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { TradeSessionManager } from "@stwd/trade-sessions";
 import { PolymarketExecutionAdapter } from "@stwd/venue-polymarket";
@@ -609,5 +617,109 @@ describe("POST /v1/trade/sessions (polymarket)", () => {
       }),
     });
     expect(res.status).toBe(400);
+  });
+
+  // ---- Agent-self path: the human-controlled agent_policies allowlist is the
+  // ceiling for prediction markets too (security: no self-grant of arbitrary
+  // pm: markets just because `polymarket` is an allowed venue). ----
+
+  function makeAgentApp(tenantId: string, agentId: string, routes: Hono) {
+    const app = new Hono<{ Variables: AppVariables }>();
+    app.use("*", async (c, next) => {
+      c.set("tenantId", tenantId);
+      c.set("agentScope", agentId);
+      c.set("authType", "agent-token");
+      await next();
+    });
+    app.route("/v1/trade", routes);
+    return app;
+  }
+
+  async function seedPolicy(
+    tenantId: string,
+    agentId: string,
+    allowedAssets: string[],
+  ): Promise<void> {
+    await getDb()
+      .insert(agentPolicies)
+      .values({
+        agentId,
+        tenantId,
+        dailyCapUsd: "1000",
+        perOrderCapUsd: "500",
+        leverageCap: "1",
+        allowedAssets,
+        allowedVenues: ["hyperliquid", "polymarket"],
+        updatedBy: "test",
+      });
+  }
+
+  it("agent-self: rejects a pm: market NOT in the agent policy allowlist (400)", async () => {
+    const { tenantId, agentId } = await seedAgent();
+    // Policy allows polymarket venue but ONLY a different market.
+    await seedPolicy(tenantId, agentId, ["pm:99999999"]);
+    stubWallet(true);
+    const app = makeAgentApp(tenantId, agentId, tradeRoutes);
+
+    const res = await app.request("/v1/trade/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        venue: "polymarket",
+        dailyCap: 100,
+        perOrderCap: 50,
+        allowedAssets: [`pm:${TOKEN_ID}`],
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { message?: string }).message).toContain(
+      "not allowed by agent policy",
+    );
+  });
+
+  it("agent-self: allows a pm: market that IS in the agent policy allowlist (201)", async () => {
+    const { tenantId, agentId } = await seedAgent();
+    await seedPolicy(tenantId, agentId, [`pm:${TOKEN_ID}`]);
+    stubWallet(true);
+    const app = makeAgentApp(tenantId, agentId, tradeRoutes);
+
+    const res = await app.request("/v1/trade/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        venue: "polymarket",
+        dailyCap: 100,
+        perOrderCap: 50,
+        allowedAssets: [`pm:${TOKEN_ID}`],
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { ok: boolean; data: { sessionId: string } };
+    const [row] = await getDb()
+      .select()
+      .from(tradeSessions)
+      .where(eq(tradeSessions.id, body.data.sessionId));
+    expect(row.allowedAssets).toEqual([`pm:${TOKEN_ID}`]);
+  });
+
+  it("agent-self: rejects a polymarket session when the agent has no policy (403)", async () => {
+    const { tenantId, agentId } = await seedAgent();
+    stubWallet(true);
+    const app = makeAgentApp(tenantId, agentId, tradeRoutes);
+
+    const res = await app.request("/v1/trade/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentId,
+        venue: "polymarket",
+        dailyCap: 100,
+        perOrderCap: 50,
+        allowedAssets: [`pm:${TOKEN_ID}`],
+      }),
+    });
+    expect(res.status).toBe(403);
   });
 });

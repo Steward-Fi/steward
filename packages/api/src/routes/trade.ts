@@ -520,28 +520,30 @@ tradeRoutes.post("/sessions", async (c) => {
     if (!agentPolicy.allowedVenues.includes(venue)) {
       return c.json(policyViolation(`venue ${venue} is not allowed by agent policy`), 400);
     }
-    // The agent-policy asset allowlist gates HL symbols. Prediction markets are
-    // identified per-token and are gated by the session-level pm: allowlist +
-    // the per-order checkOrderAllowed gate, not the (HL-symbol) policy allowlist,
-    // so we don't intersect pm: assets against agentPolicy.allowedAssets here.
-    if (!isPolymarket) {
-      const disallowedAsset = allowedAssets.find(
-        (asset) => !agentPolicy.allowedAssets.includes(asset),
+    // The agent-policy asset allowlist is the human-controlled ceiling and gates
+    // EVERY venue's markets — HL symbols (BTC/ETH/...) AND prediction markets
+    // (pm:<tokenId>/pm:cond:<id>) live together in the same agent_policies
+    // allowedAssets text[]. Apply it to polymarket too: without this, an agent
+    // whose policy merely lists `polymarket` in allowedVenues could self-grant a
+    // session for ANY pm: market and then pass the per-order session gate (the
+    // session allowlist IS the gate). The human must explicitly approve each pm:
+    // market in the policy, exactly as they approve HL symbols.
+    const disallowedAsset = allowedAssets.find(
+      (asset) => !agentPolicy.allowedAssets.includes(asset),
+    );
+    if (disallowedAsset) {
+      return c.json(
+        policyViolation(`asset ${disallowedAsset} is not allowed by agent policy`),
+        400,
       );
-      if (disallowedAsset) {
-        return c.json(
-          policyViolation(`asset ${disallowedAsset} is not allowed by agent policy`),
-          400,
-        );
-      }
     }
 
     sessionDailyCap = Math.min(dailyCap, policyDailyCap);
     sessionPerOrderCap = Math.min(perOrderCap, policyPerOrderCap);
     sessionLeverageCap = Math.min(leverageCap, policyLeverageCap);
-    sessionAllowedAssets = isPolymarket
-      ? allowedAssets
-      : allowedAssets.filter((asset) => agentPolicy.allowedAssets.includes(asset));
+    sessionAllowedAssets = allowedAssets.filter((asset) =>
+      agentPolicy.allowedAssets.includes(asset),
+    );
   } else if (!isPolymarket) {
     const requestedBuilderAsset = allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
     if (requestedBuilderAsset) {
