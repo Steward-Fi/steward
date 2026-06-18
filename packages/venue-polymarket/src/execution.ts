@@ -175,6 +175,24 @@ export function deriveActualFill(
 // (v6-shaped) signer. Known wart — see KNOWLEDGE-DUMP §5/§8.
 // ---------------------------------------------------------------------------
 
+/**
+ * Thrown by submitSignedOrder when the failure happened BEFORE any network POST
+ * (CLOB client construction / lazy import / builder SDK init). The order never
+ * reached the venue, so the caller is safe to release any reserved spend and
+ * treat this as a pre-submit failure, not an ambiguous in-flight one.
+ */
+export class PolymarketPostNotAttemptedError extends Error {
+  readonly notAttempted = true as const;
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "PolymarketPostNotAttemptedError";
+  }
+}
+
+export function isPolymarketPostNotAttempted(err: unknown): err is PolymarketPostNotAttemptedError {
+  return err instanceof PolymarketPostNotAttemptedError;
+}
+
 export class PolymarketExecutionAdapter {
   readonly venue = "polymarket" as const;
   private readonly clobUrl: string;
@@ -305,11 +323,44 @@ export class PolymarketExecutionAdapter {
   /**
    * Build + post an order. market/FOK -> FOK (marketable limit at supplied
    * price), otherwise GTC. Returns the venue-neutral result with actual fill.
+   *
+   * For callers that need to separate the BUILD/sign phase (no network reaches
+   * the venue) from the POST phase (the order may land), call buildSignedOrder()
+   * then submitSignedOrder() instead — a build failure then never gets confused
+   * with a post failure (e.g. for spend-accounting fail-safety).
    */
   async submitOrder(input: PolymarketOrderRequest): Promise<PolymarketPostOrderResult> {
     const req = orderRequestSchema.parse(input);
     const signed = await this.buildSignedOrder(req);
-    const { client, OrderType } = await this.createClobClient();
+    return this.submitSignedOrder(signed, req);
+  }
+
+  /**
+   * POST-ONLY phase: post an ALREADY-built signed order to the venue. Splitting
+   * this from buildSignedOrder lets a caller attribute failures precisely — a
+   * throw from THIS method means the post was attempted (the order may have
+   * landed), whereas a throw from buildSignedOrder means nothing was submitted.
+   * Does NOT rebuild/re-sign, so it never re-touches CLOB metadata or the signer.
+   */
+  async submitSignedOrder(
+    signed: unknown,
+    input: PolymarketOrderRequest,
+  ): Promise<PolymarketPostOrderResult> {
+    const req = orderRequestSchema.parse(input);
+    // Client construction (lazy import + builder SDK) happens BEFORE any network
+    // POST. A throw here means NOTHING reached the venue, so wrap it in a
+    // distinct error the caller can treat as not-attempted (release spend),
+    // rather than the ambiguous post-attempt path below.
+    let client: ClobClientLike;
+    let OrderType: ClobOrderTypeEnum;
+    try {
+      ({ client, OrderType } = await this.createClobClient());
+    } catch (err) {
+      throw new PolymarketPostNotAttemptedError(
+        err instanceof Error ? err.message : String(err),
+        { cause: err },
+      );
+    }
 
     const isMarketable = req.orderType === "market" || req.orderType === "FOK";
     const raw = (await client.postOrder(

@@ -28,6 +28,7 @@
     "@stwd/shared": "workspace:*",
     "@stwd/trade-sessions": "workspace:*",
     "@stwd/venue-hyperliquid": "workspace:*",
+    "@stwd/venue-polymarket": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/webhooks": "workspace:*",
     "bs58": "^6.0.0",
