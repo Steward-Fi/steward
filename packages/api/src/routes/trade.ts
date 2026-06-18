@@ -1592,20 +1592,30 @@ tradeRoutes.post("/polymarket/order", async (c) => {
         body: responseData(response),
       };
       // The order HAS landed at the venue. Persist the idempotency record BEFORE
-      // the (fallible) audit write so a retry after an audit failure replays this
-      // response instead of re-submitting a duplicate order.
+      // the audit write so a retry after an audit failure replays this response
+      // instead of re-submitting a duplicate order.
       idempotency.store?.(envelope);
-      await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
-        sessionId: session.id,
-        venue: "polymarket",
-        tokenId: body.tokenId,
-        conditionId: body.conditionId ?? null,
-        side: body.side,
-        amount,
-        price,
-        notionalUsd,
-        orderId: response.orderId,
-      });
+      // The audit write is best-effort here: the order is final + the response is
+      // recorded, so an audit failure must NOT turn a successful fill into an
+      // error to the client (which could prompt a duplicate retry). Log + proceed.
+      try {
+        await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
+          sessionId: session.id,
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          conditionId: body.conditionId ?? null,
+          side: body.side,
+          amount,
+          price,
+          notionalUsd,
+          orderId: response.orderId,
+        });
+      } catch (auditErr) {
+        console.error(
+          "[polymarket/order] submitted-audit write failed (order already final)",
+          auditErr,
+        );
+      }
       return envelope;
     },
   );
