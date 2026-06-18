@@ -1587,6 +1587,14 @@ tradeRoutes.post("/polymarket/order", async (c) => {
         avgPrice: result.actualPrice ?? Number(price),
         notionalUsd,
       };
+      const envelope: TradeIdempotencyResponse = {
+        status: 200,
+        body: responseData(response),
+      };
+      // The order HAS landed at the venue. Persist the idempotency record BEFORE
+      // the (fallible) audit write so a retry after an audit failure replays this
+      // response instead of re-submitting a duplicate order.
+      idempotency.store?.(envelope);
       await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
         sessionId: session.id,
         venue: "polymarket",
@@ -1598,11 +1606,6 @@ tradeRoutes.post("/polymarket/order", async (c) => {
         notionalUsd,
         orderId: response.orderId,
       });
-      const envelope: TradeIdempotencyResponse = {
-        status: 200,
-        body: responseData(response),
-      };
-      idempotency.store?.(envelope);
       return envelope;
     },
   );
