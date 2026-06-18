@@ -169,7 +169,7 @@ function ProblemSection() {
       <div className="max-w-[1400px] mx-auto">
         <Reveal direction="up">
           <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] max-w-3xl text-balance">
-            Wallet infrastructure built for a human-paced world.{" "}
+            Closed wallets meter you, fence you, and lock you in.{" "}
             <span className="text-[oklch(0.78_0.15_55)]">That&apos;s the problem.</span>
           </h2>
         </Reveal>
