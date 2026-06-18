@@ -12,8 +12,8 @@ import type {
   JobConfig,
   RequiredERC8183Addresses,
   SignerAdapter,
-} from "./types";
-import { JobStatus } from "./types";
+} from "./types.ts";
+import { JobStatus } from "./types.ts";
 
 // ABI derived from ERC-8183 spec; verify against deployed contract before mainnet.
 export const AGENTIC_COMMERCE_ABI = [

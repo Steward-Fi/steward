@@ -1,14 +1,26 @@
 {
   "name": "@stwd/erc8183",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "typecheck": "tsc --noEmit",
     "lint": "bunx @biomejs/biome check src package.json tsconfig.json",
     "test": "bun test src/__tests__"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "dependencies": {
     "viem": "^2.30.0"

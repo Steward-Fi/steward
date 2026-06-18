@@ -1,3 +1,3 @@
-export * from "./chains";
-export * from "./client";
-export * from "./types";
+export * from "./chains.ts";
+export * from "./client.ts";
+export * from "./types.ts";
