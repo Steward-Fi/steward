@@ -11,6 +11,7 @@ import {
 } from "@stwd/venue-hyperliquid";
 import {
   type EthersSignerLike,
+  isPolymarketPostNotAttempted,
   type PolymarketAccount,
   PolymarketExecutionAdapter,
   type PolymarketOrderRequest,
@@ -559,7 +560,11 @@ tradeRoutes.post("/sessions", async (c) => {
   const venueWallet = isPolymarket
     ? await resolvePolymarketWallet(agentId)
     : await resolveHyperliquidWallet(agentId, agent);
-  const walletAddress = venueWallet ?? parsed.data.walletAddress;
+  // Polymarket order execution resolves creds strictly via the venue-scoped
+  // wallet (vault.getWallet({venue:"polymarket"})). Allowing a caller-supplied
+  // walletAddress fallback here would mint a session that can never execute
+  // (order route would 409 wallet-not-found). Fail closed for polymarket.
+  const walletAddress = isPolymarket ? venueWallet : (venueWallet ?? parsed.data.walletAddress);
   if (!walletAddress) {
     return c.json<ApiResponse>(
       {
@@ -1473,6 +1478,32 @@ tradeRoutes.post("/polymarket/order", async (c) => {
       try {
         result = await adapter.submitSignedOrder(signedOrder, orderRequest);
       } catch (err) {
+        // A not-attempted failure (CLOB client/builder construction threw before
+        // any POST) means nothing reached the venue → RELEASE spend, return 400.
+        if (isPolymarketPostNotAttempted(err)) {
+          await getSessionManager().releaseSpend({
+            tenantId,
+            id: session.id,
+            amountUsd: notionalUsd,
+          });
+          await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+            sessionId: session.id,
+            venue: "polymarket",
+            tokenId: body.tokenId,
+            conditionId: body.conditionId ?? null,
+            notionalUsd,
+            reason: "pre-submit-build-failed",
+            error: err.message,
+          });
+          const envelope: TradeIdempotencyResponse = {
+            status: 400,
+            body: { ok: false, error: "Trade submission could not be built" },
+          };
+          idempotency.store?.(envelope);
+          return envelope;
+        }
+        // Otherwise the POST was attempted and the order may have landed —
+        // status unknown, KEEP spend (mirrors HL's 502).
         await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
           sessionId: session.id,
           venue: "polymarket",

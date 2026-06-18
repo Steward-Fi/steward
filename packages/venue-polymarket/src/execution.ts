@@ -175,6 +175,24 @@ export function deriveActualFill(
 // (v6-shaped) signer. Known wart — see KNOWLEDGE-DUMP §5/§8.
 // ---------------------------------------------------------------------------
 
+/**
+ * Thrown by submitSignedOrder when the failure happened BEFORE any network POST
+ * (CLOB client construction / lazy import / builder SDK init). The order never
+ * reached the venue, so the caller is safe to release any reserved spend and
+ * treat this as a pre-submit failure, not an ambiguous in-flight one.
+ */
+export class PolymarketPostNotAttemptedError extends Error {
+  readonly notAttempted = true as const;
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "PolymarketPostNotAttemptedError";
+  }
+}
+
+export function isPolymarketPostNotAttempted(err: unknown): err is PolymarketPostNotAttemptedError {
+  return err instanceof PolymarketPostNotAttemptedError;
+}
+
 export class PolymarketExecutionAdapter {
   readonly venue = "polymarket" as const;
   private readonly clobUrl: string;
@@ -329,7 +347,20 @@ export class PolymarketExecutionAdapter {
     input: PolymarketOrderRequest,
   ): Promise<PolymarketPostOrderResult> {
     const req = orderRequestSchema.parse(input);
-    const { client, OrderType } = await this.createClobClient();
+    // Client construction (lazy import + builder SDK) happens BEFORE any network
+    // POST. A throw here means NOTHING reached the venue, so wrap it in a
+    // distinct error the caller can treat as not-attempted (release spend),
+    // rather than the ambiguous post-attempt path below.
+    let client: ClobClientLike;
+    let OrderType: ClobOrderTypeEnum;
+    try {
+      ({ client, OrderType } = await this.createClobClient());
+    } catch (err) {
+      throw new PolymarketPostNotAttemptedError(
+        err instanceof Error ? err.message : String(err),
+        { cause: err },
+      );
+    }
 
     const isMarketable = req.orderType === "market" || req.orderType === "FOK";
     const raw = (await client.postOrder(
