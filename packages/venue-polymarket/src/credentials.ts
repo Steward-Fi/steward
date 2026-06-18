@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { POLYGON_CHAIN_ID, POLYMARKET_CLOB_API_BASE } from "./constants";
+
 // ---------------------------------------------------------------------------
 // Credential-injection model
 // ---------------------------------------------------------------------------
@@ -146,4 +148,45 @@ export async function resolveSignerAddress(signer: EthersSignerLike): Promise<st
 export function isPolymarketUnauthorized(error: unknown): boolean {
   const e = error as { status?: number; response?: { status?: number } } | null;
   return e?.status === 401 || e?.response?.status === 401;
+}
+
+export interface DeriveApiCredentialsOptions {
+  /** CLOB API base. Defaults to the production endpoint. */
+  clobUrl?: string;
+  /** Polygon chain id. Defaults to 137. */
+  chainId?: number;
+}
+
+/**
+ * Derive (or fetch the existing) L2 CLOB API credentials for an L1 delegate
+ * signer. This calls the CLOB `createOrDeriveApiKey` flow, which signs an L1
+ * message with the delegate and returns the deterministic { key, secret,
+ * passphrase } HMAC keypair for that signer. Idempotent: the SAME signer always
+ * yields the SAME creds, so a cache miss can safely re-derive.
+ *
+ * Takes ONLY the L1 signer (chicken/egg: you cannot construct the authed adapter
+ * without L2 creds, and you derive L2 creds from L1). No DB, no network at import.
+ */
+export async function deriveApiCredentials(
+  signer: EthersSignerLike,
+  options: DeriveApiCredentialsOptions = {},
+): Promise<ClobApiCredentials> {
+  const { ClobClient } = await import("@polymarket/clob-client");
+  const client = new ClobClient(
+    options.clobUrl ?? POLYMARKET_CLOB_API_BASE,
+    options.chainId ?? POLYGON_CHAIN_ID,
+    // L1-only client (no creds yet) used solely to derive L2 creds. Same v6->v5
+    // signer bridge as the authed client.
+    toClobCompatibleSigner(signer) as unknown as ConstructorParameters<typeof ClobClient>[2],
+  );
+  const creds = (await client.createOrDeriveApiKey()) as {
+    key?: string;
+    secret?: string;
+    passphrase?: string;
+  };
+  return clobApiCredentialsSchema.parse({
+    key: creds.key,
+    secret: creds.secret,
+    passphrase: creds.passphrase,
+  });
 }
