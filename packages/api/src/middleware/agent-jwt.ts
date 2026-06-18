@@ -213,8 +213,15 @@ export async function requireAgentJwt(c: Context<{ Variables: AppVariables }>, n
     }
 
     const tenantId = c.req.header("X-Steward-Tenant") || DEFAULT_TENANT_ID;
+    // Tenant binding: when the token DOES carry a tenant claim it MUST match the
+    // requested tenant (prevents a token minted for tenant A from acting on
+    // tenant B). When the trusted issuer omits the claim (the eliza-cloud
+    // single-tenant minter does not embed tenant_id), we do NOT reject — the
+    // agent→tenant binding is still enforced below by ensureAgentForTenant, which
+    // 403s if this agent is not registered for the requested tenant. The token is
+    // already JWKS-verified (iss=eliza-cloud, aud=steward, RS256) at this point.
     const tokenTenantId = stringClaim(payload, "tenant_id", "tenantId");
-    if (!tokenTenantId || tokenTenantId !== tenantId) {
+    if (tokenTenantId && tokenTenantId !== tenantId) {
       return invalid(c, "invalid tenant claims");
     }
     const tenant = await findTenant(tenantId);
