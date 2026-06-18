@@ -1,9 +1,35 @@
 import type { Metadata } from "next";
+import localFont from "next/font/local";
 import "./globals.css";
 import "@stwd/react/styles.css";
 import "@rainbow-me/rainbowkit/styles.css";
 import "@solana/wallet-adapter-react-ui/styles.css";
 import { Providers } from "@/components/providers";
+
+// Self-hosted fonts (checked into the repo) so the build needs no network egress.
+const sans = localFont({
+  src: [
+    { path: "./fonts/HankenGrotesk-400.ttf", weight: "400", style: "normal" },
+    { path: "./fonts/HankenGrotesk-500.ttf", weight: "500", style: "normal" },
+    { path: "./fonts/HankenGrotesk-600.ttf", weight: "600", style: "normal" },
+    { path: "./fonts/HankenGrotesk-700.ttf", weight: "700", style: "normal" },
+    { path: "./fonts/HankenGrotesk-800.ttf", weight: "800", style: "normal" },
+  ],
+  variable: "--font-sans",
+  display: "swap",
+  fallback: ["Avenir Next", "Segoe UI", "system-ui", "sans-serif"],
+});
+
+const mono = localFont({
+  src: [
+    { path: "./fonts/JetBrainsMono-400.ttf", weight: "400", style: "normal" },
+    { path: "./fonts/JetBrainsMono-500.ttf", weight: "500", style: "normal" },
+    { path: "./fonts/JetBrainsMono-700.ttf", weight: "700", style: "normal" },
+  ],
+  variable: "--font-jetbrains",
+  display: "swap",
+  fallback: ["JetBrains Mono", "Fira Code", "monospace"],
+});
 
 export const dynamic = "force-dynamic";
 
@@ -47,7 +73,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
       <body className="noise-overlay">
         <Providers>{children}</Providers>
       </body>

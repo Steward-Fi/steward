@@ -1,6 +1,6 @@
 "use client";
 
-import { motion, useInView } from "framer-motion";
+import { useInView } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { CopyButton } from "./copy-button";
 
@@ -113,13 +113,7 @@ export function CodeBlock({
   }
 
   return (
-    <motion.div
-      ref={ref}
-      initial={{ opacity: 0, y: 12 }}
-      animate={isInView ? { opacity: 1, y: 0 } : {}}
-      transition={{ duration: 0.5, ease: [0.25, 1, 0.5, 1] }}
-      className={`relative group ${className}`}
-    >
+    <div ref={ref} className={`relative group ${className}`}>
       {filename && (
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-border-subtle bg-bg-elevated/50">
           <span className="text-xs text-text-tertiary font-mono">{filename}</span>
@@ -146,6 +140,6 @@ export function CodeBlock({
           </div>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }
