@@ -60,6 +60,7 @@ COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/venue-polymarket/package.json  packages/venue-polymarket/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
@@ -90,6 +91,7 @@ COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/venue-polymarket/package.json  packages/venue-polymarket/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
@@ -112,6 +114,7 @@ COPY packages/sdk         packages/sdk
 COPY packages/trade-sessions    packages/trade-sessions
 COPY packages/vault       packages/vault
 COPY packages/venue-hyperliquid packages/venue-hyperliquid
+COPY packages/venue-polymarket packages/venue-polymarket
 COPY packages/webhooks    packages/webhooks
 
 # Create workspace symlinks (Bun 1.3 doesn't auto-link in Docker)
@@ -127,7 +130,8 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
     ln -sf ../../../packages/policy-engine     node_modules/@stwd/policy-engine && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
-    ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid
+    ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
+    ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket
 
 # Build api and proxy (and their deps) via turborepo
 RUN bunx turbo run build --filter=@stwd/api --filter=@stwd/proxy
@@ -164,6 +168,7 @@ COPY packages/sdk/package.json               packages/sdk/package.json
 COPY packages/trade-sessions/package.json    packages/trade-sessions/package.json
 COPY packages/vault/package.json             packages/vault/package.json
 COPY packages/venue-hyperliquid/package.json packages/venue-hyperliquid/package.json
+COPY packages/venue-polymarket/package.json  packages/venue-polymarket/package.json
 COPY packages/webhooks/package.json          packages/webhooks/package.json
 COPY packages/examples/                      packages/examples/
 
@@ -183,6 +188,7 @@ COPY --from=build /app/packages/sdk         packages/sdk
 COPY --from=build /app/packages/trade-sessions    packages/trade-sessions
 COPY --from=build /app/packages/vault       packages/vault
 COPY --from=build /app/packages/venue-hyperliquid packages/venue-hyperliquid
+COPY --from=build /app/packages/venue-polymarket packages/venue-polymarket
 COPY --from=build /app/packages/webhooks    packages/webhooks
 
 # Create workspace symlinks manually — bun 1.3 doesn't auto-link workspace packages
@@ -200,6 +206,7 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/policy-engine node_modules/@stwd/policy-engine && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
     ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
+    ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket && \
     ln -sf ../../../packages/eliza-plugin  node_modules/@stwd/eliza-plugin 2>/dev/null; true
 
 # ── Non-root user ─────────────────────────────────────────────────────────────
