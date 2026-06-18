@@ -1306,13 +1306,24 @@ tradeRoutes.post("/polymarket/order", async (c) => {
 
   // Session fetch + ownership + venue check + the prediction-market policy gate,
   // all in one pass. checkActiveOrder loads the session and runs checkOrderAllowed
-  // against the pm:<tokenId>/pm:cond:<conditionId> allowlist + per-order/daily caps.
+  // against the allowlist + per-order/daily caps.
+  //
+  // SECURITY: we deliberately do NOT forward the caller-supplied `conditionId` to
+  // the allowlist check. The order is submitted for `tokenId` only, so trusting an
+  // UNVERIFIED conditionId would let an agent pair any non-allowlisted token with
+  // an allowlisted `pm:cond:<id>` and bypass the market allowlist. Until the
+  // token->condition mapping is resolved from VERIFIED Polymarket metadata, the
+  // order route honors ONLY exact `pm:<tokenId>` entries. A `pm:cond:<id>`
+  // session grant therefore requires the per-token entry to also be present to
+  // trade (or a future Phase C resolver that derives + verifies the condition).
+  // TODO(phase-c): resolve the token's true conditionId from venue metadata and
+  // pass it here so market-wide grants can be honored safely.
   const { session, check } = await getSessionManager().checkActiveOrder({
     tenantId,
     id: body.sessionId,
     order: {
       tokenId: body.tokenId,
-      conditionId: body.conditionId,
+      // conditionId intentionally omitted — see SECURITY note above.
       notionalUsd,
     },
   });

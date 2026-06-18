@@ -261,21 +261,38 @@ describe("POST /v1/trade/polymarket/order", () => {
     expect(await dailySpendOf(sessionId)).toBe(0);
   });
 
-  it("allows the whole market via pm:cond:<conditionId> allowlist entry", async () => {
-    // No pm:<token> entry, only the condition entry; passing conditionId grants it.
+  it("SECURITY: a caller-supplied conditionId does NOT grant a non-allowlisted token", async () => {
+    // Session allowlists ONLY the market (pm:cond:<id>), not the specific token.
+    // The order route must NOT trust the caller's conditionId (the order is
+    // submitted for tokenId only), so pairing the real token with the allowlisted
+    // condition id must STILL be rejected as market-not-allowed — no bypass.
     const { tenantId, agentId, sessionId } = await seedSession({
       allowedAssets: [`pm:cond:${COND_ID}`],
     });
-    stubWallet(true); // funder present, but L2 creds still unprovisioned -> 409
+    stubWallet(true);
     const app = makeApp(tenantId, agentId, tradeRoutes);
 
     const res = await postOrder(app, sessionId, crypto.randomUUID(), {
       conditionId: COND_ID,
     });
-    // The policy gate PASSED (market allowed) — we get past it to the creds gate,
-    // which fails closed (409). Proves the conditionId allowlist path works.
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { code?: string; reason?: string };
+    expect(body.code).toBe("policy-violation");
+    expect(body.reason).toBe("market-not-allowed");
+    expect(await dailySpendOf(sessionId)).toBe(0);
+  });
+
+  it("honors an exact pm:<tokenId> allowlist entry (passes the policy gate)", async () => {
+    // The per-token entry IS the executable unit — it grants exactly this token.
+    const { tenantId, agentId, sessionId } = await seedSession({
+      allowedAssets: [`pm:${TOKEN_ID}`],
+    });
+    stubWallet(true); // funder present, L2 creds unprovisioned -> 409 past the gate
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    const res = await postOrder(app, sessionId, crypto.randomUUID());
+    // Policy gate PASSED (token allowed) -> reaches the creds gate -> 409.
     expect(res.status).toBe(409);
-    expect(await auditCount(tenantId, "trade.order.policy-rejected")).toBe(1); // the creds fail-closed audit
   });
 
   it("returns 409 on idempotency-key reuse with a different body; replays the same envelope", async () => {
