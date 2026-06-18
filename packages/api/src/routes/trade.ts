@@ -1641,6 +1641,14 @@ tradeRoutes.post("/polymarket/order", async (c) => {
           id: session.id,
           amountUsd: notionalUsd,
         });
+        // If the venue rejected with an auth error (returned, not thrown), the
+        // cached L2 creds are stale → drop them so the next order re-derives.
+        if (
+          isPolymarketUnauthorized(result) ||
+          /\b401\b|unauthor|invalid api|invalid.*key|api key/i.test(result.errorMsg ?? "")
+        ) {
+          await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+        }
         await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
           sessionId: session.id,
           venue: "polymarket",
