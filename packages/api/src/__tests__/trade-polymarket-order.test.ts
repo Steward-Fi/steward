@@ -94,6 +94,7 @@ async function seedSession(opts: {
   perOrderCapUsd?: string;
   dailyCapUsd?: string;
   status?: "active" | "revoked";
+  walletId?: string;
 }): Promise<{ tenantId: string; agentId: string; sessionId: string }> {
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const tenantId = `pm-tenant-${suffix}`;
@@ -115,7 +116,7 @@ async function seedSession(opts: {
       tenantId,
       agentId,
       venue: "polymarket",
-      walletId: WALLET,
+      walletId: opts.walletId ?? WALLET,
       status: opts.status ?? "active",
       dailySpendUsd: "0",
       dailyCapUsd: opts.dailyCapUsd ?? "100",
@@ -400,6 +401,31 @@ describe("POST /v1/trade/polymarket/order", () => {
       expect(await auditCount(tenantId, "trade.order.submitted")).toBe(1);
       expect(await auditCount(tenantId, "trade.order.submit.authorized")).toBe(1);
       expect(await auditCount(tenantId, "trade.order.canceled")).toBe(0);
+    } finally {
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("wallet-binding mismatch (rotated wallet) -> 409 fail-closed, no spend, no submit", async () => {
+    // Session bound to a DIFFERENT wallet than the one the vault now resolves
+    // (simulates a rotation/reprovision after the session was created).
+    const { tenantId, agentId, sessionId } = await seedSession({
+      walletId: "0x2222222222222222222222222222222222222222",
+    });
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true); // getWallet returns WALLET (0x111...), != session.walletId
+    submitSpy = spyOn(PolymarketExecutionAdapter.prototype, "submitSignedOrder").mockResolvedValue(
+      {} as never,
+    );
+
+    try {
+      const res = await postOrder(app, sessionId, crypto.randomUUID());
+      expect(res.status).toBe(409);
+      expect(submitSpy).not.toHaveBeenCalled();
+      expect(await dailySpendOf(sessionId)).toBe(0);
+      expect(await auditCount(tenantId, "trade.order.submitted")).toBe(0);
     } finally {
       delete process.env.STEWARD_PM_TEST_CREDS;
     }

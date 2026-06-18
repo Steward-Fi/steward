@@ -1384,6 +1384,29 @@ tradeRoutes.post("/polymarket/order", async (c) => {
     return c.json<ApiResponse>({ ok: false, error: reason }, 409);
   }
 
+  // Session binding: the session was approved against a specific wallet
+  // (session.walletId). If the venue wallet was rotated/reprovisioned after the
+  // session was created, the freshly-resolved creds.walletAddress will differ —
+  // reject rather than let a stale session authorize a DIFFERENT wallet/funder.
+  if (creds.walletAddress.toLowerCase() !== session.walletId.toLowerCase()) {
+    await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+      sessionId: session.id,
+      venue: "polymarket",
+      tokenId: body.tokenId,
+      conditionId: body.conditionId ?? null,
+      reason: "wallet-binding-mismatch",
+      sessionWallet: session.walletId,
+      resolvedWallet: creds.walletAddress,
+    });
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: "Session wallet binding no longer matches the provisioned wallet. Re-create the session.",
+      },
+      409,
+    );
+  }
+
   // Build the vault→ethers-signer bridge + the Polymarket account + adapter
   // BEFORE entering the fence. Builder attribution is resolved from env
   // (default OFF) — never hardcoded.
