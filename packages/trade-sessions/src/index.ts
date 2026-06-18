@@ -19,11 +19,128 @@ const coreAllowedAssetSchema = z.enum([
   "ZEC",
   "XMR",
 ]);
+// Builder-dex / namespaced perp symbol, e.g. `xyz:SPCX`.
+const namespacedAssetSchema = z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/);
+// Prediction-market identifier. Polymarket markets are keyed by CLOB token id
+// (a long numeric string), not a ticker. We allow:
+//   `pm:<tokenId>`  — a single outcome token (the executable unit)
+//   `pm:cond:<conditionId>` — a whole market (both outcomes) by condition id
+// Stored alongside crypto assets in the same `allowedAssets` text[] so no schema
+// migration is needed; the venue layer interprets the `pm:` namespace.
+const predictionMarketAssetSchema = z
+  .string()
+  .regex(/^pm:(cond:0x[0-9a-fA-F]{1,64}|[0-9]{1,128})$/);
 export const allowedAssetSchema = z.union([
   coreAllowedAssetSchema,
-  z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/),
+  predictionMarketAssetSchema,
+  namespacedAssetSchema,
 ]);
 export type AllowedAsset = z.infer<typeof allowedAssetSchema>;
+
+// ---------------------------------------------------------------------------
+// Prediction-market allowlist helpers (pure, no IO).
+// ---------------------------------------------------------------------------
+
+export function predictionMarketTokenAsset(tokenId: string): string {
+  return `pm:${tokenId}`;
+}
+
+export function predictionMarketConditionAsset(conditionId: string): string {
+  return `pm:cond:${conditionId}`;
+}
+
+export function isPredictionMarketAsset(asset: string): boolean {
+  return predictionMarketAssetSchema.safeParse(asset).success;
+}
+
+/**
+ * Is a Polymarket order's market permitted by an allowlist? A token id is allowed
+ * when EITHER its own `pm:<tokenId>` entry OR its market's `pm:cond:<conditionId>`
+ * entry is present. Passing the conditionId lets a session grant a whole market
+ * (both YES/NO outcomes) with one allowlist entry.
+ */
+export function isPredictionMarketAllowed(
+  allowedAssets: readonly string[],
+  tokenId: string,
+  conditionId?: string,
+): boolean {
+  const set = new Set(allowedAssets);
+  if (set.has(predictionMarketTokenAsset(tokenId))) return true;
+  if (conditionId && set.has(predictionMarketConditionAsset(conditionId))) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Pre-venue policy check (pure). The venue route calls this BEFORE placing an
+// order so the session's allowlist + per-order cap are enforced regardless of
+// venue. Crypto perps match by symbol; prediction markets by pm: token/condition.
+// ---------------------------------------------------------------------------
+
+export interface OrderCheckInput {
+  /** Symbol for crypto perps (e.g. "NEAR", "xyz:SPCX"). */
+  asset?: string;
+  /** Polymarket CLOB token id (the executable unit). */
+  tokenId?: string;
+  /** Polymarket market condition id (grants both outcomes when allowlisted). */
+  conditionId?: string;
+  /** Notional USD of THIS order; checked against perOrderCapUsd. */
+  notionalUsd: number;
+}
+
+export type OrderCheckResult =
+  | { allowed: true }
+  | {
+      allowed: false;
+      reason:
+        | "session-not-active"
+        | "asset-not-allowed"
+        | "market-not-allowed"
+        | "missing-asset-identifier"
+        | "invalid-notional"
+        | "per-order-cap-exceeded"
+        | "daily-cap-exceeded";
+    };
+
+/**
+ * Validate an order against a session WITHOUT touching IO. Checks, in order:
+ * session active, the market/asset is allowlisted, notional is sane, notional
+ * <= perOrderCap, and (spend + notional) <= dailyCap. Returns a structured
+ * reason on rejection so the caller can map it to an HTTP error + audit event.
+ * Spend RESERVATION still happens via reserveSpend() (atomic) — this is the
+ * fail-fast gate before the venue call.
+ */
+export function checkOrderAllowed(
+  session: Pick<
+    TradeSession,
+    "status" | "allowedAssets" | "perOrderCapUsd" | "dailyCapUsd" | "dailySpendUsd"
+  >,
+  input: OrderCheckInput,
+): OrderCheckResult {
+  if (session.status !== "active") return { allowed: false, reason: "session-not-active" };
+
+  if (input.tokenId !== undefined) {
+    if (!isPredictionMarketAllowed(session.allowedAssets, input.tokenId, input.conditionId)) {
+      return { allowed: false, reason: "market-not-allowed" };
+    }
+  } else if (input.asset !== undefined) {
+    if (!session.allowedAssets.includes(input.asset)) {
+      return { allowed: false, reason: "asset-not-allowed" };
+    }
+  } else {
+    return { allowed: false, reason: "missing-asset-identifier" };
+  }
+
+  if (!Number.isFinite(input.notionalUsd) || input.notionalUsd <= 0) {
+    return { allowed: false, reason: "invalid-notional" };
+  }
+  if (input.notionalUsd > session.perOrderCapUsd) {
+    return { allowed: false, reason: "per-order-cap-exceeded" };
+  }
+  if (session.dailySpendUsd + input.notionalUsd > session.dailyCapUsd) {
+    return { allowed: false, reason: "daily-cap-exceeded" };
+  }
+  return { allowed: true };
+}
 
 export const tradeSessionSchema = z.object({
   id: z.string(),
@@ -243,6 +360,43 @@ export class TradeSessionManager {
   async getActive(tenantId: string, id: string): Promise<TradeSession | null> {
     const session = await this.getSession({ tenantId, id });
     return session?.status === "active" ? session : null;
+  }
+
+  /**
+   * Fetch the active session and run the pre-venue order check against it. The
+   * venue route calls this BEFORE placing an order. Returns the loaded session
+   * on success so the caller can chain reserveSpend()/withActiveSubmissionFence().
+   * `session-not-active` covers both a missing and an inactive/expired session.
+   */
+  async checkActiveOrder(
+    input: GetSessionInput & { order: OrderCheckInput },
+  ): Promise<{ session: TradeSession; check: OrderCheckResult }> {
+    const session = await this.getSession({ tenantId: input.tenantId, id: input.id });
+    if (!session) {
+      return {
+        session: {
+          // synthetic shell so the caller always gets the same shape; status
+          // drives the rejection. Not persisted.
+          id: input.id,
+          agentId: "",
+          tenantId: input.tenantId,
+          venue: "",
+          walletId: "",
+          status: "expired",
+          dailySpendUsd: 0,
+          dailyCapUsd: 1,
+          perOrderCapUsd: 1,
+          leverageCap: 1,
+          allowedAssets: [],
+          createdAt: this.now(),
+          expiresAt: this.now(),
+          revokedAt: null,
+          revokedBy: null,
+        },
+        check: { allowed: false, reason: "session-not-active" },
+      };
+    }
+    return { session, check: checkOrderAllowed(session, input.order) };
   }
 
   async revokeSession(input: RevokeSessionInput): Promise<TradeSession | null> {
