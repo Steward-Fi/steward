@@ -12,6 +12,8 @@ describe("external agent JWT hardening", () => {
     expect(source).toContain("tokenTenantId && tokenTenantId !== tenantId");
     expect(source).toContain('return invalid(c, "invalid tenant claims")');
     expect(source).toContain('stringClaim(payload, "platform_id", "platformId")');
+    // A PRESENT platform claim must match the agent's registered platform.
+    expect(source).toContain("agent.platformId && tokenPlatformId && tokenPlatformId !== agent.platformId");
     expect(source).toContain('return invalid(c, "invalid platform claims")');
   });
 
