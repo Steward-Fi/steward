@@ -369,27 +369,13 @@ operatorRecoveryRoutes.post("/:venue/deposit", async (c) => {
       broadcast: true,
     });
   } catch (err) {
-    // TEMP DEBUG (deposit-trace): log the raw error + resolved context BEFORE the
-    // audit write (which may itself throw). Remove after diagnosis.
-    console.error("[deposit-trace] signTransaction failed", {
-      tenantId,
-      agentId,
+    await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.deposit.failed", {
+      venue,
       walletAddress,
-      chainId: ARBITRUM_CHAIN_ID,
-      errMessage: err instanceof Error ? err.message : String(err),
-      errStack: err instanceof Error ? err.stack?.split("\n").slice(0, 6).join(" | ") : undefined,
+      bridge: HYPERLIQUID_ARBITRUM_BRIDGE,
+      amount: amountBaseUnits.toString(),
+      error: err instanceof Error ? err.message : String(err),
     });
-    try {
-      await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.deposit.failed", {
-        venue,
-        walletAddress,
-        bridge: HYPERLIQUID_ARBITRUM_BRIDGE,
-        amount: amountBaseUnits.toString(),
-        error: err instanceof Error ? err.message : String(err),
-      });
-    } catch (auditErr) {
-      console.error("[deposit-trace] audit write ALSO failed", auditErr);
-    }
     return c.json<ApiResponse>({ ok: false, error: "Failed to submit deposit" }, 502);
   }
 
