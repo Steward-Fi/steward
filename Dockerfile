@@ -209,6 +209,16 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket && \
     ln -sf ../../../packages/eliza-plugin  node_modules/@stwd/eliza-plugin 2>/dev/null; true
 
+# Re-run the production install AFTER copying the built packages. The
+# `COPY --from=build /app/packages/*` lines above overwrite each package dir
+# (including its per-package node_modules) with the BUILD stage's version, whose
+# third-party-dep symlinks (e.g. packages/api/node_modules/drizzle-orm) point at the
+# build stage's `.bun` store paths that don't exist here — leaving DANGLING
+# symlinks (ENOENT reading drizzle-orm at boot). Re-installing rebuilds the
+# per-package node_modules symlinks against THIS stage's `.bun` store, so runtime
+# resolution is correct + deterministic regardless of resolution drift.
+RUN BUN_FROZEN_LOCKFILE=0 bun install --production --no-frozen-lockfile --ignore-scripts
+
 # ── Non-root user ─────────────────────────────────────────────────────────────
 # bun image already has a 'bun' user (uid 1000); use it.
 USER bun
