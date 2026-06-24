@@ -320,7 +320,16 @@ async function resolvePolicyLimitPx(
   side: "buy" | "sell",
   limitPx: string | number | undefined,
 ): Promise<string | number> {
-  if (side !== "sell") return limitPx ?? (await getMarketableLimitPx(asset, true));
+  // Respect a caller-supplied limit price for BOTH sides. Previously the sell
+  // branch ignored `limitPx` entirely and always returned a MARKETABLE price,
+  // so a resting limit-sell ABOVE market (e.g. a breakeven take-profit) executed
+  // immediately at the bid instead of resting. A provided limitPx is the caller's
+  // intent for the ORDER price — use it; only synthesize a marketable price when
+  // none is given. NOTE: this is the ORDER price; policy NOTIONAL sizing must be
+  // computed separately via resolveSizingPx (a low sell limit must NOT understate
+  // the notional for cap enforcement).
+  if (limitPx !== undefined && limitPx !== null && limitPx !== "") return limitPx;
+  if (side !== "sell") return getMarketableLimitPx(asset, true);
   try {
     return await getMarketableLimitPx(asset, false);
   } catch (error) {
@@ -330,6 +339,57 @@ async function resolvePolicyLimitPx(
     if (Number.isFinite(livePx) && livePx > 0) return livePx;
     throw error;
   }
+}
+
+/**
+ * Price used for POLICY NOTIONAL sizing (per-order + daily USD caps). Distinct
+ * from the order price.
+ *
+ * SELL: a caller could pass an arbitrarily LOW sell limit (which Hyperliquid
+ * treats as marketable and fills near the bid) to understate notional + bypass
+ * caps. So a sell's sizing price is max(orderPx, marketPx). If the market price
+ * can't be fetched we FAIL CLOSED (throw) rather than trust the caller's limit.
+ *
+ * BUY: a buy can never fill ABOVE its limit, so the caller's buy limit already
+ * bounds the max notional. Use it directly (don't floor at market — that would
+ * over-estimate a resting buy below market and could falsely trip caps).
+ */
+async function resolveSizingPx(
+  asset: z.infer<typeof hyperliquidAssetSchema>,
+  side: "buy" | "sell",
+  orderPx: string | number,
+): Promise<number> {
+  const orderPxNum = Number(orderPx);
+  if (side === "buy") {
+    if (Number.isFinite(orderPxNum) && orderPxNum > 0) return orderPxNum;
+    // No usable buy limit — fall back to market for sizing.
+  }
+  let marketPx = Number.NaN;
+  try {
+    marketPx = Number(await getMarketableLimitPx(asset, side === "buy"));
+  } catch {
+    try {
+      // HL /info requires a POST with a typed body; allMids returns {asset: px}.
+      const response = await fetch("https://api.hyperliquid.xyz/info", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "allMids" }),
+      });
+      const prices = (await response.json()) as Record<string, unknown>;
+      marketPx = Number(prices[asset]);
+    } catch {
+      marketPx = Number.NaN;
+    }
+  }
+  if (side === "sell" && !(Number.isFinite(marketPx) && marketPx > 0)) {
+    // FAIL CLOSED: cannot size a sell without a trusted market price.
+    throw new Error("unable to resolve market price for sell notional sizing");
+  }
+  const candidates = [orderPxNum, marketPx].filter((n) => Number.isFinite(n) && n > 0);
+  if (candidates.length === 0) {
+    throw new Error("unable to resolve a notional sizing price");
+  }
+  return Math.max(...candidates);
 }
 
 function tradeReplayResponse(
@@ -844,7 +904,21 @@ tradeRoutes.post("/hyperliquid/order", async (c) => {
     }
   }
   const policyLimitPx = await resolvePolicyLimitPx(parsedAsset.data, body.side, limitPx);
-  const sizeUsd = body.size * Number(policyLimitPx);
+  // Notional for cap enforcement uses a market-floored price so a low sell limit
+  // (marketable, fills near the bid) cannot understate notional and bypass caps.
+  // resolveSizingPx FAILS CLOSED for sells when no market price is available —
+  // map that to a clean policy rejection (not a 500).
+  let sizingPx: number;
+  try {
+    sizingPx = await resolveSizingPx(parsedAsset.data, body.side, policyLimitPx);
+  } catch (err) {
+    return rejectPolicy(
+      err instanceof Error ? err.message : "unable to size order notional",
+      0,
+      policyLimitPx,
+    );
+  }
+  const sizeUsd = body.size * sizingPx;
   const policy = orderPolicy(sizeUsd);
   if (!policy.allow) {
     return rejectPolicy(policy.reason ?? "order violates trading policy", sizeUsd, policyLimitPx);
