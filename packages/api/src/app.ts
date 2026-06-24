@@ -159,9 +159,10 @@ app.use("/v1/condition_sets", (c, next) => tenantAuth(c, next));
 app.use("/v1/condition_sets/*", (c, next) => tenantAuth(c, next));
 // Operator fund-recovery endpoints use the operator gate (platform key OR
 // tenant-admin), NOT requireAgentJwt. See middleware/operator-auth.ts.
-const isOperatorRecoveryPath = (path: string): boolean =>
+export const isOperatorRecoveryPath = (path: string): boolean =>
   path.endsWith("/close-all") ||
   path.endsWith("/withdraw") ||
+  path.endsWith("/deposit") ||
   path.endsWith("/transfer") ||
   path.endsWith("/leverage") ||
   path.endsWith("/add-margin") ||
