@@ -369,16 +369,6 @@ operatorRecoveryRoutes.post("/:venue/deposit", async (c) => {
       broadcast: true,
     });
   } catch (err) {
-    // TEMP DEBUG (deposit-cause): drizzle wraps the REAL error in DrizzleQueryError;
-    // walk the .cause chain to surface the underlying failure. Remove after.
-    const chain: string[] = [];
-    let cur: unknown = err;
-    for (let i = 0; i < 6 && cur; i++) {
-      const e = cur as { message?: string; cause?: unknown; code?: string };
-      chain.push(`[${i}] ${e?.code ? e.code + ": " : ""}${e?.message ?? String(cur)}`);
-      cur = e?.cause;
-    }
-    console.error("[deposit-cause] chain:", JSON.stringify(chain, null, 2));
     await auditRecoveryEvent(c, tenantId, agentId, "trade.recovery.deposit.failed", {
       venue,
       walletAddress,
