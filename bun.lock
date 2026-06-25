@@ -191,7 +191,6 @@
         "zod": "^4.3.6",
       },
       "devDependencies": {
-        "@stwd/api": "workspace:*",
         "@stwd/auth": "workspace:*",
         "@types/node": "^25.5.0",
       },
