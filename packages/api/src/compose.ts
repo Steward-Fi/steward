@@ -90,9 +90,11 @@ function makeDeferredRouteApp(app: StewardApp): {
  * Build the fully-composed deployable Steward app: lean core + this repo's opt-in
  * plugins (trading), with the canonical middleware/route ordering preserved.
  *
- * the trading plugin is loaded LAZILY (dynamic import) so the lean core graph in
- * `app.ts` never statically references `@stwd/plugin-trading`; only this
- * composition root pulls it in.
+ * the trading plugin is imported with a static, bundler-discoverable specifier
+ * (so the deployed Worker bundle includes it); only this deploy-only composition
+ * root references `@stwd/plugin-trading`. the lean core graph in `app.ts` / the
+ * library entry `lib.ts` never reference it, so a consumer importing `@stwd/api`
+ * stays trading-free.
  */
 export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
   // 1) lean core: global mw + all core auth mw (NO idempotency, NO routes yet).
@@ -101,13 +103,17 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
   // 2) plugin auth-middleware phase + buffered routes. trade auth mw lands now,
   //    before idempotency; trade routes are buffered for after.
   //
-  // the trading plugin is imported DYNAMICALLY + via a non-statically-analyzable
-  // specifier so the lean core's type/build graph never references
-  // `@stwd/plugin-trading` (the core must not depend on a plugin). the ctx the
-  // core builds is structurally the shape the plugin's `register` expects.
+  // the trading plugin is imported with a STATIC, bundler-discoverable specifier so
+  // Wrangler/esbuild include `@stwd/plugin-trading` in the Worker bundle (a
+  // non-analyzable dynamic specifier would be omitted, and the Worker would fail at
+  // runtime with a missing module on the first request). this is the DEPLOY-ONLY
+  // composition root, so it is allowed to reference the plugin; the LIBRARY entry
+  // (lib.ts) does NOT re-export composeApp, so a consumer importing `@stwd/api`
+  // never pulls the plugin into its graph and the lean core stays trading-free.
+  // the dynamic `import()` form (vs a top-level static import) is kept only so the
+  // plugin module is evaluated lazily at compose time, not at module load.
   const ctx = buildPluginContext();
-  const pluginSpecifier = "@stwd/plugin-trading";
-  const { tradingPlugin } = (await import(pluginSpecifier)) as {
+  const { tradingPlugin } = (await import("@stwd/plugin-trading")) as {
     tradingPlugin: Parameters<typeof registerPlugin<typeof ctx>>[1];
   };
   const { deferred, flush } = makeDeferredRouteApp(app);

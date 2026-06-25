@@ -13,10 +13,16 @@
  *
  * the lean core (`createApp`) has NO dependency on the trading stack; trading is
  * opt-in via the plugin.
+ *
+ * NOTE: `composeApp` (compose.ts) is intentionally NOT re-exported here. it is
+ * THIS repo's deploy-only composition root and statically imports
+ * `@stwd/plugin-trading` (so the worker bundle includes it). re-exporting it from
+ * the library entry would pull the trading plugin into the graph of every consumer
+ * that imports `@stwd/api`, defeating the lean-core decoupling. a consumer that
+ * wants trading composes it themselves with `registerPlugin(...)` as shown above.
  */
 
 export { app, createApp, mountCoreIdempotencyAndRoutes, startTime } from "./app";
-export { composeApp } from "./compose";
 export {
   buildPluginContext,
   registerPlugin,
