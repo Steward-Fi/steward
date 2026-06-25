@@ -64,7 +64,8 @@ type Posture =
   | "agent-other";
 
 async function makeApp(posture: Posture) {
-  const { tradeRoutes } = await import("../routes/trade");
+  const { createTradeRoutes } = await import("../routes/trade");
+  const { testCtx } = await import("./_ctx");
   const app = new Hono<{ Variables: AppVariables }>();
   app.use("*", async (c, next) => {
     c.set("tenantId", TENANT_ID);
@@ -89,7 +90,7 @@ async function makeApp(posture: Posture) {
     }
     await next();
   });
-  app.route("/v1/trade", tradeRoutes);
+  app.route("/v1/trade", createTradeRoutes(testCtx()));
   return app;
 }
 
@@ -403,8 +404,9 @@ describe("trade session control-plane gates (real routes)", () => {
       c.set("tenantRole", undefined);
       await next();
     });
-    const { tradeRoutes } = await import("../routes/trade");
-    app.route("/v1/trade", tradeRoutes);
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
     const res = await app.request("/v1/trade/sessions", {
       method: "POST",
       headers: { "content-type": "application/json" },

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { isOperatorRecoveryPath } from "../app";
+import { isOperatorRecoveryPath } from "../index";
 
 /**
  * Regression guard for the "added an operator route but forgot the auth

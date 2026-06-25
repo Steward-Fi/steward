@@ -135,7 +135,8 @@ async function seedAgent(opts: {
 
 async function buildApp() {
   const { isValidPlatformKey } = await import("@stwd/auth");
-  const { operatorRecoveryRoutes } = await import("../routes/operator-recovery");
+  const { createOperatorRecoveryRoutes } = await import("../routes/operator-recovery");
+  const { testCtx } = await import("./_ctx");
   const app = new Hono();
   app.use("/v1/trade/*", async (c, next) => {
     const key = c.req.header("X-Steward-Platform-Key");
@@ -150,7 +151,7 @@ async function buildApp() {
     c.set("authType", "platform");
     return next();
   });
-  app.route("/v1/trade", operatorRecoveryRoutes);
+  app.route("/v1/trade", createOperatorRecoveryRoutes(testCtx()));
   return app;
 }
 

@@ -16,7 +16,7 @@ import { validateJwtSecretEnv } from "@stwd/auth";
 import { closeDb, getDb, runMigrations } from "@stwd/db";
 import { shouldUsePGLite } from "@stwd/db/pglite";
 import { sql } from "drizzle-orm";
-import { app } from "./app";
+import { composeApp } from "./compose";
 import { initRedis, shutdownRedis } from "./middleware/redis";
 import { getAuthStoreSources, initAuthStores } from "./routes/auth";
 import {
@@ -40,6 +40,12 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
   throw new Error("PORT must be a positive integer");
 }
 validateJwtSecretEnv();
+
+// Compose the deployable app: lean core + this repo's opt-in plugins (trading).
+// composeApp() is async because plugin registration may be async + the trading
+// plugin is dynamically imported so the lean core graph never statically pulls
+// in the trading stack. top-level await is supported by the Bun entry.
+const app = await composeApp();
 
 // ─── In-memory rate-limit log + shutdown guard ───────────────────────────────
 //

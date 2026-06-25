@@ -42,7 +42,8 @@ beforeAll(async () => {
     await client.close();
   });
 
-  const { tradeRoutes } = await import("../routes/trade");
+  const { createTradeRoutes } = await import("../routes/trade");
+  const { testCtx } = await import("./_ctx");
 
   await getDb().insert(tenants).values({
     id: tenantId,
@@ -88,7 +89,7 @@ beforeAll(async () => {
     c.set("sessionMfaVerifiedAt", Date.now());
     await next();
   });
-  app.route("/v1/trade", tradeRoutes);
+  app.route("/v1/trade", createTradeRoutes(testCtx()));
 });
 
 afterAll(async () => {

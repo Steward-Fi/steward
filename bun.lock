@@ -56,10 +56,7 @@
         "@stwd/policy-engine": "workspace:*",
         "@stwd/redis": "workspace:*",
         "@stwd/shared": "workspace:*",
-        "@stwd/trade-sessions": "workspace:*",
         "@stwd/vault": "workspace:*",
-        "@stwd/venue-hyperliquid": "workspace:*",
-        "@stwd/venue-polymarket": "workspace:*",
         "@stwd/webhooks": "workspace:*",
         "bs58": "^6.0.0",
         "drizzle-orm": "^0.44.5",
@@ -174,6 +171,28 @@
         "@types/bun": "latest",
         "@types/node": "^25.5.0",
         "typescript": "^5.8.0",
+      },
+    },
+    "packages/plugin-trading": {
+      "name": "@stwd/plugin-trading",
+      "version": "0.1.0",
+      "dependencies": {
+        "@stwd/db": "workspace:*",
+        "@stwd/policy-engine": "workspace:*",
+        "@stwd/redis": "workspace:*",
+        "@stwd/shared": "workspace:*",
+        "@stwd/trade-sessions": "workspace:*",
+        "@stwd/vault": "workspace:*",
+        "@stwd/venue-hyperliquid": "workspace:*",
+        "@stwd/venue-polymarket": "workspace:*",
+        "drizzle-orm": "^0.44.5",
+        "hono": "^4.12.18",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "@stwd/api": "workspace:*",
+        "@stwd/auth": "workspace:*",
+        "@types/node": "^25.5.0",
       },
     },
     "packages/policy-engine": {
@@ -1537,6 +1556,8 @@
     "@stwd/example-waifu-integration": ["@stwd/example-waifu-integration@workspace:packages/examples/waifu-integration"],
 
     "@stwd/mcp": ["@stwd/mcp@workspace:packages/mcp"],
+
+    "@stwd/plugin-trading": ["@stwd/plugin-trading@workspace:packages/plugin-trading"],
 
     "@stwd/policy-engine": ["@stwd/policy-engine@workspace:packages/policy-engine"],
 

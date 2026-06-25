@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": "./src/lib.ts",
+    "./app": "./src/app.ts",
+    "./compose": "./src/compose.ts",
+    "./plugin": "./src/plugin.ts"
+  },
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "build": "tsc --noEmit",
@@ -26,9 +32,6 @@
     "@stwd/redis": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
     "@stwd/shared": "workspace:*",
-    "@stwd/trade-sessions": "workspace:*",
-    "@stwd/venue-hyperliquid": "workspace:*",
-    "@stwd/venue-polymarket": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/webhooks": "workspace:*",
     "bs58": "^6.0.0",

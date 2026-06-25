@@ -7,7 +7,7 @@ const operatorRecoverySource = readFileSync(
   join(apiRoot, "routes", "operator-recovery.ts"),
   "utf8",
 );
-const appSource = readFileSync(join(apiRoot, "app.ts"), "utf8");
+const appSource = readFileSync(join(apiRoot, "index.ts"), "utf8");
 
 describe("HIP-3 collateral transfer route hardening", () => {
   test("mounts /:venue/transfer behind the operator recovery auth path", () => {

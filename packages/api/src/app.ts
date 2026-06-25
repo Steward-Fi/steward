@@ -1,10 +1,18 @@
 /**
- * app.ts - Runtime-agnostic Hono app construction.
+ * app.ts - Runtime-agnostic LEAN CORE Hono app construction.
  *
- * This module exports the fully-configured `Hono` instance with all routes,
- * middleware, and per-route auth wired up. It deliberately contains NO server
- * boot code (no `Bun.serve`, no `setInterval` GC, no signal handlers, no
- * blocking `runMigrations()` call) so that it can be reused by:
+ * This module builds the LEAN core `Hono` instance: auth, vault, policy, proxy,
+ * webhooks, and the rest of the always-on routes + per-route auth. It is
+ * deliberately TRADING-FREE: the venue execution + trade-session routes and
+ * their trade-specific middleware live in the opt-in `@stwd/plugin-trading`
+ * package and are registered onto the app at the COMPOSITION ROOT (see
+ * `compose.ts`), NOT here. so a third party importing `@stwd/api` gets the lean
+ * core with no dependency on the trading stack; a deploy that wants trading opts
+ * in by registering the plugin. see `plugin.ts` for the seam.
+ *
+ * It deliberately contains NO server boot code (no `Bun.serve`, no `setInterval`
+ * GC, no signal handlers, no blocking `runMigrations()` call) so that it can be
+ * reused by:
  *
  *   - `index.ts`   - Bun entry point (long-lived process; runs migrations,
  *                    sets up GC timers, wires SIGINT/SIGTERM, calls
@@ -15,16 +23,24 @@
  *
  * Anything that must NOT run on Workers (timers, blocking I/O at module init,
  * Node-only APIs) belongs in `index.ts`, not here.
+ *
+ * ── Construction is two-phase ──────────────────────────────────────────────────
+ * `createApp()` registers global middleware + all CORE per-route auth, but does
+ * NOT install the global idempotency middleware or mount any routes.
+ * `mountCoreIdempotencyAndRoutes(app)` installs idempotency + the core routes.
+ * the split exists so the composition root (compose.ts) can register an opt-in
+ * plugin's AUTH MIDDLEWARE before idempotency and its ROUTES after idempotency,
+ * preserving the canonical order [auth -> idempotency -> routes]. for callers that
+ * just want the assembled lean core, `app` (and the default export) is the result
+ * of running both phases — trading-free.
  */
 
 import { platformAuthMiddleware } from "@stwd/auth";
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { logger } from "hono/logger";
-import { requireAgentJwt } from "./middleware/agent-jwt";
 import { correlationId } from "./middleware/correlation";
 import { idempotencyMiddleware } from "./middleware/idempotency";
-import { operatorAuth } from "./middleware/operator-auth";
 import { securityHeaders } from "./middleware/security-headers";
 import { tenantCors } from "./middleware/tenant-cors";
 import { getOpenApiSpec } from "./openapi";
@@ -40,13 +56,11 @@ import { identityDiscoveryRoutes } from "./routes/discovery";
 import { discoveryRoutes, erc8004Routes } from "./routes/erc8004";
 import { globalWalletRoutes } from "./routes/global-wallet";
 import { intentRoutes } from "./routes/intents";
-import { operatorRecoveryRoutes } from "./routes/operator-recovery";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { secretsRoutes } from "./routes/secrets";
 import { tenantConfigRoutes } from "./routes/tenant-config";
 import { tenantRoutes } from "./routes/tenants";
-import { tradeRoutes } from "./routes/trade";
 import { userRoutes, userSessionAuth } from "./routes/user";
 import { vaultRoutes } from "./routes/vault";
 import { webhookRoutes } from "./routes/webhooks";
@@ -60,181 +74,184 @@ import {
 
 const startTime = Date.now();
 
-const app = new Hono<{ Variables: AppVariables }>();
+/**
+ * Phase 1: build the lean core app with global middleware + all CORE per-route
+ * auth middleware. does NOT install the global idempotency middleware and does
+ * NOT mount any routes (those are phase 2: {@link mountCoreIdempotencyAndRoutes}).
+ * trading is NOT part of the core — it is registered as an opt-in plugin at the
+ * composition root (see compose.ts).
+ */
+export function createApp(): Hono<{ Variables: AppVariables }> {
+  const app = new Hono<{ Variables: AppVariables }>();
 
-// ─── Global error handler ─────────────────────────────────────────────────────
+  // ─── Global error handler ───────────────────────────────────────────────────
 
-app.onError((err, c) => {
-  const requestId = c.get("requestId") || "unknown";
+  app.onError((err, c) => {
+    const requestId = c.get("requestId") || "unknown";
 
-  if (err instanceof SyntaxError || err.message?.includes("JSON")) {
-    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
-  }
+    if (err instanceof SyntaxError || err.message?.includes("JSON")) {
+      return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    }
 
-  console.error(`[${requestId}] Unhandled API error:`, err);
-  return c.json<ApiResponse>({ ok: false, error: "Internal server error" }, 500);
-});
+    console.error(`[${requestId}] Unhandled API error:`, err);
+    return c.json<ApiResponse>({ ok: false, error: "Internal server error" }, 500);
+  });
 
-// ─── 404 fallback ─────────────────────────────────────────────────────────────
+  // ─── 404 fallback ───────────────────────────────────────────────────────────
 
-app.notFound((c) =>
-  c.json<ApiResponse>({ ok: false, error: `Not found: ${c.req.method} ${c.req.path}` }, 404),
-);
+  app.notFound((c) =>
+    c.json<ApiResponse>({ ok: false, error: `Not found: ${c.req.method} ${c.req.path}` }, 404),
+  );
 
-// ─── Global middleware ────────────────────────────────────────────────────────
+  // ─── Global middleware ──────────────────────────────────────────────────────
 
-app.use("*", securityHeaders);
-app.use("*", tenantCors);
-app.use("*", logger());
-app.use("*", correlationId);
+  app.use("*", securityHeaders);
+  app.use("*", tenantCors);
+  app.use("*", logger());
+  app.use("*", correlationId);
 
-app.use(
-  "*",
-  bodyLimit({
-    maxSize: 1024 * 1024,
-    onError: (c) =>
-      c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
-  }),
-);
+  app.use(
+    "*",
+    bodyLimit({
+      maxSize: 1024 * 1024,
+      onError: (c) =>
+        c.json<ApiResponse>({ ok: false, error: "Request body too large (max 1MB)" }, 413),
+    }),
+  );
 
-// ─── Auth middleware per route group ──────────────────────────────────────────
+  // ─── Auth middleware per route group ────────────────────────────────────────
 
-app.use("/agents", (c, next) => tenantAuth(c, next));
-app.use("/agents/*", (c, next) => tenantAuth(c, next));
-app.use("/wallets/batch", (c, next) => tenantAuth(c, next));
-app.use("/v1/wallets/batch", (c, next) => tenantAuth(c, next));
-app.use("/v1/agents", (c, next) => tenantAuth(c, next));
-app.use("/v1/agents/*", (c, next) => tenantAuth(c, next));
-app.use("/accounts", (c, next) => tenantAuth(c, next));
-app.use("/accounts/*", (c, next) => tenantAuth(c, next));
-app.use("/v1/accounts", (c, next) => tenantAuth(c, next));
-app.use("/v1/accounts/*", (c, next) => tenantAuth(c, next));
-app.use("/vault/*", (c, next) => tenantAuth(c, next));
-app.use("/secrets", (c, next) => tenantAuth(c, next));
-app.use("/secrets/*", (c, next) => tenantAuth(c, next));
-app.use("/tenants/:id", (c, next) => {
-  if (c.req.method === "POST" && c.req.path === "/tenants") return next();
-  // GET /tenants/config (no id) is a public discovery endpoint used by the
-  // @stwd/sdk React provider to fetch default-tenant policy/theme/feature
-  // flags before the user has authenticated. The :id wildcard would otherwise
-  // catch it and demand tenant auth, which isn't available pre-signin.
-  const id = c.req.param("id");
-  if (id === "config" && c.req.method === "GET") return next();
-  return tenantAuth(c, next, { requireTenantMatch: id });
-});
-app.use("/tenants/:id/webhook", (c, next) =>
-  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
-);
-app.use("/tenants/:id/config", (c, next) =>
-  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
-);
-app.use("/tenants/:id/config/*", (c, next) =>
-  tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
-);
-app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
-app.use("/platform", platformAuthMiddleware());
-app.use("/platform/*", platformAuthMiddleware());
-app.use("/user", (c, next) => userSessionAuth(c as never, next));
-app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
-app.use("/webhooks", (c, next) => tenantAuth(c, next));
-app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
-app.use("/approvals", (c, next) => tenantAuth(c, next));
-app.use("/approvals/*", (c, next) => tenantAuth(c, next));
-app.use("/intents", (c, next) => tenantAuth(c, next));
-app.use("/intents/*", (c, next) => tenantAuth(c, next));
-app.use("/audit", (c, next) => tenantAuth(c, next));
-app.use("/audit/*", (c, next) => tenantAuth(c, next));
-app.use("/adapters", (c, next) => tenantAuth(c, next));
-app.use("/adapters/*", (c, next) => tenantAuth(c, next));
-app.use("/v1/adapters", (c, next) => tenantAuth(c, next));
-app.use("/v1/adapters/*", (c, next) => tenantAuth(c, next));
-app.use("/v1/users/*", (c, next) => tenantAuth(c, next));
-app.use("/policies", (c, next) => tenantAuth(c, next));
-app.use("/policies/*", (c, next) => tenantAuth(c, next));
-app.use("/condition-sets", (c, next) => tenantAuth(c, next));
-app.use("/condition-sets/*", (c, next) => tenantAuth(c, next));
-app.use("/condition_sets", (c, next) => tenantAuth(c, next));
-app.use("/condition_sets/*", (c, next) => tenantAuth(c, next));
-app.use("/v1/condition_sets", (c, next) => tenantAuth(c, next));
-app.use("/v1/condition_sets/*", (c, next) => tenantAuth(c, next));
-// Operator fund-recovery endpoints use the operator gate (platform key OR
-// tenant-admin), NOT requireAgentJwt. See middleware/operator-auth.ts.
-export const isOperatorRecoveryPath = (path: string): boolean =>
-  path.endsWith("/close-all") ||
-  path.endsWith("/withdraw") ||
-  path.endsWith("/deposit") ||
-  path.endsWith("/transfer") ||
-  path.endsWith("/leverage") ||
-  path.endsWith("/add-margin") ||
-  path.endsWith("/approve-builder") ||
-  path.endsWith("/usd-send");
+  app.use("/agents", (c, next) => tenantAuth(c, next));
+  app.use("/agents/*", (c, next) => tenantAuth(c, next));
+  app.use("/wallets/batch", (c, next) => tenantAuth(c, next));
+  app.use("/v1/wallets/batch", (c, next) => tenantAuth(c, next));
+  app.use("/v1/agents", (c, next) => tenantAuth(c, next));
+  app.use("/v1/agents/*", (c, next) => tenantAuth(c, next));
+  app.use("/accounts", (c, next) => tenantAuth(c, next));
+  app.use("/accounts/*", (c, next) => tenantAuth(c, next));
+  app.use("/v1/accounts", (c, next) => tenantAuth(c, next));
+  app.use("/v1/accounts/*", (c, next) => tenantAuth(c, next));
+  app.use("/vault/*", (c, next) => tenantAuth(c, next));
+  app.use("/secrets", (c, next) => tenantAuth(c, next));
+  app.use("/secrets/*", (c, next) => tenantAuth(c, next));
+  app.use("/tenants/:id", (c, next) => {
+    if (c.req.method === "POST" && c.req.path === "/tenants") return next();
+    // GET /tenants/config (no id) is a public discovery endpoint used by the
+    // @stwd/sdk React provider to fetch default-tenant policy/theme/feature
+    // flags before the user has authenticated. The :id wildcard would otherwise
+    // catch it and demand tenant auth, which isn't available pre-signin.
+    const id = c.req.param("id");
+    if (id === "config" && c.req.method === "GET") return next();
+    return tenantAuth(c, next, { requireTenantMatch: id });
+  });
+  app.use("/tenants/:id/webhook", (c, next) =>
+    tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
+  );
+  app.use("/tenants/:id/config", (c, next) =>
+    tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
+  );
+  app.use("/tenants/:id/config/*", (c, next) =>
+    tenantAuth(c, next, { requireTenantMatch: c.req.param("id") }),
+  );
+  app.use("/dashboard/*", (c, next) => dashboardAuthMiddleware(c, next));
+  app.use("/platform", platformAuthMiddleware());
+  app.use("/platform/*", platformAuthMiddleware());
+  app.use("/user", (c, next) => userSessionAuth(c as never, next));
+  app.use("/user/*", (c, next) => userSessionAuth(c as never, next));
+  app.use("/webhooks", (c, next) => tenantAuth(c, next));
+  app.use("/webhooks/*", (c, next) => tenantAuth(c, next));
+  app.use("/approvals", (c, next) => tenantAuth(c, next));
+  app.use("/approvals/*", (c, next) => tenantAuth(c, next));
+  app.use("/intents", (c, next) => tenantAuth(c, next));
+  app.use("/intents/*", (c, next) => tenantAuth(c, next));
+  app.use("/audit", (c, next) => tenantAuth(c, next));
+  app.use("/audit/*", (c, next) => tenantAuth(c, next));
+  app.use("/adapters", (c, next) => tenantAuth(c, next));
+  app.use("/adapters/*", (c, next) => tenantAuth(c, next));
+  app.use("/v1/adapters", (c, next) => tenantAuth(c, next));
+  app.use("/v1/adapters/*", (c, next) => tenantAuth(c, next));
+  app.use("/v1/users/*", (c, next) => tenantAuth(c, next));
+  app.use("/policies", (c, next) => tenantAuth(c, next));
+  app.use("/policies/*", (c, next) => tenantAuth(c, next));
+  app.use("/condition-sets", (c, next) => tenantAuth(c, next));
+  app.use("/condition-sets/*", (c, next) => tenantAuth(c, next));
+  app.use("/condition_sets", (c, next) => tenantAuth(c, next));
+  app.use("/condition_sets/*", (c, next) => tenantAuth(c, next));
+  app.use("/v1/condition_sets", (c, next) => tenantAuth(c, next));
+  app.use("/v1/condition_sets/*", (c, next) => tenantAuth(c, next));
 
-app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
-app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
-app.use("/trade", (c, next) => tenantAuth(c, next));
-app.use("/trade/*", (c, next) => {
-  if (c.req.path.endsWith("/trade/hyperliquid/order")) return next();
-  if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
-  return tenantAuth(c, next);
-});
-app.use("/v1/trade", (c, next) => tenantAuth(c, next));
-app.use("/v1/trade/*", (c, next) => {
-  if (c.req.path.endsWith("/v1/trade/hyperliquid/order")) return next();
-  if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
-  return tenantAuth(c, next);
-});
+  return app;
+}
 
-app.use("*", idempotencyMiddleware());
+/**
+ * Phase 2: install the global idempotency middleware + mount all CORE routes onto
+ * an app produced by {@link createApp}. KEPT SEPARATE from phase 1 so the
+ * composition root can slot an opt-in plugin's auth middleware in BEFORE
+ * idempotency (phase-1 boundary) and its routes AFTER idempotency (this phase).
+ * the registration order here is identical to the pre-refactor app.ts, minus
+ * trading (which the plugin contributes).
+ */
+export function mountCoreIdempotencyAndRoutes(
+  app: Hono<{ Variables: AppVariables }>,
+): Hono<{ Variables: AppVariables }> {
+  app.use("*", idempotencyMiddleware());
 
-// ─── Health & root ────────────────────────────────────────────────────────────
+  // ─── Health & root ────────────────────────────────────────────────────────
 
-app.get("/", (c) => c.json({ name: "steward", version: API_VERSION, status: "running" }));
-app.get("/openapi.json", (c) => c.json(getOpenApiSpec()));
-app.get("/health", (c) =>
-  c.json({
-    status: "ok",
-    version: API_VERSION,
-    uptime: Math.floor((Date.now() - startTime) / 1000),
-  }),
-);
+  app.get("/", (c) => c.json({ name: "steward", version: API_VERSION, status: "running" }));
+  app.get("/openapi.json", (c) => c.json(getOpenApiSpec()));
+  app.get("/health", (c) =>
+    c.json({
+      status: "ok",
+      version: API_VERSION,
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+    }),
+  );
 
-// ─── Route modules ────────────────────────────────────────────────────────────
+  // ─── Route modules ──────────────────────────────────────────────────────────
 
-app.route("/", identityDiscoveryRoutes);
-app.route("/auth", authRoutes);
-app.route("/platform", platformRoutes);
-app.route("/user", userRoutes);
-app.route("/global-wallet", globalWalletRoutes);
-app.route("/accounts", accountRoutes);
-app.route("/v1/accounts", accountRoutes);
-app.route("/agents", agentRoutes);
-app.route("/v1/agents", agentRoutes);
-app.post("/wallets/batch", createAgentBatch);
-app.post("/v1/wallets/batch", createAgentBatch);
-app.route("/vault", vaultRoutes);
-app.route("/secrets", secretsRoutes);
-// tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler
-// is matched before tenantRoutes' `/:id` wildcard would catch "config" as an id.
-app.route("/tenants", tenantConfigRoutes);
-app.route("/tenants", tenantRoutes);
-app.route("/dashboard", dashboardRoutes);
-app.route("/webhooks", webhookRoutes);
-app.route("/approvals", approvalRoutes);
-app.route("/intents", intentRoutes);
-app.route("/audit", auditRoutes);
-app.route("/adapters", adapterRoutes);
-app.route("/v1/adapters", adapterRoutes);
-app.route("/v1/users", fiatRoutes);
-app.route("/policies", policiesStandaloneRoutes);
-app.route("/condition-sets", conditionSetRoutes);
-app.route("/condition_sets", conditionSetRoutes);
-app.route("/v1/condition_sets", conditionSetRoutes);
-app.route("/trade", tradeRoutes);
-app.route("/v1/trade", tradeRoutes);
-app.route("/trade", operatorRecoveryRoutes);
-app.route("/v1/trade", operatorRecoveryRoutes);
-app.route("/agents", erc8004Routes);
-app.route("/discovery", discoveryRoutes);
+  app.route("/", identityDiscoveryRoutes);
+  app.route("/auth", authRoutes);
+  app.route("/platform", platformRoutes);
+  app.route("/user", userRoutes);
+  app.route("/global-wallet", globalWalletRoutes);
+  app.route("/accounts", accountRoutes);
+  app.route("/v1/accounts", accountRoutes);
+  app.route("/agents", agentRoutes);
+  app.route("/v1/agents", agentRoutes);
+  app.post("/wallets/batch", createAgentBatch);
+  app.post("/v1/wallets/batch", createAgentBatch);
+  app.route("/vault", vaultRoutes);
+  app.route("/secrets", secretsRoutes);
+  // tenantConfigRoutes mounted FIRST so its literal `/config` discovery handler
+  // is matched before tenantRoutes' `/:id` wildcard would catch "config" as an id.
+  app.route("/tenants", tenantConfigRoutes);
+  app.route("/tenants", tenantRoutes);
+  app.route("/dashboard", dashboardRoutes);
+  app.route("/webhooks", webhookRoutes);
+  app.route("/approvals", approvalRoutes);
+  app.route("/intents", intentRoutes);
+  app.route("/audit", auditRoutes);
+  app.route("/adapters", adapterRoutes);
+  app.route("/v1/adapters", adapterRoutes);
+  app.route("/v1/users", fiatRoutes);
+  app.route("/policies", policiesStandaloneRoutes);
+  app.route("/condition-sets", conditionSetRoutes);
+  app.route("/condition_sets", conditionSetRoutes);
+  app.route("/v1/condition_sets", conditionSetRoutes);
+  app.route("/agents", erc8004Routes);
+  app.route("/discovery", discoveryRoutes);
+
+  return app;
+}
+
+/**
+ * The assembled LEAN CORE app (both phases run, trading-free). default export +
+ * named `app` for callers/tests that want the core directly. THIS repo's
+ * deployable server does NOT use this — it uses `composeApp()` (compose.ts) which
+ * also registers the trading plugin.
+ */
+const app = mountCoreIdempotencyAndRoutes(createApp());
 
 export { app, startTime };
 export default app;

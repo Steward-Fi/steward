@@ -1,0 +1,36 @@
+{
+  "name": "@stwd/plugin-trading",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test --timeout 30000",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stwd/db": "workspace:*",
+    "@stwd/policy-engine": "workspace:*",
+    "@stwd/redis": "workspace:*",
+    "@stwd/shared": "workspace:*",
+    "@stwd/trade-sessions": "workspace:*",
+    "@stwd/vault": "workspace:*",
+    "@stwd/venue-hyperliquid": "workspace:*",
+    "@stwd/venue-polymarket": "workspace:*",
+    "drizzle-orm": "^0.44.5",
+    "hono": "^4.12.18",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@stwd/api": "workspace:*",
+    "@stwd/auth": "workspace:*",
+    "@types/node": "^25.5.0"
+  },
+  "description": "Opt-in trading plugin for Steward: venue execution + trade sessions, registered onto a lean Steward app. The core does not depend on this package."
+}

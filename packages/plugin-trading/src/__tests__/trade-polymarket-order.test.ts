@@ -204,7 +204,9 @@ beforeAll(async () => {
       return cb();
     }) as never,
   );
-  ({ tradeRoutes: sharedTradeRoutes } = await import("../routes/trade"));
+  const { createTradeRoutes } = await import("../routes/trade");
+  const { testCtx } = await import("./_ctx");
+  sharedTradeRoutes = createTradeRoutes(testCtx());
 });
 
 afterAll(async () => {
