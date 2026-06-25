@@ -53,6 +53,7 @@
         "@stwd/adapters": "workspace:*",
         "@stwd/auth": "workspace:*",
         "@stwd/db": "workspace:*",
+        "@stwd/plugin-trading": "workspace:*",
         "@stwd/policy-engine": "workspace:*",
         "@stwd/redis": "workspace:*",
         "@stwd/shared": "workspace:*",
@@ -68,7 +69,6 @@
       "devDependencies": {
         "@cloudflare/workers-types": "^4.20241218.0",
         "@scure/btc-signer": "^2.2.0",
-        "@stwd/plugin-trading": "workspace:*",
         "@types/node": "^25.5.0",
         "openapi-typescript": "^7.13.0",
         "wrangler": "^4.0.0",
