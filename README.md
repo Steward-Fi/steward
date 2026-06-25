@@ -24,11 +24,11 @@ Steward sits between agents and everything they access. four pillars:
 3. **auth.** passkeys, email magic links, SIWE, Google/Discord OAuth. JWT sessions with refresh token rotation.
 4. **proxy gateway.** credential injection for any third-party API. agents never see raw keys. full audit trail.
 
-## who uses it
+## how it works in practice
 
-Steward is the signing layer behind every agent on [waifu.fun](https://waifu.fun). Sol, the inaugural agent, trades Hyperliquid perps under a constrained Steward policy. her LLM never holds the key; the LLM sends signing requests, the policy engine evaluates, the vault signs (or refuses) and emits an audit event.
+an agent (or the app delegating to one) holds only a Steward URL and a scoped JWT. it never holds private keys. when it wants to act, its LLM sends a signing request; the policy engine evaluates the request against the agent's policy; the vault signs or refuses; an audit event is emitted either way.
 
-read [how waifu.fun wires Steward](https://docs.waifu.fun/integrations/steward) for a concrete example.
+the key never reaches the model, and compromised app code cannot exceed the policy. spend caps, allowlists, rate limits, and an atomic freeze switch are enforced in the vault itself, before any signature is produced.
 
 ---
 
@@ -205,14 +205,11 @@ Ethereum, Base, Polygon, Arbitrum, BSC, Base Sepolia, BSC Testnet, Solana
 
 ---
 
-## building with
+## integrations
 
-- [waifu.fun](https://waifu.fun) (inaugural agent runtime; Sol signs through Steward)
-- [ELIZA OS](https://elizaos.ai)
-- [Milady](https://milady.gg)
-- [Babylon](https://babylon.market)
-- [Hyperscape](https://hyperscape.ai)
-- [Strata Reserve](https://stratareserve.co)
+- [ElizaOS](https://elizaos.ai) (via [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin))
+- wagmi v2 and v3, with a first-class MetaMask Connect (EVM) connector
+- Model Context Protocol (MCP) server for AI agents and IDEs
 
 ---
 
