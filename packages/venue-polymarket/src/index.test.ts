@@ -227,7 +227,9 @@ describe("signEndpointUrl normalization", () => {
     expect(signEndpointUrl("https://signer.example.com/")).toBe("https://signer.example.com/sign");
   });
   test("leaves an already-/sign url intact", () => {
-    expect(signEndpointUrl("https://signer.example.com/sign")).toBe("https://signer.example.com/sign");
+    expect(signEndpointUrl("https://signer.example.com/sign")).toBe(
+      "https://signer.example.com/sign",
+    );
   });
   test("preserves query string on a /sign url", () => {
     expect(signEndpointUrl("https://signer.example.com/sign?env=prod")).toBe(

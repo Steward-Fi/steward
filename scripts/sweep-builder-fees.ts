@@ -226,9 +226,7 @@ export function createDefaultDeps(config: SweepConfig): SweepDeps {
           ? (resp as { status?: unknown }).status
           : undefined;
       if (status === "err") {
-        throw new Error(
-          `Hyperliquid withdraw rejected: ${JSON.stringify(resp)}`,
-        );
+        throw new Error(`Hyperliquid withdraw rejected: ${JSON.stringify(resp)}`);
       }
       return resp;
     },

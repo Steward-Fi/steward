@@ -19,15 +19,15 @@ const REGISTRY = new Map<number, ERC8183ChainConfig>();
  * shipping any addresses of its own.
  */
 export function registerERC8183ChainConfig(config: ERC8183ChainConfig): void {
-	REGISTRY.set(config.chainId, config);
+  REGISTRY.set(config.chainId, config);
 }
 
 /** Look up a previously-registered ERC-8183 deployment by chainId. */
 export function getERC8183ChainConfig(chainId: number): ERC8183ChainConfig | undefined {
-	return REGISTRY.get(chainId);
+  return REGISTRY.get(chainId);
 }
 
 /** All registered ERC-8183 deployments. Empty until a consumer registers one. */
 export function listERC8183ChainConfigs(): ERC8183ChainConfig[] {
-	return [...REGISTRY.values()];
+  return [...REGISTRY.values()];
 }

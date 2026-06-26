@@ -356,10 +356,9 @@ export class PolymarketExecutionAdapter {
     try {
       ({ client, OrderType } = await this.createClobClient());
     } catch (err) {
-      throw new PolymarketPostNotAttemptedError(
-        err instanceof Error ? err.message : String(err),
-        { cause: err },
-      );
+      throw new PolymarketPostNotAttemptedError(err instanceof Error ? err.message : String(err), {
+        cause: err,
+      });
     }
 
     const isMarketable = req.orderType === "market" || req.orderType === "FOK";

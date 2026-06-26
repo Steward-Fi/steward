@@ -86,7 +86,8 @@ beforeEach(() => {
   captured = [];
   originalFetch = global.fetch;
   routes = {
-    "/auth/email/otp/send": () => jsonResponse({ ok: true, data: { expiresAt: "2026-01-01T00:00:00Z" } }),
+    "/auth/email/otp/send": () =>
+      jsonResponse({ ok: true, data: { expiresAt: "2026-01-01T00:00:00Z" } }),
     "/auth/email/otp/verify": () =>
       jsonResponse({ ok: true, data: { emailGrant: "grant-xyz", expiresInSeconds: 300 } }),
     "/auth/passkey/register/options": () => jsonResponse(REG_OPTIONS),
