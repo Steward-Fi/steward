@@ -434,6 +434,7 @@ export type AuthenticatedPrincipal = {
 // type positions AND re-exported so the many existing
 // `import { AppVariables } from "../services/context"` sites keep working.
 import type { AppVariables } from "@stwd/shared";
+
 export type { AppVariables };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────

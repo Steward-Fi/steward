@@ -27,8 +27,8 @@ import { createOperatorRecoveryRoutes } from "./routes/operator-recovery";
 import { createTradeRoutes } from "./routes/trade";
 
 export type { StewardAppContext } from "./context";
-export { createTradeRoutes } from "./routes/trade";
 export { createOperatorRecoveryRoutes } from "./routes/operator-recovery";
+export { createTradeRoutes } from "./routes/trade";
 
 /** the steward app the plugin mounts onto: a hono app with the shared variables. */
 export type StewardApp = Hono<{ Variables: AppVariables }>;

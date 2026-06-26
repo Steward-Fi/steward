@@ -48,7 +48,10 @@ function makeDeferredRouteApp(app: StewardApp): {
   deferred: StewardApp;
   flush: () => void;
 } {
-  const buffered: Array<{ method: "route" | "get" | "post" | "put" | "patch" | "delete"; args: RouteArgs }> = [];
+  const buffered: Array<{
+    method: "route" | "get" | "post" | "put" | "patch" | "delete";
+    args: RouteArgs;
+  }> = [];
 
   const deferred = new Proxy(app, {
     get(target, prop, receiver) {

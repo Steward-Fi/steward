@@ -9,12 +9,12 @@ export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
-// ─── Trading venues (Sprint 4) ───
-export * from "./types/venue.js";
 // ─── Per-request app context shape (shared so plugins can type routes) ───
 export type { AppVariables } from "./types/app-variables.js";
 // ─── Lean-core + opt-in-plugin contract ───
 export type { StewardPlugin } from "./types/plugin.js";
+// ─── Trading venues (Sprint 4) ───
+export * from "./types/venue.js";
 
 // ─── Tenancy ───
 

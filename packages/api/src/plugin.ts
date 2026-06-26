@@ -45,8 +45,8 @@
  * deploy that wants trading opts in by registering the plugin.
  */
 
-import type { Hono } from "hono";
 import type { StewardPlugin } from "@stwd/shared";
+import type { Hono } from "hono";
 import { requireAgentJwt } from "./middleware/agent-jwt";
 import { operatorAuth } from "./middleware/operator-auth";
 import { getRedisClient } from "./middleware/redis";

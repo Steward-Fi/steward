@@ -9,8 +9,7 @@
  * these variables stays in the core; only the shared shape lives here.
  */
 
-import type { Tenant } from "../index.js";
-import type { TenantConfig } from "../index.js";
+import type { Tenant, TenantConfig } from "../index.js";
 
 export type AppVariables = {
   tenant: Tenant;

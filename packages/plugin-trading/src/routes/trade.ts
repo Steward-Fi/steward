@@ -19,6 +19,7 @@
 import { agentPolicies, eq, getDb, proxyAuditLog } from "@stwd/db";
 import { evaluateTradeOrder } from "@stwd/policy-engine";
 import { checkRateLimit } from "@stwd/redis";
+import type { ApiResponse, AppVariables } from "@stwd/shared";
 import { type TradeSession, TradeSessionManager } from "@stwd/trade-sessions";
 import {
   getMarketableLimitPx,
@@ -40,7 +41,6 @@ import {
   type PolymarketOrderRequest,
   resolveBuilderConfig,
 } from "@stwd/venue-polymarket";
-import type { ApiResponse, AppVariables } from "@stwd/shared";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -1560,10 +1560,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       if (status === 403) {
         // 403s are not stored for idempotent replay (session state can change to
         // active and a retry should re-evaluate) — mirrors HL's session-required 403.
-        return c.json<ApiResponse>(
-          { ok: false, error: "Active Polymarket session required" },
-          403,
-        );
+        return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
       }
       const envelope: TradeIdempotencyResponse = {
         status: 400,

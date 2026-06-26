@@ -34,12 +34,12 @@
  */
 
 import { proxyAuditLog } from "@stwd/db";
+import type { ApiResponse, AppVariables } from "@stwd/shared";
 import {
   HyperliquidAdapter,
   hyperliquidAssetSchema,
   isBuilderPerpSymbol,
 } from "@stwd/venue-hyperliquid";
-import type { ApiResponse, AppVariables } from "@stwd/shared";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
