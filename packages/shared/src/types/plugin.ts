@@ -25,20 +25,68 @@
  *        core).
  */
 /**
+ * The shape of a single policy rule as seen by a contributed evaluator. A plugin
+ * owns a rule `type` that the core's closed {@link PolicyType} union does NOT
+ * enumerate, so the contribution sees the rule structurally: a string `type`
+ * (the plugin's discriminator), an `enabled` flag, and an opaque `config` bag the
+ * evaluator interprets. This mirrors the core {@link PolicyRule} fields WITHOUT
+ * narrowing `type` to the core union, so a plugin rule type is representable.
+ */
+export interface ContributedPolicyRule {
+  readonly id: string;
+  /** the plugin's rule-type discriminator (NOT a member of the core union). */
+  readonly type: string;
+  readonly enabled: boolean;
+  readonly config: Record<string, unknown>;
+}
+
+/**
+ * The verdict a contributed evaluator returns. Structurally identical to the
+ * core `PolicyResult` (policyId/type/passed/reason). Defined here — rather than
+ * importing the core `PolicyResult` — so this contract stays self-contained in
+ * `@stwd/shared`'s type vocabulary; the policy engine treats a returned value as
+ * a `PolicyResult` (the shapes are assignable).
+ */
+export interface ContributedPolicyResult {
+  readonly policyId: string;
+  readonly type: string;
+  readonly passed: boolean;
+  readonly reason?: string;
+}
+
+/**
  * A policy-rule contribution a plugin declares so the core's policy engine can
  * evaluate a rule type the plugin owns (e.g. a venue-specific gate) WITHOUT the
  * core importing the plugin.
  *
- * PLACEHOLDER (Phase 2b): the shape is intentionally minimal here so the
- * contract is REAL (a plugin can declare the field and the host can carry it),
- * but the host does not yet WIRE these into `PolicyEngine`. Full wiring —
- * registering the evaluator, validating the rule type is unique, threading the
- * eval context — is Phase 2b. Until then `policyRules` is accepted + reported by
- * the host's diagnostics but not evaluated.
+ * WIRED in Phase 2b. The plugin host registers each contribution into the policy
+ * engine's runtime evaluator registry (fail-closed on a `type` that collides with
+ * a core rule type or another plugin's). When `evaluatePolicy` meets a rule whose
+ * `type` is not one of the core cases, it consults the registry; the contributed
+ * `evaluate` runs and its result is used. Core rule evaluation is untouched.
+ *
+ * GENERIC over the evaluator context `Ctx`: `@stwd/shared` must not import
+ * `@stwd/policy-engine` (that would be a dependency cycle — policy-engine imports
+ * shared), so the concrete evaluator context type lives in policy-engine and is
+ * bound there. A plugin author binds `Ctx` to the policy engine's exported
+ * `EvaluatorContext`. Left unbound, `Ctx` defaults to `unknown` so the contract
+ * is usable without the policy engine present.
  */
-export interface PolicyRuleContribution {
+export interface PolicyRuleContribution<Ctx = unknown> {
   /** the policy `type` discriminator this rule contributes (must be unique). */
   readonly type: string;
+  /**
+   * evaluate a rule of this contributed `type` against the injected context.
+   * MUST be pure with respect to money state (it reads the context the engine
+   * supplies and returns a verdict; it reserves/commits nothing). may be async.
+   * a thrown error is treated by the engine as a fail-closed deny.
+   */
+  evaluate(
+    rule: ContributedPolicyRule,
+    ctx: Ctx,
+  ): ContributedPolicyResult | Promise<ContributedPolicyResult>;
+  /** optional human-readable description, surfaced in diagnostics. */
+  readonly description?: string;
 }
 
 /**
@@ -72,7 +120,7 @@ export interface AdapterContribution {
   readonly provider: string;
 }
 
-export interface StewardPlugin<App = unknown, Ctx = unknown> {
+export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> {
   /** stable identifier for the plugin, e.g. "trading". used in logs/diagnostics. */
   readonly name: string;
   /**
@@ -112,12 +160,14 @@ export interface StewardPlugin<App = unknown, Ctx = unknown> {
   readonly webhookEvents?: readonly string[];
 
   /**
-   * policy rules this plugin contributes. TYPED here (`PolicyRuleContribution`)
-   * so the contract shape is real, but full wiring into the policy engine is
-   * DEFERRED to Phase 2b. The host carries + reports these; it does not yet
-   * evaluate them.
+   * policy rules this plugin contributes. WIRED in Phase 2b: the host registers
+   * each into the policy engine's runtime evaluator registry (fail-closed on a
+   * `type` collision with a core rule type or another plugin's). The policy
+   * engine then evaluates a rule of a contributed `type` via the contribution's
+   * `evaluate`. `EvalCtx` is bound by the concrete app plugin type (in
+   * `@stwd/api`) to the policy engine's `EvaluatorContext`.
    */
-  readonly policyRules?: readonly PolicyRuleContribution[];
+  readonly policyRules?: readonly PolicyRuleContribution<EvalCtx>[];
 
   /**
    * database migrations this plugin contributes. TYPED here

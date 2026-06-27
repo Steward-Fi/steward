@@ -38,6 +38,14 @@ export type { VenueAllowlistContext } from "./evaluators/venue-allowlist";
 export { evaluateVenueAllowlist } from "./evaluators/venue-allowlist";
 export type { ManualApprovalSignal } from "./manual-approval";
 export { resultRequiresManualApproval } from "./manual-approval";
+export type { RegisteredPolicyEvaluator } from "./policy-rule-registry";
+export {
+  CORE_POLICY_RULE_TYPES,
+  evaluateRegisteredPolicy,
+  PolicyRuleRegistry,
+  PolicyRuleRegistryError,
+  policyRuleRegistry,
+} from "./policy-rule-registry";
 export type { ReputationInput } from "./reputation";
 export { calculateInternalReputation } from "./reputation";
 export type {

@@ -73,7 +73,17 @@ export const CONFIGURED_WEBHOOK_EVENT_TYPES = [
 export type ConfiguredWebhookEventType = (typeof CONFIGURED_WEBHOOK_EVENT_TYPES)[number];
 type VaultWebhookEventAlias = LegacyWebhookEventType;
 
-export type DispatchableWebhookEventType = WebhookEventType;
+/**
+ * The event-type a caller may pass to `dispatchWebhook`. Core event names
+ * (`WebhookEventType`) stay autocompleted/typed; the `(string & {})` arm widens
+ * the type so a PLUGIN-declared event name (one the plugin host merged into the
+ * runtime {@link webhookEventRegistry}) can also be emitted, WITHOUT the core's
+ * closed union having to enumerate it. The widening is a TYPE accommodation only:
+ * `dispatchWebhook` VALIDATES the name against the runtime registry (core ∪
+ * plugin-declared) and drops an unregistered name, so an arbitrary unvalidated
+ * string can never flow through.
+ */
+export type DispatchableWebhookEventType = WebhookEventType | (string & {});
 
 const CONFIGURED_EVENT_SET = new Set<string>(CONFIGURED_WEBHOOK_EVENT_TYPES);
 const VAULT_EVENT_ALIAS_MAP: Partial<Record<VaultWebhookEventAlias, ConfiguredWebhookEventType>> = {

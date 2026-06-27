@@ -111,6 +111,7 @@ mock.module("@stwd/webhooks", () => ({
 }));
 
 const { dispatchWebhook } = await import("../services/webhook-dispatch");
+const { webhookEventRegistry } = await import("../services/webhook-events");
 
 beforeEach(() => {
   webhookRows.length = 0;
@@ -276,5 +277,50 @@ describe("dispatchWebhook", () => {
     expect(dispatches).toHaveLength(1);
     expect(dispatches[0]?.event.type).toBe("tx_unknown_state");
     expect(dispatches[0]?.webhook).toBe("https://tenant-config.example.com/hook");
+  });
+
+  // ── Phase 2b: plugin-declared event emission ───────────────────────────────
+  it("emits a PLUGIN-declared event to a config that subscribes to it", async () => {
+    // a plugin registered this event name into the runtime registry at compose
+    // time (host.register merges StewardPlugin.webhookEvents). The core's closed
+    // union never enumerates it, but the configured fan-out must still deliver it
+    // to a subscriber that lists it.
+    webhookEventRegistry.registerPluginEvents("demo-plugin", ["demo.thing.happened"]);
+    webhookRows.push({
+      tenantId: "tenant-1",
+      url: "https://example.com/plugin-sub",
+      secret: "whsec_plugin",
+      events: ["demo.thing.happened"],
+      enabled: true,
+      maxRetries: 0,
+      retryBackoffMs: 0,
+    });
+
+    // cast: the typed API widens to (string & {}); a real plugin caller passes the
+    // declared event name. it is registry-valid so it must be delivered.
+    dispatchWebhook("tenant-1", "agent-1", "demo.thing.happened" as never, { foo: "bar" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const pluginDispatch = dispatches.find((d) => d.event.type === "demo.thing.happened");
+    expect(pluginDispatch).toBeDefined();
+    expect(pluginDispatch?.webhook).toMatchObject({ url: "https://example.com/plugin-sub" });
+  });
+
+  it("does NOT deliver a plugin event to a config that does not subscribe to it", async () => {
+    webhookEventRegistry.registerPluginEvents("demo-plugin", ["demo.thing.happened"]);
+    webhookRows.push({
+      tenantId: "tenant-1",
+      url: "https://example.com/other-sub",
+      secret: "whsec_other",
+      events: ["tx.signed"], // subscribes to a different (core) event only
+      enabled: true,
+      maxRetries: 0,
+      retryBackoffMs: 0,
+    });
+
+    dispatchWebhook("tenant-1", "agent-1", "demo.thing.happened" as never, { foo: "bar" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(dispatches.find((d) => d.event.type === "demo.thing.happened")).toBeUndefined();
   });
 });
