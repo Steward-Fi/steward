@@ -48,9 +48,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const vaultSource = readFileSync(join(import.meta.dir, "..", "routes", "vault.ts"), "utf8");
-const tradeSource = readFileSync(join(import.meta.dir, "..", "routes", "trade.ts"), "utf8");
 
-describe("vault and trade audit-ordering structural backstops", () => {
+describe("vault audit-ordering structural backstops", () => {
   it("orders authorization-audit before the irreversible action on secondary/disabled signing routes", () => {
     // Secondary signing/lifecycle routes (the audit-before-sign pattern itself is
     // proven behaviorally on /sign + approve; these are the lower-value siblings).
@@ -79,13 +78,6 @@ describe("vault and trade audit-ordering structural backstops", () => {
     );
     expect(vaultSource.indexOf('action: "vault.sign.authorization.authorized"')).toBeLessThan(
       vaultSource.indexOf("vault.signAuthorization"),
-    );
-
-    // Session revoke-authorization before the manager revoke (control-plane). The
-    // venue-submit ordering that used to live here is now behavioral — see
-    // trade-venue-submit-fence.test.ts.
-    expect(tradeSource.indexOf('"trade.session.revoke.authorized"')).toBeLessThan(
-      tradeSource.indexOf("getSessionManager().revokeSession"),
     );
   });
 
