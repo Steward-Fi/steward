@@ -50,6 +50,7 @@ COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
@@ -81,6 +82,7 @@ COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
@@ -106,6 +108,7 @@ COPY packages/adapters    packages/adapters
 COPY packages/api         packages/api
 COPY packages/auth        packages/auth
 COPY packages/db          packages/db
+COPY packages/plugin-trading packages/plugin-trading
 COPY packages/policy-engine packages/policy-engine
 COPY packages/proxy       packages/proxy
 COPY packages/redis       packages/redis
@@ -129,6 +132,7 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/proxy         node_modules/@stwd/proxy && \
     ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
     ln -sf ../../../packages/policy-engine     node_modules/@stwd/policy-engine && \
+    ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
     ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
     ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket
@@ -158,6 +162,7 @@ COPY packages/db/package.json                packages/db/package.json
 COPY packages/eliza-plugin/package.json      packages/eliza-plugin/package.json
 COPY packages/erc8004/package.json           packages/erc8004/package.json
 COPY packages/erc8183/package.json           packages/erc8183/package.json
+COPY packages/plugin-trading/package.json     packages/plugin-trading/package.json
 COPY packages/policy-engine/package.json     packages/policy-engine/package.json
 COPY packages/proxy/package.json             packages/proxy/package.json
 COPY packages/react/package.json             packages/react/package.json
@@ -180,6 +185,7 @@ COPY --from=build /app/packages/adapters    packages/adapters
 COPY --from=build /app/packages/api         packages/api
 COPY --from=build /app/packages/auth        packages/auth
 COPY --from=build /app/packages/db          packages/db
+COPY --from=build /app/packages/plugin-trading packages/plugin-trading
 COPY --from=build /app/packages/policy-engine packages/policy-engine
 COPY --from=build /app/packages/proxy       packages/proxy
 COPY --from=build /app/packages/redis       packages/redis
@@ -204,6 +210,7 @@ RUN mkdir -p node_modules/@stwd && \
     ln -sf ../../../packages/proxy         node_modules/@stwd/proxy && \
     ln -sf ../../../packages/webhooks      node_modules/@stwd/webhooks && \
     ln -sf ../../../packages/policy-engine node_modules/@stwd/policy-engine && \
+    ln -sf ../../../packages/plugin-trading    node_modules/@stwd/plugin-trading && \
     ln -sf ../../../packages/trade-sessions    node_modules/@stwd/trade-sessions && \
     ln -sf ../../../packages/venue-hyperliquid node_modules/@stwd/venue-hyperliquid && \
     ln -sf ../../../packages/venue-polymarket  node_modules/@stwd/venue-polymarket && \

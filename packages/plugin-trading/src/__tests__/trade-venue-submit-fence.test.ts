@@ -180,7 +180,9 @@ describe("Hyperliquid venue-submit spend-fence (real /hyperliquid/order path)", 
     fenceSpy = spyOn(TradeSessionManager.prototype, "withActiveSubmissionFence").mockImplementation(
       (async (_input, cb) => cb(undefined)) as never,
     );
-    ({ tradeRoutes } = await import("../routes/trade"));
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
+    tradeRoutes = createTradeRoutes(testCtx());
   });
 
   afterAll(async () => {

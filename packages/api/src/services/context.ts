@@ -428,30 +428,14 @@ export type AuthenticatedPrincipal = {
   id: string;
 };
 
-export type AppVariables = {
-  tenant: Tenant;
-  tenantConfig: TenantConfig;
-  tenantId: string;
-  userId?: string;
-  tenantRole?: string;
-  sessionMfaVerifiedAt?: number;
-  sessionMfaMethod?: string;
-  agentScope?: string;
-  agentSubject?: string;
-  agentScopes?: string[];
-  authType?:
-    | "api-key"
-    | "app-secret"
-    | "session-jwt"
-    | "agent-token"
-    | "dashboard-jwt"
-    | "platform";
-  requestSignatureVerified?: boolean;
-  requestId?: string;
-  platformKeyHash?: string;
-  platformScopes?: string[];
-  agentPolicyIds?: string[];
-};
+// AppVariables now lives in @stwd/shared so opt-in plugins can type their own
+// hono routes against the same per-request context WITHOUT importing @stwd/api
+// (which would be a circular dependency). imported for local use in this file's
+// type positions AND re-exported so the many existing
+// `import { AppVariables } from "../services/context"` sites keep working.
+import type { AppVariables } from "@stwd/shared";
+
+export type { AppVariables };
 
 // ─── Shared query helpers ─────────────────────────────────────────────────────
 

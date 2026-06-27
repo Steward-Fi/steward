@@ -135,10 +135,23 @@ async function ensureWorkerInit(env: Env): Promise<void> {
   return workerInit;
 }
 
+// Compose the deployable app once per isolate: lean core + this repo's opt-in
+// plugins (trading). cached so we don't re-register plugins on every request.
+// composeApp() dynamically imports the trading plugin so the lean core graph
+// never statically references the trading stack.
+let composedApp: Awaited<ReturnType<typeof import("./compose").composeApp>> | null = null;
+
+async function getComposedApp() {
+  if (composedApp) return composedApp;
+  const { composeApp } = await import("./compose");
+  composedApp = await composeApp();
+  return composedApp;
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: unknown): Promise<Response> {
     await ensureWorkerInit(env);
-    const { app } = await import("./app");
+    const app = await getComposedApp();
     return app.fetch(request, env, ctx as never);
   },
 };

@@ -4,6 +4,12 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
+  "exports": {
+    ".": "./src/lib.ts",
+    "./app": "./src/app.ts",
+    "./compose": "./src/compose.ts",
+    "./plugin": "./src/plugin.ts"
+  },
   "scripts": {
     "dev": "bun --watch src/index.ts",
     "build": "tsc --noEmit",
@@ -23,20 +29,18 @@
     "@stwd/adapters": "workspace:*",
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
-    "@stwd/redis": "workspace:*",
+    "@stwd/plugin-trading": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
+    "@stwd/redis": "workspace:*",
     "@stwd/shared": "workspace:*",
-    "@stwd/trade-sessions": "workspace:*",
-    "@stwd/venue-hyperliquid": "workspace:*",
-    "@stwd/venue-polymarket": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/webhooks": "workspace:*",
     "bs58": "^6.0.0",
     "drizzle-orm": "^0.44.5",
     "hono": "^4.12.18",
+    "jose": "^6.2.1",
     "viem": "^2.30.0",
-    "zod": "^4.3.6",
-    "jose": "^6.2.1"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241218.0",

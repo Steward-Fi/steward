@@ -13,7 +13,7 @@ const KID = "test-agent-token-kid";
 const auditEvents: Array<{ action: string; metadata?: Record<string, unknown>; actorId?: string }> =
   [];
 
-mock.module("../services/audit", () => ({
+mock.module("../../../api/src/services/audit", () => ({
   trackAuditEvent: (event: {
     action: string;
     metadata?: Record<string, unknown>;
@@ -33,11 +33,11 @@ mock.module("../services/audit", () => ({
 let privateKey: CryptoKey;
 let publicJwk: JsonWebKey;
 let apiKey = "";
-let requireAgentJwt: typeof import("../middleware/agent-jwt")["requireAgentJwt"];
-let clearAgentJwksCacheForTests: typeof import("../middleware/agent-jwt")["clearAgentJwksCacheForTests"];
-let clearAgentTokenStatusForTests: typeof import("../services/agent-token-status")["clearAgentTokenStatusForTests"];
-let tradeRoutes: typeof import("../routes/trade")["tradeRoutes"];
-let tenantAuth: typeof import("../services/context")["tenantAuth"];
+let requireAgentJwt: typeof import("../../../api/src/middleware/agent-jwt")["requireAgentJwt"];
+let clearAgentJwksCacheForTests: typeof import("../../../api/src/middleware/agent-jwt")["clearAgentJwksCacheForTests"];
+let clearAgentTokenStatusForTests: typeof import("../../../api/src/services/agent-token-status")["clearAgentTokenStatusForTests"];
+let tradeRoutes: Hono;
+let tenantAuth: typeof import("../../../api/src/services/context")["tenantAuth"];
 
 beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
@@ -60,10 +60,16 @@ beforeAll(async () => {
     Response.json({ keys: [publicJwk] }),
   ) as unknown as typeof fetch;
 
-  ({ requireAgentJwt, clearAgentJwksCacheForTests } = await import("../middleware/agent-jwt"));
-  ({ clearAgentTokenStatusForTests } = await import("../services/agent-token-status"));
-  ({ tradeRoutes } = await import("../routes/trade"));
-  const contextModule = await import("../services/context");
+  ({ requireAgentJwt, clearAgentJwksCacheForTests } = await import(
+    "../../../api/src/middleware/agent-jwt"
+  ));
+  ({ clearAgentTokenStatusForTests } = await import(
+    "../../../api/src/services/agent-token-status"
+  ));
+  const { createTradeRoutes } = await import("../routes/trade");
+  const { testCtx } = await import("./_ctx");
+  tradeRoutes = createTradeRoutes(testCtx());
+  const contextModule = await import("../../../api/src/services/context");
   ({ tenantAuth } = contextModule);
 
   const apiKeyPair = generateApiKey();

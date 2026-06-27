@@ -538,7 +538,6 @@ describe("idempotencyMiddleware", () => {
       'app.use("/webhooks"',
       'app.use("/intents"',
       'app.use("/policies"',
-      'app.use("/trade"',
       'app.use("/platform"',
       'app.use("/user"',
     ]) {

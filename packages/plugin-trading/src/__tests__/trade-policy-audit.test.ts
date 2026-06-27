@@ -65,7 +65,8 @@ describe("trade policy audit", () => {
     });
 
     process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
-    const { tradeRoutes } = await import("../routes/trade");
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
     const app = new Hono<{
       Variables: {
         tenantId: string;
@@ -81,7 +82,7 @@ describe("trade policy audit", () => {
       c.set("sessionMfaVerifiedAt", Date.now());
       await next();
     });
-    app.route("/v1/trade", tradeRoutes);
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
 
     const res = await app.request("/v1/trade/sessions", {
       method: "POST",
@@ -144,7 +145,8 @@ describe("trade policy audit", () => {
       });
 
     process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
-    const { tradeRoutes } = await import("../routes/trade");
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
     const app = new Hono<{
       Variables: {
         tenantId: string;
@@ -158,7 +160,7 @@ describe("trade policy audit", () => {
       c.set("authType", "agent");
       await next();
     });
-    app.route("/v1/trade", tradeRoutes);
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
 
     const res = await app.request("/v1/trade/hyperliquid/order", {
       method: "POST",
@@ -236,7 +238,8 @@ describe("trade policy audit", () => {
     }) as unknown as typeof fetch;
 
     process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
-    const { tradeRoutes } = await import("../routes/trade");
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
     const app = new Hono<{
       Variables: {
         tenantId: string;
@@ -250,7 +253,7 @@ describe("trade policy audit", () => {
       c.set("authType", "agent");
       await next();
     });
-    app.route("/v1/trade", tradeRoutes);
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
 
     const res = await app.request("/v1/trade/hyperliquid/order", {
       method: "POST",
@@ -309,7 +312,8 @@ describe("trade policy audit", () => {
       });
 
     process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
-    const { tradeRoutes } = await import("../routes/trade");
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
     const app = new Hono<{
       Variables: {
         tenantId: string;
@@ -323,7 +327,7 @@ describe("trade policy audit", () => {
       c.set("authType", "agent-token");
       await next();
     });
-    app.route("/v1/trade", tradeRoutes);
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
 
     const res = await app.request("/v1/trade/hyperliquid/order", {
       method: "POST",
@@ -371,7 +375,8 @@ describe("trade policy audit", () => {
     });
 
     process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
-    const { tradeRoutes } = await import("../routes/trade");
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
     const app = new Hono<{
       Variables: {
         tenantId: string;
@@ -387,7 +392,7 @@ describe("trade policy audit", () => {
       c.set("tenantRole", "member");
       await next();
     });
-    app.route("/v1/trade", tradeRoutes);
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
 
     const res = await app.request("/v1/trade/sessions", {
       method: "POST",
@@ -445,7 +450,8 @@ describe("trade policy audit", () => {
     const agentId = `agent-trade-idempotency-${Date.now()}`;
 
     process.env.STEWARD_MASTER_PASSWORD ??= "test-master-password";
-    const { tradeRoutes } = await import("../routes/trade");
+    const { createTradeRoutes } = await import("../routes/trade");
+    const { testCtx } = await import("./_ctx");
     const app = new Hono<{
       Variables: {
         tenantId: string;
@@ -459,7 +465,7 @@ describe("trade policy audit", () => {
       c.set("authType", "agent-token");
       await next();
     });
-    app.route("/v1/trade", tradeRoutes);
+    app.route("/v1/trade", createTradeRoutes(testCtx()));
 
     const res = await app.request("/v1/trade/hyperliquid/order", {
       method: "POST",
