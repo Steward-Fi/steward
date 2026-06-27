@@ -14,6 +14,8 @@ export type { AppVariables } from "./types/app-variables.js";
 // ─── Lean-core + opt-in-plugin contract ───
 export type {
   AdapterContribution,
+  ContributedPolicyResult,
+  ContributedPolicyRule,
   PluginMigrationSource,
   PolicyRuleContribution,
   StewardPlugin,

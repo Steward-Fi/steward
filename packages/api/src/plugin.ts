@@ -45,6 +45,12 @@
  * deploy that wants trading opts in by registering the plugin.
  */
 
+import {
+  type EvaluatorContext,
+  type PolicyRuleRegistry,
+  policyRuleRegistry,
+  type RegisteredPolicyEvaluator,
+} from "@stwd/policy-engine";
 import type { StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
 import type { Hono } from "hono";
@@ -100,8 +106,14 @@ export interface StewardAppContext {
   tenantAuth: typeof tenantAuth;
 }
 
-/** a steward plugin concretely bound to the hono app + the injected context. */
-export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext>;
+/**
+ * a steward plugin concretely bound to the hono app + the injected context. the
+ * third type arg binds a contributed policy rule's evaluator context to the policy
+ * engine's {@link EvaluatorContext}, so a plugin author's `policyRules[].evaluate`
+ * receives the real engine context (request + spend counters + oracle + venue +
+ * leverage + ...).
+ */
+export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext, EvaluatorContext>;
 
 /**
  * Build the context the core injects into a plugin: bind every shared core
@@ -158,6 +170,8 @@ export interface PluginHostDiagnostics {
   webhookEvents: string[];
   /** which plugin contributed which webhook event names (core events excluded). */
   webhookEventContributions: Record<string, string[]>;
+  /** which plugin contributed which policy rule types (Phase 2b). */
+  policyRuleContributions: Record<string, string[]>;
 }
 
 /**
@@ -231,39 +245,55 @@ function orderByDependencies<Ctx>(
 /**
  * The plugin host: composes one or more plugins onto a steward app.
  *
- * RESPONSIBILITIES (Phase 2a)
- * ---------------------------
+ * RESPONSIBILITIES (Phase 2a + 2b)
+ * --------------------------------
  *  1. validate unique plugin names + a valid (acyclic, fully-satisfied)
  *     `dependsOn` graph, FAILING CLOSED on any violation.
  *  2. order plugins so each registers AFTER its dependencies.
  *  3. collect each plugin's declared `webhookEvents` into a runtime-extensible
  *     {@link WebhookEventRegistry} (core events ∪ plugin-declared), so the
- *     webhook config/dispatch path accepts a plugin's event type.
- *  4. call each plugin's `register(app, ctx)` (if present) in dependency order.
- *  5. expose {@link describe} so ops can see what loaded + what was contributed.
+ *     webhook config/dispatch path accepts a plugin's event type. (Phase 2a)
+ *  4. register each plugin's declared `policyRules` into the policy engine's
+ *     runtime evaluator {@link PolicyRuleRegistry}, FAILING CLOSED on a rule
+ *     `type` that collides with a core rule type or another plugin's, so the
+ *     policy engine evaluates a contributed rule type via the plugin's
+ *     evaluator (core rule evaluation is untouched). (Phase 2b)
+ *  5. call each plugin's `register(app, ctx)` (if present) in dependency order.
+ *  6. expose {@link describe} so ops can see what loaded + what was contributed.
  *
- * `policyRules` / `migrations` / `adapters` contribution points are TYPED on the
- * contract but their wiring is DEFERRED to Phase 2b/2c/2d; the host does not act
- * on them yet (it does not even read them, to avoid implying behavior that does
- * not exist).
+ * `migrations` / `adapters` contribution points are TYPED on the contract but
+ * their wiring is DEFERRED to Phase 2c/2d; the host does not act on them yet.
  */
 export class PluginHost<Ctx> {
   private readonly loaded: LoadedPluginInfo[] = [];
   private readonly eventRegistry: WebhookEventRegistry;
+  private readonly policyRegistry: PolicyRuleRegistry;
+  /** which plugin contributed which policy rule types (diagnostics). */
+  private readonly policyContributions = new Map<string, string[]>();
 
   /**
    * @param eventRegistry the registry plugin-declared webhook events merge into.
    *   defaults to a fresh registry seeded with the core event types, so the host
    *   is usable standalone (tests); the composition root passes the SHARED
    *   registry the webhook config/dispatch path consults.
+   * @param policyRegistry the policy-engine evaluator registry plugin-contributed
+   *   policy rules register into. defaults to the process-wide
+   *   {@link policyRuleRegistry} the engine's evaluatePolicy consults; tests pass
+   *   an isolated registry for hermeticity.
    */
-  constructor(eventRegistry?: WebhookEventRegistry) {
+  constructor(eventRegistry?: WebhookEventRegistry, policyRegistry?: PolicyRuleRegistry) {
     this.eventRegistry = eventRegistry ?? new WebhookEventRegistry(CONFIGURED_WEBHOOK_EVENT_TYPES);
+    this.policyRegistry = policyRegistry ?? policyRuleRegistry;
   }
 
   /** the webhook event registry this host merges plugin events into. */
   get webhookEventRegistry(): WebhookEventRegistry {
     return this.eventRegistry;
+  }
+
+  /** the policy-rule evaluator registry this host registers plugin rules into. */
+  get policyRuleRegistry(): PolicyRuleRegistry {
+    return this.policyRegistry;
   }
 
   /**
@@ -288,6 +318,33 @@ export class PluginHost<Ctx> {
       }
     }
 
+    // Phase 1b: register declared policy rules into the policy-engine evaluator
+    // registry (Phase 2b). Done BEFORE any `register` hook runs, so a plugin's
+    // rule type is evaluable as soon as it (or anything) calls into the engine.
+    // FAILS CLOSED: a `type` colliding with a core rule type or another plugin's
+    // throws PolicyRuleRegistryError from the registry — the host never composes
+    // an ambiguous policy-evaluation surface (a plugin cannot shadow a money-rail
+    // core decision, nor silently override another plugin's rule type).
+    for (const plugin of ordered) {
+      if (!plugin.policyRules || plugin.policyRules.length === 0) continue;
+      for (const contribution of plugin.policyRules) {
+        this.policyRegistry.register({
+          type: contribution.type,
+          pluginName: plugin.name,
+          ...(contribution.description !== undefined
+            ? { description: contribution.description }
+            : {}),
+          // the contribution's `evaluate` is declared against the plugin's bound
+          // EvalCtx (the engine's EvaluatorContext at the api composition root);
+          // the registry calls it with the concrete EvaluatorContext.
+          evaluate: contribution.evaluate as RegisteredPolicyEvaluator["evaluate"],
+        });
+        const types = this.policyContributions.get(plugin.name) ?? [];
+        types.push(contribution.type);
+        this.policyContributions.set(plugin.name, types);
+      }
+    }
+
     // Phase 2: run each plugin's imperative register hook in dependency order.
     for (const plugin of ordered) {
       this.loaded.push({ name: plugin.name, version: plugin.version });
@@ -299,10 +356,15 @@ export class PluginHost<Ctx> {
 
   /** What this host loaded + what plugins contributed (for ops/health). */
   describe(): PluginHostDiagnostics {
+    const policyRuleContributions: Record<string, string[]> = {};
+    for (const [plugin, types] of this.policyContributions) {
+      policyRuleContributions[plugin] = [...types].sort();
+    }
     return {
       plugins: [...this.loaded],
       webhookEvents: this.eventRegistry.list(),
       webhookEventContributions: this.eventRegistry.describeContributions(),
+      policyRuleContributions,
     };
   }
 }
@@ -323,8 +385,9 @@ export async function registerPlugin<Ctx>(
   plugin: StewardPlugin<StewardApp, Ctx>,
   ctx: Ctx,
   eventRegistry?: WebhookEventRegistry,
+  policyRegistry?: PolicyRuleRegistry,
 ): Promise<PluginHost<Ctx>> {
-  const host = new PluginHost<Ctx>(eventRegistry);
+  const host = new PluginHost<Ctx>(eventRegistry, policyRegistry);
   await host.register(app, ctx, plugin);
   return host;
 }
