@@ -32,8 +32,9 @@
 
 import type { Hono } from "hono";
 import { createApp, mountCoreIdempotencyAndRoutes } from "./app";
-import { buildPluginContext, registerPlugin, type StewardApp } from "./plugin";
+import { buildPluginContext, PluginHost, type StewardApp } from "./plugin";
 import type { AppVariables } from "./services/context";
+import { webhookEventRegistry } from "./services/webhook-events";
 
 type RouteArgs = unknown[];
 
@@ -117,10 +118,19 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
   // plugin module is evaluated lazily at compose time, not at module load.
   const ctx = buildPluginContext();
   const { tradingPlugin } = (await import("@stwd/plugin-trading")) as {
-    tradingPlugin: Parameters<typeof registerPlugin<typeof ctx>>[1];
+    tradingPlugin: Parameters<PluginHost<typeof ctx>["register"]>[2];
   };
   const { deferred, flush } = makeDeferredRouteApp(app);
-  await registerPlugin(deferred, tradingPlugin, ctx);
+
+  // The plugin host composes the plugin(s): it orders by `dependsOn` (failing
+  // closed on a missing/cyclic dep), merges each plugin's declared
+  // `webhookEvents` into the SHARED process-wide registry the webhook config/
+  // dispatch path consults (so a plugin's event type is accepted), then runs
+  // each plugin's `register`. It registers onto the DEFERRED-ROUTE proxy so the
+  // load-bearing ordering is preserved: plugin auth mw lands now (before
+  // idempotency), plugin routes are buffered and flushed after.
+  const host = new PluginHost<typeof ctx>(webhookEventRegistry);
+  await host.register(deferred, ctx, tradingPlugin);
 
   // 3) core idempotency + core routes.
   mountCoreIdempotencyAndRoutes(app);

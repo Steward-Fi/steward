@@ -27,6 +27,8 @@ import {
   acceptsConfiguredWebhookEvent,
   CONFIGURED_WEBHOOK_EVENT_TYPES,
   type ConfiguredWebhookEventType,
+  isValidConfigurableWebhookEvent,
+  listValidConfigurableWebhookEvents,
 } from "../services/webhook-events";
 import { validateWebhookUrl } from "../services/webhook-url";
 
@@ -37,7 +39,12 @@ webhookRoutes.use("*", async (c, next) => {
   await next();
 });
 
-// Valid webhook event types
+// Valid CORE webhook event types. Used as the default subscription set (a
+// webhook with no explicit `events` subscribes to all CORE events; plugin-
+// declared events are opt-in by name). Validation of a SUPPLIED `events` array
+// goes through the runtime-extensible registry (core ∪ plugin-declared) via
+// isValidConfigurableWebhookEvent, so a plugin's event name is accepted once the
+// plugin host has registered it at the composition root.
 const VALID_EVENTS = CONFIGURED_WEBHOOK_EVENT_TYPES;
 const MAX_WEBHOOKS_PER_TENANT = 50;
 const WEBHOOK_DELIVERY_STATUSES = ["pending", "processing", "delivered", "failed", "dead"] as const;
@@ -345,14 +352,12 @@ webhookRoutes.post("/", async (c) => {
     if (!Array.isArray(body.events)) {
       return c.json<ApiResponse>({ ok: false, error: "events must be an array" }, 400);
     }
-    const invalidEvents = body.events.filter(
-      (e) => !(VALID_EVENTS as readonly string[]).includes(e),
-    );
+    const invalidEvents = body.events.filter((e) => !isValidConfigurableWebhookEvent(e));
     if (invalidEvents.length > 0) {
       return c.json<ApiResponse>(
         {
           ok: false,
-          error: `Invalid events: ${invalidEvents.join(", ")}. Valid: ${VALID_EVENTS.join(", ")}`,
+          error: `Invalid events: ${invalidEvents.join(", ")}. Valid: ${listValidConfigurableWebhookEvents().join(", ")}`,
         },
         400,
       );
@@ -537,9 +542,7 @@ webhookRoutes.put("/:id", async (c) => {
     if (!Array.isArray(body.events)) {
       return c.json<ApiResponse>({ ok: false, error: "events must be an array" }, 400);
     }
-    const invalidEvents = body.events.filter(
-      (e) => !(VALID_EVENTS as readonly string[]).includes(e),
-    );
+    const invalidEvents = body.events.filter((e) => !isValidConfigurableWebhookEvent(e));
     if (invalidEvents.length > 0) {
       return c.json<ApiResponse>(
         { ok: false, error: `Invalid events: ${invalidEvents.join(", ")}` },

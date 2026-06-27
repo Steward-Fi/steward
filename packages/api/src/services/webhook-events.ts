@@ -1,6 +1,7 @@
 import {
   type LegacyWebhookEventType,
   type WebhookCatalogEventType,
+  WebhookEventRegistry,
   type WebhookEventType,
 } from "@stwd/shared";
 
@@ -97,4 +98,32 @@ export function acceptsConfiguredWebhookEvent(
   type: ConfiguredWebhookEventType,
 ): boolean {
   return events.length === 0 || events.includes(type);
+}
+
+/**
+ * Process-wide registry of valid webhook event names, seeded with the core
+ * configured event types. The plugin host merges each enabled plugin's declared
+ * `webhookEvents` into THIS registry at the composition root, so the webhook
+ * config/dispatch validation accepts a plugin's event type (core ∪
+ * plugin-declared) without the core's closed union having to enumerate it.
+ *
+ * Core events are seeded here and can never be removed: a plugin can only ADD to
+ * the valid set. Tests that compose plugins against an isolated registry can
+ * construct their own {@link WebhookEventRegistry}.
+ */
+export const webhookEventRegistry = new WebhookEventRegistry(CONFIGURED_WEBHOOK_EVENT_TYPES);
+
+/**
+ * True when `type` is a valid webhook event name to CONFIGURE on a subscription:
+ * a core configured event OR an event a registered plugin declared. This is the
+ * runtime-extensible replacement for checking membership of the frozen
+ * `CONFIGURED_WEBHOOK_EVENT_TYPES` list directly.
+ */
+export function isValidConfigurableWebhookEvent(type: string): boolean {
+  return webhookEventRegistry.has(type);
+}
+
+/** Every currently-valid configurable webhook event name (core ∪ plugin), sorted. */
+export function listValidConfigurableWebhookEvents(): string[] {
+  return webhookEventRegistry.list();
 }

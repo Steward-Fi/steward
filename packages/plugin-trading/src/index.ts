@@ -53,6 +53,28 @@ export const isOperatorRecoveryPath = (path: string): boolean =>
   path.endsWith("/usd-send");
 
 /**
+ * Webhook event-type names the trading plugin's domain produces. These are
+ * trading lifecycle events a subscriber may want delivered (order + session +
+ * operator-recovery transitions). The plugin DECLARES them via
+ * {@link tradingPlugin}'s `webhookEvents` so the plugin host merges them into the
+ * core's runtime event registry (core ∪ plugin-declared) — a webhook can then be
+ * configured for these event names even though the lean core's closed event
+ * union never enumerates them. This is the Phase 2a contribution point proven
+ * end-to-end.
+ *
+ * Naming mirrors the plugin's existing `trade.*` audit-action vocabulary so the
+ * webhook stream and the audit log speak the same event language.
+ */
+export const TRADING_WEBHOOK_EVENTS = [
+  "trade.session.created",
+  "trade.session.revoked",
+  "trade.order.submitted",
+  "trade.order.canceled",
+  "trade.order.leverage.set",
+  "trade.builder.approved",
+] as const;
+
+/**
  * The trading plugin. `register(app, ctx)`:
  *   1. installs the trade-specific auth middleware (MOVED verbatim from app.ts):
  *        - the agent-JWT gate on the order endpoints,
@@ -67,6 +89,11 @@ export const isOperatorRecoveryPath = (path: string): boolean =>
  */
 export const tradingPlugin: StewardApiPlugin = {
   name: "trading",
+  version: "0.1.0",
+  // declarative contribution: the trading lifecycle webhook event names. the host
+  // merges these into the core's runtime event registry so they are valid to
+  // subscribe to. register() below is unchanged (back-compat).
+  webhookEvents: TRADING_WEBHOOK_EVENTS,
   register(app, ctx) {
     const { requireAgentJwt, operatorAuth, tenantAuth } = ctx;
 

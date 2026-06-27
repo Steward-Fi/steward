@@ -12,9 +12,16 @@ export * from "./tokens.js";
 // ─── Per-request app context shape (shared so plugins can type routes) ───
 export type { AppVariables } from "./types/app-variables.js";
 // ─── Lean-core + opt-in-plugin contract ───
-export type { StewardPlugin } from "./types/plugin.js";
+export type {
+  AdapterContribution,
+  PluginMigrationSource,
+  PolicyRuleContribution,
+  StewardPlugin,
+} from "./types/plugin.js";
 // ─── Trading venues (Sprint 4) ───
 export * from "./types/venue.js";
+// ─── Runtime-extensible webhook event registry (core ∪ plugin-declared) ───
+export { WebhookEventRegistry } from "./webhook-event-registry.js";
 
 // ─── Tenancy ───
 
