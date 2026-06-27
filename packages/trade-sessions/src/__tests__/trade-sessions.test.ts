@@ -9,8 +9,8 @@ import {
   isPredictionMarketAsset,
   predictionMarketConditionAsset,
   predictionMarketTokenAsset,
-  TradeSessionManager,
   type TradeSession,
+  TradeSessionManager,
   type TradeSessionRedisLike,
 } from "../index";
 
@@ -206,7 +206,11 @@ describe("prediction-market allowlist (pure)", () => {
   test("schema accepts crypto, namespaced, and pm: assets", () => {
     expect(allowedAssetSchema.safeParse("NEAR").success).toBe(true);
     expect(allowedAssetSchema.safeParse("xyz:SPCX").success).toBe(true);
-    expect(allowedAssetSchema.safeParse("pm:71321045679252212594626385532706912750332728571942532289631379312455583992563").success).toBe(true);
+    expect(
+      allowedAssetSchema.safeParse(
+        "pm:71321045679252212594626385532706912750332728571942532289631379312455583992563",
+      ).success,
+    ).toBe(true);
     expect(allowedAssetSchema.safeParse("pm:cond:0xabc123").success).toBe(true);
     expect(allowedAssetSchema.safeParse("pm:not-a-token!").success).toBe(false);
   });
@@ -248,17 +252,23 @@ describe("checkOrderAllowed (pure pre-venue gate)", () => {
   });
 
   test("allows a permitted pm token", () => {
-    expect(checkOrderAllowed(base, { tokenId: "123", notionalUsd: 500 })).toEqual({ allowed: true });
+    expect(checkOrderAllowed(base, { tokenId: "123", notionalUsd: 500 })).toEqual({
+      allowed: true,
+    });
   });
 
   test("allows a pm token via condition grant", () => {
-    expect(checkOrderAllowed(base, { tokenId: "777", conditionId: "0xabc", notionalUsd: 500 })).toEqual({
+    expect(
+      checkOrderAllowed(base, { tokenId: "777", conditionId: "0xabc", notionalUsd: 500 }),
+    ).toEqual({
       allowed: true,
     });
   });
 
   test("rejects inactive session", () => {
-    expect(checkOrderAllowed({ ...base, status: "revoked" }, { asset: "NEAR", notionalUsd: 1 })).toEqual({
+    expect(
+      checkOrderAllowed({ ...base, status: "revoked" }, { asset: "NEAR", notionalUsd: 1 }),
+    ).toEqual({
       allowed: false,
       reason: "session-not-active",
     });

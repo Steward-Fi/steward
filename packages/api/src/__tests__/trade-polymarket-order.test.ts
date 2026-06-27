@@ -52,8 +52,8 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { TradeSessionManager } from "@stwd/trade-sessions";
-import { PolymarketExecutionAdapter } from "@stwd/venue-polymarket";
 import { Vault } from "@stwd/vault";
+import { PolymarketExecutionAdapter } from "@stwd/venue-polymarket";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";

@@ -501,7 +501,10 @@ tradeRoutes.post("/sessions", async (c) => {
     const nonPmAsset = allowedAssets.find((a) => !a.startsWith("pm:"));
     if (nonPmAsset) {
       return c.json<ApiResponse>(
-        { ok: false, error: `polymarket session asset must be a pm: identifier, got ${nonPmAsset}` },
+        {
+          ok: false,
+          error: `polymarket session asset must be a pm: identifier, got ${nonPmAsset}`,
+        },
         400,
       );
     }
@@ -1322,7 +1325,13 @@ async function resolvePolymarketCreds(
       if (cached) {
         const parsed = clobApiCredentialsSchema.safeParse(JSON.parse(cached));
         if (parsed.success) {
-          return { ok: true, apiCredentials: parsed.data, funderAddress, walletAddress, signatureType };
+          return {
+            ok: true,
+            apiCredentials: parsed.data,
+            funderAddress,
+            walletAddress,
+            signatureType,
+          };
         }
       }
     } catch {
@@ -1450,10 +1459,16 @@ tradeRoutes.post("/polymarket/order", async (c) => {
   const amount = Number(body.amount);
   const price = Number(body.price);
   if (!Number.isFinite(amount) || amount <= 0) {
-    return c.json<ApiResponse>({ ok: false, error: "amount must be a positive finite number" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "amount must be a positive finite number" },
+      400,
+    );
   }
   if (!Number.isFinite(price) || price <= 0 || price >= 1) {
-    return c.json<ApiResponse>({ ok: false, error: "price must be in the open interval (0,1)" }, 400);
+    return c.json<ApiResponse>(
+      { ok: false, error: "price must be in the open interval (0,1)" },
+      400,
+    );
   }
   const notionalUsd = polymarketNotionalUsd(body.side, amount, price);
 
@@ -1549,7 +1564,8 @@ tradeRoutes.post("/polymarket/order", async (c) => {
     return c.json<ApiResponse>(
       {
         ok: false,
-        error: "Session wallet binding no longer matches the provisioned wallet. Re-create the session.",
+        error:
+          "Session wallet binding no longer matches the provisioned wallet. Re-create the session.",
       },
       409,
     );
@@ -1582,26 +1598,146 @@ tradeRoutes.post("/polymarket/order", async (c) => {
   // withActiveSubmissionFence): the spend reservation and the venue submit run
   // under an advisory lock that the revoke path also takes, so a revoke that
   // commits before this block cannot interleave with an in-flight submit.
-  const fenced = await manager.withActiveSubmissionFence(
-    { tenantId, id: session.id },
-    async () => {
-      // Re-confirm active inside the fence, then reserve spend (atomic; also
-      // re-checks active + cap).
-      const reserved = await getSessionManager().reserveSpend({
+  const fenced = await manager.withActiveSubmissionFence({ tenantId, id: session.id }, async () => {
+    // Re-confirm active inside the fence, then reserve spend (atomic; also
+    // re-checks active + cap).
+    const reserved = await getSessionManager().reserveSpend({
+      tenantId,
+      id: session.id,
+      amountUsd: notionalUsd,
+    });
+    if (!reserved) {
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "Trade session cap exceeded" },
+      };
+      idempotency.store?.(envelope);
+      return envelope;
+    }
+
+    await auditTradeEvent(tenantId, agentId, "trade.order.submit.authorized", {
+      sessionId: session.id,
+      venue: "polymarket",
+      tokenId: body.tokenId,
+      conditionId: body.conditionId ?? null,
+      side: body.side,
+      amount,
+      price,
+      notionalUsd,
+    });
+
+    // PRE-SUBMIT phase: build + sign the order (resolves tickSize/negRisk +
+    // applies CLOB rounding). Any throw here means NOTHING reached the venue,
+    // so the reserved spend MUST be released — these never burn the daily cap.
+    let signedOrder: unknown;
+    try {
+      signedOrder = await adapter.buildSignedOrder(orderRequest);
+    } catch (err) {
+      await getSessionManager().releaseSpend({
         tenantId,
         id: session.id,
         amountUsd: notionalUsd,
       });
-      if (!reserved) {
+      // A 401 here means the cached L2 creds were rotated/revoked CLOB-side.
+      // Drop them so the NEXT order re-derives from L1 (self-healing).
+      if (isPolymarketUnauthorized(err)) {
+        await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+      }
+      await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+        sessionId: session.id,
+        venue: "polymarket",
+        tokenId: body.tokenId,
+        conditionId: body.conditionId ?? null,
+        notionalUsd,
+        reason: "pre-submit-build-failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      const envelope: TradeIdempotencyResponse = {
+        status: 400,
+        body: { ok: false, error: "Order could not be built; not submitted" },
+      };
+      idempotency.store?.(envelope);
+      return envelope;
+    }
+
+    // SUBMIT phase: post the ALREADY-built signed order. submitSignedOrder does
+    // NOT rebuild/re-sign (no second CLOB metadata or signer round-trip), so a
+    // throw HERE genuinely means the POST was attempted and the order may have
+    // landed — status unknown, so we do NOT release spend (mirrors HL's 502).
+    let result: Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>;
+    try {
+      result = await adapter.submitSignedOrder(signedOrder, orderRequest);
+    } catch (err) {
+      // A 401 anywhere in submit (client construction or the POST) means the
+      // cached L2 creds were rotated/revoked — drop them so the next order
+      // re-derives from L1 (self-healing), regardless of attempted-vs-not.
+      if (isPolymarketUnauthorized(err)) {
+        await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+      }
+      // A not-attempted failure (CLOB client/builder construction threw before
+      // any POST) means nothing reached the venue → RELEASE spend, return 400.
+      if (isPolymarketPostNotAttempted(err)) {
+        await getSessionManager().releaseSpend({
+          tenantId,
+          id: session.id,
+          amountUsd: notionalUsd,
+        });
+        await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+          sessionId: session.id,
+          venue: "polymarket",
+          tokenId: body.tokenId,
+          conditionId: body.conditionId ?? null,
+          notionalUsd,
+          reason: "pre-submit-build-failed",
+          error: err.message,
+        });
         const envelope: TradeIdempotencyResponse = {
           status: 400,
-          body: { ok: false, error: "Trade session cap exceeded" },
+          body: { ok: false, error: "Trade submission could not be built" },
         };
         idempotency.store?.(envelope);
         return envelope;
       }
+      // Otherwise the POST was attempted and the order may have landed —
+      // status unknown, KEEP spend (mirrors HL's 502).
+      await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
+        sessionId: session.id,
+        venue: "polymarket",
+        tokenId: body.tokenId,
+        conditionId: body.conditionId ?? null,
+        notionalUsd,
+        reason: "submit-status-unknown",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      const envelope: TradeIdempotencyResponse = {
+        status: 502,
+        body: { ok: false, error: "Trade submission status unknown" },
+      };
+      idempotency.store?.(envelope);
+      return envelope;
+    }
 
-      await auditTradeEvent(tenantId, agentId, "trade.order.submit.authorized", {
+    // The adapter reports rejection as success:false / errorMsg / actualAmount 0.
+    const rejected =
+      result.success === false ||
+      Boolean(result.errorMsg) ||
+      (result.actualAmount !== undefined && result.actualAmount <= 0);
+    if (rejected) {
+      // The order was NOT accepted → release the reserved spend.
+      await getSessionManager().releaseSpend({
+        tenantId,
+        id: session.id,
+        amountUsd: notionalUsd,
+      });
+      // If the venue rejected with an auth error (returned, not thrown), the
+      // cached L2 creds are stale → drop them so the next order re-derives.
+      if (
+        isPolymarketUnauthorized(result) ||
+        /\b401\b|unauthor|invalid api|invalid.*key|api key/i.test(result.errorMsg ?? "")
+      ) {
+        await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
+      }
+      await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
         sessionId: session.id,
         venue: "polymarket",
         tokenId: body.tokenId,
@@ -1610,182 +1746,59 @@ tradeRoutes.post("/polymarket/order", async (c) => {
         amount,
         price,
         notionalUsd,
+        orderId: result.orderId ?? null,
+        reason: result.errorMsg ?? "Trade order rejected",
       });
-
-      // PRE-SUBMIT phase: build + sign the order (resolves tickSize/negRisk +
-      // applies CLOB rounding). Any throw here means NOTHING reached the venue,
-      // so the reserved spend MUST be released — these never burn the daily cap.
-      let signedOrder: unknown;
-      try {
-        signedOrder = await adapter.buildSignedOrder(orderRequest);
-      } catch (err) {
-        await getSessionManager().releaseSpend({
-          tenantId,
-          id: session.id,
-          amountUsd: notionalUsd,
-        });
-        // A 401 here means the cached L2 creds were rotated/revoked CLOB-side.
-        // Drop them so the NEXT order re-derives from L1 (self-healing).
-        if (isPolymarketUnauthorized(err)) {
-          await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
-        }
-        await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
-          sessionId: session.id,
-          venue: "polymarket",
-          tokenId: body.tokenId,
-          conditionId: body.conditionId ?? null,
-          notionalUsd,
-          reason: "pre-submit-build-failed",
-          error: err instanceof Error ? err.message : String(err),
-        });
-        const envelope: TradeIdempotencyResponse = {
-          status: 400,
-          body: { ok: false, error: "Order could not be built; not submitted" },
-        };
-        idempotency.store?.(envelope);
-        return envelope;
-      }
-
-      // SUBMIT phase: post the ALREADY-built signed order. submitSignedOrder does
-      // NOT rebuild/re-sign (no second CLOB metadata or signer round-trip), so a
-      // throw HERE genuinely means the POST was attempted and the order may have
-      // landed — status unknown, so we do NOT release spend (mirrors HL's 502).
-      let result: Awaited<ReturnType<PolymarketExecutionAdapter["submitSignedOrder"]>>;
-      try {
-        result = await adapter.submitSignedOrder(signedOrder, orderRequest);
-      } catch (err) {
-        // A 401 anywhere in submit (client construction or the POST) means the
-        // cached L2 creds were rotated/revoked — drop them so the next order
-        // re-derives from L1 (self-healing), regardless of attempted-vs-not.
-        if (isPolymarketUnauthorized(err)) {
-          await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
-        }
-        // A not-attempted failure (CLOB client/builder construction threw before
-        // any POST) means nothing reached the venue → RELEASE spend, return 400.
-        if (isPolymarketPostNotAttempted(err)) {
-          await getSessionManager().releaseSpend({
-            tenantId,
-            id: session.id,
-            amountUsd: notionalUsd,
-          });
-          await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
-            sessionId: session.id,
-            venue: "polymarket",
-            tokenId: body.tokenId,
-            conditionId: body.conditionId ?? null,
-            notionalUsd,
-            reason: "pre-submit-build-failed",
-            error: err.message,
-          });
-          const envelope: TradeIdempotencyResponse = {
-            status: 400,
-            body: { ok: false, error: "Trade submission could not be built" },
-          };
-          idempotency.store?.(envelope);
-          return envelope;
-        }
-        // Otherwise the POST was attempted and the order may have landed —
-        // status unknown, KEEP spend (mirrors HL's 502).
-        await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
-          sessionId: session.id,
-          venue: "polymarket",
-          tokenId: body.tokenId,
-          conditionId: body.conditionId ?? null,
-          notionalUsd,
-          reason: "submit-status-unknown",
-          error: err instanceof Error ? err.message : String(err),
-        });
-        const envelope: TradeIdempotencyResponse = {
-          status: 502,
-          body: { ok: false, error: "Trade submission status unknown" },
-        };
-        idempotency.store?.(envelope);
-        return envelope;
-      }
-
-      // The adapter reports rejection as success:false / errorMsg / actualAmount 0.
-      const rejected =
-        result.success === false ||
-        Boolean(result.errorMsg) ||
-        (result.actualAmount !== undefined && result.actualAmount <= 0);
-      if (rejected) {
-        // The order was NOT accepted → release the reserved spend.
-        await getSessionManager().releaseSpend({
-          tenantId,
-          id: session.id,
-          amountUsd: notionalUsd,
-        });
-        // If the venue rejected with an auth error (returned, not thrown), the
-        // cached L2 creds are stale → drop them so the next order re-derives.
-        if (
-          isPolymarketUnauthorized(result) ||
-          /\b401\b|unauthor|invalid api|invalid.*key|api key/i.test(result.errorMsg ?? "")
-        ) {
-          await invalidatePolymarketCredsCache(tenantId, agentId, creds.walletAddress);
-        }
-        await auditTradeEvent(tenantId, agentId, "trade.order.canceled", {
-          sessionId: session.id,
-          venue: "polymarket",
-          tokenId: body.tokenId,
-          conditionId: body.conditionId ?? null,
-          side: body.side,
-          amount,
-          price,
-          notionalUsd,
-          orderId: result.orderId ?? null,
-          reason: result.errorMsg ?? "Trade order rejected",
-        });
-        const envelope: TradeIdempotencyResponse = {
-          status: 400,
-          body: {
-            ok: false,
-            error: result.errorMsg ?? "Trade order rejected",
-            data: { status: result.status ?? "rejected" },
-          },
-        };
-        idempotency.store?.(envelope);
-        return envelope;
-      }
-
-      const response = {
-        orderId: result.orderId ?? crypto.randomUUID(),
-        status: result.status ?? "filled",
-        filledQty: result.actualAmount ?? 0,
-        avgPrice: result.actualPrice ?? Number(price),
-        notionalUsd,
-      };
       const envelope: TradeIdempotencyResponse = {
-        status: 200,
-        body: responseData(response),
+        status: 400,
+        body: {
+          ok: false,
+          error: result.errorMsg ?? "Trade order rejected",
+          data: { status: result.status ?? "rejected" },
+        },
       };
-      // The order HAS landed at the venue. Persist the idempotency record BEFORE
-      // the audit write so a retry after an audit failure replays this response
-      // instead of re-submitting a duplicate order.
       idempotency.store?.(envelope);
-      // The audit write is best-effort here: the order is final + the response is
-      // recorded, so an audit failure must NOT turn a successful fill into an
-      // error to the client (which could prompt a duplicate retry). Log + proceed.
-      try {
-        await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
-          sessionId: session.id,
-          venue: "polymarket",
-          tokenId: body.tokenId,
-          conditionId: body.conditionId ?? null,
-          side: body.side,
-          amount,
-          price,
-          notionalUsd,
-          orderId: response.orderId,
-        });
-      } catch (auditErr) {
-        console.error(
-          "[polymarket/order] submitted-audit write failed (order already final)",
-          auditErr,
-        );
-      }
       return envelope;
-    },
-  );
+    }
+
+    const response = {
+      orderId: result.orderId ?? crypto.randomUUID(),
+      status: result.status ?? "filled",
+      filledQty: result.actualAmount ?? 0,
+      avgPrice: result.actualPrice ?? Number(price),
+      notionalUsd,
+    };
+    const envelope: TradeIdempotencyResponse = {
+      status: 200,
+      body: responseData(response),
+    };
+    // The order HAS landed at the venue. Persist the idempotency record BEFORE
+    // the audit write so a retry after an audit failure replays this response
+    // instead of re-submitting a duplicate order.
+    idempotency.store?.(envelope);
+    // The audit write is best-effort here: the order is final + the response is
+    // recorded, so an audit failure must NOT turn a successful fill into an
+    // error to the client (which could prompt a duplicate retry). Log + proceed.
+    try {
+      await auditTradeEvent(tenantId, agentId, "trade.order.submitted", {
+        sessionId: session.id,
+        venue: "polymarket",
+        tokenId: body.tokenId,
+        conditionId: body.conditionId ?? null,
+        side: body.side,
+        amount,
+        price,
+        notionalUsd,
+        orderId: response.orderId,
+      });
+    } catch (auditErr) {
+      console.error(
+        "[polymarket/order] submitted-audit write failed (order already final)",
+        auditErr,
+      );
+    }
+    return envelope;
+  });
 
   // The fence returns null when the session is no longer active (revoked/expired
   // before the lock was taken) — fail closed without submitting.

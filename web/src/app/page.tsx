@@ -181,7 +181,9 @@ function ProblemSection() {
           {problems.map((problem) => (
             <StaggerItem key={problem.title}>
               <div className="bg-bg p-8 md:p-10 h-full">
-                <h3 className="font-display text-xl font-bold mb-3 leading-snug">{problem.title}</h3>
+                <h3 className="font-display text-xl font-bold mb-3 leading-snug">
+                  {problem.title}
+                </h3>
                 <p className="text-[0.95rem] text-text-secondary leading-relaxed text-pretty">
                   {problem.desc}
                 </p>
@@ -280,7 +282,9 @@ function ComparisonSection() {
                       {row.feature}
                     </div>
                     <div className="flex items-start gap-2.5 text-sm text-text">
-                      <span className="text-[oklch(0.78_0.15_55)] flex-shrink-0 mt-px">&#10003;</span>
+                      <span className="text-[oklch(0.78_0.15_55)] flex-shrink-0 mt-px">
+                        &#10003;
+                      </span>
                       <span>
                         <span className="font-medium">Steward</span>{" "}
                         <span className="text-text-secondary">{row.steward}</span>
@@ -498,8 +502,8 @@ const completion = await openai.chat.completions.create({
             <Reveal delay={0.15}>
               <p className="mt-6 text-text-secondary leading-relaxed text-pretty">
                 Create a wallet, attach policy, approve agent spend. A TypeScript SDK for
-                policy-checked signing and credential-injected API proxying that works with any agent
-                framework.
+                policy-checked signing and credential-injected API proxying that works with any
+                agent framework.
               </p>
             </Reveal>
             <Reveal delay={0.25}>
@@ -592,15 +596,14 @@ function PlatformsSection() {
           <div className="lg:col-span-5">
             <Reveal>
               <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
-                One rail.{" "}
-                <span className="text-[oklch(0.78_0.15_55)]">Every actor.</span>
+                One rail. <span className="text-[oklch(0.78_0.15_55)]">Every actor.</span>
               </h2>
             </Reveal>
             <Reveal delay={0.1}>
               <p className="mt-6 text-lg text-text-secondary leading-relaxed max-w-md text-pretty">
-                One Steward instance for thousands of humans and agents across isolated tenants. Each
-                tenant gets its own policies, credentials, and webhook endpoints. Self-hosted. No
-                per-transaction toll.
+                One Steward instance for thousands of humans and agents across isolated tenants.
+                Each tenant gets its own policies, credentials, and webhook endpoints. Self-hosted.
+                No per-transaction toll.
               </p>
             </Reveal>
           </div>
