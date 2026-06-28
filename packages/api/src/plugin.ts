@@ -45,13 +45,14 @@
  * deploy that wants trading opts in by registering the plugin.
  */
 
+import { pluginMigrationsTable, runPluginMigrations } from "@stwd/db";
 import {
   type EvaluatorContext,
   type PolicyRuleRegistry,
   policyRuleRegistry,
   type RegisteredPolicyEvaluator,
 } from "@stwd/policy-engine";
-import type { StewardPlugin } from "@stwd/shared";
+import type { PluginMigrationSource, StewardPlugin } from "@stwd/shared";
 import { WebhookEventRegistry } from "@stwd/shared";
 import type { Hono } from "hono";
 import { requireAgentJwt } from "./middleware/agent-jwt";
@@ -172,6 +173,14 @@ export interface PluginHostDiagnostics {
   webhookEventContributions: Record<string, string[]>;
   /** which plugin contributed which policy rule types (Phase 2b). */
   policyRuleContributions: Record<string, string[]>;
+  /**
+   * which plugin declared a migration source, and the namespaced bookkeeping
+   * table its ledger is (or will be) recorded in —
+   * `drizzle.__drizzle_migrations_plugin_<id>`, isolated from the core journal
+   * (Phase 2c). Present whether or not {@link PluginHost.runMigrations} has run
+   * yet (it reflects the declared sources, not applied state).
+   */
+  migrationSources: Record<string, { id: string; migrationsTable: string }>;
 }
 
 /**
@@ -259,10 +268,16 @@ function orderByDependencies<Ctx>(
  *     policy engine evaluates a contributed rule type via the plugin's
  *     evaluator (core rule evaluation is untouched). (Phase 2b)
  *  5. call each plugin's `register(app, ctx)` (if present) in dependency order.
- *  6. expose {@link describe} so ops can see what loaded + what was contributed.
+ *  6. collect each plugin's declared `migrations` source (in dependency order)
+ *     and apply them — via {@link runMigrations}, called by the boot/migrate path
+ *     AFTER the core migrator — into a per-plugin NAMESPACED bookkeeping table,
+ *     totally isolated from the core's `drizzle.__drizzle_migrations` journal
+ *     (Phase 2c). Migrations are NOT run during `register` (route registration
+ *     must not block on a schema migration) and NEVER per request.
+ *  7. expose {@link describe} so ops can see what loaded + what was contributed.
  *
- * `migrations` / `adapters` contribution points are TYPED on the contract but
- * their wiring is DEFERRED to Phase 2c/2d; the host does not act on them yet.
+ * the `adapters` contribution point is TYPED on the contract but its wiring is
+ * DEFERRED to Phase 2d; the host does not act on it yet.
  */
 export class PluginHost<Ctx> {
   private readonly loaded: LoadedPluginInfo[] = [];
@@ -270,6 +285,15 @@ export class PluginHost<Ctx> {
   private readonly policyRegistry: PolicyRuleRegistry;
   /** which plugin contributed which policy rule types (diagnostics). */
   private readonly policyContributions = new Map<string, string[]>();
+  /**
+   * declared plugin migration sources, in dependency (registration) order. The
+   * host does NOT run these during `register` (route registration must not block
+   * on a schema migration); instead {@link runMigrations} applies them, called by
+   * the boot/migrate path AFTER the core migrator has run. Stored in dependency
+   * order so a plugin's migrations apply after the plugins it depends on.
+   */
+  private readonly migrationSources: Array<{ pluginName: string; source: PluginMigrationSource }> =
+    [];
 
   /**
    * @param eventRegistry the registry plugin-declared webhook events merge into.
@@ -345,6 +369,18 @@ export class PluginHost<Ctx> {
       }
     }
 
+    // Phase 1c: collect declared migration sources in dependency order (Phase
+    // 2c). NOT applied here — route registration must not block on a schema
+    // migration, and migrations must run AFTER the CORE migrator. They are
+    // applied by runMigrations(), called from the boot/migrate path after core
+    // migrations. Stored in dependency order so a dependent plugin's migrations
+    // apply after the plugins it depends on (it may FK their tables).
+    for (const plugin of ordered) {
+      if (plugin.migrations) {
+        this.migrationSources.push({ pluginName: plugin.name, source: plugin.migrations });
+      }
+    }
+
     // Phase 2: run each plugin's imperative register hook in dependency order.
     for (const plugin of ordered) {
       this.loaded.push({ name: plugin.name, version: plugin.version });
@@ -354,17 +390,89 @@ export class PluginHost<Ctx> {
     }
   }
 
+  /**
+   * Collect the declared migration sources of `plugins` (in `dependsOn` order)
+   * WITHOUT mounting routes/middleware or touching the webhook/policy registries.
+   * For a migrate-only boot/CI step that wants to apply plugin migrations without
+   * building the full app. Validates the dependency graph fail-closed (same
+   * {@link PluginHostError} cases as {@link register}).
+   *
+   * After this, call {@link runMigrations} to apply them. Idempotent w.r.t. the
+   * host's stored sources only insofar as it APPENDS; call once per host.
+   */
+  collectMigrations(...plugins: Array<StewardPlugin<StewardApp, Ctx>>): this {
+    const ordered = orderByDependencies(plugins);
+    for (const plugin of ordered) {
+      if (plugin.migrations) {
+        this.migrationSources.push({ pluginName: plugin.name, source: plugin.migrations });
+      }
+    }
+    return this;
+  }
+
+  /**
+   * Apply every registered plugin's declared migrations into its OWN namespaced
+   * bookkeeping table (`drizzle.__drizzle_migrations_plugin_<id>`), totally
+   * isolated from the core's `drizzle.__drizzle_migrations` journal (see
+   * `@stwd/db`'s `runPluginMigrations`). Runs in dependency (registration) order
+   * so a dependent plugin's migrations apply after the plugins it depends on.
+   *
+   * ORDERING (load-bearing): the caller MUST invoke this AFTER the core migrator
+   * (`runMigrations()` from `@stwd/db`) has completed at boot/migrate time, so a
+   * plugin migration may reference core tables via FK. It is NOT run implicitly on
+   * every request — only at the explicit boot/migrate step, mirroring the core.
+   *
+   * FAIL-CLOSED: a plugin migration failure rejects with the plugin name in the
+   * message; the boot path surfaces it and refuses to half-boot. Plugins after a
+   * failing one are NOT applied (the run stops at the first failure).
+   *
+   * @returns per-plugin results: the id + the namespaced table its ledger was
+   *   written to (for diagnostics / isolation assertions). Empty if no plugin
+   *   declared a migration source.
+   */
+  async runMigrations(): Promise<
+    Array<{ pluginName: string; id: string; migrationsTable: string }>
+  > {
+    const results: Array<{ pluginName: string; id: string; migrationsTable: string }> = [];
+    for (const { pluginName, source } of this.migrationSources) {
+      try {
+        const { id, migrationsTable } = await runPluginMigrations(source);
+        results.push({ pluginName, id, migrationsTable });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new PluginHostError(`plugin "${pluginName}" migration failed: ${message}`);
+      }
+    }
+    return results;
+  }
+
+  /** the declared plugin migration sources, in dependency order (diagnostics). */
+  get pluginMigrationSources(): ReadonlyArray<{
+    pluginName: string;
+    source: PluginMigrationSource;
+  }> {
+    return this.migrationSources;
+  }
+
   /** What this host loaded + what plugins contributed (for ops/health). */
   describe(): PluginHostDiagnostics {
     const policyRuleContributions: Record<string, string[]> = {};
     for (const [plugin, types] of this.policyContributions) {
       policyRuleContributions[plugin] = [...types].sort();
     }
+    const migrationSources: Record<string, { id: string; migrationsTable: string }> = {};
+    for (const { pluginName, source } of this.migrationSources) {
+      migrationSources[pluginName] = {
+        id: source.id,
+        migrationsTable: pluginMigrationsTable(source.id),
+      };
+    }
     return {
       plugins: [...this.loaded],
       webhookEvents: this.eventRegistry.list(),
       webhookEventContributions: this.eventRegistry.describeContributions(),
       policyRuleContributions,
+      migrationSources,
     };
   }
 }

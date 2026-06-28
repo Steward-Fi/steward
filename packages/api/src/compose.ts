@@ -140,3 +140,34 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
 
   return app;
 }
+
+/**
+ * Apply this deploy's opt-in plugins' OWN migrations (Phase 2c), into per-plugin
+ * NAMESPACED bookkeeping tables (`drizzle.__drizzle_migrations_plugin_<id>`),
+ * totally isolated from the core's `drizzle.__drizzle_migrations` journal.
+ *
+ * ORDERING (load-bearing): the boot/migrate path MUST call this AFTER the core
+ * migrator (`runMigrations()` from `@stwd/db`) has completed, so a plugin
+ * migration may reference core tables via FK. This is the explicit migrate step
+ * only — it is NEVER run implicitly per request. Plugin migrations run in
+ * `dependsOn` order.
+ *
+ * This discovers the SAME opt-in plugins {@link composeApp} composes (currently
+ * trading), but does NOT mount routes/middleware — it only collects each plugin's
+ * declared migration source and applies it. Fails closed (rejects) on the first
+ * plugin migration error so the boot path can refuse to half-boot.
+ *
+ * @returns per-plugin results (id + the namespaced table its ledger was written
+ *   to). Empty if no opt-in plugin declares a migration source.
+ */
+export async function runComposedPluginMigrations(): Promise<
+  Array<{ pluginName: string; id: string; migrationsTable: string }>
+> {
+  const ctx = buildPluginContext();
+  const { tradingPlugin } = (await import("@stwd/plugin-trading")) as {
+    tradingPlugin: Parameters<PluginHost<typeof ctx>["register"]>[2];
+  };
+  const host = new PluginHost<typeof ctx>();
+  host.collectMigrations(tradingPlugin);
+  return host.runMigrations();
+}

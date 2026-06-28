@@ -22,6 +22,13 @@ export {
 } from "./client";
 export { runMigrations } from "./migrate";
 export { encryptOAuthAccountPlaintextTokens } from "./oauth-token-encryption";
+export {
+  pluginAdvisoryLockKey,
+  pluginMigrationsTable,
+  type RunPluginMigrationsOptions,
+  runPluginMigrations,
+  sanitizePluginMigrationId,
+} from "./plugin-migrate";
 // PGLite exports live in the `@stwd/db/pglite` subpath so Cloudflare Worker
 // bundles can import `@stwd/db` without pulling node:fs/node:path dependencies.
 export * from "./schema";
