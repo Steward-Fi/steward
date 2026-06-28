@@ -45,6 +45,7 @@
  * deploy that wants trading opts in by registering the plugin.
  */
 
+import { type AdapterCategory, AdapterRegistry, adapterRegistry } from "@stwd/adapters";
 import { pluginMigrationsTable, runPluginMigrations } from "@stwd/db";
 import {
   type EvaluatorContext,
@@ -78,6 +79,65 @@ import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "./services/webhook-events";
 export type StewardApp = Hono<{ Variables: AppVariables }>;
 
 /**
+ * The closed set of adapter categories the core registry knows, mirrored here so
+ * the host can VALIDATE a plugin's structural `category: string` before casting
+ * it to {@link AdapterCategory} and calling `register`. Kept in sync with
+ * `@stwd/adapters`' `AdapterCategory` union (a compile-time exhaustiveness check
+ * below fails the build if the union grows and this set doesn't).
+ */
+const KNOWN_ADAPTER_CATEGORIES = new Set<string>([
+  "swap",
+  "earn",
+  "onramp",
+  "offramp",
+  "kyc",
+  "tos",
+  "custodial",
+  "push",
+  "bridge",
+  "spark",
+  "exchange",
+]);
+
+// Compile-time guard: every AdapterCategory must be present in the runtime set
+// above. If the `@stwd/adapters` union grows a member not listed here, this
+// assignment fails to type-check, forcing the set to be updated in lockstep.
+const _ADAPTER_CATEGORY_EXHAUSTIVE: Record<AdapterCategory, true> = {
+  swap: true,
+  earn: true,
+  onramp: true,
+  offramp: true,
+  kyc: true,
+  tos: true,
+  custodial: true,
+  push: true,
+  bridge: true,
+  spark: true,
+  exchange: true,
+};
+void _ADAPTER_CATEGORY_EXHAUSTIVE;
+
+/** True if `c` is a known adapter category (narrows to {@link AdapterCategory}). */
+function isAdapterCategory(c: string): c is AdapterCategory {
+  return KNOWN_ADAPTER_CATEGORIES.has(c);
+}
+
+/**
+ * Structural check that an injected context carries an adapter registry, so the
+ * host can wire a plugin's `adapters` contributions WITHOUT the host's `Ctx`
+ * type parameter having to be {@link StewardAppContext} (the host stays generic;
+ * tests pass a minimal ctx + a fresh registry). A plugin that declares `adapters`
+ * REQUIRES a registry in ctx; the host fails closed if one isn't present.
+ */
+function ctxAdapterRegistry(ctx: unknown): AdapterRegistry | undefined {
+  if (ctx && typeof ctx === "object" && "adapterRegistry" in ctx) {
+    const reg = (ctx as { adapterRegistry: unknown }).adapterRegistry;
+    if (reg instanceof AdapterRegistry) return reg;
+  }
+  return undefined;
+}
+
+/**
  * The injected context the core hands a plugin's `register(app, ctx)`. Every
  * member is a CORE singleton/helper a plugin would otherwise have had to import
  * from `@stwd/api` (which would be a circular dependency for a plugin in its own
@@ -105,6 +165,15 @@ export interface StewardAppContext {
   requireAgentJwt: typeof requireAgentJwt;
   operatorAuth: typeof operatorAuth;
   tenantAuth: typeof tenantAuth;
+  /**
+   * the core's adapter registry — the seam a plugin's `adapters` contributions
+   * register a real provider integration into (Phase 2d). defaults to the
+   * process-wide {@link adapterRegistry} routes consult; tests inject a fresh
+   * {@link AdapterRegistry} (with a controlled env) so adapter resolution is
+   * hermetic. the host only CALLS `register(category, provider, adapter)` on it;
+   * the registry's fail-closed-in-production resolution is untouched.
+   */
+  adapterRegistry: AdapterRegistry;
 }
 
 /**
@@ -137,6 +206,7 @@ export function buildPluginContext(): StewardAppContext {
     requireAgentJwt,
     operatorAuth,
     tenantAuth,
+    adapterRegistry,
   };
 }
 
@@ -173,6 +243,11 @@ export interface PluginHostDiagnostics {
   webhookEventContributions: Record<string, string[]>;
   /** which plugin contributed which policy rule types (Phase 2b). */
   policyRuleContributions: Record<string, string[]>;
+  /**
+   * which plugin contributed which adapters, as `"<category>::<provider>"` keys
+   * (Phase 2d). reflects what the host REGISTERED into the adapter registry.
+   */
+  adapterContributions: Record<string, string[]>;
   /**
    * which plugin declared a migration source, and the namespaced bookkeeping
    * table its ledger is (or will be) recorded in —
@@ -254,8 +329,8 @@ function orderByDependencies<Ctx>(
 /**
  * The plugin host: composes one or more plugins onto a steward app.
  *
- * RESPONSIBILITIES (Phase 2a + 2b)
- * --------------------------------
+ * RESPONSIBILITIES (Phase 2a + 2b + 2c + 2d)
+ * ------------------------------------------
  *  1. validate unique plugin names + a valid (acyclic, fully-satisfied)
  *     `dependsOn` graph, FAILING CLOSED on any violation.
  *  2. order plugins so each registers AFTER its dependencies.
@@ -274,10 +349,15 @@ function orderByDependencies<Ctx>(
  *     totally isolated from the core's `drizzle.__drizzle_migrations` journal
  *     (Phase 2c). Migrations are NOT run during `register` (route registration
  *     must not block on a schema migration) and NEVER per request.
- *  7. expose {@link describe} so ops can see what loaded + what was contributed.
- *
- * the `adapters` contribution point is TYPED on the contract but its wiring is
- * DEFERRED to Phase 2d; the host does not act on it yet.
+ *  7. register each plugin's declared `adapters` into the core adapter registry
+ *     (from `ctx.adapterRegistry`) via its existing `register(category, provider,
+ *     adapter)` seam, in dependency order, FAILING CLOSED on a `(category,
+ *     provider)` collision with another plugin's contribution (the host never
+ *     silently overwrites a real money-route adapter) or an invalid contribution
+ *     (unknown category, empty provider, missing adapter). The registry's
+ *     fail-closed-in-production RESOLUTION is untouched — the host only CALLS
+ *     register(). (Phase 2d)
+ *  8. expose {@link describe} so ops can see what loaded + what was contributed.
  */
 export class PluginHost<Ctx> {
   private readonly loaded: LoadedPluginInfo[] = [];
@@ -285,6 +365,11 @@ export class PluginHost<Ctx> {
   private readonly policyRegistry: PolicyRuleRegistry;
   /** which plugin contributed which policy rule types (diagnostics). */
   private readonly policyContributions = new Map<string, string[]>();
+  /**
+   * which plugin contributed which adapters, as `"<category>::<provider>"` keys
+   * (diagnostics). Phase 2d.
+   */
+  private readonly adapterContributions = new Map<string, string[]>();
   /**
    * declared plugin migration sources, in dependency (registration) order. The
    * host does NOT run these during `register` (route registration must not block
@@ -366,6 +451,80 @@ export class PluginHost<Ctx> {
         const types = this.policyContributions.get(plugin.name) ?? [];
         types.push(contribution.type);
         this.policyContributions.set(plugin.name, types);
+      }
+    }
+
+    // Phase 1b2: register declared adapter contributions into the core's adapter
+    // registry (Phase 2d), BEFORE any `register` hook runs (so a plugin route
+    // that resolves an adapter during its own registration sees the contributed
+    // provider). The registry is taken from `ctx.adapterRegistry`; a plugin that
+    // declares `adapters` REQUIRES it. The registry's own fail-closed-in-prod
+    // RESOLUTION is untouched — the host only CALLS register(category, provider,
+    // adapter).
+    //
+    // FAIL-CLOSED on a `(category, provider)` collision: the registry's own
+    // `register` would silently OVERWRITE by (category, provider); to prevent a
+    // plugin (or two plugins) from silently clobbering a real money-route
+    // adapter, the host tracks every (category, provider) it has registered
+    // across the plugin loop and throws PluginHostError BEFORE calling
+    // `registry.register` on a duplicate. Each contribution is also validated
+    // fail-closed: a known category, a non-empty provider, and a present adapter.
+    {
+      const hostRegistry = ctxAdapterRegistry(ctx);
+      const seenAdapters = new Set<string>();
+      for (const plugin of ordered) {
+        if (!plugin.adapters || plugin.adapters.length === 0) continue;
+        if (!hostRegistry) {
+          throw new PluginHostError(
+            `plugin "${plugin.name}" contributes adapters but the injected context ` +
+              "carries no `adapterRegistry`.",
+          );
+        }
+        for (const contribution of plugin.adapters) {
+          const category = contribution.category;
+          const provider = contribution.provider;
+          if (typeof category !== "string" || !isAdapterCategory(category)) {
+            throw new PluginHostError(
+              `plugin "${plugin.name}" contributes an adapter for unknown category ` +
+                `"${String(category)}".`,
+            );
+          }
+          if (typeof provider !== "string" || provider.trim() === "") {
+            throw new PluginHostError(
+              `plugin "${plugin.name}" contributes a "${category}" adapter with an ` +
+                "empty provider name.",
+            );
+          }
+          if (contribution.adapter === undefined || contribution.adapter === null) {
+            throw new PluginHostError(
+              `plugin "${plugin.name}" contributes a "${category}" adapter under ` +
+                `provider "${provider}" with no adapter instance.`,
+            );
+          }
+          const key = `${category}::${provider}`;
+          if (seenAdapters.has(key)) {
+            throw new PluginHostError(
+              `duplicate adapter contribution for (category="${category}", ` +
+                `provider="${provider}") — plugin "${plugin.name}" collides with an ` +
+                "already-registered contribution; refusing to overwrite a registered " +
+                "adapter.",
+            );
+          }
+          seenAdapters.add(key);
+          // category is narrowed to AdapterCategory; adapter is `unknown` at the
+          // shared boundary — cast to the registry's per-category type here, at
+          // the api boundary where @stwd/adapters is a legitimate dependency. The
+          // cast is unavoidable (see AdapterContribution's cycle note); the
+          // contribution author owns the adapter conforming to its category.
+          hostRegistry.register(
+            category,
+            provider,
+            contribution.adapter as Parameters<AdapterRegistry["register"]>[2],
+          );
+          const list = this.adapterContributions.get(plugin.name) ?? [];
+          list.push(key);
+          this.adapterContributions.set(plugin.name, list);
+        }
       }
     }
 
@@ -460,6 +619,10 @@ export class PluginHost<Ctx> {
     for (const [plugin, types] of this.policyContributions) {
       policyRuleContributions[plugin] = [...types].sort();
     }
+    const adapterContributions: Record<string, string[]> = {};
+    for (const [plugin, keys] of this.adapterContributions) {
+      adapterContributions[plugin] = [...keys].sort();
+    }
     const migrationSources: Record<string, { id: string; migrationsTable: string }> = {};
     for (const { pluginName, source } of this.migrationSources) {
       migrationSources[pluginName] = {
@@ -472,6 +635,7 @@ export class PluginHost<Ctx> {
       webhookEvents: this.eventRegistry.list(),
       webhookEventContributions: this.eventRegistry.describeContributions(),
       policyRuleContributions,
+      adapterContributions,
       migrationSources,
     };
   }
