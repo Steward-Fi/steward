@@ -128,18 +128,44 @@ export interface PluginMigrationSource {
 /**
  * An adapter contribution a plugin registers into the core's adapter registry
  * (mirrors `packages/adapters` categories) so a plugin can supply a real
- * provider integration.
+ * provider integration (a concrete swap/earn/onramp/.../exchange adapter).
  *
- * PLACEHOLDER (Phase 2d): minimal shape so the contract is real; the host does
- * not yet REGISTER these into the adapter registry (category typing + the
- * fail-closed-in-production resolution are Phase 2d). Accepted + reported, not
- * registered.
+ * WIRED in Phase 2d. The host registers each contribution into the core's
+ * {@link AdapterRegistry} via its existing `register(category, provider, adapter)`
+ * seam, in `dependsOn` order, FAIL-CLOSED on a `(category, provider)` collision
+ * with another plugin's contribution (the host never silently overwrites a real
+ * money-route adapter — see the host's conflict detection). The registry's own
+ * fail-closed-in-production RESOLUTION is untouched: a contributed adapter is
+ * selected exactly as a core-registered one would be (env `STEWARD_<CAT>_ADAPTER`
+ * names the provider, or a single registered provider is used without env
+ * disambiguation).
+ *
+ * STRUCTURAL on purpose: `@stwd/shared` must NOT import `@stwd/adapters`
+ * (`@stwd/adapters` depends on `@stwd/shared`, so importing the concrete
+ * per-category adapter types here would create a dependency CYCLE). The category
+ * is therefore a plain `string` (assignable to the registry's `AdapterCategory`,
+ * validated by the host) and the concrete adapter instance is typed `unknown` —
+ * the host casts it to the registry's per-category type at the api boundary,
+ * where `@stwd/adapters` is a legitimate dependency.
  */
 export interface AdapterContribution {
-  /** the adapter category this contribution targets, e.g. "swap". */
+  /**
+   * the adapter category this contribution targets, e.g. "swap". a plain string
+   * (not the adapters' `AdapterCategory` union) to avoid a shared->adapters
+   * cycle; the host validates it is a known category and casts, fail-closed on
+   * an unknown category.
+   */
   readonly category: string;
-  /** the provider name this contribution registers under. */
+  /** the provider name this contribution registers under (must be non-empty). */
   readonly provider: string;
+  /**
+   * the concrete adapter instance to register under `(category, provider)`.
+   * typed `unknown` at the shared layer to avoid a shared->adapters cycle (the
+   * concrete per-category adapter types live in `@stwd/adapters`); the host
+   * casts it to the registry's expected per-category type when it calls
+   * `adapterRegistry.register(...)`.
+   */
+  readonly adapter: unknown;
 }
 
 export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> {
@@ -201,9 +227,12 @@ export interface StewardPlugin<App = unknown, Ctx = unknown, EvalCtx = unknown> 
   readonly migrations?: PluginMigrationSource;
 
   /**
-   * adapter integrations this plugin contributes. TYPED here
-   * (`AdapterContribution`); registration into the adapter registry is DEFERRED
-   * to Phase 2d.
+   * adapter integrations this plugin contributes. WIRED in Phase 2d: the host
+   * registers each into the core's adapter registry via its existing
+   * `register(category, provider, adapter)` seam, in `dependsOn` order,
+   * FAIL-CLOSED on a `(category, provider)` collision with another plugin's
+   * contribution (never silently overwrites a real money-route adapter). The
+   * registry's fail-closed-in-production RESOLUTION is untouched.
    */
   readonly adapters?: readonly AdapterContribution[];
 }
