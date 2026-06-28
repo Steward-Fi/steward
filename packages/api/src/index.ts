@@ -176,6 +176,22 @@ if (shouldUsePGLite()) {
     } else {
       console.log("[steward] Migrations already up to date.");
     }
+
+    // Plugin-owned migrations (Phase 2c): applied AFTER the core migrator so a
+    // plugin migration may reference core tables via FK. Each plugin's migrations
+    // land in its OWN namespaced bookkeeping table
+    // (drizzle.__drizzle_migrations_plugin_<id>), totally isolated from the core's
+    // drizzle.__drizzle_migrations journal. Fail-closed: a plugin migration error
+    // aborts boot (we never half-boot with a partially-migrated plugin schema).
+    const { runComposedPluginMigrations } = await import("./compose");
+    const pluginResults = await runComposedPluginMigrations();
+    if (pluginResults.length > 0) {
+      console.log(
+        `[steward] Applied plugin migrations: ${pluginResults
+          .map((r) => `${r.pluginName}\u2192${r.migrationsTable}`)
+          .join(", ")}`,
+      );
+    }
   } catch (err) {
     console.error("[steward] Migration failed — cannot start:", err);
     process.exit(1);
