@@ -45,6 +45,14 @@
       "dependsOn": ["^build"],
       "outputs": []
     },
+    "@stwd/plugin-example#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
+    "@stwd/plugin-sdk#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "@stwd/policy-engine#build": {
       "dependsOn": ["^build"],
       "outputs": []

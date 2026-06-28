@@ -1,0 +1,29 @@
+{
+  "name": "@stwd/plugin-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stwd/plugin-sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@stwd/adapters": "workspace:*",
+    "@stwd/db": "workspace:*",
+    "@stwd/policy-engine": "workspace:*",
+    "@stwd/shared": "workspace:*",
+    "@types/node": "^25.5.0",
+    "hono": "^4.12.18"
+  },
+  "description": "Minimal hello-world Steward plugin: the smallest honest plugin exercising all four declarative contribution points (route, policy rule, webhook event, migration, adapter) through @stwd/plugin-sdk alone. The runnable reference for writing a plugin."
+}

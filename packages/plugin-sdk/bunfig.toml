@@ -1,0 +1,9 @@
+# test config for @stwd/plugin-sdk.
+#
+# the sdk re-exports the host runtime from @stwd/api/plugin, whose module graph
+# evaluates @stwd/api's services/context at import time (it resolves DATABASE_URL
+# + master password + a db handle at module-init). the preload makes that first
+# evaluation deterministic (pglite + full-entropy test secrets) so a pure facade
+# smoke test can import the surface without a real database.
+[test]
+preload = ["./test-preload.ts"]
