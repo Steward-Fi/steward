@@ -174,8 +174,20 @@ DEPLOY_STATUS="UNKNOWN"
 DEPLOY_ID=""
 
 # Surface Railway's OWN failure reason + build/deploy logs so CI shows the real
-# cause instead of a bare "Deployment FAILED". Tolerant of unknown field names:
-# any GraphQL error is printed too, which is still strictly more signal.
+# cause instead of a bare "Deployment FAILED". A deploy that fails ~10s in with
+# no build phase is almost always the container crash-looping on boot (e.g. a
+# missing required env var on the Railway service) or an image-pull error — the
+# logs below are what tell the operator which. Uses a non-failing curl (the
+# normal gql() helper uses `curl -sf`, which drops the body on any HTTP error)
+# and prints RAW responses so a wrong field name / auth-scope problem is still
+# visible rather than silently swallowed.
+gql_raw() {
+  curl -s -X POST "$API" \
+    -H "Authorization: Bearer ${RAILWAY_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "$1" 2>/dev/null
+}
+
 dump_failure() {
   fail "---- Railway deployment diagnostics ----"
   if [[ -z "$DEPLOY_ID" ]]; then
@@ -183,21 +195,27 @@ dump_failure() {
     fail "----------------------------------------"
     return
   fi
-  local q out logs
+  local q resp
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { deployment(id: $id) { id status statusMessage canRedeploy } }", variables: {id: $id}}')
-  out=$(gql "$q" 2>/dev/null | jq -c '.data.deployment // .errors' 2>/dev/null) || out=""
-  [[ -n "$out" ]] && fail "Deployment: $out"
+  resp=$(gql_raw "$q")
+  fail "deployment: ${resp:-<empty response>}"
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { buildLogs(deploymentId: $id, limit: 200) { message } }", variables: {id: $id}}')
-  logs=$(gql "$q" 2>/dev/null | jq -r '.data.buildLogs[]?.message' 2>/dev/null) || logs=""
-  [[ -n "$logs" ]] && { fail "---- build logs ----"; echo "$logs" >&2; }
+  resp=$(gql_raw "$q")
+  fail "---- build logs ----"
+  echo "${resp:-<empty response>}" | jq -r '.data.buildLogs[]?.message // empty' 2>/dev/null | grep -q . \
+    && echo "${resp}" | jq -r '.data.buildLogs[].message' >&2 \
+    || fail "${resp:-<empty response>}"
 
   q=$(jq -n --arg id "$DEPLOY_ID" \
     '{query: "query($id: String!) { deploymentLogs(deploymentId: $id, limit: 200) { message } }", variables: {id: $id}}')
-  logs=$(gql "$q" 2>/dev/null | jq -r '.data.deploymentLogs[]?.message' 2>/dev/null) || logs=""
-  [[ -n "$logs" ]] && { fail "---- deploy logs ----"; echo "$logs" >&2; }
+  resp=$(gql_raw "$q")
+  fail "---- deploy logs ----"
+  echo "${resp:-<empty response>}" | jq -r '.data.deploymentLogs[]?.message // empty' 2>/dev/null | grep -q . \
+    && echo "${resp}" | jq -r '.data.deploymentLogs[].message' >&2 \
+    || fail "${resp:-<empty response>}"
   fail "----------------------------------------"
 }
 
