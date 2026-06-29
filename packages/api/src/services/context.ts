@@ -1065,6 +1065,7 @@ export {
   toSignRequest,
   toTxRecord,
   transactions,
+  vaultSigningFreezes,
   webhookConfigs,
   webhookDeliveries,
 } from "@stwd/db";

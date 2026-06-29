@@ -43,6 +43,7 @@ import {
   transactions,
   users,
   userTenants,
+  vaultSigningFreezes,
 } from "@stwd/db";
 import type {
   AgentIdentity,
@@ -973,6 +974,146 @@ platform.get("/tenants", async (c) => {
     .offset(offset);
 
   return c.json<ApiResponse<typeof rows>>({ ok: true, data: rows });
+});
+
+/**
+ * POST /tenants/:id/freeze
+ * Tenant-wide, fail-closed kill-switch for blast-radius incidents: halts ALL
+ * signing for every agent under the tenant at the vault chokepoint (checked
+ * before key decryption). Gated behind a scoped platform key.
+ */
+platform.post("/tenants/:id/freeze", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-freeze:write");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const [tenant] = await db
+    .select({ id: tenants.id })
+    .from(tenants)
+    .where(eq(tenants.id, tenantId));
+  if (!tenant) return c.json<ApiResponse>({ ok: false, error: "Tenant not found" }, 404);
+
+  let reason: string | null = null;
+  const body = await safeJsonParse<{ reason?: unknown }>(c);
+  if (body && body.reason !== undefined && body.reason !== null) {
+    if (typeof body.reason !== "string") {
+      return c.json<ApiResponse>({ ok: false, error: "reason must be a string" }, 400);
+    }
+    const trimmed = body.reason.trim();
+    reason = trimmed ? trimmed.slice(0, 1024) : null;
+  }
+
+  const [existing] = await db
+    .select({ id: vaultSigningFreezes.id })
+    .from(vaultSigningFreezes)
+    .where(
+      and(
+        eq(vaultSigningFreezes.tenantId, tenantId),
+        eq(vaultSigningFreezes.scopeType, "tenant"),
+        isNull(vaultSigningFreezes.liftedAt),
+      ),
+    )
+    .limit(1);
+
+  if (existing) {
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { tenantId, scopeType: "tenant", signingState: "frozen", freezeId: existing.id },
+    });
+  }
+
+  const [row] = await db
+    .insert(vaultSigningFreezes)
+    .values({
+      tenantId,
+      scopeType: "tenant",
+      reason,
+      createdByType: "platform",
+      createdById: "platform",
+    })
+    .returning({ id: vaultSigningFreezes.id });
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.freeze",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { freezeId: row.id, scopeType: "tenant", reason },
+    ...auditCtx(c),
+  });
+
+  dispatchWebhook(tenantId, tenantId, "wallet.frozen", {
+    tenant_id: tenantId,
+    scope_type: "tenant",
+    freeze_id: row.id,
+    reason,
+  });
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { tenantId, scopeType: "tenant", signingState: "frozen", freezeId: row.id },
+  });
+});
+
+/**
+ * POST /tenants/:id/unfreeze
+ * Lifts the active tenant-wide signing freeze. Gated behind a scoped platform key.
+ */
+platform.post("/tenants/:id/unfreeze", async (c) => {
+  const scopeResponse = requirePlatformRouteScope(c, "platform:tenant-freeze:write");
+  if (scopeResponse) return scopeResponse;
+
+  const db = getDb();
+  const tenantId = c.req.param("id");
+  if (!isValidTenantId(tenantId)) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid tenant id format" }, 400);
+  }
+
+  const lifted = await db
+    .update(vaultSigningFreezes)
+    .set({ liftedAt: sql`now()`, liftedByType: "platform", liftedById: "platform" })
+    .where(
+      and(
+        eq(vaultSigningFreezes.tenantId, tenantId),
+        eq(vaultSigningFreezes.scopeType, "tenant"),
+        isNull(vaultSigningFreezes.liftedAt),
+      ),
+    )
+    .returning({ id: vaultSigningFreezes.id });
+
+  if (lifted.length === 0) {
+    return c.json<ApiResponse>({
+      ok: true,
+      data: { tenantId, scopeType: "tenant", signingState: "active", freezeId: null },
+    });
+  }
+
+  await writeAuditEvent({
+    tenantId,
+    actorType: "platform",
+    action: "tenant.unfreeze",
+    resourceType: "tenant",
+    resourceId: tenantId,
+    metadata: { freezeId: lifted[0].id, scopeType: "tenant" },
+    ...auditCtx(c),
+  });
+
+  dispatchWebhook(tenantId, tenantId, "wallet.unfrozen", {
+    tenant_id: tenantId,
+    scope_type: "tenant",
+    freeze_id: lifted[0].id,
+  });
+
+  return c.json<ApiResponse>({
+    ok: true,
+    data: { tenantId, scopeType: "tenant", signingState: "active", freezeId: lifted[0].id },
+  });
 });
 
 /**

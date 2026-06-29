@@ -31,6 +31,7 @@ import {
   ENTRY_POINT_V07,
   type ExportPrivateKeyResult,
   getUserOperationHash,
+  isVaultSigningFrozenError,
   packUserOperation,
   parseSolanaTransaction,
   readEip7702Delegation,
@@ -95,6 +96,28 @@ vaultRoutes.use("*", async (c, next) => {
   setNoStoreHeaders(c);
   await next();
 });
+
+/**
+ * Maps a vault signing-freeze error to HTTP 423 Locked. The freeze gate lives at
+ * the lowest signing chokepoint (before key decryption) inside the vault, so any
+ * signing handler that awaits a `vault.sign*` call can surface a frozen state
+ * here. Returns null for any other error so the caller falls through to its
+ * normal error handling.
+ */
+function frozenSigningResponse(
+  c: Context<{ Variables: AppVariables }>,
+  error: unknown,
+): Response | null {
+  if (!isVaultSigningFrozenError(error)) return null;
+  return c.json<ApiResponse<{ code: string; scopeType: string }>>(
+    {
+      ok: false,
+      error: error.message,
+      data: { code: error.code, scopeType: error.scopeType },
+    },
+    423,
+  );
+}
 
 async function writeVaultAudit(
   c: Context<{ Variables: AppVariables }>,
@@ -2055,6 +2078,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         data: { txId, signedTx: result },
       });
     } catch (e: unknown) {
+      const frozen = frozenSigningResponse(c, e);
+      if (frozen) return frozen;
       const requestId = c.get("requestId") || "unknown";
       const rawMessage = e instanceof Error ? e.message : "Unknown error";
       console.error(`[${requestId}] Sign transaction failed for agent ${agentId}:`, e);
@@ -2920,6 +2945,8 @@ vaultRoutes.post("/:agentId/actions/transfer", async (c) => {
         }),
       });
     } catch (e: unknown) {
+      const frozen = frozenSigningResponse(c, e);
+      if (frozen) return frozen;
       if (completedResult && completedStatus) {
         await db
           .update(transactions)
@@ -3543,6 +3570,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         data: !shouldBroadcast ? { txId, signedTx: txHash } : { txId, txHash },
       });
     } catch (e: unknown) {
+      const frozen = frozenSigningResponse(c, e);
+      if (frozen) return frozen;
       if (!irreversibleResult) {
         await db
           .update(approvalQueue)
@@ -4464,6 +4493,8 @@ vaultRoutes.post("/:agentId/sign-message", async (c) => {
     setNoStoreHeaders(c);
     return c.json<ApiResponse>({ ok: true, data: { signature } });
   } catch (e) {
+    const frozen = frozenSigningResponse(c, e);
+    if (frozen) return frozen;
     console.error(`[Vault] sign-message failed for ${tenantId}/${agentId}:`, e);
     return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
   }
@@ -5464,6 +5495,8 @@ vaultRoutes.post("/:agentId/sign-typed-data", async (c) => {
       data: { signature, txId },
     });
   } catch (e: unknown) {
+    const frozen = frozenSigningResponse(c, e);
+    if (frozen) return frozen;
     const requestId = c.get("requestId") || "unknown";
     const rawMessage = e instanceof Error ? e.message : "Unknown error";
     console.error(`[${requestId}] Sign typed data failed for agent ${agentId}:`, e);
@@ -6349,6 +6382,8 @@ async function signSolanaBlind(
         }>
       >({ ok: true, data: { txId, ...result } });
     } catch (e: unknown) {
+      const frozen = frozenSigningResponse(c, e);
+      if (frozen) return frozen;
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Solana blind sign failed for agent ${agentId}:`, e);
       if (completedResult?.broadcast) {
@@ -6824,6 +6859,8 @@ vaultRoutes.post("/:agentId/sign-solana", async (c) => {
         data: { txId, ...result },
       });
     } catch (e: unknown) {
+      const frozen = frozenSigningResponse(c, e);
+      if (frozen) return frozen;
       const requestId = c.get("requestId") || "unknown";
       console.error(`[${requestId}] Solana sign failed for agent ${agentId}:`, e);
       if (completedResult?.broadcast) {

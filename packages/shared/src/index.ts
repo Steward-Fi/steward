@@ -64,6 +64,8 @@ export const WEBHOOK_EVENT_TYPES = [
   "wallet.raw_signature.created",
   "wallet.funds_deposited",
   "wallet.funds_withdrawn",
+  "wallet.frozen",
+  "wallet.unfrozen",
   "transaction.broadcasted",
   "transaction.confirmed",
   "transaction.execution_reverted",
