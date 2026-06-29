@@ -119,6 +119,13 @@ CONNECT_PAYLOAD=$(jq -n \
   --arg img "$FULL_IMAGE" \
   '{query: "mutation($id: String!, $input: ServiceConnectInput!) { serviceConnect(id: $id, input: $input) { id } }", variables: {id: $sid, input: {image: $img}}}')
 
+# Record when this run started so the poll ignores any pre-existing (stale)
+# deployment for this service/env. serviceConnect only changes the image SOURCE;
+# it does not reliably create a new deployment, so without this guard the poll
+# reads edges[0] = the previous, already-FAILED deployment and reports a fresh
+# failure ~10s in on every run.
+START_TS=$(date -u +%s)
+
 CONNECT_RESULT=$(gql "$CONNECT_PAYLOAD" 2>&1) || {
   fail "serviceConnect mutation failed"
   fail "Response: $CONNECT_RESULT"
@@ -133,6 +140,24 @@ fi
 
 ok "Service updated to ${FULL_IMAGE}"
 
+# serviceConnect only updates the image source; explicitly trigger a deployment
+# so a new deployment is actually created. Treat failure as non-fatal: some
+# Railway configurations auto-deploy on connect, in which case the poll below
+# (filtered to deployments newer than START_TS) still picks up the new one.
+TRIGGER_DEPLOY_ID=""
+DEPLOY_PAYLOAD=$(jq -n \
+  --arg sid "$SERVICE_ID" \
+  --arg eid "$ENV_ID" \
+  '{query: "mutation($sid: String!, $eid: String!) { serviceInstanceDeployV2(serviceId: $sid, environmentId: $eid) }", variables: {sid: $sid, eid: $eid}}')
+
+DEPLOY_TRIGGER=$(gql "$DEPLOY_PAYLOAD" 2>&1) || DEPLOY_TRIGGER=""
+if echo "$DEPLOY_TRIGGER" | jq -e '.errors' >/dev/null 2>&1; then
+  warn "serviceInstanceDeploy returned an error (service may auto-deploy on connect): $(echo "$DEPLOY_TRIGGER" | jq -r '.errors[0].message' 2>/dev/null)"
+else
+  TRIGGER_DEPLOY_ID=$(echo "$DEPLOY_TRIGGER" | jq -r '.data.serviceInstanceDeployV2 // ""' 2>/dev/null) || TRIGGER_DEPLOY_ID=""
+  [[ -n "$TRIGGER_DEPLOY_ID" ]] && ok "Triggered deployment ${TRIGGER_DEPLOY_ID}"
+fi
+
 # ---------------------------------------------------------------------------
 # Step 2: Poll for deployment status
 # ---------------------------------------------------------------------------
@@ -141,11 +166,40 @@ log "Waiting for deployment to complete (timeout: ${TIMEOUT}s)..."
 POLL_QUERY=$(jq -n \
   --arg sid "$SERVICE_ID" \
   --arg eid "$ENV_ID" \
-  '{query: "query($input: DeploymentListInput!) { deployments(input: $input) { edges { node { id status } } } }", variables: {input: {serviceId: $sid, environmentId: $eid}}}')
+  '{query: "query($input: DeploymentListInput!) { deployments(input: $input, first: 5) { edges { node { id status createdAt } } } }", variables: {input: {serviceId: $sid, environmentId: $eid}}}')
 
 ELAPSED=0
 INTERVAL=10
 DEPLOY_STATUS="UNKNOWN"
+DEPLOY_ID=""
+
+# Surface Railway's OWN failure reason + build/deploy logs so CI shows the real
+# cause instead of a bare "Deployment FAILED". Tolerant of unknown field names:
+# any GraphQL error is printed too, which is still strictly more signal.
+dump_failure() {
+  fail "---- Railway deployment diagnostics ----"
+  if [[ -z "$DEPLOY_ID" ]]; then
+    fail "No deployment id captured — serviceConnect/serviceInstanceDeploy may not have created a new deployment."
+    fail "----------------------------------------"
+    return
+  fi
+  local q out logs
+  q=$(jq -n --arg id "$DEPLOY_ID" \
+    '{query: "query($id: String!) { deployment(id: $id) { id status statusMessage canRedeploy } }", variables: {id: $id}}')
+  out=$(gql "$q" 2>/dev/null | jq -c '.data.deployment // .errors' 2>/dev/null) || out=""
+  [[ -n "$out" ]] && fail "Deployment: $out"
+
+  q=$(jq -n --arg id "$DEPLOY_ID" \
+    '{query: "query($id: String!) { buildLogs(deploymentId: $id, limit: 200) { message } }", variables: {id: $id}}')
+  logs=$(gql "$q" 2>/dev/null | jq -r '.data.buildLogs[]?.message' 2>/dev/null) || logs=""
+  [[ -n "$logs" ]] && { fail "---- build logs ----"; echo "$logs" >&2; }
+
+  q=$(jq -n --arg id "$DEPLOY_ID" \
+    '{query: "query($id: String!) { deploymentLogs(deploymentId: $id, limit: 200) { message } }", variables: {id: $id}}')
+  logs=$(gql "$q" 2>/dev/null | jq -r '.data.deploymentLogs[]?.message' 2>/dev/null) || logs=""
+  [[ -n "$logs" ]] && { fail "---- deploy logs ----"; echo "$logs" >&2; }
+  fail "----------------------------------------"
+}
 
 while [[ $ELAPSED -lt $TIMEOUT ]]; do
   sleep "$INTERVAL"
@@ -153,16 +207,33 @@ while [[ $ELAPSED -lt $TIMEOUT ]]; do
 
   POLL_RESULT=$(gql "$POLL_QUERY" 2>/dev/null) || continue
 
-  # Get the latest deployment status
-  DEPLOY_STATUS=$(echo "$POLL_RESULT" | jq -r '.data.deployments.edges[0].node.status // "UNKNOWN"' 2>/dev/null) || continue
+  # Select the deployment to track: prefer the one serviceInstanceDeploy
+  # returned; otherwise the newest deployment CREATED AT/AFTER this run started
+  # (epoch). This avoids reading a stale, previously-failed deployment.
+  if [[ -n "$TRIGGER_DEPLOY_ID" ]]; then
+    NODE=$(echo "$POLL_RESULT" | jq -c --arg id "$TRIGGER_DEPLOY_ID" \
+      '.data.deployments.edges[]?.node | select(.id == $id)' 2>/dev/null) || NODE=""
+  else
+    NODE=$(echo "$POLL_RESULT" | jq -c --argjson since "$START_TS" \
+      '[.data.deployments.edges[]?.node | select((.createdAt | sub("\\.[0-9]+Z$";"Z") | fromdateiso8601) >= $since)] | sort_by(.createdAt) | last // empty' 2>/dev/null) || NODE=""
+  fi
+
+  if [[ -z "$NODE" || "$NODE" == "null" ]]; then
+    log "  Waiting for a new deployment to appear (${ELAPSED}s elapsed)"
+    continue
+  fi
+
+  DEPLOY_ID=$(echo "$NODE" | jq -r '.id // ""' 2>/dev/null) || DEPLOY_ID=""
+  DEPLOY_STATUS=$(echo "$NODE" | jq -r '.status // "UNKNOWN"' 2>/dev/null) || DEPLOY_STATUS="UNKNOWN"
 
   case "$DEPLOY_STATUS" in
     SUCCESS)
-      ok "Deployment succeeded after ${ELAPSED}s"
+      ok "Deployment succeeded after ${ELAPSED}s (id: ${DEPLOY_ID})"
       break
       ;;
     FAILED|CRASHED|REMOVED)
-      fail "Deployment ${DEPLOY_STATUS} after ${ELAPSED}s"
+      fail "Deployment ${DEPLOY_STATUS} after ${ELAPSED}s (id: ${DEPLOY_ID})"
+      dump_failure
       exit 1
       ;;
     DEPLOYING|BUILDING|INITIALIZING|WAITING)
@@ -176,6 +247,7 @@ done
 
 if [[ "$DEPLOY_STATUS" != "SUCCESS" ]]; then
   fail "Deployment timed out after ${TIMEOUT}s (last status: ${DEPLOY_STATUS})"
+  dump_failure
   exit 1
 fi
 
