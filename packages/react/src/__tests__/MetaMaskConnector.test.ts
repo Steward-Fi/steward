@@ -29,7 +29,11 @@ describe("createStewardMetaMaskConnector", () => {
 
   test("passes the caller dapp metadata through, overriding defaults", () => {
     createStewardMetaMaskConnector({
-      dapp: { name: "My Steward App", url: "https://app.example.com", iconUrl: "https://app.example.com/icon.png" },
+      dapp: {
+        name: "My Steward App",
+        url: "https://app.example.com",
+        iconUrl: "https://app.example.com/icon.png",
+      },
     });
     const lastCall = mockMetaMask.mock.calls.at(-1)?.[0] as {
       dapp?: { name?: string; url?: string; iconUrl?: string };

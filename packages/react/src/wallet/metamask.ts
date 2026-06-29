@@ -1,5 +1,5 @@
-import { metaMask } from "wagmi/connectors";
 import type { CreateConnectorFn } from "wagmi";
+import { metaMask } from "wagmi/connectors";
 
 /**
  * dApp metadata MetaMask Connect surfaces during the connection handshake.

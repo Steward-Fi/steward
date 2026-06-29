@@ -13,9 +13,7 @@ describe("formatWei", () => {
   });
 
   it("preserves large wei precision", () => {
-    expect(formatWei("123456789012345678901234567890")).toBe(
-      "123456789012.3456",
-    );
+    expect(formatWei("123456789012345678901234567890")).toBe("123456789012.3456");
   });
 
   it("returns zero for malformed input", () => {

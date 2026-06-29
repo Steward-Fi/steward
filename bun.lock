@@ -248,7 +248,7 @@
     },
     "packages/react": {
       "name": "@stwd/react",
-      "version": "0.9.1",
+      "version": "0.10.0",
       "dependencies": {
         "@stwd/sdk": "^0.10.0",
       },
@@ -274,6 +274,7 @@
         "wagmi": "^2.0.0",
       },
       "peerDependencies": {
+        "@metamask/connect-evm": "^2.1.0",
         "@rainbow-me/rainbowkit": "^2.0.0",
         "@solana/wallet-adapter-coin98": "^0.5.24",
         "@solana/wallet-adapter-coinbase": "^0.1.23",
@@ -289,9 +290,10 @@
         "react": ">=18.0.0",
         "react-dom": ">=18.0.0",
         "viem": "^2.0.0",
-        "wagmi": "^2.0.0",
+        "wagmi": "^2.0.0 || ^3.0.0",
       },
       "optionalPeers": [
+        "@metamask/connect-evm",
         "@rainbow-me/rainbowkit",
         "@solana/wallet-adapter-coin98",
         "@solana/wallet-adapter-coinbase",
