@@ -63,9 +63,10 @@ export function createStewardMetaMaskConnector(
   options: StewardMetaMaskConnectorOptions = {},
 ): CreateConnectorFn {
   const { dapp, ...rest } = options;
+  const inferredUrl = defaultDappUrl();
   const mergedDapp: StewardMetaMaskDappMetadata = {
     name: DEFAULT_DAPP_NAME,
-    url: defaultDappUrl(),
+    ...(inferredUrl ? { url: inferredUrl } : {}),
     ...dapp,
   };
   return metaMask({ dapp: mergedDapp, ...rest }) as CreateConnectorFn;
