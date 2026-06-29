@@ -196,8 +196,13 @@ dump_failure() {
     return
   fi
   local q resp
+  # NB: the Deployment type has no `statusMessage` field (Railway's API returns a
+  # GRAPHQL_VALIDATION_FAILED for it). Query only valid fields. A FAILED status
+  # with EMPTY build+deploy logs (below) means Railway rejected the deployment at
+  # the image-pull / provision stage before any container ran — check the Railway
+  # dashboard for this service/deployment id, as the API exposes nothing further.
   q=$(jq -n --arg id "$DEPLOY_ID" \
-    '{query: "query($id: String!) { deployment(id: $id) { id status statusMessage canRedeploy } }", variables: {id: $id}}')
+    '{query: "query($id: String!) { deployment(id: $id) { id status createdAt staticUrl url canRedeploy } }", variables: {id: $id}}')
   resp=$(gql_raw "$q")
   fail "deployment: ${resp:-<empty response>}"
 
