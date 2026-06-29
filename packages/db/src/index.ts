@@ -1,7 +1,7 @@
 import type { AgentIdentity, PolicyRule, SignRequest, TxRecord } from "@stwd/shared";
 import { eq, inArray } from "drizzle-orm";
 
-export { and, count, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
+export { and, asc, count, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-orm";
 // `isNull`, `isNotNull`, `gt`, `or` live on the `/sql` subpath because
 // drizzle-orm@0.44 does not re-export them from the package root in a way
 // that bun's test loader resolves (works at runtime via the cjs fallback,

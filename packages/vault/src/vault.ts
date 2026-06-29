@@ -51,7 +51,7 @@ import {
   parseBitcoinPsbtSigningMetadata,
   signBitcoinPsbt,
 } from "./bitcoin-psbt";
-import { allocateEvmNonce } from "./evm-nonce-manager";
+import { allocateEvmNonce, confirmEvmNonce, markEvmNonceDropped } from "./evm-nonce-manager";
 import {
   assertNoExternalPrivateKeyMaterial,
   type ExternalKeyCustodyProvider,
@@ -1199,22 +1199,47 @@ export class Vault {
           chain,
           transport: http(rpcUrl),
         });
-        const nonce =
-          request.nonce ??
-          (await allocateEvmNonce({
-            walletAddress: account.address,
-            chainId,
-            getPendingNonce: (address) =>
-              publicClient.getTransactionCount({ address, blockTag: "pending" }),
-          }));
+        // Track only allocator-issued nonces for in-flight reclaim; a
+        // caller-supplied `request.nonce` is the caller's responsibility.
+        const allocatedNonce =
+          request.nonce === undefined
+            ? await allocateEvmNonce({
+                walletAddress: account.address,
+                chainId,
+                getPendingNonce: (address) =>
+                  publicClient.getTransactionCount({ address, blockTag: "pending" }),
+              })
+            : undefined;
+        const nonce = request.nonce ?? (allocatedNonce as number);
 
-        hash = await client.sendTransaction({
-          to: request.to as `0x${string}`,
-          value: BigInt(request.value),
-          data: request.data as `0x${string}` | undefined,
-          gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
-          nonce,
-        });
+        try {
+          hash = await client.sendTransaction({
+            to: request.to as `0x${string}`,
+            value: BigInt(request.value),
+            data: request.data as `0x${string}` | undefined,
+            gas: request.gasLimit ? BigInt(request.gasLimit) : undefined,
+            nonce,
+          });
+          if (allocatedNonce !== undefined) {
+            // Best-effort: confirmation bookkeeping must not fail a good send.
+            await confirmEvmNonce({
+              walletAddress: account.address,
+              chainId,
+              nonce: allocatedNonce,
+            }).catch(() => {});
+          }
+        } catch (err) {
+          if (allocatedNonce !== undefined) {
+            // Best-effort: mark the dropped nonce reclaimable so the wallet
+            // doesn't wedge behind a permanent hole.
+            await markEvmNonceDropped({
+              walletAddress: account.address,
+              chainId,
+              nonce: allocatedNonce,
+            }).catch(() => {});
+          }
+          throw err;
+        }
       } else {
         // Sign without broadcasting - return the serialized signed transaction
         const rpcUrl = CHAIN_RPCS[chainId] ?? this.config.rpcUrl;

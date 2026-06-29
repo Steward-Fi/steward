@@ -379,6 +379,13 @@
       "when": 1780135800000,
       "tag": "0072_vault_signing_freezes_and_evm_nonces",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1780136400000,
+      "tag": "0074_evm_wallet_nonce_inflight",
+      "breakpoints": true
     }
   ]
 }

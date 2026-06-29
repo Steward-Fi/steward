@@ -512,6 +512,41 @@ export const evmWalletNonces = pgTable(
 );
 
 /**
+ * Tracks EVM nonces that have been allocated to an in-flight transaction but
+ * not yet confirmed on-chain. A nonce is `allocated` once handed out and is
+ * cleared (deleted) on confirmation; on a dropped/failed broadcast it is marked
+ * `dropped` so the allocator can reclaim it instead of leaving a permanent hole
+ * that wedges the wallet behind a stuck nonce. See `evm-nonce-manager.ts`.
+ */
+export const evmWalletNonceInflight = pgTable(
+  "evm_wallet_nonce_inflight",
+  {
+    walletAddress: varchar("wallet_address", { length: 42 }).notNull(),
+    chainId: integer("chain_id").notNull(),
+    nonce: bigint("nonce", { mode: "number" }).notNull(),
+    state: varchar("state", { length: 16 }).notNull().default("allocated"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdateFn(() => sql`now()`),
+  },
+  (table) => ({
+    walletChainNonceUniqueIdx: uniqueIndex("evm_wallet_nonce_inflight_key_idx").on(
+      table.walletAddress,
+      table.chainId,
+      table.nonce,
+    ),
+    reclaimIdx: index("evm_wallet_nonce_inflight_reclaim_idx").on(
+      table.walletAddress,
+      table.chainId,
+      table.state,
+      table.nonce,
+    ),
+  }),
+);
+
+/**
  * Privy-style digital asset accounts group one or more Steward wallet agents
  * into a single balance/accounting resource. This is distinct from the
  * `accounts` identity-graph table in schema-auth.
