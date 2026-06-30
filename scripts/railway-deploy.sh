@@ -103,7 +103,7 @@ gql() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 1: Update the service image via serviceConnect
+# Step 1: Update the service image via serviceInstanceUpdate
 # ---------------------------------------------------------------------------
 log "Deploying ${FULL_IMAGE} to Railway service ${SERVICE_ID}"
 
@@ -114,20 +114,36 @@ if $DRY_RUN; then
   exit 0
 fi
 
+# Set the image source on the SERVICE INSTANCE for THIS environment.
+#
+# Why not serviceConnect? serviceConnect(id, input) is scoped to the SERVICE,
+# not an environment — it takes no environmentId. The image it sets does not
+# reliably land on the specific environment instance we then deploy
+# (serviceInstanceDeployV2 is env-scoped). The result was a deployment that
+# FAILED ~10s in with EMPTY build+deploy logs: Railway tried to deploy an
+# environment instance whose source was never set for that env, so there was
+# nothing to pull/run and it errored before any container/build stage.
+#
+# serviceInstanceUpdate(serviceId, environmentId, input.source.image) sets the
+# image on the EXACT environment instance we deploy, which is the documented,
+# current way to deploy a prebuilt Docker image per-environment. We then call
+# serviceInstanceDeployV2 (which alone triggers a fresh deploy of the new tag;
+# redeploy mutations only re-run the existing tag).
 CONNECT_PAYLOAD=$(jq -n \
   --arg sid "$SERVICE_ID" \
+  --arg eid "$ENV_ID" \
   --arg img "$FULL_IMAGE" \
-  '{query: "mutation($id: String!, $input: ServiceConnectInput!) { serviceConnect(id: $id, input: $input) { id } }", variables: {id: $sid, input: {image: $img}}}')
+  '{query: "mutation($sid: String!, $eid: String!, $input: ServiceInstanceUpdateInput!) { serviceInstanceUpdate(serviceId: $sid, environmentId: $eid, input: $input) }", variables: {sid: $sid, eid: $eid, input: {source: {image: $img}}}}')
 
 # Record when this run started so the poll ignores any pre-existing (stale)
-# deployment for this service/env. serviceConnect only changes the image SOURCE;
-# it does not reliably create a new deployment, so without this guard the poll
+# deployment for this service/env. serviceInstanceUpdate only changes the image
+# SOURCE; it does not create a new deployment, so without this guard the poll
 # reads edges[0] = the previous, already-FAILED deployment and reports a fresh
 # failure ~10s in on every run.
 START_TS=$(date -u +%s)
 
 CONNECT_RESULT=$(gql "$CONNECT_PAYLOAD" 2>&1) || {
-  fail "serviceConnect mutation failed"
+  fail "serviceInstanceUpdate mutation failed"
   fail "Response: $CONNECT_RESULT"
   exit 1
 }
@@ -138,12 +154,13 @@ if echo "$CONNECT_RESULT" | jq -e '.errors' >/dev/null 2>&1; then
   exit 1
 fi
 
-ok "Service updated to ${FULL_IMAGE}"
+ok "Service instance updated to ${FULL_IMAGE} (env ${ENV_ID})"
 
-# serviceConnect only updates the image source; explicitly trigger a deployment
-# so a new deployment is actually created. Treat failure as non-fatal: some
-# Railway configurations auto-deploy on connect, in which case the poll below
-# (filtered to deployments newer than START_TS) still picks up the new one.
+# serviceInstanceUpdate only updates the image source; explicitly trigger a
+# deployment so a new deployment is actually created. Treat failure as
+# non-fatal: some Railway configurations auto-deploy on update, in which case
+# the poll below (filtered to deployments newer than START_TS) still picks up
+# the new one.
 TRIGGER_DEPLOY_ID=""
 DEPLOY_PAYLOAD=$(jq -n \
   --arg sid "$SERVICE_ID" \
