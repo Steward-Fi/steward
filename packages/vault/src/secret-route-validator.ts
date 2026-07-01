@@ -68,12 +68,21 @@ const HTTP_HEADER_NAME = /^[A-Za-z0-9!#$%&'*+\-.^_`|~]+$/;
  *   under the host.
  * - requireExplicitMethod: the route must specify a concrete HTTP method (not
  *   "*"), so the credential is scoped to a single verb.
+ * - disallowPathWildcards: the pathPattern must not contain any "*" glob
+ *   wildcard. The proxy route matcher treats "*" as a prefix/segment wildcard,
+ *   so a path like "/repos/*" (which technically has 2 segments) would attach
+ *   the credential to every endpoint under /repos/. Requiring concrete segments
+ *   keeps a strict-host route pinned to one exact endpoint.
  */
 export const STRICT_HOSTS: Record<
   string,
-  { minPathSegments: number; requireExplicitMethod: boolean }
+  { minPathSegments: number; requireExplicitMethod: boolean; disallowPathWildcards: boolean }
 > = {
-  "api.github.com": { minPathSegments: 2, requireExplicitMethod: true },
+  "api.github.com": {
+    minPathSegments: 2,
+    requireExplicitMethod: true,
+    disallowPathWildcards: true,
+  },
 };
 
 export type SecretRouteConfigInput = {
@@ -285,6 +294,14 @@ export function validateSecretRouteConfig(
         const path = input.pathPattern?.trim();
         if (!path || countPathSegments(path) < rule.minPathSegments) {
           return `routes for ${host} must target a path with at least ${rule.minPathSegments} segments`;
+        }
+      }
+      if (rule.disallowPathWildcards) {
+        const path = input.pathPattern?.trim() ?? "";
+        // Any "*" is a glob wildcard to the proxy matcher; a strict host must be
+        // pinned to a concrete endpoint (e.g. /repos/acme/widgets, not /repos/*).
+        if (path.includes("*")) {
+          return `routes for ${host} must target an exact path (no "*" wildcards)`;
         }
       }
     }

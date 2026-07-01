@@ -186,6 +186,7 @@ describe("STRICT_HOSTS — api.github.com narrowness", () => {
     expect(STRICT_HOSTS["api.github.com"]).toEqual({
       minPathSegments: 2,
       requireExplicitMethod: true,
+      disallowPathWildcards: true,
     });
     expect(DEFAULT_SECRET_ROUTE_HOSTS).toContain("api.github.com");
     expect(configuredSecretRouteHosts()).toContain("api.github.com");
@@ -222,6 +223,30 @@ describe("STRICT_HOSTS — api.github.com narrowness", () => {
         method: "GET",
       }),
     ).toContain("at least 2 segments");
+  });
+
+  it("rejects a github route with a trailing wildcard path (/repos/*)", () => {
+    // /repos/* has 2 segments but the proxy treats * as a prefix wildcard, so it
+    // would attach the PAT to every /repos/** endpoint. Must be rejected.
+    expect(
+      validateSecretRouteConfig({
+        ...okBase,
+        hostPattern: "api.github.com",
+        pathPattern: "/repos/*",
+        method: "GET",
+      }),
+    ).toContain('exact path (no "*" wildcards)');
+  });
+
+  it("rejects a github route with an inner wildcard segment (/repos/*/issues)", () => {
+    expect(
+      validateSecretRouteConfig({
+        ...okBase,
+        hostPattern: "api.github.com",
+        pathPattern: "/repos/*/issues",
+        method: "GET",
+      }),
+    ).toContain('exact path (no "*" wildcards)');
   });
 
   it("rejects a github route without an explicit method", () => {

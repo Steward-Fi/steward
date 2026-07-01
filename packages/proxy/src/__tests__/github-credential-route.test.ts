@@ -183,6 +183,27 @@ describe("github narrow credential route (integration)", () => {
     }
   });
 
+  it("rejects a wildcard github path (/repos/*) at create time", async () => {
+    const tenantId = `tenant-gh-wildcard-${crypto.randomUUID()}`;
+    const agentId = `agent-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, agentId);
+    const vault = new SecretVault(MASTER_PASSWORD);
+    const secret = await vault.createSecret(tenantId, "github-pat-wild", FINE_GRAINED_PAT);
+
+    await expect(
+      vault.createRoute(tenantId, secret.id, {
+        agentId,
+        hostPattern: "api.github.com",
+        pathPattern: "/repos/*",
+        method: "GET",
+        injectAs: "header",
+        injectKey: "authorization",
+        injectFormat: "Bearer {value}",
+      }),
+    ).rejects.toThrow(/exact path \(no "\*" wildcards\)/);
+  });
+
   it("rejects a non-allowlisted host at create time", async () => {
     const tenantId = `tenant-evil-${crypto.randomUUID()}`;
     const agentId = `agent-${crypto.randomUUID()}`;
