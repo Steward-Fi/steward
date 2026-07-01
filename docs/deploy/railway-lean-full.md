@@ -286,3 +286,113 @@ and isolated, so it does not corrupt the core schema.
 
 that single column of differences is the entire lean-vs-full contract. the image
 is byte-identical.
+
+---
+
+## 8. the proxy service (separate process, same image)
+
+the **proxy gateway** (`packages/proxy/src/index.ts`) is a SEPARATE process from
+the API. it sits between agent containers and third-party APIs: agents send it a
+request with a scoped JWT (and, in prod, an HMAC request signature), it matches a
+credential route, decrypts the tenant's secret, injects it as a header, forwards
+upstream, and scrubs the credential from the response. it runs the SAME
+`ghcr.io/steward-fi/steward:<tag>` image as the API — only the start command and
+env differ.
+
+> agents talk to the proxy via the `@stwd/proxy-client` client (`proxyUrl` +
+> `token` + `signingSecret`); it computes the signature/idempotency headers the
+> proxy expects. see `packages/proxy-client/README.md`.
+
+### 8.1 start command override
+
+the API image's default `CMD` runs the API. for the proxy service, override the
+start command:
+
+```
+bun packages/proxy/src/index.ts
+```
+
+on Railway: set the service's **Custom Start Command** to the line above. nothing
+else in the image changes.
+
+### 8.2 required-env checklist (proxy service)
+
+read directly from proxy source: `packages/proxy/src/index.ts`,
+`packages/proxy/src/config.ts`, `packages/proxy/src/middleware/auth.ts`,
+`packages/proxy/src/middleware/redis-enforcement.ts`, and
+`packages/vault/src/keystore.ts` (the decrypt path).
+
+| var | severity | why | source |
+|-----|----------|-----|--------|
+| `NODE_ENV=production` | required | turns OFF dev-secret fallbacks AND turns ON the mandatory request-signature check + Redis fail-closed. this is the single flag that hardens the proxy | `packages/proxy/src/middleware/auth.ts` (`proxyRequestSignatureRequired`), `redis-enforcement.ts` |
+| `STEWARD_BIND_HOST=0.0.0.0` | required on Railway | Bun binds `0.0.0.0` by default, but set it explicitly so Railway's proxy can reach the container | Bun.serve default; mirror the API service |
+| `STEWARD_PROXY_PORT` | required | listen port for the proxy (default `8080`). point Railway's health check + target port here | `packages/proxy/src/config.ts` (`PROXY_PORT`), `index.ts` |
+| `DATABASE_URL` | **[boot-fatal]** | same Postgres as the API. `index.ts` exits(1) if unset. reads `secret_routes` + `secrets`, writes `proxy_audit_log`. use the SAME database as the API service | `packages/proxy/src/index.ts` (`getDatabaseUrl`) |
+| `STEWARD_JWT_SECRET` | **[boot-fatal in prod]** | `validateJwtSecretEnv()` runs at boot; verifies the agent bearer tokens. MUST equal the API's value (same tokens) | `packages/proxy/src/index.ts`, `@stwd/auth` |
+| `STEWARD_MASTER_PASSWORD` | **[boot-fatal / functional]** | derives the vault key that decrypts injected secrets. MUST equal the API's value or decryption fails | `packages/proxy/src/handlers/proxy.ts` (`getSecretVault`), `packages/vault/src/keystore.ts` |
+| `STEWARD_KDF_SALT` | **[boot-fatal in prod]** | per-deploy KDF salt for vault key derivation; `keystore.ts` THROWS in production if unset (≥32 hex chars). MUST equal the API's value | `packages/vault/src/keystore.ts` |
+| `STEWARD_PROXY_REQUEST_SIGNING_SECRET` (or `_SECRETS` for rotation, plural = comma-separated) | required in prod | HMAC secret the proxy verifies the agent's `X-Steward-Signature` against. without it, prod requests get 500 (`Proxy request signing is not configured`). the agent's `@stwd/proxy-client` must be given the SAME secret | `packages/proxy/src/middleware/auth.ts` (`configuredProxySigningSecrets`) |
+| `REDIS_URL` | required in prod (fail-closed) | rate limit + spend tracking + idempotency replay store. in prod the proxy FAILS CLOSED when Redis is configured-but-unreachable. LLM-host spend tracking only runs when Redis is available | `packages/proxy/src/middleware/redis-enforcement.ts` |
+
+recommended-but-optional (proxy service):
+
+| var | why | source |
+|-----|-----|--------|
+| `STEWARD_PROXY_ALLOWED_HOSTS` | comma-separated extra hosts for `/proxy/<host>/...` direct proxying, beyond the built-in aliases. `api.openai.com` + `api.anthropic.com` (and the birdeye/coingecko/helius aliases) are ALREADY allowed by default; set this only to add hosts | `packages/proxy/src/config.ts` (`DEFAULT_ALIASES`), `handlers/alias.ts` |
+| `STEWARD_SECRET_ROUTE_ALLOWED_HOSTS` | extra hosts a `secret_route` may target, beyond the vault default allowlist (openai/anthropic/birdeye/coingecko/helius already default-allowed) | `packages/vault/src/secret-vault.ts` |
+| `REDIS_REQUIRED=true` | force Redis to be mandatory even outside prod | `redis-enforcement.ts` |
+| `STEWARD_PROXY_UPSTREAM_TIMEOUT_MS` / `STEWARD_PROXY_RESPONSE_BYTES` / `STEWARD_PROXY_STREAM_DURATION_MS` | upstream timeout + response-size + stream-duration caps | `packages/proxy/src/handlers/proxy.ts` |
+| `STEWARD_PROXY_MAX_IN_FLIGHT_PER_AGENT` / `_PER_TENANT` | in-flight concurrency caps (overflow → 429) | `packages/proxy/src/handlers/proxy.ts` |
+
+**leave UNSET in prod (break-glass / weakens security):**
+`STEWARD_PROXY_ALLOW_UNSIGNED_REQUESTS` (prod ignores it and still requires
+signatures, but do not set it), `STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE=false`
+(prod forces it on regardless), `STEWARD_ALLOW_PROXY_REDIS_SOFT_FAIL`,
+`STEWARD_ALLOW_BROAD_SECRET_ROUTES`, `STEWARD_PGLITE_MEMORY`.
+
+### 8.3 master-password co-location tradeoff (honest note)
+
+the proxy holds `STEWARD_MASTER_PASSWORD` + `STEWARD_KDF_SALT` because it
+decrypts injected secrets itself. that means the proxy and the API currently
+share the same encryption trust domain: a full compromise of either process can
+decrypt tenant secrets. this is acceptable for now (both run the same image, same
+operator, same VPC) but it is NOT isolation — a future hardening step is to move
+decryption behind a dedicated KMS/enclave so neither the API nor the proxy holds
+the raw master password. document this in the threat model when the split lands.
+
+the proxy's own defense-in-depth (independent of that tradeoff): mandatory JWT
+`api:proxy` scope, HMAC proof-of-possession request signatures (prod), an
+idempotency-key requirement on mutating methods, a host allowlist on both the
+route and the resolver, SSRF guards on outbound DNS, and response scrubbing that
+returns 502 if the upstream ever reflects the injected credential.
+
+### 8.4 health + smoke
+
+the proxy exposes an unauthenticated `GET /health` returning
+`{ ok, service: "steward-proxy", version, aliases }`. point Railway's health
+check at `/health` on `STEWARD_PROXY_PORT`.
+
+after deploy:
+
+```sh
+# health 200 + unauthenticated request -> 401 (auth guard live)
+scripts/deploy/smoke-proxy.sh https://<proxy-host> <api-proxy-scoped-jwt>
+
+# optional: also exercise a signed request path (needs the signing secret)
+STEWARD_PROXY_REQUEST_SIGNING_SECRET=<secret> \
+  scripts/deploy/smoke-proxy.sh --signed https://<proxy-host> <jwt> <tenantId> <agentId>
+```
+
+### 8.5 rollback (proxy service)
+
+the proxy is **stateless** (all state is in Postgres/Redis). rollback = redeploy
+the previous good image tag via the same `scripts/railway-deploy.sh <tag>` /
+Railway native rollback, exactly like the API service (§6, levers 2 and 3). the
+mode-flip lever (§6 lever 1) does not apply — the proxy has no plugin toggle. env
+is unchanged across a rollback, so it comes back in the same posture. after
+rollback: re-run `smoke-proxy.sh` and confirm `/health` is 200.
+
+> keep `STEWARD_MASTER_PASSWORD` / `STEWARD_KDF_SALT` / `STEWARD_JWT_SECRET`
+> IDENTICAL between the API and proxy services and STABLE across rollbacks —
+> rotating them requires re-encrypting vault keys (master/salt) or reissuing
+> tokens (jwt).
