@@ -68,6 +68,13 @@ export {
   globToRegex,
   matchesGlob,
 } from "./route-matcher";
+export type { SecretRouteConfigInput } from "./secret-route-validator";
+export {
+  configuredSecretRouteHosts,
+  DEFAULT_SECRET_ROUTE_HOSTS,
+  STRICT_HOSTS,
+  validateSecretRouteConfig,
+} from "./secret-route-validator";
 export type { CreateSecretOptions, SecretMetadata } from "./secret-vault";
 export { SecretVault } from "./secret-vault";
 export {
