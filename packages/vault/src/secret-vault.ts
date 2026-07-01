@@ -401,8 +401,15 @@ export class SecretVault {
     // Fail-closed: re-validate against the merged (existing ∪ update) config so a
     // partial edit can never loosen a strict host's narrowness rules (explicit
     // method + minimum path depth) for a route that already targets one.
+    //
+    // Exception: if the update leaves the route DISABLED, skip the merged
+    // strict-host pass. A disabled route injects no credential, so strictness is
+    // moot — and blocking it would prevent an admin from disabling a legacy
+    // strict-host route that predates these rules (a safety-REDUCING action must
+    // never be blocked by a stricter narrowness rule).
     const current = await this.getRoute(tenantId, routeId);
-    if (current) {
+    const willBeEnabled = allowedUpdates.enabled ?? current?.enabled ?? true;
+    if (current && willBeEnabled) {
       const mergedValidationError = validateSecretRouteConfig({
         hostPattern: allowedUpdates.hostPattern ?? current.hostPattern ?? undefined,
         pathPattern: allowedUpdates.pathPattern ?? current.pathPattern ?? undefined,

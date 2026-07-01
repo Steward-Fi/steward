@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agents, closeDb, getDb, secrets, tenants } from "@stwd/db";
+import { agents, closeDb, getDb, secretRoutes, secrets, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
 import { SecretVault } from "../secret-vault";
@@ -136,6 +136,44 @@ describe("SecretVault lifecycle semantics", () => {
     // A partial update that would BREAK narrowness (shrink the path to a single
     // segment) must be rejected by the merged-config pass.
     await expect(vault.updateRoute(tenantId, route.id, { pathPattern: "/repos" })).rejects.toThrow(
+      /at least 2 segments/,
+    );
+  });
+
+  it("lets an admin disable a legacy non-compliant strict-host route", async () => {
+    const tenantId = `tenant-gh-legacy-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, "agent-gh-legacy");
+    const secret = await vault.createSecret(tenantId, "gh-legacy-pat", "github_pat_legacy");
+
+    // Simulate a route created BEFORE the strict-host rules existed: a broad
+    // single-segment github path that createRoute would now reject. Insert it
+    // directly so we can prove the disable path is not blocked by the new rule.
+    const [legacy] = await getDb()
+      .insert(secretRoutes)
+      .values({
+        tenantId,
+        agentId: "agent-gh-legacy",
+        secretId: secret.id,
+        hostPattern: "api.github.com",
+        pathPattern: "/",
+        method: "GET",
+        injectAs: "header",
+        injectKey: "authorization",
+        injectFormat: "Bearer {value}",
+        priority: 0,
+        enabled: true,
+      })
+      .returning();
+
+    // enabled:false is a safety-REDUCING change and must succeed despite the
+    // route being non-compliant with the new strict-host rules.
+    const disabled = await vault.updateRoute(tenantId, legacy.id, { enabled: false });
+    expect(disabled?.enabled).toBe(false);
+
+    // Re-enabling it (safety-INCREASING risk) must still be blocked by strict
+    // rules — you cannot turn an unsafe legacy route back on without fixing it.
+    await expect(vault.updateRoute(tenantId, legacy.id, { enabled: true })).rejects.toThrow(
       /at least 2 segments/,
     );
   });

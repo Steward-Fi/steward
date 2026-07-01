@@ -536,17 +536,24 @@ secretsRoutes.put("/routes/:id", async (c) => {
   // strict host. Re-run the shared validator on existing ∪ update so a strict
   // host's narrowness (explicit method + deep path) can never be loosened by a
   // partial edit.
-  const mergedConfig = {
-    hostPattern: update.hostPattern ?? existing.hostPattern ?? undefined,
-    pathPattern: update.pathPattern ?? existing.pathPattern ?? undefined,
-    method: update.method ?? existing.method ?? undefined,
-    injectAs: update.injectAs ?? existing.injectAs ?? undefined,
-    injectKey: update.injectKey ?? existing.injectKey ?? undefined,
-    injectFormat: update.injectFormat ?? existing.injectFormat ?? undefined,
-  };
-  const mergedValidationError = validateSecretRouteConfig(mergedConfig);
-  if (mergedValidationError) {
-    return c.json<ApiResponse>({ ok: false, error: mergedValidationError }, 400);
+  //
+  // Skipped when the update leaves the route DISABLED: a disabled route injects
+  // no credential, so strictness is moot, and an admin must always be able to
+  // disable a legacy strict-host route that predates these rules.
+  const willBeEnabled = update.enabled ?? existing.enabled ?? true;
+  if (willBeEnabled) {
+    const mergedConfig = {
+      hostPattern: update.hostPattern ?? existing.hostPattern ?? undefined,
+      pathPattern: update.pathPattern ?? existing.pathPattern ?? undefined,
+      method: update.method ?? existing.method ?? undefined,
+      injectAs: update.injectAs ?? existing.injectAs ?? undefined,
+      injectKey: update.injectKey ?? existing.injectKey ?? undefined,
+      injectFormat: update.injectFormat ?? existing.injectFormat ?? undefined,
+    };
+    const mergedValidationError = validateSecretRouteConfig(mergedConfig);
+    if (mergedValidationError) {
+      return c.json<ApiResponse>({ ok: false, error: mergedValidationError }, 400);
+    }
   }
   await writeSecretsAudit(c, {
     tenantId,
