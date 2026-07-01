@@ -1,0 +1,33 @@
+{
+  "name": "@stwd/proxy-client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-side client for the Steward proxy: signed, idempotency-keyed HTTP with credential injection handled server-side",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "bun test src/__tests__/"
+  },
+  "author": "Steward-Fi",
+  "license": "MIT",
+  "devDependencies": {
+    "@stwd/auth": "workspace:*",
+    "@stwd/db": "workspace:*",
+    "@stwd/proxy": "workspace:*",
+    "@stwd/vault": "workspace:*",
+    "@types/bun": "latest",
+    "hono": "^4.12.18",
+    "typescript": "^5.8.0"
+  }
+}

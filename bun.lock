@@ -246,6 +246,19 @@
         "typescript": "^5",
       },
     },
+    "packages/proxy-client": {
+      "name": "@stwd/proxy-client",
+      "version": "0.1.0",
+      "devDependencies": {
+        "@stwd/auth": "workspace:*",
+        "@stwd/db": "workspace:*",
+        "@stwd/proxy": "workspace:*",
+        "@stwd/vault": "workspace:*",
+        "@types/bun": "latest",
+        "hono": "^4.12.18",
+        "typescript": "^5.8.0",
+      },
+    },
     "packages/react": {
       "name": "@stwd/react",
       "version": "0.10.0",
@@ -1595,6 +1608,8 @@
     "@stwd/policy-engine": ["@stwd/policy-engine@workspace:packages/policy-engine"],
 
     "@stwd/proxy": ["@stwd/proxy@workspace:packages/proxy"],
+
+    "@stwd/proxy-client": ["@stwd/proxy-client@workspace:packages/proxy-client"],
 
     "@stwd/react": ["@stwd/react@workspace:packages/react"],
 
