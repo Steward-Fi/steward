@@ -108,10 +108,7 @@ describe("github narrow credential route (integration)", () => {
       injectFormat: "Bearer {value}",
     });
 
-    const token = await signAgentToken(
-      { agentId, tenantId, scopes: ["agent", PROXY_SCOPE] },
-      "1h",
-    );
+    const token = await signAgentToken({ agentId, tenantId, scopes: ["agent", PROXY_SCOPE] }, "1h");
 
     const agentBody = JSON.stringify({ body: "hello from agent" });
     const res = await buildApp().request("/github/repos/acme/widgets/issues/1/comments", {

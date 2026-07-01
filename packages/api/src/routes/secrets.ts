@@ -509,7 +509,9 @@ secretsRoutes.put("/routes/:id", async (c) => {
   }
   const update = parsedUpdate.value;
 
-  const validationError = validateSecretRouteConfig(update);
+  // Partial-patch validation: skip per-host strictness here (the patch may omit
+  // method/path). The merged-config pass below enforces strict-host rules.
+  const validationError = validateSecretRouteConfig(update, { enforceStrictHosts: false });
   if (validationError) {
     return c.json<ApiResponse>({ ok: false, error: validationError }, 400);
   }

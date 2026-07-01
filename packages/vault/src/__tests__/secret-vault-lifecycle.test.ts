@@ -108,6 +108,38 @@ describe("SecretVault lifecycle semantics", () => {
     ).rejects.toThrow(/expired/);
   });
 
+  it("enforces github strict-host rules across the two-pass update flow", async () => {
+    const tenantId = `tenant-gh-update-${crypto.randomUUID()}`;
+    await ensureTenant(tenantId);
+    await ensureAgent(tenantId, "agent-gh-update");
+    const secret = await vault.createSecret(tenantId, "gh-pat", "github_pat_example");
+
+    // Create a narrow, compliant github route.
+    const route = await vault.createRoute(tenantId, secret.id, {
+      agentId: "agent-gh-update",
+      hostPattern: "api.github.com",
+      pathPattern: "/repos/acme/widgets/issues/1/comments",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    });
+
+    // A partial update that keeps the route narrow (e.g. just the injectFormat)
+    // must succeed — the partial patch alone omits method/path but the merged
+    // config still satisfies the strict-host rules.
+    const updated = await vault.updateRoute(tenantId, route.id, {
+      injectFormat: "token {value}",
+    });
+    expect(updated?.injectFormat).toBe("token {value}");
+
+    // A partial update that would BREAK narrowness (shrink the path to a single
+    // segment) must be rejected by the merged-config pass.
+    await expect(vault.updateRoute(tenantId, route.id, { pathPattern: "/repos" })).rejects.toThrow(
+      /at least 2 segments/,
+    );
+  });
+
   it("rejects unsafe route configs at the vault boundary", async () => {
     const tenantId = `tenant-route-hardening-${crypto.randomUUID()}`;
     await ensureTenant(tenantId);

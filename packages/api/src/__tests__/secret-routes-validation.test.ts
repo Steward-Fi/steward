@@ -2,7 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-const secretsRouteSource = readFileSync(join(import.meta.dir, "..", "routes", "secrets.ts"), "utf8");
+const secretsRouteSource = readFileSync(
+  join(import.meta.dir, "..", "routes", "secrets.ts"),
+  "utf8",
+);
 
 // Route-config validation rules now live in the single source of truth shared
 // validator in @stwd/vault. These source-level guards assert the invariants
@@ -51,7 +54,9 @@ describe("secret route validation", () => {
   it("rejects line breaks in secret values before header injection can use them", () => {
     expect(secretsRouteSource).toContain("function validateSecretValue");
     expect(secretsRouteSource).toContain("secret value must not contain line breaks");
-    expect(secretsRouteSource).toContain("const secretValueError = validateSecretValue(body.value)");
+    expect(secretsRouteSource).toContain(
+      "const secretValueError = validateSecretValue(body.value)",
+    );
   });
 
   it("rejects invalid injected header names before persistence", () => {

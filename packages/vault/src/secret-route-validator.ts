@@ -146,15 +146,36 @@ function strictHostRuleFor(
   return null;
 }
 
+export type ValidateSecretRouteOptions = {
+  /**
+   * Whether to enforce per-host STRICT_HOSTS narrowness (explicit method +
+   * minimum path depth). Defaults to true.
+   *
+   * Set to false ONLY when validating a PARTIAL update patch in isolation:
+   * a partial patch (e.g. `{ hostPattern: "api.github.com" }`) does not carry
+   * the full route, so the strict-host rule cannot be judged fairly against it
+   * and would reject otherwise-valid partial edits. The caller MUST still run a
+   * second validation pass with strict-host enforcement ON against the merged
+   * (existing ∪ patch) config — that merged pass is where fail-closed strictness
+   * is actually enforced for updates. Create always passes a complete config,
+   * so it uses the default (strict on).
+   */
+  enforceStrictHosts?: boolean;
+};
+
 /**
  * Validate a secret-route config (create or partial update).
  *
  * Returns a human-readable error string on the first failed rule, or null if
  * the config is acceptable. Behavior-preserving relative to the reconciled
  * union of the two former copies; the only added strictness is the per-host
- * STRICT_HOSTS narrowness guard.
+ * STRICT_HOSTS narrowness guard (see enforceStrictHosts).
  */
-export function validateSecretRouteConfig(input: SecretRouteConfigInput): string | null {
+export function validateSecretRouteConfig(
+  input: SecretRouteConfigInput,
+  options?: ValidateSecretRouteOptions,
+): string | null {
+  const enforceStrictHosts = options?.enforceStrictHosts ?? true;
   if (input.agentId !== undefined && !input.agentId.trim()) return "agentId is invalid";
 
   if (input.hostPattern !== undefined) {
@@ -244,11 +265,12 @@ export function validateSecretRouteConfig(input: SecretRouteConfigInput): string
   }
 
   // ─── Per-host strictness (STRICT_HOSTS) ───────────────────────────────────
-  // Enforced when the route targets a strict host. Applied whenever hostPattern
-  // is present (always true on create). Fail-closed: a strict host requires an
-  // explicit method and a sufficiently deep path — the relevant field must be
-  // present AND satisfy the rule.
-  if (input.hostPattern !== undefined) {
+  // Enforced when the route targets a strict host and enforceStrictHosts is on.
+  // Fail-closed: a strict host requires an explicit method and a sufficiently
+  // deep path — the relevant field must be present AND satisfy the rule. Skipped
+  // for partial-update patches (enforceStrictHosts=false); the update call sites
+  // re-run this with enforcement ON against the merged config.
+  if (enforceStrictHosts && input.hostPattern !== undefined) {
     const hostPattern = input.hostPattern.trim().toLowerCase();
     const strict = strictHostRuleFor(hostPattern);
     if (strict) {

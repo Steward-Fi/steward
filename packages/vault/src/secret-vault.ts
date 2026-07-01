@@ -392,7 +392,11 @@ export class SecretVault {
     if (Object.keys(allowedUpdates).length === 0) {
       return this.getRoute(tenantId, routeId);
     }
-    const validationError = validateSecretRouteConfig(allowedUpdates);
+    // Partial-patch validation: skip per-host strictness here (the patch may not
+    // carry method/path). The merged pass below enforces strict-host rules.
+    const validationError = validateSecretRouteConfig(allowedUpdates, {
+      enforceStrictHosts: false,
+    });
     if (validationError) throw new Error(validationError);
     // Fail-closed: re-validate against the merged (existing ∪ update) config so a
     // partial edit can never loosen a strict host's narrowness rules (explicit

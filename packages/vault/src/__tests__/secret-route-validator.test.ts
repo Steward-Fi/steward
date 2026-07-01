@@ -147,8 +147,9 @@ describe("validateSecretRouteConfig — core rules", () => {
   });
 
   it("rejects an injectFormat with a line break", () => {
-    expect(validateSecretRouteConfig({ ...okBase, injectFormat: "Bearer {value}\r\ninjected" }))
-      .toBeTruthy();
+    expect(
+      validateSecretRouteConfig({ ...okBase, injectFormat: "Bearer {value}\r\ninjected" }),
+    ).toBeTruthy();
   });
 
   it("round-trips the two GitHub auth header formats", () => {
@@ -241,6 +242,22 @@ describe("STRICT_HOSTS — api.github.com narrowness", () => {
     }
   });
 
+  it("skips strict-host rules on a partial patch (enforceStrictHosts=false)", () => {
+    // A partial update patch that only sets the host to a strict host must NOT be
+    // rejected in isolation — the caller re-validates the merged config with
+    // strictness ON. This mirrors the PUT /routes/:id + updateRoute two-pass flow.
+    expect(
+      validateSecretRouteConfig({ hostPattern: "api.github.com" }, { enforceStrictHosts: false }),
+    ).toBeNull();
+  });
+
+  it("still rejects a strict-host patch in isolation when strictness is ON (create path)", () => {
+    // The create path always validates a complete config with strictness ON.
+    expect(validateSecretRouteConfig({ hostPattern: "api.github.com" })).toContain(
+      "must specify an explicit HTTP method",
+    );
+  });
+
   it("does not apply strict rules to non-strict hosts (openai keeps GET / semantics)", () => {
     // A single-segment path on openai remains valid — strictness is per-host.
     expect(
@@ -260,13 +277,25 @@ describe("STRICT_HOSTS — api.github.com narrowness", () => {
 // the reconciled accept/reject behavior so future edits to either surface can
 // only change it here, in one place.
 describe("validator parity across former call sites", () => {
-  const matrix: Array<{ name: string; input: Parameters<typeof validateSecretRouteConfig>[0]; accept: boolean }> = [
+  const matrix: Array<{
+    name: string;
+    input: Parameters<typeof validateSecretRouteConfig>[0];
+    accept: boolean;
+  }> = [
     { name: "allowlisted host", input: okBase, accept: true },
-    { name: "non-allowlisted host", input: { ...okBase, hostPattern: "api.evil.com" }, accept: false },
+    {
+      name: "non-allowlisted host",
+      input: { ...okBase, hostPattern: "api.evil.com" },
+      accept: false,
+    },
     { name: "raw IP", input: { ...okBase, hostPattern: "127.0.0.1" }, accept: false },
     { name: "localhost", input: { ...okBase, hostPattern: "localhost" }, accept: false },
     { name: "bad injectAs", input: { ...okBase, injectAs: "query" }, accept: false },
-    { name: "bad injectFormat", input: { ...okBase, injectFormat: "no placeholder" }, accept: false },
+    {
+      name: "bad injectFormat",
+      input: { ...okBase, injectFormat: "no placeholder" },
+      accept: false,
+    },
     { name: "bad injectKey", input: { ...okBase, injectKey: "content-length" }, accept: false },
   ];
 
@@ -287,13 +316,9 @@ describe("validator parity across former call sites", () => {
 
   it("broad path is env-gated identically regardless of caller", () => {
     delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
-    expect(
-      validateSecretRouteConfig({ ...okBase, pathPattern: "/*" }),
-    ).not.toBeNull();
+    expect(validateSecretRouteConfig({ ...okBase, pathPattern: "/*" })).not.toBeNull();
     process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES = "true";
-    expect(
-      validateSecretRouteConfig({ ...okBase, pathPattern: "/*", method: "GET" }),
-    ).toBeNull();
+    expect(validateSecretRouteConfig({ ...okBase, pathPattern: "/*", method: "GET" })).toBeNull();
     delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
   });
 });
