@@ -35,6 +35,7 @@ const FAKE_OPENAI_KEY = "sk-test-e2e-do-not-use-0123456789abcdef";
 let authMiddleware: typeof import("@stwd/proxy/src/middleware/auth")["authMiddleware"];
 let handleProxy: typeof import("@stwd/proxy/src/handlers/proxy")["handleProxy"];
 let setForwardProxyRequestForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setForwardProxyRequestForTests"];
+let setResolveProxyHostForTests: typeof import("@stwd/proxy/src/handlers/proxy")["__setResolveProxyHostForTests"];
 
 // Capture what the proxy tried to forward upstream.
 interface ForwardedCapture {
@@ -64,9 +65,19 @@ beforeAll(async () => {
   });
 
   ({ authMiddleware } = await import("@stwd/proxy/src/middleware/auth"));
-  ({ handleProxy, __setForwardProxyRequestForTests: setForwardProxyRequestForTests } = await import(
-    "@stwd/proxy/src/handlers/proxy"
-  ));
+  ({
+    handleProxy,
+    __setForwardProxyRequestForTests: setForwardProxyRequestForTests,
+    __setResolveProxyHostForTests: setResolveProxyHostForTests,
+  } = await import("@stwd/proxy/src/handlers/proxy"));
+
+  // Hermeticity: the proxy resolves the target host via DNS BEFORE it calls the
+  // (stubbed) forwarder, and rejects private/reserved addresses. In a
+  // network-isolated CI box a real lookup of api.openai.com would 502 with
+  // "Unable to resolve proxy target host". Stub the resolver to a deterministic
+  // PUBLIC ip so route match -> decrypt -> inject -> forward is exercised with
+  // no third-party network.
+  setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
 
   // Replace the real outbound forwarder. Assert-friendly stub: capture the
   // outbound (already credential-injected) request and synthesize a response.
