@@ -462,8 +462,11 @@ describe("parity — LEAN preserves global mw → core auth → idempotency → 
     // so the lean order is exactly createApp()'s [global mw + core auth] ->
     // idempotency -> core routes.
     expect(composeSource).toContain("mountCoreIdempotencyAndRoutes(app)");
-    // the lean early-return happens before any trading import/registration
-    const leanReturnIdx = composeSource.indexOf('if (!enabled.has("trading"))');
+    // the lean early-return happens before any trading import/registration. the
+    // lean guard is now `enabled.size === 0` (no opt-in plugins), generalized from
+    // the historical trading-only `!enabled.has("trading")` when the capabilities
+    // plugin was added to the enabled set (W-1c).
+    const leanReturnIdx = composeSource.indexOf("if (enabled.size === 0)");
     const tradingImportIdx = composeSource.indexOf('import("@stwd/plugin-trading")');
     expect(leanReturnIdx).toBeGreaterThanOrEqual(0);
     expect(tradingImportIdx).toBeGreaterThanOrEqual(0);
