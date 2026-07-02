@@ -191,6 +191,7 @@
         "zod": "^4.3.6",
       },
       "devDependencies": {
+        "@stwd/proxy": "workspace:*",
         "@types/node": "^25.5.0",
       },
     },

@@ -63,4 +63,45 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     );
     expect(chk.rows[0].n).toBe(1);
   });
+
+  test("migration 0001 lands capability_invocations in the plugin's OWN ledger, core untouched", async () => {
+    harness = await makeHarness();
+    const { client } = harness;
+
+    // (a) the invocations table exists (migration 0001 applied).
+    const invTbl = await client.query(
+      "SELECT to_regclass('public.capability_invocations') AS t",
+    );
+    expect(invTbl.rows[0].t).toBe("capability_invocations");
+
+    // (b) BOTH plugin migrations (0000 + 0001) are recorded in the plugin's OWN
+    //     namespaced ledger (>=2 rows).
+    const pluginLedger = await client.query(
+      `SELECT count(*)::int AS n FROM drizzle."__drizzle_migrations_plugin_capabilities"`,
+    );
+    expect(pluginLedger.rows[0].n).toBeGreaterThanOrEqual(2);
+
+    // (c) the core journal carries NO capability-invocations migration row.
+    const coreLedger = await client.query(
+      "SELECT to_regclass('drizzle.__drizzle_migrations') AS t",
+    );
+    if (coreLedger.rows[0].t) {
+      const contaminated = await client.query(
+        `SELECT count(*)::int AS n FROM drizzle.__drizzle_migrations WHERE hash LIKE '%invocation%'`,
+      );
+      expect(contaminated.rows[0].n).toBe(0);
+    }
+
+    // (d) the decision CHECK constraint is present (allow/deny/approval/error).
+    const chk = await client.query(
+      `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'capability_invocations_decision_check'`,
+    );
+    expect(chk.rows[0].n).toBe(1);
+
+    // (e) the rate-limit index is present (the count query's covering index).
+    const idx = await client.query(
+      `SELECT count(*)::int AS n FROM pg_indexes WHERE indexname = 'capability_invocations_rate_idx'`,
+    );
+    expect(idx.rows[0].n).toBe(1);
+  });
 });

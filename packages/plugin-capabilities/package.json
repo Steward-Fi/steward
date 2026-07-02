@@ -27,6 +27,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@stwd/proxy": "workspace:*",
     "@types/node": "^25.5.0"
   },
   "description": "Opt-in capability plugin for Steward: named narrowly-scoped credential uses (capabilities) + per-agent grants, each paired to a narrow secret_route the proxy injects through. Operator/tenant-auth CRUD with plugin-owned namespaced migrations. The core does not depend on this package."
