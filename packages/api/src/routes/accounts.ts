@@ -38,7 +38,7 @@ const MAX_CUSTOM_TOKEN_BALANCES = 25;
 const ACCOUNT_ID_PATTERN = /^[A-Za-z0-9_.:_-]{1,64}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-type ChainFamily = "evm" | "solana" | "bitcoin";
+type ChainFamily = "evm" | "solana" | "bitcoin" | "monero";
 type WalletConfiguration = {
   chain_type?: unknown;
   chainType?: unknown;
@@ -237,7 +237,8 @@ function normalizeChainFamily(value: unknown): ChainFamily | string {
   if (value === "evm" || value === "ethereum") return "evm";
   if (value === "solana") return "solana";
   if (value === "bitcoin") return "bitcoin";
-  return 'chain_type must be "ethereum", "evm", "solana", or "bitcoin"';
+  if (value === "monero") return "monero";
+  return 'chain_type must be "ethereum", "evm", "solana", "bitcoin", or "monero"';
 }
 
 function parseOptionalChainId(value: string | undefined): number | string | undefined {
@@ -355,7 +356,10 @@ function deriveWalletCapabilities(input: {
   custodyType: "server" | "user_embedded";
 }): DigitalAssetAccountCapability[] {
   if (!input.address) return [];
-  if (input.chainFamily === "bitcoin") return [];
+  // Bitcoin and Monero act through dedicated vault routes, not the
+  // account-level capability surfaces — claiming capabilities here would
+  // over-promise (fail-closed posture).
+  if (input.chainFamily === "bitcoin" || input.chainFamily === "monero") return [];
   const capabilities: DigitalAssetAccountCapability[] = [
     "sign_transaction",
     "sign_message",
@@ -573,7 +577,8 @@ async function configuredWalletMemberships(
       typeof chainFamily === "string" &&
       chainFamily !== "evm" &&
       chainFamily !== "solana" &&
-      chainFamily !== "bitcoin"
+      chainFamily !== "bitcoin" &&
+      chainFamily !== "monero"
     ) {
       await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
       return `wallets_configuration[${index}].${chainFamily}`;
@@ -581,6 +586,10 @@ async function configuredWalletMemberships(
     if (chainFamily === "bitcoin") {
       await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
       return "wallets_configuration bitcoin wallets must be created through the agent wallet API";
+    }
+    if (chainFamily === "monero") {
+      await cleanupCreatedAccountWallets(tenantId, createdWalletAgentIds);
+      return "wallets_configuration monero wallets must be created through the agent wallet API";
     }
     const requestedId = config.wallet_id ?? config.walletId;
     const walletAgentId =
@@ -916,7 +925,13 @@ async function serializeAccount(tenantId: string, accountId: string) {
       capabilityMetadata,
       capability_metadata: capabilityMetadata,
       chainType:
-        chainFamily === "solana" ? "solana" : chainFamily === "bitcoin" ? "bitcoin" : "ethereum",
+        chainFamily === "solana"
+          ? "solana"
+          : chainFamily === "bitcoin"
+            ? "bitcoin"
+            : chainFamily === "monero"
+              ? "monero"
+              : "ethereum",
       chainFamily,
       address,
       purpose: row.purpose,
@@ -1170,7 +1185,11 @@ accountRoutes.get("/:accountId/balance", async (c) => {
   const account = await serializeAccount(tenantId, c.req.param("accountId"));
   if (!account) return c.json<ApiResponse>({ ok: false, error: "Account not found" }, 404);
   const balanceWallets = balanceRowsForChainFilter(account.wallets, chainId);
-  const rpcBalanceWallets = balanceWallets.filter((wallet) => wallet.chainFamily !== "bitcoin");
+  // Bitcoin and Monero balances do not flow through the EVM/Solana RPC path;
+  // Monero balances come from GET /vault/:agentId/monero/balance.
+  const rpcBalanceWallets = balanceWallets.filter(
+    (wallet) => wallet.chainFamily !== "bitcoin" && wallet.chainFamily !== "monero",
+  );
   const balances = await Promise.all(
     rpcBalanceWallets.map(async (wallet) => {
       const resolvedChainId = accountBalanceChainId(wallet, chainId);

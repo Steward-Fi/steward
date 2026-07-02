@@ -24,6 +24,7 @@ import {
   toCaip2,
 } from "@stwd/shared";
 import {
+  assertMoneroAddress,
   assertSolanaPriorityFeeWithinCap,
   type DerivedSolanaPolicyFields,
   deriveSolanaPolicyFields,
@@ -32,7 +33,9 @@ import {
   type ExportPrivateKeyResult,
   getUserOperationHash,
   isVaultSigningFrozenError,
+  MoneroNotConfiguredError,
   packUserOperation,
+  parseMoneroWalletScope,
   parseSolanaTransaction,
   readEip7702Delegation,
   type UnpackedUserOperationFields,
@@ -1181,6 +1184,53 @@ function maxBitcoinPsbtFeeSats(): bigint {
   const configured = process.env.STEWARD_MAX_BITCOIN_PSBT_FEE_SATS;
   if (configured && /^\d+$/.test(configured)) return BigInt(configured);
   return DEFAULT_MAX_BITCOIN_PSBT_FEE_SATS;
+}
+
+/** Default Monero fee ceiling: 0.1 XMR — far above any sane network fee. */
+const DEFAULT_MAX_MONERO_FEE_PICONERO = 100_000_000_000n;
+
+function maxMoneroFeePiconero(): bigint {
+  const configured = process.env.STEWARD_MAX_MONERO_FEE_PICONERO;
+  if (configured && /^\d+$/.test(configured)) return BigInt(configured);
+  return DEFAULT_MAX_MONERO_FEE_PICONERO;
+}
+
+/** Positive uint64 decimal string (piconero). */
+function isPiconeroAmountString(value: unknown): value is string {
+  if (typeof value !== "string" || !/^[0-9]{1,20}$/.test(value)) return false;
+  const amount = BigInt(value);
+  return amount > 0n && amount <= 2n ** 64n - 1n;
+}
+
+/**
+ * Maps Monero vault failures to their HTTP shape: 423 for signing freezes,
+ * 503 when the wallet-rpc backend is not configured (fail closed, e.g. the
+ * Workers deployment), 404 for unknown wallet scopes. Returns null so callers
+ * fall through to their own handling otherwise.
+ */
+function moneroErrorResponse(
+  c: Context<{ Variables: AppVariables }>,
+  error: unknown,
+): Response | null {
+  const frozen = frozenSigningResponse(c, error);
+  if (frozen) return frozen;
+  if (
+    error instanceof MoneroNotConfiguredError ||
+    (error instanceof Error && error.name === "MoneroNotConfiguredError")
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: error.message }, 503);
+  }
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.includes("No signing key found")) {
+    return c.json<ApiResponse>({ ok: false, error: "Monero wallet not found for this scope" }, 404);
+  }
+  if (raw.includes("Monero wallet scope must look like")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must look like monero:<network>:<account>" },
+      400,
+    );
+  }
+  return null;
 }
 
 function parseBigIntString(value: unknown): bigint | null {
@@ -4669,6 +4719,18 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
       400,
     );
   }
+  if (chainSupport.capability !== "raw-digest") {
+    // e.g. Monero: ed25519 keys but CLSAG ring signatures — a raw ed25519
+    // digest signature would be meaningless/dangerous. Fail closed and point
+    // at the dedicated transfer route.
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `${body.chain} does not support raw-digest signing; use the dedicated /vault/:agentId/${body.chain}/transfer route`,
+      },
+      400,
+    );
+  }
   if (body.curve !== "secp256k1" && body.curve !== "ed25519") {
     const error =
       body.curve === "stark"
@@ -5204,6 +5266,545 @@ vaultRoutes.post("/:agentId/sign-bitcoin-psbt", async (c) => {
       });
       const status = isFinalizationFailure || noSpendableInput ? 400 : 500;
       return c.json<ApiResponse>({ ok: false, error }, status);
+    }
+  });
+});
+
+// GET /vault/:agentId/monero/balance?walletScope=monero:mainnet:0
+// Read-only wallet balance via the monero-wallet-rpc sidecar. The first call
+// after a long idle period refreshes the wallet scan and can take a few
+// seconds; restoreHeight-at-creation keeps that incremental. 503 when Monero
+// support is not configured (fail closed, never a mock balance).
+// resp: { ok: true, data: { balancePiconero, unlockedPiconero, blocksToUnlock, syncedHeight, walletScope, walletAddress, network } }
+vaultRoutes.get("/:agentId/monero/balance", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+  const walletScope = c.req.query("walletScope");
+  if (
+    !isNonEmptyString(walletScope) ||
+    walletScope.length > 256 ||
+    !walletScope.startsWith("monero:")
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must be a non-empty Monero wallet scope" },
+      400,
+    );
+  }
+
+  try {
+    const balance = await vault.getMoneroBalance({ tenantId, agentId, walletScope });
+    return c.json<ApiResponse>({
+      ok: true,
+      data: {
+        balancePiconero: balance.balancePiconero.toString(),
+        unlockedPiconero: balance.unlockedPiconero.toString(),
+        blocksToUnlock: balance.blocksToUnlock,
+        syncedHeight: balance.syncedHeight,
+        walletScope: balance.walletScope,
+        walletAddress: balance.walletAddress,
+        network: balance.network,
+      },
+    });
+  } catch (e) {
+    const mapped = moneroErrorResponse(c, e);
+    if (mapped) return mapped;
+    console.error(`[Vault] monero/balance failed for ${tenantId}/${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
+// POST /vault/:agentId/monero/transfer
+// Builds, signs, and RELAYS a native Monero transfer through the vault's
+// monero-wallet-rpc backend. Two-phase under the hood: destinations are
+// policy-evaluated first, wallet2 then builds the transaction (do_not_relay)
+// so the exact fee is known, the fee-inclusive aggregate is re-evaluated, and
+// only then is the transaction relayed to the remote daemon. An explicit
+// raw-signing-chain policy keeps the capability opt-in and fail-closed per
+// agent; the vault never accepts a caller-built transaction blob, so policy
+// fields are authoritative by construction.
+// body: { "walletScope": "monero:mainnet:0", "destinations": [{ "address": "4...", "amountPiconero": "1000000000000" }], "priority"?: 0-3, "referenceId"?: "caller-id" }
+// resp: { ok: true, data: { transactionId, txHash, feePiconero, amountPiconero, totalPiconero, walletScope, walletAddress, network } }
+vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    walletScope?: unknown;
+    destinations?: unknown;
+    priority?: unknown;
+    referenceId?: unknown;
+  }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (
+    !isNonEmptyString(body.walletScope) ||
+    body.walletScope.length > 256 ||
+    !body.walletScope.startsWith("monero:")
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must be a non-empty Monero wallet scope" },
+      400,
+    );
+  }
+  const walletScope = body.walletScope;
+  let scopeNetwork: "mainnet" | "stagenet";
+  try {
+    scopeNetwork = parseMoneroWalletScope(walletScope).network;
+  } catch {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must look like monero:<network>:<account>" },
+      400,
+    );
+  }
+  if (!Array.isArray(body.destinations) || body.destinations.length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "destinations must be a non-empty array" }, 400);
+  }
+  if (body.destinations.length > 15) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "destinations must contain at most 15 entries" },
+      400,
+    );
+  }
+  const destinations: Array<{ address: string; amountPiconero: string }> = [];
+  for (const [index, entry] of body.destinations.entries()) {
+    const destination = entry as { address?: unknown; amountPiconero?: unknown };
+    if (!isNonEmptyString(destination.address) || destination.address.length > 128) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `destinations[${index}].address must be a Monero address` },
+        400,
+      );
+    }
+    try {
+      // Base58 + checksum + network-prefix validation. Base58 is
+      // case-significant, so no normalization happens anywhere in this path.
+      assertMoneroAddress(destination.address, scopeNetwork);
+    } catch (e) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `destinations[${index}].address is invalid: ${e instanceof Error ? e.message : "malformed"}`,
+        },
+        400,
+      );
+    }
+    if (!isPiconeroAmountString(destination.amountPiconero)) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `destinations[${index}].amountPiconero must be a positive decimal piconero string`,
+        },
+        400,
+      );
+    }
+    destinations.push({
+      address: destination.address,
+      amountPiconero: destination.amountPiconero,
+    });
+  }
+  if (
+    body.priority !== undefined &&
+    (typeof body.priority !== "number" ||
+      !Number.isInteger(body.priority) ||
+      body.priority < 0 ||
+      body.priority > 3)
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "priority must be an integer between 0 and 3" },
+      400,
+    );
+  }
+  const priority = body.priority as number | undefined;
+  const referenceId = parseReferenceId(body.referenceId);
+  if (referenceId === null) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "referenceId must be a non-empty string up to 128 characters" },
+      400,
+    );
+  }
+
+  // Honest-capability gate: Monero is a transfer-intent chain — the generic
+  // raw-digest surface can never serve it, and this route can never serve
+  // anything else.
+  const chainSupport = rawSigningChainSupport("monero");
+  if (
+    !chainSupport?.supported ||
+    chainSupport.curve !== "ed25519" ||
+    chainSupport.capability !== "transfer-intent"
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Monero transfers are not supported by the raw-signing policy model" },
+      400,
+    );
+  }
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+  const hasMoneroSigningPolicy = policySet.some((p) => p.enabled && p.type === "raw-signing-chain");
+  if (!hasMoneroSigningPolicy) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Monero transfers require a `raw-signing-chain` policy for this agent. Add one that explicitly allows monero and ed25519.",
+      },
+      403,
+    );
+  }
+  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+  const rateLimitResult = await enforceRateLimit(agentId, policySet);
+  if (!rateLimitResult.allowed) {
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+      429,
+    );
+  }
+  if (rateLimitResult.headers) {
+    for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+  }
+
+  // This route broadcasts: require idempotency and honor referenceId dedupe.
+  const idempotencyResponse = requireBroadcastActionIdempotency(c, true, "Monero transfers");
+  if (idempotencyResponse) return idempotencyResponse;
+  const existingAction = await findActionByReferenceId(agentId, "monero_transfer", referenceId);
+  if (existingAction) {
+    return c.json<ApiResponse>({
+      ok: existingAction.status !== "rejected" && existingAction.status !== "failed",
+      error:
+        existingAction.status === "rejected"
+          ? "Monero transfer rejected by policy"
+          : existingAction.status === "failed"
+            ? "Monero transfer failed"
+            : undefined,
+      data: {
+        transactionId: existingAction.id,
+        txHash: existingAction.txHash ?? null,
+        status: existingAction.status,
+        deduplicated: true,
+      },
+    });
+  }
+
+  const destinationTotalPiconero = destinations.reduce(
+    (total, destination) => total + BigInt(destination.amountPiconero),
+    0n,
+  );
+  const moneroChainId = scopeNetwork === "mainnet" ? 301 : 302;
+
+  return withAgentSpendLock(agentId, async () => {
+    const lockedExistingAction = await findActionByReferenceId(
+      agentId,
+      "monero_transfer",
+      referenceId,
+    );
+    if (lockedExistingAction) {
+      return c.json<ApiResponse>({
+        ok: lockedExistingAction.status !== "rejected" && lockedExistingAction.status !== "failed",
+        data: {
+          transactionId: lockedExistingAction.id,
+          txHash: lockedExistingAction.txHash ?? null,
+          status: lockedExistingAction.status,
+          deduplicated: true,
+        },
+      });
+    }
+
+    const stats = await getTransactionStats(agentId);
+    const policyResults: PolicyResult[] = [];
+    // NOTE: USD-denominated rules fail closed for Monero (the price oracle has
+    // no XMR source), so operators must use piconero-denominated limits.
+    for (const [index, destination] of destinations.entries()) {
+      const evaluation = await policyEngine.evaluate(policySet, {
+        request: {
+          agentId,
+          tenantId,
+          to: destination.address,
+          value: destination.amountPiconero,
+          chainId: moneroChainId,
+          broadcast: true,
+        },
+        recentTxCount1h: stats.recentTxCount1h,
+        recentTxCount24h: stats.recentTxCount24h,
+        spentToday: stats.spentToday,
+        spentThisWeek: stats.spentThisWeek,
+        priceOracle,
+        conditionSets,
+        rawSigning: { chain: "monero", curve: "ed25519" },
+      });
+      const destinationResults = evaluation.results.map((result) => ({
+        ...result,
+        destinationIndex: index,
+      }));
+      policyResults.push(...destinationResults);
+      if (!evaluation.approved) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Monero transfer rejected by policy",
+            data: {
+              destination: {
+                index,
+                address: destination.address,
+                amountPiconero: destination.amountPiconero,
+              },
+              policyResults: destinationResults,
+            },
+          },
+          403,
+        );
+      }
+    }
+
+    // Build + sign WITHOUT relaying so the exact fee is known before the
+    // aggregate policy decision and before anything reaches the network.
+    let prepared: Awaited<ReturnType<typeof vault.prepareMoneroTransfer>>;
+    try {
+      prepared = await vault.prepareMoneroTransfer({
+        tenantId,
+        agentId,
+        walletScope,
+        destinations,
+        priority,
+      });
+    } catch (e) {
+      const mapped = moneroErrorResponse(c, e);
+      if (mapped) return mapped;
+      console.error(`[Vault] monero/transfer prepare failed for ${tenantId}/${agentId}:`, e);
+      const raw = e instanceof Error ? e.message : String(e);
+      const isFundsError = /not enough (unlocked )?money|not enough outputs/i.test(raw);
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: isFundsError ? "Insufficient unlocked Monero balance" : sanitizeErrorMessage(e),
+        },
+        isFundsError ? 400 : 500,
+      );
+    }
+
+    const discardPrepared = async () => {
+      try {
+        await vault.discardMoneroTransfer({ tenantId, agentId, walletScope });
+      } catch {
+        // Best-effort: the wallet cache self-heals on rehydration.
+      }
+    };
+
+    const feePiconero = prepared.feePiconero;
+    const maxFee = maxMoneroFeePiconero();
+    if (feePiconero > maxFee) {
+      await discardPrepared();
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Monero transfer fee exceeds configured maximum",
+          data: { feePiconero: feePiconero.toString(), maxFeePiconero: maxFee.toString() },
+        },
+        403,
+      );
+    }
+    const totalPiconero = destinationTotalPiconero + feePiconero;
+
+    const aggregateEvaluation = await policyEngine.evaluate(policySet, {
+      request: {
+        agentId,
+        tenantId,
+        to: destinations[0].address,
+        value: totalPiconero.toString(),
+        chainId: moneroChainId,
+        broadcast: true,
+      },
+      recentTxCount1h: stats.recentTxCount1h,
+      recentTxCount24h: stats.recentTxCount24h,
+      spentToday: stats.spentToday,
+      spentThisWeek: stats.spentThisWeek,
+      priceOracle,
+      conditionSets,
+      rawSigning: { chain: "monero", curve: "ed25519" },
+    });
+    const aggregatePolicyResults = aggregateEvaluation.results.map((result) => ({
+      ...result,
+      aggregate: true,
+    }));
+    policyResults.push(...aggregatePolicyResults);
+    if (!aggregateEvaluation.approved) {
+      await discardPrepared();
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Monero transfer rejected by policy",
+          data: {
+            aggregate: {
+              destinationTotalPiconero: destinationTotalPiconero.toString(),
+              feePiconero: feePiconero.toString(),
+              totalPiconero: totalPiconero.toString(),
+            },
+            policyResults: aggregatePolicyResults,
+          },
+        },
+        403,
+      );
+    }
+
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
+      action: "vault.monero_transfer.authorized",
+      resourceType: "wallet",
+      resourceId: agentId,
+      metadata: {
+        walletScope,
+        network: prepared.network,
+        destinations,
+        destinationTotalPiconero: destinationTotalPiconero.toString(),
+        feePiconero: feePiconero.toString(),
+        totalPiconero: totalPiconero.toString(),
+        priority: priority ?? 0,
+        referenceId: referenceId ?? null,
+        policyResults,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
+      },
+    });
+
+    try {
+      const relayed = await vault.relayMoneroTransfer({
+        tenantId,
+        agentId,
+        walletScope,
+        txMetadata: prepared.txMetadata,
+      });
+
+      const transactionId = crypto.randomUUID();
+      await db.insert(transactions).values({
+        id: transactionId,
+        agentId,
+        status: "broadcast",
+        toAddress: destinations[0].address,
+        value: totalPiconero.toString(),
+        data: null,
+        chainId: moneroChainId,
+        // Monero hashes are stored WITHOUT a 0x prefix; the EVM receipt
+        // poller skips non-0x hashes by design.
+        txHash: relayed.txHash,
+        actionType: "monero_transfer",
+        actionPayload: {
+          type: "monero_transfer",
+          walletScope: prepared.walletScope,
+          walletAddress: prepared.walletAddress,
+          network: prepared.network,
+          destinations,
+          destinationTotalPiconero: destinationTotalPiconero.toString(),
+          feePiconero: feePiconero.toString(),
+          totalPiconero: totalPiconero.toString(),
+          priority: priority ?? 0,
+          referenceId: referenceId ?? null,
+        },
+        policyResults,
+        signedAt: new Date(),
+      });
+
+      recordVaultSpend(agentId, tenantId, totalPiconero.toString(), moneroChainId).catch((err) =>
+        console.error(`[Vault] recordVaultSpend failed for ${agentId}:`, err),
+      );
+
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: "vault.monero_transfer.relayed",
+        resourceType: "wallet",
+        resourceId: agentId,
+        metadata: {
+          transactionId,
+          walletScope: prepared.walletScope,
+          walletAddress: prepared.walletAddress,
+          network: prepared.network,
+          txHash: relayed.txHash,
+          destinationTotalPiconero: destinationTotalPiconero.toString(),
+          feePiconero: feePiconero.toString(),
+          totalPiconero: totalPiconero.toString(),
+          referenceId: referenceId ?? null,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+      });
+
+      dispatchWebhook(tenantId, agentId, "tx_signed", {
+        transactionId,
+        chainId: moneroChainId,
+        caip2: toCaip2(moneroChainId),
+        txHash: relayed.txHash,
+        to: destinations[0].address,
+        value: totalPiconero.toString(),
+        actionType: "monero_transfer",
+      });
+
+      setNoStoreHeaders(c);
+      return c.json<ApiResponse>({
+        ok: true,
+        data: {
+          transactionId,
+          txHash: relayed.txHash,
+          feePiconero: feePiconero.toString(),
+          amountPiconero: destinationTotalPiconero.toString(),
+          totalPiconero: totalPiconero.toString(),
+          walletScope: prepared.walletScope,
+          walletAddress: prepared.walletAddress,
+          network: prepared.network,
+        },
+      });
+    } catch (e) {
+      await discardPrepared();
+      console.error(`[Vault] monero/transfer relay failed for ${tenantId}/${agentId}:`, e);
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: "vault.monero_transfer.failed",
+        resourceType: "wallet",
+        resourceId: agentId,
+        metadata: {
+          walletScope,
+          destinations,
+          feePiconero: feePiconero.toString(),
+          totalPiconero: totalPiconero.toString(),
+          referenceId: referenceId ?? null,
+          error: sanitizeErrorMessage(e),
+          policyResults,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+      });
+      const mapped = moneroErrorResponse(c, e);
+      if (mapped) return mapped;
+      return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
     }
   });
 });
@@ -6965,7 +7566,10 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
     return c.json<
       ApiResponse<{
         agentId: string;
-        addresses: Array<{ chainFamily: "evm" | "solana" | "bitcoin"; address: string }>;
+        addresses: Array<{
+          chainFamily: "evm" | "solana" | "bitcoin" | "monero";
+          address: string;
+        }>;
       }>
     >({
       ok: true,

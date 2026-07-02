@@ -201,7 +201,9 @@ full list in [`.env.example`](.env.example). see [deployment guide](docs/deploym
 
 ## supported chains
 
-Ethereum, Base, Polygon, Arbitrum, BSC, Base Sepolia, BSC Testnet, Solana
+Ethereum, Base, Polygon, Arbitrum, BSC, Gnosis, Base Sepolia, BSC Testnet, Solana, Bitcoin,
+Monero (self-hosted deployments; official `monero-wallet-rpc` sidecar against remote public
+nodes — keys never leave your host, policy enforced before every relay)
 
 ---
 
