@@ -402,6 +402,13 @@ export async function invokeCapabilityThroughProxy(
     // audit write failed: do NOT block the already-authorized upstream response.
   }
 
+  // Return the upstream status/body passthrough verbatim (the proxy already
+  // scrubbed the credential). Built with a raw Response so it never carries the
+  // gate marker: the OpenAI adapter treats an unmarked response as an upstream
+  // body and passes it through untouched. NOTE: the credential-injection proxy
+  // fails closed on streaming (text/event-stream) responses, so this path only
+  // ever carries a buffered upstream body; the OpenAI adapter rejects
+  // `stream: true` up front (see createInvokeRoutes) to surface that cleanly.
   return new Response(upstreamBody, {
     status: upstreamStatus,
     headers: upstreamContentType ? { "content-type": upstreamContentType } : undefined,
@@ -493,6 +500,23 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       body = await c.req.json();
     } catch {
       return openAIError("invalid JSON in request body", 400);
+    }
+
+    // Streaming is NOT supported through the credential-injection proxy: it blocks
+    // any streaming (text/event-stream) response after a credential injection
+    // (reason `credential-streaming-response-blocked`, a 502) because it cannot
+    // buffer-and-verify the credential was not reflected in an un-materialized
+    // stream. Reject `stream: true` at the adapter with a clean OpenAI-error so
+    // the SDK surfaces a clear message instead of an opaque upstream 502.
+    if (
+      typeof body === "object" &&
+      body !== null &&
+      (body as { stream?: unknown }).stream === true
+    ) {
+      return openAIError(
+        "streaming responses are not supported through this capability adapter; set stream: false",
+        400,
+      );
     }
     const query = Object.fromEntries(new URL(c.req.url).searchParams.entries());
 

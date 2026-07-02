@@ -447,6 +447,42 @@ describe("OpenAI-compatible capability adapter", () => {
     expect(rows[0].decision).toBe("allow");
   });
 
+  it("stream:true is rejected at the adapter with an OpenAI-error (proxy blocks streaming after credential injection)", async () => {
+    const capId = await seedOpenAIChatCapability();
+    currentPolicySet = [capRule("r-openai", "allow", undefined, ["openai.chat"])];
+    const app = buildInvokeApp();
+
+    const res = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${STEWARD_TOKEN_SENTINEL}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-test",
+        stream: true,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    });
+
+    // The credential-injection proxy fails closed on streaming responses; the
+    // adapter rejects stream:true up front with a clean, SDK-parseable error and
+    // never forwards.
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error?: { message?: string; type?: string };
+      ok?: boolean;
+    };
+    expect(body.ok).toBeUndefined();
+    expect(body.error?.type).toBe("invalid_request_error");
+    expect(body.error?.message).toContain("streaming");
+    expect(lastForwarded).toBeNull();
+
+    // no invocation recorded: the guard runs before the policy/proxy path.
+    const rows = await agentInvocations(capId);
+    expect(rows.length).toBe(0);
+  });
+
   it("missing grant => 403 and no proxy forward", async () => {
     await seedOpenAIChatCapability({ grant: false });
     currentPolicySet = [capRule("r-openai", "allow", undefined, ["openai.chat"])];
