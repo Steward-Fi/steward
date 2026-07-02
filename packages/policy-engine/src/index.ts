@@ -1,4 +1,14 @@
 export type {
+  CapabilityIntentConfig,
+  CapabilityIntentConstraints,
+  CapabilityIntentEffect,
+} from "./capability-intent";
+export {
+  CAPABILITY_INTENT_RULE_TYPE,
+  capabilityIntentContribution,
+  evaluateCapabilityIntent,
+} from "./capability-intent";
+export type {
   AuditHook,
   PolicyEngineOptions,
   PolicyEvaluatedEvent,

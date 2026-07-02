@@ -81,6 +81,30 @@ export interface EvaluatorContext {
     chain: string;
     curve: string;
   };
+  /**
+   * Capability-invoke context for `capability-intent` policies. Populated ONLY
+   * by the capability invoke route (W-1c); absent on ordinary signing requests,
+   * so a `capability-intent` policy is "not applicable" (passes) when this is
+   * undefined. Symmetry with `typedData`: capability policies cannot interfere
+   * with transaction signing, and transaction policies cannot interfere with
+   * capability invokes.
+   */
+  capability?: {
+    name: string;
+    args: Record<string, unknown>;
+    host: string;
+    path: string;
+    method: string;
+  };
+  /**
+   * Rolling count of capability INVOKES in the trailing hour (distinct from
+   * `recentTxCount1h`, which counts transaction signs). Populated ONLY by the
+   * capability invoke route (W-1c) alongside `capability`. When a
+   * `capability-intent` rule sets `constraints.maxCallsPerHour` but this count
+   * is absent, the rule FAILS CLOSED (deny) rather than borrowing the tx
+   * counter, so an unwired invoke path can never silently pass a rate cap.
+   */
+  capabilityInvokeCount1h?: number;
 }
 
 function parseUint256Decimal(value: unknown): bigint | null {

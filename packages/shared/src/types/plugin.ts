@@ -52,6 +52,16 @@ export interface ContributedPolicyResult {
   readonly type: string;
   readonly passed: boolean;
   readonly reason?: string;
+  /**
+   * Optional "route to manual approval instead of hard-denying" signal,
+   * structurally identical to the engine's internal `ManualApprovalSignal`.
+   * ONLY meaningful when `passed === false` (a passing result never needs
+   * approval). The engine's registry passthrough forwards this flag ONLY on a
+   * non-passing result, so a contributed rule (e.g. `capability-intent`'s
+   * `require-approval` effect) can queue an action for human review through the
+   * same channel a core rule uses. Absent => hard deny (fail closed).
+   */
+  readonly requiresManualApproval?: boolean;
 }
 
 /**
