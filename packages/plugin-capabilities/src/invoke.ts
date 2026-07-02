@@ -520,11 +520,27 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
     }
     const query = Object.fromEntries(new URL(c.req.url).searchParams.entries());
 
+    // Surface OpenAI request fields to the policy layer so existing
+    // argEquals/argMatches capability-intent constraints can gate on them (e.g.
+    // restrict `model`). Only lift scalar top-level fields (string/number/boolean)
+    // — nested structures like `messages` are not policy args — and always keep
+    // provider/operation. The body itself is still forwarded verbatim.
+    const args: Record<string, unknown> = {};
+    if (typeof body === "object" && body !== null && !Array.isArray(body)) {
+      for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+        const t = typeof value;
+        if (t === "string" || t === "number" || t === "boolean") args[key] = value;
+      }
+    }
+    // provider/operation are adapter-asserted and cannot be spoofed by the body.
+    args.provider = "openai";
+    args.operation = "chat.completions";
+
     const res = await invokeCapabilityThroughProxy(ctx, {
       tenantId,
       agentId,
       name: c.req.param("name"),
-      args: { provider: "openai", operation: "chat.completions" },
+      args,
       body,
       query: Object.keys(query).length > 0 ? query : undefined,
     });

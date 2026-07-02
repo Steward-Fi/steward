@@ -447,6 +447,34 @@ describe("OpenAI-compatible capability adapter", () => {
     expect(rows[0].decision).toBe("allow");
   });
 
+  it("argEquals on model gates the adapter: matching model allowed, other model denied", async () => {
+    const capId = await seedOpenAIChatCapability();
+    currentPolicySet = [
+      capRule("r-openai", "allow", { argEquals: { model: "gpt-allowed" } }, ["openai.chat"]),
+    ];
+    const app = buildInvokeApp();
+
+    const okRes = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-allowed", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(okRes.status).toBe(200);
+
+    const denyRes = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-forbidden", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(denyRes.status).toBe(403);
+    const denyBody = (await denyRes.json()) as { error?: { type?: string } };
+    expect(denyBody.error?.type).toBe("permission_error");
+
+    const rows = await agentInvocations(capId);
+    expect(rows.filter((r) => r.decision === "allow").length).toBe(1);
+    expect(rows.filter((r) => r.decision === "deny").length).toBe(1);
+  });
+
   it("stream:true is rejected at the adapter with an OpenAI-error (proxy blocks streaming after credential injection)", async () => {
     const capId = await seedOpenAIChatCapability();
     currentPolicySet = [capRule("r-openai", "allow", undefined, ["openai.chat"])];
