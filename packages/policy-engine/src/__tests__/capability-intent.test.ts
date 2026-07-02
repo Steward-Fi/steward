@@ -329,6 +329,26 @@ describe("capability-intent — config validation (fail closed)", () => {
     expect(r.reason).toContain("argEquals");
   });
 
+  it("denies an unknown top-level config key (typo => fail closed)", () => {
+    const r = evaluateCapabilityIntent(
+      rule({ capabilities: ["github.*"], effect: "allow", effects: "deny" }),
+      makeContext({ capability: cap() }),
+    );
+    expect(r.passed).toBe(false);
+    expect(r.reason).toContain("unknown config key");
+  });
+
+  it("denies an unknown constraint key (misspelled maxCallPerHour => fail closed, not fail open)", () => {
+    const r = evaluateCapabilityIntent(
+      rule({ capabilities: ["github.*"], effect: "allow", constraints: { maxCallPerHour: 5 } }),
+      makeContext({ capability: cap(), capabilityInvokeCount1h: 999 }),
+    );
+    // without the guard this would ALLOW (the typo'd cap silently dropped); with
+    // it, the config is rejected and the action denied.
+    expect(r.passed).toBe(false);
+    expect(r.reason).toContain("unknown constraint key");
+  });
+
   it("config validation happens BEFORE effect, but AFTER the absent-capability short-circuit", () => {
     // absent capability => pass regardless of a bad config (inert on tx signs).
     const r = evaluateCapabilityIntent(rule({ effect: "banana" }), makeContext());

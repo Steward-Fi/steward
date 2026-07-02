@@ -127,7 +127,22 @@ function capabilityMatches(config: CapabilityIntentConfig, name: string): boolea
  * Validate the (opaque) rule config into a typed shape, or return an error
  * reason. FAIL CLOSED: anything malformed is rejected (the caller denies).
  */
+const ALLOWED_CONFIG_KEYS: ReadonlySet<string> = new Set(["capabilities", "effect", "constraints"]);
+const ALLOWED_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
+  "maxCallsPerHour",
+  "argEquals",
+  "argMatches",
+]);
+
 function parseConfig(raw: Record<string, unknown>): CapabilityIntentConfig | { error: string } {
+  // FAIL CLOSED on unknown top-level keys: a misspelled key (e.g. `capabilties`
+  // or `effects`) must never be silently ignored, since that could drop the
+  // intended gate and let an action through unconstrained.
+  const unknownTop = Object.keys(raw).filter((k) => !ALLOWED_CONFIG_KEYS.has(k));
+  if (unknownTop.length > 0) {
+    return { error: `capability-intent: unknown config key(s): ${unknownTop.join(", ")}` };
+  }
+
   const capabilities = raw.capabilities;
   if (
     !Array.isArray(capabilities) ||
@@ -152,6 +167,15 @@ function parseConfig(raw: Record<string, unknown>): CapabilityIntentConfig | { e
       return { error: "capability-intent: `constraints` must be an object when present" };
     }
     const c = raw.constraints as Record<string, unknown>;
+
+    // FAIL CLOSED on unknown constraint keys: a typo like `maxCallPerHour` must
+    // deny, not silently drop the rate cap on an `allow` rule (codex P2).
+    const unknownConstraint = Object.keys(c).filter((k) => !ALLOWED_CONSTRAINT_KEYS.has(k));
+    if (unknownConstraint.length > 0) {
+      return {
+        error: `capability-intent: unknown constraint key(s): ${unknownConstraint.join(", ")}`,
+      };
+    }
 
     if (c.maxCallsPerHour !== undefined) {
       if (
