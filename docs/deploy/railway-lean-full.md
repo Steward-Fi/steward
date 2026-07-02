@@ -123,6 +123,38 @@ flipping `STEWARD_PLUGINS=trading` and adding the venue vars it actually uses.
 > `STEWARD_PM_TEST_CREDS`) are NOT production env — do not set them on a prod
 > trading service.
 
+### capabilities-only (FULL service running the capabilities plugin)
+
+the capabilities plugin (agent-facing credential-invoke layer) is an opt-in
+plugin toggled the SAME way as trading, through `STEWARD_PLUGINS`. it may run
+alongside trading (`STEWARD_PLUGINS=trading,capabilities`) or alone
+(`STEWARD_PLUGINS=capabilities`). its operator CRUD + agent invoke routes 404 in
+lean; its `capability_invocations` migration runs on boot only in full (parity).
+
+set these ONLY on a service that enables `capabilities`. the agent invoke route
+delegates the allowed call THROUGH the proxy via `@stwd/proxy-client` (it NEVER
+decrypts a secret in-process); these vars are how it reaches the proxy. fail-
+closed: if any is missing, the invoke route returns **503** and forwards nothing.
+
+| var | severity | why | source |
+|-----|----------|-----|--------|
+| `STEWARD_PLUGINS=capabilities` (or `trading,capabilities`) | required (full) | enables the capabilities plugin (routes + migrations) | `packages/api/src/plugin-config.ts` |
+| `STEWARD_PROXY_URL` | required (full) | base URL of the Steward proxy service the invoke route delegates to (e.g. `https://proxy.internal`). ABSENT => invoke returns 503 | `packages/plugin-capabilities/src/invoke.ts` |
+| `STEWARD_PROXY_REQUEST_SIGNING_SECRET` | required (full) | HMAC secret the invoke route signs its proxy requests with. MUST be one of the secrets the proxy verifies (`STEWARD_PROXY_REQUEST_SIGNING_SECRET(S)` on the proxy). ABSENT => invoke returns 503 | `packages/plugin-capabilities/src/invoke.ts` |
+
+notes:
+- the invoke route mints a SHORT-LIVED `api:proxy`-scoped agent token per call
+  using the shared `STEWARD_JWT_SECRET` (already in the mode-independent set) —
+  the SAME secret the proxy verifies tokens with. no extra token var is needed.
+- `STEWARD_PROXY_REQUEST_SIGNING_SECRETS` (comma-separated, plural) is also
+  accepted; the invoke route uses the FIRST entry. run the proxy with request
+  signing enabled (`STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE=true`) in prod.
+- the capabilities plugin also reads `DATABASE_URL`, `STEWARD_MASTER_PASSWORD`,
+  `STEWARD_AUDIT_HMAC_KEY` — already in the mode-independent set (no extra action
+  beyond `STEWARD_PLUGINS`, `STEWARD_PROXY_URL`, and the signing secret).
+- the proxy itself needs a credential route materialized for the agent (the
+  capability GRANT does this) + the target host in its allowlist / a named alias.
+
 ---
 
 ## 3. build the image
