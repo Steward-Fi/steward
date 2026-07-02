@@ -1,5 +1,5 @@
 /**
- * _harness.ts — shared test setup for the capability plugin.
+ * _harness.ts - shared test setup for the capability plugin.
  *
  * builds a hermetic PGLite database carrying BOTH the core schema (createPGLiteDb
  * runs the core migrations: tenants, agents, secrets, secret_routes, ...) and
@@ -9,21 +9,20 @@
  * bookkeeping table isolated from the core journal.
  */
 
-import { agents, secrets, secretRoutes, tenants } from "@stwd/db";
-import { runPluginMigrations } from "@stwd/db";
-import { createPGLiteDb } from "@stwd/db/pglite";
-import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 import { fileURLToPath } from "node:url";
+import { agents, runPluginMigrations, secretRoutes, secrets, tenants } from "@stwd/db";
+import { createPGLiteDb } from "@stwd/db/pglite";
 import { and, eq } from "drizzle-orm";
+import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
 
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
 
-// biome-ignore lint/suspicious/noExplicitAny: pglite db/client handles are driver-typed.
+// note (any is intentional): pglite db/client handles are driver-typed.
 export type TestDb = any;
 
 export interface Harness {
   db: TestDb;
-  // biome-ignore lint/suspicious/noExplicitAny: pglite client is driver-typed.
+  // note (any is intentional): pglite client is driver-typed.
   client: any;
   close(): Promise<void>;
 }
@@ -33,7 +32,7 @@ export async function makeHarness(): Promise<Harness> {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   const { db, client } = await createPGLiteDb("memory://");
   // apply THIS plugin's migrations into its own namespaced ledger (driver-neutral
-  // runner, pglite migrator injected, no advisory lock — pglite has none).
+  // runner, pglite migrator injected, no advisory lock - pglite has none).
   await runPluginMigrations(
     { id: "capabilities", migrationsFolder: MIGRATIONS_FOLDER },
     { db, client, useAdvisoryLock: false, migrateFn: pgliteMigrate as never },
@@ -67,11 +66,7 @@ export async function ensureAgent(db: TestDb, tenantId: string, agentId: string)
 }
 
 /** insert a bare secret row (the plugin only references its id, never decrypts). */
-export async function ensureSecret(
-  db: TestDb,
-  tenantId: string,
-  name: string,
-): Promise<string> {
+export async function ensureSecret(db: TestDb, tenantId: string, name: string): Promise<string> {
   const [row] = await db
     .insert(secrets)
     .values({
@@ -97,10 +92,7 @@ export async function enabledRouteCount(db: TestDb, tenantId: string): Promise<n
 
 /** count ALL secret_routes for a tenant (enabled or not). */
 export async function totalRouteCount(db: TestDb, tenantId: string): Promise<number> {
-  const rows = await db
-    .select()
-    .from(secretRoutes)
-    .where(eq(secretRoutes.tenantId, tenantId));
+  const rows = await db.select().from(secretRoutes).where(eq(secretRoutes.tenantId, tenantId));
   return rows.length;
 }
 

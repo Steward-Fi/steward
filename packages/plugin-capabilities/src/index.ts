@@ -1,11 +1,11 @@
 /**
- * @stwd/plugin-capabilities — the opt-in capability plugin for Steward.
+ * @stwd/plugin-capabilities - the opt-in capability plugin for Steward.
  *
  * a CAPABILITY is a NAMED, narrowly-scoped use of a stored secret
  * (e.g. "github.pr.comment" -> secretId + host + path + method + header
  * injection). a GRANT says "agent X may use capability Y" (optionally until an
  * expiry). the plugin's job is to keep, per grant, exactly one legal narrow
- * secret_route — the row the already-defended proxy consumes to inject the
+ * secret_route - the row the already-defended proxy consumes to inject the
  * credential outbound. the plugin NEVER decrypts a secret and NEVER injects a
  * credential itself; it maintains the route rows the proxy matches.
  *
@@ -33,6 +33,7 @@ import type { StewardAppContext } from "./context";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 
 export type { StewardAppContext } from "./context";
+export { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 export type {
   Capability,
   CapabilityGrant,
@@ -40,9 +41,8 @@ export type {
   NewCapabilityGrant,
 } from "./schema";
 export { capabilities, capabilityGrants } from "./schema";
-export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
 export type { CapabilitySpec } from "./store";
-export { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
+export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
 export {
   createCapabilitySchema,
   createGrantSchema,
@@ -77,7 +77,7 @@ export const CAPABILITY_WEBHOOK_EVENTS = ["capability.created", "capability.revo
  * The capability plugin. `register(app, ctx)`:
  *   1. installs the tenant gate on /capabilities and /agents (operator-facing
  *      management surface; the routes additionally require recent tenant-admin
- *      MFA — the same bar the core /secrets + secret-route CRUD enforce, because
+ *      MFA - the same bar the core /secrets + secret-route CRUD enforce, because
  *      capabilities drive live credential injection).
  *   2. mounts the capability + grant CRUD router at /capabilities and /v1/capabilities.
  *   3. mounts the agent-scoped "usable capabilities" read at /agents and /v1/agents.

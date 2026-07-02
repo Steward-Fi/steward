@@ -1,5 +1,5 @@
 /**
- * store.ts — the capability plugin's transactional data layer.
+ * store.ts - the capability plugin's transactional data layer.
  *
  * this owns the KEY architectural piece: the paired secret_route lifecycle. one
  * capability compiles to a legal narrow secret_route (the proxy's injection
@@ -24,7 +24,7 @@
  * materializing one route per grant (agentId = the grant's agent) keeps the
  * proxy UNCHANGED. documented in the PR body as the locked design call.
  *
- * the plugin NEVER decrypts a secret and NEVER injects a credential itself — it
+ * the plugin NEVER decrypts a secret and NEVER injects a credential itself - it
  * only maintains the secret_route ROWS the already-defended proxy consumes. the
  * injection config lives on the capability so a capability compiles to exactly
  * one legal route; every field is validated by the SHARED secret-route validator
@@ -32,20 +32,15 @@
  */
 
 import { agents, and, eq, type NewSecretRoute, type SecretRoute, secretRoutes } from "@stwd/db";
-import {
-  type Capability,
-  capabilities,
-  type CapabilityGrant,
-  capabilityGrants,
-} from "./schema";
+import { type Capability, type CapabilityGrant, capabilities, capabilityGrants } from "./schema";
 
 /**
  * a drizzle db handle (the core hands it via ctx.db). typed loosely so the plugin
- * does not couple to a specific driver — the core injects a real postgres-js /
+ * does not couple to a specific driver - the core injects a real postgres-js /
  * pglite handle. the members used here (select/insert/update/delete/transaction)
  * are common to every drizzle driver.
  */
-// biome-ignore lint/suspicious/noExplicitAny: drizzle's db handle is driver-typed
+// note (any is intentional): drizzle's db handle is driver-typed
 // (postgres-js/pglite/neon); the store accepts any drizzle db exposing the common
 // query builder + transaction. the core injects the concrete handle.
 export type Db = any;
@@ -119,7 +114,7 @@ export class CapabilityStore {
 
   /**
    * Create a capability. No grants yet, so NO paired routes are materialized (a
-   * capability with zero grants attaches the credential to nothing — fail-closed
+   * capability with zero grants attaches the credential to nothing - fail-closed
    * by construction). The caller MUST have validated the spec through the shared
    * secret-route validator first.
    */
@@ -160,7 +155,7 @@ export class CapabilityStore {
    *   route re-enabled (revoked/expired grants keep their route disabled).
    * - routing/inject fields changed: capability updated + every paired route's
    *   match/inject fields rewritten (a narrowing update narrows the live route
-   *   too — no widen-by-patch escaping the proxy).
+   *   too - no widen-by-patch escaping the proxy).
    *
    * `now` is injected for deterministic expiry evaluation in tests.
    */
@@ -207,9 +202,7 @@ export class CapabilityStore {
       const grants: CapabilityGrant[] = await tx
         .select()
         .from(capabilityGrants)
-        .where(
-          and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)),
-        );
+        .where(and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)));
 
       for (const grant of grants) {
         if (!grant.secretRouteId) continue;
@@ -255,9 +248,7 @@ export class CapabilityStore {
       const grants: CapabilityGrant[] = await tx
         .select()
         .from(capabilityGrants)
-        .where(
-          and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)),
-        );
+        .where(and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)));
 
       for (const grant of grants) {
         if (grant.secretRouteId) {
@@ -274,9 +265,7 @@ export class CapabilityStore {
       // FK cascade support.
       await tx
         .delete(capabilityGrants)
-        .where(
-          and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)),
-        );
+        .where(and(eq(capabilityGrants.tenantId, tenantId), eq(capabilityGrants.capabilityId, id)));
       await tx
         .delete(capabilities)
         .where(and(eq(capabilities.id, id), eq(capabilities.tenantId, tenantId)));
@@ -355,10 +344,7 @@ export class CapabilityStore {
         .select()
         .from(capabilities)
         .where(
-          and(
-            eq(capabilities.id, input.capabilityId),
-            eq(capabilities.tenantId, input.tenantId),
-          ),
+          and(eq(capabilities.id, input.capabilityId), eq(capabilities.tenantId, input.tenantId)),
         );
       if (!cap) return null;
 
@@ -372,7 +358,7 @@ export class CapabilityStore {
 
       // reject a duplicate grant PROACTIVELY (before materializing a route), so
       // the unique(tenant, agent, capability) constraint is surfaced as a typed
-      // error rather than a driver-wrapped 500 — and no orphaned route is created
+      // error rather than a driver-wrapped 500 - and no orphaned route is created
       // (the insert is never attempted). fail-closed.
       const [existing] = await tx
         .select({ id: capabilityGrants.id })

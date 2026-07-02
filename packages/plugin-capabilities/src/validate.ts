@@ -1,5 +1,5 @@
 /**
- * validate.ts — capability create/update validation.
+ * validate.ts - capability create/update validation.
  *
  * a capability compiles to a legal narrow secret_route. so EVERY create/update
  * that touches the routing/injection fields is validated through the SHARED
@@ -120,7 +120,7 @@ export function validateCapabilitySpec(input: {
       injectFormat: spec.injectFormat,
     },
     // create/full-spec validation ALWAYS enforces strict hosts (the config is
-    // complete here — this is not a partial patch).
+    // complete here - this is not a partial patch).
     { enforceStrictHosts: true },
   );
   if (error) return { ok: false, error };

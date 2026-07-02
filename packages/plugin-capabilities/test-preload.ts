@@ -1,5 +1,5 @@
 /**
- * bun test preload for @stwd/plugin-capabilities — runs ONCE per `bun test`
+ * bun test preload for @stwd/plugin-capabilities - runs ONCE per `bun test`
  * process, before any test file's module graph is evaluated.
  *
  * every value is set with `??=` so a real environment is never overridden, and

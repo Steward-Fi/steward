@@ -1,5 +1,5 @@
 /**
- * routes.test.ts — operator/tenant-auth CRUD route behavior + auth gates.
+ * routes.test.ts - operator/tenant-auth CRUD route behavior + auth gates.
  *
  * mounts the capability + grant router (and the agent-scoped router) onto a bare
  * hono app with an injected test context and a test middleware that stamps the
@@ -7,12 +7,14 @@
  * proves: the MFA/admin gate on every mutating route (the same bar the core
  * /secrets CRUD enforces), the create->grant->revoke->delete happy path with no
  * orphaned enabled routes, validation rejections surfaced as 400, secret values
- * never returned (there are none to return — only ids + routing metadata).
+ * never returned (there are none to return - only ids + routing metadata).
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { AppVariables } from "@stwd/shared";
 import { Hono } from "hono";
+import type { StewardAppContext } from "../context";
+import { createAgentCapabilityRoutes, createCapabilityRoutes } from "../routes";
 import {
   enabledRouteCount,
   ensureAgent,
@@ -22,8 +24,6 @@ import {
   makeHarness,
   totalRouteCount,
 } from "./_harness";
-import { createAgentCapabilityRoutes, createCapabilityRoutes } from "../routes";
-import type { StewardAppContext } from "../context";
 
 setDefaultTimeout(30000);
 
@@ -35,11 +35,11 @@ let secretId: string;
 function buildCtx(db: unknown): StewardAppContext {
   return {
     db,
-    // biome-ignore lint/suspicious/noExplicitAny: unused-by-routes ctx members are stubbed.
+    // note (any is intentional): unused-by-routes ctx members are stubbed.
     vault: {} as any,
-    // biome-ignore lint/suspicious/noExplicitAny: unused-by-routes ctx members are stubbed.
+    // note (any is intentional): unused-by-routes ctx members are stubbed.
     policyEngine: {} as any,
-    // biome-ignore lint/suspicious/noExplicitAny: unused-by-routes ctx members are stubbed.
+    // note (any is intentional): unused-by-routes ctx members are stubbed.
     priceOracle: {} as any,
     async ensureAgentForTenant() {
       return undefined;
@@ -69,7 +69,7 @@ function buildCtx(db: unknown): StewardAppContext {
     async requireAgentJwt() {},
     async operatorAuth() {},
     async tenantAuth() {},
-    // biome-ignore lint/suspicious/noExplicitAny: the test ctx satisfies the used subset.
+    // note (any is intentional): the test ctx satisfies the used subset.
   } as any;
 }
 
@@ -121,7 +121,10 @@ afterEach(async () => {
   harness = null;
 });
 
-async function createCap(app: Hono<{ Variables: AppVariables }>, overrides: Record<string, unknown> = {}) {
+async function createCap(
+  app: Hono<{ Variables: AppVariables }>,
+  overrides: Record<string, unknown> = {},
+) {
   return app.request("/capabilities", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -247,8 +250,14 @@ describe("grant + patch route behaviors (authorized)", () => {
     const capId = (await (await createCap(app)).json()).data.id as string;
     const body = JSON.stringify({ agentId: "agent-a" });
     const h = { "content-type": "application/json" };
-    expect((await app.request(`/capabilities/${capId}/grants`, { method: "POST", headers: h, body })).status).toBe(201);
-    expect((await app.request(`/capabilities/${capId}/grants`, { method: "POST", headers: h, body })).status).toBe(409);
+    expect(
+      (await app.request(`/capabilities/${capId}/grants`, { method: "POST", headers: h, body }))
+        .status,
+    ).toBe(201);
+    expect(
+      (await app.request(`/capabilities/${capId}/grants`, { method: "POST", headers: h, body }))
+        .status,
+    ).toBe(409);
   });
 
   test("PATCH disable -> paired routes disabled (no orphans)", async () => {
@@ -289,7 +298,10 @@ describe("grant + patch route behaviors (authorized)", () => {
     const res = await app.request(`/capabilities/${capId}/grants`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ agentId: "agent-a", expiresAt: new Date(Date.now() - 1000).toISOString() }),
+      body: JSON.stringify({
+        agentId: "agent-a",
+        expiresAt: new Date(Date.now() - 1000).toISOString(),
+      }),
     });
     expect(res.status).toBe(400);
   });

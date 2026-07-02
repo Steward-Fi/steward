@@ -1,11 +1,11 @@
 /**
- * routes.ts — operator/tenant-auth CRUD for capabilities + grants.
+ * routes.ts - operator/tenant-auth CRUD for capabilities + grants.
  *
  * these are the OPERATOR-facing management routes (create/list/read/update/delete
  * a capability, grant/revoke, and "what may an agent use"). the agent-facing
  * invoke route is W-1c and is NOT here. mounted by the plugin's `register` behind
  * the tenant gate (see index.ts), and each mutation additionally requires a
- * recent tenant-admin MFA verification — the SAME bar the core /secrets + route
+ * recent tenant-admin MFA verification - the SAME bar the core /secrets + route
  * CRUD requires, because capabilities drive live credential injection.
  *
  * the routes NEVER return a secret value (they only ever touch secret IDs +
@@ -58,13 +58,13 @@ function toGrantView(grant: CapabilityGrant) {
   };
 }
 
-/** tenant-admin session predicate — mirrors the core /secrets route gate. */
+/** tenant-admin session predicate - mirrors the core /secrets route gate. */
 function isTenantAdminSession(c: Context<{ Variables: AppVariables }>): boolean {
   const role = c.get("tenantRole");
   return c.get("authType") === "session-jwt" && (role === "owner" || role === "admin");
 }
 
-/** recent-MFA check — mirrors the core /secrets route gate (5 min default). */
+/** recent-MFA check - mirrors the core /secrets route gate (5 min default). */
 function hasRecentSessionMfa(
   c: Context<{ Variables: AppVariables }>,
   maxAgeMs = 5 * 60_000,
@@ -87,7 +87,10 @@ function requireCapabilityAdmin(
   reason: string,
 ): Response | null {
   if (!isTenantAdminSession(c)) {
-    return c.json<ApiResponse>({ ok: false, error: `${reason} requires owner or admin session` }, 403);
+    return c.json<ApiResponse>(
+      { ok: false, error: `${reason} requires owner or admin session` },
+      403,
+    );
   }
   if (!hasRecentSessionMfa(c)) {
     return c.json<ApiResponse>(
@@ -103,9 +106,7 @@ function requireCapabilityAdmin(
  * (db + audit + json parse). The router is mounted behind the tenant gate by the
  * plugin's `register`.
  */
-export function createCapabilityRoutes(
-  ctx: StewardAppContext,
-): Hono<{ Variables: AppVariables }> {
+export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables: AppVariables }> {
   const routes = new Hono<{ Variables: AppVariables }>();
   const store = new CapabilityStore(ctx.db);
 
@@ -133,18 +134,22 @@ export function createCapabilityRoutes(
     });
   }
 
-  // ── POST /capabilities — create (validates, no grants -> no routes yet) ─────
+  // ── POST /capabilities - create (validates, no grants -> no routes yet) ─────
   routes.post("/", async (c) => {
     const mfa = requireCapabilityAdmin(c, "Capability management");
     if (mfa) return mfa;
     const tenantId = c.get("tenantId");
 
     const body = await ctx.safeJsonParse<Record<string, unknown>>(c);
-    if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    if (!body)
+      return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
 
     const parsed = createCapabilitySchema.safeParse(body);
     if (!parsed.success) {
-      return c.json<ApiResponse>({ ok: false, error: parsed.error.issues[0]?.message ?? "invalid body" }, 400);
+      return c.json<ApiResponse>(
+        { ok: false, error: parsed.error.issues[0]?.message ?? "invalid body" },
+        400,
+      );
     }
     const input = parsed.data;
 
@@ -162,7 +167,10 @@ export function createCapabilityRoutes(
     try {
       const existing = await store.getCapabilityByName(tenantId, input.name);
       if (existing) {
-        return c.json<ApiResponse>({ ok: false, error: `capability '${input.name}' already exists` }, 409);
+        return c.json<ApiResponse>(
+          { ok: false, error: `capability '${input.name}' already exists` },
+          409,
+        );
       }
       const cap = await store.createCapability({
         tenantId,
@@ -191,7 +199,7 @@ export function createCapabilityRoutes(
     }
   });
 
-  // ── GET /capabilities — list ────────────────────────────────────────────────
+  // ── GET /capabilities - list ────────────────────────────────────────────────
   routes.get("/", async (c) => {
     const mfa = requireCapabilityAdmin(c, "Capability management");
     if (mfa) return mfa;
@@ -200,7 +208,7 @@ export function createCapabilityRoutes(
     return c.json<ApiResponse>({ ok: true, data: caps.map(toCapabilityView) });
   });
 
-  // ── GET /capabilities/:id — read ─────────────────────────────────────────────
+  // ── GET /capabilities/:id - read ─────────────────────────────────────────────
   routes.get("/:id", async (c) => {
     const mfa = requireCapabilityAdmin(c, "Capability management");
     if (mfa) return mfa;
@@ -210,7 +218,7 @@ export function createCapabilityRoutes(
     return c.json<ApiResponse>({ ok: true, data: toCapabilityView(cap) });
   });
 
-  // ── PATCH /capabilities/:id — enable/disable + constraint/routing update ────
+  // ── PATCH /capabilities/:id - enable/disable + constraint/routing update ────
   routes.patch("/:id", async (c) => {
     const mfa = requireCapabilityAdmin(c, "Capability management");
     if (mfa) return mfa;
@@ -218,11 +226,15 @@ export function createCapabilityRoutes(
     const id = c.req.param("id");
 
     const body = await ctx.safeJsonParse<Record<string, unknown>>(c);
-    if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    if (!body)
+      return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
 
     const parsed = updateCapabilitySchema.safeParse(body);
     if (!parsed.success) {
-      return c.json<ApiResponse>({ ok: false, error: parsed.error.issues[0]?.message ?? "invalid body" }, 400);
+      return c.json<ApiResponse>(
+        { ok: false, error: parsed.error.issues[0]?.message ?? "invalid body" },
+        400,
+      );
     }
     const patch = parsed.data;
 
@@ -278,7 +290,7 @@ export function createCapabilityRoutes(
     }
   });
 
-  // ── DELETE /capabilities/:id — delete + tear down paired routes ─────────────
+  // ── DELETE /capabilities/:id - delete + tear down paired routes ─────────────
   routes.delete("/:id", async (c) => {
     const mfa = requireCapabilityAdmin(c, "Capability management");
     if (mfa) return mfa;
@@ -299,7 +311,7 @@ export function createCapabilityRoutes(
     }
   });
 
-  // ── POST /capabilities/:id/grants — grant an agent (materializes route) ─────
+  // ── POST /capabilities/:id/grants - grant an agent (materializes route) ─────
   routes.post("/:id/grants", async (c) => {
     const mfa = requireCapabilityAdmin(c, "Capability grant management");
     if (mfa) return mfa;
@@ -307,11 +319,15 @@ export function createCapabilityRoutes(
     const capabilityId = c.req.param("id");
 
     const body = await ctx.safeJsonParse<Record<string, unknown>>(c);
-    if (!body) return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+    if (!body)
+      return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
 
     const parsed = createGrantSchema.safeParse(body);
     if (!parsed.success) {
-      return c.json<ApiResponse>({ ok: false, error: parsed.error.issues[0]?.message ?? "invalid body" }, 400);
+      return c.json<ApiResponse>(
+        { ok: false, error: parsed.error.issues[0]?.message ?? "invalid body" },
+        400,
+      );
     }
     const { agentId, expiresAt } = parsed.data;
     const expires = expiresAt ? new Date(expiresAt) : null;
@@ -320,7 +336,12 @@ export function createCapabilityRoutes(
     }
 
     try {
-      const result = await store.createGrant({ tenantId, capabilityId, agentId, expiresAt: expires });
+      const result = await store.createGrant({
+        tenantId,
+        capabilityId,
+        agentId,
+        expiresAt: expires,
+      });
       if (!result) return c.json<ApiResponse>({ ok: false, error: "capability not found" }, 404);
       await audit(c, {
         tenantId,
@@ -340,13 +361,16 @@ export function createCapabilityRoutes(
         return c.json<ApiResponse>({ ok: false, error: e.message }, 404);
       }
       if (e instanceof GrantExistsError) {
-        return c.json<ApiResponse>({ ok: false, error: "agent already granted this capability" }, 409);
+        return c.json<ApiResponse>(
+          { ok: false, error: "agent already granted this capability" },
+          409,
+        );
       }
       return errorResponse(c, e);
     }
   });
 
-  // ── DELETE /grants/:grantId — revoke (tears down paired route) ──────────────
+  // ── DELETE /grants/:grantId - revoke (tears down paired route) ──────────────
   routes.delete("/grants/:grantId", async (c) => {
     const mfa = requireCapabilityAdmin(c, "Capability grant management");
     if (mfa) return mfa;
@@ -373,7 +397,7 @@ export function createCapabilityRoutes(
 /**
  * The agent-scoped read: what capabilities an agent may USE (active, unexpired
  * grants to enabled capabilities). This is what the W-1c invoke path consults. It
- * is a SEPARATE router mounted under a different prefix (/agents) — see index.ts.
+ * is a SEPARATE router mounted under a different prefix (/agents) - see index.ts.
  * Never returns a secret value.
  */
 export function createAgentCapabilityRoutes(
@@ -382,7 +406,7 @@ export function createAgentCapabilityRoutes(
   const routes = new Hono<{ Variables: AppVariables }>();
   const store = new CapabilityStore(ctx.db);
 
-  // ── GET /agents/:agentId/capabilities — usable-by-agent listing ─────────────
+  // ── GET /agents/:agentId/capabilities - usable-by-agent listing ─────────────
   routes.get("/:agentId/capabilities", async (c) => {
     const mfa = requireCapabilityAdmin(c, "Capability management");
     if (mfa) return mfa;

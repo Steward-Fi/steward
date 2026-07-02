@@ -1,5 +1,5 @@
 /**
- * store-lifecycle.test.ts — the paired secret_route lifecycle + validation matrix.
+ * store-lifecycle.test.ts - the paired secret_route lifecycle + validation matrix.
  *
  * proves the KEY invariant: NO orphaned enabled routes in any path (create ->
  * route exists+enabled; disable/revoke/expire -> route disabled/gone; delete ->
@@ -8,6 +8,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { CapabilityStore } from "../store";
+import { validateCapabilitySpec } from "../validate";
 import {
   enabledRouteCount,
   ensureAgent,
@@ -18,8 +20,6 @@ import {
   makeHarness,
   totalRouteCount,
 } from "./_harness";
-import { CapabilityStore } from "../store";
-import { validateCapabilitySpec } from "../validate";
 
 setDefaultTimeout(30000);
 
@@ -72,7 +72,12 @@ describe("validation matrix (shared secret-route validator, strict hosts)", () =
   test("rejects github with a valid-but-non-github method omitted via GET narrowness still needs 2 segments", () => {
     // a concrete method that is NOT the broad wildcard still must satisfy the
     // strict-host path-depth rule; a shallow path is rejected with the strict msg.
-    const v = validateCapabilitySpec({ secretId, ...GH_SPEC, pathPattern: "/repos", method: "GET" });
+    const v = validateCapabilitySpec({
+      secretId,
+      ...GH_SPEC,
+      pathPattern: "/repos",
+      method: "GET",
+    });
     expect(v.ok).toBe(false);
     if (!v.ok) expect(v.error).toMatch(/at least 2 segments/i);
   });
@@ -160,8 +165,18 @@ describe("grant create -> paired route exists + enabled", () => {
     const cap = await createGithubCapability();
     await ensureAgent(harness!.db, tenantId, "agent-a");
     await ensureAgent(harness!.db, tenantId, "agent-b");
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-a", expiresAt: null });
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-b", expiresAt: null });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-a",
+      expiresAt: null,
+    });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-b",
+      expiresAt: null,
+    });
     expect(await enabledRouteCount(harness!.db, tenantId)).toBe(2);
   });
 
@@ -207,8 +222,18 @@ describe("capability disable/enable -> paired routes track fail-closed", () => {
     const cap = await createGithubCapability();
     await ensureAgent(harness!.db, tenantId, "agent-a");
     await ensureAgent(harness!.db, tenantId, "agent-b");
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-a", expiresAt: null });
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-b", expiresAt: null });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-a",
+      expiresAt: null,
+    });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-b",
+      expiresAt: null,
+    });
     expect(await enabledRouteCount(harness!.db, tenantId)).toBe(2);
 
     // disable -> both routes off (no orphaned enabled route)
@@ -325,8 +350,18 @@ describe("capability delete -> all paired routes gone (no orphans)", () => {
     const cap = await createGithubCapability();
     await ensureAgent(harness!.db, tenantId, "agent-a");
     await ensureAgent(harness!.db, tenantId, "agent-b");
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-a", expiresAt: null });
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-b", expiresAt: null });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-a",
+      expiresAt: null,
+    });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-b",
+      expiresAt: null,
+    });
     expect(await totalRouteCount(harness!.db, tenantId)).toBe(2);
 
     const removed = await store.deleteCapability(tenantId, cap.id);
@@ -349,8 +384,18 @@ describe("grant expiry semantics (usable-by-agent listing)", () => {
     await ensureAgent(harness!.db, tenantId, "agent-a");
     await ensureAgent(harness!.db, tenantId, "agent-b");
     const future = new Date(Date.now() + 3_600_000);
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-a", expiresAt: future });
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-b", expiresAt: future });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-a",
+      expiresAt: future,
+    });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-b",
+      expiresAt: future,
+    });
 
     // as of now: both usable
     const now = new Date();
@@ -376,7 +421,12 @@ describe("grant expiry semantics (usable-by-agent listing)", () => {
   test("disabled capability is not listed as usable", async () => {
     const cap = await createGithubCapability("github.pr.comment", true);
     await ensureAgent(harness!.db, tenantId, "agent-a");
-    await store.createGrant({ tenantId, capabilityId: cap.id, agentId: "agent-a", expiresAt: null });
+    await store.createGrant({
+      tenantId,
+      capabilityId: cap.id,
+      agentId: "agent-a",
+      expiresAt: null,
+    });
     await store.updateCapability(tenantId, cap.id, { enabled: false });
     expect(await store.listUsableCapabilitiesForAgent(tenantId, "agent-a")).toHaveLength(0);
   });

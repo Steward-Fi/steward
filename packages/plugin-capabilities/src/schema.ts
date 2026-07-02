@@ -1,5 +1,5 @@
 /**
- * schema.ts — the capability plugin's OWN drizzle table definitions.
+ * schema.ts - the capability plugin's OWN drizzle table definitions.
  *
  * these mirror the SQL in `drizzle/0000_capabilities.sql` (the migration source
  * of truth the host applies into a per-plugin namespaced bookkeeping table). the
@@ -13,7 +13,7 @@
  *   so a capability can never be broader than a legal route.
  *
  * a grant is: agent X may use capability Y (optionally until expiresAt). the
- * grant carries the id of its paired secret_route (per-GRANT pairing — the proxy
+ * grant carries the id of its paired secret_route (per-GRANT pairing - the proxy
  * matches secret_routes by exact agentId, and capabilities are tenant-wide with
  * per-agent grants, so a route materializes once per grant; see PR / index.ts).
  */
@@ -48,9 +48,7 @@ export const capabilities = pgTable(
     injectAs: text("inject_as").notNull().default("header"),
     injectKey: text("inject_key").notNull(),
     injectFormat: text("inject_format").notNull().default("{value}"),
-    constraints: jsonb("constraints")
-      .notNull()
-      .default(sql`'{}'::jsonb`),
+    constraints: jsonb("constraints").notNull().default(sql`'{}'::jsonb`),
     enabled: boolean("enabled").notNull().default(true),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -73,7 +71,7 @@ export const capabilityGrants = pgTable(
     // proxy matches secret_routes by exact agentId, so one route per grant keeps
     // the proxy's matching semantics unchanged. nullable only transiently while a
     // grant is being torn down / for a route that failed to materialize (never
-    // left as an orphaned enabled route — see the lifecycle in store.ts + tests).
+    // left as an orphaned enabled route - see the lifecycle in store.ts + tests).
     secretRouteId: uuid("secret_route_id"),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     status: text("status").notNull().default("active"),

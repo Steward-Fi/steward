@@ -1,12 +1,12 @@
 /**
- * context.ts — the injected service context the lean core hands the capability
+ * context.ts - the injected service context the lean core hands the capability
  * plugin at registration.
  *
  * the plugin's routes need shared core singletons (db, audit writer, the agent
  * resolver, json parsing) and the auth middleware that gate operator/tenant
  * endpoints. those live in the CORE (`@stwd/api`). to avoid a circular dependency
  * (core must not import plugin; plugin must not import core), the core does NOT
- * export them to the plugin via an import — it BUILDS this context object and
+ * export them to the plugin via an import - it BUILDS this context object and
  * passes it to `register(app, ctx)`. the plugin codes against this interface only.
  *
  * this shape mirrors `@stwd/api`'s `StewardAppContext` (identical to
