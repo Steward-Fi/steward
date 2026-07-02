@@ -45,6 +45,10 @@
       "dependsOn": ["^build"],
       "outputs": []
     },
+    "@stwd/plugin-capabilities#build": {
+      "dependsOn": ["^build"],
+      "outputs": []
+    },
     "@stwd/plugin-example#build": {
       "dependsOn": ["^build"],
       "outputs": []

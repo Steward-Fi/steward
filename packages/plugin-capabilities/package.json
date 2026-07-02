@@ -1,0 +1,32 @@
+{
+  "name": "@stwd/plugin-capabilities",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test --timeout 30000",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@stwd/db": "workspace:*",
+    "@stwd/redis": "workspace:*",
+    "@stwd/shared": "workspace:*",
+    "@stwd/vault": "workspace:*",
+    "drizzle-orm": "^0.44.5",
+    "hono": "^4.12.18",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@stwd/plugin-sdk": "workspace:*",
+    "@stwd/policy-engine": "workspace:*",
+    "@types/node": "^25.5.0"
+  },
+  "description": "Opt-in capability plugin for Steward: named narrowly-scoped credential uses (capabilities) + per-agent grants, each paired to a narrow secret_route the proxy injects through. Operator/tenant-auth CRUD with plugin-owned namespaced migrations. The core does not depend on this package."
+}
