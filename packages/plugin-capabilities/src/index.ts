@@ -31,10 +31,11 @@ import { capabilityIntentContribution } from "@stwd/policy-engine";
 import type { AppVariables, StewardPlugin } from "@stwd/shared";
 import type { Context, Hono, Next } from "hono";
 import type { StewardAppContext } from "./context";
-import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 import { createInvokeRoutes } from "./invoke";
+import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 
 export type { StewardAppContext } from "./context";
+export { createInvokeRoutes } from "./invoke";
 export { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 export type {
   Capability,
@@ -46,7 +47,6 @@ export type {
   NewCapabilityInvocation,
 } from "./schema";
 export { capabilities, capabilityGrants, capabilityInvocations } from "./schema";
-export { createInvokeRoutes } from "./invoke";
 export type { CapabilitySpec } from "./store";
 export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
 export {
@@ -103,6 +103,15 @@ export const capabilitiesPlugin: StewardApiPlugin = {
   name: "capabilities",
   version: "0.1.0",
   webhookEvents: CAPABILITY_WEBHOOK_EVENTS,
+  // the `capability-intent` policy rule (W-1b, shipped in @stwd/policy-engine as a
+  // PolicyRuleContribution). the plugin host registers it into the policy-engine
+  // evaluator registry BEFORE any route runs, so the engine can evaluate a
+  // capability-intent rule (via the registry's default arm) instead of denying it
+  // as an unknown type. the invoke path (invoke.ts) still owns the effective
+  // default-deny; this contribution just makes the rule TYPE evaluable engine-wide.
+  // registration fails closed on a type collision (a core rule type or another
+  // plugin's) — see the plugin host.
+  policyRules: [capabilityIntentContribution],
   migrations: {
     id: "capabilities",
     migrationsFolder: MIGRATIONS_FOLDER,

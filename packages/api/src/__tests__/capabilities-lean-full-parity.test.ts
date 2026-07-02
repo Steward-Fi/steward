@@ -19,8 +19,17 @@
  *   ~/.bun/bin/bun test src/__tests__/capabilities-lean-full-parity.test.ts
  */
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { policyRuleRegistry } from "@stwd/policy-engine";
 import { composeApp, runComposedPluginMigrations } from "../compose";
+
+// the capabilities plugin contributes the `capability-intent` policy rule into the
+// PROCESS-WIDE policy-rule registry (fail-closed on double-register: a second
+// plugin, or a second boot, that registers the SAME type throws). in PRODUCTION
+// composeApp runs ONCE per process, so this never fires; in this suite we boot
+// composeApp multiple times, so we CLEAR the (contributed-only) registry before a
+// FULL boot to keep each boot hermetic. clearing is safe: core rule types are NOT
+// in this registry (only plugin contributions are).
 
 // capabilities routes, enumerated from packages/plugin-capabilities/src/:
 //   - routes.ts        → CRUD + grants (createCapabilityRoutes), agent-scoped read
@@ -87,17 +96,28 @@ afterEach(() => {
 });
 
 describe("capabilities parity — routes 404 in LEAN (genuinely not mounted)", () => {
+  // LEAN boots register NO policy rules, so no registry hygiene needed here.
+  let leanApp: Awaited<ReturnType<typeof bootApp>>;
+  beforeAll(async () => {
+    leanApp = await bootApp(undefined);
+  });
   it.each(CAP_ROUTES)("LEAN 404: $method $path", async ({ method, path }) => {
-    const app = await bootApp(undefined);
-    expect(await probe(app, method, path)).toBe(404);
+    expect(await probe(leanApp, method, path)).toBe(404);
   });
 });
 
 describe("capabilities parity — routes MOUNTED in FULL (reach plugin, NOT 404)", () => {
+  // boot FULL ONCE (the capability-intent contribution registers into the
+  // process-wide registry, which fail-closes on a second same-type register).
+  // clear the contributed-rule registry first for hermeticity across files.
+  let fullApp: Awaited<ReturnType<typeof bootApp>>;
+  beforeAll(async () => {
+    policyRuleRegistry.clear();
+    fullApp = await bootApp("capabilities");
+  });
   it.each(CAP_ROUTES)("FULL mounted: $method $path", async ({ method, path }) => {
-    const app = await bootApp("capabilities");
     // mounted → reaches plugin auth/handler: 400/401/403/200 etc, just NOT 404.
-    expect(await probe(app, method, path)).not.toBe(404);
+    expect(await probe(fullApp, method, path)).not.toBe(404);
   });
 });
 
@@ -144,6 +164,9 @@ describe("capabilities parity — migration composition (both-on/both-off)", () 
 
 describe("capabilities parity — multi-plugin (trading + capabilities)", () => {
   it("STEWARD_PLUGINS=trading,capabilities mounts BOTH", async () => {
+    // fresh registry: this boot re-registers capability-intent, which would
+    // collide with a prior FULL boot's registration in the same process.
+    policyRuleRegistry.clear();
     const app = await bootApp("trading,capabilities");
     // a trading route is mounted…
     expect(await probe(app, "GET", "/v1/trade/token-status")).not.toBe(404);

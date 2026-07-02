@@ -69,9 +69,7 @@ describe("capability plugin migrations: namespaced-journal isolation", () => {
     const { client } = harness;
 
     // (a) the invocations table exists (migration 0001 applied).
-    const invTbl = await client.query(
-      "SELECT to_regclass('public.capability_invocations') AS t",
-    );
+    const invTbl = await client.query("SELECT to_regclass('public.capability_invocations') AS t");
     expect(invTbl.rows[0].t).toBe("capability_invocations");
 
     // (b) BOTH plugin migrations (0000 + 0001) are recorded in the plugin's OWN

@@ -23,20 +23,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { and, eq } from "@stwd/db";
+import { eq } from "@stwd/db";
 import type { AppVariables, PolicyRule } from "@stwd/shared";
 import { Hono } from "hono";
 import type { StewardAppContext } from "../context";
 import { createInvokeRoutes } from "../invoke";
 import { capabilityInvocations } from "../schema";
 import { CapabilityStore } from "../store";
-import {
-  ensureAgent,
-  ensureSecret,
-  ensureTenant,
-  type Harness,
-  makeHarness,
-} from "./_harness";
+import { ensureAgent, ensureSecret, ensureTenant, type Harness, makeHarness } from "./_harness";
 
 setDefaultTimeout(30000);
 
@@ -156,8 +150,13 @@ async function seedCapabilityWithGrant(opts?: {
 
 async function invocationRows(capabilityId: string | null) {
   const db = harness!.db;
-  const rows = await db.select().from(capabilityInvocations).where(eq(capabilityInvocations.agentId, agentId));
-  return capabilityId === null ? rows : rows.filter((r: { capabilityId: string | null }) => r.capabilityId === capabilityId);
+  const rows = await db
+    .select()
+    .from(capabilityInvocations)
+    .where(eq(capabilityInvocations.agentId, agentId));
+  return capabilityId === null
+    ? rows
+    : rows.filter((r: { capabilityId: string | null }) => r.capabilityId === capabilityId);
 }
 
 function invokeReq(body?: unknown) {
@@ -272,7 +271,10 @@ describe("invoke: default-deny + effects", () => {
     const app = buildApp(harness!.db, { agent: true });
     const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
     expect(res.status).toBe(202);
-    const body = (await res.json()) as { ok: boolean; data: { approvalId: string; status: string } };
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { approvalId: string; status: string };
+    };
     expect(body.ok).toBe(true);
     expect(body.data.status).toBe("pending");
     expect(body.data.approvalId).toBeTruthy();
@@ -286,7 +288,10 @@ describe("invoke: default-deny + effects", () => {
     const capId = await seedCapabilityWithGrant();
     currentPolicySet = [capRule("r1", "allow")];
     const app = buildApp(harness!.db, { agent: true });
-    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({ body: { x: 1 } }));
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: { x: 1 } }),
+    );
     expect(res.status).toBe(503);
     const rows = await invocationRows(capId);
     expect(rows.length).toBe(1);
@@ -325,12 +330,18 @@ describe("invoke: rate limit (count from invocations table)", () => {
     const app = buildApp(harness!.db, { agent: true });
 
     // first invoke: count=0 < 1 => authorized, forward fails closed (503, records error).
-    const first = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({ body: {} }));
+    const first = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
     expect(first.status).toBe(503);
 
     // second invoke: count=1 (the recorded error attempt) >= 1 => the rate
     // constraint denies the allow rule => default-deny => 403.
-    const second = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({ body: {} }));
+    const second = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: {} }),
+    );
     expect(second.status).toBe(403);
 
     const rows = await invocationRows(capId);

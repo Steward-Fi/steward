@@ -50,8 +50,8 @@ import { signAgentToken } from "@stwd/auth";
 import {
   CAPABILITY_INTENT_RULE_TYPE,
   type CapabilityIntentConfig,
-  evaluateCapabilityIntent,
   type EvaluatorContext,
+  evaluateCapabilityIntent,
   PolicyEngine,
 } from "@stwd/policy-engine";
 import { StewardProxyClient } from "@stwd/proxy-client";

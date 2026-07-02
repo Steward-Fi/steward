@@ -23,19 +23,18 @@
  * only the network is stubbed).
  */
 
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
-import { agents, closeDb, eq, getDb, tenants } from "@stwd/db";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { fileURLToPath } from "node:url";
+import { agents, closeDb, eq, getDb, runPluginMigrations, tenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { AppVariables, PolicyRule } from "@stwd/shared";
 import { SecretVault } from "@stwd/vault";
-import { Hono } from "hono";
-import { fileURLToPath } from "node:url";
-import { runPluginMigrations } from "@stwd/db";
 import { migrate as pgliteMigrate } from "drizzle-orm/pglite/migrator";
+import { Hono } from "hono";
+import type { StewardAppContext } from "../context";
 import { createInvokeRoutes } from "../invoke";
 import { capabilityInvocations } from "../schema";
 import { CapabilityStore } from "../store";
-import type { StewardAppContext } from "../context";
 
 setDefaultTimeout(30000);
 
@@ -71,7 +70,11 @@ function capRule(
     id,
     type: "capability-intent" as unknown as PolicyRule["type"],
     enabled: true,
-    config: { capabilities: ["github.pr.comment"], effect, ...(constraints ? { constraints } : {}) },
+    config: {
+      capabilities: ["github.pr.comment"],
+      effect,
+      ...(constraints ? { constraints } : {}),
+    },
   };
 }
 
@@ -121,7 +124,8 @@ beforeAll(async () => {
   // override globalThis.fetch: route the proxy URL into the in-process proxy app;
   // everything else uses the real fetch.
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    const url =
+      typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
     if (url.startsWith(PROXY_URL) && proxyApp) {
       const path = url.slice(PROXY_URL.length) || "/";
       return proxyApp.request(path, init as RequestInit);
@@ -148,7 +152,9 @@ let agentId: string;
 async function seedTenantAgent(): Promise<void> {
   tenantId = `tenant-cap-e2e-${crypto.randomUUID()}`;
   agentId = `agent-cap-e2e-${crypto.randomUUID()}`;
-  await getDb().insert(tenants).values({ id: tenantId, name: tenantId, apiKeyHash: `hash-${tenantId}` });
+  await getDb()
+    .insert(tenants)
+    .values({ id: tenantId, name: tenantId, apiKeyHash: `hash-${tenantId}` });
   await getDb()
     .insert(agents)
     .values({ id: agentId, tenantId, name: agentId, walletAddress: `0x${"2".repeat(40)}` });
@@ -323,7 +329,10 @@ describe("invoke e2e: full arc through the real proxy", () => {
       body: JSON.stringify({}),
     });
     expect(res.status).toBe(202);
-    const body = (await res.json()) as { ok: boolean; data: { approvalId: string; status: string } };
+    const body = (await res.json()) as {
+      ok: boolean;
+      data: { approvalId: string; status: string };
+    };
     expect(body.data.status).toBe("pending");
     const rows = await agentInvocations(capId);
     expect(rows.length).toBe(1);
