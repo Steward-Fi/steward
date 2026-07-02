@@ -197,6 +197,32 @@ any other operator's instance.
 | `STEWARD_PROXY_URL` | Proxy URL used by web/server-side app code | `http://localhost:8080` in local Compose | Should match the exposed proxy URL. |
 | `STEWARD_AGENT_TOKEN` | Agent token for web/server-side routes | none | Required only by app paths that call Steward as an agent. |
 | `SKIP_MIGRATIONS` | Disable API startup migrations | false | Set `true` or `1` only when another process applies migrations. |
+| `STEWARD_MONERO_WALLET_RPC_URL` | monero-wallet-rpc sidecar endpoint | none | Empty disables Monero: every Monero endpoint fails closed with 503. In Compose use `http://monero-wallet-rpc:18083/json_rpc`. |
+| `MONERO_WALLET_RPC_PASSWORD` | Password for the sidecar's `--rpc-login` (username `steward`) | none | Required when the `monero` Compose profile is enabled; Compose derives `STEWARD_MONERO_WALLET_RPC_LOGIN` from it. |
+| `STEWARD_MONERO_DAEMON_URL` | Remote Monero daemon used for chain height at wallet creation | `http://node.sethforprivacy.com:18089` | Restricted public RPC is sufficient; keys never reach the daemon. Stagenet: `:38089`. |
+| `MONERO_DAEMON_ADDRESS` | Daemon `host:port` the sidecar syncs wallets against | `node.sethforprivacy.com:18089` | Keep consistent with `STEWARD_MONERO_DAEMON_URL`. A public node operator can correlate your IP with wallet activity — run your own daemon or Tor if that matters. |
+| `STEWARD_MONERO_NETWORK` | Monero network of the sidecar | `mainnet` | `mainnet` or `stagenet`; must match the sidecar's flags (add `--stagenet` there for stagenet). |
+| `STEWARD_MAX_MONERO_FEE_PICONERO` | Fee ceiling for Monero transfers | `100000000000` (0.1 XMR) | Transfers whose network fee exceeds this are rejected before relay. |
+
+### Monero support (optional)
+
+Monero runs as an opt-in Compose profile: the official `monero-wallet-rpc`
+(wallet2) container connects to a remote public daemon with
+`--untrusted-daemon`, so there is no local `monerod` and no blockchain
+storage. The vault generates keys in-process, stores them AAD-encrypted in
+Postgres (canonical), and rehydrates sidecar wallet files on demand — new
+wallets record the chain height as their restore height, so wallet scanning
+stays incremental. USD-denominated policy rules fail closed for Monero (no
+XMR price source); use piconero-denominated limits. Enable with:
+
+```bash
+# .env: set MONERO_WALLET_RPC_PASSWORD and
+#        STEWARD_MONERO_WALLET_RPC_URL=http://monero-wallet-rpc:18083/json_rpc
+COMPOSE_PROFILES=monero docker compose up -d
+```
+
+Monero is unavailable on the Cloudflare Workers deployment target (no
+sidecar there); the API fails closed with 503 for Monero endpoints.
 
 ## Migration behavior
 
