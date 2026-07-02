@@ -343,6 +343,65 @@ export interface SignBitcoinPsbtResult {
   feeSats?: string;
 }
 
+export interface MoneroTransferDestinationInput {
+  /** Standard, subaddress, or integrated Monero address (case-significant base58). */
+  address: string;
+  /** Positive decimal amount in piconero (1 XMR = 10^12 piconero). */
+  amountPiconero: string;
+}
+
+export interface TransferMoneroInput {
+  /** Scoped Monero wallet id returned by create/list wallet APIs, e.g. monero:mainnet:0. */
+  walletScope: string;
+  destinations: MoneroTransferDestinationInput[];
+  /** wallet2 fee priority: 0 default … 3 elevated. */
+  priority?: 0 | 1 | 2 | 3;
+  /**
+   * Optional caller-supplied ID mirrored in audit/history metadata and used for
+   * server-side dedupe: retries with the same referenceId return the original
+   * transaction instead of relaying twice.
+   */
+  referenceId?: string;
+  /**
+   * Broadcast idempotency key (required by the API). Auto-generated when
+   * omitted; pass a stable value together with referenceId when retrying.
+   */
+  idempotencyKey?: string;
+  /** Delegated signer or key quorum authentication for non-admin signing flows. */
+  signerId?: StewardSignerAuthOptions["signerId"];
+  signerSecret?: StewardSignerAuthOptions["signerSecret"];
+  keyQuorumId?: StewardSignerAuthOptions["keyQuorumId"];
+  keyQuorumCredentials?: StewardSignerAuthOptions["keyQuorumCredentials"];
+}
+
+export interface TransferMoneroResult {
+  /** Steward transaction record ID for audit/history lookup. */
+  transactionId: string;
+  /** Monero transaction hash (64 hex chars, no 0x prefix). Already relayed. */
+  txHash: string;
+  /** Network fee paid, in piconero. */
+  feePiconero: string;
+  /** Sum of destination amounts, in piconero. */
+  amountPiconero: string;
+  /** amount + fee, in piconero (the value policy counters record). */
+  totalPiconero: string;
+  walletScope: string;
+  walletAddress: string;
+  network: "mainnet" | "stagenet";
+}
+
+export interface MoneroBalanceResult {
+  /** Total balance in piconero. */
+  balancePiconero: string;
+  /** Spendable (unlocked) balance in piconero. */
+  unlockedPiconero: string;
+  blocksToUnlock: number;
+  syncedHeight: number;
+  walletScope: string;
+  walletAddress: string;
+  network: "mainnet" | "stagenet";
+}
+
 export type HyperliquidAsset =
   | "BTC"
   | "ETH"
@@ -2300,6 +2359,59 @@ export class StewardClient {
         headers: signerHeaders(input),
         body: JSON.stringify(body),
       },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Build, sign, and relay a native Monero transfer through the vault.
+   * Requires an enabled `raw-signing-chain` policy allowing monero/ed25519 and
+   * a self-hosted deployment with the monero-wallet-rpc sidecar configured
+   * (503 otherwise). Amounts are piconero decimal strings (1 XMR = 10^12);
+   * USD-denominated policy rules fail closed for Monero — use
+   * piconero-denominated limits.
+   */
+  async transferMonero(agentId: string, input: TransferMoneroInput): Promise<TransferMoneroResult> {
+    const {
+      signerId: _signerId,
+      signerSecret: _signerSecret,
+      keyQuorumId: _keyQuorumId,
+      keyQuorumCredentials: _keyQuorumCredentials,
+      idempotencyKey,
+      ...body
+    } = input;
+    const headers: Record<string, string> = {
+      ...((signerHeaders(input) as Record<string, string> | undefined) ?? {}),
+      "Idempotency-Key": idempotencyKey ?? crypto.randomUUID(),
+    };
+    const response = await this.request<TransferMoneroResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/monero/transfer`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      },
+    );
+
+    if (!response.ok) {
+      throw new StewardApiError(response.error, response.status, response.data);
+    }
+
+    return response.data;
+  }
+
+  /**
+   * Read a scoped Monero wallet balance (piconero string amounts). The first
+   * call after idle time refreshes the wallet scan and may take a few seconds.
+   */
+  async getMoneroBalance(agentId: string, walletScope: string): Promise<MoneroBalanceResult> {
+    const response = await this.request<MoneroBalanceResult, StewardErrorResponse>(
+      `/vault/${encodeURIComponent(agentId)}/monero/balance?walletScope=${encodeURIComponent(walletScope)}`,
     );
 
     if (!response.ok) {
