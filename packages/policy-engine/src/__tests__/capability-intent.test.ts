@@ -265,12 +265,16 @@ describe("capability-intent — name matching (glob + exact + case)", () => {
   it("exact-only pattern matches only the exact name", () => {
     const denyExact = rule({ capabilities: ["github.pr.comment"], effect: "deny" });
     expect(
-      evaluateCapabilityIntent(denyExact, makeContext({ capability: cap({ name: "github.pr.comment" }) }))
-        .passed,
+      evaluateCapabilityIntent(
+        denyExact,
+        makeContext({ capability: cap({ name: "github.pr.comment" }) }),
+      ).passed,
     ).toBe(false);
     expect(
-      evaluateCapabilityIntent(denyExact, makeContext({ capability: cap({ name: "github.pr.delete" }) }))
-        .passed,
+      evaluateCapabilityIntent(
+        denyExact,
+        makeContext({ capability: cap({ name: "github.pr.delete" }) }),
+      ).passed,
     ).toBe(true); // not applicable
   });
 
@@ -286,11 +290,14 @@ describe("capability-intent — name matching (glob + exact + case)", () => {
 describe("capability-intent — config validation (fail closed)", () => {
   it("denies when capabilities is missing/empty", () => {
     expect(
-      evaluateCapabilityIntent(rule({ effect: "allow" }), makeContext({ capability: cap() })).passed,
+      evaluateCapabilityIntent(rule({ effect: "allow" }), makeContext({ capability: cap() }))
+        .passed,
     ).toBe(false);
     expect(
-      evaluateCapabilityIntent(rule({ capabilities: [], effect: "allow" }), makeContext({ capability: cap() }))
-        .passed,
+      evaluateCapabilityIntent(
+        rule({ capabilities: [], effect: "allow" }),
+        makeContext({ capability: cap() }),
+      ).passed,
     ).toBe(false);
   });
 

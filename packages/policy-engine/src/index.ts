@@ -1,14 +1,4 @@
 export type {
-  AuditHook,
-  PolicyEngineOptions,
-  PolicyEvaluatedEvent,
-  PolicyEvaluationContext,
-  PolicySimulationRequest,
-  ProxySimulationRequest,
-  TransactionSimulationRequest,
-} from "./engine";
-export { PolicyEngine } from "./engine";
-export type {
   CapabilityIntentConfig,
   CapabilityIntentConstraints,
   CapabilityIntentEffect,
@@ -18,6 +8,16 @@ export {
   capabilityIntentContribution,
   evaluateCapabilityIntent,
 } from "./capability-intent";
+export type {
+  AuditHook,
+  PolicyEngineOptions,
+  PolicyEvaluatedEvent,
+  PolicyEvaluationContext,
+  PolicySimulationRequest,
+  ProxySimulationRequest,
+  TransactionSimulationRequest,
+} from "./engine";
+export { PolicyEngine } from "./engine";
 export type { EvaluatorContext } from "./evaluators";
 export { evaluatePolicy } from "./evaluators";
 export type {
