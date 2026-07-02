@@ -8,7 +8,6 @@
  * credential injection into proxied requests.
  */
 
-import { isIP } from "node:net";
 import {
   agents,
   and,
@@ -23,28 +22,7 @@ import {
   secrets,
 } from "@stwd/db";
 import { type EncryptedKey, KeyStore } from "./keystore";
-
-const DEFAULT_SECRET_ROUTE_HOSTS = [
-  "api.openai.com",
-  "api.anthropic.com",
-  "public-api.birdeye.so",
-  "api.coingecko.com",
-  "api.helius.xyz",
-];
-const BLOCKED_INJECT_HEADERS = new Set([
-  "connection",
-  "content-length",
-  "host",
-  "proxy-authenticate",
-  "proxy-authorization",
-  "te",
-  "trailer",
-  "transfer-encoding",
-  "upgrade",
-]);
-const VALID_PROXY_METHODS = new Set(["*", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
-const MAX_SECRET_INJECT_FORMAT_LENGTH = 255;
-const MAX_SECRET_ROUTE_PRIORITY = 1_000_000;
+import { validateSecretRouteConfig } from "./secret-route-validator";
 
 export interface SecretMetadata {
   id: string;
@@ -61,134 +39,6 @@ export interface SecretMetadata {
 export interface CreateSecretOptions {
   description?: string;
   expiresAt?: Date;
-}
-
-type SecretRouteConfig = {
-  agentId?: string;
-  hostPattern?: string;
-  pathPattern?: string;
-  method?: string;
-  injectAs?: string;
-  injectKey?: string;
-  injectFormat?: string;
-  priority?: number;
-};
-
-function configuredSecretRouteHosts(): string[] {
-  return [
-    ...DEFAULT_SECRET_ROUTE_HOSTS,
-    ...(process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS ?? "")
-      .split(",")
-      .map((host) => host.trim().toLowerCase())
-      .filter(Boolean),
-  ];
-}
-
-function hostAllowedByEntry(hostPattern: string, allowedHost: string): boolean {
-  if (hostPattern === allowedHost) return true;
-  if (hostPattern.startsWith("*.")) {
-    const suffix = hostPattern.slice(2);
-    const suffixLabels = suffix.split(".").filter(Boolean);
-    if (suffixLabels.length < 2) return false;
-    if (!allowedHost.startsWith("*.")) return false;
-    const allowedSuffix = allowedHost.slice(2);
-    return suffix === allowedSuffix || suffix.endsWith(`.${allowedSuffix}`);
-  }
-  if (allowedHost.startsWith("*.")) {
-    const allowedSuffix = allowedHost.slice(1);
-    return hostPattern.endsWith(allowedSuffix) && hostPattern.length > allowedSuffix.length;
-  }
-  return false;
-}
-
-function validateSecretRouteConfig(input: SecretRouteConfig): string | null {
-  if (input.agentId !== undefined && !input.agentId.trim()) return "agentId is invalid";
-
-  if (input.hostPattern !== undefined) {
-    const hostPattern = input.hostPattern.trim().toLowerCase();
-    if (!hostPattern || hostPattern === "*" || hostPattern === "*.*") {
-      return "hostPattern must be an explicit allowed host";
-    }
-    const hostForIpCheck = hostPattern.startsWith("*.") ? hostPattern.slice(2) : hostPattern;
-    if (
-      isIP(hostForIpCheck) ||
-      hostForIpCheck === "localhost" ||
-      hostForIpCheck.endsWith(".localhost") ||
-      hostForIpCheck.endsWith(".local") ||
-      hostForIpCheck.endsWith(".internal")
-    ) {
-      return "hostPattern must not target localhost, private, or internal hosts";
-    }
-    if (!configuredSecretRouteHosts().some((allowed) => hostAllowedByEntry(hostPattern, allowed))) {
-      return "hostPattern is not in the secret route allowlist";
-    }
-  }
-
-  if (input.pathPattern !== undefined) {
-    const pathPattern = input.pathPattern.trim();
-    const lowered = pathPattern.toLowerCase();
-    if (!pathPattern.startsWith("/")) return "pathPattern must start with /";
-    if (
-      process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES !== "true" &&
-      (pathPattern === "/*" || pathPattern === "*")
-    ) {
-      return "broad pathPattern requires STEWARD_ALLOW_BROAD_SECRET_ROUTES=true";
-    }
-    if (/[\u0000-\u001f\u007f\\]/.test(pathPattern)) return "pathPattern is invalid";
-    if (
-      lowered.includes("%2e") ||
-      lowered.includes("%2f") ||
-      lowered.includes("%5c") ||
-      pathPattern.split("/").some((segment) => segment === "." || segment === "..")
-    ) {
-      return "pathPattern must not contain dot segments or encoded path separators";
-    }
-  }
-
-  if (input.method !== undefined) {
-    const method = input.method.trim().toUpperCase();
-    if (!VALID_PROXY_METHODS.has(method)) return "method is not allowed";
-    if (process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES !== "true" && method === "*") {
-      return "broad method requires STEWARD_ALLOW_BROAD_SECRET_ROUTES=true";
-    }
-  }
-
-  if (input.injectAs !== undefined) {
-    if (!["header", "query"].includes(input.injectAs)) {
-      return "'injectAs' must be one of: header, query";
-    }
-    if (input.injectAs === "query" && process.env.STEWARD_ALLOW_QUERY_SECRET_INJECTION !== "true") {
-      return "query credential injection requires STEWARD_ALLOW_QUERY_SECRET_INJECTION=true";
-    }
-  }
-
-  if (input.injectKey !== undefined) {
-    const key = input.injectKey.trim().toLowerCase();
-    if (!key || /[\r\n:]/.test(key)) return "injectKey is invalid";
-    if (BLOCKED_INJECT_HEADERS.has(key)) return `injectKey '${input.injectKey}' is not allowed`;
-  }
-
-  if (input.injectFormat !== undefined) {
-    if (input.injectFormat.length > MAX_SECRET_INJECT_FORMAT_LENGTH) {
-      return `injectFormat cannot exceed ${MAX_SECRET_INJECT_FORMAT_LENGTH} characters`;
-    }
-    if (/[\r\n]/.test(input.injectFormat)) return "injectFormat must not contain line breaks";
-    const placeholderCount = input.injectFormat.match(/\{value\}/g)?.length ?? 0;
-    if (placeholderCount !== 1) {
-      return "injectFormat must contain exactly one {value} placeholder";
-    }
-  }
-
-  if (
-    input.priority !== undefined &&
-    (!Number.isSafeInteger(input.priority) ||
-      input.priority < 0 ||
-      input.priority > MAX_SECRET_ROUTE_PRIORITY)
-  ) {
-    return `priority must be an integer between 0 and ${MAX_SECRET_ROUTE_PRIORITY}`;
-  }
-
-  return null;
 }
 
 export class SecretVault {
@@ -542,8 +392,34 @@ export class SecretVault {
     if (Object.keys(allowedUpdates).length === 0) {
       return this.getRoute(tenantId, routeId);
     }
-    const validationError = validateSecretRouteConfig(allowedUpdates);
+    // Partial-patch validation: skip per-host strictness here (the patch may not
+    // carry method/path). The merged pass below enforces strict-host rules.
+    const validationError = validateSecretRouteConfig(allowedUpdates, {
+      enforceStrictHosts: false,
+    });
     if (validationError) throw new Error(validationError);
+    // Fail-closed: re-validate against the merged (existing ∪ update) config so a
+    // partial edit can never loosen a strict host's narrowness rules (explicit
+    // method + minimum path depth) for a route that already targets one.
+    //
+    // Exception: if the update leaves the route DISABLED, skip the merged
+    // strict-host pass. A disabled route injects no credential, so strictness is
+    // moot — and blocking it would prevent an admin from disabling a legacy
+    // strict-host route that predates these rules (a safety-REDUCING action must
+    // never be blocked by a stricter narrowness rule).
+    const current = await this.getRoute(tenantId, routeId);
+    const willBeEnabled = allowedUpdates.enabled ?? current?.enabled ?? true;
+    if (current && willBeEnabled) {
+      const mergedValidationError = validateSecretRouteConfig({
+        hostPattern: allowedUpdates.hostPattern ?? current.hostPattern ?? undefined,
+        pathPattern: allowedUpdates.pathPattern ?? current.pathPattern ?? undefined,
+        method: allowedUpdates.method ?? current.method ?? undefined,
+        injectAs: allowedUpdates.injectAs ?? current.injectAs ?? undefined,
+        injectKey: allowedUpdates.injectKey ?? current.injectKey ?? undefined,
+        injectFormat: allowedUpdates.injectFormat ?? current.injectFormat ?? undefined,
+      });
+      if (mergedValidationError) throw new Error(mergedValidationError);
+    }
     if (allowedUpdates.hostPattern !== undefined) {
       allowedUpdates.hostPattern = allowedUpdates.hostPattern.trim().toLowerCase();
     }
