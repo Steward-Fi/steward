@@ -432,7 +432,9 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
     const tenantId = c.get("tenantId");
     const agentId = c.get("agentScope");
     if (!tenantId || !agentId) {
-      return jsonResponse({ ok: false, error: "agent authentication required" }, 401);
+      return stripGateMarker(
+        jsonResponse({ ok: false, error: "agent authentication required" }, 401),
+      );
     }
 
     type InvokeEnvelope = {
@@ -451,11 +453,15 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       try {
         const parsedBody = JSON.parse(rawBody);
         if (parsedBody === null || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
-          return jsonResponse({ ok: false, error: "invoke body must be a JSON object" }, 400);
+          return stripGateMarker(
+            jsonResponse({ ok: false, error: "invoke body must be a JSON object" }, 400),
+          );
         }
         envelope = parsedBody as InvokeEnvelope;
       } catch {
-        return jsonResponse({ ok: false, error: "invalid JSON in request body" }, 400);
+        return stripGateMarker(
+          jsonResponse({ ok: false, error: "invalid JSON in request body" }, 400),
+        );
       }
     }
 

@@ -330,6 +330,8 @@ describe("invoke e2e: full arc through the real proxy", () => {
     });
     expect(res.status).toBe(403);
     expect(lastForwarded).toBeNull();
+    // the internal gate marker must never leak on the envelope route either.
+    expect(res.headers.get("x-steward-cap-gate")).toBeNull();
   });
 
   it("ungranted capability => 403", async () => {
