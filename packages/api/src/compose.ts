@@ -116,55 +116,76 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
   // 1) lean core: global mw + all core auth mw (NO idempotency, NO routes yet).
   const app = createApp();
 
-  if (!enabled.has("trading")) {
+  if (enabled.size === 0) {
     // LEAN MODE: no opt-in plugins to register. the deferred-route machinery only
     // exists to slot a plugin's auth mw before idempotency and its routes after;
     // with no plugins there is nothing to defer, so mount core idempotency +
     // core routes directly. ordering is identical to FULL minus the (absent)
     // plugin contributions: [global mw + core auth mw (createApp)] -> idempotency
-    // -> core routes. the trading plugin is NOT imported in this path, so its
-    // module is never evaluated when trading is disabled.
+    // -> core routes. no opt-in plugin module is imported in this path, so none
+    // is ever evaluated in lean mode.
     mountCoreIdempotencyAndRoutes(app);
     return app;
   }
 
-  // FULL MODE: register the trading plugin. behavior-identical to the historical
-  // hardcoded path — same registration, same ordering, same migrations.
+  // FULL MODE: register this deploy's enabled opt-in plugins. behavior-identical
+  // to the historical hardcoded path for trading — same registration, same
+  // ordering, same migrations — plus any other enabled plugin (capabilities).
   //
-  // 2) plugin auth-middleware phase + buffered routes. trade auth mw lands now,
-  //    before idempotency; trade routes are buffered for after.
+  // 2) plugin auth-middleware phase + buffered routes. each plugin's auth mw lands
+  //    now, before idempotency; its routes are buffered for after.
   //
-  // the trading plugin is imported with a STATIC, bundler-discoverable specifier so
-  // Wrangler/esbuild include `@stwd/plugin-trading` in the Worker bundle (a
-  // non-analyzable dynamic specifier would be omitted, and the Worker would fail at
-  // runtime with a missing module on the first request). gating is on the
-  // EXECUTION (the `if (enabled.has("trading"))` guard around this block), NOT on
-  // the import specifier — the literal `import("@stwd/plugin-trading")` string is
-  // still statically analyzable so the bundler always includes the module; it is
-  // simply not EVALUATED when trading is disabled. this is the DEPLOY-ONLY
-  // composition root, so it is allowed to reference the plugin; the LIBRARY entry
-  // (lib.ts) does NOT re-export composeApp, so a consumer importing `@stwd/api`
-  // never pulls the plugin into its graph and the lean core stays trading-free.
+  // each opt-in plugin is imported with a STATIC, bundler-discoverable specifier so
+  // Wrangler/esbuild include it in the Worker bundle (a non-analyzable dynamic
+  // specifier would be omitted, and the Worker would fail at runtime with a
+  // missing module on the first request). gating is on the EXECUTION (the
+  // `enabled.has(...)` guards below), NOT on the import specifier — the literal
+  // `import("@stwd/plugin-...")` strings are still statically analyzable so the
+  // bundler always includes the modules; they are simply not EVALUATED when the
+  // plugin is disabled. this is the DEPLOY-ONLY composition root, so it is allowed
+  // to reference the plugins; the LIBRARY entry (lib.ts) does NOT re-export
+  // composeApp, so a consumer importing `@stwd/api` never pulls a plugin into its
+  // graph and the lean core stays plugin-free.
   const ctx = buildPluginContext();
-  const { tradingPlugin } = (await import("@stwd/plugin-trading")) as {
-    tradingPlugin: Parameters<PluginHost<typeof ctx>["register"]>[2];
-  };
+  type ComposedPlugin = Parameters<PluginHost<typeof ctx>["register"]>[2];
+  const plugins: ComposedPlugin[] = [];
+
+  if (enabled.has("trading")) {
+    const { tradingPlugin } = (await import("@stwd/plugin-trading")) as {
+      tradingPlugin: ComposedPlugin;
+    };
+    plugins.push(tradingPlugin);
+  }
+
+  if (enabled.has("capabilities")) {
+    // PARITY: gated by the SAME resolver as its migrations (see
+    // runComposedPluginMigrations). the capabilities plugin also contributes the
+    // `capability-intent` policy rule declaratively (plugin.policyRules); the host
+    // registers it into the policy-engine evaluator registry BEFORE any route
+    // runs, so the agent invoke path can evaluate capability-intent rules.
+    const { capabilitiesPlugin } = (await import("@stwd/plugin-capabilities")) as {
+      capabilitiesPlugin: ComposedPlugin;
+    };
+    plugins.push(capabilitiesPlugin);
+  }
+
   const { deferred, flush } = makeDeferredRouteApp(app);
 
   // The plugin host composes the plugin(s): it orders by `dependsOn` (failing
   // closed on a missing/cyclic dep), merges each plugin's declared
   // `webhookEvents` into the SHARED process-wide registry the webhook config/
-  // dispatch path consults (so a plugin's event type is accepted), then runs
-  // each plugin's `register`. It registers onto the DEFERRED-ROUTE proxy so the
-  // load-bearing ordering is preserved: plugin auth mw lands now (before
+  // dispatch path consults (so a plugin's event type is accepted), registers each
+  // plugin's declared `policyRules` into the policy-engine evaluator registry,
+  // then runs each plugin's `register`. It registers onto the DEFERRED-ROUTE proxy
+  // so the load-bearing ordering is preserved: plugin auth mw lands now (before
   // idempotency), plugin routes are buffered and flushed after.
   const host = new PluginHost<typeof ctx>(webhookEventRegistry);
-  await host.register(deferred, ctx, tradingPlugin);
+  await host.register(deferred, ctx, ...plugins);
 
   // 3) core idempotency + core routes.
   mountCoreIdempotencyAndRoutes(app);
 
-  // 4) flush the plugin's buffered routes (now AFTER idempotency).
+  // 4) flush the plugins' buffered routes (now AFTER idempotency).
   flush();
 
   return app;
@@ -195,19 +216,32 @@ export async function composeApp(): Promise<Hono<{ Variables: AppVariables }>> {
 export async function runComposedPluginMigrations(): Promise<
   Array<{ pluginName: string; id: string; migrationsTable: string }>
 > {
-  // PARITY with composeApp: resolve the SAME enabled set from the SAME resolver.
-  // if trading is disabled, collect NO trading migrations (its routes are also
-  // not mounted by composeApp) — the two paths can never drift.
+  // PARITY with composeApp: resolve the SAME enabled set from the SAME resolver,
+  // and collect migrations for EXACTLY the plugins composeApp registers. a plugin
+  // that is disabled contributes NO migrations (its routes are also not mounted)
+  // — the two paths can never drift (both-on or both-off, per plugin).
   const enabled = resolveEnabledPlugins();
-  if (!enabled.has("trading")) {
+  if (enabled.size === 0) {
     return [];
   }
 
   const ctx = buildPluginContext();
-  const { tradingPlugin } = (await import("@stwd/plugin-trading")) as {
-    tradingPlugin: Parameters<PluginHost<typeof ctx>["register"]>[2];
-  };
+  type ComposedPlugin = Parameters<PluginHost<typeof ctx>["register"]>[2];
   const host = new PluginHost<typeof ctx>();
-  host.collectMigrations(tradingPlugin);
+
+  if (enabled.has("trading")) {
+    const { tradingPlugin } = (await import("@stwd/plugin-trading")) as {
+      tradingPlugin: ComposedPlugin;
+    };
+    host.collectMigrations(tradingPlugin);
+  }
+
+  if (enabled.has("capabilities")) {
+    const { capabilitiesPlugin } = (await import("@stwd/plugin-capabilities")) as {
+      capabilitiesPlugin: ComposedPlugin;
+    };
+    host.collectMigrations(capabilitiesPlugin);
+  }
+
   return host.runMigrations();
 }

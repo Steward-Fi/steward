@@ -29,6 +29,7 @@
     "@stwd/adapters": "workspace:*",
     "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
+    "@stwd/plugin-capabilities": "workspace:*",
     "@stwd/plugin-trading": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
     "@stwd/redis": "workspace:*",

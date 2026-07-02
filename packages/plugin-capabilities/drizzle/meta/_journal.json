@@ -8,6 +8,13 @@
       "when": 1782800000000,
       "tag": "0000_capabilities",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1782900000000,
+      "tag": "0001_capability_invocations",
+      "breakpoints": true
     }
   ]
 }

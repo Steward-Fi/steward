@@ -15,7 +15,10 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@stwd/auth": "workspace:*",
     "@stwd/db": "workspace:*",
+    "@stwd/policy-engine": "workspace:*",
+    "@stwd/proxy-client": "workspace:*",
     "@stwd/redis": "workspace:*",
     "@stwd/shared": "workspace:*",
     "@stwd/vault": "workspace:*",
@@ -24,8 +27,6 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@stwd/plugin-sdk": "workspace:*",
-    "@stwd/policy-engine": "workspace:*",
     "@types/node": "^25.5.0"
   },
   "description": "Opt-in capability plugin for Steward: named narrowly-scoped credential uses (capabilities) + per-agent grants, each paired to a narrow secret_route the proxy injects through. Operator/tenant-auth CRUD with plugin-owned namespaced migrations. The core does not depend on this package."
