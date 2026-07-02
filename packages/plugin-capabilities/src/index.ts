@@ -130,6 +130,8 @@ export const capabilitiesPlugin: StewardApiPlugin = {
     // anything that is not exactly the invoke subpath falls through to tenantAuth.
     app.use("/capabilities/:name/invoke", (c, next) => requireAgentJwt(c, next));
     app.use("/v1/capabilities/:name/invoke", (c, next) => requireAgentJwt(c, next));
+    app.use("/capabilities/:name/openai/v1/*", (c, next) => requireAgentJwt(c, next));
+    app.use("/v1/capabilities/:name/openai/v1/*", (c, next) => requireAgentJwt(c, next));
     app.use("/capabilities", (c, next) => tenantAuth(c, next));
     app.use("/capabilities/*", (c, next) => tenantGateSkippingInvoke(c, next, tenantAuth));
     app.use("/v1/capabilities", (c, next) => tenantAuth(c, next));
@@ -154,14 +156,15 @@ export const capabilitiesPlugin: StewardApiPlugin = {
 };
 
 /** the invoke subpath predicate: `/capabilities/<name>/invoke` (any single name segment). */
-const INVOKE_SUBPATH = /\/(?:v1\/)?capabilities\/[^/]+\/invoke\/?$/;
+const INVOKE_SUBPATH =
+  /\/(?:v1\/)?capabilities\/[^/]+\/(?:invoke|openai\/v1\/(?:chat\/completions|models))\/?$/;
 
 /**
- * Apply the operator tenant gate to a `/capabilities/*` request UNLESS it is the
- * agent-facing invoke subpath (which is authed by its own agent-jwt middleware).
- * Skipping the invoke subpath here prevents the broad operator gate from
- * rejecting a valid agent token. Fail-closed: only the exact invoke subpath is
- * exempted; every other path is gated.
+ * Apply the operator tenant gate to a `/capabilities/*` request UNLESS it is an
+ * agent-facing invoke/adapter subpath (which is authed by its own agent-jwt
+ * middleware). Skipping those exact subpaths here prevents the broad operator
+ * gate from rejecting a valid agent token. Fail-closed: only exact agent subpaths
+ * are exempted; every other path is gated.
  */
 async function tenantGateSkippingInvoke(
   c: Context<{ Variables: AppVariables }>,
