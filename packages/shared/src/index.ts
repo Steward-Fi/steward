@@ -163,7 +163,7 @@ export interface AutoApprovalRuleRecord {
 // ─── Chain Family ───
 
 /** Identifies the blockchain family for a wallet key/address. */
-export type ChainFamily = "evm" | "solana" | "bitcoin";
+export type ChainFamily = "evm" | "solana" | "bitcoin" | "monero";
 
 export type BitcoinNetwork = "mainnet" | "testnet";
 export type BitcoinAddressType = "p2wpkh" | "p2tr";
@@ -180,8 +180,29 @@ export interface BitcoinWalletMetadata {
   caip2: string;
 }
 
+export type MoneroNetwork = "mainnet" | "stagenet";
+
+/**
+ * Public wallet metadata for a Monero wallet. Contains PUBLIC keys only.
+ *
+ * Monero-specific caveat: the private view key is a secret in Monero's
+ * privacy model (it grants incoming-transaction visibility) and lives in the
+ * encrypted key payload alongside the spend key — it must NEVER appear here.
+ */
+export interface MoneroWalletMetadata {
+  network: MoneroNetwork;
+  address: string;
+  publicSpendKey: string;
+  publicViewKey: string;
+  /** Chain height at wallet creation; scanning starts here (light-sync). */
+  restoreHeight: number;
+  account: number;
+  caip2: string;
+}
+
 export interface WalletAddressMetadata {
   bitcoin?: BitcoinWalletMetadata;
+  monero?: MoneroWalletMetadata;
   [key: string]: unknown;
 }
 
@@ -197,7 +218,7 @@ export interface AgentIdentity {
    * All addresses for this agent, keyed by chain family.
    * Present for agents created with multi-wallet support.
    */
-  walletAddresses?: { evm?: string; solana?: string; bitcoin?: string };
+  walletAddresses?: { evm?: string; solana?: string; bitcoin?: string; monero?: string };
   erc8004TokenId?: string;
   platformId?: string; // e.g. waifu.fun agent ID
   createdAt: Date;

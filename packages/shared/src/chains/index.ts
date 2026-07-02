@@ -14,6 +14,7 @@ import { bitcoin, bitcoinTestnet } from "./bitcoin.js";
 import { bsc, bscTestnet } from "./bsc.js";
 import { ethereum } from "./ethereum.js";
 import { gnosis } from "./gnosis.js";
+import { monero, moneroStagenet } from "./monero.js";
 import { polygon } from "./polygon.js";
 import { solana, solanaDevnet } from "./solana.js";
 import type { ChainProvider } from "./types.js";
@@ -48,6 +49,8 @@ export const CHAIN_PROVIDERS: readonly ChainProvider[] = [
   solanaDevnet,
   bitcoin,
   bitcoinTestnet,
+  monero,
+  moneroStagenet,
 ];
 
 /** Lookup helpers built from the registry. */
@@ -77,6 +80,8 @@ export {
   bscTestnet,
   ethereum,
   gnosis,
+  monero,
+  moneroStagenet,
   polygon,
   solana,
   solanaDevnet,
