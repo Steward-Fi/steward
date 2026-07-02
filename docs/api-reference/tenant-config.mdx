@@ -71,7 +71,7 @@ curl https://api.steward.fi/tenants/my-platform/config \
 
 If no config has been saved, returns a default empty config (all features enabled, no policy restrictions).
 
-Built-in defaults are available for: `milady-cloud`, `milady-desktop`, `eliza-cloud`.
+Built-in defaults ship for a small set of known tenant ids. If your tenant id matches one, its preset config is used as the fallback; otherwise the default empty config applies.
 
 ---
 

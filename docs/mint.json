@@ -91,7 +91,7 @@
         "guides/local-mode",
         "guides/wallet-external-id-migration",
         "guides/eliza-plugin",
-        "guides/milady-cloud",
+        "guides/cloud-deployment",
         "guides/self-hosting",
         "guides/docker"
       ]

@@ -83,7 +83,7 @@ docker compose up -d
 
 ## Who Uses Steward
 
-- **Milady Cloud** — Production deployment managing 17+ AI agents across 6 nodes on Base mainnet
+- **Production multi-agent deployments** — A production deployment managing dozens of AI agents across a node fleet on Base mainnet
 - **Agent developers** — Anyone building autonomous agents that need wallet access or API credential management
 - **Platform operators** — Teams running multi-tenant agent hosting who need security, cost control, and compliance
 - **Desktop apps** — Local mode with PGLite runs as an embedded sidecar with zero external dependencies
