@@ -94,6 +94,49 @@ export const capabilityGrants = pgTable(
   }),
 );
 
+/**
+ * capability_invocations - the append-only audit + rate-limit source for the
+ * agent invoke path (W-1c). EVERY invoke attempt records exactly one row with its
+ * terminal decision (allow / deny / approval / error), regardless of outcome:
+ *   - it is the audit trail (who invoked what, and how it was decided),
+ *   - it is the source of the trailing-hour invoke count the `capability-intent`
+ *     `maxCallsPerHour` constraint reads (count of this agent+capability rows in
+ *     the last hour). recording the attempt BEFORE forwarding means the count is
+ *     fail-closed: a decision is always durable before any credential leaves.
+ *
+ * plugin-owned + namespaced (mirrors capabilities/capability_grants). no FK to
+ * core tables: an invocation is a self-contained decision record keyed by
+ * tenant/agent/capability ids.
+ */
+export const capabilityInvocations = pgTable(
+  "capability_invocations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: text("tenant_id").notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    // nullable: an attempt can be recorded (denied/404) before a capability row
+    // is resolved (e.g. unknown capability name). when set, it is the resolved
+    // capability's id.
+    capabilityId: uuid("capability_id"),
+    decision: text("decision").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    decisionCheck: check(
+      "capability_invocations_decision_check",
+      sql`${table.decision} IN ('allow','deny','approval','error')`,
+    ),
+    // the rate-limit + audit read path: this agent's rows for a capability in a
+    // time window. (agent_id, capability_id, created_at) covers the count query.
+    rateIdx: index("capability_invocations_rate_idx").on(
+      table.agentId,
+      table.capabilityId,
+      table.createdAt,
+    ),
+    tenantIdx: index("capability_invocations_tenant_idx").on(table.tenantId),
+  }),
+);
+
 export const capabilityRelations = relations(capabilities, ({ many }) => ({
   grants: many(capabilityGrants),
 }));
@@ -109,3 +152,8 @@ export type Capability = typeof capabilities.$inferSelect;
 export type NewCapability = typeof capabilities.$inferInsert;
 export type CapabilityGrant = typeof capabilityGrants.$inferSelect;
 export type NewCapabilityGrant = typeof capabilityGrants.$inferInsert;
+export type CapabilityInvocation = typeof capabilityInvocations.$inferSelect;
+export type NewCapabilityInvocation = typeof capabilityInvocations.$inferInsert;
+
+/** the terminal decision recorded for an invoke attempt. */
+export type InvocationDecision = "allow" | "deny" | "approval" | "error";

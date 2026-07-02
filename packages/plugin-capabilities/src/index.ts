@@ -27,20 +27,26 @@
  */
 
 import { fileURLToPath } from "node:url";
+import { capabilityIntentContribution } from "@stwd/policy-engine";
 import type { AppVariables, StewardPlugin } from "@stwd/shared";
-import type { Hono } from "hono";
+import type { Context, Hono, Next } from "hono";
 import type { StewardAppContext } from "./context";
+import { createInvokeRoutes } from "./invoke";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 
 export type { StewardAppContext } from "./context";
+export { createInvokeRoutes } from "./invoke";
 export { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 export type {
   Capability,
   CapabilityGrant,
+  CapabilityInvocation,
+  InvocationDecision,
   NewCapability,
   NewCapabilityGrant,
+  NewCapabilityInvocation,
 } from "./schema";
-export { capabilities, capabilityGrants } from "./schema";
+export { capabilities, capabilityGrants, capabilityInvocations } from "./schema";
 export type { CapabilitySpec } from "./store";
 export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
 export {
@@ -71,7 +77,14 @@ const MIGRATIONS_FOLDER = fileURLToPath(new URL("../drizzle", import.meta.url));
  * (capability.invoked / .denied / .approval_queued) are declared by W-1c, the
  * package that emits them.
  */
-export const CAPABILITY_WEBHOOK_EVENTS = ["capability.created", "capability.revoked"] as const;
+export const CAPABILITY_WEBHOOK_EVENTS = [
+  "capability.created",
+  "capability.revoked",
+  // invoke-time events (W-1c). declared by THIS package because it emits them.
+  "capability.invoked",
+  "capability.denied",
+  "capability.approval_queued",
+] as const;
 
 /**
  * The capability plugin. `register(app, ctx)`:
@@ -90,27 +103,71 @@ export const capabilitiesPlugin: StewardApiPlugin = {
   name: "capabilities",
   version: "0.1.0",
   webhookEvents: CAPABILITY_WEBHOOK_EVENTS,
+  // the `capability-intent` policy rule (W-1b, shipped in @stwd/policy-engine as a
+  // PolicyRuleContribution). the plugin host registers it into the policy-engine
+  // evaluator registry BEFORE any route runs, so the engine can evaluate a
+  // capability-intent rule (via the registry's default arm) instead of denying it
+  // as an unknown type. the invoke path (invoke.ts) still owns the effective
+  // default-deny; this contribution just makes the rule TYPE evaluable engine-wide.
+  // registration fails closed on a type collision (a core rule type or another
+  // plugin's) — see the plugin host.
+  policyRules: [capabilityIntentContribution],
   migrations: {
     id: "capabilities",
     migrationsFolder: MIGRATIONS_FOLDER,
   },
   register(app, ctx) {
-    const { tenantAuth } = ctx;
+    const { tenantAuth, requireAgentJwt } = ctx;
 
-    // ── tenant gate on the management + agent-scoped surfaces ─────────────────
+    // ── auth gates ────────────────────────────────────────────────────────────
+    // the agent-facing invoke path (`/capabilities/:name/invoke`) is agent-token-
+    // authed, NOT tenant-gated. it carries its OWN agent-jwt middleware. every
+    // OTHER `/capabilities/*` subpath is the operator CRUD/grant surface and stays
+    // behind the tenant gate. because a single broad `/capabilities/*` tenant gate
+    // would also match the invoke subpath (and reject an agent token), the tenant
+    // gate is applied via a wrapper that SKIPS the invoke subpath — the invoke
+    // route's own agent-jwt middleware is the only auth on that path. fail-closed:
+    // anything that is not exactly the invoke subpath falls through to tenantAuth.
+    app.use("/capabilities/:name/invoke", (c, next) => requireAgentJwt(c, next));
+    app.use("/v1/capabilities/:name/invoke", (c, next) => requireAgentJwt(c, next));
     app.use("/capabilities", (c, next) => tenantAuth(c, next));
-    app.use("/capabilities/*", (c, next) => tenantAuth(c, next));
+    app.use("/capabilities/*", (c, next) => tenantGateSkippingInvoke(c, next, tenantAuth));
     app.use("/v1/capabilities", (c, next) => tenantAuth(c, next));
-    app.use("/v1/capabilities/*", (c, next) => tenantAuth(c, next));
+    app.use("/v1/capabilities/*", (c, next) => tenantGateSkippingInvoke(c, next, tenantAuth));
     app.use("/agents/*", (c, next) => tenantAuth(c, next));
     app.use("/v1/agents/*", (c, next) => tenantAuth(c, next));
 
     // ── route mounts (unversioned + versioned) ────────────────────────────────
+    // invoke routes mount FIRST so `/capabilities/:name/invoke` is registered
+    // before the CRUD `/:id` matcher (hono resolves same-specificity routes in
+    // registration order; the invoke handler ends the chain for that path).
+    const invokeRoutes = createInvokeRoutes(ctx);
     const capabilityRoutes = createCapabilityRoutes(ctx);
     const agentRoutes = createAgentCapabilityRoutes(ctx);
+    app.route("/capabilities", invokeRoutes);
+    app.route("/v1/capabilities", invokeRoutes);
     app.route("/capabilities", capabilityRoutes);
     app.route("/v1/capabilities", capabilityRoutes);
     app.route("/agents", agentRoutes);
     app.route("/v1/agents", agentRoutes);
   },
 };
+
+/** the invoke subpath predicate: `/capabilities/<name>/invoke` (any single name segment). */
+const INVOKE_SUBPATH = /\/(?:v1\/)?capabilities\/[^/]+\/invoke\/?$/;
+
+/**
+ * Apply the operator tenant gate to a `/capabilities/*` request UNLESS it is the
+ * agent-facing invoke subpath (which is authed by its own agent-jwt middleware).
+ * Skipping the invoke subpath here prevents the broad operator gate from
+ * rejecting a valid agent token. Fail-closed: only the exact invoke subpath is
+ * exempted; every other path is gated.
+ */
+async function tenantGateSkippingInvoke(
+  c: Context<{ Variables: AppVariables }>,
+  next: Next,
+  tenantAuth: StewardAppContext["tenantAuth"],
+): Promise<void | Response> {
+  if (INVOKE_SUBPATH.test(c.req.path)) return next();
+  return tenantAuth(c, next);
+}

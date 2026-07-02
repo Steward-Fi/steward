@@ -35,13 +35,22 @@ import {
   agents,
   and,
   eq,
+  gte,
   isNull,
   type NewSecretRoute,
   type SecretRoute,
   secretRoutes,
   secrets,
+  sql,
 } from "@stwd/db";
-import { type Capability, type CapabilityGrant, capabilities, capabilityGrants } from "./schema";
+import {
+  type Capability,
+  type CapabilityGrant,
+  capabilities,
+  capabilityGrants,
+  capabilityInvocations,
+  type InvocationDecision,
+} from "./schema";
 
 /**
  * a drizzle db handle (the core hands it via ctx.db). typed loosely so the plugin
@@ -353,6 +362,62 @@ export class CapabilityStore {
         ),
       );
     return rows.filter((r) => !isExpired(r.grant.expiresAt, now));
+  }
+
+  // ── invocations (audit + rate-limit source for the invoke path) ─────────────
+
+  /**
+   * Record ONE invoke attempt with its terminal decision. Append-only; called on
+   * EVERY invoke path outcome (allow/deny/approval/error) so the row is durable
+   * before any credential leaves (fail-closed audit + rate source). Returns the
+   * new invocation id (used as the 202 `approvalId` for a require-approval
+   * decision).
+   */
+  async recordInvocation(input: {
+    tenantId: string;
+    agentId: string;
+    capabilityId: string | null;
+    decision: InvocationDecision;
+    now?: Date;
+  }): Promise<string> {
+    const values: Record<string, unknown> = {
+      tenantId: input.tenantId,
+      agentId: input.agentId,
+      capabilityId: input.capabilityId,
+      decision: input.decision,
+    };
+    if (input.now) values.createdAt = input.now;
+    const [row] = await this.db.insert(capabilityInvocations).values(values).returning();
+    return row.id as string;
+  }
+
+  /**
+   * Count this agent's invocations of a specific capability in the trailing
+   * `windowMs` (default 1h) as of `now`. This is the source for the
+   * `capability-intent` `maxCallsPerHour` constraint. Counts ALL recorded
+   * attempts in the window (an attempt consumes rate whether or not it forwarded
+   * — a denied/errored attempt still counts, so a caller cannot probe the cap for
+   * free). Only rows carrying THIS capability id are counted (a pre-resolution
+   * denial with a null capability id is not attributed to any capability's cap).
+   */
+  async countInvocations1h(
+    agentId: string,
+    capabilityId: string,
+    now: Date = new Date(),
+    windowMs: number = 60 * 60_000,
+  ): Promise<number> {
+    const since = new Date(now.getTime() - windowMs);
+    const [row] = await this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(capabilityInvocations)
+      .where(
+        and(
+          eq(capabilityInvocations.agentId, agentId),
+          eq(capabilityInvocations.capabilityId, capabilityId),
+          gte(capabilityInvocations.createdAt, since),
+        ),
+      );
+    return Number(row?.n ?? 0);
   }
 
   // ── grant create (materializes the paired route) ────────────────────────────

@@ -42,7 +42,7 @@
  * authority for "what can be enabled" so adding a plugin is a one-line change
  * here plus its registration in compose.ts.
  */
-export const KNOWN_PLUGIN_NAMES = new Set<string>(["trading"]);
+export const KNOWN_PLUGIN_NAMES = new Set<string>(["trading", "capabilities"]);
 
 /**
  * Error thrown when `STEWARD_PLUGINS` names a plugin this composition root does

@@ -53,6 +53,7 @@
         "@stwd/adapters": "workspace:*",
         "@stwd/auth": "workspace:*",
         "@stwd/db": "workspace:*",
+        "@stwd/plugin-capabilities": "workspace:*",
         "@stwd/plugin-trading": "workspace:*",
         "@stwd/policy-engine": "workspace:*",
         "@stwd/redis": "workspace:*",
@@ -178,7 +179,10 @@
       "name": "@stwd/plugin-capabilities",
       "version": "0.1.0",
       "dependencies": {
+        "@stwd/auth": "workspace:*",
         "@stwd/db": "workspace:*",
+        "@stwd/policy-engine": "workspace:*",
+        "@stwd/proxy-client": "workspace:*",
         "@stwd/redis": "workspace:*",
         "@stwd/shared": "workspace:*",
         "@stwd/vault": "workspace:*",
@@ -187,8 +191,7 @@
         "zod": "^4.3.6",
       },
       "devDependencies": {
-        "@stwd/plugin-sdk": "workspace:*",
-        "@stwd/policy-engine": "workspace:*",
+        "@stwd/proxy": "workspace:*",
         "@types/node": "^25.5.0",
       },
     },

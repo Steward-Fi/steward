@@ -120,6 +120,7 @@ describe("resolveEnabledPlugins — fail-closed on unknown plugin", () => {
 describe("KNOWN_PLUGIN_NAMES", () => {
   it("contains trading and nothing unexpected", () => {
     expect(KNOWN_PLUGIN_NAMES.has("trading")).toBe(true);
-    expect([...KNOWN_PLUGIN_NAMES]).toEqual(["trading"]);
+    expect(KNOWN_PLUGIN_NAMES.has("capabilities")).toBe(true);
+    expect([...KNOWN_PLUGIN_NAMES]).toEqual(["trading", "capabilities"]);
   });
 });
