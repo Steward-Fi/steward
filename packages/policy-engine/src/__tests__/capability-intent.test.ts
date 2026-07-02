@@ -329,6 +329,33 @@ describe("capability-intent — config validation (fail closed)", () => {
     expect(r.reason).toContain("argEquals");
   });
 
+  it("denies a malformed glob pattern (* not in trailing .* position => fail closed)", () => {
+    for (const bad of ["github.*.delete", "*.delete", "git*hub", "github.**", "*"]) {
+      const r = evaluateCapabilityIntent(
+        rule({ capabilities: [bad], effect: "deny" }),
+        makeContext({ capability: cap({ name: "github.pr.delete" }) }),
+      );
+      expect(r.passed).toBe(false);
+      expect(r.reason).toContain("unsupported glob");
+    }
+  });
+
+  it("accepts the supported trailing .* glob and a bare exact name", () => {
+    // sanity: valid patterns still parse (deny fires on match).
+    expect(
+      evaluateCapabilityIntent(
+        rule({ capabilities: ["github.*"], effect: "deny" }),
+        makeContext({ capability: cap({ name: "github.pr.delete" }) }),
+      ).passed,
+    ).toBe(false);
+    expect(
+      evaluateCapabilityIntent(
+        rule({ capabilities: ["github.pr.comment"], effect: "deny" }),
+        makeContext({ capability: cap({ name: "github.pr.comment" }) }),
+      ).passed,
+    ).toBe(false);
+  });
+
   it("denies an unknown top-level config key (typo => fail closed)", () => {
     const r = evaluateCapabilityIntent(
       rule({ capabilities: ["github.*"], effect: "allow", effects: "deny" }),

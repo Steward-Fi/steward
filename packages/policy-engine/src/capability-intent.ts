@@ -152,6 +152,21 @@ function parseConfig(raw: Record<string, unknown>): CapabilityIntentConfig | { e
     return { error: "capability-intent: `capabilities` must be a non-empty string[]" };
   }
 
+  // FAIL CLOSED on malformed patterns: `*` is supported ONLY as a single
+  // trailing `.*` prefix glob (e.g. `github.*`). Any other `*` usage (e.g.
+  // `github.*.delete`, `*.delete`, `git*hub`) would be treated by
+  // `patternMatches` as an exact literal that can never match, silently making
+  // a deny/require-approval rule inert. Reject it at parse so the misconfig
+  // denies instead of passing (codex P2).
+  const badPattern = (capabilities as string[]).find(
+    (p) => p.includes("*") && !(p.endsWith(".*") && !p.slice(0, -2).includes("*")),
+  );
+  if (badPattern !== undefined) {
+    return {
+      error: `capability-intent: unsupported glob "${badPattern}" (\`*\` allowed only as a single trailing ".*")`,
+    };
+  }
+
   const effect = raw.effect;
   if (effect !== "allow" && effect !== "deny" && effect !== "require-approval") {
     return {
