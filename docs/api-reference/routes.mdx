@@ -205,3 +205,21 @@ A route matches when:
 
 A request to `api.example.com/v2/trading/orders` matches the priority-10 route.
 A request to `api.example.com/v1/data` matches the priority-0 fallback.
+
+## Restricted inject headers
+
+Some `injectKey` header names are rejected at route-create time. Hop-by-hop and
+framing-sensitive headers (`connection`, `content-length`, `host`,
+`transfer-encoding`, etc.) are unconditionally blocked.
+
+Session-cookie headers (`Cookie` and `Set-Cookie`, matched case-insensitively)
+are **blocked by default** and only become injectable when the operator sets
+`STEWARD_ALLOW_COOKIE_INJECTION=true`. Injecting a raw `Cookie` replays a whole
+browser session: there is no scoping, no revocation handle, and no `Set-Cookie`
+rotation path, so the blast radius is the entire session. The preferred pattern
+is a **scoped broker read token** injected as `Authorization: Bearer <token>` —
+revocable, auditable, and narrowed per grant. Raw session replay stays available
+for hosts that only speak cookies, but as a deliberate operator opt-in rather
+than an implicit default. Existing routes are validated at create time, so a
+route created before this default took effect keeps working; the flag only
+gates creation of new cookie-injecting routes.

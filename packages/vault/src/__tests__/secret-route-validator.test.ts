@@ -181,6 +181,81 @@ describe("validateSecretRouteConfig — core rules", () => {
   });
 });
 
+describe("cookie injection — fail-closed default with explicit opt-in (#157)", () => {
+  beforeEach(() => {
+    delete process.env.STEWARD_ALLOW_COOKIE_INJECTION;
+  });
+  afterEach(() => {
+    delete process.env.STEWARD_ALLOW_COOKIE_INJECTION;
+  });
+
+  it("blocks injectKey=cookie by default", () => {
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "cookie" })).toContain(
+      "STEWARD_ALLOW_COOKIE_INJECTION=true",
+    );
+  });
+
+  it("blocks injectKey=set-cookie by default", () => {
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "set-cookie" })).toContain(
+      "STEWARD_ALLOW_COOKIE_INJECTION=true",
+    );
+  });
+
+  it("blocks cookie case-insensitively (Cookie / COOKIE / cookie)", () => {
+    for (const key of ["Cookie", "COOKIE", "cookie", "CoOkIe"]) {
+      expect(validateSecretRouteConfig({ ...okBase, injectKey: key })).toContain(
+        "STEWARD_ALLOW_COOKIE_INJECTION=true",
+      );
+    }
+  });
+
+  it("blocks set-cookie case-insensitively (Set-Cookie / SET-COOKIE)", () => {
+    for (const key of ["Set-Cookie", "SET-COOKIE", "set-cookie"]) {
+      expect(validateSecretRouteConfig({ ...okBase, injectKey: key })).toContain(
+        "STEWARD_ALLOW_COOKIE_INJECTION=true",
+      );
+    }
+  });
+
+  it("allows injectKey=cookie only when the opt-in flag is set", () => {
+    process.env.STEWARD_ALLOW_COOKIE_INJECTION = "true";
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "cookie" })).toBeNull();
+  });
+
+  it("allows injectKey=Cookie (mixed case) when the opt-in flag is set", () => {
+    process.env.STEWARD_ALLOW_COOKIE_INJECTION = "true";
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "Cookie" })).toBeNull();
+  });
+
+  it("allows injectKey=set-cookie when the opt-in flag is set", () => {
+    process.env.STEWARD_ALLOW_COOKIE_INJECTION = "true";
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "set-cookie" })).toBeNull();
+  });
+
+  it("treats any non-'true' flag value as blocked (fail-closed)", () => {
+    for (const val of ["1", "yes", "TRUE", "", "false"]) {
+      process.env.STEWARD_ALLOW_COOKIE_INJECTION = val;
+      expect(validateSecretRouteConfig({ ...okBase, injectKey: "cookie" })).toContain(
+        "STEWARD_ALLOW_COOKIE_INJECTION=true",
+      );
+    }
+  });
+
+  it("leaves unconditionally-blocked hop-by-hop headers blocked even with the cookie flag on", () => {
+    process.env.STEWARD_ALLOW_COOKIE_INJECTION = "true";
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "host" })).toContain("is not allowed");
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "content-length" })).toContain(
+      "is not allowed",
+    );
+  });
+
+  it("does not affect other injectKeys — authorization stays valid regardless of the flag", () => {
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "authorization" })).toBeNull();
+    process.env.STEWARD_ALLOW_COOKIE_INJECTION = "true";
+    expect(validateSecretRouteConfig({ ...okBase, injectKey: "authorization" })).toBeNull();
+  });
+});
+
 describe("STRICT_HOSTS — api.github.com narrowness", () => {
   it("declares api.github.com as a strict host", () => {
     expect(STRICT_HOSTS["api.github.com"]).toEqual({
@@ -322,13 +397,20 @@ describe("validator parity across former call sites", () => {
       accept: false,
     },
     { name: "bad injectKey", input: { ...okBase, injectKey: "content-length" }, accept: false },
+    {
+      name: "cookie injectKey blocked by default",
+      input: { ...okBase, injectKey: "cookie" },
+      accept: false,
+    },
   ];
 
   beforeEach(() => {
     delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
+    delete process.env.STEWARD_ALLOW_COOKIE_INJECTION;
   });
   afterEach(() => {
     delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
+    delete process.env.STEWARD_ALLOW_COOKIE_INJECTION;
   });
 
   for (const c of matrix) {

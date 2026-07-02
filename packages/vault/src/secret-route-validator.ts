@@ -32,7 +32,8 @@ export const DEFAULT_SECRET_ROUTE_HOSTS = [
 
 /**
  * Header names that must never be settable via injectKey — hop-by-hop headers
- * and framing-sensitive headers whose injection could enable smuggling.
+ * and framing-sensitive headers whose injection could enable smuggling. These
+ * are unconditionally blocked; there is no operator escape valve.
  */
 const BLOCKED_INJECT_HEADERS = new Set([
   "connection",
@@ -45,6 +46,20 @@ const BLOCKED_INJECT_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+
+/**
+ * Session-material headers that are blocked by default but may be enabled by a
+ * deliberate operator opt-in (STEWARD_ALLOW_COOKIE_INJECTION=true).
+ *
+ * Injecting a raw `Cookie` header replays a whole browser session: no scoping,
+ * no revocation handle, no `Set-Cookie` rotation path on our side — the blast
+ * radius is the entire session. House style is fail-closed, so this is blocked
+ * by default. The preferred pattern is a scoped broker read token injected as
+ * `Authorization: Bearer <token>` (revocable, auditable, per-grant). Raw
+ * session replay remains a legitimate niche (some hosts only speak cookies), so
+ * it stays reachable — but only as an explicit operator choice, never implicit.
+ */
+const COOKIE_INJECT_HEADERS = new Set(["cookie", "set-cookie"]);
 
 const VALID_PROXY_METHODS = new Set(["*", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]);
 const MAX_SECRET_INJECT_FORMAT_LENGTH = 255;
@@ -98,6 +113,16 @@ export type SecretRouteConfigInput = {
 
 function allowBroadSecretRoutes(): boolean {
   return process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES === "true";
+}
+
+/**
+ * Whether the operator has opted into raw session-cookie injection. Read at
+ * call time (same pattern as allowBroadSecretRoutes) so tests / operators can
+ * toggle it. Fail-closed: anything other than the exact string "true" leaves
+ * cookie injection blocked.
+ */
+function allowCookieInjection(): boolean {
+  return process.env.STEWARD_ALLOW_COOKIE_INJECTION === "true";
 }
 
 /**
@@ -250,6 +275,11 @@ export function validateSecretRouteConfig(
     // denylist; keep the allowlist.
     if (!key || !HTTP_HEADER_NAME.test(key)) return "injectKey is invalid";
     if (BLOCKED_INJECT_HEADERS.has(key)) return `injectKey '${input.injectKey}' is not allowed`;
+    // Session-cookie headers are blocked by default (fail-closed) and only
+    // reachable via a deliberate operator opt-in. See COOKIE_INJECT_HEADERS.
+    if (COOKIE_INJECT_HEADERS.has(key) && !allowCookieInjection()) {
+      return `injectKey '${input.injectKey}' requires STEWARD_ALLOW_COOKIE_INJECTION=true`;
+    }
   }
 
   if (input.injectFormat !== undefined) {
