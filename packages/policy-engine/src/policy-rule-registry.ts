@@ -37,6 +37,7 @@ import type {
   PolicyRule,
 } from "@stwd/shared";
 import type { EvaluatorContext } from "./evaluators";
+import type { ManualApprovalSignal } from "./manual-approval";
 
 /**
  * The set of rule-type discriminators the CORE owns. A plugin may NOT register an
@@ -164,16 +165,18 @@ export const policyRuleRegistry = new PolicyRuleRegistry();
 
 /**
  * Evaluate a rule whose `type` is NOT a core type by consulting the registry.
- * Returns the contributed evaluator's verdict (as a `PolicyResult`), or `null`
- * when no plugin registered an evaluator for the type (the caller then keeps its
- * existing "Unknown policy type" deny). A thrown evaluator error is converted to
- * a fail-closed deny so a buggy plugin can never crash the money-route decision.
+ * Returns the contributed evaluator's verdict (as a `PolicyResult`, optionally
+ * carrying the `requiresManualApproval` signal on a non-passing result), or
+ * `null` when no plugin registered an evaluator for the type (the caller then
+ * keeps its existing "Unknown policy type" deny). A thrown evaluator error is
+ * converted to a fail-closed deny so a buggy plugin can never crash the
+ * money-route decision.
  */
 export async function evaluateRegisteredPolicy(
   rule: PolicyRule,
   ctx: EvaluatorContext,
   registry: PolicyRuleRegistry = policyRuleRegistry,
-): Promise<PolicyResult | null> {
+): Promise<(PolicyResult & ManualApprovalSignal) | null> {
   const evaluator = registry.get(rule.type);
   if (!evaluator) return null;
   const contributedRule: ContributedPolicyRule = {
@@ -187,11 +190,22 @@ export async function evaluateRegisteredPolicy(
     // The contributed result is structurally a PolicyResult; surface it as one,
     // pinning policyId/type to the rule so a misbehaving plugin can't mislabel
     // the verdict's identity.
+    const passed = result.passed === true;
+    // Forward the manual-approval signal ONLY on a non-passing result (mirrors
+    // ManualApprovalSignal's contract in ./manual-approval: the flag is
+    // meaningless on a pass, and the engine must never treat a hard failure as
+    // "needs approval" unless the evaluator explicitly opted in). This lets a
+    // contributed rule (e.g. capability-intent's require-approval effect) route
+    // to the approval queue through the same channel a core rule uses. Absence
+    // of the flag => hard deny (fail closed).
     return {
       policyId: rule.id,
       type: rule.type as PolicyResult["type"],
-      passed: result.passed === true,
+      passed,
       ...(result.reason !== undefined ? { reason: result.reason } : {}),
+      ...(!passed && result.requiresManualApproval === true
+        ? { requiresManualApproval: true }
+        : {}),
     };
   } catch (error) {
     return {
