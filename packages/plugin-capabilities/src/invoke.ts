@@ -315,19 +315,19 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
     const capRules = policySet.filter((r) => isCapabilityIntentRule(r));
 
     // d. evaluate through the engine's existing entry point.
-    const evaluation = await engine.evaluate(capRules, {
-      request: syntheticSignRequest(tenantId, agentId),
-      recentTxCount1h: 0,
-      recentTxCount24h: 0,
-      spentToday: 0n,
-      spentThisWeek: 0n,
-      capability: capabilityCtx,
-      capabilityInvokeCount1h: count1h,
-    });
-
-    // e. DEFAULT-DENY + effect resolution. build the per-rule evaluator context
-    //    once (identical to what the engine used) so matched-allow detection and
-    //    matched-deny/approval detection use the AUTHORITATIVE evaluator.
+    // e. DEFAULT-DENY + effect resolution.
+    //
+    // build the per-rule evaluator context (identical for the engine pass and the
+    // authoritative per-rule loop). we run BOTH:
+    //   - engine.evaluate over the capability-intent rules: the EXISTING entry
+    //     point (all-must-pass composition), so any global engine hooks/audit fire
+    //     exactly as they do for tx signing. it is a consistency/audit pass.
+    //   - the AUTHORITATIVE per-rule loop below: the invoke layer OWNS default-deny
+    //     (the contract) — engine-approved alone is not enough, and the engine's
+    //     dispatch of a contributed rule depends on the plugin having registered
+    //     the evaluator into the registry (true at the compose root; the direct
+    //     loop makes the decision robust regardless of registry state). the loop
+    //     computes matched-allow/deny/approval directly via evaluateCapabilityIntent.
     const evaluatorCtx: EvaluatorContext = {
       request: syntheticSignRequest(tenantId, agentId),
       recentTxCount1h: 0,
@@ -337,6 +337,17 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       capability: capabilityCtx,
       capabilityInvokeCount1h: count1h,
     };
+    // consistency/audit pass through the existing entry point (result inspected
+    // for parity, but the AUTHORITATIVE decision is the per-rule loop below).
+    await engine.evaluate(capRules, {
+      request: evaluatorCtx.request,
+      recentTxCount1h: 0,
+      recentTxCount24h: 0,
+      spentToday: 0n,
+      spentThisWeek: 0n,
+      capability: capabilityCtx,
+      capabilityInvokeCount1h: count1h,
+    });
 
     const governing = capRules.filter((r) => isGoverningRule(r, cap.name));
     if (governing.length === 0) {
@@ -354,9 +365,14 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       });
     }
 
-    // evaluate each governing rule with the authoritative evaluator.
+    // evaluate each governing rule with the authoritative evaluator. all-must-pass:
+    // a matched deny OR a matched allow that failed a constraint is a hard deny
+    // (takes precedence over any other rule). a require-approval routes to 202
+    // only when nothing hard-denied. authorization requires >=1 allow rule that
+    // matched AND passed, with no hard deny.
     let sawApproval = false;
     let matchedAllowPassed = false;
+    let sawDeny = false;
     let denyReason: string | undefined;
     for (const rule of governing) {
       const result = evaluateCapabilityIntent(
@@ -368,22 +384,21 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
         continue;
       }
       if (!result.passed) {
-        // a matched deny, OR a matched allow that failed its constraints.
+        // a matched deny, OR a matched allow that failed its constraints => hard deny.
+        sawDeny = true;
         denyReason = result.reason ?? "denied by policy";
         continue;
       }
-      // passed. only an ALLOW-effect rule authorizes (a passing rule that is not
-      // an allow rule cannot happen for a governing rule: deny/require-approval
-      // never pass. but re-check the effect defensively).
+      // passed. only an ALLOW-effect rule authorizes (deny/require-approval never
+      // pass; re-check the effect defensively).
       if (isMatchingAllowRule(rule, cap.name)) matchedAllowPassed = true;
     }
 
-    // precedence: a matched-allow that passed AND the engine overall did not
-    // hard-reject authorizes. a require-approval (with no passing allow) => 202.
-    // anything else => deny.
-    if (matchedAllowPassed && evaluation.approved) {
+    // precedence (all-must-pass): ANY hard deny wins. else a require-approval => 202.
+    // else a matched-allow that passed => authorize. else default-deny.
+    if (!sawDeny && matchedAllowPassed) {
       // proceed to forward (below).
-    } else if (sawApproval && !matchedAllowPassed) {
+    } else if (!sawDeny && sawApproval) {
       // f-approval: enqueue via the plugin's own invocation record (the core
       // approval_queue is tx-shaped and cannot hold a capability invoke). the
       // 202 returns the invocation id as the approvalId. an enqueue (record)
