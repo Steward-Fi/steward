@@ -430,13 +430,71 @@ describe("MoneroWalletRpcBackend (scripted)", () => {
     expect(calls.length).toBe(0);
   });
 
-  test("relayTransfer relays prepared metadata and validates the tx hash", async () => {
-    const { backend } = scriptedBackend([
+  test("relayTransfer opens the signing wallet before relay_tx (wallet-rpc -13 regression)", async () => {
+    const { backend, calls, consumed } = scriptedBackend([
+      { method: "open_wallet", result: {} },
+      { method: "get_address", result: { address: VECTOR.address, addresses: [] } },
       { method: "relay_tx", result: { tx_hash: "cd".repeat(32) } },
+      { method: "close_wallet", result: {} },
     ]);
-    const relayed = await backend.relayTransfer("deadbeef");
+    const relayed = await backend.relayTransfer(PAYLOAD, CONTEXT, "deadbeef");
     expect(relayed.txHash).toBe("cd".repeat(32));
-    await expect(backend.relayTransfer("")).rejects.toThrow(/prepared transaction/);
+    expect(consumed()).toBe(true);
+    // The wallet MUST be open when relay_tx fires — verified against
+    // monero-wallet-rpc v0.18.5.0, which returns -13 "No wallet file" otherwise.
+    const methods = calls.map((call) => call.method);
+    expect(methods.indexOf("relay_tx")).toBeGreaterThan(methods.indexOf("open_wallet"));
+    await expect(backend.relayTransfer(PAYLOAD, CONTEXT, "")).rejects.toThrow(
+      /prepared transaction/,
+    );
+  });
+
+  test("recovers when the cache file exists but cannot be opened (rehydration race)", async () => {
+    // open fails → generate says "already exists" (another process won the
+    // race) → retry open succeeds → address check passes.
+    const { backend, consumed } = scriptedBackend([
+      { method: "open_wallet", error: { code: -1, message: "Failed to open wallet" } },
+      { method: "generate_from_keys", error: { code: -21, message: "Wallet already exists" } },
+      { method: "open_wallet", result: {} },
+      { method: "get_address", result: { address: VECTOR.address, addresses: [] } },
+      { method: "refresh", result: {} },
+      { method: "get_balance", result: { balance: 0, unlocked_balance: 0, blocks_to_unlock: 0 } },
+      { method: "get_height", result: { height: 1 } },
+      { method: "close_wallet", result: {} },
+    ]);
+    const balance = await backend.getBalance(PAYLOAD, CONTEXT);
+    expect(balance.balancePiconero).toBe(0n);
+    expect(consumed()).toBe(true);
+  });
+
+  test("fails with operator guidance when the cache file is permanently unopenable", async () => {
+    const { backend } = scriptedBackend([
+      { method: "open_wallet", error: { code: -1, message: "Failed to open wallet" } },
+      { method: "generate_from_keys", error: { code: -21, message: "Wallet already exists" } },
+      { method: "open_wallet", error: { code: -1, message: "Failed to open wallet" } },
+      { method: "close_wallet", result: {} },
+    ]);
+    await expect(backend.getBalance(PAYLOAD, CONTEXT)).rejects.toThrow(/wallet cache volume/);
+  });
+
+  test("parses adjacent uint64 values exactly (regex lookahead regression)", async () => {
+    const { backend } = scriptedBackend([
+      { method: "open_wallet", result: {} },
+      { method: "get_address", result: { address: VECTOR.address, addresses: [] } },
+      { method: "refresh", result: {} },
+      {
+        method: "get_balance",
+        // Adjacent >2^53 integers in both object and array positions: a
+        // consuming trailing-delimiter regex silently rounds every other one.
+        rawBody:
+          '{"jsonrpc":"2.0","id":"0","result":{"balance":111111111111111111,"unlocked_balance":222222222222222222,"blocks_to_unlock":0,"per_subaddress":[{"a":333333333333333333,"b":444444444444444444}]}}',
+      },
+      { method: "get_height", result: { height: 1 } },
+      { method: "close_wallet", result: {} },
+    ]);
+    const balance = await backend.getBalance(PAYLOAD, CONTEXT);
+    expect(balance.balancePiconero).toBe(111_111_111_111_111_111n);
+    expect(balance.unlockedPiconero).toBe(222_222_222_222_222_222n);
   });
 
   test("surfaces wallet-rpc errors without leaking request params", async () => {
@@ -503,12 +561,12 @@ describe("MoneroWalletRpcBackend (scripted)", () => {
   });
 
   test("performs digest auth on 401 challenges", async () => {
-    let attempts = 0;
+    let unauthorizedResponses = 0;
     let sawAuthorization = "";
     const fetchFn = (async (_input: string | URL | Request, init?: RequestInit) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
-      attempts += 1;
       if (!headers.Authorization) {
+        unauthorizedResponses += 1;
         return new Response("Unauthorized", {
           status: 401,
           headers: {
@@ -518,10 +576,14 @@ describe("MoneroWalletRpcBackend (scripted)", () => {
         });
       }
       sawAuthorization = headers.Authorization;
-      return new Response(
-        JSON.stringify({ jsonrpc: "2.0", id: "0", result: { tx_hash: "ef".repeat(32) } }),
-        { status: 200 },
-      );
+      const body = JSON.parse(String(init?.body)) as { method: string };
+      const result =
+        body.method === "get_address"
+          ? { address: VECTOR.address, addresses: [] }
+          : body.method === "relay_tx"
+            ? { tx_hash: "ef".repeat(32) }
+            : {};
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: "0", result }), { status: 200 });
     }) as typeof fetch;
 
     const backend = new MoneroWalletRpcBackend({
@@ -530,9 +592,10 @@ describe("MoneroWalletRpcBackend (scripted)", () => {
       rpcLogin: "steward:secret",
       fetchFn,
     });
-    const result = await backend.relayTransfer("deadbeef");
+    const result = await backend.relayTransfer(PAYLOAD, CONTEXT, "deadbeef");
     expect(result.txHash).toBe("ef".repeat(32));
-    expect(attempts).toBe(2);
+    // Every RPC method (open, get_address, relay, close) got challenged once.
+    expect(unauthorizedResponses).toBeGreaterThanOrEqual(3);
     expect(sawAuthorization).toContain('username="steward"');
     expect(sawAuthorization).toContain('nonce="abc123"');
     expect(sawAuthorization).toContain("qop=auth");

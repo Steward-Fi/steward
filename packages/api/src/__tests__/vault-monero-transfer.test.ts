@@ -60,7 +60,11 @@ class SetupMoneroBackend implements MoneroWalletBackend {
   ): Promise<PreparedMoneroTransfer> {
     throw new Error("not used in setup");
   }
-  async relayTransfer(): Promise<{ txHash: string }> {
+  async relayTransfer(
+    _payload: MoneroKeyPayloadV1,
+    _context: unknown,
+    _txMetadata: string,
+  ): Promise<{ txHash: string }> {
     throw new Error("not used in setup");
   }
   async discardPreparedTransfer(): Promise<void> {}
@@ -504,6 +508,11 @@ describe("vault Monero transfer + balance routes", () => {
     expect(relayIndex).toBeGreaterThan(transferIndex);
     const transferCall = scripted.rpcCalls[transferIndex];
     expect(transferCall.params.do_not_relay).toBe(true);
+    // relay_tx requires the signing wallet open in wallet-rpc (-13 otherwise):
+    // the relay session must re-open the wallet after prepare closed it.
+    const reopenIndex = methods.slice(transferIndex).lastIndexOf("open_wallet") + transferIndex;
+    expect(reopenIndex).toBeGreaterThan(transferIndex);
+    expect(reopenIndex).toBeLessThan(relayIndex);
 
     const [row] = await getDb()
       .select()

@@ -7,7 +7,7 @@
  * dual-derivation address cross-check, signing-freeze on transfer paths, and
  * that no private key material ever lands in agent_wallets.metadata.
  */
-import { afterAll, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   agentWallets,
   and,
@@ -94,8 +94,13 @@ class FakeMoneroBackend implements MoneroWalletBackend {
     };
   }
 
-  async relayTransfer(txMetadata: string): Promise<{ txHash: string }> {
+  async relayTransfer(
+    payload: MoneroKeyPayloadV1,
+    _context: MoneroWalletBackendContext,
+    txMetadata: string,
+  ): Promise<{ txHash: string }> {
     this.calls.push("relayTransfer");
+    if (!/^[0-9a-f]{64}$/.test(payload.spendKey)) throw new Error("bad payload reached backend");
     this.relayedMetadata.push(txMetadata);
     return { txHash: "cd".repeat(32) };
   }

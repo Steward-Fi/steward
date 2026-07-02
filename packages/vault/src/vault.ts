@@ -3013,9 +3013,15 @@ export class Vault {
       chainFamily: "monero",
       venue: walletScope,
     });
-    // Re-verify ownership so a relay can never be replayed across tenants.
-    await this.resolveMoneroWallet({ tenantId, agentId, walletScope });
-    return backend.relayTransfer(txMetadata);
+    // Re-verify ownership so a relay can never be replayed across tenants;
+    // the backend needs the wallet identity because relay_tx requires the
+    // signing wallet to be open in wallet-rpc.
+    const { payload } = await this.resolveMoneroWallet({ tenantId, agentId, walletScope });
+    return backend.relayTransfer(
+      payload,
+      { cacheId: this.moneroCacheId(tenantId, agentId, walletScope) },
+      txMetadata,
+    );
   }
 
   /**
@@ -3365,7 +3371,15 @@ export class Vault {
         throw new Error("createWallet: only Monero account 0 is supported");
       }
       venue ??= moneroWalletScope(network, account);
-      parseMoneroWalletScope(venue);
+      // A caller-supplied scope must agree with the wallet actually being
+      // created — a mismatched scope would route future policy/network
+      // checks against the wrong network.
+      const parsedScope = parseMoneroWalletScope(venue);
+      if (parsedScope.network !== network || parsedScope.account !== account) {
+        throw new Error(
+          `createWallet: scope ${venue} does not match the requested Monero network/account (${network}/${account})`,
+        );
+      }
       // restoreHeight = current chain height: a fresh wallet has no history,
       // so scanning starts at the tip and stays incremental (light client).
       const restoreHeight = await backend.getDaemonHeight();

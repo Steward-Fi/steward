@@ -537,7 +537,16 @@ export interface MoneroWalletBackend {
     context: MoneroWalletBackendContext,
     request: { destinations: MoneroTransferDestination[]; priority?: number },
   ): Promise<PreparedMoneroTransfer>;
-  relayTransfer(txMetadata: string): Promise<{ txHash: string }>;
+  /**
+   * Relay a previously prepared transaction. Takes the wallet identity
+   * because wallet-rpc's relay_tx requires the signing wallet to be open
+   * (it fails with -13 "No wallet file" otherwise).
+   */
+  relayTransfer(
+    payload: MoneroKeyPayloadV1,
+    context: MoneroWalletBackendContext,
+    txMetadata: string,
+  ): Promise<{ txHash: string }>;
   /** Best-effort cache repair after a prepared transfer is discarded. */
   discardPreparedTransfer(
     payload: MoneroKeyPayloadV1,
@@ -561,7 +570,10 @@ function stringifyWithBigints(value: unknown): string {
 
 function parseWithBigIntegers(text: string): unknown {
   // Quote integers of 15+ digits so JSON.parse keeps them exact as strings.
-  const quoted = text.replace(/([:[,]\s*)(\d{15,})(\s*[,}\]])/g, '$1"$2"$3');
+  // The trailing delimiter is a lookahead (not consumed) so ADJACENT large
+  // numbers ("[111…1,222…2]") both match — a consuming group here silently
+  // rounds every other array element through Number.
+  const quoted = text.replace(/([:[,]\s*)(\d{15,})(?=\s*[,}\]])/g, '$1"$2"');
   return JSON.parse(quoted);
 }
 
@@ -649,7 +661,14 @@ function buildDigestAuthorization(
 
 // ─── monero-wallet-rpc backend ────────────────────────────────────────────────
 
-/** Async mutex: wallet-rpc holds at most one wallet open at a time. */
+/**
+ * Async mutex: wallet-rpc holds at most one wallet open at a time.
+ *
+ * This serializes wallet sessions WITHIN one process only. A wallet-rpc
+ * sidecar must be paired with a single vault process — when scaling API
+ * replicas, give each replica its own sidecar (wallet files rehydrate from
+ * the DB, so sidecars are stateless-by-design and cheap to multiply).
+ */
 class AsyncMutex {
   private tail: Promise<void> = Promise.resolve();
 
@@ -828,20 +847,31 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
     });
   }
 
-  async relayTransfer(txMetadata: string): Promise<{ txHash: string }> {
+  async relayTransfer(
+    payload: MoneroKeyPayloadV1,
+    context: MoneroWalletBackendContext,
+    txMetadata: string,
+  ): Promise<{ txHash: string }> {
     if (typeof txMetadata !== "string" || txMetadata.length === 0) {
       throw new Error("Monero relay requires the prepared transaction metadata");
     }
     return this.mutex.run(async () => {
-      const result = (await this.walletRpc("relay_tx", { hex: txMetadata })) as Record<
-        string,
-        unknown
-      >;
-      const txHash = result.tx_hash;
-      if (typeof txHash !== "string" || !/^[0-9a-f]{64}$/.test(txHash)) {
-        throw new MoneroRpcError("relay_tx", "response tx_hash is malformed");
+      try {
+        // relay_tx needs the signing wallet open (verified against
+        // monero-wallet-rpc v0.18.5.0: -13 "No wallet file" otherwise).
+        await this.ensureWalletLoaded(payload, context);
+        const result = (await this.walletRpc("relay_tx", { hex: txMetadata })) as Record<
+          string,
+          unknown
+        >;
+        const txHash = result.tx_hash;
+        if (typeof txHash !== "string" || !/^[0-9a-f]{64}$/.test(txHash)) {
+          throw new MoneroRpcError("relay_tx", "response tx_hash is malformed");
+        }
+        return { txHash };
+      } finally {
+        await this.closeWalletQuietly();
       }
-      return { txHash };
     });
   }
 
@@ -882,33 +912,52 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
     const password = walletCachePassword(payload.spendKey);
     try {
       await this.walletRpc("open_wallet", { filename, password });
-    } catch (error) {
-      if (!isMissingWalletError(error)) throw error;
-      const generated = (await this.walletRpc("generate_from_keys", {
-        filename,
-        password,
-        address: payload.address,
-        spendkey: payload.spendKey,
-        viewkey: payload.viewKey,
-        restore_height: payload.restoreHeight,
-        autosave_current: true,
-      })) as Record<string, unknown>;
-      if (generated.address !== payload.address) {
-        await this.closeWalletQuietly();
-        throw new Error(
-          "monero-wallet-rpc derived a different address for this wallet's keys — refusing to proceed",
-        );
+    } catch (openError) {
+      // wallet-rpc's open_wallet error is generic ("Failed to open wallet")
+      // for both missing and unreadable files, so rehydrate on any open
+      // failure and let generate_from_keys disambiguate.
+      if (!(openError instanceof MoneroRpcError) || openError.method !== "open_wallet") {
+        throw openError;
+      }
+      try {
+        const generated = (await this.walletRpc("generate_from_keys", {
+          filename,
+          password,
+          address: payload.address,
+          spendkey: payload.spendKey,
+          viewkey: payload.viewKey,
+          restore_height: payload.restoreHeight,
+          autosave_current: true,
+        })) as Record<string, unknown>;
+        if (generated.address !== payload.address) {
+          await this.closeWalletQuietly();
+          throw new Error(
+            "monero-wallet-rpc derived a different address for this wallet's keys — refusing to proceed",
+          );
+        }
+      } catch (generateError) {
+        if (!isWalletExistsError(generateError)) throw generateError;
+        // The file exists but open_wallet failed. Either another process
+        // just rehydrated it (retry the open) or the cache file is
+        // corrupted/foreign (fail with operator guidance — the cache volume
+        // is disposable, canonical keys live in the DB).
+        try {
+          await this.walletRpc("open_wallet", { filename, password });
+        } catch {
+          throw new Error(
+            `monero wallet cache file cannot be opened or regenerated (${openError.message}); ` +
+              "clear the monero-wallet-rpc wallet cache volume to force rehydration from the vault's canonical keys",
+          );
+        }
       }
     }
+    // Unconditional dual-derivation check: the opened wallet's primary
+    // (account 0) address must match the vault's canonical address.
     const addressResult = (await this.walletRpc("get_address", {
-      account_index: payload.account,
+      account_index: 0,
       address_index: [0],
     })) as Record<string, unknown>;
-    const reported =
-      payload.account === 0
-        ? addressResult.address
-        : (addressResult.addresses as Array<Record<string, unknown>> | undefined)?.[0]?.address;
-    if (payload.account === 0 && reported !== payload.address) {
+    if (addressResult.address !== payload.address) {
       await this.closeWalletQuietly();
       throw new Error(
         "monero wallet cache address does not match the vault's canonical address — refusing to proceed",
@@ -985,11 +1034,11 @@ export class MoneroWalletRpcBackend implements MoneroWalletBackend {
   }
 }
 
-function isMissingWalletError(error: unknown): boolean {
+function isWalletExistsError(error: unknown): boolean {
   return (
     error instanceof MoneroRpcError &&
-    error.method === "open_wallet" &&
-    /failed to open wallet|file not found|doesn't exist/i.test(error.message)
+    error.method === "generate_from_keys" &&
+    /already exists/i.test(error.message)
   );
 }
 
