@@ -75,7 +75,7 @@ export interface TenantEmailConfig {
   magicLinkCallbackPath?: string;
 }
 
-export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana", "bitcoin"]);
+export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana", "bitcoin", "monero"]);
 
 export const policyTypeEnum = pgEnum("policy_type", [
   "spending-limit",

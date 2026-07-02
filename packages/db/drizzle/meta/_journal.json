@@ -386,6 +386,13 @@
       "when": 1780136400000,
       "tag": "0074_evm_wallet_nonce_inflight",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1780137000000,
+      "tag": "0075_monero_chain_family",
+      "breakpoints": true
     }
   ]
 }
