@@ -45,10 +45,70 @@ export interface CapabilityInvokeRequest {
   query?: Record<string, string>;
 }
 
+/**
+ * Internal marker on Steward-wrapped ({ok:...}) gate responses. The upstream
+ * passthrough (verbatim provider body) is built with a raw `new Response` and
+ * therefore never carries this header, so the OpenAI adapter can distinguish a
+ * Steward gate decision (translate to OpenAI-error shape) from an upstream body
+ * (pass through untouched). Stripped before the response leaves the adapter.
+ */
+const GATE_MARKER_HEADER = "x-steward-cap-gate";
+
 function jsonResponse(payload: ApiResponse, status: number): Response {
   return new Response(JSON.stringify(payload), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", [GATE_MARKER_HEADER]: "1" },
+  });
+}
+
+/** OpenAI-error `type` bucket for a Steward gate status, so the SDK surfaces it cleanly. */
+function openAIErrorType(status: number): string {
+  if (status === 401) return "invalid_request_error";
+  if (status === 403) return "permission_error";
+  if (status === 429) return "rate_limit_error";
+  if (status === 400) return "invalid_request_error";
+  return "api_error";
+}
+
+/**
+ * Translate a Steward-gated adapter response into an OpenAI-compatible response
+ * the OpenAI SDK can parse. Upstream passthroughs (no gate marker) and the 202
+ * approval envelope pass through unchanged; only Steward-wrapped {ok:false,error}
+ * gate DENIALS are reshaped to {error:{message,type}} with the same status. The
+ * gate marker header is always stripped.
+ */
+/** Strip the internal gate marker so it never leaks to a client. No-op if absent. */
+function stripGateMarker(res: Response): Response {
+  if (!res.headers.has(GATE_MARKER_HEADER)) return res;
+  const headers = new Headers(res.headers);
+  headers.delete(GATE_MARKER_HEADER);
+  return new Response(res.body, { status: res.status, headers });
+}
+
+async function toOpenAICompatible(res: Response): Promise<Response> {
+  const isGate = res.headers.get(GATE_MARKER_HEADER) === "1";
+  if (!isGate) return res;
+
+  const headers = new Headers(res.headers);
+  headers.delete(GATE_MARKER_HEADER);
+
+  // approval (202) and any success wrapper keep their Steward shape (there is no
+  // OpenAI-error equivalent for "pending approval"); only reshape error bodies.
+  if (res.ok) {
+    return new Response(res.body, { status: res.status, headers });
+  }
+
+  let message = "request denied";
+  try {
+    const parsed = (await res.clone().json()) as { error?: unknown };
+    if (typeof parsed.error === "string" && parsed.error.trim() !== "") message = parsed.error;
+  } catch {
+    // non-JSON gate body (should not happen): keep the default message.
+  }
+  headers.set("content-type", "application/json");
+  return new Response(JSON.stringify({ error: { message, type: openAIErrorType(res.status) } }), {
+    status: res.status,
+    headers,
   });
 }
 
@@ -401,7 +461,7 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
         ? (envelope.query as Record<string, string>)
         : undefined;
 
-    return invokeCapabilityThroughProxy(ctx, {
+    const res = await invokeCapabilityThroughProxy(ctx, {
       tenantId,
       agentId,
       name: c.req.param("name"),
@@ -409,24 +469,34 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       body: envelope.body,
       query,
     });
+    return stripGateMarker(res);
   });
+
+  // OpenAI-error-shaped response for the adapter's OWN inline gate errors, so the
+  // OpenAI SDK surfaces them cleanly (the shared core's wrapped errors are
+  // reshaped separately via toOpenAICompatible).
+  const openAIError = (message: string, status: number): Response =>
+    new Response(JSON.stringify({ error: { message, type: openAIErrorType(status) } }), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
 
   routes.post("/:name/openai/v1/chat/completions", async (c) => {
     const tenantId = c.get("tenantId");
     const agentId = c.get("agentScope");
     if (!tenantId || !agentId) {
-      return jsonResponse({ ok: false, error: "agent authentication required" }, 401);
+      return openAIError("agent authentication required", 401);
     }
 
     let body: unknown;
     try {
       body = await c.req.json();
     } catch {
-      return jsonResponse({ ok: false, error: "invalid JSON in request body" }, 400);
+      return openAIError("invalid JSON in request body", 400);
     }
     const query = Object.fromEntries(new URL(c.req.url).searchParams.entries());
 
-    return invokeCapabilityThroughProxy(ctx, {
+    const res = await invokeCapabilityThroughProxy(ctx, {
       tenantId,
       agentId,
       name: c.req.param("name"),
@@ -434,16 +504,17 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
       body,
       query: Object.keys(query).length > 0 ? query : undefined,
     });
+    return toOpenAICompatible(res);
   });
 
   routes.get("/:name/openai/v1/models", async (c) => {
     const tenantId = c.get("tenantId");
     const agentId = c.get("agentScope");
     if (!tenantId || !agentId) {
-      return jsonResponse({ ok: false, error: "agent authentication required" }, 401);
+      return openAIError("agent authentication required", 401);
     }
     const ok = await hasActiveGrant(ctx, { tenantId, agentId, name: c.req.param("name") });
-    if (!ok) return jsonResponse({ ok: false, error: "capability not available to agent" }, 403);
+    if (!ok) return openAIError("capability not available to agent", 403);
 
     return new Response(JSON.stringify({ object: "list", data: [] }), {
       status: 200,

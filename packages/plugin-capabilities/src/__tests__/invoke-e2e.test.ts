@@ -460,7 +460,7 @@ describe("OpenAI-compatible capability adapter", () => {
     expect(lastForwarded).toBeNull();
   });
 
-  it("no matching allow => 403 default-deny", async () => {
+  it("no matching allow => 403 default-deny in OpenAI-error shape", async () => {
     await seedOpenAIChatCapability();
     currentPolicySet = [];
     const app = buildInvokeApp();
@@ -470,6 +470,32 @@ describe("OpenAI-compatible capability adapter", () => {
       body: JSON.stringify({ model: "gpt-test", messages: [] }),
     });
     expect(res.status).toBe(403);
+    expect(lastForwarded).toBeNull();
+    // OpenAI-SDK-parseable error shape (not the Steward {ok:false} wrapper).
+    const body = (await res.json()) as {
+      error?: { message?: string; type?: string };
+      ok?: boolean;
+    };
+    expect(body.ok).toBeUndefined();
+    expect(typeof body.error?.message).toBe("string");
+    expect(body.error?.type).toBe("permission_error");
+    // the internal gate marker must not leak to the client.
+    expect(res.headers.get("x-steward-cap-gate")).toBeNull();
+  });
+
+  it("unauthenticated adapter request => 401 in OpenAI-error shape", async () => {
+    await seedOpenAIChatCapability();
+    currentPolicySet = [capRule("r-openai", "allow", undefined, ["openai.chat"])];
+    const app = buildInvokeApp(false);
+    const res = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error?: { message?: string; type?: string } };
+    expect(typeof body.error?.message).toBe("string");
+    expect(body.error?.type).toBe("invalid_request_error");
     expect(lastForwarded).toBeNull();
   });
 
