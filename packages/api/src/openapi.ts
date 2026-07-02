@@ -294,8 +294,8 @@ const digitalAssetAccountWalletSchema: JsonSchema = {
     capabilities: digitalAssetAccountCapabilitiesSchema,
     capabilityMetadata: { type: "object", additionalProperties: true },
     capability_metadata: { type: "object", additionalProperties: true },
-    chainType: { type: "string", enum: ["ethereum", "solana", "bitcoin"] },
-    chainFamily: { type: "string", enum: ["evm", "solana", "bitcoin"] },
+    chainType: { type: "string", enum: ["ethereum", "solana", "bitcoin", "monero"] },
+    chainFamily: { type: "string", enum: ["evm", "solana", "bitcoin", "monero"] },
     address: nullableStringSchema,
     purpose: nullableStringSchema,
     venue: nullableStringSchema,
@@ -365,8 +365,8 @@ const digitalAssetAccountMutationSchema: JsonSchema = {
       items: {
         type: "object",
         properties: {
-          chain_type: { type: "string", enum: ["ethereum", "evm", "solana", "bitcoin"] },
-          chainType: { type: "string", enum: ["ethereum", "evm", "solana", "bitcoin"] },
+          chain_type: { type: "string", enum: ["ethereum", "evm", "solana", "bitcoin", "monero"] },
+          chainType: { type: "string", enum: ["ethereum", "evm", "solana", "bitcoin", "monero"] },
           name: stringSchema,
           wallet_id: stringSchema,
           walletId: stringSchema,
@@ -379,7 +379,7 @@ const digitalAssetAccountMutationSchema: JsonSchema = {
       items: {
         type: "object",
         properties: {
-          chainType: { type: "string", enum: ["ethereum", "evm", "solana", "bitcoin"] },
+          chainType: { type: "string", enum: ["ethereum", "evm", "solana", "bitcoin", "monero"] },
           name: stringSchema,
           walletId: stringSchema,
         },
@@ -433,7 +433,7 @@ const digitalAssetAccountBalanceRowSchema: JsonSchema = {
   ],
   properties: {
     walletId: stringSchema,
-    chainFamily: { type: "string", enum: ["evm", "solana", "bitcoin"] },
+    chainFamily: { type: "string", enum: ["evm", "solana", "bitcoin", "monero"] },
     chainId: { type: ["integer", "null"] },
     symbol: nullableStringSchema,
     native: nullableStringSchema,
@@ -6096,6 +6096,120 @@ export function getOpenApiSpec() {
                   txId: { type: "string" },
                   vsize: { type: "integer", minimum: 1 },
                   feeSats: { type: "string" },
+                },
+              }),
+            ),
+            ...errorResponses(),
+          },
+        },
+      },
+      "/vault/{agentId}/monero/balance": {
+        parameters: [parameter("agentId", "path")],
+        get: {
+          tags: ["Vault"],
+          summary: "Get a scoped Monero wallet balance",
+          description:
+            "Reads the wallet balance through the self-hosted monero-wallet-rpc sidecar (remote public daemon, keys never leave the host). Returns 503 when Monero support is not configured. The first call after idle time refreshes the wallet scan and may take a few seconds.",
+          security: [{ bearerAuth: [] }, { tenantApiKey: [] }],
+          parameters: [parameter("walletScope", "query", stringSchema)],
+          responses: {
+            "200": jsonResponse(
+              apiResponse({
+                type: "object",
+                required: [
+                  "balancePiconero",
+                  "unlockedPiconero",
+                  "blocksToUnlock",
+                  "syncedHeight",
+                  "walletScope",
+                  "walletAddress",
+                  "network",
+                ],
+                properties: {
+                  balancePiconero: { type: "string", description: "Total balance in piconero" },
+                  unlockedPiconero: {
+                    type: "string",
+                    description: "Spendable (unlocked) balance in piconero",
+                  },
+                  blocksToUnlock: { type: "integer", minimum: 0 },
+                  syncedHeight: { type: "integer", minimum: 0 },
+                  walletScope: stringSchema,
+                  walletAddress: stringSchema,
+                  network: { type: "string", enum: ["mainnet", "stagenet"] },
+                },
+              }),
+            ),
+            ...errorResponses(),
+          },
+        },
+      },
+      "/vault/{agentId}/monero/transfer": {
+        parameters: [parameter("agentId", "path")],
+        post: {
+          tags: ["Vault"],
+          summary: "Build, sign, and relay a Monero transfer",
+          description:
+            "Requires agent access plus owner/admin recent MFA or delegated signer credentials with `sign_transaction`, an enabled `raw-signing-chain` policy that explicitly allows `monero` and `ed25519`, and an Idempotency-Key header. Destinations are policy-evaluated first; the vault's wallet2 backend then builds the transaction without relaying so the exact fee is known, the fee-inclusive aggregate spend is re-evaluated, and only then is the transaction relayed. The vault never accepts a caller-built transaction blob. USD-denominated policy rules fail closed for Monero (no XMR price source) — use piconero-denominated limits.",
+          security: [{ bearerAuth: [] }, { tenantApiKey: [] }],
+          requestBody: jsonRequestBody({
+            type: "object",
+            required: ["walletScope", "destinations"],
+            properties: {
+              walletScope: {
+                type: "string",
+                description: "Monero wallet scope, e.g. monero:mainnet:0",
+              },
+              destinations: {
+                type: "array",
+                minItems: 1,
+                maxItems: 15,
+                items: {
+                  type: "object",
+                  required: ["address", "amountPiconero"],
+                  properties: {
+                    address: {
+                      type: "string",
+                      description: "Standard, subaddress, or integrated Monero address",
+                    },
+                    amountPiconero: {
+                      type: "string",
+                      description: "Positive decimal amount in piconero (1 XMR = 10^12)",
+                    },
+                  },
+                },
+              },
+              priority: {
+                type: "integer",
+                minimum: 0,
+                maximum: 3,
+                description: "wallet2 fee priority: 0 default … 3 elevated",
+              },
+              referenceId: stringSchema,
+            },
+          }),
+          responses: {
+            "200": jsonResponse(
+              apiResponse({
+                type: "object",
+                required: [
+                  "transactionId",
+                  "txHash",
+                  "feePiconero",
+                  "amountPiconero",
+                  "totalPiconero",
+                  "walletScope",
+                  "walletAddress",
+                  "network",
+                ],
+                properties: {
+                  transactionId: stringSchema,
+                  txHash: { type: "string", description: "64-hex Monero transaction hash" },
+                  feePiconero: { type: "string" },
+                  amountPiconero: { type: "string" },
+                  totalPiconero: { type: "string" },
+                  walletScope: stringSchema,
+                  walletAddress: stringSchema,
+                  network: { type: "string", enum: ["mainnet", "stagenet"] },
                 },
               }),
             ),

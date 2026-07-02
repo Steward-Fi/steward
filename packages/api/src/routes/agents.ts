@@ -111,9 +111,10 @@ type PortfolioAsset = {
 type AgentSignerRow = typeof agentSigners.$inferSelect;
 type AgentKeyQuorumRow = typeof agentKeyQuorums.$inferSelect;
 type PolicyRow = typeof policies.$inferSelect;
-type AgentWalletChainFamily = "evm" | "solana" | "bitcoin";
+type AgentWalletChainFamily = "evm" | "solana" | "bitcoin" | "monero";
 type BitcoinNetwork = "mainnet" | "testnet";
 type BitcoinAddressType = "p2wpkh" | "p2tr";
+type MoneroNetwork = "mainnet" | "stagenet";
 
 const USD_SCALE_DECIMALS = 18;
 
@@ -1438,6 +1439,7 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
     purpose?: string;
     bitcoinNetwork?: BitcoinNetwork;
     bitcoinAddressType?: BitcoinAddressType;
+    moneroNetwork?: MoneroNetwork;
     account?: number;
     change?: 0 | 1;
     index?: number;
@@ -1446,19 +1448,31 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
   if (!body) {
     return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
   }
-  if (body.chainType !== "evm" && body.chainType !== "solana" && body.chainType !== "bitcoin") {
+  if (
+    body.chainType !== "evm" &&
+    body.chainType !== "solana" &&
+    body.chainType !== "bitcoin" &&
+    body.chainType !== "monero"
+  ) {
     return c.json<ApiResponse>(
-      { ok: false, error: 'chainType must be "evm", "solana", or "bitcoin"' },
+      { ok: false, error: 'chainType must be "evm", "solana", "bitcoin", or "monero"' },
       400,
     );
   }
   const scope = body.scope ?? body.venue;
-  if (body.chainType !== "bitcoin" && !isNonEmptyString(scope)) {
+  // Bitcoin and Monero wallet scopes are auto-derived from their options when omitted.
+  if (body.chainType !== "bitcoin" && body.chainType !== "monero" && !isNonEmptyString(scope)) {
     return c.json<ApiResponse>({ ok: false, error: "venue or scope is required" }, 400);
   }
   if (body.bitcoinNetwork !== undefined && !["mainnet", "testnet"].includes(body.bitcoinNetwork)) {
     return c.json<ApiResponse>(
       { ok: false, error: 'bitcoinNetwork must be "mainnet" or "testnet"' },
+      400,
+    );
+  }
+  if (body.moneroNetwork !== undefined && !["mainnet", "stagenet"].includes(body.moneroNetwork)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: 'moneroNetwork must be "mainnet" or "stagenet"' },
       400,
     );
   }
@@ -1484,6 +1498,7 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
         purpose: body.purpose ?? null,
         bitcoinNetwork: body.bitcoinNetwork ?? null,
         bitcoinAddressType: body.bitcoinAddressType ?? null,
+        moneroNetwork: body.moneroNetwork ?? null,
       },
     });
     const wallet = await vault.createWallet({
@@ -1500,6 +1515,13 @@ agentRoutes.post("/:agentId/wallets", async (c) => {
               account: body.account,
               change: body.change,
               index: body.index,
+            }
+          : undefined,
+      monero:
+        body.chainType === "monero"
+          ? {
+              network: body.moneroNetwork,
+              account: body.account,
             }
           : undefined,
     });
