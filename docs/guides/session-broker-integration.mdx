@@ -1,0 +1,305 @@
+---
+title: "Session Broker Integration"
+description: "Give an agent scoped, credential-injected access to a session broker — store the broker token as a secret, grant a capability, and invoke through the proxy without ever exposing the token."
+---
+
+# Session Broker Integration
+
+A **session broker** is an third-party service that turns a stored session (a cookie
+jar, an OAuth session, a headless-browser session) into a small, scoped HTTP API:
+the agent asks the broker to `list`, `fetch`, or `render` something on a site that
+only has an unofficial web API, and the broker replies with structured JSON. The
+broker holds the live session; the agent never does.
+
+Steward is the governance layer in front of that broker. This guide wires an agent
+to a session broker **config-only** — no product-code changes — so that:
+
+- the broker's scoped token is stored as an encrypted Steward **secret** and
+  injected on the outbound request by the **proxy** (the agent never sees it),
+- a **capability** + **grant** + an **allow policy** decide, per agent, whether a
+  given broker call is permitted (deny-by-default),
+- every attempt writes one durable **audit** row (allow / deny / approval / error).
+
+The moving parts mirror the reference implementation in
+[teleport-computer/oauth3-server](https://github.com/teleport-computer/oauth3-server):
+a broker exposes scoped read/fetch endpoints behind a bearer token, and a
+delegating gateway (here, Steward) attaches that token to allowed calls only.
+
+## Architecture
+
+```
+┌────────┐   POST /capabilities/:name/invoke   ┌──────────────────────┐
+│ agent  │ ─────────────────────────────────▶ │ steward api          │
+│(no key)│   { args, body, query }             │  plugin-capabilities │
+└────────┘                                     │  - resolve grant     │
+                                               │  - policy default-deny│
+                                               │  - audit row          │
+                                               └───────────┬──────────┘
+                                                           │ minted api:proxy
+                                                           │ token (HMAC-signed)
+                                                           ▼
+                                               ┌──────────────────────┐
+                                               │ steward proxy        │
+                                               │  - match secret_route │
+                                               │  - decrypt secret     │
+                                               │  - inject Authorization│
+                                               │  - SSRF guard + scrub │
+                                               └───────────┬──────────┘
+                                                           │ https 443
+                                                           ▼
+                                               ┌──────────────────────┐
+                                               │ session broker (public)│
+                                               │  GET  /sessions/:id    │
+                                               │  POST /render          │
+                                               └──────────────────────┘
+```
+
+The agent only ever holds an agent token. The broker's bearer token lives encrypted
+in the vault, is decrypted **only** inside the proxy, is attached **only** to a
+matching outbound request, and is **scrubbed** from the response body before the
+proxy returns it. The plugin never decrypts anything.
+
+## Prerequisites
+
+- A Steward tenant with a tenant-admin session (secrets, capabilities, and grants
+  are all MFA-gated tenant-admin operations).
+- An agent already created in the tenant (see [Setting Up an Agent](/guides/agent-setup)).
+- A **publicly reachable** session broker on `https://<broker-host>` port `443`.
+  See [Constraints](#constraints) — a `localhost` / LAN / private-IP broker is
+  rejected by the proxy's SSRF guard and cannot be integrated as-is.
+- A scoped broker token (the credential the broker expects in `Authorization`).
+
+## Step 1: Configure the environment
+
+Add these to the Steward API + proxy environment. The first three are the only
+required additions; the timeout is recommended for brokers that render.
+
+```bash
+# Allow the proxy to route to your broker host at all (SSRF allowlist, layer 1).
+STEWARD_PROXY_ALLOWED_HOSTS=broker.example.com
+
+# Allow a credential-injection route to attach a secret to that host (layer 2,
+# the secret-route host allowlist — extends the code defaults).
+STEWARD_SECRET_ROUTE_ALLOWED_HOSTS=broker.example.com
+
+# Recommended for render/fetch brokers: the proxy's default upstream timeout is
+# 30s. A headless render can exceed that; raise it (value in milliseconds).
+STEWARD_PROXY_UPSTREAM_TIMEOUT_MS=120000
+
+# Optional: the response cap defaults to 25 MiB (fits screenshot / rendered
+# payloads). Only raise it if a broker returns larger bodies.
+# STEWARD_PROXY_RESPONSE_BYTES=26214400
+```
+
+<Warning>
+  Both host allowlists take a **comma-separated** list. `STEWARD_PROXY_ALLOWED_HOSTS`
+  gates whether the proxy will dial the host at all; `STEWARD_SECRET_ROUTE_ALLOWED_HOSTS`
+  gates whether a credential may be injected on it. A broker host must be in **both**.
+</Warning>
+
+## Step 2: Store the broker token as a secret
+
+The scoped broker token is stored encrypted. It is never returned in any response.
+
+```bash
+curl -X POST https://api.steward.fi/secrets \
+  -H "X-Steward-Key: your-tenant-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "session-broker-token",
+    "value": "brk_live_...scoped-broker-token...",
+    "description": "Scoped session-broker bearer token"
+  }'
+```
+
+The response returns `data.id` (a UUID) and `data.name` — never the value. Keep the
+`data.id`; the capability references it as `secretId`.
+
+## Step 3: Create the capability
+
+A **capability** binds `(secret, host, path, method, injection)` into a named,
+grantable unit. Creating it also validates the injection route against the
+secret-route rules (host must be allowlisted, `injectAs` is header-only, framing
+headers are blocked).
+
+```bash
+curl -X POST https://api.steward.fi/capabilities \
+  -H "X-Steward-Key: your-tenant-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "broker.session.render",
+    "secretId": "550e8400-...",
+    "host": "broker.example.com",
+    "pathPattern": "/render",
+    "method": "POST",
+    "injectAs": "header",
+    "injectKey": "authorization",
+    "injectFormat": "Bearer {value}"
+  }'
+```
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `name` | string | Dotted lowercase identifier, e.g. `broker.session.render`. |
+| `secretId` | uuid | The secret ID from Step 2. |
+| `host` | string | The broker host, lower-cased. Must be public https (see Constraints). |
+| `pathPattern` | string | v1 is **exact-path**: the forwarded path is this value verbatim. |
+| `method` | string | `POST` for a body-carrying broker call (see the GET note below). |
+| `injectAs` | string | `header` only. Query/body injection is unsupported (reflection risk). |
+| `injectKey` | string | The header name to set, e.g. `authorization`. |
+| `injectFormat` | string | `{value}` is replaced with the decrypted secret, e.g. `Bearer {value}`. |
+
+<Note>
+  `injectAs` defaults to `header` and `injectFormat` defaults to `{value}` if
+  omitted. Both are shown here for clarity.
+</Note>
+
+## Step 4: Grant the capability to the agent
+
+A capability is inert until an agent is granted it. Grants are per-agent and may
+carry an optional expiry.
+
+```bash
+curl -X POST https://api.steward.fi/capabilities/<capabilityId>/grants \
+  -H "X-Steward-Key: your-tenant-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agentId": "my-agent",
+    "expiresAt": "2027-01-01T00:00:00Z"
+  }'
+```
+
+`expiresAt` is optional (omit for a non-expiring grant). Deleting the grant, or
+disabling the capability, immediately revokes access with no redeploy.
+
+## Step 5: Add an allow policy
+
+Even with a grant, an invoke is **denied by default**. Authorization requires at
+least one enabled `capability-intent` policy rule whose `effect` is `allow` and
+whose patterns govern the capability name. Policies are set with the full-set
+`PUT` (it **replaces** the agent's policy set — include every rule).
+
+```bash
+curl -X PUT https://api.steward.fi/agents/my-agent/policies \
+  -H "X-Steward-Key: your-tenant-key" \
+  -H "Content-Type: application/json" \
+  -d '[
+    {
+      "id": "allow-broker-render",
+      "type": "capability-intent",
+      "enabled": true,
+      "config": {
+        "capabilities": ["broker.session.render"],
+        "effect": "allow",
+        "constraints": { "maxCallsPerHour": 60 }
+      }
+    }
+  ]'
+```
+
+| Config Field | Type | Description |
+|--------------|------|-------------|
+| `capabilities` | string[] | Exact names, or a single trailing `.*` prefix glob (`broker.*`). Case-sensitive. |
+| `effect` | string | `allow`, `deny`, or `require-approval`. A matched `deny` always wins; `require-approval` routes to a `202` queued outcome. |
+| `constraints.maxCallsPerHour` | number | Cap on invokes per trailing hour for this (agent, capability). |
+| `constraints.argEquals` | object | Each key must exist in the invoke `args` and strictly equal the value. |
+| `constraints.argMatches` | object | Each key must match the (anchored) regex. |
+
+<Warning>
+  `PUT /agents/:id/policies` **replaces** the entire policy set. Always send the
+  complete set, or you will drop rules the agent still needs.
+</Warning>
+
+## Step 6: Invoke from the agent
+
+The agent calls the invoke route with its **agent token** (not the tenant key). The
+agent never references the broker token — the proxy attaches it.
+
+```bash
+curl -X POST https://api.steward.fi/capabilities/broker.session.render/invoke \
+  -H "Authorization: Bearer <agent-token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "args": { "sessionId": "sess_123" },
+    "body": { "url": "https://example.com/dashboard", "format": "png" }
+  }'
+```
+
+The envelope is `{ args?, body?, query? }`:
+
+- `args` drive policy constraints (`argEquals` / `argMatches`) — they are **not**
+  forwarded to the broker.
+- `body` is the JSON request body forwarded to the broker (for `POST`/`PUT`/`PATCH`).
+- `query` is appended to the forwarded URL as a query string.
+
+On an allowed call the proxy returns the broker's status and body **verbatim** (the
+injected credential already scrubbed). A `403` means denied by policy or missing
+grant; a `503` means the proxy delegation env is not configured; a `502` means the
+broker call itself failed.
+
+## Constraints
+
+Read these before integrating — they are hard limits, not tunables.
+
+- **The broker must be a public HTTPS host on 443.** The proxy enforces SSRF
+  defense in two layers, and there is **no** flag to disable it:
+  1. a string-level guard rejects `localhost`, `*.localhost`, `*.local`,
+     `*.internal`, and bare IPs, and requires the host to be in
+     `STEWARD_PROXY_ALLOWED_HOSTS`;
+  2. a DNS-level guard resolves the host and rejects any private/reserved address,
+     then pins the dial to the vetted record.
+  A broker on `localhost`, a LAN address, or a private/reserved IP **cannot** be
+  integrated. Put the broker behind a public HTTPS hostname (the proxy forces
+  `https://`).
+
+- **Use `POST`, not `GET`, for broker capabilities.** Two things make `GET`
+  capabilities unusable for a credential-injected broker call under production
+  request-signing:
+  1. a `GET` (or `HEAD`) capability does **not** forward a request body — the
+     invoke path omits the body for those verbs, so a render payload in `body`
+     never reaches the broker;
+  2. more importantly, when the proxy runs with request signing enabled
+     (`STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE=true`, the production posture), it
+     requires an `Idempotency-Key` header on **any signed request — including safe
+     `GET` methods**. The proxy client does not auto-attach an idempotency key on
+     `GET`, and the invoke path supplies none, so a **signed `GET` capability
+     invoke fails closed with a `400` before it ever forwards** (`Idempotency-Key
+     header is required for signed proxy requests`).
+
+  `POST` both carries the request body and receives an auto-attached idempotency
+  key, so a `POST` capability works end to end. Do not work around the `GET` block
+  by smuggling the payload into `query` (query strings can reflect into upstream
+  responses and are not the injection surface). Model every broker capability as
+  `POST`. This limitation is pinned by a test in
+  `session-broker-e2e.test.ts`.
+
+- **Responses are capped at 25 MiB** (`STEWARD_PROXY_RESPONSE_BYTES`). This
+  comfortably fits screenshot / rendered-image payloads. Raise it only if a broker
+  legitimately returns larger bodies. The proxy buffers the response for its
+  reflection scan (an `includes()` check that the injected credential did not leak
+  back), so very large bodies cost proportional memory.
+
+- **Raise the upstream timeout for render brokers.** The default is 30s
+  (`STEWARD_PROXY_UPSTREAM_TIMEOUT_MS`). Headless rendering can exceed that; a
+  value like `120000` (120s) avoids premature upstream aborts.
+
+- **Injection is header-only.** `injectAs` supports `header` and nothing else, and
+  framing / hop-by-hop headers (`host`, `content-length`, `transfer-encoding`, …)
+  cannot be the injection key.
+
+## Zero-code claim
+
+Everything above is **configuration**: environment variables, secrets, a
+capability, a grant, and a policy rule. No Steward product code is modified to
+integrate a session broker. The one honest caveat is the **signed-`GET`
+limitation** above — a `GET` capability is not usable for a credential-injected
+broker call under production request-signing (it fails closed with a `400` for the
+missing idempotency key, and would not forward a body regardless), so a broker
+integration must be modeled as `POST`. That is a design boundary of the invoke +
+proxy request-signing path, not something the runbook works around.
+
+## See also
+
+- [Managing Secrets](/guides/secrets) — the secret + route primitives this builds on.
+- [Policies](/guides/policies) — the policy engine and rule-set semantics.
+- [Setting Up an Agent](/guides/agent-setup) — creating the agent and minting its token.
