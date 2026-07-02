@@ -40,7 +40,7 @@ export type {
   NewCapabilityGrant,
 } from "./schema";
 export { capabilities, capabilityGrants } from "./schema";
-export { AgentNotFoundError, CapabilityStore, isExpired } from "./store";
+export { AgentNotFoundError, CapabilityStore, GrantExistsError, isExpired } from "./store";
 export type { CapabilitySpec } from "./store";
 export { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 export {

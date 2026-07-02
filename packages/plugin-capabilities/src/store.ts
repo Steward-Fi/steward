@@ -370,6 +370,22 @@ export class CapabilityStore {
         .where(and(eq(agents.id, input.agentId), eq(agents.tenantId, input.tenantId)));
       if (!agent) throw new AgentNotFoundError(input.agentId, input.tenantId);
 
+      // reject a duplicate grant PROACTIVELY (before materializing a route), so
+      // the unique(tenant, agent, capability) constraint is surfaced as a typed
+      // error rather than a driver-wrapped 500 — and no orphaned route is created
+      // (the insert is never attempted). fail-closed.
+      const [existing] = await tx
+        .select({ id: capabilityGrants.id })
+        .from(capabilityGrants)
+        .where(
+          and(
+            eq(capabilityGrants.tenantId, input.tenantId),
+            eq(capabilityGrants.agentId, input.agentId),
+            eq(capabilityGrants.capabilityId, input.capabilityId),
+          ),
+        );
+      if (existing) throw new GrantExistsError(input.agentId, input.capabilityId);
+
       const unexpired = !isExpired(input.expiresAt, now);
       const routeEnabled = cap.enabled && unexpired;
 
@@ -434,6 +450,18 @@ export class AgentNotFoundError extends Error {
   constructor(agentId: string, tenantId: string) {
     super(`Agent ${agentId} not found for tenant ${tenantId}`);
     this.name = "AgentNotFoundError";
+  }
+}
+
+/**
+ * Thrown when an agent is already granted a capability (the
+ * unique(tenant, agent, capability) invariant). The route layer maps this to a
+ * 409. Detected proactively so no orphaned route is created.
+ */
+export class GrantExistsError extends Error {
+  constructor(agentId: string, capabilityId: string) {
+    super(`Agent ${agentId} is already granted capability ${capabilityId}`);
+    this.name = "GrantExistsError";
   }
 }
 

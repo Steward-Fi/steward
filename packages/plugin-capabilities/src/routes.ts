@@ -18,7 +18,7 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import type { StewardAppContext } from "./context";
 import type { Capability, CapabilityGrant } from "./schema";
-import { AgentNotFoundError, CapabilityStore } from "./store";
+import { AgentNotFoundError, CapabilityStore, GrantExistsError } from "./store";
 import {
   createCapabilitySchema,
   createGrantSchema,
@@ -339,9 +339,7 @@ export function createCapabilityRoutes(
       if (e instanceof AgentNotFoundError) {
         return c.json<ApiResponse>({ ok: false, error: e.message }, 404);
       }
-      // unique-violation on (tenant, agent, capability) -> already granted.
-      const msg = e instanceof Error ? e.message : "";
-      if (/unique|duplicate/i.test(msg)) {
+      if (e instanceof GrantExistsError) {
         return c.json<ApiResponse>({ ok: false, error: "agent already granted this capability" }, 409);
       }
       return errorResponse(c, e);
