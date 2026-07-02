@@ -7,8 +7,7 @@ import { useEffect, useState } from "react";
 import { ChainBadge } from "@/components/chain-badge";
 import { StatusBadge } from "@/components/status-badge";
 import { steward } from "@/lib/api";
-import { getChainSymbol } from "@/lib/chains";
-import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
+import { formatDate, formatNativeAmount, shortenAddress } from "@/lib/utils";
 
 const easeOutQuart: [number, number, number, number] = [0.25, 1, 0.5, 1];
 
@@ -214,10 +213,7 @@ export default function DashboardOverview() {
                 </div>
                 <div className="flex items-center gap-6 flex-shrink-0">
                   <span className="text-sm tabular-nums text-text-secondary">
-                    {formatWei(
-                      tx.request?.value || "0",
-                      getChainSymbol(tx.request?.chainId ?? 8453),
-                    )}
+                    {formatNativeAmount(tx.request?.value || "0", tx.request?.chainId ?? 8453)}
                   </span>
                   <span className="text-xs text-text-tertiary hidden md:inline">
                     {tx.createdAt ? formatDate(tx.createdAt) : ""}
