@@ -77,6 +77,25 @@ export interface PolicyEvaluationContext {
     chain: string;
     curve: string;
   };
+  /**
+   * Capability-invoke context for `capability-intent` policies. The capability
+   * invoke route (W-1c) wires this from the resolved capability; absent on
+   * ordinary transaction signs, so capability policies stay inert on tx signing
+   * (mirrors the `typedData` seam).
+   */
+  capability?: {
+    name: string;
+    args: Record<string, unknown>;
+    host: string;
+    path: string;
+    method: string;
+  };
+  /**
+   * Trailing-hour capability-invoke count (distinct from `recentTxCount1h`). The
+   * invoke route (W-1c) wires this so `capability-intent`'s `maxCallsPerHour`
+   * constraint can be enforced; absent => that constraint fails closed (deny).
+   */
+  capabilityInvokeCount1h?: number;
 }
 
 export interface EvaluationResult {
@@ -181,6 +200,8 @@ export class PolicyEngine {
       aggregations: ctx.aggregations,
       typedData: ctx.typedData,
       rawSigning: ctx.rawSigning,
+      capability: ctx.capability,
+      capabilityInvokeCount1h: ctx.capabilityInvokeCount1h,
     };
 
     const results: EnginePolicyResult[] = await Promise.all(

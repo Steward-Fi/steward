@@ -23,6 +23,7 @@ import {
   capabilityIntentContribution,
   evaluateCapabilityIntent,
 } from "../capability-intent";
+import { PolicyEngine } from "../engine";
 import { type EvaluatorContext, evaluatePolicy } from "../evaluators";
 import { policyRuleRegistry } from "../policy-rule-registry";
 
@@ -404,6 +405,105 @@ describe("capability-intent — registry integration (end-to-end via evaluatePol
       makeContext(), // a normal transaction sign, no capability channel
     );
     expect(result.passed).toBe(true);
+  });
+});
+
+describe("capability-intent — PolicyEngine.evaluate seam (capability ctx must flow through)", () => {
+  function capRule(config: Record<string, unknown>, id = "cr1"): PolicyRule {
+    return { id, type: CAPABILITY_INTENT_RULE_TYPE as PolicyRule["type"], enabled: true, config };
+  }
+  function engineCtx(overrides: Partial<EvaluatorContext> = {}) {
+    return {
+      request: {
+        agentId: "a",
+        tenantId: "t",
+        to: "0x1234567890123456789012345678901234567890",
+        value: "0",
+        chainId: 8453,
+      } as SignRequest,
+      recentTxCount24h: 0,
+      recentTxCount1h: 0,
+      spentToday: 0n,
+      spentThisWeek: 0n,
+      ...overrides,
+    };
+  }
+
+  it("a deny rule ENFORCES through PolicyEngine.evaluate when capability ctx is present", async () => {
+    policyRuleRegistry.register({
+      type: capabilityIntentContribution.type,
+      pluginName: "capability-plugin",
+      evaluate: capabilityIntentContribution.evaluate,
+    });
+    const engine = new PolicyEngine();
+    const result = await engine.evaluate(
+      [capRule({ capabilities: ["github.*"], effect: "deny" })],
+      engineCtx({ capability: cap({ name: "github.pr.delete" }) }),
+    );
+    // if the engine dropped ctx.capability, this would be approved:true (inert pass).
+    expect(result.approved).toBe(false);
+    expect(result.requiresManualApproval).toBe(false);
+  });
+
+  it("require-approval routes to manual approval through the engine", async () => {
+    policyRuleRegistry.register({
+      type: capabilityIntentContribution.type,
+      pluginName: "capability-plugin",
+      evaluate: capabilityIntentContribution.evaluate,
+    });
+    const engine = new PolicyEngine();
+    const result = await engine.evaluate(
+      [capRule({ capabilities: ["github.*"], effect: "require-approval" })],
+      engineCtx({ capability: cap() }),
+    );
+    expect(result.approved).toBe(false);
+    expect(result.requiresManualApproval).toBe(true);
+  });
+
+  it("maxCallsPerHour reads capabilityInvokeCount1h through the engine seam", async () => {
+    policyRuleRegistry.register({
+      type: capabilityIntentContribution.type,
+      pluginName: "capability-plugin",
+      evaluate: capabilityIntentContribution.evaluate,
+    });
+    const engine = new PolicyEngine();
+    const over = await engine.evaluate(
+      [
+        capRule({
+          capabilities: ["github.*"],
+          effect: "allow",
+          constraints: { maxCallsPerHour: 2 },
+        }),
+      ],
+      engineCtx({ capability: cap(), capabilityInvokeCount1h: 2 }),
+    );
+    expect(over.approved).toBe(false);
+    const under = await engine.evaluate(
+      [
+        capRule({
+          capabilities: ["github.*"],
+          effect: "allow",
+          constraints: { maxCallsPerHour: 2 },
+        }),
+      ],
+      engineCtx({ capability: cap(), capabilityInvokeCount1h: 1 }),
+    );
+    expect(under.approved).toBe(true);
+  });
+
+  it("stays inert on an ordinary tx sign through the engine (no capability ctx)", async () => {
+    policyRuleRegistry.register({
+      type: capabilityIntentContribution.type,
+      pluginName: "capability-plugin",
+      evaluate: capabilityIntentContribution.evaluate,
+    });
+    const engine = new PolicyEngine();
+    const result = await engine.evaluate(
+      [capRule({ capabilities: ["github.*"], effect: "deny" })],
+      engineCtx(), // no capability channel
+    );
+    // rule is inert (passes); with only this rule, all hard policies pass => approved.
+    expect(result.approved).toBe(true);
   });
 });
 
