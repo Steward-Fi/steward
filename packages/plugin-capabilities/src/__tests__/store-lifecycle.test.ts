@@ -130,6 +130,36 @@ describe("validation matrix (shared secret-route validator, strict hosts)", () =
   });
 });
 
+describe("secret usability guard (fail-closed on bad/deleted/expired secret)", () => {
+  test("a fresh tenant secret is usable", async () => {
+    expect(await store.secretUsableForTenant(tenantId, secretId)).toBe(true);
+  });
+
+  test("an unknown secret id is not usable", async () => {
+    expect(await store.secretUsableForTenant(tenantId, crypto.randomUUID())).toBe(false);
+  });
+
+  test("a soft-deleted secret is not usable", async () => {
+    const { secrets } = await import("@stwd/db");
+    const { eq } = await import("drizzle-orm");
+    await harness!.db
+      .update(secrets)
+      .set({ deletedAt: new Date() })
+      .where(eq(secrets.id, secretId));
+    expect(await store.secretUsableForTenant(tenantId, secretId)).toBe(false);
+  });
+
+  test("an expired secret is not usable", async () => {
+    const { secrets } = await import("@stwd/db");
+    const { eq } = await import("drizzle-orm");
+    await harness!.db
+      .update(secrets)
+      .set({ expiresAt: new Date(Date.now() - 60_000) })
+      .where(eq(secrets.id, secretId));
+    expect(await store.secretUsableForTenant(tenantId, secretId)).toBe(false);
+  });
+});
+
 describe("capability create: no grants -> no routes (fail-closed by construction)", () => {
   test("creating a capability materializes zero routes", async () => {
     const cap = await createGithubCapability();

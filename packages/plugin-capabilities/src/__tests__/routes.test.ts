@@ -229,6 +229,22 @@ describe("capability CRUD happy path (authorized)", () => {
     const res = await createCap(app, { name: "Bad Name!" });
     expect(res.status).toBe(400);
   });
+
+  test("unknown secretId -> 400 (secret must exist for the tenant)", async () => {
+    const app = authedApp(harness!.db);
+    const res = await createCap(app, { secretId: crypto.randomUUID() });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/secret not found or not usable/i);
+  });
+
+  test("foreign-tenant secretId -> 400 (no cross-tenant secret reference)", async () => {
+    const otherTenant = `tenant-other-${crypto.randomUUID()}`;
+    await ensureTenant(harness!.db, otherTenant);
+    const foreignSecret = await ensureSecret(harness!.db, otherTenant, "foreign-pat");
+    const app = authedApp(harness!.db);
+    const res = await createCap(app, { secretId: foreignSecret });
+    expect(res.status).toBe(400);
+  });
 });
 
 describe("grant + patch route behaviors (authorized)", () => {

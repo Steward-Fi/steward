@@ -164,6 +164,13 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
     });
     if (!validated.ok) return c.json<ApiResponse>({ ok: false, error: validated.error }, 400);
 
+    // the referenced secret must exist, belong to this tenant, and be usable
+    // (not deleted/expired). fail-closed: a bad secretId would otherwise create a
+    // route the proxy can never match/decrypt for this tenant.
+    if (!(await store.secretUsableForTenant(tenantId, validated.spec.secretId))) {
+      return c.json<ApiResponse>({ ok: false, error: "secret not found or not usable" }, 400);
+    }
+
     try {
       const existing = await store.getCapabilityByName(tenantId, input.name);
       if (existing) {
@@ -264,6 +271,13 @@ export function createCapabilityRoutes(ctx: StewardAppContext): Hono<{ Variables
         injectFormat: patch.injectFormat ?? current.injectFormat,
       });
       if (!spec.ok) return c.json<ApiResponse>({ ok: false, error: spec.error }, 400);
+      // if the patch points at a (possibly new) secret, it must be usable too.
+      if (
+        patch.secretId !== undefined &&
+        !(await store.secretUsableForTenant(tenantId, spec.spec.secretId))
+      ) {
+        return c.json<ApiResponse>({ ok: false, error: "secret not found or not usable" }, 400);
+      }
     }
 
     try {

@@ -31,7 +31,16 @@
  * before any row is written.
  */
 
-import { agents, and, eq, type NewSecretRoute, type SecretRoute, secretRoutes } from "@stwd/db";
+import {
+  agents,
+  and,
+  eq,
+  isNull,
+  type NewSecretRoute,
+  type SecretRoute,
+  secretRoutes,
+  secrets,
+} from "@stwd/db";
 import { type Capability, type CapabilityGrant, capabilities, capabilityGrants } from "./schema";
 
 /**
@@ -108,6 +117,29 @@ export class CapabilityStore {
 
   async listCapabilities(tenantId: string): Promise<Capability[]> {
     return this.db.select().from(capabilities).where(eq(capabilities.tenantId, tenantId));
+  }
+
+  /**
+   * True if `secretId` names a secret that exists, belongs to `tenantId`, is not
+   * soft-deleted, and is not expired as of `now`. A capability MUST reference a
+   * usable secret so its paired routes are ones the proxy can actually match +
+   * decrypt for this tenant (fail-closed: a typo / foreign / deleted / expired
+   * secret is rejected at create/update, not silently accepted as a dead route).
+   */
+  async secretUsableForTenant(
+    tenantId: string,
+    secretId: string,
+    now: Date = new Date(),
+  ): Promise<boolean> {
+    const [row] = await this.db
+      .select({ id: secrets.id, expiresAt: secrets.expiresAt })
+      .from(secrets)
+      .where(
+        and(eq(secrets.id, secretId), eq(secrets.tenantId, tenantId), isNull(secrets.deletedAt)),
+      );
+    if (!row) return false;
+    if (row.expiresAt && new Date(row.expiresAt).getTime() <= now.getTime()) return false;
+    return true;
   }
 
   // ── capability create ─────────────────────────────────────────────────────
