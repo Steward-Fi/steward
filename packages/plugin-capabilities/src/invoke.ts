@@ -237,14 +237,37 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
     }
     const name = c.req.param("name");
 
-    // parse the optional body envelope. an invalid JSON body is a 400.
-    const parsed = await ctx.safeJsonParse<{
+    // parse the optional body envelope. an EMPTY body is allowed (no args); a
+    // PRESENT-but-invalid JSON body is a 400 (do not silently coerce malformed
+    // client input to `{}` and then authorize/forward it). we distinguish the two
+    // by reading the raw body: empty/whitespace => no envelope; non-empty =>
+    // JSON.parse (a parse failure => 400).
+    type InvokeEnvelope = {
       args?: Record<string, unknown>;
       body?: unknown;
       query?: Record<string, string>;
-    }>(c);
-    // an empty body is allowed (no args). a present-but-invalid JSON body => 400.
-    const envelope = parsed ?? {};
+    };
+    let envelope: InvokeEnvelope = {};
+    let rawBody: string;
+    try {
+      rawBody = await c.req.text();
+    } catch {
+      rawBody = "";
+    }
+    if (rawBody.trim() !== "") {
+      try {
+        const parsedBody = JSON.parse(rawBody);
+        if (parsedBody === null || typeof parsedBody !== "object" || Array.isArray(parsedBody)) {
+          return c.json<ApiResponse>(
+            { ok: false, error: "invoke body must be a JSON object" },
+            400,
+          );
+        }
+        envelope = parsedBody as InvokeEnvelope;
+      } catch {
+        return c.json<ApiResponse>({ ok: false, error: "invalid JSON in request body" }, 400);
+      }
+    }
     const invokeArgs =
       envelope.args && typeof envelope.args === "object" && !Array.isArray(envelope.args)
         ? (envelope.args as Record<string, unknown>)
@@ -311,8 +334,13 @@ export function createInvokeRoutes(ctx: StewardAppContext): Hono<{ Variables: Ap
         payload: { ok: false, error: "policy evaluation unavailable" } satisfies ApiResponse,
       });
     }
-    // only the capability-intent rules govern a capability invoke.
-    const capRules = policySet.filter((r) => isCapabilityIntentRule(r));
+    // only the ENABLED capability-intent rules govern a capability invoke. an
+    // operator who disables an allow rule (enabled:false) to revoke access must
+    // NOT have it still authorize — the engine skips disabled rules, and the
+    // authoritative per-rule loop below reuses THIS filtered set, so a disabled
+    // allow/deny/require-approval rule has no effect (fail-closed on the allow
+    // side: a disabled allow no longer sets matchedAllowPassed).
+    const capRules = policySet.filter((r) => isCapabilityIntentRule(r) && r.enabled !== false);
 
     // d. evaluate through the engine's existing entry point.
     // e. DEFAULT-DENY + effect resolution.

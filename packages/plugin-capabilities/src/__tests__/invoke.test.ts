@@ -247,6 +247,18 @@ describe("invoke: default-deny + effects", () => {
     expect(rows[0].decision).toBe("deny");
   });
 
+  test("a DISABLED allow rule does NOT authorize => 403 (revoke-by-disable is honored)", async () => {
+    const capId = await seedCapabilityWithGrant();
+    // an allow rule that WOULD authorize, but disabled. the engine skips it and
+    // the authoritative loop must too (fail-closed): access is revoked.
+    currentPolicySet = [{ ...capRule("r1", "allow"), enabled: false }];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+    const rows = await invocationRows(capId);
+    expect(rows[0].decision).toBe("deny");
+  });
+
   test("a rule that governs a DIFFERENT capability does not authorize => 403", async () => {
     await seedCapabilityWithGrant();
     currentPolicySet = [capRule("r1", "allow", undefined, ["github.other.thing"])];
@@ -296,6 +308,41 @@ describe("invoke: default-deny + effects", () => {
     const rows = await invocationRows(capId);
     expect(rows.length).toBe(1);
     expect(rows[0].decision).toBe("error");
+  });
+});
+
+describe("invoke: body parsing", () => {
+  test("malformed JSON body => 400 (not silently coerced to {})", async () => {
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("r1", "allow")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{ not valid json",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("empty body is allowed (no args) => authorized, proxy-env-absent 503", async () => {
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("r1", "allow")];
+    const app = buildApp(harness!.db, { agent: true });
+    // no body at all.
+    const res = await app.request("/capabilities/github.pr.comment/invoke", { method: "POST" });
+    expect(res.status).toBe(503);
+  });
+
+  test("a JSON array body => 400 (must be an object)", async () => {
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("r1", "allow")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "[1,2,3]",
+    });
+    expect(res.status).toBe(400);
   });
 });
 
