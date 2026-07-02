@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   agents,
   agentWallets,
@@ -14,6 +14,7 @@ import type {
   BitcoinAddressType,
   BitcoinNetwork,
   ChainFamily,
+  MoneroNetwork,
   PolicyResult,
   RpcRequest,
   RpcResponse,
@@ -66,6 +67,20 @@ import {
 import { deriveBitcoinKey, deriveEvmKey, deriveSolanaKey, generateMnemonic } from "./hd-wallet";
 import { type EncryptedKey, KeyStore } from "./keystore";
 import { backendFromKeyStore, type KeystoreBackend } from "./keystore-backend";
+import {
+  createMoneroBackendFromEnv,
+  generateMoneroWallet,
+  type MoneroBalanceResult,
+  type MoneroKeyPayloadV1,
+  MoneroNotConfiguredError,
+  type MoneroWalletBackend,
+  moneroPublicMetadataFromPayload,
+  moneroWalletScope,
+  parseMoneroKeyPayload,
+  parseMoneroWalletScope,
+  parsePiconeroAmount,
+  serializeMoneroKeyPayload,
+} from "./monero";
 import { assertVaultSigningActive } from "./signing-freeze";
 import {
   assertSolanaTransferTransactionMatches,
@@ -100,6 +115,12 @@ export interface VaultConfig {
   chainId?: number;
   keystoreBackend?: KeystoreBackend;
   externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
+  /**
+   * Monero wallet backend. When omitted, the vault builds one lazily from
+   * STEWARD_MONERO_* env config; Monero entry points fail closed when neither
+   * is available.
+   */
+  moneroBackend?: MoneroWalletBackend;
 }
 
 /**
@@ -121,10 +142,23 @@ export interface BitcoinPrivateKeyExport {
   metadata: WalletAddressMetadata;
 }
 
+export interface MoneroPrivateKeyExport {
+  /** Private spend key (sufficient to restore the wallet anywhere). */
+  spendKey: string;
+  /** Private view key. */
+  viewKey: string;
+  address: string;
+  restoreHeight: number;
+  venue: string | null;
+  purpose: string | null;
+  metadata: WalletAddressMetadata;
+}
+
 export interface ExportPrivateKeyResult {
   evm?: { privateKey: string; address: string };
   solana?: { privateKey: string; address: string };
   bitcoin?: BitcoinPrivateKeyExport[];
+  monero?: MoneroPrivateKeyExport[];
 }
 
 export interface SignBitcoinPsbtRequest {
@@ -148,6 +182,51 @@ export interface InspectBitcoinPsbtResult {
 export interface SignBitcoinPsbtResult extends BitcoinPsbtSignerResult {
   walletScope: string;
   walletAddress: string;
+}
+
+export interface MoneroCreateOptions {
+  network?: MoneroNetwork;
+  /** Only account 0 is supported today; the scope format reserves room for more. */
+  account?: number;
+}
+
+export interface GetMoneroBalanceRequest {
+  tenantId: string;
+  agentId: string;
+  walletScope: string;
+}
+
+export interface GetMoneroBalanceResult extends MoneroBalanceResult {
+  walletScope: string;
+  walletAddress: string;
+  network: MoneroNetwork;
+}
+
+export interface PrepareMoneroTransferRequest {
+  tenantId: string;
+  agentId: string;
+  walletScope: string;
+  destinations: Array<{ address: string; amountPiconero: string }>;
+  /** wallet2 fee priority, 0 (default) .. 3 (elevated). */
+  priority?: number;
+}
+
+export interface PrepareMoneroTransferResult {
+  walletScope: string;
+  walletAddress: string;
+  network: MoneroNetwork;
+  /** Signed-but-unrelayed tx blob. Keep in memory only; relay or discard. */
+  txMetadata: string;
+  txHash: string;
+  feePiconero: bigint;
+  amountPiconero: bigint;
+}
+
+export interface RelayMoneroTransferRequest {
+  tenantId: string;
+  agentId: string;
+  walletScope: string;
+  txMetadata: string;
 }
 
 const CHAINS: Record<number, Chain> = {
@@ -323,15 +402,103 @@ export class Vault {
   private keyStore: KeystoreBackend;
   private config: VaultConfig;
   private externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
+  private moneroBackend?: MoneroWalletBackend;
 
   constructor(config: VaultConfig) {
     this.config = config;
     this.externalKeyCustodyProvider = config.externalKeyCustodyProvider;
+    this.moneroBackend = config.moneroBackend;
     // Signing-vault keeps the legacy (undomain) root so existing wallet ciphertext
     // stays decryptable; the SecretVault uses a distinct domain-separated root, so
     // the two roots are cryptographically independent despite sharing masterPassword.
     this.keyStore =
       config.keystoreBackend ?? backendFromKeyStore(new KeyStore(config.masterPassword));
+  }
+
+  /** Resolve the Monero backend, or fail closed when Monero is unconfigured. */
+  private getMoneroBackend(): MoneroWalletBackend {
+    if (!this.moneroBackend) {
+      const backend = createMoneroBackendFromEnv();
+      if (!backend) throw new MoneroNotConfiguredError();
+      this.moneroBackend = backend;
+    }
+    return this.moneroBackend;
+  }
+
+  /**
+   * Stable, non-reversible wallet-cache id for the monero-wallet-rpc sidecar.
+   * Only ever derived from identifiers (never key material).
+   */
+  private moneroCacheId(tenantId: string, agentId: string, walletScope: string): string {
+    return createHash("sha256").update(`${tenantId}\x00${agentId}\x00${walletScope}`).digest("hex");
+  }
+
+  /**
+   * Load + decrypt the canonical Monero key payload for a scoped wallet.
+   * The AAD context MUST byte-match the context used at createWallet time —
+   * a drifted context makes the ciphertext permanently undecryptable.
+   */
+  private async resolveMoneroWallet(args: {
+    tenantId: string;
+    agentId: string;
+    walletScope: string;
+  }): Promise<{ payload: MoneroKeyPayloadV1; walletAddress: string }> {
+    const { tenantId, agentId, walletScope } = args;
+    parseMoneroWalletScope(walletScope);
+    const db = getDb();
+
+    const [agentRow] = await db
+      .select({ id: agents.id })
+      .from(agents)
+      .where(and(eq(agents.id, agentId), eq(agents.tenantId, tenantId)));
+    if (!agentRow) {
+      throw new Error(`Agent ${agentId} not found for tenant ${tenantId}`);
+    }
+
+    const [wallet] = await db
+      .select({ address: agentWallets.address })
+      .from(agentWallets)
+      .where(
+        and(
+          eq(agentWallets.agentId, agentId),
+          eq(agentWallets.chainFamily, "monero"),
+          eq(agentWallets.venue, walletScope),
+        ),
+      );
+    if (!wallet) {
+      throw missingSigningKeyError(agentId, "monero", walletScope);
+    }
+
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, agentId),
+          eq(encryptedChainKeys.chainFamily, "monero"),
+          eq(encryptedChainKeys.venue, walletScope),
+        ),
+      );
+    if (!chainKey) {
+      throw missingSigningKeyError(agentId, "monero", walletScope);
+    }
+
+    const serialized = await this.keyStore.decrypt(
+      {
+        ciphertext: chainKey.ciphertext,
+        iv: chainKey.iv,
+        tag: chainKey.tag,
+        salt: chainKey.salt,
+      },
+      { tenantId, agentId, chainFamily: "monero", venue: walletScope },
+    );
+    const payload = parseMoneroKeyPayload(serialized);
+    if (payload.address !== wallet.address) {
+      throw new Error(
+        "Monero wallet row address does not match the encrypted key payload — refusing to proceed",
+      );
+    }
+    return { payload, walletAddress: wallet.address };
   }
 
   private async getExternalKeyWallet(args: {
@@ -889,6 +1056,7 @@ export class Vault {
         if (w.chainFamily === "evm") addresses.evm = w.address;
         if (w.chainFamily === "solana") addresses.solana = w.address;
         if (w.chainFamily === "bitcoin") addresses.bitcoin = w.address;
+        if (w.chainFamily === "monero") addresses.monero = w.address;
       }
       identity.walletAddresses = addresses;
     }
@@ -929,6 +1097,7 @@ export class Vault {
       if (w.chainFamily === "evm") entry.evm = w.address;
       if (w.chainFamily === "solana") entry.solana = w.address;
       if (w.chainFamily === "bitcoin") entry.bitcoin = w.address;
+      if (w.chainFamily === "monero") entry.monero = w.address;
     }
 
     return rows.map((agent) => {
@@ -2560,6 +2729,63 @@ export class Vault {
       );
     }
 
+    // ── Get Monero scoped keys ───────────────────────────────────────────
+    // Monero wallets are always scoped rows (venue = monero:<network>:<account>).
+    // The exported spend key alone is sufficient to restore the wallet in any
+    // Monero wallet software ("restore from keys"); the view key and restore
+    // height make the restore instant instead of a full rescan.
+    const moneroChainKeys = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(eq(encryptedChainKeys.agentId, agentId), eq(encryptedChainKeys.chainFamily, "monero")),
+      );
+
+    if (moneroChainKeys.length > 0) {
+      const moneroWalletRows = await db
+        .select({
+          address: agentWallets.address,
+          venue: agentWallets.venue,
+          purpose: agentWallets.purpose,
+          metadata: agentWallets.metadata,
+        })
+        .from(agentWallets)
+        .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.chainFamily, "monero")));
+      const moneroWalletByVenue = new Map(
+        moneroWalletRows.map((wallet) => [wallet.venue ?? "", wallet]),
+      );
+
+      result.monero = await Promise.all(
+        moneroChainKeys.map(async (chainKey) => {
+          const serialized = await this.keyStore.decrypt(
+            {
+              ciphertext: chainKey.ciphertext,
+              iv: chainKey.iv,
+              tag: chainKey.tag,
+              salt: chainKey.salt,
+            },
+            {
+              tenantId,
+              agentId,
+              chainFamily: "monero",
+              venue: chainKey.venue ?? null,
+            },
+          );
+          const payload = parseMoneroKeyPayload(serialized);
+          const wallet = moneroWalletByVenue.get(chainKey.venue ?? "");
+          return {
+            spendKey: payload.spendKey,
+            viewKey: payload.viewKey,
+            address: payload.address,
+            restoreHeight: payload.restoreHeight,
+            venue: chainKey.venue ?? null,
+            purpose: chainKey.purpose ?? wallet?.purpose ?? null,
+            metadata: (wallet?.metadata ?? {}) as WalletAddressMetadata,
+          };
+        }),
+      );
+    }
+
     return result;
   }
 
@@ -2701,6 +2927,109 @@ export class Vault {
       walletScope,
       walletAddress: wallet.address,
     };
+  }
+
+  /**
+   * Read a scoped Monero wallet's balance. Read-only: no signing-freeze gate,
+   * but tenant ownership and the AAD-bound key payload are still enforced —
+   * scanning requires the (private) view key, which never leaves this host.
+   */
+  async getMoneroBalance(request: GetMoneroBalanceRequest): Promise<GetMoneroBalanceResult> {
+    const { tenantId, agentId, walletScope } = request;
+    const backend = this.getMoneroBackend();
+    const { payload, walletAddress } = await this.resolveMoneroWallet({
+      tenantId,
+      agentId,
+      walletScope,
+    });
+    const balance = await backend.getBalance(payload, {
+      cacheId: this.moneroCacheId(tenantId, agentId, walletScope),
+    });
+    return {
+      ...balance,
+      walletScope,
+      walletAddress,
+      network: payload.network,
+    };
+  }
+
+  /**
+   * Build + sign (but DO NOT broadcast) a Monero transfer. Two-phase by
+   * design: the exact network fee is only known after wallet2 builds the
+   * transaction, and the fee-inclusive aggregate policy check must run before
+   * anything is relayed. Callers either relayMoneroTransfer() the returned
+   * txMetadata or discardMoneroTransfer() on policy denial.
+   */
+  async prepareMoneroTransfer(
+    request: PrepareMoneroTransferRequest,
+  ): Promise<PrepareMoneroTransferResult> {
+    const { tenantId, agentId, walletScope, destinations, priority } = request;
+    const backend = this.getMoneroBackend();
+    await assertVaultSigningActive({
+      tenantId,
+      agentId,
+      chainFamily: "monero",
+      venue: walletScope,
+    });
+    const { payload, walletAddress } = await this.resolveMoneroWallet({
+      tenantId,
+      agentId,
+      walletScope,
+    });
+    if (!Array.isArray(destinations) || destinations.length === 0) {
+      throw new Error("Monero transfer requires at least one destination");
+    }
+    const parsedDestinations = destinations.map((destination) => ({
+      address: destination.address,
+      amountPiconero: parsePiconeroAmount(destination.amountPiconero),
+    }));
+    const prepared = await backend.prepareTransfer(
+      payload,
+      { cacheId: this.moneroCacheId(tenantId, agentId, walletScope) },
+      { destinations: parsedDestinations, priority },
+    );
+    return {
+      walletScope,
+      walletAddress,
+      network: payload.network,
+      txMetadata: prepared.txMetadata,
+      txHash: prepared.txHash,
+      feePiconero: prepared.feePiconero,
+      amountPiconero: prepared.amountPiconero,
+    };
+  }
+
+  /**
+   * Broadcast a transfer previously produced by prepareMoneroTransfer. The
+   * signing freeze is re-checked so a freeze between prepare and relay still
+   * stops the funds from moving.
+   */
+  async relayMoneroTransfer(request: RelayMoneroTransferRequest): Promise<{ txHash: string }> {
+    const { tenantId, agentId, walletScope, txMetadata } = request;
+    const backend = this.getMoneroBackend();
+    await assertVaultSigningActive({
+      tenantId,
+      agentId,
+      chainFamily: "monero",
+      venue: walletScope,
+    });
+    // Re-verify ownership so a relay can never be replayed across tenants.
+    await this.resolveMoneroWallet({ tenantId, agentId, walletScope });
+    return backend.relayTransfer(txMetadata);
+  }
+
+  /**
+   * Best-effort cache cleanup after a prepared transfer was denied by policy
+   * and will never be relayed. Failure is non-fatal: the wallet cache is
+   * disposable and self-heals on rehydration.
+   */
+  async discardMoneroTransfer(request: GetMoneroBalanceRequest): Promise<void> {
+    const { tenantId, agentId, walletScope } = request;
+    const backend = this.getMoneroBackend();
+    const { payload } = await this.resolveMoneroWallet({ tenantId, agentId, walletScope });
+    await backend.discardPreparedTransfer(payload, {
+      cacheId: this.moneroCacheId(tenantId, agentId, walletScope),
+    });
   }
 
   /**
@@ -2980,9 +3309,15 @@ export class Vault {
     chainType: WalletChainFamily;
     purpose?: string;
     bitcoin?: BitcoinCreateOptions;
+    monero?: MoneroCreateOptions;
   }): Promise<WalletRowResult> {
     const { agentId, chainType, purpose } = args;
-    if (chainType !== "evm" && chainType !== "solana" && chainType !== "bitcoin") {
+    if (
+      chainType !== "evm" &&
+      chainType !== "solana" &&
+      chainType !== "bitcoin" &&
+      chainType !== "monero"
+    ) {
       throw new Error(`createWallet: unsupported chainType ${chainType}`);
     }
 
@@ -3013,6 +3348,45 @@ export class Vault {
       const kp = generateSolanaKeypair();
       address = kp.publicKey;
       secret = kp.secretKey;
+    } else if (chainType === "monero") {
+      // Requires the wallet-rpc backend: the receiving address is only handed
+      // out after wallet2 independently re-derives it from the same keys
+      // (dual-derivation check). No backend → fail closed, never an
+      // unvalidated address.
+      const backend = this.getMoneroBackend();
+      const network = args.monero?.network ?? backend.network;
+      const account = args.monero?.account ?? 0;
+      if (network !== backend.network) {
+        throw new Error(
+          `createWallet: the configured Monero sidecar operates on ${backend.network}, not ${network}`,
+        );
+      }
+      if (account !== 0) {
+        throw new Error("createWallet: only Monero account 0 is supported");
+      }
+      venue ??= moneroWalletScope(network, account);
+      parseMoneroWalletScope(venue);
+      // restoreHeight = current chain height: a fresh wallet has no history,
+      // so scanning starts at the tip and stays incremental (light client).
+      const restoreHeight = await backend.getDaemonHeight();
+      const generated = generateMoneroWallet(network);
+      const payload: MoneroKeyPayloadV1 = {
+        v: 1,
+        network,
+        spendKey: generated.spendKey,
+        viewKey: generated.viewKey,
+        address: generated.address,
+        restoreHeight,
+        account,
+      };
+      await backend.verifyWalletKeys(payload, {
+        cacheId: this.moneroCacheId(agentRow.tenantId, agentId, venue),
+      });
+      address = generated.address;
+      secret = serializeMoneroKeyPayload(payload);
+      metadata = {
+        monero: moneroPublicMetadataFromPayload(payload, `monero:${network}`),
+      };
     } else {
       const bitcoinOptions: Required<BitcoinCreateOptions> = {
         network: args.bitcoin?.network ?? "mainnet",
@@ -3131,5 +3505,6 @@ export class Vault {
 function chainIdToChainFamily(chainId: number): WalletChainFamily {
   if (chainId === 101 || chainId === 102) return "solana";
   if (chainId === 201 || chainId === 202) return "bitcoin";
+  if (chainId === 301 || chainId === 302) return "monero";
   return "evm";
 }

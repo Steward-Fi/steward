@@ -61,6 +61,36 @@ export type {
   Pkcs11KmsEnvelopeOptions,
 } from "./keystore-kms";
 export { KmsEnvelopeKeystore, resolveKmsEnvelopeOptions } from "./keystore-kms";
+export type {
+  DecodedMoneroAddress,
+  GeneratedMoneroWallet,
+  MoneroAddressKind,
+  MoneroBalanceResult,
+  MoneroEnv,
+  MoneroKeyPayloadV1,
+  MoneroTransferDestination,
+  MoneroWalletBackend,
+  MoneroWalletBackendContext,
+  MoneroWalletRpcBackendConfig,
+  ParsedMoneroWalletScope,
+  PreparedMoneroTransfer,
+} from "./monero";
+export {
+  assertMoneroAddress,
+  createMoneroBackendFromEnv,
+  decodeMoneroAddress,
+  generateMoneroWallet,
+  MONERO_ATOMIC_UNITS,
+  MONERO_DEFAULT_DAEMON_URLS,
+  MoneroNotConfiguredError,
+  MoneroRpcError,
+  MoneroWalletRpcBackend,
+  moneroWalletScope,
+  parseMoneroKeyPayload,
+  parseMoneroWalletScope,
+  parsePiconeroAmount,
+  serializeMoneroKeyPayload,
+} from "./monero";
 export type { MatchedRoute } from "./route-matcher";
 export {
   findMatchingRoute,
@@ -140,7 +170,14 @@ export type {
   BitcoinPrivateKeyExport,
   ExportPrivateKeyAuthorization,
   ExportPrivateKeyResult,
+  GetMoneroBalanceRequest,
+  GetMoneroBalanceResult,
   InspectBitcoinPsbtResult,
+  MoneroCreateOptions,
+  MoneroPrivateKeyExport,
+  PrepareMoneroTransferRequest,
+  PrepareMoneroTransferResult,
+  RelayMoneroTransferRequest,
   SignBitcoinPsbtRequest,
   SignBitcoinPsbtResult,
   VaultConfig,
