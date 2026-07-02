@@ -69,7 +69,9 @@ services:
       # Enable the monero-wallet-rpc sidecar with: COMPOSE_PROFILES=monero
       # and set STEWARD_MONERO_WALLET_RPC_URL to the sidecar's endpoint below.
       STEWARD_MONERO_WALLET_RPC_URL: "${STEWARD_MONERO_WALLET_RPC_URL:-}"
-      STEWARD_MONERO_WALLET_RPC_LOGIN: "${MONERO_WALLET_RPC_PASSWORD:+steward:${MONERO_WALLET_RPC_PASSWORD}}"
+      # Only consulted when the RPC URL above is set; username matches the
+      # sidecar's --rpc-login.
+      STEWARD_MONERO_WALLET_RPC_LOGIN: "steward:${MONERO_WALLET_RPC_PASSWORD:-}"
       STEWARD_MONERO_DAEMON_URL: "${STEWARD_MONERO_DAEMON_URL:-http://node.sethforprivacy.com:18089}"
       STEWARD_MONERO_NETWORK: "${STEWARD_MONERO_NETWORK:-mainnet}"
       STEWARD_MAX_MONERO_FEE_PICONERO: "${STEWARD_MAX_MONERO_FEE_PICONERO:-}"
@@ -154,14 +156,16 @@ services:
     command:
       - "--daemon-address=${MONERO_DAEMON_ADDRESS:-node.sethforprivacy.com:18089}"
       - "--untrusted-daemon"
-      - "--wallet-dir=/home/monero/wallets"
+      # The image runs as monero:monero and prepares /home/monero/wallet —
+      # mounting the volume anywhere else leaves it root-owned and unwritable.
+      - "--wallet-dir=/home/monero/wallet"
       - "--rpc-bind-ip=0.0.0.0"
       - "--rpc-bind-port=18083"
       - "--confirm-external-bind"
       - "--rpc-login=steward:${MONERO_WALLET_RPC_PASSWORD:?MONERO_WALLET_RPC_PASSWORD must be set when the monero profile is enabled}"
       - "--log-level=0"
     volumes:
-      - monero-wallet-cache:/home/monero/wallets
+      - monero-wallet-cache:/home/monero/wallet
     # Dual-homed like steward-api: `backend` is internal-only (so only
     # steward-api can reach the RPC port), `public` provides egress to the
     # remote daemon. No host port is published.
