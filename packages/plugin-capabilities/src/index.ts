@@ -34,6 +34,21 @@ import type { StewardAppContext } from "./context";
 import { createInvokeRoutes } from "./invoke";
 import { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
 
+export type {
+  CapturedCookie,
+  CaptureMetadata,
+  CapturePayload,
+} from "./capture-payload";
+export {
+  CAPTURED_COOKIE_FIELDS,
+  capturedCookieSchema,
+  captureMetadataSchema,
+  capturePayloadSchema,
+  captureScopeSchema,
+  captureTtlSchema,
+  redactCapturePayload,
+  sameSiteSchema,
+} from "./capture-payload";
 export type { StewardAppContext } from "./context";
 export { createInvokeRoutes } from "./invoke";
 export { createAgentCapabilityRoutes, createCapabilityRoutes } from "./routes";
