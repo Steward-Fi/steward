@@ -247,6 +247,82 @@ function validatePolicyConfig(policy: PolicyRule): string | null {
       }
       return null;
 
+    case "typed-data": {
+      if (
+        config.verifyingContractAllowlist !== undefined &&
+        !areOptionalEvmAddresses(config.verifyingContractAllowlist)
+      ) {
+        return "typed-data.verifyingContractAllowlist must be an EVM address array";
+      }
+      if (
+        config.verifyingContractBlocklist !== undefined &&
+        !areOptionalEvmAddresses(config.verifyingContractBlocklist)
+      ) {
+        return "typed-data.verifyingContractBlocklist must be an EVM address array";
+      }
+      if (
+        config.allowedChainIds !== undefined &&
+        (!Array.isArray(config.allowedChainIds) ||
+          config.allowedChainIds.some(
+            (chainId) => typeof chainId !== "number" || !Number.isInteger(chainId) || chainId <= 0,
+          ))
+      ) {
+        return "typed-data.allowedChainIds must be a positive integer array";
+      }
+      if (
+        config.allowedDomainNames !== undefined &&
+        (!Array.isArray(config.allowedDomainNames) ||
+          config.allowedDomainNames.some((name) => typeof name !== "string" || !name.trim()))
+      ) {
+        return "typed-data.allowedDomainNames must be a string array";
+      }
+      if (
+        config.allowedPrimaryTypes !== undefined &&
+        (!Array.isArray(config.allowedPrimaryTypes) ||
+          config.allowedPrimaryTypes.some((type) => typeof type !== "string" || !type.trim()))
+      ) {
+        return "typed-data.allowedPrimaryTypes must be a string array";
+      }
+      if (config.messageConditions !== undefined) {
+        const validOperators = new Set([
+          "address_in",
+          "address_not_in",
+          "eq",
+          "in",
+          "not_in",
+          "uint_max",
+        ]);
+        if (
+          !Array.isArray(config.messageConditions) ||
+          config.messageConditions.some((condition) => {
+            if (
+              !isPlainObject(condition) ||
+              typeof condition.field !== "string" ||
+              !condition.field.trim() ||
+              typeof condition.operator !== "string" ||
+              !validOperators.has(condition.operator)
+            ) {
+              return true;
+            }
+            if (condition.operator === "address_in" || condition.operator === "address_not_in") {
+              return !areOptionalEvmAddresses(condition.values) || condition.values === undefined;
+            }
+            if (condition.operator === "in" || condition.operator === "not_in") {
+              return (
+                !Array.isArray(condition.values) ||
+                condition.values.some((value) => typeof value !== "string")
+              );
+            }
+            // eq / uint_max take a single string value.
+            return typeof condition.value !== "string" || !condition.value.trim();
+          })
+        ) {
+          return "typed-data.messageConditions must be valid conditions (field, operator, and matching value/values)";
+        }
+      }
+      return null;
+    }
+
     case "raw-signing-chain":
       if (
         config.allowedChains !== undefined &&

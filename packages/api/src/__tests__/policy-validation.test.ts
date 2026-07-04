@@ -329,4 +329,81 @@ describe("policy rule validation", () => {
       ]),
     ).toContain("65536 bytes");
   });
+
+  it("accepts a valid typed-data policy (regression: previously rejected as unknown type)", () => {
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "td",
+          type: "typed-data",
+          enabled: true,
+          config: {
+            verifyingContractAllowlist: ["0xE7C3D8C9a439feDe00D2600032D5dB0Be71C3c29"],
+            allowedChainIds: [80002],
+            allowedDomainNames: ["JPY Coin"],
+            allowedPrimaryTypes: ["ReceiveWithAuthorization"],
+            messageConditions: [
+              {
+                field: "to",
+                operator: "address_in",
+                values: ["0x752B7AaD0089286EB7b553d84D05233d80c9FCB4"],
+              },
+              { field: "value", operator: "uint_max", value: "3000000000000000000" },
+            ],
+          },
+        },
+      ]),
+    ).toBeNull();
+
+    // An empty config is a valid (vacuously-passing) typed-data policy; its real
+    // value is that its existence enables typed-data signing at all.
+    expect(
+      getPolicyRulesValidationError([
+        { id: "td-empty", type: "typed-data", enabled: true, config: {} },
+      ]),
+    ).toBeNull();
+  });
+
+  it("rejects malformed typed-data configs", () => {
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "td",
+          type: "typed-data",
+          enabled: true,
+          config: { verifyingContractAllowlist: ["not-an-address"] },
+        },
+      ]),
+    ).toContain("typed-data.verifyingContractAllowlist");
+
+    expect(
+      getPolicyRulesValidationError([
+        { id: "td", type: "typed-data", enabled: true, config: { allowedChainIds: [0] } },
+      ]),
+    ).toContain("typed-data.allowedChainIds");
+
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "td",
+          type: "typed-data",
+          enabled: true,
+          config: {
+            messageConditions: [{ field: "value", operator: "uint_maximum", value: "1" }],
+          },
+        },
+      ]),
+    ).toContain("typed-data.messageConditions");
+
+    expect(
+      getPolicyRulesValidationError([
+        {
+          id: "td",
+          type: "typed-data",
+          enabled: true,
+          config: { messageConditions: [{ field: "to", operator: "address_in" }] },
+        },
+      ]),
+    ).toContain("typed-data.messageConditions");
+  });
 });
