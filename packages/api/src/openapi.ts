@@ -4137,6 +4137,7 @@ function adapterPaths(prefix = ""): Record<string, unknown> {
       amount: stringSchema,
       chainId: { type: "integer", minimum: 1 },
       slippageBps: { type: "integer", minimum: 0, maximum: 10000 },
+      taker: stringSchema,
       estimatedUsd: { type: "number", minimum: 0 },
     },
   };

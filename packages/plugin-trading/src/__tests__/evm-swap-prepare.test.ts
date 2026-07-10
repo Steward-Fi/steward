@@ -53,15 +53,30 @@ class FakeSwapAdapter implements SwapAdapter {
   chainId: number | null = null;
   mutateOwner = false;
   mutateQuoteId = false;
+  mutateQuoteFromToken = false;
+  mutateQuoteToToken = false;
+  mutateQuoteAmount = false;
+  expireQuote = false;
+  failUnavailable = false;
+  observedTaker: string | undefined;
 
   async getQuote(request: SwapQuoteRequest): Promise<SwapQuote> {
     this.quoteCalls += 1;
+    this.observedTaker = request.taker;
+    if (this.failUnavailable) {
+      const { AdapterUnavailableError } = await import("@stwd/adapters");
+      throw new AdapterUnavailableError("swap", "recorded provider failure");
+    }
     return {
       provider: this.provider,
-      fromToken: request.fromToken,
-      toToken: request.toToken,
+      fromToken: this.mutateQuoteFromToken
+        ? { ...request.fromToken, address: "0x00000000000000000000000000000000000000ef" }
+        : request.fromToken,
+      toToken: this.mutateQuoteToToken
+        ? { ...request.toToken, address: "0x00000000000000000000000000000000000000ef" }
+        : request.toToken,
       chainId: this.chainId ?? request.chainId,
-      amountIn: request.amount,
+      amountIn: this.mutateQuoteAmount ? "999" : request.amount,
       amountOut: request.amount,
       minAmountOut: request.amount,
       route: [
@@ -69,7 +84,7 @@ class FakeSwapAdapter implements SwapAdapter {
       ],
       feeAmount: "0",
       slippageBps: request.slippageBps ?? 50,
-      expiresAt: Date.now() + 60_000,
+      expiresAt: this.expireQuote ? Date.now() - 1 : Date.now() + 60_000,
       quoteId: `quote-${request.chainId}-${request.amount}`,
     };
   }
@@ -309,6 +324,7 @@ describe("governed EVM swap prepare", () => {
     };
     expect(body.data.intentHash).toMatch(/^sha256:/);
     expect(body.data.unsignedIntent.data).toBe(CALLDATA);
+    expect(adapter.observedTaker).toMatch(/^0x[a-f0-9]{40}$/i);
     expect(adapter.buildCalls).toBe(1);
     expect(simulationCalls()).toBe(1);
 
@@ -448,6 +464,24 @@ describe("governed EVM swap prepare", () => {
       const { app } = await buildApp({ adapter, simulator: { ok: true } });
       const res = await postPrepare(app);
       expect([400, 403]).toContain(res.status);
+    }
+  });
+
+  it("denies provider-returned quote mutation and unavailable failures before simulation", async () => {
+    const cases: Array<[Partial<FakeSwapAdapter>, number]> = [
+      [{ chainId: 1 }, 400],
+      [{ mutateQuoteFromToken: true }, 400],
+      [{ mutateQuoteToToken: true }, 400],
+      [{ mutateQuoteAmount: true }, 400],
+      [{ expireQuote: true }, 400],
+      [{ failUnavailable: true }, 503],
+    ];
+    for (const [adapterPatch, status] of cases) {
+      const adapter = Object.assign(new FakeSwapAdapter(), adapterPatch);
+      const { app, simulationCalls } = await buildApp({ adapter, simulator: { ok: true } });
+      const res = await postPrepare(app);
+      expect(res.status).toBe(status);
+      expect(simulationCalls()).toBe(0);
     }
   });
 

@@ -25,7 +25,7 @@ import { MockOfframpAdapter, type OfframpAdapter } from "./adapters/offramp.js";
 import { MockOnrampAdapter, type OnrampAdapter } from "./adapters/onramp.js";
 import { MockPushAdapter, type PushAdapter } from "./adapters/push.js";
 import { MockSparkAdapter, type SparkAdapter } from "./adapters/spark.js";
-import { MockSwapAdapter, type SwapAdapter } from "./adapters/swap.js";
+import { MockSwapAdapter, type SwapAdapter, ZeroExSwapAdapter } from "./adapters/swap.js";
 import { MockTosAdapter, type TosAdapter } from "./adapters/tos.js";
 import { type AdapterCategory, AdapterNotConfiguredError, type BaseAdapter } from "./types.js";
 
@@ -108,6 +108,50 @@ function makeMockAdapter<C extends AdapterCategory>(category: C): CategoryToAdap
   return MOCK_FACTORIES[category]();
 }
 
+function parsePositiveIntEnv(
+  env: Record<string, string | undefined>,
+  key: string,
+): number | undefined {
+  const raw = env[key]?.trim();
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function parseZeroExAffiliateFee(env: Record<string, string | undefined>) {
+  const recipient = env.STEWARD_ZEROEX_SWAP_FEE_RECIPIENT?.trim();
+  const bpsRaw = env.STEWARD_ZEROEX_SWAP_FEE_BPS?.trim();
+  const token = env.STEWARD_ZEROEX_SWAP_FEE_TOKEN?.trim();
+  if (!recipient && !bpsRaw && !token) return undefined;
+  const bps = Number(bpsRaw);
+  if (!recipient || !Number.isInteger(bps)) {
+    throw new Error("invalid 0x affiliate fee config");
+  }
+  return {
+    recipient,
+    bps,
+    token: token || undefined,
+  };
+}
+
+function maybeMakeZeroExSwapAdapter(env: Record<string, string | undefined>): SwapAdapter | null {
+  const apiKey = env.STEWARD_ZEROEX_API_KEY?.trim();
+  const supportedChainsJson = env.STEWARD_ZEROEX_SUPPORTED_CHAINS_JSON?.trim();
+  if (!apiKey || !supportedChainsJson) return null;
+  try {
+    return new ZeroExSwapAdapter({
+      apiKey,
+      supportedChains: JSON.parse(supportedChainsJson),
+      baseUrl: env.STEWARD_ZEROEX_BASE_URL?.trim() || undefined,
+      timeoutMs: parsePositiveIntEnv(env, "STEWARD_ZEROEX_TIMEOUT_MS"),
+      quoteTtlMs: parsePositiveIntEnv(env, "STEWARD_ZEROEX_QUOTE_TTL_MS"),
+      affiliateFee: parseZeroExAffiliateFee(env),
+    });
+  } catch {
+    return null;
+  }
+}
+
 export class AdapterRegistry {
   private readonly env: Record<string, string | undefined>;
   // category -> (providerName -> adapter) for explicitly registered real adapters
@@ -151,6 +195,17 @@ export class AdapterRegistry {
 
     const configured = this.env[envKey(category)]?.trim();
     const byName = this.registered.get(category);
+
+    if (category === "swap" && configured === "zeroex") {
+      const zeroEx = maybeMakeZeroExSwapAdapter(this.env);
+      if (zeroEx) {
+        this.resolved.set(category, zeroEx);
+        return zeroEx as CategoryToAdapter[C];
+      }
+      const disabled = makeDisabledAdapter(category);
+      this.resolved.set(category, disabled);
+      return disabled;
+    }
 
     // 1. Explicit env selection of a registered provider.
     if (configured && configured !== "mock" && byName?.has(configured)) {

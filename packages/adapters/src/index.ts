@@ -111,6 +111,10 @@ export {
   type SwapAdapter,
   type SwapQuote,
   type SwapQuoteRequest,
+  type ZeroExAffiliateFeeConfig,
+  type ZeroExChainConfig,
+  ZeroExSwapAdapter,
+  type ZeroExSwapAdapterOptions,
 } from "./adapters/swap.js";
 export {
   MockTosAdapter,

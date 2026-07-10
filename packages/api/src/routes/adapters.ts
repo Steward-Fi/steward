@@ -457,6 +457,7 @@ const swapQuoteSchema = z.object({
   amount: z.string().min(1).max(80),
   chainId: z.number().int().positive(),
   slippageBps: z.number().int().min(0).max(10_000).optional(),
+  taker: z.string().min(1).max(128).optional(),
   /** Caller's USD notional estimate for the input amount (for the spend gate). */
   estimatedUsd: z.number().positive().max(1e12).optional(),
 });
@@ -646,6 +647,7 @@ adapterRoutes.post("/swap/quote", async (c) => {
       amount: parsed.data.amount,
       chainId: parsed.data.chainId,
       slippageBps: parsed.data.slippageBps,
+      taker: parsed.data.taker,
     });
     return c.json(ok({ quote }));
   } catch (err) {

@@ -43328,6 +43328,9 @@
                     "minimum": 0,
                     "maximum": 10000
                   },
+                  "taker": {
+                    "type": "string"
+                  },
                   "estimatedUsd": {
                     "type": "number",
                     "minimum": 0
@@ -51194,6 +51197,9 @@
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 10000
+                  },
+                  "taker": {
+                    "type": "string"
                   },
                   "estimatedUsd": {
                     "type": "number",

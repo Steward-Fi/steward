@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import type { SwapQuote } from "@stwd/adapters";
+import {
+  AdapterNotConfiguredError,
+  AdapterUnavailableError,
+  AdapterValidationError,
+  type SwapQuote,
+} from "@stwd/adapters";
 import {
   aggregationLookupFromMap,
   aggregationQueriesForPolicies,
@@ -468,6 +473,7 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         toToken: parsed.data.toToken,
         amount: parsed.data.amount,
         chainId: parsed.data.chainId,
+        taker: owner,
         slippageBps: parsed.data.slippageBps,
       });
       if (
@@ -605,8 +611,14 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
           },
         },
       };
-    })().catch(async (): Promise<StoredResponse> => {
-      const reason = "EVM swap preparation failed";
+    })().catch(async (error): Promise<StoredResponse> => {
+      const adapterReason =
+        error instanceof AdapterValidationError ||
+        error instanceof AdapterNotConfiguredError ||
+        error instanceof AdapterUnavailableError
+          ? error.message
+          : null;
+      const reason = adapterReason ?? "EVM swap preparation failed";
       await ctx.writeAuditEvent({
         tenantId,
         actorType: "agent",
@@ -616,6 +628,12 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         resourceId: parsed.data.agentId,
         metadata: { reason, agentId: parsed.data.agentId, chainId: parsed.data.chainId },
       });
+      if (error instanceof AdapterValidationError) {
+        return { status: 400, body: rejectReason(error.message) };
+      }
+      if (error instanceof AdapterNotConfiguredError || error instanceof AdapterUnavailableError) {
+        return { status: 503, body: { ok: false, error: error.message } };
+      }
       return { status: 500, body: { ok: false, error: "Internal server error" } };
     });
 
