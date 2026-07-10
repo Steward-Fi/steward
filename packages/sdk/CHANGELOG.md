@@ -7,6 +7,7 @@
 
 - Expands Hyperliquid trade asset types to include NEAR, HYPE, ZEC, XMR.
 - Expands Hyperliquid trade asset types to include BNB, SOL, AVAX, ARB, and OP.
+- Documents the optional per-selector `maxNativeValueWei` contract policy field used by governed EVM swap preparation.
 
 ## 0.10.0
 
