@@ -44,9 +44,9 @@ const metadataBase = (() => {
 
 export const metadata: Metadata = {
   metadataBase,
-  title: "Steward: wallets and policy for humans and agents",
+  title: "Steward: the open authority and execution layer for AI agents",
   description:
-    "The open, self-hostable wallet and governance rail for humans and agents. Embedded wallets, a policy engine with spend caps and kill-switch, and a proxy gateway. MIT-licensed, no per-transaction toll.",
+    "The open-source authority and execution layer for AI agents. Steward holds wallets and credentials, enforces policy before every privileged action, routes approvals, executes across APIs and financial rails, and produces a complete audit trail.",
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "32x32" },
@@ -57,9 +57,9 @@ export const metadata: Metadata = {
   },
   manifest: "/site.webmanifest",
   openGraph: {
-    title: "Steward: wallets and policy for humans and agents",
+    title: "Steward: the open authority and execution layer for AI agents",
     description:
-      "The open, self-hostable wallet and governance rail for humans and agents. MIT-licensed, no per-transaction toll. Own your keys, policies, and data.",
+      "Open-source authority and execution for AI agents. Any model, any runtime, any cloud, any chain, on infrastructure you control.",
     type: "website",
     images: [
       {
