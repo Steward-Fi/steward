@@ -816,8 +816,7 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
     };
   }
 
-  const constraint =
-    contract.constraints?.[selector] ?? contract.constraints?.[selector.toUpperCase()];
+  const constraint = selectorConstraint(contract.constraints, selector);
   if (constraint) {
     const constraintResult = evaluateEvmSelectorConstraint(rule, ctx, selector, data, constraint);
     if (!constraintResult.passed) return constraintResult;
@@ -829,6 +828,16 @@ function evaluateContractAllowlist(rule: PolicyRule, ctx: EvaluatorContext): Pol
 type ContractSelectorConstraint = NonNullable<
   ContractAllowlistConfig["contracts"][number]["constraints"]
 >[string];
+
+function selectorConstraint(
+  constraints: ContractAllowlistConfig["contracts"][number]["constraints"] | undefined,
+  selector: string,
+): ContractSelectorConstraint | undefined {
+  if (!constraints) return undefined;
+  const normalizedSelector = selector.toLowerCase();
+  if (Object.hasOwn(constraints, normalizedSelector)) return constraints[normalizedSelector];
+  return Object.entries(constraints).find(([key]) => key.toLowerCase() === normalizedSelector)?.[1];
+}
 
 function decodeAbiAddress(word: string): string | null {
   if (!/^[a-fA-F0-9]{64}$/.test(word)) return null;

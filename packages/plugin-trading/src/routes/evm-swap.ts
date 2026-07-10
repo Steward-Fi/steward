@@ -171,7 +171,13 @@ function decimalLte(a: string, b: string): boolean {
 function selectorMaxNativeValue(entry: Record<string, unknown>, selector: string): string | null {
   const constraints = entry.constraints;
   if (!constraints || typeof constraints !== "object") return null;
-  const selectorConfig = (constraints as Record<string, unknown>)[selector];
+  const normalizedSelector = selector.toLowerCase();
+  const constraintsBySelector = constraints as Record<string, unknown>;
+  const selectorConfig = Object.hasOwn(constraintsBySelector, normalizedSelector)
+    ? constraintsBySelector[normalizedSelector]
+    : Object.entries(constraintsBySelector).find(
+        ([key]) => key.toLowerCase() === normalizedSelector,
+      )?.[1];
   if (!selectorConfig || typeof selectorConfig !== "object") return null;
   const value = (selectorConfig as Record<string, unknown>).maxNativeValueWei;
   return typeof value === "string" && /^\d+$/.test(value) ? value : null;
@@ -529,6 +535,7 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         aggregations,
         priceOracle: ctx.priceOracle,
         correlationId: idempotencyKey,
+        venue: intent.provider,
       });
       if (!policyEvaluation.approved) {
         return reject(

@@ -5,18 +5,15 @@ import {
   type SwapQuote,
   type SwapQuoteRequest,
 } from "@stwd/adapters";
-import { auditEvents, closeDb, getDb, policies, tenants } from "@stwd/db";
-import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { asc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { StewardAppContext } from "../context";
-import { tradingPlugin } from "../index";
-import { createEvmSwapRoutes } from "../routes/evm-swap";
 
 // Set these before dynamically loading the API context. Bun may evaluate test
 // files concurrently in one module graph, before any beforeAll hook runs.
 process.env.STEWARD_PGLITE_MEMORY = "true";
+process.env.STEWARD_DB_MODE = "pglite";
 process.env.STEWARD_MASTER_PASSWORD = "evm-swap-master-password";
 process.env.STEWARD_AUDIT_HMAC_KEY = "evm-swap-audit-hmac-key-with-enough-entropy";
 
@@ -35,6 +32,14 @@ let publicJwk: JsonWebKey;
 let requireAgentJwt: typeof import("../../../api/src/middleware/agent-jwt")["requireAgentJwt"];
 let clearAgentJwksCacheForTests: typeof import("../../../api/src/middleware/agent-jwt")["clearAgentJwksCacheForTests"];
 let testCtx: () => StewardAppContext;
+let tradingPlugin: typeof import("../index")["tradingPlugin"];
+let createEvmSwapRoutes: typeof import("../routes/evm-swap")["createEvmSwapRoutes"];
+let auditEvents: typeof import("@stwd/db")["auditEvents"];
+let policies: typeof import("@stwd/db")["policies"];
+let tenants: typeof import("@stwd/db")["tenants"];
+let closeDb: typeof import("@stwd/db")["closeDb"];
+let getDb: typeof import("@stwd/db")["getDb"];
+let pgliteDb: ReturnType<typeof getDb>;
 
 class FakeSwapAdapter implements SwapAdapter {
   readonly category = "swap" as const;
@@ -119,6 +124,8 @@ async function seedPolicy(
     target?: string;
     selector?: string;
     maxNativeValueWei?: string;
+    selectorConstraints?: Record<string, { maxNativeValueWei: string }>;
+    venueAllowlist?: string[];
   } = {},
 ) {
   await getDb().delete(policies).where(eq(policies.agentId, AGENT_ID));
@@ -142,7 +149,7 @@ async function seedPolicy(
             {
               address: overrides.target ?? TARGET,
               selectors: [overrides.selector ?? SELECTOR],
-              constraints: {
+              constraints: overrides.selectorConstraints ?? {
                 [overrides.selector ?? SELECTOR]: {
                   maxNativeValueWei: overrides.maxNativeValueWei ?? "0",
                 },
@@ -151,6 +158,17 @@ async function seedPolicy(
           ],
         },
       },
+      ...(overrides.venueAllowlist
+        ? [
+            {
+              id: `venue-${crypto.randomUUID()}`,
+              agentId: AGENT_ID,
+              type: "venue-allowlist" as const,
+              enabled: true,
+              config: { allowedVenues: overrides.venueAllowlist },
+            },
+          ]
+        : []),
     ]);
 }
 
@@ -229,11 +247,17 @@ async function postPrepare(
 }
 
 beforeAll(async () => {
-  ({ testCtx } = await import("./_ctx"));
+  const { createPGLiteDb, setPGLiteOverride } = await import("@stwd/db/pglite");
   const { db, client } = await createPGLiteDb("memory://");
   setPGLiteOverride(db, async () => {
     await client.close();
   });
+  pgliteDb = db as ReturnType<typeof getDb>;
+
+  ({ auditEvents, closeDb, getDb, policies, tenants } = await import("@stwd/db"));
+  ({ testCtx } = await import("./_ctx"));
+  ({ tradingPlugin } = await import("../index"));
+  ({ createEvmSwapRoutes } = await import("../routes/evm-swap"));
 
   const keys = await generateKeyPair("RS256", { extractable: true });
   privateKey = keys.privateKey;
@@ -269,6 +293,12 @@ beforeEach(async () => {
 });
 
 describe("governed EVM swap prepare", () => {
+  it("uses the in-memory PGLite override installed before API context imports", () => {
+    expect(getDb()).toBe(pgliteDb);
+    expect(process.env.STEWARD_DB_MODE).toBe("pglite");
+    expect(process.env.STEWARD_PGLITE_MEMORY).toBe("true");
+  });
+
   it("prepares an unsigned intent, replays idempotently, and sanitizes audit", async () => {
     const { app, adapter, simulationCalls } = await buildApp({ simulator: { ok: true } });
     const key = crypto.randomUUID();
@@ -360,6 +390,56 @@ describe("governed EVM swap prepare", () => {
       expect(res.status).toBe(400);
       expect((await res.json()) as { code: string }).toMatchObject({ code: "policy-violation" });
     }
+  });
+
+  it("passes authoritative intent provider as venue into policy evaluation", async () => {
+    await seedPolicy({ venueAllowlist: ["fake"] });
+    const { app } = await buildApp({ simulator: { ok: true } });
+    const res = await postPrepare(app);
+    expect(res.status).toBe(200);
+  });
+
+  it("denies provider venues outside the policy allowlist", async () => {
+    await seedPolicy({ venueAllowlist: ["other-venue"] });
+    const { app } = await buildApp({ simulator: { ok: true } });
+    const res = await postPrepare(app);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      code: "policy-violation",
+      reason: "venue-not-allowlisted: fake",
+    });
+  });
+
+  it("accepts mixed-case selector constraint keys in strict EVM policy", async () => {
+    await seedPolicy({ selector: "0xAbCdEf12", maxNativeValueWei: "1" });
+    const adapter = Object.assign(new FakeSwapAdapter(), {
+      data: `0xabcdef12${"0".repeat(64)}`,
+      value: "1",
+    });
+    const { app } = await buildApp({ adapter, simulator: { ok: true } });
+    const res = await postPrepare(app);
+    expect(res.status).toBe(200);
+  });
+
+  it("prefers an exact lowercase selector constraint over an earlier folded duplicate in strict EVM policy", async () => {
+    await seedPolicy({
+      selector: "0xabcdef12",
+      selectorConstraints: {
+        "0xAbCdEf12": { maxNativeValueWei: "10" },
+        "0xabcdef12": { maxNativeValueWei: "1" },
+      },
+    });
+    const adapter = Object.assign(new FakeSwapAdapter(), {
+      data: `0xabcdef12${"0".repeat(64)}`,
+      value: "2",
+    });
+    const { app } = await buildApp({ adapter, simulator: { ok: true } });
+    const res = await postPrepare(app);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      code: "policy-violation",
+      reason: "EVM policy must allowlist target, selector, and max native value",
+    });
   });
 
   it("denies intent owner and quote binding mutation", async () => {
