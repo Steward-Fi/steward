@@ -34,6 +34,7 @@ import {
   type EthersSignerLike,
   isPolymarketPostNotAttempted,
   isPolymarketUnauthorized,
+  listPositions as listPolymarketPositions,
   POLY_EOA_SIGNATURE_TYPE,
   POLY_GNOSIS_SAFE_SIGNATURE_TYPE,
   type PolymarketAccount,
@@ -147,6 +148,41 @@ const pmSubmitOrderSchema = z.object({
 
 type PmSubmitOrderBody = z.infer<typeof pmSubmitOrderSchema>;
 
+const pmListOrdersSchema = z.object({
+  agentId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
+  market: z.string().min(1).optional(),
+});
+
+const pmListPositionsSchema = z.object({
+  agentId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
+  limit: z.coerce.number().int().positive().max(500).optional(),
+  minBalance: z.coerce.number().nonnegative().optional(),
+});
+
+const pmCancelOrderSchema = z.object({
+  agentId: z.string().min(1).optional(),
+  sessionId: z.string().min(1),
+  idempotencyKey: z.string().min(1).max(256).optional(),
+});
+
+type PmCancelOrderBody = z.infer<typeof pmCancelOrderSchema> & {
+  orderId: string;
+  cancelAll?: false;
+};
+
+const pmCancelAllSchema = z.object({
+  agentId: z.string().min(1).optional(),
+  sessionId: z.string().min(1),
+  market: z.string().min(1).optional(),
+  idempotencyKey: z.string().min(1).max(256).optional(),
+});
+
+type PmCancelAllBody = z.infer<typeof pmCancelAllSchema> & {
+  cancelAll: true;
+};
+
 /**
  * Build the trade router, closing over the injected core context. Every helper
  * + route that used a core service (db, vault, redis, audit, token status) reads
@@ -171,6 +207,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }
   >();
   const pmMemoryIdempotency = new Map<
+    string,
+    { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }
+  >();
+  const pmCancelMemoryIdempotency = new Map<
     string,
     { bodyHash: string; response: TradeIdempotencyResponse; expiresAt: number }
   >();
@@ -228,6 +268,29 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     return !scopedAgent || scopedAgent === agentId;
   }
 
+  function isOperatorRecoveryCaller(c: Context<{ Variables: AppVariables }>): boolean {
+    if (c.get("authType") === "platform" || c.get("authType") === "api-key") return true;
+    return (
+      c.get("authType") === "session-jwt" &&
+      (c.get("tenantRole") === "owner" || c.get("tenantRole") === "admin")
+    );
+  }
+
+  function tradeActor(
+    c: Context<{ Variables: AppVariables }>,
+    agentId: string,
+  ): {
+    actorType: "agent" | "user" | "api-key";
+    actorId: string;
+  } {
+    const scoped = callerAgentId(c);
+    if (scoped) return { actorType: "agent", actorId: scoped };
+    const control = controlPlaneAuditActor(c);
+    return control.actorType === "api-key"
+      ? { actorType: "api-key", actorId: control.actorId }
+      : { actorType: "user", actorId: control.actorId ?? agentId };
+  }
+
   function hasOwnBodyValue(body: unknown, key: string): boolean {
     return typeof body === "object" && body !== null && Object.hasOwn(body, key);
   }
@@ -249,6 +312,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       | "trade.order.policy-rejected"
       | "trade.order.builder.stamped"
       | "trade.builder.approved"
+      | "trade.order.cancel.authorized"
       | "trade.order.canceled",
     details: Record<string, unknown>,
     actor: { actorType: "agent" | "user" | "api-key"; actorId: string } = {
@@ -1437,6 +1501,115 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     };
   }
 
+  type PolymarketWalletResolution =
+    | {
+        ok: true;
+        funderAddress: string;
+        walletAddress: string;
+      }
+    | { ok: false; reason: "wallet-not-found" };
+
+  async function resolvePolymarketWalletBinding(
+    agentId: string,
+  ): Promise<PolymarketWalletResolution> {
+    try {
+      const wallet = await vault.getWallet({ agentId, venue: "polymarket" });
+      const meta = wallet.metadata as { funderAddress?: unknown } | undefined;
+      const funderAddress =
+        typeof meta?.funderAddress === "string" ? meta.funderAddress : wallet.address;
+      return { ok: true, funderAddress, walletAddress: wallet.address };
+    } catch {
+      return { ok: false, reason: "wallet-not-found" };
+    }
+  }
+
+  function polymarketCredsError(
+    reason: "wallet-not-found" | "creds-not-provisioned" | "derive-failed",
+  ): string {
+    return reason === "wallet-not-found"
+      ? "Polymarket venue wallet not found. Provision a polymarket wallet before trading."
+      : "Polymarket credentials are not provisioned for this agent.";
+  }
+
+  function createPolymarketAdapter(
+    tenantId: string,
+    agentId: string,
+    creds: Extract<PolymarketCredsResolution, { ok: true }>,
+  ): PolymarketExecutionAdapter {
+    const signer = buildPolymarketVaultSigner(tenantId, agentId, creds.walletAddress);
+    const account: PolymarketAccount = {
+      apiCredentials: creds.apiCredentials,
+      funderAddress: creds.funderAddress,
+      signer,
+      signatureType: creds.signatureType,
+    };
+    return new PolymarketExecutionAdapter(account, {
+      builder: resolveBuilderConfig(),
+      ...(creds.clobUrl ? { clobUrl: creds.clobUrl } : {}),
+    });
+  }
+
+  async function resolvePolymarketReadAgent(
+    c: Context<{ Variables: AppVariables }>,
+    input: { agentId?: string; sessionId?: string },
+  ): Promise<
+    | { ok: true; agentId: string; session?: TradeSession }
+    | { ok: false; status: 400 | 403 | 404; error: string }
+  > {
+    const tenantId = c.get("tenantId");
+    const scoped = callerAgentId(c);
+    const requestedAgentId = input.agentId ?? scoped;
+    let session: TradeSession | undefined;
+    if (input.sessionId) {
+      const loaded = await getSessionManager().getSession({ tenantId, id: input.sessionId });
+      if (!loaded || loaded.venue !== "polymarket") {
+        return { ok: false, status: 404, error: "Polymarket session not found" };
+      }
+      session = loaded;
+      if (requestedAgentId && requestedAgentId !== loaded.agentId) {
+        return { ok: false, status: 403, error: "Forbidden: session belongs to another agent" };
+      }
+    }
+    const agentId = session?.agentId ?? requestedAgentId;
+    if (!agentId) return { ok: false, status: 400, error: "agentId or sessionId is required" };
+    if (!canAccessAgent(c, agentId)) {
+      return { ok: false, status: 403, error: "Forbidden: agent token cannot access this agent" };
+    }
+    const agent = await ensureAgentForTenant(tenantId, agentId);
+    if (!agent) return { ok: false, status: 404, error: "Agent not found" };
+    return { ok: true, agentId, ...(session ? { session } : {}) };
+  }
+
+  function getPmCancelIdempotency(
+    tenantId: string,
+    agentId: string,
+    key: string | undefined,
+    body: PmCancelOrderBody | PmCancelAllBody,
+  ): {
+    conflict?: boolean;
+    response?: TradeIdempotencyResponse;
+    store?: (response: TradeIdempotencyResponse) => void;
+  } {
+    if (!key) return {};
+    const now = Date.now();
+    const mapKey = `${tenantId}:${agentId}:pm-cancel:${key}`;
+    const bodyHash = hashBody({ ...body, idempotencyKey: undefined });
+    const existing = pmCancelMemoryIdempotency.get(mapKey);
+    if (existing && existing.expiresAt > now) {
+      if (existing.bodyHash !== bodyHash) return { conflict: true };
+      return { response: existing.response };
+    }
+    return {
+      store(response: TradeIdempotencyResponse) {
+        pmCancelMemoryIdempotency.set(mapKey, {
+          bodyHash,
+          response,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
+      },
+    };
+  }
+
   /**
    * The vault→ethers-signer bridge.
    *
@@ -1498,6 +1671,305 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       _signTypedData,
     };
   }
+
+  tradeRoutes.get("/polymarket/orders", async (c) => {
+    const tenantId = c.get("tenantId");
+    const parsed = pmListOrdersSchema.safeParse({
+      agentId: c.req.query("agentId") ?? undefined,
+      sessionId: c.req.query("sessionId") ?? undefined,
+      market: c.req.query("market") ?? undefined,
+    });
+    if (!parsed.success) {
+      return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+    }
+
+    const access = await resolvePolymarketReadAgent(c, parsed.data);
+    if (!access.ok) return c.json<ApiResponse>({ ok: false, error: access.error }, access.status);
+
+    const creds = await resolvePolymarketCreds(tenantId, access.agentId);
+    if (!creds.ok) {
+      return c.json<ApiResponse>({ ok: false, error: polymarketCredsError(creds.reason) }, 409);
+    }
+    if (
+      access.session &&
+      creds.walletAddress.toLowerCase() !== access.session.walletId.toLowerCase()
+    ) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Session wallet binding no longer matches the provisioned wallet. Re-create the session.",
+        },
+        409,
+      );
+    }
+
+    const adapter = createPolymarketAdapter(tenantId, access.agentId, creds);
+    const orders = parsed.data.market
+      ? await adapter.listOrders({ market: parsed.data.market })
+      : await adapter.listOrders();
+    return c.json(responseData({ agentId: access.agentId, orders }));
+  });
+
+  tradeRoutes.get("/polymarket/positions", async (c) => {
+    const parsed = pmListPositionsSchema.safeParse({
+      agentId: c.req.query("agentId") ?? undefined,
+      sessionId: c.req.query("sessionId") ?? undefined,
+      limit: c.req.query("limit") ?? undefined,
+      minBalance: c.req.query("minBalance") ?? undefined,
+    });
+    if (!parsed.success) {
+      return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+    }
+
+    const access = await resolvePolymarketReadAgent(c, parsed.data);
+    if (!access.ok) return c.json<ApiResponse>({ ok: false, error: access.error }, access.status);
+
+    const wallet = await resolvePolymarketWalletBinding(access.agentId);
+    if (!wallet.ok) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Polymarket venue wallet not found. Provision a polymarket wallet before trading.",
+        },
+        409,
+      );
+    }
+    if (
+      access.session &&
+      wallet.walletAddress.toLowerCase() !== access.session.walletId.toLowerCase()
+    ) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Session wallet binding no longer matches the provisioned wallet. Re-create the session.",
+        },
+        409,
+      );
+    }
+
+    const positions = await listPolymarketPositions({
+      user: wallet.funderAddress,
+      ...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}),
+      ...(parsed.data.minBalance !== undefined ? { minBalance: parsed.data.minBalance } : {}),
+    });
+    return c.json(
+      responseData({
+        agentId: access.agentId,
+        walletAddress: wallet.walletAddress,
+        funderAddress: wallet.funderAddress,
+        positions,
+      }),
+    );
+  });
+
+  async function cancelPolymarketOrders(
+    c: Context<{ Variables: AppVariables }>,
+    body: PmCancelOrderBody | PmCancelAllBody,
+  ): Promise<Response> {
+    const tenantId = c.get("tenantId");
+    const scopedAgentId = callerAgentId(c);
+    const operator = isOperatorRecoveryCaller(c);
+    const requestedAgentId = body.agentId ?? scopedAgentId;
+    if (!requestedAgentId && !operator) {
+      return c.json<ApiResponse>({ ok: false, error: "Agent JWT required for trading" }, 403);
+    }
+
+    const session = await getSessionManager().getSession({ tenantId, id: body.sessionId });
+    if (
+      !session ||
+      session.venue !== "polymarket" ||
+      session.status !== "active" ||
+      session.expiresAt.getTime() <= Date.now()
+    ) {
+      return c.json<ApiResponse>({ ok: false, error: "Active Polymarket session required" }, 403);
+    }
+    const agentId = session.agentId;
+    if (requestedAgentId && requestedAgentId !== agentId) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Forbidden: session belongs to another agent" },
+        403,
+      );
+    }
+    if (scopedAgentId && scopedAgentId !== agentId) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Forbidden: agent token cannot cancel for another agent" },
+        403,
+      );
+    }
+    if (!scopedAgentId && !operator) {
+      return c.json<ApiResponse>({ ok: false, error: "Operator recovery auth required" }, 403);
+    }
+
+    const idempotency = getPmCancelIdempotency(tenantId, agentId, body.idempotencyKey, body);
+    if (idempotency.conflict) {
+      return c.json<ApiResponse>(
+        { ok: false, error: "Idempotency key reused with a different body" },
+        409,
+      );
+    }
+    if (idempotency.response) {
+      return tradeReplayResponse(c, idempotency.response);
+    }
+
+    if (!body.idempotencyKey) {
+      return c.json<ApiResponse>({ ok: false, error: "Idempotency-Key is required" }, 400);
+    }
+
+    const creds = await resolvePolymarketCreds(tenantId, agentId);
+    if (!creds.ok) {
+      return c.json<ApiResponse>({ ok: false, error: polymarketCredsError(creds.reason) }, 409);
+    }
+    if (creds.walletAddress.toLowerCase() !== session.walletId.toLowerCase()) {
+      await auditTradeEvent(tenantId, agentId, "trade.order.policy-rejected", {
+        sessionId: session.id,
+        venue: "polymarket",
+        reason: "wallet-binding-mismatch",
+        sessionWallet: session.walletId,
+        resolvedWallet: creds.walletAddress,
+      });
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Session wallet binding no longer matches the provisioned wallet. Re-create the session.",
+        },
+        409,
+      );
+    }
+
+    const adapter = createPolymarketAdapter(tenantId, agentId, creds);
+    const actor = tradeActor(c, agentId);
+    const manager = getSessionManager();
+    const fenced = await manager.withActiveSubmissionFence(
+      { tenantId, id: session.id },
+      async () => {
+        await auditTradeEvent(
+          tenantId,
+          agentId,
+          "trade.order.cancel.authorized",
+          {
+            sessionId: session.id,
+            venue: "polymarket",
+            orderId: body.cancelAll ? null : body.orderId,
+            cancelAll: body.cancelAll === true,
+            market: body.cancelAll ? (body.market ?? null) : null,
+          },
+          actor,
+        );
+
+        try {
+          const result = body.cancelAll
+            ? body.market
+              ? await adapter.cancelAllOrders({ market: body.market })
+              : await adapter.cancelAllOrders()
+            : await adapter.cancelOrder({ orderId: body.orderId });
+          const response = body.cancelAll
+            ? {
+                status: "cancel_requested" as const,
+                canceledCount: Array.isArray(result) ? result.length : 0,
+                results: result,
+              }
+            : {
+                status: "cancel_requested" as const,
+                orderId: body.orderId,
+                result,
+              };
+          const envelope: TradeIdempotencyResponse = {
+            status: 200,
+            body: responseData(response),
+          };
+          idempotency.store?.(envelope);
+          await auditTradeEvent(
+            tenantId,
+            agentId,
+            "trade.order.canceled",
+            {
+              sessionId: session.id,
+              venue: "polymarket",
+              orderId: body.cancelAll ? null : body.orderId,
+              cancelAll: body.cancelAll === true,
+              market: body.cancelAll ? (body.market ?? null) : null,
+              canceledCount: body.cancelAll && Array.isArray(result) ? result.length : 1,
+            },
+            actor,
+          );
+          return envelope;
+        } catch (err) {
+          if (isPolymarketUnauthorized(err)) {
+            await invalidatePolymarketCredsCache(
+              tenantId,
+              agentId,
+              creds.walletAddress,
+              creds.clobUrl,
+            );
+          }
+          const envelope: TradeIdempotencyResponse = {
+            status: 502,
+            body: {
+              ok: false,
+              error: "Polymarket cancel status unknown",
+              data: { status: "unknown" },
+            },
+          };
+          idempotency.store?.(envelope);
+          await auditTradeEvent(
+            tenantId,
+            agentId,
+            "trade.order.canceled",
+            {
+              sessionId: session.id,
+              venue: "polymarket",
+              orderId: body.cancelAll ? null : body.orderId,
+              cancelAll: body.cancelAll === true,
+              market: body.cancelAll ? (body.market ?? null) : null,
+              reason: "cancel-status-unknown",
+              error: err instanceof Error ? err.message : String(err),
+            },
+            actor,
+          );
+          return envelope;
+        }
+      },
+    );
+
+    if (!fenced) {
+      const envelope: TradeIdempotencyResponse = {
+        status: 409,
+        body: { ok: false, error: "Trade session was revoked before cancel submission" },
+      };
+      idempotency.store?.(envelope);
+      return c.json(envelope.body, envelope.status);
+    }
+    return c.json(fenced.body, fenced.status);
+  }
+
+  tradeRoutes.post("/polymarket/orders/:orderId/cancel", async (c) => {
+    const raw = await safeJsonParse(c);
+    const parsed = pmCancelOrderSchema.safeParse(raw);
+    if (!parsed.success) {
+      return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+    }
+    return cancelPolymarketOrders(c, {
+      ...parsed.data,
+      idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+      orderId: c.req.param("orderId"),
+    });
+  });
+
+  tradeRoutes.post("/polymarket/cancel-all", async (c) => {
+    const raw = await safeJsonParse(c);
+    const parsed = pmCancelAllSchema.safeParse(raw);
+    if (!parsed.success) {
+      return c.json<ApiResponse>({ ok: false, error: parsed.error.message }, 400);
+    }
+    return cancelPolymarketOrders(c, {
+      ...parsed.data,
+      idempotencyKey: c.req.header("Idempotency-Key") ?? parsed.data.idempotencyKey,
+      cancelAll: true,
+    });
+  });
 
   tradeRoutes.post("/polymarket/order", async (c) => {
     const tenantId = c.get("tenantId");

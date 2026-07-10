@@ -527,6 +527,88 @@ describe("PolymarketExecutionAdapter order build", () => {
     ).rejects.toThrow("socket hang up");
   });
 
+  test("listOrders parses the SDK-returned flattened open-order array", async () => {
+    const adapter = new PolymarketExecutionAdapter(account, { fetch: notFetch() });
+    const stub = {
+      async getOpenOrders(params?: { market?: string }) {
+        expect(params).toEqual({ market: "0xabc" });
+        return [
+          {
+            id: "open-1",
+            market: "0xabc",
+            asset_id: bigToken,
+            side: "BUY",
+            price: "0.5",
+            original_size: "20",
+            size_matched: "0",
+            status: "LIVE",
+          },
+        ];
+      },
+    };
+    // @ts-expect-error private override for test
+    adapter.createClobClient = async () => ({ client: stub });
+
+    const orders = await adapter.listOrders({ market: "0xabc" });
+    expect(orders).toEqual([
+      {
+        id: "open-1",
+        market: "0xabc",
+        asset_id: bigToken,
+        side: "BUY",
+        price: "0.5",
+        original_size: "20",
+        size_matched: "0",
+        status: "LIVE",
+      },
+    ]);
+  });
+
+  test("cancelAllOrders lists then cancels each open order id", async () => {
+    const adapter = new PolymarketExecutionAdapter(account, { fetch: notFetch() });
+    const canceled: string[] = [];
+    const stub = {
+      async getOpenOrders(params?: { market?: string }) {
+        expect(params).toEqual({ market: "0xabc" });
+        return [
+          {
+            id: "open-1",
+            market: "0xabc",
+            asset_id: bigToken,
+            side: "BUY",
+            price: "0.5",
+            original_size: "20",
+            size_matched: "0",
+            status: "LIVE",
+          },
+          {
+            id: "open-2",
+            market: "0xabc",
+            asset_id: bigToken,
+            side: "SELL",
+            price: "0.4",
+            original_size: "10",
+            size_matched: "0",
+            status: "LIVE",
+          },
+        ];
+      },
+      async cancelOrder(payload: { orderID: string }) {
+        canceled.push(payload.orderID);
+        return { canceled: [payload.orderID] };
+      },
+    };
+    // @ts-expect-error private override for test
+    adapter.createClobClient = async () => ({ client: stub });
+
+    const results = await adapter.cancelAllOrders({ market: "0xabc" });
+    expect(canceled).toEqual(["open-1", "open-2"]);
+    expect(results).toEqual([
+      { venue: "polymarket", orderId: "open-1", raw: { canceled: ["open-1"] } },
+      { venue: "polymarket", orderId: "open-2", raw: { canceled: ["open-2"] } },
+    ]);
+  });
+
   test("resolveOrderOptions throws (no guess) when book lookup fails and caller didn't supply both", async () => {
     const failFetch = (async () => {
       throw new Error("book down");

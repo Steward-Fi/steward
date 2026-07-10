@@ -45,6 +45,13 @@ export type StewardApiPlugin = StewardPlugin<StewardApp, StewardAppContext>;
 export const isAgentOrderPath = (path: string): boolean =>
   path.endsWith("/trade/hyperliquid/order") || path.endsWith("/trade/polymarket/order");
 
+export const isAgentPolymarketReadPath = (path: string): boolean =>
+  path.endsWith("/trade/polymarket/orders") || path.endsWith("/trade/polymarket/positions");
+
+export const isAgentOrOperatorTradeWritePath = (path: string): boolean =>
+  path.endsWith("/trade/polymarket/cancel-all") ||
+  /\/trade\/polymarket\/orders\/[^/]+\/cancel$/.test(path);
+
 export const isOperatorRecoveryPath = (path: string): boolean =>
   path.endsWith("/close-all") ||
   path.endsWith("/withdraw") ||
@@ -54,6 +61,19 @@ export const isOperatorRecoveryPath = (path: string): boolean =>
   path.endsWith("/add-margin") ||
   path.endsWith("/approve-builder") ||
   path.endsWith("/usd-send");
+
+function decodeJwtHeaderAlg(token: string | undefined): string | undefined {
+  const encoded = token?.split(".")[0];
+  if (!encoded) return undefined;
+  try {
+    const normalized = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(normalized.length + ((4 - (normalized.length % 4)) % 4), "=");
+    const json = atob(padded);
+    return (JSON.parse(json) as { alg?: unknown }).alg as string | undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Webhook event-type names the trading plugin's domain produces. These are
@@ -100,6 +120,24 @@ export const tradingPlugin: StewardApiPlugin = {
   register(app, ctx) {
     const { requireAgentJwt, operatorAuth, tenantAuth } = ctx;
 
+    const rejectAgentTokenFallback: typeof requireAgentJwt = async (c, next) => {
+      if (c.get("authType") === "agent-token" || c.get("agentScope")) {
+        return c.json({ ok: false, error: "RS256 agent JWT required" }, 403);
+      }
+      return next();
+    };
+    const agentOrOperatorAuth: typeof requireAgentJwt = (c, next) => {
+      if (c.req.header("X-Steward-Platform-Key")) return operatorAuth(c, next);
+      const token = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "");
+      if (decodeJwtHeaderAlg(token) === "RS256") return requireAgentJwt(c, next);
+      return operatorAuth(c, (() => rejectAgentTokenFallback(c, next)) as never);
+    };
+    const agentOrTenantReadAuth: typeof requireAgentJwt = (c, next) => {
+      const token = c.req.header("Authorization")?.replace(/^Bearer\s+/i, "");
+      if (decodeJwtHeaderAlg(token) === "RS256") return requireAgentJwt(c, next);
+      return tenantAuth(c, (() => rejectAgentTokenFallback(c, next)) as never);
+    };
+
     // ── trade-specific auth middleware (verbatim from app.ts ~lines 172-182) ──
     for (const path of [
       "/trade/hyperliquid/order",
@@ -109,15 +147,27 @@ export const tradingPlugin: StewardApiPlugin = {
     ]) {
       app.use(path, (c, next) => requireAgentJwt(c, next));
     }
+    for (const path of [
+      "/trade/polymarket/orders/:orderId/cancel",
+      "/v1/trade/polymarket/orders/:orderId/cancel",
+      "/trade/polymarket/cancel-all",
+      "/v1/trade/polymarket/cancel-all",
+    ]) {
+      app.use(path, (c, next) => agentOrOperatorAuth(c, next));
+    }
     app.use("/trade", (c, next) => tenantAuth(c, next));
     app.use("/trade/*", (c, next) => {
       if (isAgentOrderPath(c.req.path)) return next();
+      if (isAgentOrOperatorTradeWritePath(c.req.path)) return next();
+      if (isAgentPolymarketReadPath(c.req.path)) return agentOrTenantReadAuth(c, next);
       if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
       return tenantAuth(c, next);
     });
     app.use("/v1/trade", (c, next) => tenantAuth(c, next));
     app.use("/v1/trade/*", (c, next) => {
       if (isAgentOrderPath(c.req.path)) return next();
+      if (isAgentOrOperatorTradeWritePath(c.req.path)) return next();
+      if (isAgentPolymarketReadPath(c.req.path)) return agentOrTenantReadAuth(c, next);
       if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
       return tenantAuth(c, next);
     });

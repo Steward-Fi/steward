@@ -429,6 +429,16 @@ export class PolymarketExecutionAdapter {
     const raw = await client.cancelOrder({ orderID: params.orderId });
     return { venue: "polymarket", orderId: params.orderId, raw };
   }
+
+  /** Cancel every currently open order visible to this CLOB account. */
+  async cancelAllOrders(params: { market?: string } = {}): Promise<PolymarketCancelResult[]> {
+    const orders = await this.listOrders(params);
+    const results: PolymarketCancelResult[] = [];
+    for (const order of orders) {
+      results.push(await this.cancelOrder({ orderId: order.id }));
+    }
+    return results;
+  }
 }
 
 export function createPolymarketExecutionAdapter(

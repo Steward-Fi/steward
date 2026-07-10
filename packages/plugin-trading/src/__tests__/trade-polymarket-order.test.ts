@@ -149,6 +149,22 @@ function postOrder(
   });
 }
 
+function cancelOrder(app: Hono, sessionId: string, orderId: string, idempotencyKey: string) {
+  return app.request(`/v1/trade/polymarket/orders/${orderId}/cancel`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify({ sessionId }),
+  });
+}
+
+function cancelAll(app: Hono, sessionId: string, idempotencyKey: string, market?: string) {
+  return app.request("/v1/trade/polymarket/cancel-all", {
+    method: "POST",
+    headers: { "content-type": "application/json", "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify({ sessionId, ...(market ? { market } : {}) }),
+  });
+}
+
 async function dailySpendOf(sessionId: string): Promise<number> {
   const [row] = await getDb()
     .select({ spent: tradeSessions.dailySpendUsd })
@@ -395,6 +411,431 @@ describe("POST /v1/trade/polymarket/order", () => {
       expect(await auditCount(tenantId, "trade.order.canceled")).toBe(0);
     } finally {
       delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("lists open orders through the real governed agent/session/wallet binding", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    const listSpy = spyOn(PolymarketExecutionAdapter.prototype, "listOrders").mockResolvedValue([
+      {
+        id: "pm-open-1",
+        market: COND_ID,
+        asset_id: TOKEN_ID,
+        side: "BUY",
+        price: "0.5",
+        original_size: "20",
+        size_matched: "0",
+        status: "LIVE",
+      },
+    ] as never);
+
+    try {
+      const res = await app.request(
+        `/v1/trade/polymarket/orders?sessionId=${encodeURIComponent(sessionId)}`,
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json()) as unknown).toMatchObject({
+        ok: true,
+        data: { agentId, orders: [{ id: "pm-open-1", asset_id: TOKEN_ID }] },
+      });
+      expect(listSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      listSpy.mockRestore();
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("lists positions by funder address without deriving CLOB credentials", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    stubWallet(true);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe("/positions");
+      expect(url.searchParams.get("user")?.toLowerCase()).toBe(FUNDER.toLowerCase());
+      return new Response(
+        JSON.stringify([
+          {
+            asset: TOKEN_ID,
+            title: "Will lifecycle pass?",
+            outcome: "Yes",
+            size: 3,
+            avgPrice: 0.4,
+            curPrice: 0.5,
+          },
+        ]),
+        { status: 200 },
+      );
+    }) as never);
+
+    try {
+      const res = await app.request(
+        `/v1/trade/polymarket/positions?sessionId=${encodeURIComponent(sessionId)}`,
+      );
+      expect(res.status).toBe(200);
+      expect((await res.json()) as unknown).toMatchObject({
+        ok: true,
+        data: {
+          agentId,
+          funderAddress: FUNDER,
+          positions: [{ tokenId: TOKEN_ID, balance: 3, currentValue: 1.5 }],
+        },
+      });
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("cancel order is governed, audited, idempotent, and does not reserve spend", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    const cancelSpy = spyOn(PolymarketExecutionAdapter.prototype, "cancelOrder").mockResolvedValue({
+      venue: "polymarket" as const,
+      orderId: "pm-open-1",
+      raw: { canceled: ["pm-open-1"] },
+    });
+
+    try {
+      const key = crypto.randomUUID();
+      const first = await cancelOrder(app, sessionId, "pm-open-1", key);
+      expect(first.status).toBe(200);
+      expect((await first.json()) as unknown).toMatchObject({
+        ok: true,
+        data: { status: "cancel_requested", orderId: "pm-open-1" },
+      });
+      const replay = await cancelOrder(app, sessionId, "pm-open-1", key);
+      expect(replay.status).toBe(200);
+      expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+      expect(cancelSpy).toHaveBeenCalledTimes(1);
+      expect(await dailySpendOf(sessionId)).toBe(0);
+      expect(await auditCount(tenantId, "trade.order.cancel.authorized")).toBe(1);
+      expect(await auditCount(tenantId, "trade.order.canceled")).toBe(1);
+    } finally {
+      cancelSpy.mockRestore();
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("cancel unknown status is replayed and not retried", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    const cancelSpy = spyOn(PolymarketExecutionAdapter.prototype, "cancelOrder").mockRejectedValue(
+      new Error("cancel timeout"),
+    );
+
+    try {
+      const key = crypto.randomUUID();
+      const first = await cancelOrder(app, sessionId, "pm-open-unknown", key);
+      expect(first.status).toBe(502);
+      expect((await first.json()) as unknown).toMatchObject({
+        ok: false,
+        error: "Polymarket cancel status unknown",
+        data: { status: "unknown" },
+      });
+      const replay = await cancelOrder(app, sessionId, "pm-open-unknown", key);
+      expect(replay.status).toBe(502);
+      expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+      expect(cancelSpy).toHaveBeenCalledTimes(1);
+      expect(await auditCount(tenantId, "trade.order.canceled")).toBe(1);
+    } finally {
+      cancelSpy.mockRestore();
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("cancel refuses a revoked session before touching credentials or the adapter", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({ status: "revoked" });
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    const cancelSpy = spyOn(PolymarketExecutionAdapter.prototype, "cancelOrder").mockResolvedValue(
+      {} as never,
+    );
+
+    try {
+      const res = await cancelOrder(app, sessionId, "pm-open-1", crypto.randomUUID());
+      expect(res.status).toBe(403);
+      expect(((await res.json()) as { error?: string }).error).toContain(
+        "Active Polymarket session required",
+      );
+      expect(getWalletSpy).toBeUndefined();
+      expect(cancelSpy).not.toHaveBeenCalled();
+      expect(await dailySpendOf(sessionId)).toBe(0);
+    } finally {
+      cancelSpy.mockRestore();
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("cancel-all composes real list/cancel adapter support", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({});
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    type ClobHttpOptions = {
+      headers?: Record<string, string>;
+      data?: unknown;
+      params?: Record<string, unknown>;
+    };
+    type ClobHttpPrototype = {
+      get(endpoint: string, options?: ClobHttpOptions): Promise<unknown>;
+      del(endpoint: string, options?: ClobHttpOptions): Promise<unknown>;
+    };
+    const clobPrototype = ClobClient.prototype as unknown as ClobHttpPrototype;
+    const getSpy = spyOn(clobPrototype, "get").mockImplementation((async (
+      endpoint: string,
+      options?: ClobHttpOptions,
+    ) => {
+      const path = new URL(endpoint).pathname;
+      requests.push({ method: "GET", path });
+      expect(path).toBe("/data/orders");
+      expect(options?.params?.market).toBe(COND_ID);
+      expect(options?.params?.next_cursor).toBe("MA==");
+      return {
+        data: [
+          {
+            id: "pm-open-1",
+            market: COND_ID,
+            asset_id: TOKEN_ID,
+            side: "BUY",
+            price: "0.5",
+            original_size: "20",
+            size_matched: "0",
+            status: "LIVE",
+          },
+          {
+            id: "pm-open-2",
+            market: COND_ID,
+            asset_id: TOKEN_ID,
+            side: "SELL",
+            price: "0.6",
+            original_size: "5",
+            size_matched: "0",
+            status: "LIVE",
+          },
+        ],
+        next_cursor: "LTE=",
+      };
+    }) as never);
+    const delSpy = spyOn(clobPrototype, "del").mockImplementation((async (
+      endpoint: string,
+      options?: ClobHttpOptions,
+    ) => {
+      const path = new URL(endpoint).pathname;
+      requests.push({ method: "DELETE", path, body: options?.data });
+      expect(path).toBe("/order");
+      return { canceled: [(options?.data as { orderID?: string } | undefined)?.orderID] };
+    }) as never);
+
+    try {
+      const res = await cancelAll(app, sessionId, crypto.randomUUID(), COND_ID);
+      expect(res.status).toBe(200);
+      expect((await res.json()) as unknown).toMatchObject({
+        ok: true,
+        data: { status: "cancel_requested", canceledCount: 2 },
+      });
+      expect(requests.filter((r) => r.path === "/data/orders")).toHaveLength(1);
+      expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(2);
+    } finally {
+      getSpy.mockRestore();
+      delSpy.mockRestore();
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("cancel refuses stale session wallet binding before touching the adapter", async () => {
+    const { tenantId, agentId, sessionId } = await seedSession({
+      walletId: "0x2222222222222222222222222222222222222222",
+    });
+    const app = makeApp(tenantId, agentId, tradeRoutes);
+
+    process.env.STEWARD_PM_TEST_CREDS = "1";
+    stubWallet(true);
+    const cancelSpy = spyOn(PolymarketExecutionAdapter.prototype, "cancelOrder").mockResolvedValue(
+      {} as never,
+    );
+
+    try {
+      const res = await cancelOrder(app, sessionId, "pm-open-1", crypto.randomUUID());
+      expect(res.status).toBe(409);
+      expect(cancelSpy).not.toHaveBeenCalled();
+      expect(await auditCount(tenantId, "trade.order.policy-rejected")).toBe(1);
+    } finally {
+      cancelSpy.mockRestore();
+      delete process.env.STEWARD_PM_TEST_CREDS;
+    }
+  });
+
+  it("deterministic lifecycle E2E: real vault creds, CLOB list/cancel, and Data positions", async () => {
+    const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const tenantId = `pm-life-tenant-${suffix}`;
+    const agentId = `pm-life-agent-${suffix}`;
+    await getDb()
+      .insert(tenants)
+      .values({ id: tenantId, name: "PM Lifecycle Tenant", apiKeyHash: `hash-${tenantId}` });
+    await getDb().insert(agents).values({
+      id: agentId,
+      tenantId,
+      name: "PM Lifecycle Agent",
+      walletAddress: "0x0000000000000000000000000000000000000001",
+    });
+    await getDb()
+      .insert(agentPolicies)
+      .values({
+        agentId,
+        tenantId,
+        dailyCapUsd: "100",
+        perOrderCapUsd: "25",
+        leverageCap: "1",
+        allowedAssets: [`pm:${TOKEN_ID}`],
+        allowedVenues: ["polymarket"],
+        updatedBy: "lifecycle-human-policy",
+      });
+
+    const wallet = await sharedTestContext.vault.createWallet({
+      agentId,
+      venue: "polymarket",
+      chainType: "evm",
+    });
+    await getDb()
+      .update(agentWallets)
+      .set({ metadata: { funderAddress: FUNDER } })
+      .where(and(eq(agentWallets.agentId, agentId), eq(agentWallets.venue, "polymarket")));
+
+    const requests: Array<{ method: string; path: string; body?: unknown }> = [];
+    type ClobHttpOptions = { headers?: Record<string, string>; data?: unknown };
+    type ClobHttpPrototype = {
+      get(endpoint: string, options?: ClobHttpOptions): Promise<unknown>;
+      post(endpoint: string, options?: ClobHttpOptions): Promise<unknown>;
+      del(endpoint: string, options?: ClobHttpOptions): Promise<unknown>;
+    };
+    const clobPrototype = ClobClient.prototype as unknown as ClobHttpPrototype;
+    const getSpy = spyOn(clobPrototype, "get").mockImplementation((async (
+      endpoint: string,
+      options?: { params?: Record<string, unknown> },
+    ) => {
+      const path = new URL(endpoint).pathname;
+      requests.push({ method: "GET", path });
+      if (path === "/data/orders") {
+        expect(options?.params?.next_cursor).toBe("MA==");
+        expect(options?.params?.market).toBeUndefined();
+        return {
+          data: [
+            {
+              id: "pm-life-open-1",
+              market: COND_ID,
+              asset_id: TOKEN_ID,
+              side: "BUY",
+              price: "0.5",
+              original_size: "20",
+              size_matched: "0",
+              status: "LIVE",
+            },
+          ],
+          next_cursor: "LTE=",
+        };
+      }
+      throw new Error(`unexpected deterministic CLOB GET ${path}`);
+    }) as never);
+    const postSpy = spyOn(clobPrototype, "post").mockImplementation((async (
+      endpoint: string,
+      options?: ClobHttpOptions,
+    ) => {
+      const path = new URL(endpoint).pathname;
+      requests.push({ method: "POST", path, body: options?.data });
+      const headers = new Headers(options?.headers);
+      if (path === "/auth/api-key") {
+        expect(headers.get("poly_address")?.toLowerCase()).toBe(wallet.address.toLowerCase());
+        return {
+          apiKey: "deterministic-life-key",
+          secret: "ZGV0ZXJtaW5pc3RpYy1saWZlLXNlY3JldA==",
+          passphrase: "deterministic-life-passphrase",
+        };
+      }
+      throw new Error(`unexpected deterministic CLOB POST ${path}`);
+    }) as never);
+    const deleteSpy = spyOn(clobPrototype, "del").mockImplementation((async (
+      endpoint: string,
+      options?: ClobHttpOptions,
+    ) => {
+      const path = new URL(endpoint).pathname;
+      requests.push({ method: "DELETE", path, body: options?.data });
+      const headers = new Headers(options?.headers);
+      expect(headers.get("poly_api_key")).toBe("deterministic-life-key");
+      return { canceled: ["pm-life-open-1"] };
+    }) as never);
+    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: string | URL) => {
+      const url = new URL(String(input));
+      requests.push({ method: "GET", path: url.pathname });
+      expect(url.pathname).toBe("/positions");
+      expect(url.searchParams.get("user")?.toLowerCase()).toBe(FUNDER.toLowerCase());
+      return new Response(
+        JSON.stringify([{ asset: TOKEN_ID, outcome: "Yes", size: 4, curPrice: 0.25 }]),
+        { status: 200 },
+      );
+    }) as never);
+
+    process.env.POLYMARKET_CLOB_API_URL = "https://clob.lifecycle.invalid";
+    try {
+      const app = makeApp(tenantId, agentId, tradeRoutes);
+      const sessionRes = await app.request("/v1/trade/sessions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          agentId,
+          venue: "polymarket",
+          dailyCap: 40,
+          perOrderCap: 20,
+          allowedAssets: [`pm:${TOKEN_ID}`],
+        }),
+      });
+      expect(sessionRes.status).toBe(201);
+      const sessionBody = (await sessionRes.json()) as { data: { sessionId: string } };
+
+      const list = await app.request(
+        `/v1/trade/polymarket/orders?sessionId=${encodeURIComponent(sessionBody.data.sessionId)}`,
+      );
+      expect(list.status).toBe(200);
+      expect((await list.json()) as unknown).toMatchObject({
+        ok: true,
+        data: { orders: [{ id: "pm-life-open-1" }] },
+      });
+
+      const positions = await app.request(
+        `/v1/trade/polymarket/positions?sessionId=${encodeURIComponent(sessionBody.data.sessionId)}`,
+      );
+      expect(positions.status).toBe(200);
+      expect((await positions.json()) as unknown).toMatchObject({
+        ok: true,
+        data: { positions: [{ tokenId: TOKEN_ID, balance: 4, currentValue: 1 }] },
+      });
+
+      const key = `pm-life-cancel-${crypto.randomUUID()}`;
+      const cancel = await cancelOrder(app, sessionBody.data.sessionId, "pm-life-open-1", key);
+      expect(cancel.status).toBe(200);
+      const replay = await cancelOrder(app, sessionBody.data.sessionId, "pm-life-open-1", key);
+      expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+      expect(requests.filter((r) => r.path === "/auth/api-key")).toHaveLength(2);
+      expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(1);
+    } finally {
+      delete process.env.POLYMARKET_CLOB_API_URL;
+      getSpy.mockRestore();
+      postSpy.mockRestore();
+      deleteSpy.mockRestore();
+      fetchSpy.mockRestore();
     }
   });
 
