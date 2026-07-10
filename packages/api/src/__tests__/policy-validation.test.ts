@@ -134,6 +134,7 @@ describe("policy rule validation", () => {
                 constraints: {
                   "0xa9059cbb": {
                     recipientAllowlist: ["0x3333333333333333333333333333333333333333"],
+                    maxNativeValueWei: "0",
                     maxAmount: "1000",
                   },
                   "0x095ea7b3": {

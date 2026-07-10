@@ -107,6 +107,33 @@ describe("Contract Allowlist Policy", () => {
     expect(result.passed).toBe(true);
   });
 
+  it("enforces selector-level native value caps", async () => {
+    const cappedSelector = "0x12345678";
+    const cappedRule = makeContractAllowlistRule({
+      contracts: [
+        {
+          address: contract,
+          selectors: [cappedSelector],
+          constraints: { [cappedSelector]: { maxNativeValueWei: "10" } },
+        },
+      ],
+    });
+    const result = await evaluatePolicy(
+      cappedRule,
+      makeContext({
+        request: {
+          ...makeContext().request,
+          to: contract,
+          value: "11",
+          data: `${cappedSelector}00`,
+        },
+      }),
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain("maxNativeValueWei");
+  });
+
   it("fails when selector is not allowed for the contract", async () => {
     const result = await evaluatePolicy(
       rule,

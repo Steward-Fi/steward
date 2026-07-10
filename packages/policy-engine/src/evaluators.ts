@@ -991,6 +991,25 @@ function evaluateEvmSelectorConstraint(
 ): PolicyResult {
   const base = { policyId: rule.id, type: rule.type } as const;
 
+  if (constraint.maxNativeValueWei !== undefined) {
+    const requestValue = parseUint256Decimal(ctx.request.value);
+    const maxValue = parseUint256Decimal(constraint.maxNativeValueWei);
+    if (requestValue === null || maxValue === null) {
+      return {
+        ...base,
+        passed: false,
+        reason: "Native value and selector maxNativeValueWei must be uint256 decimal strings",
+      };
+    }
+    if (requestValue > maxValue) {
+      return {
+        ...base,
+        passed: false,
+        reason: `Native value ${ctx.request.value} exceeds selector maxNativeValueWei ${constraint.maxNativeValueWei}`,
+      };
+    }
+  }
+
   switch (selector) {
     case "0xa9059cbb": {
       const recipient = decodeAbiAddress(calldataWord(data, 0) ?? "");

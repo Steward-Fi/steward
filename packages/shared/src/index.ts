@@ -461,6 +461,8 @@ export interface ContractAllowlistConfig {
         tokenIdAllowlist?: string[];
         /** Decimal uint256 token ids blocked (ERC721/1155). */
         tokenIdBlocklist?: string[];
+        /** Maximum native chain value, in decimal wei, permitted with this selector. */
+        maxNativeValueWei?: string;
         maxAmount?: string;
       }
     >;
