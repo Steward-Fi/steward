@@ -16,11 +16,15 @@ process.env.STEWARD_PGLITE_MEMORY = "true";
 process.env.STEWARD_DB_MODE = "pglite";
 process.env.STEWARD_MASTER_PASSWORD = "evm-swap-master-password";
 process.env.STEWARD_AUDIT_HMAC_KEY = "evm-swap-audit-hmac-key-with-enough-entropy";
+process.env.STEWARD_PLATFORM_KEYS = "evm-swap-platform-key";
 
 const TENANT_ID = "evm-swap-tenant";
+const OTHER_TENANT_ID = "evm-swap-other-tenant";
 const AGENT_ID = "evm-swap-agent";
 const OTHER_AGENT_ID = "evm-swap-other-agent";
+const SESSION_ID = "evm-swap-session";
 const KID = "evm-swap-kid";
+const PLATFORM_KEY = "evm-swap-platform-key";
 const TARGET = "0x00000000000000000000000000000000000000bb";
 const FROM_TOKEN = "0x00000000000000000000000000000000000000cc";
 const TO_TOKEN = "0x00000000000000000000000000000000000000dd";
@@ -35,11 +39,14 @@ let testCtx: () => StewardAppContext;
 let tradingPlugin: typeof import("../index")["tradingPlugin"];
 let createEvmSwapRoutes: typeof import("../routes/evm-swap")["createEvmSwapRoutes"];
 let auditEvents: typeof import("@stwd/db")["auditEvents"];
+let intents: typeof import("@stwd/db")["intents"];
 let policies: typeof import("@stwd/db")["policies"];
 let tenants: typeof import("@stwd/db")["tenants"];
+let tradeSessions: typeof import("@stwd/db")["tradeSessions"];
 let closeDb: typeof import("@stwd/db")["closeDb"];
 let getDb: typeof import("@stwd/db")["getDb"];
 let pgliteDb: ReturnType<typeof getDb>;
+let agentWalletAddress: string;
 
 class FakeSwapAdapter implements SwapAdapter {
   readonly category = "swap" as const;
@@ -190,6 +197,7 @@ async function seedPolicy(
 function requestBody(agentId = AGENT_ID) {
   return {
     agentId,
+    sessionId: SESSION_ID,
     chainId: 8453,
     fromToken: { address: FROM_TOKEN, symbol: "A", decimals: 18 },
     toToken: { address: TO_TOKEN, symbol: "B", decimals: 18 },
@@ -221,7 +229,7 @@ async function buildApp(options?: {
       : null,
   };
   const app = new Hono();
-  app.use("/v1/trade/evm/swap/prepare", (c, next) => requireAgentJwt(c as never, next));
+  app.use("/v1/trade/evm/swap/*", (c, next) => requireAgentJwt(c as never, next));
   app.route("/v1/trade", createEvmSwapRoutes(ctx));
   return { app, adapter, simulationCalls: () => simulationCalls };
 }
@@ -261,6 +269,44 @@ async function postPrepare(
   });
 }
 
+async function getIntent(app: Hono, id: string, agentId = AGENT_ID) {
+  return app.request(`/v1/trade/evm/swap/intents/${id}`, {
+    headers: {
+      Authorization: `Bearer ${await signToken(agentId)}`,
+      "X-Steward-Tenant": TENANT_ID,
+    },
+  });
+}
+
+async function revokeIntent(app: Hono, id: string, agentId = AGENT_ID) {
+  return app.request(`/v1/trade/evm/swap/intents/${id}/revoke`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${await signToken(agentId)}`,
+      "X-Steward-Tenant": TENANT_ID,
+    },
+  });
+}
+
+async function getIntentWithPlatform(app: Hono, id: string, tenantId = TENANT_ID) {
+  return app.request(`/v1/trade/evm/swap/intents/${id}`, {
+    headers: {
+      "X-Steward-Tenant": tenantId,
+      "X-Steward-Platform-Key": PLATFORM_KEY,
+    },
+  });
+}
+
+async function revokeIntentWithPlatform(app: Hono, id: string, tenantId = TENANT_ID) {
+  return app.request(`/v1/trade/evm/swap/intents/${id}/revoke`, {
+    method: "POST",
+    headers: {
+      "X-Steward-Tenant": tenantId,
+      "X-Steward-Platform-Key": PLATFORM_KEY,
+    },
+  });
+}
+
 beforeAll(async () => {
   const { createPGLiteDb, setPGLiteOverride } = await import("@stwd/db/pglite");
   const { db, client } = await createPGLiteDb("memory://");
@@ -269,7 +315,9 @@ beforeAll(async () => {
   });
   pgliteDb = db as ReturnType<typeof getDb>;
 
-  ({ auditEvents, closeDb, getDb, policies, tenants } = await import("@stwd/db"));
+  ({ auditEvents, closeDb, getDb, intents, policies, tenants, tradeSessions } = await import(
+    "@stwd/db"
+  ));
   ({ testCtx } = await import("./_ctx"));
   ({ tradingPlugin } = await import("../index"));
   ({ createEvmSwapRoutes } = await import("../routes/evm-swap"));
@@ -290,10 +338,14 @@ beforeAll(async () => {
   const { vault } = await import("../../../api/src/services/context");
   await getDb()
     .insert(tenants)
-    .values({ id: TENANT_ID, name: "EVM Swap Tenant", apiKeyHash: "hash" })
+    .values([
+      { id: TENANT_ID, name: "EVM Swap Tenant", apiKeyHash: "hash" },
+      { id: OTHER_TENANT_ID, name: "Other EVM Swap Tenant", apiKeyHash: "other-hash" },
+    ])
     .onConflictDoNothing();
   await vault.createAgent(TENANT_ID, AGENT_ID, "EVM Swap Agent");
   await vault.createAgent(TENANT_ID, OTHER_AGENT_ID, "Other EVM Swap Agent");
+  agentWalletAddress = (await vault.getWallet({ agentId: AGENT_ID, chainId: 8453 })).address;
 });
 
 afterAll(async () => {
@@ -304,6 +356,24 @@ afterAll(async () => {
 beforeEach(async () => {
   clearAgentJwksCacheForTests();
   await getDb().delete(auditEvents).where(eq(auditEvents.tenantId, TENANT_ID));
+  await getDb().delete(intents).where(eq(intents.tenantId, TENANT_ID));
+  await getDb().delete(tradeSessions).where(eq(tradeSessions.tenantId, TENANT_ID));
+  await getDb()
+    .insert(tradeSessions)
+    .values({
+      id: SESSION_ID,
+      agentId: AGENT_ID,
+      tenantId: TENANT_ID,
+      venue: "evm",
+      walletId: agentWalletAddress,
+      status: "active",
+      dailySpendUsd: "0",
+      dailyCapUsd: "100",
+      perOrderCapUsd: "100",
+      leverageCap: "1",
+      allowedAssets: ["eip155:8453"],
+      expiresAt: new Date(Date.now() + 60_000),
+    });
   await seedPolicy();
 });
 
@@ -320,13 +390,20 @@ describe("governed EVM swap prepare", () => {
     const res = await postPrepare(app, requestBody(), key);
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
-      data: { intentHash: string; unsignedIntent: { data: string } };
+      data: { intentId: string; intentHash: string; unsignedIntent: { data: string } };
     };
+    expect(body.data.intentId).toMatch(/^evm_/);
     expect(body.data.intentHash).toMatch(/^sha256:/);
     expect(body.data.unsignedIntent.data).toBe(CALLDATA);
     expect(adapter.observedTaker).toMatch(/^0x[a-f0-9]{40}$/i);
     expect(adapter.buildCalls).toBe(1);
     expect(simulationCalls()).toBe(1);
+
+    const stored = await getDb().select().from(intents).where(eq(intents.id, body.data.intentId));
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.status).toBe("prepared");
+    expect(stored[0]?.idempotencyKey).toBe(key);
+    expect(stored[0]?.semanticRequestHash).toMatch(/^sha256:/);
 
     const replay = await postPrepare(app, requestBody(), key);
     expect(replay.status).toBe(200);
@@ -345,6 +422,28 @@ describe("governed EVM swap prepare", () => {
       "trade.evm.swap.prepare.prepared",
     ]);
     expect(JSON.stringify(rows.map((row) => row.metadata))).not.toContain(CALLDATA.slice(10));
+  });
+
+  it("persists replay and status across handler recreation", async () => {
+    const key = crypto.randomUUID();
+    const first = await buildApp({ simulator: { ok: true } });
+    const created = await postPrepare(first.app, requestBody(), key);
+    expect(created.status).toBe(200);
+    const createdBody = (await created.json()) as { data: { intentId: string } };
+
+    const second = await buildApp({ simulator: { ok: true } });
+    const replay = await postPrepare(second.app, requestBody(), key);
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotency-Replayed")).toBe("true");
+    expect((await replay.json()) as unknown).toEqual(createdBody);
+    expect(second.adapter.buildCalls).toBe(0);
+
+    const status = await getIntent(second.app, createdBody.data.intentId);
+    expect(status.status).toBe(200);
+    expect(await status.json()).toMatchObject({
+      ok: true,
+      data: { intentId: createdBody.data.intentId, status: "prepared" },
+    });
   });
 
   it("mounts through the trading plugin on unversioned and v1 prefixes", async () => {
@@ -366,7 +465,7 @@ describe("governed EVM swap prepare", () => {
     expect(adapter.buildCalls).toBe(2);
   });
 
-  it("coalesces concurrent same-key requests and rejects conflicting bodies", async () => {
+  it("handles concurrent same-key requests and rejects conflicting semantics", async () => {
     const { app, adapter, simulationCalls } = await buildApp({ simulator: { ok: true } });
     const key = crypto.randomUUID();
     const [a, b] = await Promise.all([
@@ -380,6 +479,124 @@ describe("governed EVM swap prepare", () => {
 
     const conflict = await postPrepare(app, { ...requestBody(), amount: "1001" }, key);
     expect(conflict.status).toBe(409);
+  });
+
+  it("durably replays non-5xx rejections across handler recreation and conflicts on semantic drift", async () => {
+    const key = crypto.randomUUID();
+    const rejectedAdapter = Object.assign(new FakeSwapAdapter(), {
+      target: "0x00000000000000000000000000000000000000ff",
+    });
+    const first = await buildApp({ adapter: rejectedAdapter, simulator: { ok: true } });
+    const rejected = await postPrepare(first.app, requestBody(), key);
+    expect(rejected.status).toBe(400);
+    const rejectedBody = await rejected.json();
+    expect(rejectedAdapter.buildCalls).toBe(1);
+
+    const second = await buildApp({ simulator: { ok: true } });
+    const replayed = await postPrepare(second.app, requestBody(), key);
+    expect(replayed.status).toBe(400);
+    expect(replayed.headers.get("Idempotency-Replayed")).toBe("true");
+    expect(await replayed.json()).toEqual(rejectedBody);
+    expect(second.adapter.quoteCalls).toBe(0);
+    expect(second.adapter.buildCalls).toBe(0);
+
+    const stored = await getDb().select().from(intents).where(eq(intents.idempotencyKey, key));
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.status).toBe("rejected");
+    expect(JSON.stringify(stored[0]?.payload)).not.toContain(CALLDATA.slice(10));
+
+    const conflict = await postPrepare(second.app, { ...requestBody(), amount: "1001" }, key);
+    expect(conflict.status).toBe(409);
+    expect(second.adapter.quoteCalls).toBe(0);
+  });
+
+  it("keeps 5xx prepare failures retryable", async () => {
+    const key = crypto.randomUUID();
+    const unavailableAdapter = Object.assign(new FakeSwapAdapter(), { failUnavailable: true });
+    const unavailable = await buildApp({
+      adapter: unavailableAdapter,
+      simulator: { ok: true },
+    });
+    const first = await postPrepare(unavailable.app, requestBody(), key);
+    expect(first.status).toBe(503);
+    expect(unavailableAdapter.quoteCalls).toBe(1);
+
+    const healthy = await buildApp({ simulator: { ok: true } });
+    const retry = await postPrepare(healthy.app, requestBody(), key);
+    expect(retry.status).toBe(200);
+    expect(retry.headers.get("Idempotency-Replayed")).toBe(null);
+    expect(healthy.adapter.quoteCalls).toBe(1);
+  });
+
+  it("revokes and expires prepared intents before execution", async () => {
+    const { app } = await buildApp({ simulator: { ok: true } });
+    const created = await postPrepare(app);
+    const body = (await created.json()) as { data: { intentId: string } };
+    const revoked = await revokeIntent(app, body.data.intentId);
+    expect(revoked.status).toBe(200);
+    expect(await revoked.json()).toMatchObject({
+      data: { intentId: body.data.intentId, status: "revoked" },
+    });
+
+    await getDb()
+      .update(intents)
+      .set({ status: "prepared", expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(intents.id, body.data.intentId));
+    const expired = await getIntent(app, body.data.intentId);
+    expect(expired.status).toBe(200);
+    expect(await expired.json()).toMatchObject({
+      data: { intentId: body.data.intentId, status: "expired" },
+    });
+  });
+
+  it("allows platform recovery status and revoke while denying cross-agent and cross-tenant access", async () => {
+    const { app } = await buildPluginMountedApp({ simulator: { ok: true } });
+    const created = await postPrepare(app);
+    expect(created.status).toBe(200);
+    const body = (await created.json()) as { data: { intentId: string } };
+
+    const otherAgentStatus = await getIntent(app, body.data.intentId, OTHER_AGENT_ID);
+    expect(otherAgentStatus.status).toBe(404);
+
+    const wrongTenantStatus = await getIntentWithPlatform(app, body.data.intentId, OTHER_TENANT_ID);
+    expect(wrongTenantStatus.status).toBe(404);
+
+    const platformStatus = await getIntentWithPlatform(app, body.data.intentId);
+    expect(platformStatus.status).toBe(200);
+    expect(await platformStatus.json()).toMatchObject({
+      ok: true,
+      data: { intentId: body.data.intentId, status: "prepared" },
+    });
+
+    const platformRevoke = await revokeIntentWithPlatform(app, body.data.intentId);
+    expect(platformRevoke.status).toBe(200);
+    expect(await platformRevoke.json()).toMatchObject({
+      ok: true,
+      data: { intentId: body.data.intentId, status: "revoked" },
+    });
+  });
+
+  it("denies revoked session and wallet drift before persistence", async () => {
+    await getDb()
+      .update(tradeSessions)
+      .set({ status: "revoked", revokedAt: new Date(), revokedBy: "test" })
+      .where(eq(tradeSessions.id, SESSION_ID));
+    const revokedSession = await buildApp({ simulator: { ok: true } });
+    expect((await postPrepare(revokedSession.app)).status).toBe(403);
+    expect(revokedSession.adapter.buildCalls).toBe(0);
+
+    await getDb()
+      .update(tradeSessions)
+      .set({
+        status: "active",
+        revokedAt: null,
+        revokedBy: null,
+        walletId: "0x00000000000000000000000000000000000000aa",
+      })
+      .where(eq(tradeSessions.id, SESSION_ID));
+    const walletDrift = await buildApp({ simulator: { ok: true } });
+    expect((await postPrepare(walletDrift.app)).status).toBe(409);
+    expect(walletDrift.adapter.buildCalls).toBe(0);
   });
 
   it("denies cross-agent and caller-supplied transaction fields", async () => {

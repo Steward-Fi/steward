@@ -30,9 +30,11 @@ const namespacedAssetSchema = z.string().regex(/^[a-z0-9]+:[A-Z0-9]+$/);
 const predictionMarketAssetSchema = z
   .string()
   .regex(/^pm:(cond:0x[0-9a-fA-F]{1,64}|[0-9]{1,128})$/);
+const evmChainAssetSchema = z.string().regex(/^eip155:[1-9][0-9]{0,15}$/);
 export const allowedAssetSchema = z.union([
   coreAllowedAssetSchema,
   predictionMarketAssetSchema,
+  evmChainAssetSchema,
   namespacedAssetSchema,
 ]);
 export type AllowedAsset = z.infer<typeof allowedAssetSchema>;
@@ -206,6 +208,11 @@ export interface ListForAgentInput {
   tenantId: string;
   includeExpired?: boolean;
 }
+
+type TradeSessionDb = Pick<
+  ReturnType<typeof getDb>,
+  "delete" | "execute" | "insert" | "select" | "update"
+>;
 
 const DEFAULT_TTL_SECONDS = 900;
 const MAX_TTL_SECONDS = 24 * 60 * 60;
@@ -471,7 +478,7 @@ export class TradeSessionManager {
 
   async withActiveSubmissionFence<T>(
     input: SessionFenceInput,
-    callback: (session: TradeSession) => Promise<T>,
+    callback: (session: TradeSession, db: TradeSessionDb) => Promise<T>,
   ): Promise<T | null> {
     return getDb().transaction(async (tx) => {
       await tx.execute(
@@ -489,7 +496,7 @@ export class TradeSessionManager {
           ),
         );
       if (!row) return null;
-      return callback(rowToSession(row));
+      return callback(rowToSession(row), tx);
     });
   }
 

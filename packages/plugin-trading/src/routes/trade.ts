@@ -53,11 +53,12 @@ import type { StewardAppContext } from "../context";
 const sessionPredictionMarketAssetSchema = z
   .string()
   .regex(/^pm:(cond:0x[0-9a-fA-F]{1,64}|[0-9]{1,128})$/);
+const sessionEvmChainAssetSchema = z.string().regex(/^eip155:[1-9][0-9]{0,15}$/);
 
 const createSessionSchema = z
   .object({
     agentId: z.string().min(1).optional(),
-    venue: z.enum(["hyperliquid", "polymarket"]).default("hyperliquid"),
+    venue: z.enum(["hyperliquid", "polymarket", "evm"]).default("hyperliquid"),
     walletAddress: z.string().min(1).optional(),
     dailyCap: z.number().positive().max(50_000).default(300),
     perOrderCap: z.number().positive().max(10_000).default(100),
@@ -68,7 +69,13 @@ const createSessionSchema = z
     // venue-appropriate subset is validated in the handler. Optional so the
     // per-venue default below applies.
     allowedAssets: z
-      .array(z.union([hyperliquidAssetSchema, sessionPredictionMarketAssetSchema]))
+      .array(
+        z.union([
+          hyperliquidAssetSchema,
+          sessionPredictionMarketAssetSchema,
+          sessionEvmChainAssetSchema,
+        ]),
+      )
       .min(1)
       .optional(),
     ttlSeconds: z.number().int().positive().max(86_400).default(3_600),
@@ -468,6 +475,20 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
   }
 
+  async function resolveEvmSessionWallet(
+    agentId: string,
+    agent: { walletAddress?: string; walletAddresses?: { evm?: string } },
+    allowedAssets: readonly string[],
+  ): Promise<string | null> {
+    const chainAsset = allowedAssets.find((asset) => asset.startsWith("eip155:"));
+    const chainId = chainAsset ? Number(chainAsset.slice("eip155:".length)) : undefined;
+    try {
+      return (await vault.getWallet({ agentId, chainId })).address;
+    } catch {
+      return agent.walletAddresses?.evm ?? agent.walletAddress ?? null;
+    }
+  }
+
   tradeRoutes.get("/token-status", async (c) => {
     const agentId = c.req.query("agentId")?.trim();
     if (!agentId) {
@@ -534,6 +555,7 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
     }
     const { venue, dailyCap, perOrderCap, leverageCap, allowedAssets, ttlSeconds } = parsed.data;
     const isPolymarket = venue === "polymarket";
+    const isEvm = venue === "evm";
 
     if (!canAccessAgent(c, agentId)) {
       return c.json<ApiResponse>(
@@ -563,6 +585,23 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           400,
         );
       }
+    } else if (isEvm) {
+      if (allowedAssets.length === 0) {
+        return c.json<ApiResponse>(
+          { ok: false, error: "evm sessions require an explicit allowedAssets (eip155:<chainId>)" },
+          400,
+        );
+      }
+      const nonEvmAsset = allowedAssets.find((a) => !a.startsWith("eip155:"));
+      if (nonEvmAsset) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: `evm session asset must be an eip155:<chainId> identifier, got ${nonEvmAsset}`,
+          },
+          400,
+        );
+      }
     } else {
       const pmAsset = allowedAssets.find((a) => a.startsWith("pm:"));
       if (pmAsset) {
@@ -570,6 +609,16 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
           {
             ok: false,
             error: `hyperliquid session cannot allowlist a prediction market ${pmAsset}`,
+          },
+          400,
+        );
+      }
+      const evmAsset = allowedAssets.find((a) => a.startsWith("eip155:"));
+      if (evmAsset) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: `hyperliquid session cannot allowlist an EVM chain ${evmAsset}`,
           },
           400,
         );
@@ -614,9 +663,10 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
       const policyLeverageCap = Number(agentPolicy.leverageCap);
       // Builder-perp gating is Hyperliquid-only (isBuilderPerpSymbol matches HL
       // namespaced perps, never pm: assets).
-      const requestedBuilderAsset = isPolymarket
-        ? undefined
-        : allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
+      const requestedBuilderAsset =
+        isPolymarket || isEvm
+          ? undefined
+          : allowedAssets.find((asset) => isBuilderPerpSymbol(asset));
       if (requestedBuilderAsset && !agentPolicy.allowBuilderPerps) {
         return c.json(
           policyViolation(
@@ -689,12 +739,15 @@ export function createTradeRoutes(ctx: StewardAppContext): Hono<{ Variables: App
 
     const venueWallet = isPolymarket
       ? await resolvePolymarketWallet(agentId)
-      : await resolveHyperliquidWallet(agentId, agent);
+      : isEvm
+        ? await resolveEvmSessionWallet(agentId, agent, allowedAssets)
+        : await resolveHyperliquidWallet(agentId, agent);
     // Polymarket order execution resolves creds strictly via the venue-scoped
     // wallet (vault.getWallet({venue:"polymarket"})). Allowing a caller-supplied
     // walletAddress fallback here would mint a session that can never execute
     // (order route would 409 wallet-not-found). Fail closed for polymarket.
-    const walletAddress = isPolymarket ? venueWallet : (venueWallet ?? parsed.data.walletAddress);
+    const walletAddress =
+      isPolymarket || isEvm ? venueWallet : (venueWallet ?? parsed.data.walletAddress);
     if (!walletAddress) {
       return c.json<ApiResponse>(
         {

@@ -990,6 +990,9 @@ export const intents = pgTable(
       .default([]),
     payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
     executionResult: jsonb("execution_result").$type<Record<string, unknown>>(),
+    idempotencyKey: varchar("idempotency_key", { length: 255 }),
+    semanticRequestHash: varchar("semantic_request_hash", { length: 128 }),
+    intentHash: varchar("intent_hash", { length: 128 }),
     expiresAt: timestamp("expires_at", { withTimezone: true }),
     authorizedBy: varchar("authorized_by", { length: 255 }),
     canceledAt: timestamp("canceled_at", { withTimezone: true }),
@@ -1014,6 +1017,17 @@ export const intents = pgTable(
     tenantCreatedIdx: index("intents_tenant_created_idx").on(table.tenantId, table.createdAt),
     agentIdx: index("intents_agent_idx").on(table.agentId),
     resourceIdx: index("intents_resource_idx").on(table.resourceType, table.resourceId),
+    idempotencyUniqueIdx: uniqueIndex("intents_tenant_agent_type_idempotency_unique_idx")
+      .on(table.tenantId, table.agentId, table.intentType, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
+    intentHashUniqueIdx: uniqueIndex("intents_tenant_agent_type_intent_hash_unique_idx")
+      .on(table.tenantId, table.agentId, table.intentType, table.intentHash)
+      .where(sql`${table.intentHash} is not null`),
+    semanticRequestIdx: index("intents_tenant_agent_semantic_request_idx").on(
+      table.tenantId,
+      table.agentId,
+      table.semanticRequestHash,
+    ),
     tenantAgentFk: foreignKey({
       columns: [table.tenantId, table.agentId],
       foreignColumns: [agents.tenantId, agents.id],

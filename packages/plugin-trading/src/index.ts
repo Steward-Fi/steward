@@ -20,8 +20,9 @@
  * keeps the dependency one-directional (no cycle).
  */
 
+import { Buffer } from "node:buffer";
 import type { AppVariables, StewardPlugin } from "@stwd/shared";
-import type { Hono } from "hono";
+import type { Context, Hono, Next } from "hono";
 import type { StewardAppContext } from "./context";
 import { createEvmSwapRoutes } from "./routes/evm-swap";
 import { createOperatorRecoveryRoutes } from "./routes/operator-recovery";
@@ -76,6 +77,21 @@ export const TRADING_WEBHOOK_EVENTS = [
   "trade.builder.approved",
 ] as const;
 
+function bearerLooksLikeExternalAgentJwt(c: Context<{ Variables: AppVariables }>): boolean {
+  const auth = c.req.header("Authorization");
+  if (!auth?.startsWith("Bearer ")) return false;
+  const [, payload] = auth.slice("Bearer ".length).split(".");
+  if (!payload) return false;
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
+      agent_id?: unknown;
+    };
+    return typeof decoded.agent_id === "string" && decoded.agent_id.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The trading plugin. `register(app, ctx)`:
  *   1. installs the trade-specific auth middleware (MOVED verbatim from app.ts):
@@ -98,16 +114,21 @@ export const tradingPlugin: StewardApiPlugin = {
   webhookEvents: TRADING_WEBHOOK_EVENTS,
   register(app, ctx) {
     const { requireAgentJwt, operatorAuth, tenantAuth } = ctx;
+    const evmIntentAuth = (c: Context<{ Variables: AppVariables }>, next: Next) =>
+      bearerLooksLikeExternalAgentJwt(c) ? requireAgentJwt(c, next) : operatorAuth(c, next);
 
     // ── trade-specific auth middleware (verbatim from app.ts ~lines 172-182) ──
     app.use("/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
     app.use("/v1/trade/hyperliquid/order", (c, next) => requireAgentJwt(c, next));
     app.use("/trade/evm/swap/prepare", (c, next) => requireAgentJwt(c, next));
     app.use("/v1/trade/evm/swap/prepare", (c, next) => requireAgentJwt(c, next));
+    app.use("/trade/evm/swap/intents/*", evmIntentAuth);
+    app.use("/v1/trade/evm/swap/intents/*", evmIntentAuth);
     app.use("/trade", (c, next) => tenantAuth(c, next));
     app.use("/trade/*", (c, next) => {
       if (c.req.path.endsWith("/trade/hyperliquid/order")) return next();
       if (c.req.path.endsWith("/trade/evm/swap/prepare")) return next();
+      if (c.req.path.includes("/trade/evm/swap/intents/")) return next();
       if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
       return tenantAuth(c, next);
     });
@@ -115,6 +136,7 @@ export const tradingPlugin: StewardApiPlugin = {
     app.use("/v1/trade/*", (c, next) => {
       if (c.req.path.endsWith("/v1/trade/hyperliquid/order")) return next();
       if (c.req.path.endsWith("/v1/trade/evm/swap/prepare")) return next();
+      if (c.req.path.includes("/v1/trade/evm/swap/intents/")) return next();
       if (isOperatorRecoveryPath(c.req.path)) return operatorAuth(c, next);
       return tenantAuth(c, next);
     });

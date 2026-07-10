@@ -5,6 +5,7 @@ import {
   AdapterValidationError,
   type SwapQuote,
 } from "@stwd/adapters";
+import { and, eq, intents, sql } from "@stwd/db";
 import {
   aggregationLookupFromMap,
   aggregationQueriesForPolicies,
@@ -13,15 +14,26 @@ import {
 import { getAggregationSnapshot } from "@stwd/redis";
 import type { ApiResponse, AppVariables, PolicyRule, SignRequest } from "@stwd/shared";
 import { toCaip2 } from "@stwd/shared";
+import { TradeSessionManager } from "@stwd/trade-sessions";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
 
 type PreparedSwapResponse = {
+  intentId: string;
   intentHash: string;
+  status: PreparedIntentStatus;
+  expiresAt: string;
+  requestDigest: string;
   quoteId: string;
+  quoteHash: string;
   simulation: { ok: true; gasEstimate?: string };
+  lifecycle: {
+    canExecute: boolean;
+    terminal: boolean;
+    executionStatus: string | null;
+  };
   unsignedIntent: {
     kind: "evm-tx";
     chainId: number;
@@ -34,20 +46,30 @@ type PreparedSwapResponse = {
   };
 };
 
+type PreparedIntentStatus =
+  | "prepared"
+  | "submitting"
+  | "submitted"
+  | "rejected"
+  | "unknown"
+  | "revoked"
+  | "expired";
+
 type StoredResponse = {
   status: 200 | 400 | 403 | 404 | 409 | 500 | 503;
   body: ApiResponse<PreparedSwapResponse> | ApiResponse | { code: string; reason: string };
 };
 
-type IdempotencyEntry = {
-  bodyHash: string;
-  expiresAt: number;
-  promise: Promise<StoredResponse>;
-  response?: StoredResponse;
+type RejectedPreparePayload = {
+  kind: "evm-swap-prepare-rejection";
+  requestDigest: string;
+  replay: StoredResponse;
 };
 
-const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_IDEMPOTENCY_ENTRIES = 1_000;
+type InflightIdempotencyEntry = {
+  requestDigest: string;
+  promise: Promise<StoredResponse>;
+};
 
 const tokenRefSchema = z
   .object({
@@ -60,6 +82,7 @@ const tokenRefSchema = z
 const prepareSwapSchema = z
   .object({
     agentId: z.string().min(1).max(128),
+    sessionId: z.string().min(1).max(128),
     chainId: z.number().int().positive(),
     fromToken: tokenRefSchema,
     toToken: tokenRefSchema,
@@ -98,11 +121,31 @@ function sha256(value: unknown): string {
   return createHash("sha256").update(stableStringify(value)).digest("hex");
 }
 
+function prefixedSha256(value: unknown): string {
+  return `sha256:${sha256(value)}`;
+}
+
+function quoteHash(quote: SwapQuote): string {
+  return prefixedSha256({
+    provider: quote.provider,
+    quoteId: quote.quoteId,
+    chainId: quote.chainId,
+    fromToken: normalizeAddress(quote.fromToken.address),
+    toToken: normalizeAddress(quote.toToken.address),
+    amountIn: quote.amountIn,
+    amountOut: quote.amountOut,
+    minAmountOut: quote.minAmountOut,
+    slippageBps: quote.slippageBps,
+    feeAmount: quote.feeAmount ?? null,
+    expiresAt: quote.expiresAt,
+  });
+}
+
 function canonicalIntentHash(
   intent: SignRequest & { owner: string; category: string; provider: string },
   quote: SwapQuote,
 ): string {
-  return `sha256:${sha256({
+  return prefixedSha256({
     agentId: intent.agentId,
     tenantId: intent.tenantId,
     chainId: intent.chainId,
@@ -120,7 +163,7 @@ function canonicalIntentHash(
       minAmountOut: quote.minAmountOut,
       expiresAt: quote.expiresAt,
     },
-  })}`;
+  });
 }
 
 function json<T>(
@@ -358,35 +401,114 @@ function replay(c: Context<{ Variables: AppVariables }>, response: StoredRespons
   return c.json(response.body, response.status);
 }
 
+function getSessionManager(ctx: StewardAppContext): TradeSessionManager {
+  return new TradeSessionManager({ redis: ctx.getRedisClient() });
+}
+
+function isPreparedStatus(value: unknown): value is PreparedIntentStatus {
+  return (
+    value === "prepared" ||
+    value === "submitting" ||
+    value === "submitted" ||
+    value === "rejected" ||
+    value === "unknown" ||
+    value === "revoked" ||
+    value === "expired"
+  );
+}
+
+function preparedResponseFromRow(row: typeof intents.$inferSelect): PreparedSwapResponse {
+  const payload = row.payload as Record<string, unknown>;
+  const execution = (row.executionResult ?? {}) as Record<string, unknown>;
+  const unsignedIntent = payload.unsignedIntent as PreparedSwapResponse["unsignedIntent"];
+  const simulation = payload.simulation as PreparedSwapResponse["simulation"];
+  const quote = payload.quote as Record<string, unknown>;
+  return {
+    intentId: row.id,
+    intentHash: String(row.intentHash ?? payload.intentHash),
+    status: isPreparedStatus(row.status) ? row.status : "rejected",
+    expiresAt: (row.expiresAt ?? new Date()).toISOString(),
+    requestDigest: String(row.semanticRequestHash ?? payload.requestDigest),
+    quoteId: String(quote.quoteId),
+    quoteHash: String(payload.quoteHash),
+    simulation,
+    lifecycle: {
+      canExecute: row.status === "prepared" && (!row.expiresAt || row.expiresAt > new Date()),
+      terminal:
+        row.status === "submitted" ||
+        row.status === "rejected" ||
+        row.status === "revoked" ||
+        row.status === "expired",
+      executionStatus: typeof execution.status === "string" ? execution.status : null,
+    },
+    unsignedIntent,
+  };
+}
+
+function rejectedPrepareReplayFromRow(row: typeof intents.$inferSelect): StoredResponse | null {
+  const payload = row.payload as Partial<RejectedPreparePayload>;
+  if (payload.kind !== "evm-swap-prepare-rejection") return null;
+  const replayed = payload.replay;
+  if (!replayed || typeof replayed !== "object") return null;
+  const status = replayed.status;
+  if (status !== 400 && status !== 403 && status !== 404 && status !== 409) {
+    return null;
+  }
+  return { status, body: replayed.body };
+}
+
+async function loadPreparedIntent(
+  ctx: StewardAppContext,
+  tenantId: string,
+  agentId: string | null,
+  idOrHash: string,
+) {
+  const conditions = [
+    eq(intents.tenantId, tenantId),
+    eq(intents.intentType, "evm_swap"),
+    sql`(${intents.id} = ${idOrHash} or ${intents.intentHash} = ${idOrHash})`,
+  ];
+  if (agentId) conditions.push(eq(intents.agentId, agentId));
+  const [row] = await ctx.db
+    .select()
+    .from(intents)
+    .where(and(...conditions));
+  if (!row) return null;
+  if (row.status === "prepared" && row.expiresAt && row.expiresAt <= new Date()) {
+    const [expired] = await ctx.db
+      .update(intents)
+      .set({
+        status: "expired",
+        expiredAt: new Date(),
+        expiredBy: "system",
+        updatedAt: new Date(),
+        executionResult: {
+          ...((row.executionResult ?? {}) as Record<string, unknown>),
+          status: "expired",
+          reason: "prepared intent expired before execution",
+        },
+      })
+      .where(and(eq(intents.id, row.id), eq(intents.status, "prepared")))
+      .returning();
+    return expired ?? row;
+  }
+  return row;
+}
+
+function intentAuditActor(c: Context<{ Variables: AppVariables }>) {
+  const scopedAgent = c.get("agentScope");
+  if (scopedAgent) return { actorType: "agent" as const, actorId: scopedAgent };
+  if (c.get("authType") === "platform") {
+    return { actorType: "platform" as const, actorId: "platform" };
+  }
+  const userId = c.get("userId");
+  if (userId) return { actorType: "user" as const, actorId: userId };
+  return { actorType: "api-key" as const, actorId: c.get("tenantId") };
+}
+
 export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: AppVariables }> {
   const routes = new Hono<{ Variables: AppVariables }>();
-  const idempotency = new Map<string, IdempotencyEntry>();
-
-  function remember(
-    tenantId: string,
-    agentId: string,
-    key: string,
-    bodyHash: string,
-    promise: Promise<StoredResponse>,
-  ) {
-    const now = Date.now();
-    for (const [entryKey, entry] of idempotency) {
-      if (entry.expiresAt <= now || idempotency.size >= MAX_IDEMPOTENCY_ENTRIES) {
-        idempotency.delete(entryKey);
-      }
-      if (idempotency.size < MAX_IDEMPOTENCY_ENTRIES) break;
-    }
-    const mapKey = `${tenantId}:${agentId}:${key}`;
-    const entry: IdempotencyEntry = { bodyHash, expiresAt: now + IDEMPOTENCY_TTL_MS, promise };
-    idempotency.set(mapKey, entry);
-    promise.then((response) => {
-      if (response.status >= 500) {
-        idempotency.delete(mapKey);
-        return;
-      }
-      entry.response = response;
-    });
-  }
+  const inflightIdempotency = new Map<string, InflightIdempotencyEntry>();
 
   routes.post("/evm/swap/prepare", async (c) => {
     const idempotencyKey = c.req.header("Idempotency-Key");
@@ -414,14 +536,55 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
     const agent = await ctx.ensureAgentForTenant(tenantId, parsed.data.agentId);
     if (!agent) return json(c, { ok: false, error: "Agent not found" }, 404);
 
-    const bodyHash = sha256(parsed.data);
-    const mapKey = `${tenantId}:${parsed.data.agentId}:${idempotencyKey}`;
-    const existing = idempotency.get(mapKey);
-    if (existing && existing.expiresAt > Date.now()) {
-      if (existing.bodyHash !== bodyHash) {
-        return json(c, { ok: false, error: "Idempotency key reused with a different body" }, 409);
+    const requestDigest = prefixedSha256({
+      agentId: parsed.data.agentId,
+      sessionId: parsed.data.sessionId,
+      chainId: parsed.data.chainId,
+      fromToken: normalizeAddress(parsed.data.fromToken.address),
+      toToken: normalizeAddress(parsed.data.toToken.address),
+      amount: parsed.data.amount,
+      slippageBps: parsed.data.slippageBps ?? null,
+    });
+    const [existingByKey] = await ctx.db
+      .select()
+      .from(intents)
+      .where(
+        and(
+          eq(intents.tenantId, tenantId),
+          eq(intents.agentId, parsed.data.agentId),
+          eq(intents.intentType, "evm_swap"),
+          eq(intents.idempotencyKey, idempotencyKey),
+        ),
+      );
+    if (existingByKey) {
+      if (existingByKey.semanticRequestHash !== requestDigest) {
+        return json(
+          c,
+          { ok: false, error: "Idempotency key reused with different semantics" },
+          409,
+        );
       }
-      return replay(c, existing.response ?? (await existing.promise));
+      const rejectedReplay = rejectedPrepareReplayFromRow(existingByKey);
+      if (rejectedReplay) return replay(c, rejectedReplay);
+      const replayRow =
+        (await loadPreparedIntent(ctx, tenantId, parsed.data.agentId, existingByKey.id)) ??
+        existingByKey;
+      return replay(c, {
+        status: 200,
+        body: { ok: true, data: preparedResponseFromRow(replayRow) },
+      });
+    }
+    const idempotencyScope = `${tenantId}:${parsed.data.agentId}:${idempotencyKey}`;
+    const inflight = inflightIdempotency.get(idempotencyScope);
+    if (inflight) {
+      if (inflight.requestDigest !== requestDigest) {
+        return json(
+          c,
+          { ok: false, error: "Idempotency key reused with different semantics" },
+          409,
+        );
+      }
+      return replay(c, await inflight.promise);
     }
 
     const prepare = (async (): Promise<StoredResponse> => {
@@ -435,11 +598,13 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         resourceId: parsed.data.agentId,
         metadata: {
           agentId: parsed.data.agentId,
+          sessionId: parsed.data.sessionId,
           chainId: parsed.data.chainId,
           fromToken: parsed.data.fromToken.address,
           toToken: parsed.data.toToken.address,
           amount: parsed.data.amount,
           slippageBps: parsed.data.slippageBps ?? null,
+          requestDigest,
         },
       });
 
@@ -447,6 +612,10 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         status: StoredResponse["status"],
         reason: string,
       ): Promise<StoredResponse> => {
+        const response: StoredResponse = {
+          status,
+          body: status === 400 ? rejectReason(reason) : { ok: false, error: reason },
+        };
         await ctx.writeAuditEvent({
           tenantId,
           actorType: actor.actorType,
@@ -456,15 +625,87 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
           resourceId: parsed.data.agentId,
           metadata: { reason, agentId: parsed.data.agentId, chainId: parsed.data.chainId },
         });
-        return {
-          status,
-          body: status === 400 ? rejectReason(reason) : { ok: false, error: reason },
-        };
+        if (status >= 500) return response;
+
+        const now = new Date();
+        const [created] = await ctx.db
+          .insert(intents)
+          .values({
+            id: `evm_rej_${crypto.randomUUID()}`,
+            tenantId,
+            agentId: parsed.data.agentId,
+            intentType: "evm_swap",
+            status: "rejected",
+            resourceType: "trade.evm.swap.prepare",
+            resourceId: requestDigest,
+            createdByType: "agent",
+            createdById: actor.actorId,
+            idempotencyKey,
+            semanticRequestHash: requestDigest,
+            authorizationDetails: [
+              {
+                kind: "evm-swap-prepare-rejection",
+                status,
+                sessionId: parsed.data.sessionId,
+                chainId: parsed.data.chainId,
+              },
+            ],
+            payload: {
+              kind: "evm-swap-prepare-rejection",
+              requestDigest,
+              replay: response,
+            } satisfies RejectedPreparePayload,
+            executionResult: { status: "rejected" },
+            rejectedAt: now,
+            rejectedBy: actor.actorId,
+            rejectionReason: reason,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .onConflictDoNothing()
+          .returning();
+        if (created) return response;
+
+        const [existing] = await ctx.db
+          .select()
+          .from(intents)
+          .where(
+            and(
+              eq(intents.tenantId, tenantId),
+              eq(intents.agentId, parsed.data.agentId),
+              eq(intents.intentType, "evm_swap"),
+              eq(intents.idempotencyKey, idempotencyKey),
+            ),
+          );
+        if (existing?.semanticRequestHash && existing.semanticRequestHash !== requestDigest) {
+          return {
+            status: 409,
+            body: { ok: false, error: "Idempotency key reused with different semantics" },
+          };
+        }
+        return rejectedPrepareReplayFromRow(existing ?? created) ?? response;
       };
 
       if (!ctx.evmSimulator) return reject(503, "EVM simulator is not configured");
       const owner = await resolveEvmWallet(ctx, agent, parsed.data.chainId);
       if (!owner || !isEvmAddress(owner)) return reject(403, "Agent EVM wallet not found");
+      const sessionManager = getSessionManager(ctx);
+      const session = await sessionManager.getSession({ tenantId, id: parsed.data.sessionId });
+      if (
+        !session ||
+        session.agentId !== parsed.data.agentId ||
+        session.venue !== "evm" ||
+        session.status !== "active" ||
+        session.expiresAt <= new Date()
+      ) {
+        return reject(403, "Active EVM trade session required");
+      }
+      if (!session.allowedAssets.includes(toCaip2(parsed.data.chainId) ?? "")) {
+        return reject(403, "EVM trade session does not allow this chain");
+      }
+      if (normalizeAddress(session.walletId) !== normalizeAddress(owner)) {
+        return reject(409, "EVM trade session wallet no longer matches the agent wallet");
+      }
 
       const swap = ctx.adapterRegistry.swap();
       if (!swap.enabled) return reject(503, "Swap adapter is disabled");
@@ -560,6 +801,7 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         },
         quote,
       );
+      const qHash = quoteHash(quote);
       const simulation = await ctx.evmSimulator.simulate({
         chainId: intent.chainId,
         from: owner,
@@ -573,6 +815,141 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
       }
 
       const sanitized = sanitizeIntent(intent);
+      const createdAt = new Date();
+      const expiresAt = new Date(Math.min(quote.expiresAt, session.expiresAt.getTime()));
+      const preparedRow = await sessionManager.withActiveSubmissionFence(
+        { tenantId, id: parsed.data.sessionId },
+        async (freshSession, db) => {
+          if (
+            freshSession.agentId !== parsed.data.agentId ||
+            freshSession.venue !== "evm" ||
+            normalizeAddress(freshSession.walletId) !== normalizeAddress(owner) ||
+            !freshSession.allowedAssets.includes(toCaip2(parsed.data.chainId) ?? "")
+          ) {
+            return null;
+          }
+          const [row] = await db
+            .insert(intents)
+            .values({
+              id: `evm_${crypto.randomUUID()}`,
+              tenantId,
+              agentId: parsed.data.agentId,
+              intentType: "evm_swap",
+              status: "prepared",
+              resourceType: "trade.evm.swap",
+              resourceId: intentHash,
+              createdByType: "agent",
+              createdById: actor.actorId,
+              idempotencyKey,
+              semanticRequestHash: requestDigest,
+              intentHash,
+              authorizationDetails: [
+                {
+                  kind: "evm-prepared-swap",
+                  sessionId: parsed.data.sessionId,
+                  wallet: normalizeAddress(owner),
+                  provider: intent.provider,
+                  chainId: intent.chainId,
+                  target: sanitized.target,
+                  selector: sanitized.selector,
+                  value: sanitized.value,
+                  minAmountOut: quote.minAmountOut,
+                  quoteHash: qHash,
+                  policyApproved: true,
+                  simulationOk: true,
+                },
+              ],
+              payload: {
+                requestDigest,
+                quoteHash: qHash,
+                intentHash,
+                sessionId: parsed.data.sessionId,
+                wallet: normalizeAddress(owner),
+                provider: intent.provider,
+                chainId: intent.chainId,
+                target: sanitized.target,
+                selector: sanitized.selector,
+                value: sanitized.value,
+                minAmountOut: quote.minAmountOut,
+                semanticRequest: {
+                  chainId: parsed.data.chainId,
+                  fromToken: {
+                    ...parsed.data.fromToken,
+                    address: normalizeAddress(parsed.data.fromToken.address),
+                  },
+                  toToken: {
+                    ...parsed.data.toToken,
+                    address: normalizeAddress(parsed.data.toToken.address),
+                  },
+                  amount: parsed.data.amount,
+                  slippageBps: parsed.data.slippageBps ?? null,
+                },
+                quote: {
+                  provider: quote.provider,
+                  quoteId: quote.quoteId,
+                  amountIn: quote.amountIn,
+                  amountOut: quote.amountOut,
+                  minAmountOut: quote.minAmountOut,
+                  expiresAt: new Date(quote.expiresAt).toISOString(),
+                },
+                simulation: { ok: true, gasEstimate: simulation.gasEstimate },
+                policy: {
+                  approved: true,
+                  resultCount: policyEvaluation.results.length,
+                  failedCount: policyEvaluation.results.filter((result) => !result.passed).length,
+                },
+                unsignedIntent: {
+                  kind: "evm-tx",
+                  chainId: intent.chainId,
+                  to: normalizeAddress(intent.to),
+                  value: intent.value,
+                  data,
+                  owner: normalizeAddress(owner),
+                  category: "swap",
+                  provider: intent.provider,
+                },
+                lifecycle: {
+                  allowedTransitions: {
+                    prepared: ["submitting", "revoked", "expired"],
+                    submitting: ["submitted", "rejected", "unknown"],
+                    unknown: ["submitted", "rejected"],
+                  },
+                  retry: "never blind retry unknown; reconcile by intent id or transaction hash",
+                },
+              },
+              executionResult: { status: "prepared", transactionHash: null },
+              expiresAt,
+              createdAt,
+              updatedAt: createdAt,
+            })
+            .onConflictDoNothing()
+            .returning();
+          if (row) return row;
+          const [existing] = await db
+            .select()
+            .from(intents)
+            .where(
+              and(
+                eq(intents.tenantId, tenantId),
+                eq(intents.agentId, parsed.data.agentId),
+                eq(intents.intentType, "evm_swap"),
+                eq(intents.idempotencyKey, idempotencyKey),
+              ),
+            );
+          return existing ?? null;
+        },
+      );
+      if (!preparedRow) {
+        return reject(409, "Trade session was revoked before intent persistence");
+      }
+      if (preparedRow.semanticRequestHash !== requestDigest) {
+        return {
+          status: 409,
+          body: { ok: false, error: "Idempotency key reused with different semantics" },
+        };
+      }
+      const rejectedReplay = rejectedPrepareReplayFromRow(preparedRow);
+      if (rejectedReplay) return rejectedReplay;
       await ctx.writeAuditEvent({
         tenantId,
         actorType: actor.actorType,
@@ -583,8 +960,12 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         metadata: {
           ...sanitized,
           agentId: parsed.data.agentId,
+          sessionId: parsed.data.sessionId,
+          intentId: preparedRow.id,
           intentHash,
           quoteId: quote.quoteId,
+          quoteHash: qHash,
+          requestDigest,
           gasEstimate: simulation.gasEstimate ?? null,
         },
         requestId: idempotencyKey,
@@ -594,21 +975,7 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
         status: 200,
         body: {
           ok: true,
-          data: {
-            intentHash,
-            quoteId: quote.quoteId,
-            simulation: { ok: true, gasEstimate: simulation.gasEstimate },
-            unsignedIntent: {
-              kind: "evm-tx",
-              chainId: intent.chainId,
-              to: normalizeAddress(intent.to),
-              value: intent.value,
-              data,
-              owner: normalizeAddress(owner),
-              category: "swap",
-              provider: intent.provider,
-            },
-          },
+          data: preparedResponseFromRow(preparedRow),
         },
       };
     })().catch(async (error): Promise<StoredResponse> => {
@@ -637,9 +1004,84 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
       return { status: 500, body: { ok: false, error: "Internal server error" } };
     });
 
-    remember(tenantId, parsed.data.agentId, idempotencyKey, bodyHash, prepare);
-    const response = await prepare;
+    inflightIdempotency.set(idempotencyScope, { requestDigest, promise: prepare });
+    const response = await prepare.finally(() => {
+      inflightIdempotency.delete(idempotencyScope);
+    });
     return c.json(response.body, response.status);
+  });
+
+  routes.get("/evm/swap/intents/:id", async (c) => {
+    const tenantId = c.get("tenantId");
+    const scopedAgent = c.get("agentScope");
+    const row = await loadPreparedIntent(ctx, tenantId, scopedAgent ?? null, c.req.param("id"));
+    if (!row) return json(c, { ok: false, error: "Prepared intent not found" }, 404);
+    return c.json({ ok: true, data: preparedResponseFromRow(row) }, 200);
+  });
+
+  routes.post("/evm/swap/intents/:id/revoke", async (c) => {
+    const tenantId = c.get("tenantId");
+    const scopedAgent = c.get("agentScope");
+    const existing = await loadPreparedIntent(
+      ctx,
+      tenantId,
+      scopedAgent ?? null,
+      c.req.param("id"),
+    );
+    if (!existing) return json(c, { ok: false, error: "Prepared intent not found" }, 404);
+    if (existing.status === "revoked" || existing.status === "expired") {
+      return c.json({ ok: true, data: preparedResponseFromRow(existing) }, 200);
+    }
+    if (existing.status !== "prepared") {
+      return json(
+        c,
+        { ok: false, error: `Cannot revoke prepared intent in ${existing.status} status` },
+        409,
+      );
+    }
+    const now = new Date();
+    const actor = intentAuditActor(c);
+    const [revoked] = await ctx.db
+      .update(intents)
+      .set({
+        status: "revoked",
+        canceledAt: now,
+        canceledBy: actor.actorId,
+        cancellationReason: scopedAgent ? "revoked by agent" : "revoked by recovery auth",
+        updatedAt: now,
+        executionResult: {
+          ...((existing.executionResult ?? {}) as Record<string, unknown>),
+          status: "revoked",
+          reason: "revoked before execution",
+        },
+      })
+      .where(and(eq(intents.id, existing.id), eq(intents.status, "prepared")))
+      .returning();
+    if (!revoked) {
+      const reloaded = await loadPreparedIntent(ctx, tenantId, scopedAgent ?? null, existing.id);
+      return json(
+        c,
+        {
+          ok: false,
+          error: `Cannot revoke prepared intent in ${reloaded?.status ?? "unknown"} status`,
+        },
+        409,
+      );
+    }
+    await ctx.writeAuditEvent({
+      tenantId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      action: "trade.evm.swap.intent.revoked",
+      resourceType: "trade.evm.swap",
+      resourceId: revoked.id,
+      metadata: {
+        intentId: revoked.id,
+        intentHash: revoked.intentHash,
+        status: revoked.status,
+      },
+    });
+    return c.json({ ok: true, data: preparedResponseFromRow(revoked) }, 200);
   });
 
   return routes;

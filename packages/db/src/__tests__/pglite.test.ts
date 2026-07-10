@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 
 import { createPGLiteDb } from "../pglite";
-import { agents, encryptedKeys, policies, tenants, transactions } from "../schema";
+import { agents, encryptedKeys, intents, policies, tenants, transactions } from "../schema";
 
 setDefaultTimeout(120000);
 
@@ -270,6 +270,58 @@ describe("PGLite Adapter", () => {
 
       expect(agentRows).toHaveLength(1);
       expect(agentRows[0].name).toBe("Persistent Agent");
+
+      await client.close();
+    }
+  });
+
+  test("prepared EVM intent ledger columns persist across close/reopen", async () => {
+    tempDir = await mkdtemp(join(tmpdir(), "steward-pglite-intents-"));
+
+    {
+      const { db, client } = await createPGLiteDb(tempDir);
+
+      await db.insert(tenants).values({
+        id: "intent-tenant",
+        name: "Intent Tenant",
+        apiKeyHash: "intent-hash",
+      });
+      await db.insert(agents).values({
+        id: "intent-agent",
+        tenantId: "intent-tenant",
+        name: "Intent Agent",
+        walletAddress: "0x0000000000000000000000000000000000000001",
+      });
+      await db.insert(intents).values({
+        id: "evm_persisted",
+        tenantId: "intent-tenant",
+        agentId: "intent-agent",
+        intentType: "evm_swap",
+        status: "prepared",
+        resourceType: "trade.evm.swap",
+        resourceId: "sha256:intent",
+        createdByType: "agent",
+        createdById: "intent-agent",
+        idempotencyKey: "idem-persisted",
+        semanticRequestHash: "sha256:request",
+        intentHash: "sha256:intent",
+        payload: { quoteHash: "sha256:quote" },
+      });
+
+      await client.close();
+    }
+
+    {
+      const { db, client } = await createPGLiteDb(tempDir);
+      const rows = await db.select().from(intents).where(eq(intents.id, "evm_persisted"));
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        idempotencyKey: "idem-persisted",
+        semanticRequestHash: "sha256:request",
+        intentHash: "sha256:intent",
+        status: "prepared",
+      });
 
       await client.close();
     }
