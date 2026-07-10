@@ -43,6 +43,8 @@ let intents: typeof import("@stwd/db")["intents"];
 let policies: typeof import("@stwd/db")["policies"];
 let tenants: typeof import("@stwd/db")["tenants"];
 let tradeSessions: typeof import("@stwd/db")["tradeSessions"];
+let transactions: typeof import("@stwd/db")["transactions"];
+let vaultSigningFreezes: typeof import("@stwd/db")["vaultSigningFreezes"];
 let closeDb: typeof import("@stwd/db")["closeDb"];
 let getDb: typeof import("@stwd/db")["getDb"];
 let pgliteDb: ReturnType<typeof getDb>;
@@ -115,6 +117,40 @@ class FakeSwapAdapter implements SwapAdapter {
         slippageBps: quote.slippageBps,
       },
     };
+  }
+}
+
+class FakeEvmRpc {
+  pendingNonce = 0;
+  gasPrice = "1000000000";
+  sendCalls: string[] = [];
+  receipt: Record<string, unknown> | null = null;
+  transaction: Record<string, unknown> | null = null;
+  failSend: Error | null = null;
+  onBeforeSend?: () => Promise<void>;
+
+  async getPendingNonce() {
+    return this.pendingNonce;
+  }
+
+  async getGasPrice() {
+    return this.gasPrice;
+  }
+
+  async sendRawTransaction(_chainId: number, rawTransaction: string) {
+    this.sendCalls.push(rawTransaction);
+    await this.onBeforeSend?.();
+    if (this.failSend) throw this.failSend;
+    const { keccak256 } = await import("viem");
+    return keccak256(rawTransaction as `0x${string}`).toLowerCase();
+  }
+
+  async getTransactionReceipt() {
+    return this.receipt;
+  }
+
+  async getTransactionByHash() {
+    return this.transaction;
   }
 }
 
@@ -199,9 +235,9 @@ function requestBody(agentId = AGENT_ID) {
     agentId,
     sessionId: SESSION_ID,
     chainId: 8453,
-    fromToken: { address: FROM_TOKEN, symbol: "A", decimals: 18 },
+    fromToken: { address: FROM_TOKEN, symbol: "A", decimals: 0 },
     toToken: { address: TO_TOKEN, symbol: "B", decimals: 18 },
-    amount: "1000",
+    amount: "10",
     slippageBps: 50,
   };
 }
@@ -209,13 +245,23 @@ function requestBody(agentId = AGENT_ID) {
 async function buildApp(options?: {
   adapter?: FakeSwapAdapter;
   simulator?: { ok: boolean; revertReason?: string };
+  evmRpc?: FakeEvmRpc | null;
+  tokenUsdPrice?: number | null;
   auditLog?: unknown[];
+  auditFailureActions?: string[];
 }) {
   const adapter = options?.adapter ?? new FakeSwapAdapter();
   let simulationCalls = 0;
+  const baseCtx = testCtx();
   const ctx = {
-    ...testCtx(),
+    ...baseCtx,
     adapterRegistry: makeRegistry(adapter),
+    priceOracle: {
+      getNativeUsdPrice: async () => options?.tokenUsdPrice ?? 1,
+      getTokenUsdPrice: async () => options?.tokenUsdPrice ?? 1,
+      weiToUsd: async (value: string) => Number(value) * (options?.tokenUsdPrice ?? 1),
+      usdToWei: async (value: number) => String(value),
+    },
     evmSimulator: options?.simulator
       ? {
           simulate: async (request: unknown) => {
@@ -227,6 +273,13 @@ async function buildApp(options?: {
           },
         }
       : null,
+    evmRpc: options?.evmRpc ?? null,
+    writeAuditEvent: async (event: Parameters<typeof baseCtx.writeAuditEvent>[0]) => {
+      if (options?.auditFailureActions?.includes(event.action)) {
+        throw new Error(`audit failed for ${event.action}`);
+      }
+      return baseCtx.writeAuditEvent(event);
+    },
   };
   const app = new Hono();
   app.use("/v1/trade/evm/swap/*", (c, next) => requireAgentJwt(c as never, next));
@@ -237,14 +290,22 @@ async function buildApp(options?: {
 async function buildPluginMountedApp(options?: {
   adapter?: FakeSwapAdapter;
   simulator?: { ok: boolean; revertReason?: string };
+  evmRpc?: FakeEvmRpc | null;
 }) {
   const adapter = options?.adapter ?? new FakeSwapAdapter();
   const ctx = {
     ...testCtx(),
     adapterRegistry: makeRegistry(adapter),
+    priceOracle: {
+      getNativeUsdPrice: async () => 1,
+      getTokenUsdPrice: async () => 1,
+      weiToUsd: async (value: string) => Number(value),
+      usdToWei: async (value: number) => String(value),
+    },
     evmSimulator: options?.simulator
       ? { simulate: async () => ({ ok: true as const, gasEstimate: "0x5208" }) }
       : null,
+    evmRpc: options?.evmRpc ?? null,
   };
   const app = new Hono();
   tradingPlugin.register(app as never, ctx);
@@ -288,6 +349,39 @@ async function revokeIntent(app: Hono, id: string, agentId = AGENT_ID) {
   });
 }
 
+async function executeIntent(app: Hono, id: string, key = crypto.randomUUID(), agentId = AGENT_ID) {
+  return app.request(`/v1/trade/evm/swap/intents/${id}/execute`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${await signToken(agentId)}`,
+      "X-Steward-Tenant": TENANT_ID,
+      "Content-Type": "application/json",
+      "Idempotency-Key": key,
+    },
+    body: JSON.stringify({}),
+  });
+}
+
+async function reconcileIntent(app: Hono, id: string, agentId = AGENT_ID) {
+  return app.request(`/v1/trade/evm/swap/intents/${id}/reconcile`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${await signToken(agentId)}`,
+      "X-Steward-Tenant": TENANT_ID,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({}),
+  });
+}
+
+async function dailySpendOf(sessionId = SESSION_ID): Promise<number> {
+  const [row] = await getDb()
+    .select({ spent: tradeSessions.dailySpendUsd })
+    .from(tradeSessions)
+    .where(eq(tradeSessions.id, sessionId));
+  return Number(row?.spent ?? 0);
+}
+
 async function getIntentWithPlatform(app: Hono, id: string, tenantId = TENANT_ID) {
   return app.request(`/v1/trade/evm/swap/intents/${id}`, {
     headers: {
@@ -315,9 +409,17 @@ beforeAll(async () => {
   });
   pgliteDb = db as ReturnType<typeof getDb>;
 
-  ({ auditEvents, closeDb, getDb, intents, policies, tenants, tradeSessions } = await import(
-    "@stwd/db"
-  ));
+  ({
+    auditEvents,
+    closeDb,
+    getDb,
+    intents,
+    policies,
+    tenants,
+    tradeSessions,
+    transactions,
+    vaultSigningFreezes,
+  } = await import("@stwd/db"));
   ({ testCtx } = await import("./_ctx"));
   ({ tradingPlugin } = await import("../index"));
   ({ createEvmSwapRoutes } = await import("../routes/evm-swap"));
@@ -357,6 +459,8 @@ beforeEach(async () => {
   clearAgentJwksCacheForTests();
   await getDb().delete(auditEvents).where(eq(auditEvents.tenantId, TENANT_ID));
   await getDb().delete(intents).where(eq(intents.tenantId, TENANT_ID));
+  await getDb().delete(transactions).where(eq(transactions.agentId, AGENT_ID));
+  await getDb().delete(vaultSigningFreezes).where(eq(vaultSigningFreezes.tenantId, TENANT_ID));
   await getDb().delete(tradeSessions).where(eq(tradeSessions.tenantId, TENANT_ID));
   await getDb()
     .insert(tradeSessions)
@@ -732,5 +836,236 @@ describe("governed EVM swap prepare", () => {
     const res = await postPrepare(app);
     expect(res.status).toBe(200);
     expect(signSpy).not.toHaveBeenCalled();
+  });
+
+  it("executes a prepared swap once, persists tx identity before send, and never exposes raw tx", async () => {
+    const rpc = new FakeEvmRpc();
+    let persistedBeforeSend: string | null = null;
+    rpc.onBeforeSend = async () => {
+      const [row] = await getDb().select().from(intents).where(eq(intents.id, intentId));
+      const execution = (row?.executionResult ?? {}) as Record<string, unknown>;
+      persistedBeforeSend =
+        typeof execution.transactionHash === "string" ? execution.transactionHash : null;
+    };
+    const { app } = await buildApp({ simulator: { ok: true }, evmRpc: rpc });
+    const prepared = await postPrepare(app);
+    const preparedBody = (await prepared.json()) as { data: { intentId: string } };
+    const intentId = preparedBody.data.intentId;
+
+    const key = crypto.randomUUID();
+    const executed = await executeIntent(app, intentId, key);
+    expect(executed.status).toBe(200);
+    const body = (await executed.json()) as {
+      data: { status: string; executionStatus: string; transactionHash: string };
+    };
+    expect(body.data.status).toBe("submitted");
+    expect(body.data.executionStatus).toBe("submitted");
+    expect(body.data.transactionHash).toMatch(/^0x[a-f0-9]{64}$/);
+    expect(persistedBeforeSend).toBe(body.data.transactionHash);
+    expect(rpc.sendCalls).toHaveLength(1);
+    expect(JSON.stringify(body)).not.toContain(rpc.sendCalls[0] ?? "raw-missing");
+    expect(JSON.stringify(await getDb().select().from(intents))).not.toContain(
+      rpc.sendCalls[0] ?? "raw-missing",
+    );
+    expect(JSON.stringify(await getDb().select().from(transactions))).not.toContain(
+      rpc.sendCalls[0] ?? "raw-missing",
+    );
+    expect(await dailySpendOf()).toBeGreaterThan(0);
+
+    const replay = await executeIntent(app, intentId, key);
+    expect(replay.status).toBe(200);
+    expect((await replay.json()) as unknown).toEqual(body);
+    expect(rpc.sendCalls).toHaveLength(1);
+
+    const conflict = await executeIntent(app, intentId, crypto.randomUUID());
+    expect(conflict.status).toBe(409);
+    expect(rpc.sendCalls).toHaveLength(1);
+  });
+
+  it("preserves submitted identity when the post-submit audit write fails", async () => {
+    const rpc = new FakeEvmRpc();
+    const { app } = await buildApp({
+      simulator: { ok: true },
+      evmRpc: rpc,
+      auditFailureActions: ["trade.evm.swap.execute.submitted"],
+    });
+    const prepared = await postPrepare(app);
+    const { data } = (await prepared.json()) as { data: { intentId: string } };
+
+    const executed = await executeIntent(app, data.intentId);
+    expect(executed.status).toBe(200);
+    expect(await executed.json()).toMatchObject({
+      data: { status: "submitted", executionStatus: "submitted", retry: "not-retryable" },
+    });
+    expect(await dailySpendOf()).toBeGreaterThan(0);
+
+    const [intentRow] = await getDb().select().from(intents).where(eq(intents.id, data.intentId));
+    const [txRow] = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, data.intentId));
+    expect(intentRow?.status).toBe("submitted");
+    expect(txRow?.status).toBe("broadcast");
+    expect(txRow?.txHash).toMatch(/^0x[a-f0-9]{64}$/);
+  });
+
+  it("rejects execute for non-owning agents and pre-sign fences without reserving spend", async () => {
+    const rpc = new FakeEvmRpc();
+    const { app } = await buildApp({ simulator: { ok: true }, evmRpc: rpc });
+    const prepared = await postPrepare(app);
+    const { data } = (await prepared.json()) as { data: { intentId: string } };
+
+    expect(
+      (await executeIntent(app, data.intentId, crypto.randomUUID(), OTHER_AGENT_ID)).status,
+    ).toBe(404);
+
+    await getDb()
+      .update(tradeSessions)
+      .set({ status: "revoked", revokedAt: new Date(), revokedBy: "test" })
+      .where(eq(tradeSessions.id, SESSION_ID));
+    const revoked = await executeIntent(app, data.intentId);
+    expect(revoked.status).toBe(403);
+    expect(await dailySpendOf()).toBe(0);
+    expect(rpc.sendCalls).toHaveLength(0);
+  });
+
+  it("releases spend and drops nonce on pre-submit signing freeze rejection", async () => {
+    const rpc = new FakeEvmRpc();
+    const { app } = await buildApp({ simulator: { ok: true }, evmRpc: rpc });
+    const prepared = await postPrepare(app);
+    const { data } = (await prepared.json()) as { data: { intentId: string } };
+    await getDb().insert(vaultSigningFreezes).values({
+      tenantId: TENANT_ID,
+      scopeType: "agent",
+      agentId: AGENT_ID,
+      reason: "test freeze",
+      createdByType: "system",
+    });
+
+    const rejected = await executeIntent(app, data.intentId);
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({
+      data: { executionStatus: "not_attempted" },
+    });
+    expect(rpc.sendCalls).toHaveLength(0);
+    expect(await dailySpendOf()).toBe(0);
+    const [row] = await getDb().select().from(intents).where(eq(intents.id, data.intentId));
+    expect(row?.status).toBe("rejected");
+  });
+
+  it("classifies send timeout as unknown, retains spend, and never resubmits on replay", async () => {
+    const rpc = Object.assign(new FakeEvmRpc(), { failSend: new Error("network timeout") });
+    const { app } = await buildApp({ simulator: { ok: true }, evmRpc: rpc });
+    const prepared = await postPrepare(app);
+    const { data } = (await prepared.json()) as { data: { intentId: string } };
+    const key = crypto.randomUUID();
+
+    const unknown = await executeIntent(app, data.intentId, key);
+    expect(unknown.status).toBe(200);
+    expect(await unknown.json()).toMatchObject({
+      data: { status: "unknown", executionStatus: "unknown", retry: "reconcile-only" },
+    });
+    expect(await dailySpendOf()).toBeGreaterThan(0);
+    expect(rpc.sendCalls).toHaveLength(1);
+
+    const replay = await executeIntent(app, data.intentId, key);
+    expect(replay.status).toBe(200);
+    expect(rpc.sendCalls).toHaveLength(1);
+
+    const blindRetry = await executeIntent(app, data.intentId, crypto.randomUUID());
+    expect(blindRetry.status).toBe(409);
+    expect(rpc.sendCalls).toHaveLength(1);
+  });
+
+  it("marks definite RPC-rejected sends failed in the transaction ledger", async () => {
+    const rpc = Object.assign(new FakeEvmRpc(), {
+      failSend: new Error("insufficient funds for gas * price + value"),
+    });
+    const { app } = await buildApp({ simulator: { ok: true }, evmRpc: rpc });
+    const prepared = await postPrepare(app);
+    const { data } = (await prepared.json()) as { data: { intentId: string } };
+
+    const rejected = await executeIntent(app, data.intentId);
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({
+      data: { executionStatus: "rejected" },
+    });
+    expect(await dailySpendOf()).toBe(0);
+    const [intentRow] = await getDb().select().from(intents).where(eq(intents.id, data.intentId));
+    const [txRow] = await getDb()
+      .select()
+      .from(transactions)
+      .where(eq(transactions.id, data.intentId));
+    expect(intentRow?.status).toBe("rejected");
+    expect(txRow?.status).toBe("failed");
+  });
+
+  it("reconciles confirmed, reverted, and not-found ambiguity from persisted tx hash only", async () => {
+    const confirmedRpc = Object.assign(new FakeEvmRpc(), { failSend: new Error("timeout") });
+    const confirmedApp = await buildApp({ simulator: { ok: true }, evmRpc: confirmedRpc });
+    const confirmedPrepared = await postPrepare(confirmedApp.app);
+    const confirmedId = ((await confirmedPrepared.json()) as { data: { intentId: string } }).data
+      .intentId;
+    await executeIntent(confirmedApp.app, confirmedId);
+    const [confirmedRow] = await getDb().select().from(intents).where(eq(intents.id, confirmedId));
+    const confirmedHash = ((confirmedRow?.executionResult ?? {}) as Record<string, unknown>)
+      .transactionHash as string;
+    confirmedRpc.failSend = null;
+    confirmedRpc.receipt = { status: "0x1", transactionHash: confirmedHash, blockNumber: "0x1" };
+    expect((await reconcileIntent(confirmedApp.app, confirmedId)).status).toBe(200);
+    expect(await getIntent(confirmedApp.app, confirmedId).then((r) => r.json())).toMatchObject({
+      data: { status: "submitted" },
+    });
+
+    await getDb().delete(intents).where(eq(intents.tenantId, TENANT_ID));
+    await getDb()
+      .update(tradeSessions)
+      .set({ dailySpendUsd: "0", status: "active" })
+      .where(eq(tradeSessions.id, SESSION_ID));
+
+    const revertedRpc = Object.assign(new FakeEvmRpc(), { failSend: new Error("timeout") });
+    const revertedApp = await buildApp({ simulator: { ok: true }, evmRpc: revertedRpc });
+    const revertedPrepared = await postPrepare(revertedApp.app);
+    const revertedId = ((await revertedPrepared.json()) as { data: { intentId: string } }).data
+      .intentId;
+    await executeIntent(revertedApp.app, revertedId);
+    const [revertedRow] = await getDb().select().from(intents).where(eq(intents.id, revertedId));
+    const revertedHash = ((revertedRow?.executionResult ?? {}) as Record<string, unknown>)
+      .transactionHash as string;
+    expect(await dailySpendOf()).toBeGreaterThan(0);
+    revertedRpc.failSend = null;
+    revertedRpc.receipt = { status: "0x0", transactionHash: revertedHash, blockNumber: "0x2" };
+    await reconcileIntent(revertedApp.app, revertedId);
+    expect(await getIntent(revertedApp.app, revertedId).then((r) => r.json())).toMatchObject({
+      data: { status: "rejected" },
+    });
+    expect(await dailySpendOf()).toBe(0);
+    await getDb()
+      .update(tradeSessions)
+      .set({ dailySpendUsd: "10" })
+      .where(eq(tradeSessions.id, SESSION_ID));
+    await reconcileIntent(revertedApp.app, revertedId);
+    expect(await dailySpendOf()).toBe(10);
+
+    await getDb().delete(intents).where(eq(intents.tenantId, TENANT_ID));
+    await getDb()
+      .update(tradeSessions)
+      .set({ dailySpendUsd: "0", status: "active" })
+      .where(eq(tradeSessions.id, SESSION_ID));
+
+    const missingRpc = Object.assign(new FakeEvmRpc(), { failSend: new Error("timeout") });
+    const missingApp = await buildApp({ simulator: { ok: true }, evmRpc: missingRpc });
+    const missingPrepared = await postPrepare(missingApp.app);
+    const missingId = ((await missingPrepared.json()) as { data: { intentId: string } }).data
+      .intentId;
+    await executeIntent(missingApp.app, missingId);
+    missingRpc.failSend = null;
+    missingRpc.receipt = null;
+    missingRpc.transaction = null;
+    await reconcileIntent(missingApp.app, missingId);
+    expect(await getIntent(missingApp.app, missingId).then((r) => r.json())).toMatchObject({
+      data: { status: "unknown" },
+    });
+    expect(await dailySpendOf()).toBeGreaterThan(0);
   });
 });

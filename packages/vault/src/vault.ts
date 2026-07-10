@@ -309,6 +309,12 @@ export interface SignTransactionOptions {
   status?: TxStatus;
 }
 
+export interface SignEvmRawTransactionRequest extends SignRequest {
+  chainId: number;
+  nonce: number;
+  gasPrice: string;
+}
+
 interface MnemonicWalletMaterial {
   evmPrivateKey: `0x${string}`;
   evmAddress: string;
@@ -1443,6 +1449,152 @@ export class Vault {
     await this.recordSignedTransaction(request, chainId, shouldBroadcast, hash, options);
 
     return hash;
+  }
+
+  /**
+   * Sign one fully parameterized EVM transaction inside the Steward vault and
+   * return only the serialized signed transaction. This is for governed
+   * execution flows that must persist the transaction hash before submitting
+   * through their own idempotent/reconciliation state machine.
+   */
+  async signEvmRawTransaction(request: SignEvmRawTransactionRequest): Promise<string> {
+    const db = getDb();
+    const [agentRow] = await db
+      .select({ id: agents.id, walletAddress: agents.walletAddress })
+      .from(agents)
+      .where(and(eq(agents.id, request.agentId), eq(agents.tenantId, request.tenantId)));
+
+    if (!agentRow) {
+      throw new Error(`Agent ${request.agentId} not found for tenant ${request.tenantId}`);
+    }
+    if (request.chainId === 101 || request.chainId === 102) {
+      throw new Error("signEvmRawTransaction only supports EVM chains");
+    }
+    if (!Number.isSafeInteger(request.nonce) || request.nonce < 0) {
+      throw new Error("EVM nonce must be a non-negative safe integer");
+    }
+
+    const chain = CHAINS[request.chainId];
+    if (!chain) {
+      throw new Error(`Unsupported EVM chain: ${request.chainId}`);
+    }
+
+    const venue = resolveSignVenueSelector(request);
+    await assertVaultSigningActive({
+      tenantId: request.tenantId,
+      agentId: request.agentId,
+      chainFamily: "evm",
+      venue,
+      walletAddress: request.walletAddress,
+    });
+
+    let secretKey: string;
+    const [chainKey] = await db
+      .select()
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, request.agentId),
+          eq(encryptedChainKeys.chainFamily, "evm"),
+          venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+        ),
+      );
+
+    if (chainKey) {
+      secretKey = await this.keyStore.decrypt(
+        {
+          ciphertext: chainKey.ciphertext,
+          iv: chainKey.iv,
+          tag: chainKey.tag,
+          salt: chainKey.salt,
+        },
+        {
+          tenantId: request.tenantId,
+          agentId: request.agentId,
+          chainFamily: "evm",
+          venue: chainKey.venue ?? venue,
+        },
+      );
+    } else {
+      const externalWallet = await this.getExternalKeyWallet({
+        agentId: request.agentId,
+        chainFamily: "evm",
+        venue,
+      });
+      if (externalWallet) {
+        if (request.walletAddress && externalWallet.address) {
+          if (externalWallet.address.toLowerCase() !== request.walletAddress.toLowerCase()) {
+            throw new Error(
+              `Wallet address mismatch: resolved ${externalWallet.address} but request specified ${request.walletAddress}`,
+            );
+          }
+        }
+        if (
+          externalWallet.metadata.externalKey.signingAvailability !== "provider-signing" ||
+          !this.externalKeyCustodyProvider?.signTransaction
+        ) {
+          throw externalKeySigningUnavailableError();
+        }
+        const signed = await this.externalKeyCustodyProvider.signTransaction({
+          tenantId: request.tenantId,
+          agentId: request.agentId,
+          chainFamily: "evm",
+          address: externalWallet.address,
+          handle: {
+            providerId: externalWallet.metadata.externalKey.providerId,
+            keyId: externalWallet.metadata.externalKey.keyId,
+            version: externalWallet.metadata.externalKey.version,
+            region: externalWallet.metadata.externalKey.region,
+          },
+          venue,
+          chainId: request.chainId,
+          to: request.to,
+          value: request.value,
+          data: request.data,
+          gasLimit: request.gasLimit,
+          nonce: request.nonce,
+          broadcast: false,
+          rpcUrl: CHAIN_RPCS[request.chainId] ?? this.config.rpcUrl,
+        });
+        assertNoExternalPrivateKeyMaterial(signed, "externalSignTransactionResult");
+        if (signed.broadcast !== false) {
+          throw new Error("External key custody signer returned an unexpected broadcast mode");
+        }
+        if (!/^0x[0-9a-fA-F]+$/.test(signed.result)) {
+          throw new Error("External key custody signer returned an invalid signed transaction");
+        }
+        return signed.result;
+      }
+      if (venue) {
+        throw missingSigningKeyError(request.agentId, "evm", venue);
+      }
+      const [legacyKey] = await db
+        .select()
+        .from(encryptedKeys)
+        .where(eq(encryptedKeys.agentId, request.agentId));
+      if (!legacyKey) {
+        throw missingSigningKeyError(request.agentId, "evm");
+      }
+      secretKey = await this.keyStore.decrypt(legacyKey as EncryptedKey, {
+        tenantId: request.tenantId,
+        agentId: request.agentId,
+        chainFamily: "evm",
+        venue: null,
+      });
+    }
+
+    assertEvmWalletAddressMatches(secretKey, request.walletAddress);
+    const account = privateKeyToAccount(secretKey as `0x${string}`);
+    const txRequest: TransactionSerializable = {
+      to: request.to as `0x${string}`,
+      value: BigInt(request.value),
+      data: request.data as `0x${string}` | undefined,
+      gas: request.gasLimit ? BigInt(request.gasLimit) : 21000n,
+      nonce: request.nonce,
+      gasPrice: BigInt(request.gasPrice),
+      chainId: request.chainId,
+    };
+    return account.signTransaction(txRequest);
   }
 
   /**

@@ -5,7 +5,7 @@ import {
   AdapterValidationError,
   type SwapQuote,
 } from "@stwd/adapters";
-import { and, eq, intents, sql } from "@stwd/db";
+import { and, eq, intents, sql, tradeSessions, transactions } from "@stwd/db";
 import {
   aggregationLookupFromMap,
   aggregationQueriesForPolicies,
@@ -15,8 +15,15 @@ import { getAggregationSnapshot } from "@stwd/redis";
 import type { ApiResponse, AppVariables, PolicyRule, SignRequest } from "@stwd/shared";
 import { toCaip2 } from "@stwd/shared";
 import { TradeSessionManager } from "@stwd/trade-sessions";
+import {
+  allocateEvmNonce,
+  confirmEvmNonce,
+  isVaultSigningFrozenError,
+  markEvmNonceDropped,
+} from "@stwd/vault";
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { type Hex, keccak256 } from "viem";
 import { z } from "zod";
 import type { StewardAppContext } from "../context";
 
@@ -33,6 +40,7 @@ type PreparedSwapResponse = {
     canExecute: boolean;
     terminal: boolean;
     executionStatus: string | null;
+    transactionHash?: string | null;
   };
   unsignedIntent: {
     kind: "evm-tx";
@@ -71,6 +79,15 @@ type InflightIdempotencyEntry = {
   promise: Promise<StoredResponse>;
 };
 
+type ExecuteResponse = {
+  intentId: string;
+  intentHash: string;
+  status: PreparedIntentStatus;
+  executionStatus: "not_attempted" | "rejected" | "unknown" | "submitted";
+  transactionHash: string | null;
+  retry: "same-idempotency-key" | "reconcile-only" | "not-retryable";
+};
+
 const tokenRefSchema = z
   .object({
     address: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "token address must be an EVM address"),
@@ -90,6 +107,8 @@ const prepareSwapSchema = z
     slippageBps: z.number().int().min(0).max(10_000).optional(),
   })
   .strict();
+
+const emptyBodySchema = z.object({}).strict();
 
 const evmAddressRe = /^0x[a-fA-F0-9]{40}$/;
 const calldataRe = /^0x(?:[a-fA-F0-9]{2})+$/;
@@ -440,9 +459,140 @@ function preparedResponseFromRow(row: typeof intents.$inferSelect): PreparedSwap
         row.status === "revoked" ||
         row.status === "expired",
       executionStatus: typeof execution.status === "string" ? execution.status : null,
+      transactionHash:
+        typeof execution.transactionHash === "string" ? execution.transactionHash : null,
     },
     unsignedIntent,
   };
+}
+
+function executeResponseFromRow(row: typeof intents.$inferSelect): ExecuteResponse {
+  const execution = (row.executionResult ?? {}) as Record<string, unknown>;
+  const status =
+    execution.status === "submitted" ||
+    execution.status === "unknown" ||
+    execution.status === "rejected" ||
+    execution.status === "not_attempted"
+      ? execution.status
+      : row.status === "submitted"
+        ? "submitted"
+        : row.status === "unknown" || row.status === "submitting"
+          ? "unknown"
+          : row.status === "rejected"
+            ? "rejected"
+            : "not_attempted";
+  return {
+    intentId: row.id,
+    intentHash: String(row.intentHash ?? ""),
+    status: isPreparedStatus(row.status) ? row.status : "rejected",
+    executionStatus: status as ExecuteResponse["executionStatus"],
+    transactionHash:
+      typeof execution.transactionHash === "string" ? execution.transactionHash : null,
+    retry:
+      status === "unknown"
+        ? "reconcile-only"
+        : status === "not_attempted"
+          ? "same-idempotency-key"
+          : "not-retryable",
+  };
+}
+
+function decimalAmountToUsd(amount: string, decimals: number | undefined, price: number): number {
+  const scale = 10n ** BigInt(decimals ?? 18);
+  const raw = BigInt(amount);
+  const whole = raw / scale;
+  const fraction = raw % scale;
+  return (Number(whole) + Number(fraction) / Number(scale)) * price;
+}
+
+async function executeSpendUsd(
+  ctx: StewardAppContext,
+  payload: Record<string, unknown>,
+): Promise<number | null> {
+  const semantic = payload.semanticRequest as Record<string, unknown> | undefined;
+  const token = semantic?.fromToken as Record<string, unknown> | undefined;
+  const chainId =
+    typeof semantic?.chainId === "number" ? semantic.chainId : Number(payload.chainId);
+  const amount = typeof semantic?.amount === "string" ? semantic.amount : null;
+  const address = typeof token?.address === "string" ? token.address : null;
+  if (!Number.isSafeInteger(chainId) || !amount || !address) return null;
+  const price = await ctx.priceOracle.getTokenUsdPrice(chainId, address);
+  if (!Number.isFinite(price) || !price || price <= 0) return null;
+  const decimals = typeof token?.decimals === "number" ? token.decimals : undefined;
+  const usd = decimalAmountToUsd(amount, decimals, price);
+  return Number.isFinite(usd) && usd > 0 ? usd : null;
+}
+
+function classifySendError(error: unknown): "rejected" | "unknown" {
+  const message =
+    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  if (
+    message.includes("already known") ||
+    message.includes("known transaction") ||
+    message.includes("already imported")
+  ) {
+    return "unknown";
+  }
+  if (
+    message.includes("insufficient funds") ||
+    message.includes("intrinsic gas") ||
+    message.includes("gas too low") ||
+    message.includes("nonce too low") ||
+    message.includes("replacement transaction underpriced") ||
+    message.includes("exceeds block gas limit") ||
+    message.includes("invalid sender")
+  ) {
+    return "rejected";
+  }
+  return "unknown";
+}
+
+async function markExecutionRejected(input: {
+  ctx: StewardAppContext;
+  row: typeof intents.$inferSelect;
+  actorId: string;
+  reason: string;
+  executionStatus: "not_attempted" | "rejected";
+  nonce?: number;
+  spendUsd?: number;
+}) {
+  const payload = input.row.payload as Record<string, unknown>;
+  const wallet = typeof payload.wallet === "string" ? payload.wallet : "";
+  const chainId = Number(payload.chainId);
+  await input.ctx.db
+    .update(intents)
+    .set({
+      status: "rejected",
+      rejectedAt: new Date(),
+      rejectedBy: input.actorId,
+      rejectionReason: input.reason,
+      updatedAt: new Date(),
+      executionResult: {
+        ...((input.row.executionResult ?? {}) as Record<string, unknown>),
+        status: input.executionStatus,
+        reason: input.reason,
+      },
+    })
+    .where(eq(intents.id, input.row.id));
+  if (input.spendUsd && input.spendUsd > 0) {
+    const sessionId = String(payload.sessionId);
+    await getSessionManager(input.ctx).releaseSpend({
+      tenantId: input.row.tenantId,
+      id: sessionId,
+      amountUsd: input.spendUsd,
+    });
+  }
+  await input.ctx.db
+    .update(transactions)
+    .set({ status: "failed" })
+    .where(eq(transactions.id, input.row.id));
+  if (input.nonce !== undefined && isEvmAddress(wallet) && Number.isSafeInteger(chainId)) {
+    await markEvmNonceDropped({
+      walletAddress: wallet as `0x${string}`,
+      chainId,
+      nonce: input.nonce,
+    }).catch(() => {});
+  }
 }
 
 function rejectedPrepareReplayFromRow(row: typeof intents.$inferSelect): StoredResponse | null {
@@ -504,6 +654,85 @@ function intentAuditActor(c: Context<{ Variables: AppVariables }>) {
   const userId = c.get("userId");
   if (userId) return { actorType: "user" as const, actorId: userId };
   return { actorType: "api-key" as const, actorId: c.get("tenantId") };
+}
+
+function quoteFromPayload(payload: Record<string, unknown>): SwapQuote | null {
+  const semantic = payload.semanticRequest as Record<string, unknown> | undefined;
+  const quote = payload.quote as Record<string, unknown> | undefined;
+  const fromToken = semantic?.fromToken as Record<string, unknown> | undefined;
+  const toToken = semantic?.toToken as Record<string, unknown> | undefined;
+  const chainId =
+    typeof semantic?.chainId === "number" ? semantic.chainId : Number(payload.chainId);
+  const expiresAt =
+    typeof quote?.expiresAt === "string" ? new Date(quote.expiresAt).getTime() : Number.NaN;
+  if (
+    !quote ||
+    !fromToken ||
+    !toToken ||
+    !Number.isSafeInteger(chainId) ||
+    !Number.isSafeInteger(expiresAt) ||
+    typeof quote.provider !== "string" ||
+    typeof quote.quoteId !== "string" ||
+    typeof quote.amountIn !== "string" ||
+    typeof quote.amountOut !== "string" ||
+    typeof quote.minAmountOut !== "string" ||
+    typeof fromToken.address !== "string" ||
+    typeof toToken.address !== "string"
+  ) {
+    return null;
+  }
+  return {
+    provider: quote.provider,
+    quoteId: quote.quoteId,
+    chainId,
+    fromToken: {
+      address: fromToken.address,
+      symbol: typeof fromToken.symbol === "string" ? fromToken.symbol : undefined,
+      decimals: typeof fromToken.decimals === "number" ? fromToken.decimals : undefined,
+    },
+    toToken: {
+      address: toToken.address,
+      symbol: typeof toToken.symbol === "string" ? toToken.symbol : undefined,
+      decimals: typeof toToken.decimals === "number" ? toToken.decimals : undefined,
+    },
+    amountIn: quote.amountIn,
+    amountOut: quote.amountOut,
+    minAmountOut: quote.minAmountOut,
+    feeAmount: typeof quote.feeAmount === "string" ? quote.feeAmount : "0",
+    slippageBps:
+      typeof (payload.semanticRequest as Record<string, unknown> | undefined)?.slippageBps ===
+      "number"
+        ? ((payload.semanticRequest as Record<string, unknown>).slippageBps as number)
+        : 0,
+    route: [],
+    expiresAt,
+  };
+}
+
+function unsignedIntentFromPayload(payload: Record<string, unknown>) {
+  const intent = payload.unsignedIntent as PreparedSwapResponse["unsignedIntent"] | undefined;
+  if (
+    !intent ||
+    intent.kind !== "evm-tx" ||
+    !Number.isSafeInteger(intent.chainId) ||
+    !isEvmAddress(intent.to) ||
+    !isEvmAddress(intent.owner) ||
+    !/^\d+$/.test(intent.value) ||
+    typeof intent.data !== "string" ||
+    !selectorOf(intent.data) ||
+    intent.category !== "swap" ||
+    typeof intent.provider !== "string"
+  ) {
+    return null;
+  }
+  return intent;
+}
+
+function gasLimitFromEstimate(estimate?: string): string {
+  if (estimate && /^0x[0-9a-fA-F]+$/.test(estimate)) {
+    return BigInt(estimate).toString();
+  }
+  return "21000";
 }
 
 export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: AppVariables }> {
@@ -1009,6 +1238,654 @@ export function createEvmSwapRoutes(ctx: StewardAppContext): Hono<{ Variables: A
       inflightIdempotency.delete(idempotencyScope);
     });
     return c.json(response.body, response.status);
+  });
+
+  routes.post("/evm/swap/intents/:id/execute", async (c) => {
+    const tenantId = c.get("tenantId");
+    const scopedAgent = c.get("agentScope");
+    if (!scopedAgent) return json(c, { ok: false, error: "Agent JWT required" }, 403);
+    const idempotencyKey = c.req.header("Idempotency-Key");
+    if (!idempotencyKey) {
+      return json(c, { ok: false, error: "Idempotency-Key is required" }, 400);
+    }
+    if (idempotencyKey.length > 200) {
+      return json(c, { ok: false, error: "Idempotency-Key is too long" }, 400);
+    }
+    const raw = await ctx.safeJsonParse(c);
+    const parsed = emptyBodySchema.safeParse(raw ?? {});
+    if (!parsed.success) return json(c, { ok: false, error: parsed.error.message }, 400);
+    if (!ctx.evmSimulator || !ctx.evmRpc) {
+      return json(c, { ok: false, error: "EVM execution RPC is not configured" }, 503);
+    }
+
+    const id = c.req.param("id");
+    const existing = await loadPreparedIntent(ctx, tenantId, scopedAgent, id);
+    if (!existing) return json(c, { ok: false, error: "Prepared intent not found" }, 404);
+    const existingExecution = (existing.executionResult ?? {}) as Record<string, unknown>;
+    if (existing.status !== "prepared") {
+      if (existingExecution.executionIdempotencyKey === idempotencyKey) {
+        return c.json({ ok: true, data: executeResponseFromRow(existing) }, 200);
+      }
+      return json(
+        c,
+        {
+          ok: false,
+          error:
+            existing.status === "unknown"
+              ? "Execution status is unknown; reconcile instead of retrying"
+              : `Cannot execute intent in ${existing.status} status`,
+        },
+        409,
+      );
+    }
+
+    const payload = existing.payload as Record<string, unknown>;
+    const unsignedIntent = unsignedIntentFromPayload(payload);
+    const quote = quoteFromPayload(payload);
+    const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : null;
+    const wallet = typeof payload.wallet === "string" ? payload.wallet : null;
+    if (!unsignedIntent || !quote || !sessionId || !wallet || !isEvmAddress(wallet)) {
+      return json(c, { ok: false, error: "Prepared intent payload is not executable" }, 409);
+    }
+    if (existing.expiresAt && existing.expiresAt <= new Date()) {
+      const expired = await loadPreparedIntent(ctx, tenantId, scopedAgent, existing.id);
+      return json(
+        c,
+        { ok: false, error: `Cannot execute intent in ${expired?.status ?? "expired"} status` },
+        409,
+      );
+    }
+
+    const spendUsd = await executeSpendUsd(ctx, payload);
+    if (!spendUsd) {
+      return json(
+        c,
+        { ok: false, error: "Unable to price EVM swap for session spend reservation" },
+        503,
+      );
+    }
+
+    const actor = auditActor(c, scopedAgent);
+    const sessionManager = getSessionManager(ctx);
+    const now = new Date();
+    const currentWallet = await resolveEvmWallet(
+      ctx,
+      { id: scopedAgent, walletAddress: wallet, walletAddresses: { evm: wallet } },
+      unsignedIntent.chainId,
+    );
+    if (!currentWallet || normalizeAddress(currentWallet) !== normalizeAddress(wallet)) {
+      return json(c, { ok: false, error: "Agent wallet no longer matches prepared intent" }, 409);
+    }
+    const policySet = await ctx.getPolicySet(tenantId, scopedAgent);
+    const selector = selectorOf(unsignedIntent.data);
+    if (!selector) return json(c, { ok: false, error: "Prepared intent calldata is invalid" }, 409);
+    const strict = validateGovernedEvmExecutionPolicy(policySet, {
+      agentId: scopedAgent,
+      tenantId,
+      chainId: unsignedIntent.chainId,
+      owner: unsignedIntent.owner,
+      target: unsignedIntent.to,
+      selector,
+      value: unsignedIntent.value,
+      provider: unsignedIntent.provider,
+      category: unsignedIntent.category,
+      quote,
+      intentMetadata: {
+        quoteId: quote.quoteId,
+        amountIn: quote.amountIn,
+        minAmountOut: quote.minAmountOut,
+      },
+    });
+    if (!strict.ok) {
+      return json(
+        c,
+        { ok: false, error: strict.reason, data: { executionStatus: "not_attempted" } },
+        403,
+      );
+    }
+
+    const request: SignRequest = {
+      agentId: scopedAgent,
+      tenantId,
+      to: unsignedIntent.to,
+      value: unsignedIntent.value,
+      data: unsignedIntent.data,
+      chainId: unsignedIntent.chainId,
+      broadcast: false,
+      walletAddress: wallet,
+    };
+    const [stats, conditionSets, aggregations] = await Promise.all([
+      getTransactionStats(ctx, scopedAgent, unsignedIntent.chainId),
+      loadConditionSets(ctx, tenantId, policySet),
+      loadAggregations(policySet, request),
+    ]);
+    const policyEvaluation = await ctx.policyEngine.evaluate(policySet, {
+      request,
+      ...stats,
+      conditionSets,
+      aggregations,
+      priceOracle: ctx.priceOracle,
+      correlationId: idempotencyKey,
+      venue: unsignedIntent.provider,
+    });
+    if (!policyEvaluation.approved) {
+      return json(
+        c,
+        {
+          ok: false,
+          error:
+            policyEvaluation.results.find((result) => !result.passed)?.reason ??
+            "EVM execution rejected by policy",
+          data: { executionStatus: "not_attempted" },
+        },
+        403,
+      );
+    }
+
+    const recomputedHash = canonicalIntentHash(
+      { ...request, owner: wallet, category: "swap", provider: unsignedIntent.provider },
+      quote,
+    );
+    if (recomputedHash !== existing.intentHash) {
+      return json(c, { ok: false, error: "Prepared intent digest no longer matches payload" }, 409);
+    }
+    const simulation = await ctx.evmSimulator.simulate({
+      chainId: unsignedIntent.chainId,
+      from: wallet,
+      to: unsignedIntent.to,
+      value: unsignedIntent.value,
+      data: unsignedIntent.data,
+      intentHash: recomputedHash,
+    });
+    if (!simulation.ok) {
+      return json(
+        c,
+        {
+          ok: false,
+          error: simulation.revertReason ?? "EVM simulation failed before signing",
+          data: { executionStatus: "not_attempted" },
+        },
+        503,
+      );
+    }
+    const claimed = await sessionManager.withActiveSubmissionFence(
+      { tenantId, id: sessionId },
+      async (freshSession, db) => {
+        if (
+          freshSession.agentId !== scopedAgent ||
+          freshSession.venue !== "evm" ||
+          !freshSession.allowedAssets.includes(toCaip2(unsignedIntent.chainId) ?? "") ||
+          normalizeAddress(freshSession.walletId) !== normalizeAddress(wallet)
+        ) {
+          return {
+            ok: false as const,
+            reason: "Active EVM trade session no longer matches intent",
+          };
+        }
+
+        const [reserved] = await db
+          .update(tradeSessions)
+          .set({
+            dailySpendUsd: sql`${tradeSessions.dailySpendUsd} + ${String(spendUsd)}::numeric`,
+          })
+          .where(
+            and(
+              eq(tradeSessions.id, sessionId),
+              eq(tradeSessions.tenantId, tenantId),
+              eq(tradeSessions.status, "active"),
+              sql`${tradeSessions.expiresAt} > ${now.toISOString()}`,
+              sql`${tradeSessions.dailySpendUsd} + ${String(spendUsd)}::numeric <= ${tradeSessions.dailyCapUsd}`,
+            ),
+          )
+          .returning();
+        if (!reserved) {
+          return { ok: false as const, reason: "EVM trade session spend cap exceeded" };
+        }
+
+        const [row] = await db
+          .update(intents)
+          .set({
+            status: "submitting",
+            executedBy: actor.actorId,
+            executedAt: now,
+            updatedAt: now,
+            executionResult: {
+              ...existingExecution,
+              status: "not_attempted",
+              executionIdempotencyKey: idempotencyKey,
+              spendUsd,
+              transactionHash: null,
+              retry: "same idempotency key only until transaction hash is known",
+            },
+          })
+          .where(
+            and(
+              eq(intents.id, existing.id),
+              eq(intents.tenantId, tenantId),
+              eq(intents.agentId, scopedAgent),
+              eq(intents.status, "prepared"),
+              sql`${intents.expiresAt} > ${now.toISOString()}`,
+            ),
+          )
+          .returning();
+        if (!row) {
+          await db
+            .update(tradeSessions)
+            .set({
+              dailySpendUsd: sql`greatest(${tradeSessions.dailySpendUsd} - ${String(spendUsd)}::numeric, 0)`,
+            })
+            .where(and(eq(tradeSessions.id, sessionId), eq(tradeSessions.tenantId, tenantId)));
+          return { ok: false as const, reason: "Prepared intent was already claimed" };
+        }
+        return { ok: true as const, row, policyResults: policyEvaluation.results, simulation };
+      },
+    );
+
+    if (!claimed) return json(c, { ok: false, error: "Active EVM trade session required" }, 403);
+    if (!claimed.ok) {
+      await ctx.writeAuditEvent({
+        tenantId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        action: "trade.evm.swap.execute.rejected",
+        resourceType: "trade.evm.swap",
+        resourceId: existing.id,
+        metadata: { intentId: existing.id, reason: claimed.reason },
+        requestId: idempotencyKey,
+      });
+      return json(
+        c,
+        { ok: false, error: claimed.reason, data: { executionStatus: "not_attempted" } },
+        403,
+      );
+    }
+
+    let nonce: number | undefined;
+    let submittedToProvider: { transactionHash: string; nonce: number } | null = null;
+    let persistedSubmitted = false;
+    try {
+      nonce = await allocateEvmNonce({
+        walletAddress: wallet as `0x${string}`,
+        chainId: unsignedIntent.chainId,
+        getPendingNonce: (address) => ctx.evmRpc!.getPendingNonce(unsignedIntent.chainId, address),
+      });
+      const gasPrice = await ctx.evmRpc.getGasPrice(unsignedIntent.chainId);
+      const rawTransaction = await ctx.vault.signEvmRawTransaction({
+        agentId: scopedAgent,
+        tenantId,
+        to: unsignedIntent.to,
+        value: unsignedIntent.value,
+        data: unsignedIntent.data,
+        chainId: unsignedIntent.chainId,
+        walletAddress: wallet,
+        broadcast: false,
+        nonce,
+        gasPrice,
+        gasLimit: gasLimitFromEstimate(claimed.simulation.gasEstimate),
+      });
+      const transactionHash = keccak256(rawTransaction as Hex).toLowerCase();
+      await ctx.db.transaction(async (tx) => {
+        await tx
+          .insert(transactions)
+          .values({
+            id: claimed.row.id,
+            agentId: scopedAgent,
+            status: "signed",
+            toAddress: unsignedIntent.to,
+            value: unsignedIntent.value,
+            data: unsignedIntent.data,
+            chainId: unsignedIntent.chainId,
+            txHash: transactionHash,
+            actionType: "evm_swap",
+            actionPayload: {
+              type: "evm_swap",
+              intentId: claimed.row.id,
+              intentHash: claimed.row.intentHash,
+              provider: unsignedIntent.provider,
+              sessionId,
+              nonce,
+            },
+            policyResults: claimed.policyResults,
+            signedAt: new Date(),
+            createdAt: new Date(),
+          })
+          .onConflictDoUpdate({
+            target: transactions.id,
+            set: {
+              status: "signed",
+              txHash: transactionHash,
+              policyResults: claimed.policyResults,
+              signedAt: new Date(),
+            },
+          });
+        await tx
+          .update(intents)
+          .set({
+            executionResult: {
+              ...((claimed.row.executionResult ?? {}) as Record<string, unknown>),
+              status: "unknown",
+              transactionHash,
+              nonce,
+              spendUsd,
+              retry: "never blind retry; reconcile by intent id or transaction hash",
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(intents.id, claimed.row.id));
+      });
+
+      let providerHash: string;
+      try {
+        providerHash = await ctx.evmRpc.sendRawTransaction(unsignedIntent.chainId, rawTransaction);
+      } catch (error) {
+        const classification = classifySendError(error);
+        if (classification === "rejected") {
+          await markExecutionRejected({
+            ctx,
+            row: claimed.row,
+            actorId: actor.actorId,
+            reason: error instanceof Error ? error.message : "EVM transaction rejected by RPC",
+            executionStatus: "rejected",
+            nonce,
+            spendUsd,
+          });
+          return json(
+            c,
+            {
+              ok: false,
+              error: "EVM transaction rejected by RPC",
+              data: { executionStatus: "rejected", transactionHash },
+            },
+            409,
+          );
+        }
+        await ctx.db
+          .update(intents)
+          .set({
+            status: "unknown",
+            executionResult: {
+              ...((claimed.row.executionResult ?? {}) as Record<string, unknown>),
+              status: "unknown",
+              transactionHash,
+              nonce,
+              spendUsd,
+              reason: error instanceof Error ? error.message : "EVM transaction submission unknown",
+              retry: "never blind retry; reconcile by intent id or transaction hash",
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(intents.id, claimed.row.id));
+        return c.json(
+          {
+            ok: true,
+            data: executeResponseFromRow({
+              ...claimed.row,
+              status: "unknown",
+              executionResult: { status: "unknown", transactionHash },
+            }),
+          },
+          200,
+        );
+      }
+
+      if (providerHash !== transactionHash) {
+        await ctx.db
+          .update(intents)
+          .set({
+            status: "unknown",
+            executionResult: {
+              ...((claimed.row.executionResult ?? {}) as Record<string, unknown>),
+              status: "unknown",
+              transactionHash,
+              providerHash,
+              nonce,
+              spendUsd,
+              reason: "RPC returned a different transaction hash",
+              retry: "never blind retry; reconcile by persisted transaction hash",
+            },
+            updatedAt: new Date(),
+          })
+          .where(eq(intents.id, claimed.row.id));
+        return c.json(
+          {
+            ok: true,
+            data: executeResponseFromRow({
+              ...claimed.row,
+              status: "unknown",
+              executionResult: { status: "unknown", transactionHash },
+            }),
+          },
+          200,
+        );
+      }
+
+      submittedToProvider = { transactionHash, nonce };
+      const [submitted] = await ctx.db
+        .update(intents)
+        .set({
+          status: "submitted",
+          executionResult: {
+            ...((claimed.row.executionResult ?? {}) as Record<string, unknown>),
+            status: "submitted",
+            transactionHash,
+            nonce,
+            spendUsd,
+          },
+          updatedAt: new Date(),
+        })
+        .where(eq(intents.id, claimed.row.id))
+        .returning();
+      await ctx.db
+        .update(transactions)
+        .set({ status: "broadcast", txHash: transactionHash })
+        .where(eq(transactions.id, claimed.row.id));
+      persistedSubmitted = true;
+      await confirmEvmNonce({
+        walletAddress: wallet as `0x${string}`,
+        chainId: unsignedIntent.chainId,
+        nonce,
+      }).catch(() => {});
+      await ctx.writeAuditEvent({
+        tenantId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        action: "trade.evm.swap.execute.submitted",
+        resourceType: "trade.evm.swap",
+        resourceId: claimed.row.id,
+        metadata: {
+          intentId: claimed.row.id,
+          intentHash: claimed.row.intentHash,
+          transactionHash,
+          chainId: unsignedIntent.chainId,
+          target: normalizeAddress(unsignedIntent.to),
+          selector: selectorOf(unsignedIntent.data),
+          provider: unsignedIntent.provider,
+        },
+        requestId: idempotencyKey,
+      });
+      return c.json({ ok: true, data: executeResponseFromRow(submitted ?? claimed.row) }, 200);
+    } catch (error) {
+      if (submittedToProvider) {
+        const reason =
+          error instanceof Error ? error.message : "EVM transaction post-submit bookkeeping failed";
+        const preservedStatus = persistedSubmitted ? "submitted" : "unknown";
+        try {
+          await ctx.db
+            .update(intents)
+            .set({
+              status: preservedStatus,
+              executionResult: {
+                ...((claimed.row.executionResult ?? {}) as Record<string, unknown>),
+                status: preservedStatus,
+                transactionHash: submittedToProvider.transactionHash,
+                nonce: submittedToProvider.nonce,
+                spendUsd,
+                reason,
+                retry: "never blind retry; reconcile by intent id or transaction hash",
+              },
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(intents.id, claimed.row.id),
+                sql`${intents.status} not in ('rejected','revoked','expired')`,
+              ),
+            );
+          await ctx.db
+            .update(transactions)
+            .set({ status: "broadcast", txHash: submittedToProvider.transactionHash })
+            .where(eq(transactions.id, claimed.row.id));
+        } catch (preserveError) {
+          console.warn("[evm-swap] failed to preserve post-submit state", preserveError);
+        }
+        return c.json(
+          {
+            ok: true,
+            data: executeResponseFromRow({
+              ...claimed.row,
+              status: preservedStatus,
+              executionResult: {
+                status: preservedStatus,
+                transactionHash: submittedToProvider.transactionHash,
+              },
+            }),
+          },
+          200,
+        );
+      }
+      const reason = isVaultSigningFrozenError(error)
+        ? "Vault signing is frozen"
+        : error instanceof Error
+          ? error.message
+          : "EVM execution failed before submission";
+      await markExecutionRejected({
+        ctx,
+        row: claimed.row,
+        actorId: actor.actorId,
+        reason,
+        executionStatus: "not_attempted",
+        nonce,
+        spendUsd,
+      });
+      await ctx.writeAuditEvent({
+        tenantId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        action: "trade.evm.swap.execute.rejected",
+        resourceType: "trade.evm.swap",
+        resourceId: claimed.row.id,
+        metadata: { intentId: claimed.row.id, reason, executionStatus: "not_attempted" },
+        requestId: idempotencyKey,
+      });
+      return json(c, { ok: false, error: reason, data: { executionStatus: "not_attempted" } }, 409);
+    }
+  });
+
+  routes.post("/evm/swap/intents/:id/reconcile", async (c) => {
+    const tenantId = c.get("tenantId");
+    const scopedAgent = c.get("agentScope");
+    if (!ctx.evmRpc)
+      return json(c, { ok: false, error: "EVM execution RPC is not configured" }, 503);
+    const row = await loadPreparedIntent(ctx, tenantId, scopedAgent ?? null, c.req.param("id"));
+    if (!row) return json(c, { ok: false, error: "Prepared intent not found" }, 404);
+    const execution = (row.executionResult ?? {}) as Record<string, unknown>;
+    const txHash = typeof execution.transactionHash === "string" ? execution.transactionHash : null;
+    if (!txHash) return c.json({ ok: true, data: preparedResponseFromRow(row) }, 200);
+    const payload = row.payload as Record<string, unknown>;
+    const chainId = Number(payload.chainId);
+    if (!Number.isSafeInteger(chainId)) {
+      return json(c, { ok: false, error: "Prepared intent chain is invalid" }, 409);
+    }
+    const receipt = await ctx.evmRpc.getTransactionReceipt(chainId, txHash);
+    const actor = intentAuditActor(c);
+    if (receipt?.status === "0x1") {
+      const [submitted] = await ctx.db
+        .update(intents)
+        .set({
+          status: "submitted",
+          executionResult: {
+            ...execution,
+            status: "submitted",
+            transactionHash: txHash,
+            receiptStatus: receipt.status,
+            blockHash: receipt.blockHash ?? null,
+            blockNumber: receipt.blockNumber ?? null,
+          },
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(intents.id, row.id),
+            sql`${intents.status} in ('submitting','unknown','submitted')`,
+          ),
+        )
+        .returning();
+      await ctx.db
+        .update(transactions)
+        .set({ status: "confirmed", confirmedAt: new Date() })
+        .where(eq(transactions.id, row.id));
+      return c.json({ ok: true, data: preparedResponseFromRow(submitted ?? row) }, 200);
+    }
+    if (receipt?.status === "0x0") {
+      const spendUsd = typeof execution.spendUsd === "number" ? execution.spendUsd : undefined;
+      const [rejected] = await ctx.db
+        .update(intents)
+        .set({
+          status: "rejected",
+          rejectedAt: new Date(),
+          rejectedBy: actor.actorId,
+          rejectionReason: "EVM transaction reverted",
+          executionResult: {
+            ...execution,
+            status: "rejected",
+            transactionHash: txHash,
+            receiptStatus: receipt.status,
+            blockHash: receipt.blockHash ?? null,
+            blockNumber: receipt.blockNumber ?? null,
+            reason: "EVM transaction reverted",
+          },
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(intents.id, row.id),
+            sql`${intents.status} in ('submitting','unknown','submitted')`,
+          ),
+        )
+        .returning();
+      if (rejected) {
+        if (spendUsd && spendUsd > 0) {
+          await getSessionManager(ctx).releaseSpend({
+            tenantId: row.tenantId,
+            id: String(payload.sessionId),
+            amountUsd: spendUsd,
+          });
+        }
+        await ctx.db
+          .update(transactions)
+          .set({ status: "failed" })
+          .where(eq(transactions.id, row.id));
+      }
+      return c.json({ ok: true, data: preparedResponseFromRow(rejected ?? row) }, 200);
+    }
+    const tx = await ctx.evmRpc.getTransactionByHash(chainId, txHash);
+    if (tx) {
+      const [submitted] = await ctx.db
+        .update(intents)
+        .set({
+          status: "submitted",
+          executionResult: { ...execution, status: "submitted", transactionHash: txHash },
+          updatedAt: new Date(),
+        })
+        .where(and(eq(intents.id, row.id), sql`${intents.status} in ('submitting','unknown')`))
+        .returning();
+      await ctx.db
+        .update(transactions)
+        .set({ status: "broadcast", txHash })
+        .where(eq(transactions.id, row.id));
+      return c.json({ ok: true, data: preparedResponseFromRow(submitted ?? row) }, 200);
+    }
+    return c.json({ ok: true, data: preparedResponseFromRow(row) }, 200);
   });
 
   routes.get("/evm/swap/intents/:id", async (c) => {

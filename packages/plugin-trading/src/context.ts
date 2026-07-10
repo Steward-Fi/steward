@@ -65,6 +65,21 @@ export interface EvmSimulator {
   simulate(request: EvmSimulationRequest): Promise<EvmSimulationResult>;
 }
 
+export interface EvmTransactionReceipt {
+  transactionHash?: string;
+  status?: string;
+  blockHash?: string | null;
+  blockNumber?: string | null;
+}
+
+export interface EvmRpcClient {
+  getPendingNonce(chainId: number, address: string): Promise<number>;
+  getGasPrice(chainId: number): Promise<string>;
+  sendRawTransaction(chainId: number, rawTransaction: string): Promise<string>;
+  getTransactionReceipt(chainId: number, txHash: string): Promise<EvmTransactionReceipt | null>;
+  getTransactionByHash(chainId: number, txHash: string): Promise<Record<string, unknown> | null>;
+}
+
 /** a hono middleware over the steward app's per-request variables. */
 export type StewardMiddleware = (
   c: Context<{ Variables: AppVariables }>,
@@ -85,6 +100,7 @@ export interface StewardAppContext {
   priceOracle: PriceOracle;
   adapterRegistry: AdapterRegistry;
   evmSimulator: EvmSimulator | null;
+  evmRpc: EvmRpcClient | null;
 
   // ── core helpers (from @stwd/api services/context) ────────────────────────
   ensureAgentForTenant(tenantId: string, agentId: string): Promise<AgentIdentity | undefined>;

@@ -49,13 +49,18 @@ const UNRELATED_CHAIN = 137;
 const ETH_SPEND = "3000000000000000000"; // 3e18 wei
 const SOL_SPEND = "5000000000"; // 5e9 lamports
 
-async function seedTx(idSuffix: string, chainId: number, value: string) {
+async function seedTx(
+  idSuffix: string,
+  chainId: number,
+  value: string,
+  status: "signed" | "failed" = "signed",
+) {
   await getDb()
     .insert(transactions)
     .values({
       id: `${AGENT_ID}-${idSuffix}`,
       agentId: AGENT_ID,
-      status: "signed",
+      status,
       toAddress: RECIPIENT,
       value,
       chainId,
@@ -79,6 +84,7 @@ describe("getTransactionStats chain scoping (issue #110)", () => {
     // One committed spend on each chain, both inside the rolling day/week window.
     await seedTx("eth", ETH_MAINNET, ETH_SPEND);
     await seedTx("sol", SOLANA, SOL_SPEND);
+    await seedTx("failed-rejected-send", ETH_MAINNET, "999999999999999999999999", "failed");
   });
 
   afterAll(async () => {

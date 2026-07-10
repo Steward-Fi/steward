@@ -22,7 +22,7 @@ export {
   serializeEip7702Transaction,
   toEip7702SignedAuthorization,
 } from "./eip7702-auth";
-export { allocateEvmNonce } from "./evm-nonce-manager";
+export { allocateEvmNonce, confirmEvmNonce, markEvmNonceDropped } from "./evm-nonce-manager";
 export type {
   ExternalKeyCustodyProvider,
   ExternalKeyHandleDescriptor,
@@ -180,6 +180,7 @@ export type {
   RelayMoneroTransferRequest,
   SignBitcoinPsbtRequest,
   SignBitcoinPsbtResult,
+  SignEvmRawTransactionRequest,
   VaultConfig,
 } from "./vault";
 export { Vault, Vault as VaultClient } from "./vault";

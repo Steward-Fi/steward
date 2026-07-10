@@ -73,7 +73,12 @@ import {
   tenantAuth,
   vault,
 } from "./services/context";
-import { createEnvEvmSimulator, type EvmSimulator } from "./services/evm-simulator";
+import {
+  createEnvEvmRpcClient,
+  createEnvEvmSimulator,
+  type EvmRpcClient,
+  type EvmSimulator,
+} from "./services/evm-simulator";
 import { CONFIGURED_WEBHOOK_EVENT_TYPES } from "./services/webhook-events";
 
 /** the steward app a plugin mounts onto: a hono app with the shared variables. */
@@ -176,6 +181,7 @@ export interface StewardAppContext {
    */
   adapterRegistry: AdapterRegistry;
   evmSimulator: EvmSimulator | null;
+  evmRpc: EvmRpcClient | null;
 }
 
 /**
@@ -210,6 +216,7 @@ export function buildPluginContext(): StewardAppContext {
     tenantAuth,
     adapterRegistry,
     evmSimulator: createEnvEvmSimulator(),
+    evmRpc: createEnvEvmRpcClient(),
   };
 }
 

@@ -20,7 +20,6 @@
  * keeps the dependency one-directional (no cycle).
  */
 
-import { Buffer } from "node:buffer";
 import type { AppVariables, StewardPlugin } from "@stwd/shared";
 import type { Context, Hono, Next } from "hono";
 import type { StewardAppContext } from "./context";
@@ -83,7 +82,7 @@ function bearerLooksLikeExternalAgentJwt(c: Context<{ Variables: AppVariables }>
   const [, payload] = auth.slice("Bearer ".length).split(".");
   if (!payload) return false;
   try {
-    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as {
+    const decoded = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/"))) as {
       agent_id?: unknown;
     };
     return typeof decoded.agent_id === "string" && decoded.agent_id.length > 0;
