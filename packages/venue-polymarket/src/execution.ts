@@ -107,6 +107,13 @@ export function isRejectedPostOrder(raw: RawPostOrderResult): boolean {
   return false;
 }
 
+function isAmbiguousPostError(raw: RawPostOrderResult): boolean {
+  const detail = String(raw.error ?? raw.errorMsg ?? raw.status ?? "").toLowerCase();
+  return /\bsocket\b|timeout|timed out|econn|network|bad gateway|status unknown|unconfirmed/.test(
+    detail,
+  );
+}
+
 // USDC + outcome-token base-unit scale (6 decimals). The CLOB can report the
 // post-order making/taking amounts either as human-readable units (what matchr
 // observed live and consumed directly) or as 6-decimal base-unit strings
@@ -366,6 +373,9 @@ export class PolymarketExecutionAdapter {
       signed,
       isMarketable ? OrderType.FOK : OrderType.GTC,
     )) as RawPostOrderResult;
+    if (isAmbiguousPostError(raw)) {
+      throw new Error(raw.error ?? raw.errorMsg ?? "Polymarket post status unknown");
+    }
 
     const reqAmount = Number.parseFloat(String(req.amount));
     const reqPrice = Number.parseFloat(String(req.price));

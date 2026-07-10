@@ -498,6 +498,35 @@ describe("PolymarketExecutionAdapter order build", () => {
     expect(res.errorMsg).toBe("not enough balance");
   });
 
+  test("submitOrder throws ambiguous post errors instead of reporting venue rejection", async () => {
+    const adapter = new PolymarketExecutionAdapter(account, { fetch: notFetch() });
+    const stub = {
+      async createOrder() {
+        return { signed: true };
+      },
+      async postOrder() {
+        return { error: "socket hang up" };
+      },
+    };
+    // @ts-expect-error private override for test
+    adapter.createClobClient = async () => ({
+      client: stub,
+      OrderType: { FOK: "FOK", GTC: "GTC" },
+      Side: { BUY: "BUY", SELL: "SELL" },
+    });
+
+    await expect(
+      adapter.submitOrder({
+        tokenId: bigToken,
+        side: "buy",
+        amount: 10,
+        price: 0.5,
+        tickSize: "0.01",
+        negRisk: false,
+      }),
+    ).rejects.toThrow("socket hang up");
+  });
+
   test("resolveOrderOptions throws (no guess) when book lookup fails and caller didn't supply both", async () => {
     const failFetch = (async () => {
       throw new Error("book down");
