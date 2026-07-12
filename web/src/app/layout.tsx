@@ -1,9 +1,35 @@
 import type { Metadata } from "next";
+import localFont from "next/font/local";
 import "./globals.css";
 import "@stwd/react/styles.css";
 import "@rainbow-me/rainbowkit/styles.css";
 import "@solana/wallet-adapter-react-ui/styles.css";
 import { Providers } from "@/components/providers";
+
+// Self-hosted fonts (checked into the repo) so the build needs no network egress.
+const sans = localFont({
+  src: [
+    { path: "./fonts/HankenGrotesk-400.ttf", weight: "400", style: "normal" },
+    { path: "./fonts/HankenGrotesk-500.ttf", weight: "500", style: "normal" },
+    { path: "./fonts/HankenGrotesk-600.ttf", weight: "600", style: "normal" },
+    { path: "./fonts/HankenGrotesk-700.ttf", weight: "700", style: "normal" },
+    { path: "./fonts/HankenGrotesk-800.ttf", weight: "800", style: "normal" },
+  ],
+  variable: "--font-sans",
+  display: "swap",
+  fallback: ["Avenir Next", "Segoe UI", "system-ui", "sans-serif"],
+});
+
+const mono = localFont({
+  src: [
+    { path: "./fonts/JetBrainsMono-400.ttf", weight: "400", style: "normal" },
+    { path: "./fonts/JetBrainsMono-500.ttf", weight: "500", style: "normal" },
+    { path: "./fonts/JetBrainsMono-700.ttf", weight: "700", style: "normal" },
+  ],
+  variable: "--font-jetbrains",
+  display: "swap",
+  fallback: ["JetBrains Mono", "Fira Code", "monospace"],
+});
 
 export const dynamic = "force-dynamic";
 
@@ -18,9 +44,9 @@ const metadataBase = (() => {
 
 export const metadata: Metadata = {
   metadataBase,
-  title: "Steward — Agent Wallet Infrastructure",
+  title: "Steward: the open authority and execution layer for AI agents",
   description:
-    "Managed wallets for AI agents with policy enforcement, multi-tenant isolation, and webhook-driven approvals. Self-hosted.",
+    "The open-source authority and execution layer for AI agents. Steward holds wallets and credentials, enforces policy before every privileged action, routes approvals, executes across APIs and financial rails, and produces a complete audit trail.",
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "32x32" },
@@ -31,8 +57,9 @@ export const metadata: Metadata = {
   },
   manifest: "/site.webmanifest",
   openGraph: {
-    title: "Steward — Agent Wallet Infrastructure",
-    description: "Managed wallets for AI agents. Policy enforcement. Self-hosted.",
+    title: "Steward: the open authority and execution layer for AI agents",
+    description:
+      "Open-source authority and execution for AI agents. Any model, any runtime, any cloud, any chain, on infrastructure you control.",
     type: "website",
     images: [
       {
@@ -47,7 +74,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${sans.variable} ${mono.variable}`}>
       <body className="noise-overlay">
         <Providers>{children}</Providers>
       </body>

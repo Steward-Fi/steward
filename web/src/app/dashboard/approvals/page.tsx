@@ -7,8 +7,7 @@ import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { ChainBadge } from "@/components/chain-badge";
 import { steward } from "@/lib/api";
-import { getChainSymbol } from "@/lib/chains";
-import { formatDate, formatWei, shortenAddress } from "@/lib/utils";
+import { formatDate, formatNativeAmount, shortenAddress } from "@/lib/utils";
 
 type PendingItem = ApprovalQueueEntry;
 
@@ -197,7 +196,7 @@ export default function ApprovalsPage() {
                       <span>
                         Value:{" "}
                         <span className="text-text-secondary tabular-nums">
-                          {formatWei(item.value || "0", getChainSymbol(item.chainId || 8453))}
+                          {formatNativeAmount(item.value || "0", item.chainId || 8453)}
                         </span>
                       </span>
                     </div>
