@@ -45,8 +45,9 @@
   --text-hero: clamp(3.5rem, 8vw + 1rem, 8rem);
   --text-hero-landing: clamp(3rem, 6vw + 0.5rem, 6rem);
   --text-hero-sm: clamp(2.5rem, 5vw + 1rem, 5rem);
-  --font-display: "Avenir Next", "Segoe UI", system-ui, sans-serif;
-  --font-body: "Instrument Sans", "Avenir Next", system-ui, sans-serif;
+  --font-display: var(--font-sans), "Avenir Next", system-ui, sans-serif;
+  --font-body: var(--font-sans), "Avenir Next", system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), "JetBrains Mono", "Fira Code", monospace;
 }
 
 @layer base {
@@ -104,6 +105,37 @@
 }
 
 @layer components {
+  /* Hero entrance: CSS-driven so it is CSP-safe and never gates visibility on JS.
+     Content is visible by default; the animation only enhances it. */
+  .hero-rise {
+    opacity: 0;
+    transform: translateY(24px);
+    animation: heroRise 0.7s var(--ease-out-expo) forwards;
+  }
+  .hero-fade {
+    opacity: 0;
+    animation: heroFade 0.7s var(--ease-out-expo) forwards;
+  }
+  @keyframes heroRise {
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes heroFade {
+    to {
+      opacity: 1;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .hero-rise,
+    .hero-fade {
+      opacity: 1;
+      transform: none;
+      animation: none;
+    }
+  }
+
   /* Noise overlay for texture */
   .noise-overlay::before {
     content: "";

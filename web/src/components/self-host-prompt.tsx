@@ -1,7 +1,6 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { API_URL } from "@/lib/api";
 
 const DOCS_URL = "https://docs.steward.fi";
 const REPO_URL = "https://github.com/Steward-Fi/steward";
@@ -89,11 +88,8 @@ export function SelfHostPrompt({ detail, onRetry, variant = "page" }: SelfHostPr
             <code className="font-mono text-xs text-text bg-bg px-1.5 py-0.5">
               NEXT_PUBLIC_STEWARD_API_URL
             </code>{" "}
-            before building, or run the dashboard locally alongside your API. Configured to reach{" "}
-            <code className="font-mono text-xs text-text bg-bg px-1.5 py-0.5 break-all">
-              {API_URL}
-            </code>{" "}
-            and the API didn&apos;t respond.
+            before building, or run the dashboard locally alongside your API. The configured API
+            origin didn&apos;t respond.
           </p>
           {onRetry && (
             <button

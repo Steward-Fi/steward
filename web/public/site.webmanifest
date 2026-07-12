@@ -1,7 +1,7 @@
 {
-  "name": "Steward — Agent Wallet Infrastructure",
+  "name": "Steward: wallets and policy for humans and agents",
   "short_name": "Steward",
-  "description": "Managed wallets for AI agents with policy enforcement, multi-tenant isolation, and webhook-driven approvals.",
+  "description": "The open, self-hostable wallet and governance rail for humans and agents. MIT-licensed, no per-transaction toll.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#0b0a09",

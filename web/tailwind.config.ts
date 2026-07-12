@@ -5,9 +5,9 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        display: ["var(--font-display)", "system-ui", "sans-serif"],
-        body: ["var(--font-body)", "system-ui", "sans-serif"],
-        mono: ['"JetBrains Mono"', '"Fira Code"', "monospace"],
+        display: ["var(--font-sans)", "var(--font-display)", "system-ui", "sans-serif"],
+        body: ["var(--font-sans)", "var(--font-body)", "system-ui", "sans-serif"],
+        mono: ["var(--font-jetbrains)", '"JetBrains Mono"', '"Fira Code"', "monospace"],
       },
       colors: {
         bg: {
