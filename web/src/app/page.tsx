@@ -26,71 +26,48 @@ function Hero() {
   return (
     <section
       ref={ref}
-      className="relative min-h-[100dvh] flex items-center px-6 md:px-10 pt-28 pb-20 lg:pb-16 overflow-hidden"
+      className="relative h-[100dvh] min-h-[560px] max-h-[1100px] flex items-center px-6 md:px-10 pt-16 overflow-hidden"
     >
-      {/* Grid lines background */}
+      {/* Single structural line, no decoration kit */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-0 left-[20%] w-px h-full bg-border-subtle opacity-40" />
-        <div className="absolute top-0 left-[40%] w-px h-full bg-border-subtle opacity-20" />
-        <div className="absolute top-0 left-[70%] w-px h-full bg-border-subtle opacity-30" />
-        <div className="absolute top-[30%] left-0 w-full h-px bg-border-subtle opacity-20" />
-        <div className="absolute top-[60%] left-0 w-full h-px bg-border-subtle opacity-15" />
-      </div>
-
-      {/* Accent glow */}
-      <div className="absolute top-1/3 left-1/4 w-[600px] h-[600px] rounded-full pointer-events-none opacity-[0.07] blur-[120px] bg-[oklch(0.75_0.15_55)]" />
-
-      {/* Compass star watermark */}
-      <div className="absolute top-1/2 right-[3%] -translate-y-1/2 opacity-[0.035] pointer-events-none hidden xl:block">
-        <Image src="/logo.png" alt="" width={560} height={560} className="w-[480px] h-[480px]" />
+        <div className="absolute top-0 left-[62%] w-px h-full bg-border-subtle opacity-30 hidden lg:block" />
       </div>
 
       <motion.div style={{ opacity, y }} className="relative max-w-[1400px] mx-auto w-full">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-14 items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-14 items-center">
           {/* Left: headline */}
-          <div className="lg:col-span-6">
-            <div
-              className="hero-rise inline-flex items-center gap-2 mb-7 border border-border rounded-full pl-1.5 pr-3.5 py-1"
-              style={{ animationDelay: "0.1s" }}
+          <div className="lg:col-span-7">
+            <p
+              className="hero-fade font-mono text-[0.7rem] uppercase tracking-[0.18em] text-text-tertiary mb-6"
+              style={{ animationDelay: "0.05s" }}
             >
-              <span className="text-[10px] font-mono uppercase tracking-wider bg-[oklch(0.2_0.04_55)] text-[oklch(0.82_0.14_55)] px-2 py-0.5 rounded-full">
-                MIT
-              </span>
-              <span className="text-xs text-text-secondary">
-                The authority and execution layer for AI agents
-              </span>
-            </div>
+              Open source, MIT
+            </p>
 
             <h1
-              className="hero-rise font-display text-hero-landing font-extrabold leading-[0.92] tracking-[-0.035em] text-balance"
-              style={{ animationDelay: "0.2s" }}
+              className="hero-rise font-display text-hero-landing font-extrabold leading-[0.94] tracking-[-0.035em] text-balance"
+              style={{ animationDelay: "0.15s" }}
             >
-              Give agents power
+              Give agents power.
               <br />
-              without giving them
-              <br />
-              <span className={accent}>the keys.</span>
+              <span className={accent}>Never the keys.</span>
             </h1>
 
             <p
-              className="hero-rise mt-8 text-lg text-text-secondary max-w-xl leading-relaxed text-pretty"
-              style={{ animationDelay: "0.38s" }}
+              className="hero-rise mt-6 text-lg text-text-secondary max-w-lg leading-relaxed text-pretty"
+              style={{ animationDelay: "0.3s" }}
             >
-              Steward is the open-source authority and execution layer for AI agents. It holds
-              wallets and credentials, enforces policy before every privileged action, routes human
-              approvals, executes across APIs and financial rails, and produces a complete audit
-              trail.
+              The open authority and execution layer for AI agents. Policy before every privileged
+              action. Human approval when it matters. A full audit trail, always.
             </p>
 
             <div
-              className="hero-fade mt-7 flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[0.7rem] uppercase tracking-wider text-text-tertiary"
-              style={{ animationDelay: "0.5s" }}
+              className="hero-fade mt-6 flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[0.7rem] uppercase tracking-wider text-text-tertiary"
+              style={{ animationDelay: "0.42s" }}
             >
               <span>Any model</span>
               <span className="text-border">/</span>
               <span>Any runtime</span>
-              <span className="text-border">/</span>
-              <span>Any cloud</span>
               <span className="text-border">/</span>
               <span>Any chain</span>
               <span className="text-border">/</span>
@@ -98,8 +75,8 @@ function Hero() {
             </div>
 
             <div
-              className="hero-rise mt-10 flex flex-wrap items-center gap-4"
-              style={{ animationDelay: "0.62s" }}
+              className="hero-rise mt-8 flex flex-wrap items-center gap-4"
+              style={{ animationDelay: "0.5s" }}
             >
               <a
                 href="/dashboard"
@@ -121,40 +98,24 @@ function Hero() {
 
           {/* Right: governed-action panel */}
           <div
-            className="hero-rise lg:col-span-6 hidden lg:block"
-            style={{ animationDelay: "0.5s" }}
+            className="hero-rise lg:col-span-5 hidden lg:block"
+            style={{ animationDelay: "0.4s" }}
           >
             <div className="border border-border bg-bg-elevated rounded-sm shadow-[0_24px_80px_-20px_rgba(0,0,0,0.7)]">
               <CodeBlock
                 filename="agent.ts"
                 language="typescript"
-                typeEffect
-                code={`import { StewardClient } from "@stwd/sdk"
-
-const steward = new StewardClient({
-  baseUrl: process.env.STEWARD_URL,
-  bearerToken: process.env.STEWARD_TOKEN,
-})
-
-// Agent asks. Steward decides. No raw key in memory.
+                code={`// Agent asks. Steward decides.
 const swap = await steward.signTransaction(agentId, {
   to: "0xUniswapRouter",
   value: "500000000000000000",
-  data: swapCalldata,
 })
-// -> policy check -> simulate -> sign
-// swap.txHash: "0x9f3c..."
+// -> policy check -> sign -> "0x9f3c..."
 
 // Over the daily cap: held for a human
-const wire = await steward.signTransaction(agentId, {
-  to: "0xTreasury", value: "40000000000000000000",
-})
-// -> { status: "pending_approval", approvalId }
+// -> { status: "pending_approval" }
 
-// Not on the allowlist: denied at the boundary
-await steward.createTransferAction(agentId, {
-  to: "0xUnknown", token: "USDC", amount: "25000",
-})
+// Not on the allowlist: denied
 // -> PolicyDenied: destination not permitted`}
               />
             </div>
