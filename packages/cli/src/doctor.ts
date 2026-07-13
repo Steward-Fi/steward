@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { StewardApiClient } from "./api";
-import { redact } from "./format";
+import { describeSecret } from "./format";
 
 export type DoctorCheck = {
   name: string;
@@ -42,7 +42,9 @@ export async function runDoctor(
     "STEWARD_AUDIT_SIGNING_KEY",
   ];
   for (const key of required) {
-    checks.push({ name: `env:${key}`, ok: Boolean(env[key]), detail: redact(env[key]) });
+    // detail reports ONLY presence + byte length — never any substring of the
+    // secret value (see describeSecret).
+    checks.push({ name: `env:${key}`, ok: Boolean(env[key]), detail: describeSecret(env[key]) });
   }
   checks.push({
     name: "audit:ed25519-key-format",
