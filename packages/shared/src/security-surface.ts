@@ -1,7 +1,4 @@
-export type SecuritySurfaceKind =
-  | "wallet-signing"
-  | "key-material-export"
-  | "credential-injection";
+export type SecuritySurfaceKind = "wallet-signing" | "key-material-export" | "credential-injection";
 
 export type EnforcementBoundary =
   | "route-policy"
@@ -88,7 +85,8 @@ export const SECURITY_SURFACE_OPERATIONS = [
     custody: {
       localVault: true,
       externalCustody: "supported",
-      notes: "Vault.signTransaction can delegate only this operation to externalKeyCustodyProvider.signTransaction.",
+      notes:
+        "Vault.signTransaction can delegate only this operation to externalKeyCustodyProvider.signTransaction.",
     },
     unsafeFlags: ["STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING for unconstrained contract calls"],
     evidence: ["transactions row", "vault audit events", "webhook events"],
@@ -128,7 +126,8 @@ export const SECURITY_SURFACE_OPERATIONS = [
     ],
     evidence: ["audit events"],
     boundary: "route-policy-with-unsafe-flag",
-    notes: "Compatibility signing path intentionally fails closed unless explicit unsafe flags and MFA gates pass.",
+    notes:
+      "Compatibility signing path intentionally fails closed unless explicit unsafe flags and MFA gates pass.",
   },
   {
     id: "wallet.raw_hash.sign",
@@ -164,11 +163,16 @@ export const SECURITY_SURFACE_OPERATIONS = [
     policy: ["raw-signing-chain policy", "PolicyEngine.evaluate", "rate limit policy"],
     policyEngineGated: true,
     legacy: false,
-    custody: { localVault: true, externalCustody: "unsupported", notes: "Local EVM/Solana keys only." },
+    custody: {
+      localVault: true,
+      externalCustody: "unsupported",
+      notes: "Local EVM/Solana keys only.",
+    },
     unsafeFlags: ["STEWARD_ALLOW_UNSAFE_RAW_SIGNING", "STEWARD_ALLOW_VAULT_UNSAFE_RAW_SIGNING"],
     evidence: ["vault audit events", "wallet.raw_signature.created webhook"],
     boundary: "route-policy-with-unsafe-flag",
-    notes: "Cross-curve raw digest signing is constrained by route policy before Vault.signRawDigest.",
+    notes:
+      "Cross-curve raw digest signing is constrained by route policy before Vault.signRawDigest.",
   },
   {
     id: "wallet.bitcoin_psbt.sign",
@@ -183,10 +187,17 @@ export const SECURITY_SURFACE_OPERATIONS = [
       },
     ],
     auth: ["agent access", "delegated sign_transaction"],
-    policy: ["raw-signing-chain bitcoin/secp256k1", "destination and aggregate PolicyEngine.evaluate"],
+    policy: [
+      "raw-signing-chain bitcoin/secp256k1",
+      "destination and aggregate PolicyEngine.evaluate",
+    ],
     policyEngineGated: true,
     legacy: false,
-    custody: { localVault: true, externalCustody: "unsupported", notes: "Local Bitcoin keys only." },
+    custody: {
+      localVault: true,
+      externalCustody: "unsupported",
+      notes: "Local Bitcoin keys only.",
+    },
     unsafeFlags: [],
     evidence: ["transactions row", "vault audit events"],
     boundary: "route-policy",
@@ -198,17 +209,29 @@ export const SECURITY_SURFACE_OPERATIONS = [
     capability: "transfer_monero",
     vaultMethods: ["prepareMoneroTransfer", "relayMoneroTransfer"],
     routes: [
-      { file: "packages/api/src/routes/vault.ts", method: "POST", path: "/:agentId/monero/transfer" },
+      {
+        file: "packages/api/src/routes/vault.ts",
+        method: "POST",
+        path: "/:agentId/monero/transfer",
+      },
     ],
     auth: ["agent access", "delegated sign_transaction"],
-    policy: ["raw-signing-chain monero/ed25519", "destination and fee-inclusive aggregate PolicyEngine.evaluate"],
+    policy: [
+      "raw-signing-chain monero/ed25519",
+      "destination and fee-inclusive aggregate PolicyEngine.evaluate",
+    ],
     policyEngineGated: true,
     legacy: false,
-    custody: { localVault: true, externalCustody: "unsupported", notes: "monero-wallet-rpc backend only." },
+    custody: {
+      localVault: true,
+      externalCustody: "unsupported",
+      notes: "monero-wallet-rpc backend only.",
+    },
     unsafeFlags: [],
     evidence: ["transactions row", "vault audit events", "wallet_action-style metadata"],
     boundary: "route-policy",
-    notes: "The route prepares a signed but unrelayed transfer, re-evaluates fee-inclusive spend, then relays.",
+    notes:
+      "The route prepares a signed but unrelayed transfer, re-evaluates fee-inclusive spend, then relays.",
   },
   {
     id: "wallet.typed_data.sign",
@@ -240,7 +263,8 @@ export const SECURITY_SURFACE_OPERATIONS = [
     ],
     evidence: ["transactions row", "vault/global-wallet audit events"],
     boundary: "route-policy-with-unsafe-flag",
-    notes: "The vault route has policy evaluation; the global wallet compatibility route is consent/MFA gated.",
+    notes:
+      "The vault route has policy evaluation; the global wallet compatibility route is consent/MFA gated.",
   },
   {
     id: "wallet.user_operation.sign",
@@ -314,7 +338,8 @@ export const SECURITY_SURFACE_OPERATIONS = [
     unsafeFlags: ["STEWARD_ALLOW_UNSAFE_SOLANA_BLIND_SIGNING"],
     evidence: ["transactions row", "vault audit events"],
     boundary: "route-policy",
-    notes: "Parsed Solana transactions are policy-derived from bytes; blind signing is explicit unsafe opt-in.",
+    notes:
+      "Parsed Solana transactions are policy-derived from bytes; blind signing is explicit unsafe opt-in.",
   },
   {
     id: "wallet.private_key.export",
@@ -328,10 +353,15 @@ export const SECURITY_SURFACE_OPERATIONS = [
         file: "packages/api/src/routes/user.ts",
         method: "POST",
         path: "/me/wallet/claim-pregenerated",
-        notes: "internal claim migration path exports from the pre-generated tenant wallet before import",
+        notes:
+          "internal claim migration path exports from the pre-generated tenant wallet before import",
       },
     ],
-    auth: ["tenant admin or personal user session", "recent MFA", "plaintext response acknowledgement"],
+    auth: [
+      "tenant admin or personal user session",
+      "recent MFA",
+      "plaintext response acknowledgement",
+    ],
     policy: ["tenant/user MFA export policy gate"],
     policyEngineGated: false,
     legacy: false,
@@ -349,7 +379,8 @@ export const SECURITY_SURFACE_OPERATIONS = [
     ],
     evidence: ["audit events", "private_key.exported webhook"],
     boundary: "route-mfa-break-glass",
-    notes: "Break-glass plaintext export is not part of the signing path but is intentionally classified.",
+    notes:
+      "Break-glass plaintext export is not part of the signing path but is intentionally classified.",
   },
   {
     id: "credential.proxy.inject_http",
@@ -365,7 +396,10 @@ export const SECURITY_SURFACE_OPERATIONS = [
       { file: "packages/api/src/routes/secrets.ts", method: "POST", path: "/routes" },
       { file: "packages/api/src/routes/secrets.ts", method: "PUT", path: "/routes/:id" },
     ],
-    auth: ["proxy agent JWT with api:proxy scope", "secret route management requires owner/admin recent MFA"],
+    auth: [
+      "proxy agent JWT with api:proxy scope",
+      "secret route management requires owner/admin recent MFA",
+    ],
     policy: ["route host/path/method/header validation", "proxy spend/rate/replay checks"],
     policyEngineGated: false,
     legacy: false,

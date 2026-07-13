@@ -7,7 +7,8 @@ import {
 
 const read = async (path: string) => Bun.file(new URL(path, import.meta.url)).text();
 
-const SIGN_CAPABLE_OR_EXPORT = /^(sign[A-Z].*|prepareMoneroTransfer|relayMoneroTransfer|exportPrivateKey)$/;
+const SIGN_CAPABLE_OR_EXPORT =
+  /^(sign[A-Z].*|prepareMoneroTransfer|relayMoneroTransfer|exportPrivateKey)$/;
 const ROUTE_CALL =
   /\b(?:vault|getVault\(\))\.(sign[A-Z]\w*|prepareMoneroTransfer|relayMoneroTransfer|exportPrivateKey)\b/g;
 
@@ -83,9 +84,11 @@ describe("security surface inventory", () => {
     );
 
     expect(credentialOperation?.vaultMethods).toContain("SecretVault.decryptSecret");
-    expect(credentialOperation?.routes.some((route) => route.file === "packages/proxy/src/handlers/proxy.ts")).toBe(
-      true,
-    );
+    expect(
+      credentialOperation?.routes.some(
+        (route) => route.file === "packages/proxy/src/handlers/proxy.ts",
+      ),
+    ).toBe(true);
     expect(secretVaultSource).toContain("async decryptSecret(");
     expect(proxySource).toContain("credential = await decryptSecret(");
     expect(proxySource).toContain("await recordAudit({");
