@@ -73,7 +73,7 @@ Each encrypted key is stored with:
 
 ## Signing Flow
 
-Every signing request passes through the [Policy Engine](/concepts/policy-engine) before execution:
+Supported transaction-signing API routes pass through the [Policy Engine](/concepts/policy-engine) before invoking the Vault. Compatibility signing routes may instead require MFA, signer permission, and explicit unsafe feature flags:
 
 ```typescript
 // 1. Agent requests a transaction
