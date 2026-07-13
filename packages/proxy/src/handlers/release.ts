@@ -178,13 +178,12 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
     const response = await executePendingProxyRequest(claimed);
     // The poll that wins the single-use claim is the only caller able to receive
     // the upstream result. Bound it so a hostile upstream cannot exhaust memory.
-    const responseClone = response.clone();
-    const declaredLength = Number(responseClone.headers.get("content-length") ?? "0");
+    const declaredLength = Number(response.headers.get("content-length") ?? "0");
     const maxResponseBytes = 1_048_576;
     let upstreamBody: unknown = null;
     let upstreamTruncated = false;
     if (!Number.isFinite(declaredLength) || declaredLength <= maxResponseBytes) {
-      const reader = responseClone.body?.getReader();
+      const reader = response.body?.getReader();
       const chunks: Uint8Array[] = [];
       let total = 0;
       if (reader) {
@@ -209,7 +208,7 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
         offset += chunk.byteLength;
       }
       const text = new TextDecoder().decode(bytes);
-      if ((responseClone.headers.get("content-type") ?? "").includes("application/json")) {
+      if ((response.headers.get("content-type") ?? "").includes("application/json")) {
         try {
           upstreamBody = JSON.parse(text);
         } catch {
