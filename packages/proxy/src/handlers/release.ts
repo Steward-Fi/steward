@@ -156,6 +156,29 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
 
   try {
     const response = await executePendingProxyRequest(claimed);
+    // The poll that wins the single-use claim is the only caller able to receive
+    // the upstream result. Bound it so a hostile upstream cannot exhaust memory.
+    const responseClone = response.clone();
+    const declaredLength = Number(responseClone.headers.get("content-length") ?? "0");
+    const maxResponseBytes = 1_048_576;
+    let upstreamBody: unknown = null;
+    let upstreamTruncated = false;
+    if (!Number.isFinite(declaredLength) || declaredLength <= maxResponseBytes) {
+      const bytes = new Uint8Array(await responseClone.arrayBuffer());
+      upstreamTruncated = bytes.byteLength > maxResponseBytes;
+      const text = new TextDecoder().decode(bytes.slice(0, maxResponseBytes));
+      if ((responseClone.headers.get("content-type") ?? "").includes("application/json")) {
+        try {
+          upstreamBody = JSON.parse(text);
+        } catch {
+          upstreamBody = text;
+        }
+      } else {
+        upstreamBody = text;
+      }
+    } else {
+      upstreamTruncated = true;
+    }
     const [executed] = await db
       .update(pendingProxyRequests)
       .set({
@@ -176,7 +199,16 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
       latencyMs: 0,
       reason: "proxy-approval-executed",
     });
-    return c.json({ ok: true, data: publicPending(executed ?? claimed) });
+    return c.json({
+      ok: true,
+      data: publicPending(executed ?? claimed),
+      upstream: {
+        status: response.status,
+        contentType: response.headers.get("content-type"),
+        body: upstreamBody,
+        truncated: upstreamTruncated,
+      },
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Approved proxy execution failed";
     const [failed] = await db
