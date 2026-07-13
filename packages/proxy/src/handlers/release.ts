@@ -1,5 +1,5 @@
 import type { PendingProxyRequest } from "@stwd/db";
-import { and, eq, getDb, inArray, pendingProxyRequests } from "@stwd/db";
+import { and, eq, getDb, inArray, pendingProxyRequests, sql } from "@stwd/db";
 import type { Context } from "hono";
 import { recordRequiredAudit } from "../middleware/audit";
 import { canonicalProxyApprovalDigest, decryptPendingProxyBody } from "./approvals";
@@ -166,13 +166,62 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
     );
   }
 
+  // Atomic approved -> executing claim. Re-check expiry SERVER-SIDE (sql`now()`)
+  // inside the same UPDATE so a row read just before its deadline cannot expire
+  // during digest computation above and still be executed. The window between
+  // the initial read and this claim is exactly the TOCTOU gap being closed.
   const [claimed] = await db
     .update(pendingProxyRequests)
     .set({ status: "executing", updatedAt: new Date() })
-    .where(and(eq(pendingProxyRequests.id, row.id), eq(pendingProxyRequests.status, "approved")))
+    .where(
+      and(
+        eq(pendingProxyRequests.id, row.id),
+        eq(pendingProxyRequests.status, "approved"),
+        sql`${pendingProxyRequests.expiresAt} > now()`,
+      ),
+    )
     .returning();
-  if (!claimed)
-    return c.json({ ok: true, data: { ...publicPending(row), status: "executing" } }, 202);
+  if (!claimed) {
+    // The claim failed. Either another poller already claimed it (still
+    // "approved" -> now "executing"/terminal), or it expired between the read
+    // and the claim. Distinguish by attempting an atomic expiry transition:
+    // only an approved-but-expired row will flip here, and we must NOT execute.
+    const [expired] = await db
+      .update(pendingProxyRequests)
+      .set({ status: "expired", updatedAt: new Date() })
+      .where(
+        and(
+          eq(pendingProxyRequests.id, row.id),
+          eq(pendingProxyRequests.status, "approved"),
+          sql`${pendingProxyRequests.expiresAt} <= now()`,
+        ),
+      )
+      .returning();
+    if (expired) {
+      await recordRequiredAudit({
+        agentId,
+        tenantId,
+        targetHost: expired.targetHost,
+        targetPath: expired.targetPath,
+        method: expired.method,
+        statusCode: 410,
+        latencyMs: 0,
+        reason: "proxy-approval-expired",
+      });
+      return c.json({ ok: true, data: publicPending(expired) });
+    }
+    // Otherwise the row was concurrently claimed by another poller; surface the
+    // in-flight/terminal status without executing here.
+    const [current] = await db
+      .select()
+      .from(pendingProxyRequests)
+      .where(eq(pendingProxyRequests.id, row.id))
+      .limit(1);
+    return c.json(
+      { ok: true, data: publicPending(current ?? { ...row, status: "executing" }) },
+      202,
+    );
+  }
 
   try {
     const response = await executePendingProxyRequest(claimed);
