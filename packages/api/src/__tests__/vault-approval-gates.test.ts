@@ -46,6 +46,10 @@ import { Vault } from "@stwd/vault";
 import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
+import {
+  executionPayloadDigestForEvmSign,
+  policyRevisionHashForPolicySet,
+} from "../services/execution-authorization";
 
 const TENANT_ID = `approval-gate-tenant-${Date.now()}`;
 const ACTOR_ID = "00000000-0000-4000-8000-000000000001";
@@ -116,6 +120,25 @@ async function seedPendingTx(
   to: string,
   requestedBy?: { type: string; id: string },
 ) {
+  // Persist the execution-authorization binding exactly as the real /sign path
+  // now does when it queues a primary EVM approval. Post-gateway, a genuinely
+  // pending EVM approval ALWAYS carries a stored digest + policy-revision hash;
+  // the approve handler fails closed on legacy/null-digest rows. These fixtures
+  // exercise the downstream gates (separation-of-duties, current-policy
+  // re-eval, audit-before-sign), so they must look like a properly-bound row.
+  //
+  // The stored digest is computed over the SAME normalized intent the approve
+  // handler recomputes from the replay request: toSignRequest(row) gives
+  // agentId/to/value/chainId (+ data), with nonce/gasLimit/venue/walletAddress
+  // absent because actionPayload only carries {type,broadcast:false}.
+  const boundDigest = executionPayloadDigestForEvmSign({
+    agentId,
+    tenantId: TENANT_ID,
+    to,
+    value: "1000",
+    chainId: 8453,
+    broadcast: false,
+  });
   await getDb()
     .insert(transactions)
     .values({
@@ -126,6 +149,8 @@ async function seedPendingTx(
       value: "1000",
       chainId: 8453,
       actionPayload: { type: "transaction", broadcast: false },
+      executionPayloadDigest: boundDigest,
+      executionPolicyRevisionHash: policyRevisionHashForPolicySet([]),
       policyResults: [],
     });
   await getDb()
