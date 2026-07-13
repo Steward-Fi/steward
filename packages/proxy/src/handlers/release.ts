@@ -164,9 +164,31 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
     let upstreamBody: unknown = null;
     let upstreamTruncated = false;
     if (!Number.isFinite(declaredLength) || declaredLength <= maxResponseBytes) {
-      const bytes = new Uint8Array(await responseClone.arrayBuffer());
-      upstreamTruncated = bytes.byteLength > maxResponseBytes;
-      const text = new TextDecoder().decode(bytes.slice(0, maxResponseBytes));
+      const reader = responseClone.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const remaining = maxResponseBytes - total;
+          if (value.byteLength > remaining) {
+            if (remaining > 0) chunks.push(value.slice(0, remaining));
+            upstreamTruncated = true;
+            await reader.cancel();
+            break;
+          }
+          chunks.push(value);
+          total += value.byteLength;
+        }
+      }
+      const bytes = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0));
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      const text = new TextDecoder().decode(bytes);
       if ((responseClone.headers.get("content-type") ?? "").includes("application/json")) {
         try {
           upstreamBody = JSON.parse(text);
