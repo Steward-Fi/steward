@@ -87,7 +87,10 @@ function repoRelative(absPath: string): string {
 function classifyTokenAt(
   source: string,
   index: number,
-): { kind: "raw-call" | "governed-call" | "options-type" | "property-key" | "comment-ref"; note: string } | null {
+): {
+  kind: "raw-call" | "governed-call" | "options-type" | "property-key" | "comment-ref";
+  note: string;
+} | null {
   const token = "signTransaction";
   const after = source.slice(index + token.length);
   const before = source.slice(Math.max(0, index - 64), index);
@@ -96,12 +99,14 @@ function classifyTokenAt(
   if (/^Authorized\s*\(/.test(after)) {
     // Only classify as governed when it is actually a member call (preceded by
     // a member-access receiver), otherwise fall through to stricter checks.
-    if (/[\w$)\]]\s*\.\s*$/.test(before)) return { kind: "governed-call", note: "governed .signTransactionAuthorized( call" };
+    if (/[\w$)\]]\s*\.\s*$/.test(before))
+      return { kind: "governed-call", note: "governed .signTransactionAuthorized( call" };
   }
 
   // 2. Options type reference: SignTransactionOptions etc. never appears as
   //    lowercase `signTransaction` + `Options`, but guard anyway.
-  if (/^Options\b/.test(after)) return { kind: "options-type", note: "SignTransactionOptions type reference" };
+  if (/^Options\b/.test(after))
+    return { kind: "options-type", note: "SignTransactionOptions type reference" };
 
   // 3. Raw member call: <recv>.signTransaction( (NOT Authorized, NOT Options).
   if (/^\s*\(/.test(after) && /[\w$)\]]\s*\.\s*$/.test(before)) {
@@ -116,7 +121,8 @@ function classifyTokenAt(
   //    The occurrence must sit on a line whose first non-space characters are `//`.
   const lineStart = source.lastIndexOf("\n", index) + 1;
   const lineHead = source.slice(lineStart, index);
-  if (/^\s*(\/\/|\*|\/\*)/.test(lineHead)) return { kind: "comment-ref", note: "documentation comment reference" };
+  if (/^\s*(\/\/|\*|\/\*)/.test(lineHead))
+    return { kind: "comment-ref", note: "documentation comment reference" };
 
   return null;
 }
@@ -159,7 +165,9 @@ describe("execution gateway raw-signer inventory (repository-wide)", () => {
           const lineNo = source.slice(0, index).split("\n").length;
           const snippetStart = source.lastIndexOf("\n", index) + 1;
           const snippetEnd = source.indexOf("\n", index);
-          const snippet = source.slice(snippetStart, snippetEnd === -1 ? source.length : snippetEnd).trim();
+          const snippet = source
+            .slice(snippetStart, snippetEnd === -1 ? source.length : snippetEnd)
+            .trim();
           unclassified.push(`${repoRelative(file)}:${lineNo}  ${snippet}`);
           continue;
         }
