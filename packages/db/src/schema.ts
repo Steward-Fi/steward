@@ -1743,3 +1743,35 @@ export const auditChainHeads = pgTable("audit_chain_heads", {
 
 export type AuditChainHead = typeof auditChainHeads.$inferSelect;
 export type NewAuditChainHead = typeof auditChainHeads.$inferInsert;
+
+// Ed25519 checkpoints over the audit chain head. The HMAC chain is symmetric
+// (verifiable only with STEWARD_AUDIT_HMAC_KEY); a checkpoint signs a canonical
+// statement about the chain head with an Ed25519 key whose PUBLIC half can be
+// published, so an third-party auditor can verify a signed evidence bundle offline
+// without any Steward secret. `payload` is the exact JSON object that was
+// canonicalized+signed; `signature` is base64 Ed25519 over the canonical bytes;
+// `publicKey` is the SPKI PEM (denormalized per row so a bundle is
+// self-contained and key rotation is auditable). Append-only, never mutated.
+export const auditCheckpoints = pgTable(
+  "audit_checkpoints",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    seq: bigint("seq", { mode: "number" }).notNull(),
+    headHmac: bytea("head_hmac").notNull(),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
+    signature: text("signature").notNull(),
+    publicKey: text("public_key").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    tenantSeqIdx: index("audit_checkpoints_tenant_seq_idx").on(table.tenantId, table.seq),
+    tenantCreatedIdx: index("audit_checkpoints_tenant_created_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type AuditCheckpointRow = typeof auditCheckpoints.$inferSelect;
+export type NewAuditCheckpointRow = typeof auditCheckpoints.$inferInsert;
