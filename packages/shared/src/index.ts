@@ -24,6 +24,8 @@ export type {
 export * from "./types/venue.js";
 // ─── Runtime-extensible webhook event registry (core ∪ plugin-declared) ───
 export { WebhookEventRegistry } from "./webhook-event-registry.js";
+export * from "./execution-contract.js";
+export * from "./security-surface.js";
 
 // ─── Tenancy ───
 

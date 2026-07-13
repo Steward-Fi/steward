@@ -6,7 +6,7 @@ Every agent deserves a bank account it can't be robbed of.
 
 AI agents are managing real money, signing real transactions, calling paid APIs. The infrastructure securing those operations is a `.env` file with plaintext keys. One prompt injection, one leaked log, one compromised dependency, and everything is gone.
 
-Steward exists to make that impossible. Not through trust, through architecture: encrypted vaults, policy enforcement at the signing layer, credential isolation at the proxy layer. Agents operate autonomously within constraints their operators define. No exceptions, no workarounds.
+Steward exists to reduce that blast radius through architecture: encrypted vaults, route-level policy gates before supported signing operations, and credential isolation at the proxy layer. Agents operate autonomously within constraints their operators define, with sensitive actions authenticated, audited, and denied by default when the route cannot evaluate them safely.
 
 ---
 
@@ -18,7 +18,7 @@ Four pillars. Each solves a distinct problem. Together they form a complete secu
 AES-256-GCM encrypted key storage. Per-agent encryption keys derived from master password + agent ID via PBKDF2. Private keys are decrypted ephemerally for signing and never returned to callers. Supports EVM (7 chains) and Solana (Ed25519).
 
 ### Policy Engine
-Composable rules evaluated synchronously before every signing operation. Six types: spending limits (per-tx, daily, weekly), approved address lists, rate limits, time windows, auto-approve thresholds, and allowed chains. Hard policies reject. Soft policies (auto-approve-threshold) queue for human review. All policies must pass for a transaction to be signed. The engine is stateless; spend and rate context are pre-fetched and injected.
+Composable rules evaluated synchronously by supported signing routes before they call the Vault. Six types: spending limits (per-tx, daily, weekly), approved address lists, rate limits, time windows, auto-approve thresholds, and allowed chains. Hard policies reject. Soft policies (auto-approve-threshold) queue for human review. The engine is stateless; spend and rate context are pre-fetched and injected. The raw Vault signing methods do not yet verify a gateway authorization themselves.
 
 ### Auth
 User authentication with passkeys (WebAuthn), email magic links, Sign-In With Ethereum, and OAuth (Google, Discord). JWT sessions with refresh token rotation. Users are global identities that can belong to multiple tenants. On first login, users get an auto-provisioned embedded wallet.
@@ -41,11 +41,11 @@ Six capabilities define the space. Most platforms cover two or three:
 | **Open source** | Audit the code. Fork it. No black boxes. |
 | **Self-hostable** | Run it on your infra. No vendor dependency. No token required. |
 | **Auth** | User login (passkeys, email, OAuth, SIWE). Not just API keys. |
-| **Policy enforcement** | Rules enforced at the vault, not the application layer. |
+| **Policy enforcement** | Rules enforced by supported API/proxy routes before sensitive operations. |
 | **Agent-native** | Built for autonomous operation, not retrofitted from consumer auth. |
 | **Credential proxy** | Manages all sensitive credentials, not just wallet keys. |
 
-Steward checks all six. Existing platforms each miss critical boxes — most are closed and hosted-only, depend on an external MPC network, lack auth or policy enforcement, or expose only low-level signing primitives without auth, policies, or a credential proxy.
+Steward checks all six at the supported route boundary. Existing platforms each miss critical boxes — most are closed and hosted-only, depend on an external MPC network, lack auth or policy controls, or expose only low-level signing primitives without auth, policies, or a credential proxy.
 
 ---
 
@@ -96,4 +96,4 @@ Same API surface. Same guarantees. Write the integration once.
 
 **No token required.** Steward is infrastructure, not a protocol. No governance token, no staking requirement, no on-chain dependency for basic operations.
 
-**Policy is architecture, not advice.** Rules are enforced at the cryptographic signing layer. Not in middleware. Not in application code. Not as suggestions. If the policy says no, the vault won't sign it.
+**Policy is part of the execution path.** Supported signing and proxy routes authenticate the caller, evaluate policy, apply MFA or unsafe-flag gates where required, and audit the decision before invoking Vault or credential-decryption code. The next boundary improvement is moving that authorization check into the signer itself so raw Vault methods cannot be called without a valid execution authorization.

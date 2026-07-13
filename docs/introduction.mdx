@@ -1,10 +1,10 @@
 ---
 title: "what is Steward?"
-description: "the policy-bound signing layer for autonomous AI agents. encrypted wallets, credential management, audit trail, embeddable React UI."
+description: "policy-gated wallet and credential infrastructure for autonomous AI agents. encrypted wallets, credential management, audit trail, embeddable React UI."
 ---
 
 Steward is a governance layer for autonomous AI agents. it provides
-encrypted wallet management, credential storage, policy enforcement, API
+encrypted wallet management, credential storage, route-level policy gates, API
 proxy with credential injection, and audit logging, so agents can interact
 with blockchains and third-party APIs without ever touching raw private keys
 or API credentials.
@@ -48,7 +48,7 @@ STEWARD_PROXY_URL=http://steward-proxy:8080
 STEWARD_AGENT_TOKEN=stwd_jwt_...
 ```
 
-every API call and every transaction flows through Steward, where it is authenticated, policy-checked, logged, and metered before being forwarded with the real credentials injected.
+supported API calls and transactions flow through Steward routes, where they are authenticated, policy-checked, logged, and metered before Vault signing or proxy credential injection happens.
 
 ## who uses Steward?
 

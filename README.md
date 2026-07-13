@@ -1,6 +1,6 @@
 # Steward
 
-auth + wallet infrastructure for autonomous agents. open source. self-hostable. policy enforced at the signing layer.
+auth + wallet infrastructure for autonomous agents. open source. self-hostable. signing and proxy routes are policy-gated and audited.
 
 [![npm](https://img.shields.io/npm/v/@stwd/sdk)](https://www.npmjs.com/package/@stwd/sdk)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -20,15 +20,15 @@ existing embedded-wallet platforms were built for consumer apps, not agents. the
 Steward sits between agents and everything they access. four pillars:
 
 1. **vault.** AES-256-GCM encrypted keys. EVM (7 chains) + Solana. keys never exist in plaintext outside a signing operation.
-2. **policy engine.** 6 composable rule types evaluated before every action. spending limits, rate limits, address whitelists, time windows, auto-approve thresholds.
+2. **policy engine.** 6 composable rule types evaluated by API routes before sensitive actions. spending limits, rate limits, address whitelists, time windows, auto-approve thresholds.
 3. **auth.** passkeys, email magic links, SIWE, Google/Discord OAuth. JWT sessions with refresh token rotation.
 4. **proxy gateway.** credential injection for any third-party API. agents never see raw keys. full audit trail.
 
 ## how it works in practice
 
-an agent (or the app delegating to one) holds only a Steward URL and a scoped JWT. it never holds private keys. when it wants to act, its LLM sends a signing request; the policy engine evaluates the request against the agent's policy; the vault signs or refuses; an audit event is emitted either way.
+an agent (or the app delegating to one) holds only a Steward URL and a scoped JWT. it never holds private keys. when it wants to act, its LLM sends a signing request; the API route authenticates the caller, evaluates policy, records audit evidence, and then calls the vault only if that route-level gate passes.
 
-the key never reaches the model, and compromised app code cannot exceed the policy. spend caps, allowlists, rate limits, and an atomic freeze switch are enforced in the vault itself, before any signature is produced.
+the key never reaches the model. spend caps, allowlists, rate limits, MFA gates, unsafe compatibility flags, and an atomic freeze switch reduce what a compromised app can do through supported routes. Today those policy gates live in API/proxy route code; the raw Vault signing methods are not yet a signer-side authorization boundary.
 
 ---
 
@@ -67,7 +67,7 @@ const steward = new StewardClient({
 const agent = await steward.createWallet("trading-bot", "Trading Bot");
 console.log(agent.walletAddresses); // { evm: "0x...", solana: "..." }
 
-// sign a transaction (policy-enforced)
+// sign a transaction through the policy-gated API route
 const result = await steward.signTransaction("trading-bot", {
   to: "0xRecipient",
   value: "10000000000000000", // 0.01 ETH
@@ -193,7 +193,7 @@ full list in [`.env.example`](.env.example). see [deployment guide](docs/deploym
 - **open source.** MIT licensed, full source available.
 - **self-hostable.** docker, embedded PGLite, or hosted.
 - **full auth surface.** passkey / email / SIWE / OAuth.
-- **policy enforcement at the vault layer.** 6 composable rule types evaluated before any signature is produced. compromised app code cannot bypass.
+- **policy-gated signing routes.** 6 composable rule types are evaluated by supported signing routes before they call the Vault. The raw Vault methods are not yet the enforcement boundary.
 - **agent-native.** built from day one for autonomous operation: approval queues, audit log, kill-switch.
 - **credential proxy.** inject keys for any third-party API. agents never see raw secrets.
 
@@ -203,7 +203,7 @@ full list in [`.env.example`](.env.example). see [deployment guide](docs/deploym
 
 Ethereum, Base, Polygon, Arbitrum, BSC, Gnosis, Base Sepolia, BSC Testnet, Solana, Bitcoin,
 Monero (self-hosted deployments; official `monero-wallet-rpc` sidecar against remote public
-nodes — keys never leave your host, policy enforced before every relay)
+nodes — keys never leave your host, route policy is evaluated before every relay)
 
 ---
 
