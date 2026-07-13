@@ -46,7 +46,7 @@ describe("GovernedVault", () => {
       calls.push(`consume:${expected.payloadDigest}`);
     });
 
-    const result = await governed.signTransaction(request, {
+    const result = await governed.signTransactionAuthorized(request, {
       txId: "tx-1",
       executionAuthorization: authorization,
       executionPayloadDigest: authorization.payloadDigest,
@@ -69,7 +69,7 @@ describe("GovernedVault", () => {
     });
 
     await expect(
-      governed.signTransaction(
+      governed.signTransactionAuthorized(
         { ...request, value: "2" },
         {
           txId: "tx-mismatch",
@@ -92,7 +92,7 @@ describe("GovernedVault", () => {
     const governed = new GovernedVault(rawVault, async () => {});
 
     await expect(
-      governed.signTransaction(request, {
+      governed.signTransactionAuthorized(request, {
         txId: "tx-missing",
         executionPayloadDigest: authorization.payloadDigest,
       }),
@@ -113,7 +113,7 @@ describe("GovernedVault", () => {
     });
 
     await expect(
-      governed.signTransaction(request, {
+      governed.signTransactionAuthorized(request, {
         txId: "tx-replay",
         executionAuthorization: authorization,
         executionPayloadDigest: authorization.payloadDigest,

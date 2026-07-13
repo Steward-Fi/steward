@@ -7,6 +7,7 @@ import {
   executionPayloadDigestForEvmSign,
   mintExecutionAuthorization,
   sha256Hex,
+  verifyExecutionAuthorization,
 } from "../services/execution-authorization";
 
 const TENANT_ID = `exec-auth-tenant-${Date.now()}`;
@@ -115,5 +116,38 @@ describe("execution authorization service", () => {
         payloadDigest: "d".repeat(64),
       }),
     ).rejects.toThrow("context does not match");
+  });
+
+  it("rejects expired, tenant/backend-mismatched, and tampered authorizations", async () => {
+    const payloadDigest = "e".repeat(64);
+    const expected = {
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      capability: "wallet.sign_transaction" as const,
+      backend: "local-vault" as const,
+      payloadDigest,
+    };
+    const authorization = await mintExecutionAuthorization({
+      requestId: "tx-exec-auth-negative",
+      ...expected,
+      policyRevisionHash: "f".repeat(64),
+    });
+
+    expect(() =>
+      verifyExecutionAuthorization(authorization, { ...expected, tenantId: "other-tenant" }),
+    ).toThrow("context does not match");
+    expect(() =>
+      verifyExecutionAuthorization(authorization, { ...expected, backend: "external-custody" }),
+    ).toThrow("context does not match");
+    expect(() =>
+      verifyExecutionAuthorization({ ...authorization, signature: "tampered" }, expected),
+    ).toThrow("signature is invalid");
+
+    const expired = await mintExecutionAuthorization({
+      requestId: "tx-exec-auth-expired",
+      ...expected,
+      now: new Date(Date.now() - 61_000),
+    });
+    expect(() => verifyExecutionAuthorization(expired, expected)).toThrow("expired");
   });
 });

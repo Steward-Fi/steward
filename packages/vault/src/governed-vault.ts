@@ -79,7 +79,7 @@ export class GovernedVault {
     private readonly consumeExecutionAuthorization: ExecutionAuthorizationConsumeCallback,
   ) {}
 
-  async signTransaction(
+  async signTransactionAuthorized(
     request: SignRequest,
     options: GovernedSignTransactionOptions,
   ): Promise<string> {

@@ -2164,7 +2164,7 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
                 });
                 throw error;
               }
-            }).signTransaction(signRequest, {
+            }).signTransactionAuthorized(signRequest, {
               txId,
               policyResults: evaluation.results,
               status: txStatus,
@@ -3722,7 +3722,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               throw error;
             }
           });
-          txHash = await governedVault.signTransaction(approvalSignRequest, {
+          txHash = await governedVault.signTransactionAuthorized(approvalSignRequest, {
             txId,
             policyResults: currentEvaluation.results,
             status: shouldBroadcast ? "broadcast" : "signed",
