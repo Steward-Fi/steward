@@ -110,6 +110,15 @@ export class GovernedVault {
       executionPayloadDigest: _digest,
       ...rawOptions
     } = options;
-    return this.rawVault.signTransaction(request, rawOptions);
+    // Bind the raw signer to the SAME custody backend this governed
+    // authorization was consumed against ("local-vault"). The raw vault
+    // re-resolves the backend from the fresh wallet lookup it will sign with
+    // and fails closed (BackendBindingMismatchError) if the wallet has flipped
+    // to third-party custody since resolveExecutionBackend ran, closing the
+    // resolution->sign TOCTOU before any external provider is reached.
+    return this.rawVault.signTransaction(request, {
+      ...rawOptions,
+      expectedBackend: "local-vault",
+    });
   }
 }

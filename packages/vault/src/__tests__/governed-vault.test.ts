@@ -122,6 +122,37 @@ describe("GovernedVault", () => {
     expect(rawCalled).toBe(false);
   });
 
+  it("threads expectedBackend=local-vault into the raw signer (TOCTOU backend binding)", async () => {
+    // The governed path is only ever consumed against backend "local-vault"
+    // (see the consume callback's expected.backend). It must bind the raw
+    // signer to that same backend so the vault layer can re-resolve and fail
+    // closed if the wallet flipped to third-party custody between resolution and
+    // signing. This asserts the option is forwarded verbatim.
+    let observedOptions: SignTransactionOptions | undefined;
+    const rawVault = {
+      async signTransaction(_request: SignRequest, options: SignTransactionOptions) {
+        observedOptions = options;
+        return "0xsigned";
+      },
+    } as Vault;
+    const governed = new GovernedVault(rawVault, async () => {});
+
+    await governed.signTransactionAuthorized(request, {
+      txId: "tx-bound",
+      executionAuthorization: authorization,
+      executionPayloadDigest: authorization.payloadDigest,
+    });
+
+    expect(observedOptions?.expectedBackend).toBe("local-vault");
+    // The gateway-only fields are stripped before reaching the raw signer.
+    expect(
+      (observedOptions as { executionAuthorization?: unknown }).executionAuthorization,
+    ).toBeUndefined();
+    expect(
+      (observedOptions as { executionPayloadDigest?: unknown }).executionPayloadDigest,
+    ).toBeUndefined();
+  });
+
   it("digest binds normalized intent via the shared canonicalizer (safe-integer validated)", () => {
     // Field-order independence proves the shared canonicalizer is used.
     const a = executionPayloadDigestForGovernedEvmSign({

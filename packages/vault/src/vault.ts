@@ -307,6 +307,42 @@ export interface SignTransactionOptions {
   txId?: string;
   policyResults?: PolicyResult[];
   status?: TxStatus;
+  /**
+   * The custody backend the caller's authorization is cryptographically bound
+   * to (set by the governed execution-gateway path to "local-vault"). When
+   * present, {@link Vault.signTransaction} RE-RESOLVES the backend from the SAME
+   * fresh wallet lookup it will actually sign with and asserts it matches this
+   * bound backend BEFORE routing to any provider. This closes the
+   * resolveExecutionBackend -> sign TOCTOU: if the wallet's backend flips (a
+   * local key is removed and an third-party-custody key inserted) between the
+   * gateway's precheck and the raw sign, a local-vault-bound authorization can
+   * no longer reach the third-party provider. Absent (undefined) preserves the
+   * legacy, un-gateway-bound behavior for non-gateway callers.
+   */
+  expectedBackend?: "local-vault";
+}
+
+/**
+ * Thrown when a governed (gateway-authorized) sign request that is bound to a
+ * specific custody backend re-resolves at signing time to a DIFFERENT backend.
+ * The gateway mints authorizations bound to "local-vault"; if the wallet has
+ * since flipped to third-party custody, the raw signer fails closed here before
+ * any third-party provider is reached (audited, fund-loss-safe).
+ */
+export class BackendBindingMismatchError extends Error {
+  readonly code = "backend_binding_mismatch";
+  constructor(
+    readonly expectedBackend: "local-vault",
+    readonly resolvedBackend: "third-party-custody",
+  ) {
+    super(
+      `Execution backend binding mismatch: authorization is bound to ` +
+        `"${expectedBackend}" but the wallet re-resolved to "${resolvedBackend}" ` +
+        `at signing time. Refusing to route a ${expectedBackend}-bound ` +
+        `authorization to the third-party custody provider.`,
+    );
+    this.name = "BackendBindingMismatchError";
+  }
 }
 
 interface MnemonicWalletMaterial {
@@ -1294,6 +1330,17 @@ export class Vault {
         venue,
       });
       if (externalWallet) {
+        // Backend-binding re-resolution (TOCTOU close).
+        // This branch means the request re-resolved to external custody using
+        // the SAME fresh wallet lookup that will actually sign (no second racy
+        // read). If the caller's authorization was bound to "local-vault" (the
+        // only gateway-supported backend), the wallet's backend has FLIPPED
+        // since the gateway's resolveExecutionBackend precheck. Fail closed
+        // BEFORE any provider routing so a local-vault-bound authorization can
+        // never reach the external custody provider.
+        if (options.expectedBackend === "local-vault") {
+          throw new BackendBindingMismatchError("local-vault", "third-party-custody");
+        }
         if (request.walletAddress && externalWallet.address) {
           if (externalWallet.address.toLowerCase() !== request.walletAddress.toLowerCase()) {
             throw new Error(
