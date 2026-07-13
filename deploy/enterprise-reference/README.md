@@ -18,7 +18,9 @@ docker compose --env-file deploy/enterprise-reference/.env \
   -f deploy/enterprise-reference/docker-compose.yml \
   --profile backup run --rm backup
 
-bun run packages/cli/src/index.ts tenant create --id acme --name Acme --api-key stw_tenant_change_me
+# Supply a REAL, unique tenant API key you generated yourself. Never ship or
+# reuse a placeholder/`change-me` value — it becomes a usable machine credential.
+bun run packages/cli/src/index.ts tenant create --id acme --name Acme --api-key "$(openssl rand -hex 24 | sed 's/^/stw_tenant_/')"
 bun run packages/cli/src/index.ts audit bundle --from 1 --out bundle.json
 node scripts/verify-evidence-bundle.mjs bundle.json
 ```
