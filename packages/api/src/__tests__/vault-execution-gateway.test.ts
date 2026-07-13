@@ -522,14 +522,12 @@ describe("vault EVM execution gateway", () => {
       walletAddress: "0x00000000000000000000000000000000000000ff",
     });
     // Non-local-custody EVM wallet, NO encrypted_chain_keys row => the resolver
-    // returns a non-local-vault backend. The custody discriminator and metadata
-    // key are built from char codes at RUNTIME so their exact bytes match the
-    // vault package's isExternalKeyWalletMetadata literals in this harness.
-    const CUSTODY_KIND = String.fromCharCode(101, 120, 116, 101, 114, 110, 97, 108);
-    const CUSTODY_KEY_FIELD = `${CUSTODY_KIND}Key`;
+    // returns a non-local-vault backend. The custody discriminator "external" and
+    // its metadata key "third-partyKey" matches the vault package,
+    // aligning with isExternalKeyWalletMetadata string literals exactly.
     const custodyMetadata: Record<string, unknown> = {
-      custody: CUSTODY_KIND,
-      [CUSTODY_KEY_FIELD]: {
+      custody: "external",
+      externalKey: {
         providerId: "test-kms",
         keyId: "key-ext-1",
         registeredAt: new Date().toISOString(),
