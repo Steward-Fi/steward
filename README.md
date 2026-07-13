@@ -1,52 +1,36 @@
 # Steward
 
-auth + wallet infrastructure for autonomous agents. open source. self-hostable. policy enforced at the signing layer.
+Steward is the self-hostable authority plane for private enterprise agents. It gives agents scoped wallet and API capabilities without exposing secrets, routes sensitive actions through policy and human approval, and produces signed execution evidence. Bring your own agent runtime, cloud, and custodian.
 
 [![npm](https://img.shields.io/npm/v/@stwd/sdk)](https://www.npmjs.com/package/@stwd/sdk)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![API](https://img.shields.io/badge/API-live-brightgreen)](https://api.steward.fi)
 [![Docs](https://img.shields.io/badge/docs-steward.fi-blue)](https://docs.steward.fi)
 
----
+## what exists today
 
-## the problem
+Steward provides encrypted wallet and credential storage, authenticated multi-tenant APIs, policy evaluation and approval workflows, a credential-injecting proxy, operator freeze controls, and an HMAC-chained execution record. Wallet and API capabilities are the core. Trading venue packages are optional extensions.
 
-AI agents need wallet keys, API keys, database credentials. today these live as plaintext environment variables, one prompt injection away from exfiltration. no spending controls, no audit trail, no kill switch.
-
-existing embedded-wallet platforms were built for consumer apps, not agents. they're closed source, can't be self-hosted, charge per-transaction fees, and have no concept of policy enforcement or autonomous operation.
-
-## the solution
-
-Steward sits between agents and everything they access. four pillars:
-
-1. **vault.** AES-256-GCM encrypted keys. EVM (7 chains) + Solana. keys never exist in plaintext outside a signing operation.
-2. **policy engine.** 6 composable rule types evaluated before every action. spending limits, rate limits, address whitelists, time windows, auto-approve thresholds.
-3. **auth.** passkeys, email magic links, SIWE, Google/Discord OAuth. JWT sessions with refresh token rotation.
-4. **proxy gateway.** credential injection for any third-party API. agents never see raw keys. full audit trail.
-
-## how it works in practice
-
-an agent (or the app delegating to one) holds only a Steward URL and a scoped JWT. it never holds private keys. when it wants to act, its LLM sends a signing request; the policy engine evaluates the request against the agent's policy; the vault signs or refuses; an audit event is emitted either way.
-
-the key never reaches the model, and compromised app code cannot exceed the policy. spend caps, allowlists, rate limits, and an atomic freeze switch are enforced in the vault itself, before any signature is produced.
-
----
+| Area | Current implementation |
+|---|---|
+| **Custody** | Wallet keys are encrypted at rest under an operator-held root. An optional KMS envelope is available, with an adapter seam for third-party custody providers. |
+| **Policy boundary** | Policy is evaluated in API route handlers before governed routes call signing operations. The vault primitive does not independently enforce policy. |
+| **Approvals** | Sensitive actions can be held for human review, then approved or denied through API and UI workflows. |
+| **Execution record** | Steward writes a machine-readable, HMAC-chained audit record. Offline, independently verifiable Ed25519 evidence bundles are roadmap work. |
+| **Deployment** | Self-hosted Docker and embedded PGLite modes are available. Operators bring their own runtime, cloud, and custody configuration. |
 
 ## architecture
 
+```text
+agent runtime              Steward authority plane             target systems
+┌─────────────┐      ┌────────────────────────────┐      ┌──────────────────┐
+│ scoped token│─────>│ auth + route policy checks │─────>│ chains and APIs  │
+│ no raw keys │      │ approvals                  │      │ custody provider │
+│ no API keys │      │ encrypted wallet/secrets   │      └──────────────────┘
+└─────────────┘      │ credential proxy           │
+                     │ HMAC-chained audit record  │
+                     └────────────────────────────┘
 ```
-agent / app              Steward                        third-party
-┌─────────────┐    ┌──────────────────────┐    ┌──────────────────┐
-│ STEWARD_URL │───>│ auth (JWT/passkey)   │    │ chains (EVM/Sol) │
-│ STEWARD_JWT │    │ policy engine        │───>│ OpenAI/Anthropic │
-│             │    │ wallet vault         │    │ any API          │
-│ no API keys │    │ secret vault         │    └──────────────────┘
-│ no priv keys│    │ proxy gateway        │
-└─────────────┘    │ audit log            │
-                   └──────────────────────┘
-```
-
----
 
 ## quick start
 
@@ -67,7 +51,7 @@ const steward = new StewardClient({
 const agent = await steward.createWallet("trading-bot", "Trading Bot");
 console.log(agent.walletAddresses); // { evm: "0x...", solana: "..." }
 
-// sign a transaction (policy-enforced)
+// request signing through a policy-evaluating API route
 const result = await steward.signTransaction("trading-bot", {
   to: "0xRecipient",
   value: "10000000000000000", // 0.01 ETH
@@ -193,7 +177,7 @@ full list in [`.env.example`](.env.example). see [deployment guide](docs/deploym
 - **open source.** MIT licensed, full source available.
 - **self-hostable.** docker, embedded PGLite, or hosted.
 - **full auth surface.** passkey / email / SIWE / OAuth.
-- **policy enforcement at the vault layer.** 6 composable rule types evaluated before any signature is produced. compromised app code cannot bypass.
+- **policy evaluation in governed API routes.** 6 composable rule types are evaluated before those routes call the vault. The vault primitive is not an independent policy boundary.
 - **agent-native.** built from day one for autonomous operation: approval queues, audit log, kill-switch.
 - **credential proxy.** inject keys for any third-party API. agents never see raw secrets.
 
@@ -203,7 +187,7 @@ full list in [`.env.example`](.env.example). see [deployment guide](docs/deploym
 
 Ethereum, Base, Polygon, Arbitrum, BSC, Gnosis, Base Sepolia, BSC Testnet, Solana, Bitcoin,
 Monero (self-hosted deployments; official `monero-wallet-rpc` sidecar against remote public
-nodes — keys never leave your host, policy enforced before every relay)
+nodes: keys never leave your host, policy evaluated by the relay route)
 
 ---
 

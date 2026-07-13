@@ -1,12 +1,14 @@
 # Steward Vision
 
+Steward is the self-hostable authority plane for private enterprise agents. It gives agents scoped wallet and API capabilities without exposing secrets, routes sensitive actions through policy and human approval, and produces signed execution evidence. Bring your own agent runtime, cloud, and custodian.
+
 ## Mission
 
-Every agent deserves a bank account it can't be robbed of.
+Every agent deserves scoped authority without direct access to the underlying secrets.
 
 AI agents are managing real money, signing real transactions, calling paid APIs. The infrastructure securing those operations is a `.env` file with plaintext keys. One prompt injection, one leaked log, one compromised dependency, and everything is gone.
 
-Steward exists to make that impossible. Not through trust, through architecture: encrypted vaults, policy enforcement at the signing layer, credential isolation at the proxy layer. Agents operate autonomously within constraints their operators define. No exceptions, no workarounds.
+Steward reduces exposure by combining encrypted vaults, policy evaluation in API route handlers before signing, and credential isolation at the proxy layer. Agents operate within constraints their operators define. A signer-level authorization boundary is on the roadmap.
 
 ---
 
@@ -18,7 +20,7 @@ Four pillars. Each solves a distinct problem. Together they form a complete secu
 AES-256-GCM encrypted key storage. Per-agent encryption keys derived from master password + agent ID via PBKDF2. Private keys are decrypted ephemerally for signing and never returned to callers. Supports EVM (7 chains) and Solana (Ed25519).
 
 ### Policy Engine
-Composable rules evaluated synchronously before every signing operation. Six types: spending limits (per-tx, daily, weekly), approved address lists, rate limits, time windows, auto-approve thresholds, and allowed chains. Hard policies reject. Soft policies (auto-approve-threshold) queue for human review. All policies must pass for a transaction to be signed. The engine is stateless; spend and rate context are pre-fetched and injected.
+Composable rules evaluated synchronously by Steward API routes before they call the vault for governed signing operations. Six types: spending limits (per-tx, daily, weekly), approved address lists, rate limits, time windows, auto-approve thresholds, and allowed chains. Hard policies reject. Soft policies (auto-approve-threshold) queue for human review. A failed policy evaluation stops the governed API request before signing. The engine is stateless; spend and rate context are pre-fetched and injected.
 
 ### Auth
 User authentication with passkeys (WebAuthn), email magic links, Sign-In With Ethereum, and OAuth (Google, Discord). JWT sessions with refresh token rotation. Users are global identities that can belong to multiple tenants. On first login, users get an auto-provisioned embedded wallet.
@@ -41,11 +43,11 @@ Six capabilities define the space. Most platforms cover two or three:
 | **Open source** | Audit the code. Fork it. No black boxes. |
 | **Self-hostable** | Run it on your infra. No vendor dependency. No token required. |
 | **Auth** | User login (passkeys, email, OAuth, SIWE). Not just API keys. |
-| **Policy enforcement** | Rules enforced at the vault, not the application layer. |
+| **Policy evaluation** | Rules evaluated in Steward API signing routes before the vault is called. |
 | **Agent-native** | Built for autonomous operation, not retrofitted from consumer auth. |
 | **Credential proxy** | Manages all sensitive credentials, not just wallet keys. |
 
-Steward checks all six. Existing platforms each miss critical boxes — most are closed and hosted-only, depend on an external MPC network, lack auth or policy enforcement, or expose only low-level signing primitives without auth, policies, or a credential proxy.
+Steward checks all six. Existing platforms each miss critical boxes: most are closed and hosted-only, depend on an external MPC network, lack auth or policy enforcement, or expose only low-level signing primitives without auth, policies, or a credential proxy.
 
 ---
 
@@ -96,4 +98,4 @@ Same API surface. Same guarantees. Write the integration once.
 
 **No token required.** Steward is infrastructure, not a protocol. No governance token, no staking requirement, no on-chain dependency for basic operations.
 
-**Policy is architecture, not advice.** Rules are enforced at the cryptographic signing layer. Not in middleware. Not in application code. Not as suggestions. If the policy says no, the vault won't sign it.
+**Policy is first-class.** Steward API signing routes evaluate policies before calling the vault, and a failed evaluation stops that request before key decryption. Moving authorization into a signer-level boundary is a roadmap item.

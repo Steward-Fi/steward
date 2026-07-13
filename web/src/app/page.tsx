@@ -57,21 +57,22 @@ function Hero() {
               className="hero-rise mt-6 text-lg text-text-secondary max-w-lg leading-relaxed text-pretty"
               style={{ animationDelay: "0.3s" }}
             >
-              The open authority and execution layer for AI agents. Policy before every privileged
-              action. Human approval when it matters. A full audit trail, always.
+              The self-hostable authority plane for private enterprise agents. Give agents scoped
+              wallet and API capabilities without exposing secrets, with policy checks, human
+              approval, and an HMAC-chained execution record.
             </p>
 
             <div
               className="hero-fade mt-6 flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[0.7rem] uppercase tracking-wider text-text-tertiary"
               style={{ animationDelay: "0.42s" }}
             >
-              <span>Any model</span>
+              <span>Your runtime</span>
               <span className="text-border">/</span>
-              <span>Any runtime</span>
+              <span>Your cloud</span>
               <span className="text-border">/</span>
-              <span>Any chain</span>
+              <span>Your custodian</span>
               <span className="text-border">/</span>
-              <span className={accent}>Your infrastructure</span>
+              <span className={accent}>Your authority plane</span>
             </div>
 
             <div
@@ -105,12 +106,12 @@ function Hero() {
               <CodeBlock
                 filename="agent.ts"
                 language="typescript"
-                code={`// Agent asks. Steward decides.
-const swap = await steward.signTransaction(agentId, {
-  to: "0xUniswapRouter",
+                code={`// Agent asks. Steward evaluates.
+const payment = await steward.signTransaction(agentId, {
+  to: "0xApprovedVendor",
   value: "500000000000000000",
 })
-// -> policy check -> sign -> "0x9f3c..."
+// -> route policy check -> sign -> "0x9f3c..."
 
 // Over the daily cap: held for a human
 // -> { status: "pending_approval" }
@@ -222,13 +223,13 @@ function PipelineSection() {
     {
       idx: "03",
       label: "Simulation + execution",
-      body: "The action is simulated, then signed and executed across the target rail.",
+      body: "Where supported, the action is simulated, then signed and executed across the target rail.",
       decision: true,
     },
     {
       idx: "04",
       label: "Audit + reconciliation",
-      body: "Every decision and effect lands in an append-only, tamper-evident record.",
+      body: "Requests, decisions, and effects land in an HMAC-chained, machine-readable record.",
       decision: false,
     },
   ];
@@ -248,8 +249,9 @@ function PipelineSection() {
           </Reveal>
           <Reveal delay={0.1}>
             <p className="mt-6 text-text-secondary leading-relaxed max-w-md text-pretty">
-              Every privileged action crosses the same boundary. The model never needs custody of
-              the underlying authority. It asks, and Steward decides, executes, and records.
+              Privileged actions enter Steward through authenticated API routes. Those routes
+              evaluate policy and approvals before calling the relevant signing or proxy operation,
+              then record the request, decision, and effect.
             </p>
           </Reveal>
           <Reveal delay={0.18}>
@@ -322,12 +324,12 @@ function ExecutionSection() {
     {
       tag: "evm.swap",
       title: "Governed EVM swap",
-      body: "Prepare, execute, reconcile with simulation gates and durable intents. A dropped connection never means a lost or double transaction.",
+      body: "Prepare and execute an EVM swap through policy-aware API routes, with durable intents for reconciliation.",
     },
     {
       tag: "trade.session",
       title: "Venue-scoped trading",
-      body: "Hyperliquid and Polymarket sessions with spend caps and a freeze switch. Authority is bounded to a venue, a size, and a window.",
+      body: "Optional Hyperliquid and Polymarket packages support venue-scoped sessions, spend caps, and operator controls.",
     },
     {
       tag: "proxy.inject",
@@ -342,7 +344,7 @@ function ExecutionSection() {
     {
       tag: "sign.freeze",
       title: "Atomic freeze",
-      body: "One kill switch halts all signing across every wallet and session, instantly, without redeploying the agent.",
+      body: "An operator freeze control can halt signing without redeploying the agent.",
     },
     {
       tag: "audit.log",
@@ -360,14 +362,14 @@ function ExecutionSection() {
               Execution
             </p>
             <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
-              From API access to financial execution.{" "}
-              <span className={accent}>One policy plane.</span>
+              Wallet and API authority. <span className={accent}>One operator plane.</span>
             </h2>
           </Reveal>
           <Reveal delay={0.1}>
             <p className="mt-6 text-text-secondary leading-relaxed max-w-sm text-pretty">
-              These are not roadmap items. Signing, trading, proxying, and grants all run behind the
-              same boundary and land in the same audit trail.
+              Today Steward provides wallet signing, credential proxying, capability grants,
+              approval workflows, and an HMAC-chained audit record. Trading packages are optional
+              extensions.
             </p>
           </Reveal>
         </div>
@@ -456,13 +458,13 @@ const res = await openai.chat.completions.create({
             <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02]">
               Ask for the action.
               <br />
-              <span className={accent}>Steward enforces it.</span>
+              <span className={accent}>Steward evaluates it.</span>
             </h2>
           </Reveal>
           <Reveal delay={0.15}>
             <p className="mt-6 text-text-secondary leading-relaxed text-pretty">
-              One TypeScript client for signing, trading, grants, and proxying. It works with any
-              agent framework and any model, because the authority lives in Steward, not the prompt.
+              One TypeScript client for signing, grants, proxying, and optional trading extensions.
+              Bring your own agent framework, model, cloud, and custody integration.
             </p>
           </Reveal>
           <Reveal delay={0.25}>
@@ -501,7 +503,7 @@ function AgentsSection() {
     },
     {
       t: "Bounded financial permissions",
-      d: "Caps, allowlists, and windows are enforced in the vault, not suggested in a prompt.",
+      d: "Caps, allowlists, and windows are evaluated in Steward API routes before those routes call the vault.",
     },
     {
       t: "Ambiguous-outcome recovery",
@@ -572,8 +574,8 @@ function SpecsSection() {
       <div className="max-w-[1400px] mx-auto">
         <Reveal>
           <p className="text-text-secondary text-sm mb-8 max-w-2xl">
-            Built to enterprise security standards. Audited paths, encrypted at rest, fast enough to
-            sit in front of every call.
+            Designed for private enterprise deployments, with encrypted storage, explicit policy
+            paths, and operator-controlled infrastructure.
           </p>
         </Reveal>
         <div className="grid grid-cols-2 lg:grid-cols-4 border-t border-l border-border-subtle">
@@ -602,13 +604,17 @@ function ComparisonSection() {
   const rows = [
     { feature: "Source", steward: "Open source, MIT", vendor: "Closed, proprietary" },
     { feature: "Hosting", steward: "Self-host or managed", vendor: "Hosted only" },
-    { feature: "Keys and data", steward: "You own them", vendor: "On their infrastructure" },
+    {
+      feature: "Custody",
+      steward: "Operator-held root, optional KMS envelope",
+      vendor: "Vendor-defined",
+    },
     {
       feature: "Policy engine",
-      steward: "Enforced before every action",
-      vendor: "Bolted on, if any",
+      steward: "Evaluated in API action routes",
+      vendor: "Vendor-defined",
     },
-    { feature: "Agents", steward: "First-class actors", vendor: "Human-paced pricing" },
+    { feature: "Agent runtime", steward: "Bring your own", vendor: "Vendor-dependent" },
     {
       feature: "Pricing",
       steward: "No per-transaction toll",
@@ -630,8 +636,9 @@ function ComparisonSection() {
           </Reveal>
           <Reveal delay={0.1}>
             <p className="mt-6 text-text-secondary leading-relaxed max-w-sm text-pretty">
-              Closed custody vendors hold your keys, meter your growth, and give you no way out.
-              Steward is the same authority on infrastructure you control.
+              Steward is self-hostable and vendor-neutral. It stores keys encrypted under an
+              operator-held root, supports an optional KMS envelope, and exposes a seam for
+              third-party custody providers.
             </p>
           </Reveal>
         </div>
@@ -728,8 +735,9 @@ function OpenSourceSection() {
         </Reveal>
         <Reveal delay={0.1}>
           <p className="mt-7 text-lg text-text-secondary leading-relaxed max-w-xl mx-auto text-pretty">
-            MIT-licensed, self-hostable, and vendor-neutral, with no per-transaction toll. Own your
-            keys, your policies, your data, and your audit trail, on infrastructure you control.
+            MIT-licensed, self-hostable, and vendor-neutral, with no per-transaction toll. Choose
+            your runtime, cloud, and custodian while keeping policy, approvals, and execution
+            records under operator control.
           </p>
         </Reveal>
         <Reveal delay={0.16}>
@@ -783,7 +791,7 @@ function Footer() {
             <span className="font-display text-base font-bold tracking-tight">steward</span>
           </div>
           <p className="text-xs text-text-tertiary mt-1.5">
-            The open authority and execution layer for AI agents.
+            The self-hostable authority plane for private enterprise agents.
           </p>
         </div>
         <div className="flex items-center gap-6 text-sm text-text-secondary">
