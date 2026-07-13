@@ -201,6 +201,7 @@ export async function holdProxyApprovalRequest(input: {
   const safeHeaders = safeProxyApprovalHeaders(input.request.headers);
   const preview = bodyPreview(input.request.headers, body);
   preview.bodySha256 = await sha256Hex(body);
+  const idempotencyKey = safeHeaders["idempotency-key"] ?? null;
   const digest = await canonicalProxyApprovalDigest({
     tenantId: input.tenantId,
     agentId: input.agentId,
@@ -211,6 +212,24 @@ export async function holdProxyApprovalRequest(input: {
     safeHeaders,
     body,
   });
+  if (idempotencyKey) {
+    const [existing] = await getDb()
+      .select()
+      .from(pendingProxyRequests)
+      .where(
+        and(
+          eq(pendingProxyRequests.tenantId, input.tenantId),
+          eq(pendingProxyRequests.agentId, input.agentId),
+          eq(pendingProxyRequests.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .limit(1);
+    if (existing) {
+      if (existing.requestDigest !== digest)
+        throw new Error("Idempotency-Key was already used for a different proxy request");
+      return existing;
+    }
+  }
   const encrypted = approvalKeyStore().encrypt(bytesToBase64(body), {
     tenantId: input.tenantId,
     agentId: input.agentId,
@@ -226,6 +245,7 @@ export async function holdProxyApprovalRequest(input: {
       targetHost: input.targetHost,
       targetPath: input.targetPath,
       requestDigest: digest,
+      idempotencyKey,
       preview,
       safeHeaders,
       bodyCiphertext: encrypted.ciphertext,
@@ -235,8 +255,24 @@ export async function holdProxyApprovalRequest(input: {
       status: "pending",
       expiresAt: new Date(Date.now() + approvalTtlMs(input.route)),
     })
+    .onConflictDoNothing()
     .returning();
-  return row;
+  if (row) return row;
+  if (idempotencyKey) {
+    const [existing] = await getDb()
+      .select()
+      .from(pendingProxyRequests)
+      .where(
+        and(
+          eq(pendingProxyRequests.tenantId, input.tenantId),
+          eq(pendingProxyRequests.agentId, input.agentId),
+          eq(pendingProxyRequests.idempotencyKey, idempotencyKey),
+        ),
+      )
+      .limit(1);
+    if (existing?.requestDigest === digest) return existing;
+  }
+  throw new Error("Failed to persist pending proxy request");
 }
 
 export function decryptPendingProxyBody(row: PendingProxyRequest): Uint8Array {

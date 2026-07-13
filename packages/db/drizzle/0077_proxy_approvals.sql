@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS "pending_proxy_requests" (
   "target_host" varchar(512) NOT NULL,
   "target_path" varchar(2048) NOT NULL,
   "request_digest" varchar(64) NOT NULL,
+  "idempotency_key" varchar(255),
   "preview" jsonb DEFAULT '{}'::jsonb NOT NULL,
   "safe_headers" jsonb DEFAULT '{}'::jsonb NOT NULL,
   "body_ciphertext" text NOT NULL,
@@ -60,3 +61,6 @@ CREATE INDEX IF NOT EXISTS "pending_proxy_requests_route_idx"
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "pending_proxy_requests_expires_at_idx"
   ON "pending_proxy_requests" USING btree ("expires_at");
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "pending_proxy_requests_idempotency_idx"
+  ON "pending_proxy_requests" USING btree ("tenant_id","agent_id","idempotency_key");

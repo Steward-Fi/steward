@@ -1173,7 +1173,12 @@ export async function handleProxy(c: Context): Promise<Response> {
         reason: "proxy-approval-hold-failed",
       });
       const error = err instanceof Error ? err.message : "Failed to hold proxy request";
-      return c.json({ ok: false, error }, error.includes("too large") ? 413 : 500);
+      const status = error.includes("too large")
+        ? 413
+        : error.includes("Idempotency-Key")
+          ? 409
+          : 500;
+      return c.json({ ok: false, error }, status);
     }
   }
 

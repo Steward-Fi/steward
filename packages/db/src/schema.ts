@@ -1649,6 +1649,7 @@ export const pendingProxyRequests = pgTable(
     targetHost: varchar("target_host", { length: 512 }).notNull(),
     targetPath: varchar("target_path", { length: 2048 }).notNull(),
     requestDigest: varchar("request_digest", { length: 64 }).notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 255 }),
     preview: jsonb("preview").$type<Record<string, unknown>>().notNull().default({}),
     safeHeaders: jsonb("safe_headers").$type<Record<string, string>>().notNull().default({}),
     bodyCiphertext: text("body_ciphertext").notNull(),
@@ -1680,6 +1681,11 @@ export const pendingProxyRequests = pgTable(
     agentIdx: index("pending_proxy_requests_agent_idx").on(table.agentId),
     routeIdx: index("pending_proxy_requests_route_idx").on(table.routeId),
     expiresAtIdx: index("pending_proxy_requests_expires_at_idx").on(table.expiresAt),
+    idempotencyIdx: uniqueIndex("pending_proxy_requests_idempotency_idx").on(
+      table.tenantId,
+      table.agentId,
+      table.idempotencyKey,
+    ),
   }),
 );
 

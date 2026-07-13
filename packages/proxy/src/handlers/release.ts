@@ -219,6 +219,7 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
       }
     } else {
       upstreamTruncated = true;
+      await response.body?.cancel();
     }
     const [executed] = await db
       .update(pendingProxyRequests)
