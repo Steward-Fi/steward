@@ -92,7 +92,6 @@ import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
 import { priceOracle, setNoStoreHeaders, verifySessionToken } from "../services/context";
-import { getConfiguredVault } from "../services/vault-factory";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
@@ -100,6 +99,7 @@ import {
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
 import { lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
+import { getConfiguredVault } from "../services/vault-factory";
 import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {

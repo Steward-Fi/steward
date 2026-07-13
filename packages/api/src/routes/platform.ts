@@ -68,13 +68,13 @@ import {
 import { normalizeGasSpendQuery, querySponsoredGasSpend } from "../services/gas-sponsorship";
 import { normalizeOidcProviders } from "../services/oidc-provider-config";
 import { getPolicyRulesValidationError } from "../services/policy-validation";
-import { getConfiguredVault } from "../services/vault-factory";
 import { lockUserSession, lockUserSessions } from "../services/session-lock";
 import {
   createTenantTestAccountConfig,
   publicTestAccount,
   redactedTestAccount,
 } from "../services/test-account-credentials";
+import { getConfiguredVault } from "../services/vault-factory";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import { getEmailAuthForTenant, invalidateEmailAuthForTenant } from "./auth";
 

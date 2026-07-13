@@ -1,6 +1,6 @@
+import { afterEach, describe, expect, it } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { afterEach, describe, expect, it } from "bun:test";
 import {
   _clearConfiguredVaultsForTests,
   configuredVaultStartupLogLine,
@@ -42,9 +42,7 @@ function restoreEnv(): void {
 }
 
 function stripComments(source: string): string {
-  return source
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:])\/\/.*$/gm, "$1");
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 }
 
 function productionTsFiles(dir: string): string[] {
