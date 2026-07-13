@@ -4,6 +4,7 @@
 
 export interface StewardPluginConfig {
   apiUrl: string;
+  proxyUrl?: string;
   apiKey?: string;
   bearerToken?: string;
   agentId: string;

@@ -53,6 +53,8 @@ import type {
   Intent,
   IntentCreate,
   IntentListOptions,
+  PendingProxyRequest,
+  PendingProxyRequestStatus,
   PlatformLinkAccountResult,
   PlatformTenantInvitation,
   PlatformTenantInvitationCreateResult,
@@ -4424,6 +4426,55 @@ export class StewardClient {
         body: JSON.stringify({ reason, deniedBy }),
       },
     );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Poll one held proxy request through the control-plane API. */
+  async getPendingProxyRequest(id: string): Promise<PendingProxyRequest> {
+    const response = await this.request<PendingProxyRequest, StewardErrorResponse>(
+      `/approvals/proxy/${encodeURIComponent(id)}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** List approval-gated proxy requests for an operator. */
+  async listPendingProxyRequests(
+    status?: PendingProxyRequestStatus,
+  ): Promise<PendingProxyRequest[]> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    const response = await this.request<PendingProxyRequest[], StewardErrorResponse>(
+      `/approvals/proxy${qs}`,
+    );
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Approve a held proxy request. It executes exactly once when the agent polls the proxy. */
+  async approveProxyRequest(
+    id: string,
+  ): Promise<{ id: string; status: PendingProxyRequestStatus }> {
+    const response = await this.request<
+      { id: string; status: PendingProxyRequestStatus },
+      StewardErrorResponse
+    >(`/approvals/proxy/${encodeURIComponent(id)}/approve`, { method: "POST", body: "{}" });
+    if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
+    return response.data;
+  }
+
+  /** Deny a held proxy request without forwarding it. */
+  async denyProxyRequest(
+    id: string,
+    reason?: string,
+  ): Promise<{ id: string; status: PendingProxyRequestStatus }> {
+    const response = await this.request<
+      { id: string; status: PendingProxyRequestStatus },
+      StewardErrorResponse
+    >(`/approvals/proxy/${encodeURIComponent(id)}/deny`, {
+      method: "POST",
+      body: JSON.stringify({ reason }),
+    });
     if (!response.ok) throw new StewardApiError(response.error, response.status, response.data);
     return response.data;
   }

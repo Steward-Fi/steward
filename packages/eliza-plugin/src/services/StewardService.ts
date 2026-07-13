@@ -6,6 +6,7 @@ import {
   type ApprovalStats,
   type GetBalanceResult,
   type GetHistoryResult,
+  type PendingProxyRequest,
   type PolicyRule,
   type SignMessageResult,
   type SignTransactionInput,
@@ -144,6 +145,7 @@ export class StewardService extends Service {
 
     return {
       apiUrl,
+      proxyUrl: settings.proxyUrl ?? env.STEWARD_PROXY_URL ?? apiUrl,
       apiKey: settings.apiKey ?? env.STEWARD_API_KEY,
       bearerToken: settings.bearerToken ?? env.STEWARD_JWT,
       agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId ?? "default",
@@ -223,6 +225,55 @@ export class StewardService extends Service {
   async getApprovalStats(): Promise<ApprovalStats> {
     this.assertConnected();
     return this.getClient().getApprovalStats();
+  }
+
+  async listPendingProxyRequests(): Promise<PendingProxyRequest[]> {
+    this.assertConnected();
+    return this.getClient().listPendingProxyRequests();
+  }
+
+  async getPendingProxyRequest(id: string): Promise<PendingProxyRequest> {
+    this.assertConnected();
+    return this.getClient().getPendingProxyRequest(id);
+  }
+
+  async callGovernedApi(input: {
+    url: string;
+    method?: string;
+    body?: unknown;
+    headers?: Record<string, string>;
+  }): Promise<{ held: boolean; status: number; data: unknown }> {
+    this.assertConnected();
+    const target = new URL(input.url);
+    if (target.protocol !== "https:") throw new Error("Governed API target must use https://");
+    const proxyBase = this.pluginConfig?.proxyUrl;
+    if (!proxyBase) throw new Error("STEWARD_PROXY_URL is not configured");
+    assertSecureApiUrl(proxyBase);
+    const headers = new Headers(input.headers);
+    const token = this.pluginConfig?.bearerToken;
+    if (!token) throw new Error("STEWARD_JWT is required for governed API calls");
+    headers.set("authorization", `Bearer ${token}`);
+    let body: string | undefined;
+    if (input.body !== undefined) {
+      body = typeof input.body === "string" ? input.body : JSON.stringify(input.body);
+      if (!headers.has("content-type")) headers.set("content-type", "application/json");
+    }
+    const response = await fetch(
+      `${proxyBase.replace(/\/$/, "")}/proxy/${target.host}${target.pathname}${target.search}`,
+      {
+        method: (input.method ?? "GET").toUpperCase(),
+        headers,
+        body,
+      },
+    );
+    const data = await response.json().catch(() => null);
+    return {
+      held:
+        response.status === 202 &&
+        (data as { status?: string } | null)?.status === "pending_approval",
+      status: response.status,
+      data,
+    };
   }
 
   // ── Internal ────────────────────────────────────────────────────

@@ -1049,6 +1049,7 @@ export {
   encryptedChainKeys,
   encryptedKeys,
   intents,
+  pendingProxyRequests,
   policies,
   tenants,
   toPolicyRule,

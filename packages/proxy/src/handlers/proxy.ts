@@ -1112,7 +1112,23 @@ export async function handleProxy(c: Context): Promise<Response> {
     );
   }
 
-  const approvalReleaseId = requestHeader(c, "x-steward-proxy-approval-release");
+  // Only the in-process release handler can set this context value. Never trust
+  // a request header for approval bypass, since agents control all headers.
+  const approvalReleaseId = c.get("proxyApprovalRelease" as never) as string | undefined;
+  const approvalReleaseRouteId = c.get("proxyApprovalRouteId" as never) as string | undefined;
+  if (approvalReleaseId && approvalReleaseRouteId !== route.id) {
+    await recordRequiredAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 409,
+      latencyMs: Date.now() - startTime,
+      reason: "proxy-approval-route-mismatch",
+    });
+    return c.json({ ok: false, error: "Approved proxy route no longer matches" }, 409);
+  }
   if (route.requiresApproval && !approvalReleaseId) {
     try {
       const held = await holdProxyApprovalRequest({

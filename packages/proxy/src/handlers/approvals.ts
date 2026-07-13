@@ -5,9 +5,7 @@ import { type EncryptedKey, KeyStore } from "@stwd/vault";
 const MAX_HELD_PROXY_BODY_BYTES = Number(
   process.env.STEWARD_PROXY_APPROVAL_MAX_BODY_BYTES ?? 2 * 1024 * 1024,
 );
-const DEFAULT_APPROVAL_TTL_MS = Number(
-  process.env.STEWARD_PROXY_APPROVAL_TTL_MS ?? 15 * 60 * 1000,
-);
+const DEFAULT_APPROVAL_TTL_MS = Number(process.env.STEWARD_PROXY_APPROVAL_TTL_MS ?? 15 * 60 * 1000);
 
 const SENSITIVE_HEADER_NAMES = new Set([
   "authorization",
@@ -45,8 +43,12 @@ function bytesToString(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes);
 }
 
-function stringToBytes(value: string): Uint8Array {
-  return new TextEncoder().encode(value);
+function bytesToBase64(bytes: Uint8Array): string {
+  return Buffer.from(bytes).toString("base64");
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  return new Uint8Array(Buffer.from(value, "base64"));
 }
 
 async function sha256Hex(input: string | ArrayBuffer | Uint8Array): Promise<string> {
@@ -56,7 +58,7 @@ async function sha256Hex(input: string | ArrayBuffer | Uint8Array): Promise<stri
       : input instanceof Uint8Array
         ? input
         : input;
-  const digest = await crypto.subtle.digest("SHA-256", data);
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(data));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
@@ -113,7 +115,8 @@ async function readBoundedRequestBody(request: Request): Promise<Uint8Array> {
 
 function sanitizeBodyPreview(value: unknown, depth = 0): unknown {
   if (depth > 4) return "[truncated]";
-  if (Array.isArray(value)) return value.slice(0, 10).map((item) => sanitizeBodyPreview(item, depth + 1));
+  if (Array.isArray(value))
+    return value.slice(0, 10).map((item) => sanitizeBodyPreview(item, depth + 1));
   if (!value || typeof value !== "object") {
     if (typeof value === "string" && value.length > 256) return `${value.slice(0, 256)}...`;
     return value;
@@ -125,7 +128,7 @@ function sanitizeBodyPreview(value: unknown, depth = 0): unknown {
   return out;
 }
 
-function bodyPreview(headers: Headers, body: Uint8Array): Record<string, unknown> {
+export function bodyPreview(headers: Headers, body: Uint8Array): Record<string, unknown> {
   const contentType = headers.get("content-type") ?? "";
   const preview: Record<string, unknown> = {
     contentType: contentType || null,
@@ -203,7 +206,7 @@ export async function holdProxyApprovalRequest(input: {
     safeHeaders,
     body,
   });
-  const encrypted = approvalKeyStore().encrypt(bytesToString(body), {
+  const encrypted = approvalKeyStore().encrypt(bytesToBase64(body), {
     tenantId: input.tenantId,
     agentId: input.agentId,
     name: `pending-proxy:${digest}`,
@@ -243,10 +246,12 @@ export function decryptPendingProxyBody(row: PendingProxyRequest): Uint8Array {
     agentId: row.agentId,
     name: `pending-proxy:${row.requestDigest}`,
   });
-  return stringToBytes(plaintext);
+  return base64ToBytes(plaintext);
 }
 
-export async function markExpiredPendingProxyRequests(tenantId?: string): Promise<PendingProxyRequest[]> {
+export async function markExpiredPendingProxyRequests(
+  tenantId?: string,
+): Promise<PendingProxyRequest[]> {
   const rows = await getDb()
     .update(pendingProxyRequests)
     .set({ status: "expired", updatedAt: new Date() })
