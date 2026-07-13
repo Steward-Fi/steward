@@ -523,6 +523,101 @@ export const LEGACY_EVM_SIGN_CALL_SITES = [
   },
 ] as const satisfies readonly LegacyEvmSignCallSite[];
 
+/**
+ * Classification of a single raw `Vault.signTransaction(` call site in the
+ * production API source (packages/api/src, excluding __tests__).
+ *
+ *  - "migrated-invariant-guarded": a primary-EVM/approval site that is
+ *    unreachable for EVM flows because a nearby invariant guard throws before
+ *    it (the Solana primary-sign fallback and the transfer approval-replay
+ *    fallback). These are inside the two gateway-migrated routes.
+ *  - "legacy": a not-yet-gateway-migrated EVM sign surface, one-for-one with an
+ *    entry in LEGACY_EVM_SIGN_CALL_SITES (PR5b convergence).
+ */
+export interface RawEvmSignCallSite {
+  file: string;
+  /** Stable nearby source marker (route/function/guard string) unique enough to
+   *  anchor the call site without brittle line numbers. */
+  marker: string;
+  classification: "migrated-invariant-guarded" | "legacy";
+  reason: string;
+}
+
+/**
+ * COMPLETE inventory of every raw `Vault.signTransaction(` production call site
+ * across packages/api/src. The CI guard (packages/api execution gateway guard
+ * test) scans the production source repository-wide and asserts a one-for-one
+ * match: exact per-file raw-call counts against this inventory's per-file
+ * counts, AND that each occurrence anchors to a recognized marker here. Adding
+ * a new raw signTransaction call anywhere (vault.ts / intents.ts / user.ts / a
+ * NEW file) fails the guard until it is classified here; deleting an inventory
+ * entry without removing the call also fails.
+ */
+export const RAW_EVM_SIGN_INVENTORY = [
+  // ── packages/api/src/routes/vault.ts (3 raw calls) ──
+  {
+    file: "packages/api/src/routes/vault.ts",
+    marker: "invariant: primary EVM sign reached raw signer without gateway authorization",
+    classification: "migrated-invariant-guarded",
+    reason:
+      "Primary /sign Solana-only fallback. An isEvmSignRequest invariant guard throws immediately above it, so no EVM request can reach raw signing.",
+  },
+  {
+    file: "packages/api/src/routes/vault.ts",
+    marker: "/:agentId/actions/transfer",
+    classification: "legacy",
+    reason:
+      "Transfer action EVM sign; separate non-migrated surface. One-for-one with LEGACY_EVM_SIGN_CALL_SITES.",
+  },
+  {
+    file: "packages/api/src/routes/vault.ts",
+    marker: "invariant: primary EVM approval reached raw signer without gateway authorization",
+    classification: "migrated-invariant-guarded",
+    reason:
+      "Approval replay TRANSFER fallback. An isRawEvmSigningCandidate invariant guard throws for any primary-EVM candidate before it.",
+  },
+  // ── packages/api/src/routes/intents.ts (2 raw calls) ──
+  {
+    file: "packages/api/src/routes/intents.ts",
+    marker: "Transfer rejected by policy",
+    classification: "legacy",
+    reason:
+      "Legacy intent execution EVM sign (single-transfer branch); PR5b convergence. Anchored to its policy-rejection guard string.",
+  },
+  {
+    file: "packages/api/src/routes/intents.ts",
+    marker: "Batch calls rejected by policy",
+    classification: "legacy",
+    reason:
+      "Legacy intent batch-call execution EVM sign; PR5b convergence. Anchored to its batch policy-rejection guard string.",
+  },
+  // ── packages/api/src/routes/user.ts (1 raw call) ──
+  {
+    file: "packages/api/src/routes/user.ts",
+    marker: "/me/wallet/sign",
+    classification: "legacy",
+    reason: "Personal user-session EVM sign; PR5b convergence.",
+  },
+  // ── packages/api/src/routes/global-wallet.ts (1 raw call) ──
+  {
+    file: "packages/api/src/routes/global-wallet.ts",
+    marker: "eth_sendTransaction",
+    classification: "legacy",
+    reason: "Global wallet compatibility EVM sign; PR5b convergence.",
+  },
+] as const satisfies readonly RawEvmSignCallSite[];
+
+/**
+ * Exact expected raw `Vault.signTransaction(` call count per production source
+ * file. Derived from RAW_EVM_SIGN_INVENTORY so the two never drift. The CI
+ * scan asserts the actual per-file counts equal these.
+ */
+export const RAW_EVM_SIGN_EXPECTED_COUNTS: Readonly<Record<string, number>> =
+  RAW_EVM_SIGN_INVENTORY.reduce<Record<string, number>>((acc, site) => {
+    acc[site.file] = (acc[site.file] ?? 0) + 1;
+    return acc;
+  }, {});
+
 export const SECURITY_SURFACE_VAULT_METHODS = [
   ...new Set(
     SECURITY_SURFACE_OPERATIONS.flatMap((operation) =>

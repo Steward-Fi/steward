@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { LEGACY_EVM_SIGN_CALL_SITES, SECURITY_SURFACE_OPERATIONS } from "../security-surface.js";
+import {
+  LEGACY_EVM_SIGN_CALL_SITES,
+  RAW_EVM_SIGN_EXPECTED_COUNTS,
+  RAW_EVM_SIGN_INVENTORY,
+  SECURITY_SURFACE_OPERATIONS,
+} from "../security-surface.js";
 
 const read = async (path: string) => Bun.file(new URL(path, import.meta.url)).text();
 
@@ -38,16 +43,57 @@ describe("execution gateway guard", () => {
     expect(source).toContain("missing_or_malformed_transaction_action_payload");
   });
 
-  test("every raw signTransaction call site in the vault route is accounted for", async () => {
+  test("vault route raw signTransaction count matches the shared inventory", async () => {
     const source = await read("../../../api/src/routes/vault.ts");
-    const rawCalls = [...source.matchAll(/\bvault\.signTransaction\(/g)];
-    // Exactly three raw call sites are expected:
-    //  1. primary-sign Solana-only fallback (invariant-guarded)
-    //  2. transfer action EVM sign (separate non-migrated surface)
-    //  3. approval replay TRANSFER fallback (invariant-guarded)
-    // If a new raw call site is added, this test fails until it is classified
-    // (either gateway-migrated or added to LEGACY_EVM_SIGN_CALL_SITES).
-    expect(rawCalls.length).toBe(3);
+    const rawCalls = [...source.matchAll(/\b(?:vault|getVault\(\))\.signTransaction\(/g)];
+    // Derived from RAW_EVM_SIGN_INVENTORY (single source of truth), NOT a magic
+    // number. The full repository-wide one-for-one scan lives in packages/api
+    // (execution-gateway-inventory.test.ts) to avoid crossing package rootDirs;
+    // this is the in-package consistency check for the vault route file.
+    expect(rawCalls.length).toBe(RAW_EVM_SIGN_EXPECTED_COUNTS["packages/api/src/routes/vault.ts"]);
+  });
+
+  test("raw-sign inventory is internally consistent and reconciles with the legacy list", () => {
+    // Per-file expected counts are derived from the inventory and must not drift.
+    const recomputed = RAW_EVM_SIGN_INVENTORY.reduce<Record<string, number>>((acc, site) => {
+      acc[site.file] = (acc[site.file] ?? 0) + 1;
+      return acc;
+    }, {});
+    expect(RAW_EVM_SIGN_EXPECTED_COUNTS).toEqual(recomputed);
+
+    // LEGACY_EVM_SIGN_CALL_SITES and RAW_EVM_SIGN_INVENTORY are two lenses on the
+    // same raw-sign surface:
+    //  - LEGACY enumerates non-primary EVM sign SURFACES (route-local policy
+    //    only; PR5b convergence), including the vault.ts transfer + approval-
+    //    transfer branches.
+    //  - The inventory classifies each raw call by REACHABILITY: the two vault.ts
+    //    primary/approval fallbacks are "migrated-invariant-guarded" (an
+    //    invariant throws before them) even though the transfer surfaces they sit
+    //    beside are legacy.
+    // Reconcile at the file level: every file that appears in LEGACY must appear
+    // in the inventory, and the inventory must be a superset (it also carries the
+    // guarded primary-sign fallback that LEGACY does not list).
+    const legacyFiles = new Set(LEGACY_EVM_SIGN_CALL_SITES.map((s) => s.file));
+    const inventoryFiles = new Set(RAW_EVM_SIGN_INVENTORY.map((s) => s.file));
+    for (const file of legacyFiles) {
+      expect(inventoryFiles.has(file), `${file} must be in the raw-sign inventory`).toBe(true);
+    }
+
+    // The non-vault legacy files are pure legacy surfaces, so their inventory
+    // rows must all be classified "legacy" and one-for-one with LEGACY.
+    for (const file of inventoryFiles) {
+      if (file === "packages/api/src/routes/vault.ts") continue;
+      const invForFile = RAW_EVM_SIGN_INVENTORY.filter((s) => s.file === file);
+      const legacyForFile = LEGACY_EVM_SIGN_CALL_SITES.filter((s) => s.file === file);
+      expect(
+        invForFile.every((s) => s.classification === "legacy"),
+        `${file} raw calls must all be legacy-classified`,
+      ).toBe(true);
+      expect(
+        invForFile.length,
+        `${file} inventory count must equal its legacy call-site count`,
+      ).toBe(legacyForFile.length);
+    }
   });
 
   test("gateway claim is honestly scoped in the security surface", () => {
