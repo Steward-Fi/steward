@@ -228,13 +228,29 @@ export class StewardService extends Service {
   }
 
   async listPendingProxyRequests(): Promise<PendingProxyRequest[]> {
-    this.assertConnected();
-    return this.getClient().listPendingProxyRequests();
+    return this.proxyApprovalRequest<PendingProxyRequest[]>("/approvals/proxy");
   }
 
   async getPendingProxyRequest(id: string): Promise<PendingProxyRequest> {
+    return this.proxyApprovalRequest<PendingProxyRequest>(
+      `/approvals/proxy/${encodeURIComponent(id)}`,
+    );
+  }
+
+  private async proxyApprovalRequest<T>(path: string): Promise<T> {
     this.assertConnected();
-    return this.getClient().getPendingProxyRequest(id);
+    const proxyBase = this.pluginConfig?.proxyUrl;
+    const token = this.pluginConfig?.bearerToken;
+    if (!proxyBase || !token)
+      throw new Error("STEWARD_PROXY_URL and STEWARD_JWT are required for proxy approvals");
+    assertSecureApiUrl(proxyBase);
+    const response = await fetch(`${proxyBase.replace(/\/$/, "")}${path}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const payload = (await response.json()) as { ok?: boolean; data?: T; error?: string };
+    if (!response.ok || !payload.ok || payload.data === undefined)
+      throw new Error(payload.error ?? `Proxy approval request failed (${response.status})`);
+    return payload.data;
   }
 
   async callGovernedApi(input: {

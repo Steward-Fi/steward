@@ -18,7 +18,7 @@ import { cors } from "hono/cors";
 import { PROXY_PORT } from "./config";
 import { getAliasNames } from "./handlers/alias";
 import { handleProxy } from "./handlers/proxy";
-import { handlePendingProxyRequest } from "./handlers/release";
+import { handlePendingProxyRequest, listPendingProxyRequests } from "./handlers/release";
 import { authMiddleware } from "./middleware/auth";
 import { initProxyRedis, shutdownProxyRedis } from "./middleware/redis-enforcement";
 
@@ -56,6 +56,7 @@ app.get("/health", (c) =>
 // ─── All other routes go through auth + proxy ────────────────────────────────
 
 app.use("*", authMiddleware);
+app.get("/approvals/proxy", listPendingProxyRequests);
 app.get("/approvals/proxy/:id", handlePendingProxyRequest);
 app.all("*", handleProxy);
 

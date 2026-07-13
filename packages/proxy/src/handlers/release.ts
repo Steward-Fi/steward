@@ -62,6 +62,26 @@ function publicPending(row: PendingProxyRequest) {
   };
 }
 
+/** List held requests owned by the authenticated agent without exposing tenant peers. */
+export async function listPendingProxyRequests(c: Context): Promise<Response> {
+  const tenantId = c.get("tenantId") as string;
+  const agentId = c.get("agentId") as string;
+  const db = getDb();
+  const rows = await db
+    .select()
+    .from(pendingProxyRequests)
+    .where(
+      and(
+        eq(pendingProxyRequests.tenantId, tenantId),
+        eq(pendingProxyRequests.agentId, agentId),
+        inArray(pendingProxyRequests.status, ["pending", "approved", "executing"]),
+      ),
+    )
+    .orderBy(pendingProxyRequests.createdAt)
+    .limit(100);
+  return c.json({ ok: true, data: rows.map(publicPending) });
+}
+
 /** Agent-owned polling endpoint. An approved request is claimed exactly once and executed here. */
 export async function handlePendingProxyRequest(c: Context): Promise<Response> {
   const tenantId = c.get("tenantId") as string;
