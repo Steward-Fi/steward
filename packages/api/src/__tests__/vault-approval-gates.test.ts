@@ -152,6 +152,7 @@ describe("vault approval gates (real /approve path)", () => {
   beforeAll(async () => {
     process.env.STEWARD_PGLITE_MEMORY = "true";
     process.env.STEWARD_MASTER_PASSWORD = "approval-gate-master-password";
+    process.env.STEWARD_JWT_SECRET = "approval-gate-jwt-secret-with-enough-entropy-0123456789";
     process.env.STEWARD_AUDIT_HMAC_KEY ??=
       "approval-gate-test-audit-hmac-key-0123456789abcdef0123456789";
     const { db, client } = await createPGLiteDb("memory://");

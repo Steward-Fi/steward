@@ -2,6 +2,7 @@ export type SecuritySurfaceKind = "wallet-signing" | "key-material-export" | "cr
 
 export type EnforcementBoundary =
   | "route-policy"
+  | "gateway-authorized"
   | "route-policy-with-unsafe-flag"
   | "route-consent-with-unsafe-flag"
   | "route-mfa-break-glass"
@@ -90,9 +91,9 @@ export const SECURITY_SURFACE_OPERATIONS = [
     },
     unsafeFlags: ["STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING for unconstrained contract calls"],
     evidence: ["transactions row", "vault audit events", "webhook events"],
-    boundary: "route-policy",
+    boundary: "gateway-authorized",
     notes:
-      "Policy is enforced in API routes before Vault.signTransaction; Vault.signTransaction itself does not verify gateway authorization.",
+      "Primary EVM transaction signing and its approval replay mint a policy-bound execution authorization that is consumed immediately before raw Vault.signTransaction.",
   },
   {
     id: "wallet.message.sign",
