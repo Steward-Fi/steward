@@ -1,13 +1,11 @@
 ---
 title: "what is Steward?"
-description: "policy-gated wallet and credential infrastructure for autonomous AI agents. encrypted wallets, credential management, audit trail, embeddable React UI."
+description: "a self-hostable authority plane for private enterprise agents, with scoped wallet and API capabilities, policy, approvals, and execution records."
 ---
 
-Steward is a governance layer for autonomous AI agents. it provides
-encrypted wallet management, credential storage, route-level policy gates, API
-proxy with credential injection, and audit logging, so agents can interact
-with blockchains and third-party APIs without ever touching raw private keys
-or API credentials.
+Steward is the self-hostable authority plane for private enterprise agents. It gives agents scoped wallet and API capabilities without exposing secrets, routes sensitive actions through policy and human approval, and produces an HMAC-chained execution record. Bring your own agent runtime, cloud, and custodian.
+
+Today, keys are stored encrypted under an operator-held root, with an optional KMS envelope and a seam for third-party custody providers. Policy is evaluated in API route handlers before governed signing operations call the vault. Steward records requests, decisions, and effects in an HMAC-chained audit log. Offline independently verifiable evidence bundles are roadmap work.
 
 <CardGroup cols={2}>
   <Card title="wallet vault" icon="vault" href="/concepts/wallet-vault">
@@ -20,7 +18,7 @@ or API credentials.
     declarative policies evaluated before every action. spending limits, rate limits, address whitelists, time windows, all configurable per agent.
   </Card>
   <Card title="API proxy" icon="shuffle" href="/concepts/proxy-gateway">
-    all third-party API calls flow through Steward. credentials injected at the proxy, costs tracked, everything audited.
+    configured third-party API calls flow through Steward. credentials are injected at the proxy, with cost tracking and audit events.
   </Card>
 </CardGroup>
 
@@ -48,11 +46,12 @@ STEWARD_PROXY_URL=http://steward-proxy:8080
 STEWARD_AGENT_TOKEN=stwd_jwt_...
 ```
 
-supported API calls and transactions flow through Steward routes, where they are authenticated, policy-checked, logged, and metered before Vault signing or proxy credential injection happens.
+configured API calls and wallet actions enter Steward through authenticated routes. governed routes evaluate policy and approvals before calling signing or proxy operations, then record the result.
 
 ## who uses Steward?
 
-- **constrained trading agents.** an agent trading Hyperliquid perps under a tight Steward policy: long-only, major pairs, $100 per position, 5x max leverage, $300 daily open budget. the LLM never holds the key.
+- **private enterprise agents.** agents using scoped wallet or API capabilities for treasury operations, vendor payments, internal systems, and other sensitive workflows.
+- **constrained trading agents.** optional venue packages support bounded financial workflows without making trading the core platform.
 - **production multi-agent deployments.** platforms managing dozens of agents across a node fleet with on-chain transactions on Base mainnet.
 - **agent developers** building autonomous agents that need wallet access or API credential management.
 - **platform operators** running multi-tenant agent hosting who need security, cost control, and compliance.
@@ -60,7 +59,7 @@ supported API calls and transactions flow through Steward routes, where they are
 
 ## what's new
 
-Steward has grown beyond wallet management into a full agent infrastructure platform:
+Current authority-plane capabilities include:
 
 - **API proxy.** route any HTTP API call through Steward for credential injection, cost tracking, and audit logging.
 - **webhook events.** get notified on `tx.pending`, `tx.signed`, `spend.threshold`, `policy.violation`, and more.
