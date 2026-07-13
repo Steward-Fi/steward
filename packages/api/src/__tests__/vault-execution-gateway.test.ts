@@ -461,6 +461,20 @@ describe("vault EVM execution gateway", () => {
     await expectFailClosed(txId, "malformed_transaction_action_payload");
   });
 
+  it("fails closed on a present-null broadcast in the action payload", async () => {
+    const txId = "tx-fail-null-broadcast";
+    await seedPendingEvmApproval(txId, {
+      actionPayload: {
+        type: "transaction",
+        broadcast: null, // present null is not a boolean -> must fail closed
+        nonce: REPLAY_BASE.nonce,
+        gasLimit: REPLAY_BASE.gasLimit,
+        walletAddress: REPLAY_BASE.walletAddress,
+      },
+    });
+    await expectFailClosed(txId, "malformed_transaction_action_payload");
+  });
+
   it("fails closed on a wrong-type gasLimit in the action payload", async () => {
     const txId = "tx-fail-wrong-gaslimit";
     await seedPendingEvmApproval(txId, {
@@ -499,6 +513,75 @@ describe("vault EVM execution gateway", () => {
         nonce: REPLAY_BASE.nonce,
         gasLimit: REPLAY_BASE.gasLimit,
         walletAddress: 12345, // wrong type: number, must be a string
+      },
+    });
+    await expectFailClosed(txId, "malformed_transaction_action_payload");
+  });
+
+  // ── ROUND 3 / ITEM 1: present-null must fail closed (not be normalized away) ─
+  // A PRESENT null for nonce/gasLimit/venue/walletAddress is distinct from an
+  // absent key. The old validator used `x !== undefined && x !== null`, which
+  // treated a present null as "absent" and silently dropped it, mutating the
+  // digested intent without a rejection. The validator now distinguishes
+  // absence from present-null via Object.hasOwn, so each of these fails closed:
+  // 409 + malformed_transaction_action_payload audit + zero nonce rows + zero
+  // raw signer calls (all asserted by expectFailClosed). Legitimately-minted
+  // payloads never serialize explicit nulls for these fields (the
+  // transactionActionPayload builder omits undefined/null keys and jsonb never
+  // injects nulls), so these payloads can only be malformed/adversarial.
+
+  it("fails closed on a present-null nonce in the action payload", async () => {
+    const txId = "tx-fail-null-nonce";
+    await seedPendingEvmApproval(txId, {
+      actionPayload: {
+        type: "transaction",
+        broadcast: false,
+        nonce: null, // present null must be rejected, not normalized to omitted
+        gasLimit: REPLAY_BASE.gasLimit,
+        walletAddress: REPLAY_BASE.walletAddress,
+      },
+    });
+    await expectFailClosed(txId, "malformed_transaction_action_payload");
+  });
+
+  it("fails closed on a present-null gasLimit in the action payload", async () => {
+    const txId = "tx-fail-null-gaslimit";
+    await seedPendingEvmApproval(txId, {
+      actionPayload: {
+        type: "transaction",
+        broadcast: false,
+        nonce: REPLAY_BASE.nonce,
+        gasLimit: null, // present null must be rejected, not normalized to omitted
+        walletAddress: REPLAY_BASE.walletAddress,
+      },
+    });
+    await expectFailClosed(txId, "malformed_transaction_action_payload");
+  });
+
+  it("fails closed on a present-null venue in the action payload", async () => {
+    const txId = "tx-fail-null-venue";
+    await seedPendingEvmApproval(txId, {
+      actionPayload: {
+        type: "transaction",
+        broadcast: false,
+        nonce: REPLAY_BASE.nonce,
+        gasLimit: REPLAY_BASE.gasLimit,
+        venue: null, // present null must be rejected, not normalized to omitted
+        walletAddress: REPLAY_BASE.walletAddress,
+      },
+    });
+    await expectFailClosed(txId, "malformed_transaction_action_payload");
+  });
+
+  it("fails closed on a present-null walletAddress in the action payload", async () => {
+    const txId = "tx-fail-null-wallet";
+    await seedPendingEvmApproval(txId, {
+      actionPayload: {
+        type: "transaction",
+        broadcast: false,
+        nonce: REPLAY_BASE.nonce,
+        gasLimit: REPLAY_BASE.gasLimit,
+        walletAddress: null, // present null must be rejected, not normalized to omitted
       },
     });
     await expectFailClosed(txId, "malformed_transaction_action_payload");

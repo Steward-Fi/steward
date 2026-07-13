@@ -900,12 +900,17 @@ function getTransactionActionPayload(payload: unknown): {
     );
   }
 
-  // nonce: OPTIONAL, but if present must be a non-negative safe integer. A
-  // string/object/float/negative/unsafe-integer nonce was previously dropped,
-  // silently changing the digested intent (or later throwing deep in the shared
-  // normalizer without a specific rejection audit).
+  // nonce: OPTIONAL, but a PRESENT value (including an explicit null) must be a
+  // non-negative safe integer. Absence is distinguished from a present-null via
+  // Object.hasOwn: a legitimately-minted payload omits the key entirely (the
+  // transactionActionPayload builder spreads it in only when defined+non-null,
+  // and jsonb storage never injects nulls for omitted keys), so a present null
+  // can only come from a malformed/adversarial payload and must fail closed
+  // rather than be silently normalized to "omitted". A string/object/float/
+  // negative/unsafe-integer nonce was likewise previously dropped, silently
+  // changing the digested intent.
   let nonce: number | undefined;
-  if (value.nonce !== undefined && value.nonce !== null) {
+  if (Object.hasOwn(value, "nonce")) {
     if (typeof value.nonce !== "number" || !Number.isSafeInteger(value.nonce) || value.nonce < 0) {
       throw new TransactionActionPayloadValidationError(
         "transaction action payload 'nonce' must be a non-negative safe integer",
@@ -915,10 +920,12 @@ function getTransactionActionPayload(payload: unknown): {
     nonce = value.nonce;
   }
 
-  // gasLimit: OPTIONAL, but if present must be a decimal uint string (its actual
-  // contract, e.g. "65000"). A wrong-type gasLimit was previously dropped.
+  // gasLimit: OPTIONAL, but a PRESENT value (including explicit null) must be a
+  // decimal uint string (its actual contract, e.g. "65000"). Absence vs
+  // present-null distinguished via Object.hasOwn; a wrong-type or present-null
+  // gasLimit was previously dropped.
   let gasLimit: string | undefined;
-  if (value.gasLimit !== undefined && value.gasLimit !== null) {
+  if (Object.hasOwn(value, "gasLimit")) {
     if (!isUint256DecimalString(value.gasLimit)) {
       throw new TransactionActionPayloadValidationError(
         "transaction action payload 'gasLimit' must be a decimal uint string",
@@ -928,10 +935,12 @@ function getTransactionActionPayload(payload: unknown): {
     gasLimit = value.gasLimit;
   }
 
-  // venue / walletAddress: OPTIONAL, but if present must be strings. Wrong-type
-  // values were previously dropped, changing the resolved signing wallet/venue.
+  // venue / walletAddress: OPTIONAL, but a PRESENT value (including explicit
+  // null) must be a string. Absence vs present-null distinguished via
+  // Object.hasOwn; wrong-type or present-null values were previously dropped,
+  // changing the resolved signing wallet/venue.
   let venue: string | undefined;
-  if (value.venue !== undefined && value.venue !== null) {
+  if (Object.hasOwn(value, "venue")) {
     if (typeof value.venue !== "string") {
       throw new TransactionActionPayloadValidationError(
         "transaction action payload 'venue' must be a string",
@@ -942,7 +951,7 @@ function getTransactionActionPayload(payload: unknown): {
   }
 
   let walletAddress: string | undefined;
-  if (value.walletAddress !== undefined && value.walletAddress !== null) {
+  if (Object.hasOwn(value, "walletAddress")) {
     if (typeof value.walletAddress !== "string") {
       throw new TransactionActionPayloadValidationError(
         "transaction action payload 'walletAddress' must be a string",
