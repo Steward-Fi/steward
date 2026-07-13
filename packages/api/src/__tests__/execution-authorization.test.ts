@@ -165,15 +165,34 @@ describe("execution authorization service", () => {
       idempotencyKey: "idem-hmac-tamper",
     });
 
-    // Each mutation flips exactly one signed field; the HMAC verify must reject
-    // every one of them with an invalid-signature error. Context-checked fields
-    // (tenantId/agentId/capability/backend/payloadDigest/status) are verified
-    // separately via the context guard; here we prove the SIGNATURE itself binds
-    // the non-context fields the reviewer called out.
-    const tampers: Array<{
+    // The HMAC binds ALL 14 fields in signaturePayload():
+    //   id, requestId, tenantId, agentId, capability, payloadDigest, backend,
+    //   policyRevisionHash, approvalId, nonce, issuedAt, expiresAt, status,
+    //   idempotencyKey.
+    //
+    // verifyExecutionAuthorization checks a CONTEXT guard
+    // (tenantId/agentId/capability/backend/payloadDigest and the literal
+    // status==="active") BEFORE the HMAC verify. To prove the SIGNATURE itself
+    // covers each field:
+    //  - Non-context fields (id/requestId/policyRevisionHash/approvalId/nonce/
+    //    issuedAt/expiresAt/idempotencyKey) reach the HMAC directly, so tampering
+    //    them alone must fail with "signature is invalid".
+    //  - Context-bound fields (tenantId/agentId/capability/backend/payloadDigest)
+    //    would otherwise trip the context guard first, masking the signature
+    //    binding. We align `expected` to the tampered value so the context guard
+    //    passes and the case GENUINELY reaches the HMAC verify, which must then
+    //    reject because the stored signature was computed over the original
+    //    value.
+    //  - `status` cannot reach the HMAC: the context guard requires the LITERAL
+    //    status==="active", so any status mutation is a fail-closed context
+    //    rejection, asserted honestly as such below.
+    type VerifyContext = Parameters<typeof verifyExecutionAuthorization>[1];
+    const signatureTampers: Array<{
       field: string;
       mutate: (a: ExecutionAuthorization) => ExecutionAuthorization;
+      expectedOverride?: Partial<VerifyContext>;
     }> = [
+      // ── Non-context signed fields (reach HMAC directly) ──
       { field: "id", mutate: (a) => ({ ...a, id: "00000000-0000-4000-8000-000000000000" }) },
       { field: "requestId", mutate: (a) => ({ ...a, requestId: "tampered-request" }) },
       {
@@ -188,15 +207,53 @@ describe("execution authorization service", () => {
         mutate: (a) => ({ ...a, expiresAt: new Date(Date.now() + 3_600_000).toISOString() }),
       },
       { field: "idempotencyKey", mutate: (a) => ({ ...a, idempotencyKey: "tampered-idem" }) },
+      // ── Context-bound signed fields (expected aligned so the case reaches HMAC) ──
+      {
+        field: "tenantId",
+        mutate: (a) => ({ ...a, tenantId: "11111111-1111-4111-8111-111111111111" }),
+        expectedOverride: { tenantId: "11111111-1111-4111-8111-111111111111" },
+      },
+      {
+        field: "agentId",
+        mutate: (a) => ({ ...a, agentId: "22222222-2222-4222-8222-222222222222" }),
+        expectedOverride: { agentId: "22222222-2222-4222-8222-222222222222" },
+      },
+      {
+        field: "capability",
+        // The only other capability in the union; align expected so the context
+        // guard passes and the HMAC (bound to the original capability) rejects.
+        mutate: (a) => ({ ...a, capability: "wallet.sign_message" as const }),
+        expectedOverride: { capability: "wallet.sign_message" as const },
+      },
+      {
+        field: "payloadDigest",
+        mutate: (a) => ({ ...a, payloadDigest: "d".repeat(64) }),
+        expectedOverride: { payloadDigest: "d".repeat(64) },
+      },
+      {
+        field: "backend",
+        mutate: (a) => ({ ...a, backend: "third-party-custody" as const }),
+        expectedOverride: { backend: "third-party-custody" as const },
+      },
     ];
 
-    for (const { field, mutate } of tampers) {
+    for (const { field, mutate, expectedOverride } of signatureTampers) {
       const tampered = mutate(authorization);
+      const verifyContext: VerifyContext = { ...expected, ...(expectedOverride ?? {}) };
       expect(
-        () => verifyExecutionAuthorization(tampered, expected),
+        () => verifyExecutionAuthorization(tampered, verifyContext),
         `tampering ${field} must invalidate the signature`,
       ).toThrow("signature is invalid");
     }
+
+    // `status` is bound by the HMAC but the context guard rejects any non-active
+    // status BEFORE the signature is checked. Assert the honest fail-closed
+    // behaviour: a mutated status is a context rejection, not a signature pass.
+    expect(
+      () =>
+        verifyExecutionAuthorization({ ...authorization, status: "consumed" as const }, expected),
+      "tampering status must be rejected (context guard, fail closed)",
+    ).toThrow("context does not match");
 
     // Sanity: the untampered authorization still verifies.
     expect(() => verifyExecutionAuthorization(authorization, expected)).not.toThrow();
