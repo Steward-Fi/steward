@@ -16,7 +16,9 @@ import {
 } from "../services/audit";
 import {
   AuditSigningKeyError,
+  type CheckpointEventContent,
   type CheckpointPayload,
+  eventsContentDigest,
   getCheckpointSigner,
   isCheckpointSigningConfigured,
   type SignedCheckpoint,
@@ -936,6 +938,25 @@ auditRoutes.get("/bundle", async (c) => {
   // bundle's upper bound — the checkpoint attests to the full head so a partial
   // export can still be tied to the operator's committed head. The verifier only
   // enforces head==checkpoint when the export INCLUDES the head event.
+  // Content commitment over EVERY exported event's canonical fields (not just
+  // the chain pointers). Signing this authenticates each event to an offline
+  // auditor who lacks the HMAC key: any post-export field mutation breaks the
+  // signature. The verifier recomputes this digest independently.
+  const digestEvents: CheckpointEventContent[] = events.map((ev) => ({
+    tenantId,
+    seq: ev.seq,
+    actorType: ev.actorType,
+    actorId: ev.actorId,
+    action: ev.action,
+    resourceType: ev.resourceType,
+    resourceId: ev.resourceId,
+    metadata: ev.metadata,
+    ipAddress: ev.ipAddress,
+    userAgent: ev.userAgent,
+    requestId: ev.requestId,
+    createdAt: ev.createdAt,
+  }));
+
   let checkpointPayload: CheckpointPayload;
   let signed: SignedCheckpoint;
   try {
@@ -950,6 +971,9 @@ auditRoutes.get("/bundle", async (c) => {
       floorSeq: head?.floorSeq ?? 0,
       timestamp: nowIso,
       softwareVersion: API_VERSION,
+      eventsDigest: eventsContentDigest(digestEvents),
+      eventsFromSeq: events.length > 0 ? events[0].seq : 0,
+      eventsToSeq: events.length > 0 ? events[events.length - 1].seq : 0,
     };
     signed = signer.sign(checkpointPayload);
   } catch (err) {

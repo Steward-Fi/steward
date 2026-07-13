@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { generateKeyPairSync, sign as edSign } from "node:crypto";
+import { sign as edSign, generateKeyPairSync } from "node:crypto";
 import {
   AuditSigningKeyError,
-  canonicalCheckpointBytes,
+  type CheckpointEventContent,
   type CheckpointPayload,
+  canonicalCheckpointBytes,
   createCheckpointSigner,
+  eventsContentDigest,
   parseSigningKey,
   publicKeyPem,
   verifyCheckpoint,
@@ -28,7 +30,28 @@ const basePayload: CheckpointPayload = {
   floorSeq: 0,
   timestamp: "2026-01-01T00:00:00.000Z",
   softwareVersion: "0.0.0-test",
+  eventsDigest: "",
+  eventsFromSeq: 0,
+  eventsToSeq: 0,
 };
+
+function ev(seq: number, over: Partial<CheckpointEventContent> = {}): CheckpointEventContent {
+  return {
+    tenantId: "tenant-ckpt",
+    seq,
+    actorType: "user",
+    actorId: `user-${seq}`,
+    action: `act.${seq}`,
+    resourceType: "wallet",
+    resourceId: `w-${seq}`,
+    metadata: { seq },
+    ipAddress: null,
+    userAgent: null,
+    requestId: `r-${seq}`,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    ...over,
+  };
+}
 
 describe("audit checkpoint signer", () => {
   it("signs and self-verifies with a PKCS#8 PEM key", () => {
@@ -73,6 +96,9 @@ describe("audit checkpoint signer", () => {
       headHmac: basePayload.headHmac,
       seq: basePayload.seq,
       tenantId: basePayload.tenantId,
+      eventsToSeq: basePayload.eventsToSeq,
+      eventsFromSeq: basePayload.eventsFromSeq,
+      eventsDigest: basePayload.eventsDigest,
       v: 1,
     };
     expect(Buffer.from(canonicalCheckpointBytes(reordered)).toString("utf8")).toBe(text);
@@ -127,5 +153,37 @@ describe("audit checkpoint signer", () => {
   it("publicKeyPem derives the same public key from PEM and seed inputs", () => {
     const { pkcs8Pem, seedHex } = ed25519();
     expect(publicKeyPem(parseSigningKey(seedHex))).toBe(publicKeyPem(parseSigningKey(pkcs8Pem)));
+  });
+});
+
+describe("eventsContentDigest", () => {
+  it("returns empty string for no events", () => {
+    expect(eventsContentDigest([])).toBe("");
+  });
+
+  it("is deterministic for the same ordered events", () => {
+    const list = [ev(1), ev(2), ev(3)];
+    expect(eventsContentDigest(list)).toBe(eventsContentDigest([ev(1), ev(2), ev(3)]));
+    expect(eventsContentDigest(list)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("changes when ANY content field changes", () => {
+    const base = eventsContentDigest([ev(1), ev(2)]);
+    expect(eventsContentDigest([ev(1), ev(2, { action: "different" })])).not.toBe(base);
+    expect(eventsContentDigest([ev(1), ev(2, { metadata: { seq: 999 } })])).not.toBe(base);
+    expect(eventsContentDigest([ev(1), ev(2, { actorId: "x" })])).not.toBe(base);
+    expect(eventsContentDigest([ev(1), ev(2, { createdAt: "2030-01-01T00:00:00.000Z" })])).not.toBe(
+      base,
+    );
+  });
+
+  it("is order-sensitive (reordering breaks the digest)", () => {
+    expect(eventsContentDigest([ev(1), ev(2)])).not.toBe(eventsContentDigest([ev(2), ev(1)]));
+  });
+
+  it("detects insertion/removal of an event", () => {
+    const base = eventsContentDigest([ev(1), ev(2), ev(3)]);
+    expect(eventsContentDigest([ev(1), ev(2)])).not.toBe(base);
+    expect(eventsContentDigest([ev(1), ev(2), ev(3), ev(4)])).not.toBe(base);
   });
 });

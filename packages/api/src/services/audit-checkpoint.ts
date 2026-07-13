@@ -29,7 +29,14 @@
  * Zero new dependencies: uses node:crypto Ed25519 primitives.
  */
 
-import { createPrivateKey, createPublicKey, type KeyObject, sign, verify } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  type KeyObject,
+  sign,
+  verify,
+} from "node:crypto";
 
 // This package is typechecked with @cloudflare/workers-types in scope, whose
 // `Buffer` shadows Node's and lacks `concat` / "base64". We therefore avoid
@@ -70,6 +77,89 @@ function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out;
 }
 
+function sha256Hex(bytes: Uint8Array): string {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+/**
+ * The canonical CONTENT fields of one audit event, matching (field-for-field,
+ * name-for-name) the encoding that services/audit.ts commits to in the HMAC
+ * chain. The offline verifier reproduces this exact shape from the bundle so it
+ * can recompute the content digest WITHOUT the HMAC key.
+ */
+export interface CheckpointEventContent {
+  tenantId: string;
+  seq: number;
+  actorType: string;
+  actorId: string | null;
+  action: string;
+  resourceType: string | null;
+  resourceId: string | null;
+  metadata: Record<string, unknown>;
+  ipAddress: string | null;
+  userAgent: string | null;
+  requestId: string | null;
+  createdAt: string;
+}
+
+/** Recursively canonicalize a JSON value: sort keys, null for undefined. Mirrors
+ * `canonicalJsonValue` in services/audit.ts and the verifier. */
+function canonicalJsonValue(value: unknown): unknown {
+  if (value === undefined || value === null) return null;
+  if (Array.isArray(value)) return value.map((item) => canonicalJsonValue(item));
+  if (typeof value === "object") {
+    const ordered: Record<string, unknown> = {};
+    for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+      ordered[key] = canonicalJsonValue((value as Record<string, unknown>)[key]);
+    }
+    return ordered;
+  }
+  return value;
+}
+
+/** Canonical byte encoding of one event's content. Uses snake_case field names
+ * to match the HMAC chain's canonicalization exactly. */
+export function canonicalEventContentBytes(ev: CheckpointEventContent): Uint8Array {
+  const fields = {
+    tenant_id: ev.tenantId,
+    seq: ev.seq,
+    actor_type: ev.actorType,
+    actor_id: ev.actorId ?? null,
+    action: ev.action,
+    resource_type: ev.resourceType ?? null,
+    resource_id: ev.resourceId ?? null,
+    metadata: ev.metadata ?? {},
+    ip_address: ev.ipAddress ?? null,
+    user_agent: ev.userAgent ?? null,
+    request_id: ev.requestId ?? null,
+    created_at: ev.createdAt,
+  };
+  return utf8ToBytes(JSON.stringify(canonicalJsonValue(fields)));
+}
+
+/**
+ * SHA-256 content commitment over an ordered list of events. Computed as a
+ * rolling hash: digest_0 = SHA-256("steward-audit-events/v1"); digest_i =
+ * SHA-256(digest_{i-1} || SHA-256(canonical_event_i)). Order-sensitive and
+ * content-sensitive, so any insertion, removal, reorder, or field mutation
+ * changes the result. Returns "" for an empty list. The verifier recomputes
+ * this identically from the bundle events.
+ */
+export function eventsContentDigest(events: CheckpointEventContent[]): string {
+  if (events.length === 0) return "";
+  // Work in hex strings end-to-end so we never touch the workers-types-shadowed
+  // Buffer. acc/leaf are 64-char hex; feeding them as utf8 to the next hash is
+  // fine as long as the verifier does the SAME thing (it does).
+  let acc = createHash("sha256").update("steward-audit-events/v1").digest("hex");
+  for (const ev of events) {
+    const leaf = createHash("sha256").update(canonicalEventContentBytes(ev)).digest("hex");
+    acc = createHash("sha256").update(acc).update(leaf).digest("hex");
+  }
+  return acc;
+}
+
+export { sha256Hex };
+
 /** Canonical checkpoint payload. Field order here is NOT authoritative — the
  * signed bytes come from `canonicalCheckpointBytes`, which sorts keys. */
 export interface CheckpointPayload {
@@ -89,6 +179,19 @@ export interface CheckpointPayload {
   timestamp: string;
   /** Software version that produced the checkpoint (provenance breadcrumb). */
   softwareVersion: string;
+  /**
+   * Hex SHA-256 commitment over the canonical CONTENT of every event in the
+   * bundle (not just the chain pointers). Signing this authenticates each
+   * exported event's fields to an offline auditor who lacks the HMAC key: any
+   * post-export mutation of an event's action/metadata/actor/timestamp/etc.
+   * changes this digest and breaks the signature. Empty-string when the bundle
+   * carries no events. See `eventsContentDigest`.
+   */
+  eventsDigest: string;
+  /** Seq of the first event committed by `eventsDigest` (0 when none). */
+  eventsFromSeq: number;
+  /** Seq of the last event committed by `eventsDigest` (0 when none). */
+  eventsToSeq: number;
 }
 
 export interface SignedCheckpoint {

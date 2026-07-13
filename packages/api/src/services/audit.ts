@@ -569,8 +569,7 @@ export async function readAuditBundleData(
   );
 
   const events: BundleEvent[] = rows.map((row) => {
-    const created =
-      row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+    const created = row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
     return {
       seq: Number(row.seq),
       prevHash: toHex(row.prev_hash),

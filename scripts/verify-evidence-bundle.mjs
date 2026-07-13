@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 /**
  * Standalone offline verifier for a Steward audit evidence bundle.
  *
@@ -16,15 +17,20 @@
  *   (a) Ed25519 signature: the checkpoint payload was signed by the holder of
  *       the private key matching the bundle's published public key, and has not
  *       been altered since (any change to a payload field breaks the signature).
- *   (b) Event linkage: within the exported list, each event's `prevHash` equals
+ *   (b) Event content authentication: the checkpoint signs `eventsDigest`, a
+ *       SHA-256 commitment over EVERY exported event's canonical fields. The
+ *       verifier recomputes it from the bundle events and requires a match, so
+ *       mutating ANY field (action, metadata, actorId, createdAt, ...) or
+ *       inserting/removing/reordering events breaks verification, even without
+ *       the operator's secret HMAC key.
+ *   (c) Event linkage: within the exported list, each event's `prevHash` equals
  *       the previous event's `hmac` — the exported rows form an unbroken
- *       segment of one hash chain (no row inserted, removed, or reordered
- *       inside the exported range without detection).
- *   (c) Head binding: when the export includes the chain head (range.includesHead),
- *       the last event's `hmac` equals the checkpoint's signed `headHmac`. This
- *       ties the exported set to the exact head the operator committed to at
- *       signing time.
- *   (d) Sequence continuity: seqs increase by exactly 1 with no gaps.
+ *       segment of one hash chain.
+ *   (d) Head binding: head inclusion is DERIVED from the signed checkpoint
+ *       (`lastEvent.seq === payload.seq`), never from an unsigned envelope flag.
+ *       When the export reaches the head, the last event's `hmac` MUST equal the
+ *       signed `headHmac`, tying the exported set to the operator's committed head.
+ *   (e) Sequence continuity: seqs increase by exactly 1 with no gaps.
  *
  * ─── WHAT THIS DOES NOT PROVE ────────────────────────────────────────────────
  *   • It does not recompute the per-row HMACs. Those are keyed with the
@@ -34,13 +40,14 @@
  *     raises the bar from "trust the operator's secret" to "trust the operator's
  *     published, append-only, third-partyly-witnessable checkpoints."
  *   • It does not prove the exported range is the WHOLE history — only that what
- *     is present is internally consistent and (if includesHead) reaches the
- *     signed head. A gap BELOW range.from is expected for partial exports.
+ *     is present is internally consistent, its contents are authentic, and (when
+ *     it reaches the head) it matches the signed head. A gap BELOW the first
+ *     exported seq is expected for partial exports.
  *   • It does not timestamp-anchor the checkpoint externally (out of scope v1).
  */
 
+import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { createPublicKey, verify as edVerify } from "node:crypto";
 
 function fail(msg, seq) {
   const at = seq === undefined ? "" : ` (seq ${seq})`;
@@ -90,12 +97,62 @@ function canonicalCheckpointBytes(payload) {
   return Buffer.from(JSON.stringify(ordered), "utf8");
 }
 
+// Recursively canonicalize a JSON value: sort keys, null for undefined/null.
+// MUST match canonicalJsonValue in services/audit.ts + audit-checkpoint.ts.
+function canonicalJsonValue(value) {
+  if (value === undefined || value === null) return null;
+  if (Array.isArray(value)) return value.map((item) => canonicalJsonValue(item));
+  if (typeof value === "object") {
+    const ordered = {};
+    for (const key of Object.keys(value).sort()) {
+      ordered[key] = canonicalJsonValue(value[key]);
+    }
+    return ordered;
+  }
+  return value;
+}
+
+// Canonical bytes of one event's CONTENT. Field names are snake_case to match
+// the server's HMAC-chain canonicalization and audit-checkpoint.ts exactly.
+function canonicalEventContentBytes(ev, tenantId) {
+  const fields = {
+    tenant_id: tenantId,
+    seq: ev.seq,
+    actor_type: ev.actorType ?? null,
+    actor_id: ev.actorId ?? null,
+    action: ev.action ?? null,
+    resource_type: ev.resourceType ?? null,
+    resource_id: ev.resourceId ?? null,
+    metadata: ev.metadata ?? {},
+    ip_address: ev.ipAddress ?? null,
+    user_agent: ev.userAgent ?? null,
+    request_id: ev.requestId ?? null,
+    created_at: ev.createdAt ?? null,
+  };
+  return Buffer.from(JSON.stringify(canonicalJsonValue(fields)), "utf8");
+}
+
+// Rolling SHA-256 content commitment over the ordered events. MUST match
+// eventsContentDigest in services/audit-checkpoint.ts: "" for empty; else
+// acc = SHA256("steward-audit-events/v1"); acc = SHA256(acc_hex || leaf_hex).
+function eventsContentDigest(events, tenantId) {
+  if (events.length === 0) return "";
+  let acc = createHash("sha256").update("steward-audit-events/v1").digest("hex");
+  for (const ev of events) {
+    const leaf = createHash("sha256")
+      .update(canonicalEventContentBytes(ev, tenantId))
+      .digest("hex");
+    acc = createHash("sha256").update(acc).update(leaf).digest("hex");
+  }
+  return acc;
+}
+
 function main() {
   const bundle = loadBundle();
 
   if (!bundle || typeof bundle !== "object") fail("bundle is not an object");
   if (bundle.version !== 1) fail(`unsupported bundle version: ${bundle.version}`);
-  const { checkpoint, events, range, tenantId } = bundle;
+  const { checkpoint, events, tenantId } = bundle;
   if (!checkpoint || typeof checkpoint !== "object") fail("bundle.checkpoint missing");
   if (!Array.isArray(events)) fail("bundle.events is not an array");
 
@@ -128,7 +185,7 @@ function main() {
     fail(`checkpoint tenantId (${payload.tenantId}) != bundle tenantId (${tenantId})`);
   }
 
-  // ── (b)+(d) Event linkage + sequence continuity ──────────────────────────
+  // ── (c)+(e) Event linkage + sequence continuity ──────────────────────────
   let prevHmac = null; // hmac (hex) of the previous event; null before first
   let prevSeq = null;
   for (const ev of events) {
@@ -146,22 +203,50 @@ function main() {
     prevSeq = ev.seq;
   }
 
-  // ── (c) Head binding (only when the export reaches the chain head) ────────
-  const includesHead = range && range.includesHead === true;
-  if (includesHead) {
-    if (events.length === 0) {
-      fail("range.includesHead is true but the event list is empty");
+  // ── (b) Event content authentication ─────────────────────────────────────
+  // Recompute the signed content digest from the bundle events. This is the
+  // check that catches mutation of any event FIELD (action, metadata, actorId,
+  // createdAt, ...) even though the offline verifier has no HMAC key. The
+  // recomputation uses the CHECKPOINT'S tenantId (which is signed), so an
+  // attacker cannot dodge it by rewriting the unsigned envelope tenantId.
+  const recomputedDigest = eventsContentDigest(events, payload.tenantId);
+  if (typeof payload.eventsDigest !== "string") {
+    fail("checkpoint payload is missing eventsDigest (unsupported/old bundle)");
+  }
+  if (recomputedDigest !== payload.eventsDigest) {
+    fail("event content digest does not match the signed checkpoint (events tampered)");
+  }
+  // The signed eventsFromSeq/eventsToSeq must bracket exactly the present events.
+  if (events.length > 0) {
+    if (payload.eventsFromSeq !== events[0].seq) {
+      fail(
+        `signed eventsFromSeq (${payload.eventsFromSeq}) != first event seq (${events[0].seq})`,
+        events[0].seq,
+      );
     }
+    if (payload.eventsToSeq !== events[events.length - 1].seq) {
+      fail(
+        `signed eventsToSeq (${payload.eventsToSeq}) != last event seq (${events[events.length - 1].seq})`,
+        events[events.length - 1].seq,
+      );
+    }
+  } else if (payload.eventsFromSeq !== 0 || payload.eventsToSeq !== 0) {
+    fail("signed eventsFromSeq/eventsToSeq are non-zero but the bundle has no events");
+  }
+
+  // ── (d) Head binding: DERIVE inclusion from signed data, never the envelope.
+  // The export reaches the chain head iff its last event's seq equals the
+  // checkpoint's signed head seq. `range.includesHead` in the envelope is
+  // unsigned and advisory only — we ignore it for the security decision.
+  const includesHead =
+    events.length > 0 &&
+    typeof payload.seq === "number" &&
+    events[events.length - 1].seq === payload.seq;
+  if (includesHead) {
     const lastHmac = events[events.length - 1].hmac;
     if (lastHmac !== payload.headHmac) {
       fail(
         `last event hmac (${lastHmac}) != checkpoint headHmac (${payload.headHmac})`,
-        events[events.length - 1].seq,
-      );
-    }
-    if (typeof payload.seq === "number" && events[events.length - 1].seq !== payload.seq) {
-      fail(
-        `last event seq (${events[events.length - 1].seq}) != checkpoint seq (${payload.seq})`,
         events[events.length - 1].seq,
       );
     }
@@ -173,19 +258,29 @@ function main() {
     : "partial range (does NOT include chain head — head binding not checked)";
   console.log("PASS");
   console.log(`  tenant:        ${payload.tenantId}`);
-  console.log(`  events:        ${events.length}` +
-    (events.length ? ` (seq ${events[0].seq}..${events[events.length - 1].seq})` : ""));
-  console.log(`  checkpoint:    seq=${payload.seq} count=${payload.expectedCount} floorSeq=${payload.floorSeq}`);
+  console.log(
+    `  events:        ${events.length}` +
+      (events.length ? ` (seq ${events[0].seq}..${events[events.length - 1].seq})` : ""),
+  );
+  console.log(
+    `  checkpoint:    seq=${payload.seq} count=${payload.expectedCount} floorSeq=${payload.floorSeq}`,
+  );
   console.log(`  signed at:     ${payload.timestamp} (software ${payload.softwareVersion})`);
   console.log(`  signature:     Ed25519 OK`);
+  console.log(`  content:       SHA-256 events digest OK`);
   console.log(`  linkage:       OK`);
   console.log(`  head:          ${headNote}`);
   console.log("");
-  console.log("Proven: exported rows form an unbroken hash-chain segment; " +
-    (includesHead ? "the head matches the operator's signed checkpoint; " : "") +
-    "the checkpoint is authentically Ed25519-signed and unaltered.");
-  console.log("NOT proven: per-row HMAC recomputation (needs the operator's secret key); " +
-    "that the export is the complete history; third-party timestamp anchoring.");
+  console.log(
+    "Proven: exported event contents are authentic (signed SHA-256 digest); " +
+      "rows form an unbroken hash-chain segment; " +
+      (includesHead ? "the head matches the operator's signed checkpoint; " : "") +
+      "the checkpoint is authentically Ed25519-signed and unaltered.",
+  );
+  console.log(
+    "NOT proven: per-row HMAC recomputation (needs the operator's secret key); " +
+      "that the export is the complete history; third-party timestamp anchoring.",
+  );
   process.exit(0);
 }
 

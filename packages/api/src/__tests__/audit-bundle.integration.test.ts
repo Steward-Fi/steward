@@ -5,8 +5,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { auditCheckpoints, closeDb, getDb, tenants } from "@stwd/db";
-import { eq } from "drizzle-orm";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import { resetCheckpointSignerCache } from "../services/audit-checkpoint";
@@ -14,7 +14,15 @@ import type { AppVariables } from "../services/context";
 
 const TENANT_ID = "audit-bundle-tenant";
 const OTHER_TENANT_ID = "audit-bundle-other-tenant";
-const VERIFIER = join(import.meta.dir, "..", "..", "..", "..", "scripts", "verify-evidence-bundle.mjs");
+const VERIFIER = join(
+  import.meta.dir,
+  "..",
+  "..",
+  "..",
+  "..",
+  "scripts",
+  "verify-evidence-bundle.mjs",
+);
 
 let auditRoutesModule: Awaited<typeof import("../routes/audit")>;
 let tmpDir: string;
@@ -180,6 +188,30 @@ describe("audit evidence bundle endpoint + offline verifier", () => {
     expect(code).toBe(1);
     expect(stderr).toContain("FAIL");
     expect(stderr).toContain("seq 3");
+  });
+
+  it("FAILS the verifier when an event CONTENT field is altered (no HMAC key needed)", async () => {
+    const bundle = await fetchBundle();
+    // Change a content field (action) while leaving hmac/prevHash intact. This
+    // must be caught by the signed content digest, not linkage.
+    bundle.events[1].action = `${bundle.events[1].action}-tampered`;
+    const { code, stderr } = runVerifier(bundle);
+    expect(code).toBe(1);
+    expect(stderr).toContain("content digest");
+  });
+
+  it("FAILS the verifier when the unsigned includesHead flag is flipped to hide a bad head", async () => {
+    const bundle = await fetchBundle();
+    // Attacker corrupts the head event's hmac AND flips the advisory flag to
+    // false, hoping to skip head binding. Head inclusion is derived from the
+    // SIGNED seq, so this must still FAIL.
+    const last = bundle.events[bundle.events.length - 1];
+    const first = last.hmac[0] === "a" ? "b" : "a";
+    last.hmac = first + last.hmac.slice(1);
+    bundle.range.includesHead = false;
+    const { code, stderr } = runVerifier(bundle);
+    expect(code).toBe(1);
+    expect(stderr).toContain("FAIL");
   });
 
   it("FAILS the verifier when the checkpoint payload is tampered", async () => {
