@@ -674,11 +674,22 @@ function sendCallsActionPayload(input: {
   };
 }
 
-function transactionActionPayload(input: { broadcast: boolean; referenceId?: string | null }) {
+function transactionActionPayload(input: {
+  broadcast: boolean;
+  referenceId?: string | null;
+  nonce?: number | null;
+  gasLimit?: string | null;
+  venue?: string | null;
+  walletAddress?: string | null;
+}) {
   return {
     type: "transaction",
     broadcast: input.broadcast,
     ...(input.referenceId ? { referenceId: input.referenceId } : {}),
+    ...(input.nonce !== undefined && input.nonce !== null ? { nonce: input.nonce } : {}),
+    ...(input.gasLimit ? { gasLimit: input.gasLimit } : {}),
+    ...(input.venue ? { venue: input.venue } : {}),
+    ...(input.walletAddress ? { walletAddress: input.walletAddress } : {}),
   };
 }
 
@@ -838,6 +849,10 @@ function getTransactionActionPayload(payload: unknown): {
   type: "transaction";
   broadcast: boolean;
   referenceId?: string;
+  nonce?: number;
+  gasLimit?: string;
+  venue?: string;
+  walletAddress?: string;
 } | null {
   if (!payload || typeof payload !== "object") return null;
   const value = payload as Record<string, unknown>;
@@ -846,6 +861,13 @@ function getTransactionActionPayload(payload: unknown): {
     type: "transaction",
     broadcast: value.broadcast !== false,
     referenceId: actionReferenceId(value) ?? undefined,
+    nonce:
+      typeof value.nonce === "number" && Number.isInteger(value.nonce) && value.nonce >= 0
+        ? value.nonce
+        : undefined,
+    gasLimit: typeof value.gasLimit === "string" ? value.gasLimit : undefined,
+    venue: typeof value.venue === "string" ? value.venue : undefined,
+    walletAddress: typeof value.walletAddress === "string" ? value.walletAddress : undefined,
   };
 }
 
@@ -1894,8 +1916,13 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
 
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
-  const executionPayloadDigest = executionPayloadDigestForEvmSign(signRequest);
-  const executionPolicyRevisionHash = policyRevisionHashForPolicySet(policySet);
+  const isEvmSignRequest = resolvedChainId !== 101 && resolvedChainId !== 102;
+  const executionPayloadDigest = isEvmSignRequest
+    ? executionPayloadDigestForEvmSign(signRequest)
+    : null;
+  const executionPolicyRevisionHash = isEvmSignRequest
+    ? policyRevisionHashForPolicySet(policySet)
+    : null;
 
   // ── Redis rate-limit check (before policy evaluation) ──────────────────────
   const rateLimitResult = await enforceRateLimit(agentId, policySet);
@@ -1957,6 +1984,10 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
             policyResults: evaluation.results,
             actionPayload: transactionActionPayload({
               broadcast: signRequest.broadcast !== false,
+              nonce: signRequest.nonce,
+              gasLimit: signRequest.gasLimit,
+              venue: signRequest.venue,
+              walletAddress: signRequest.walletAddress,
             }),
           });
           await tx
@@ -2053,30 +2084,35 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     try {
       const txId = crypto.randomUUID();
       const txStatus: "broadcast" | "signed" = shouldBroadcast ? "broadcast" : "signed";
-      const executionAuthorization = await mintExecutionAuthorization({
-        requestId: txId,
-        tenantId,
-        agentId,
-        capability: "wallet.sign_transaction",
-        payloadDigest: executionPayloadDigest,
-        backend: "local-vault",
-        policyRevisionHash: executionPolicyRevisionHash,
-        idempotencyKey: c.req.header("Idempotency-Key") ?? undefined,
-      });
-      await writeVaultAudit(c, {
-        tenantId,
-        actorType: "agent",
-        actorId: agentId,
-        action: "vault.execution_authorization.minted",
-        resourceType: "execution_authorization",
-        resourceId: executionAuthorization.id,
-        metadata: {
-          txId,
-          payloadDigest: executionPayloadDigest,
-          policyRevisionHash: executionPolicyRevisionHash,
-          expiresAt: executionAuthorization.expiresAt,
-        },
-      });
+      const executionAuthorization =
+        isEvmSignRequest && executionPayloadDigest
+          ? await mintExecutionAuthorization({
+              requestId: txId,
+              tenantId,
+              agentId,
+              capability: "wallet.sign_transaction",
+              payloadDigest: executionPayloadDigest,
+              backend: "local-vault",
+              policyRevisionHash: executionPolicyRevisionHash ?? undefined,
+              idempotencyKey: c.req.header("Idempotency-Key") ?? undefined,
+            })
+          : null;
+      if (executionAuthorization && executionPayloadDigest) {
+        await writeVaultAudit(c, {
+          tenantId,
+          actorType: "agent",
+          actorId: agentId,
+          action: "vault.execution_authorization.minted",
+          resourceType: "execution_authorization",
+          resourceId: executionAuthorization.id,
+          metadata: {
+            txId,
+            payloadDigest: executionPayloadDigest,
+            policyRevisionHash: executionPolicyRevisionHash,
+            expiresAt: executionAuthorization.expiresAt,
+          },
+        });
+      }
       await writeVaultAudit(c, {
         tenantId,
         actorType: "agent",
@@ -2093,47 +2129,53 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           policyResults: evaluation.results,
         },
       });
-      const governedVault = new GovernedVault(vault, async (authorization, expected) => {
-        try {
-          await consumeExecutionAuthorization(authorization, expected);
-          await writeVaultAudit(c, {
-            tenantId,
-            actorType: "agent",
-            actorId: agentId,
-            action: "vault.execution_authorization.consumed",
-            resourceType: "execution_authorization",
-            resourceId: authorization.id,
-            metadata: {
+      const result =
+        executionAuthorization && executionPayloadDigest
+          ? await new GovernedVault(vault, async (authorization, expected) => {
+              try {
+                await consumeExecutionAuthorization(authorization, expected);
+                await writeVaultAudit(c, {
+                  tenantId,
+                  actorType: "agent",
+                  actorId: agentId,
+                  action: "vault.execution_authorization.consumed",
+                  resourceType: "execution_authorization",
+                  resourceId: authorization.id,
+                  metadata: {
+                    txId,
+                    payloadDigest: expected.payloadDigest,
+                    capability: expected.capability,
+                    backend: expected.backend,
+                  },
+                });
+              } catch (error) {
+                await writeVaultAudit(c, {
+                  tenantId,
+                  actorType: "agent",
+                  actorId: agentId,
+                  action: "vault.execution_authorization.rejected",
+                  resourceType: "execution_authorization",
+                  resourceId: authorization.id,
+                  metadata: {
+                    txId,
+                    payloadDigest: expected.payloadDigest,
+                    error: error instanceof Error ? error.message : "authorization rejected",
+                  },
+                });
+                throw error;
+              }
+            }).signTransaction(signRequest, {
               txId,
-              payloadDigest: expected.payloadDigest,
-              capability: expected.capability,
-              backend: expected.backend,
-            },
-          });
-        } catch (error) {
-          await writeVaultAudit(c, {
-            tenantId,
-            actorType: "agent",
-            actorId: agentId,
-            action: "vault.execution_authorization.rejected",
-            resourceType: "execution_authorization",
-            resourceId: authorization.id,
-            metadata: {
+              policyResults: evaluation.results,
+              status: txStatus,
+              executionAuthorization,
+              executionPayloadDigest,
+            })
+          : await vault.signTransaction(signRequest, {
               txId,
-              payloadDigest: expected.payloadDigest,
-              error: error instanceof Error ? error.message : "authorization rejected",
-            },
-          });
-          throw error;
-        }
-      });
-      const result = await governedVault.signTransaction(signRequest, {
-        txId,
-        policyResults: evaluation.results,
-        status: txStatus,
-        executionAuthorization,
-        executionPayloadDigest,
-      });
+              policyResults: evaluation.results,
+              status: txStatus,
+            });
 
       await db
         .update(transactions)
@@ -3383,11 +3425,14 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       const approvalSignRequest: SignRequest = {
         ...toSignRequest(transactionRow),
         tenantId,
+        nonce: transactionPayload?.nonce,
         gasLimit:
           transferPayload && transferPayload.token !== "native" && transactionRow.data
             ? "65000"
-            : undefined,
+            : transactionPayload?.gasLimit,
         broadcast: requestedBroadcast,
+        venue: transactionPayload?.venue,
+        walletAddress: transactionPayload?.walletAddress,
       };
       const currentPolicySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
       const currentExecutionPolicyRevisionHash = policyRevisionHashForPolicySet(currentPolicySet);
@@ -3730,6 +3775,10 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               ? transactionActionPayload({
                   broadcast: transactionPayload.broadcast,
                   referenceId: transactionPayload.referenceId,
+                  nonce: transactionPayload.nonce,
+                  gasLimit: transactionPayload.gasLimit,
+                  venue: transactionPayload.venue,
+                  walletAddress: transactionPayload.walletAddress,
                 })
               : transactionRow.actionPayload,
           signedAt: resolvedAt,
@@ -3820,7 +3869,6 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       const authorizationError = executionAuthorizationErrorResponse(c, e);
-      if (authorizationError) return authorizationError;
       if (!irreversibleResult) {
         await db
           .update(approvalQueue)
@@ -3854,6 +3902,8 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           })
           .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
       }
+
+      if (authorizationError) return authorizationError;
 
       const requestId = c.get("requestId") || "unknown";
       const rawMessage = e instanceof Error ? e.message : "Unknown error";

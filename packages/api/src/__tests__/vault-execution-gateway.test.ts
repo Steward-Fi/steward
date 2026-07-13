@@ -130,6 +130,37 @@ describe("vault EVM execution gateway", () => {
     }
   });
 
+  it("preserves the legacy Solana sign path without minting an EVM authorization", async () => {
+    const beforeRows = await getDb().select().from(executionAuthorizationNonces);
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
+      return "solana-signed";
+    });
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${AGENT_ID}/sign`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          data: "0x12345678",
+          chainId: 101,
+          broadcast: false,
+        }),
+      });
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(signSpy).toHaveBeenCalledTimes(1);
+
+      const afterRows = await getDb().select().from(executionAuthorizationNonces);
+      expect(afterRows).toHaveLength(beforeRows.length);
+    } finally {
+      signSpy.mockRestore();
+    }
+  });
+
   it("mints and consumes an execution authorization for primary EVM approval replay", async () => {
     const txId = "tx-gateway-approval-replay";
     const replayRequest = {
@@ -139,7 +170,10 @@ describe("vault EVM execution gateway", () => {
       value: "1",
       data: "0x12345678",
       chainId: 8453,
+      nonce: 7,
+      gasLimit: "45000",
       broadcast: false,
+      walletAddress: "0x0000000000000000000000000000000000000001",
     };
     await getDb()
       .insert(transactions)
@@ -151,7 +185,13 @@ describe("vault EVM execution gateway", () => {
         value: replayRequest.value,
         data: replayRequest.data,
         chainId: replayRequest.chainId,
-        actionPayload: { type: "transaction", broadcast: false },
+        actionPayload: {
+          type: "transaction",
+          broadcast: false,
+          nonce: replayRequest.nonce,
+          gasLimit: replayRequest.gasLimit,
+          walletAddress: replayRequest.walletAddress,
+        },
         executionPayloadDigest: executionPayloadDigestForEvmSign(replayRequest),
         executionPolicyRevisionHash: "queued-policy-revision",
         policyResults: [],
