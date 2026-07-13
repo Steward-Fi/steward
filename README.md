@@ -1,6 +1,6 @@
 # Steward
 
-Steward is the self-hostable authority plane for private enterprise agents. It gives agents scoped wallet and API capabilities without exposing secrets, routes sensitive actions through policy and human approval, and produces signed execution evidence. Bring your own agent runtime, cloud, and custodian.
+Steward is the self-hostable authority plane for private enterprise agents. It gives agents scoped wallet and API capabilities without exposing secrets, routes sensitive actions through policy and human approval, and records execution evidence. Bring your own agent runtime, cloud, and custodian.
 
 [![npm](https://img.shields.io/npm/v/@stwd/sdk)](https://www.npmjs.com/package/@stwd/sdk)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
