@@ -92,6 +92,7 @@ import { type Context, Hono, type Next } from "hono";
 import { getAddress, verifyMessage as viemVerifyMessage } from "viem";
 import { writeAuditEvent } from "../services/audit";
 import { priceOracle, setNoStoreHeaders, verifySessionToken } from "../services/context";
+import { getConfiguredVault } from "../services/vault-factory";
 import {
   publicGasSponsorshipState,
   readTenantGasSponsorshipConfig,
@@ -1268,15 +1269,7 @@ async function provisionEmbeddedUserWallet(
 
 /** Build a Vault instance from environment. Same defaults as index.ts. */
 function getVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    throw new Error("STEWARD_MASTER_PASSWORD is required");
-  }
-  return new Vault({
-    masterPassword,
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-  });
+  return getConfiguredVault();
 }
 
 async function getTransactionStats(agentId: string) {
