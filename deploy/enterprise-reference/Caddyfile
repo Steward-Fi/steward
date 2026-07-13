@@ -1,0 +1,11 @@
+{$STEWARD_DOMAIN} {
+  encode gzip
+
+  handle_path /proxy/* {
+    reverse_proxy steward-proxy:8080
+  }
+
+  handle {
+    reverse_proxy steward-api:3200
+  }
+}
