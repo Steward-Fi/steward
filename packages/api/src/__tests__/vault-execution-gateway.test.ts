@@ -22,6 +22,8 @@ import { executionPayloadDigestForEvmSign } from "../services/execution-authoriz
 const TENANT_ID = `gateway-tenant-${Date.now()}`;
 const AGENT_ID = `gateway-agent-${Date.now()}`;
 const USER_ID = "00000000-0000-4000-8000-000000000123";
+const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
+const ORIGINAL_REDIS_REQUIRED = process.env.REDIS_REQUIRED;
 
 async function makeApp() {
   const { vaultRoutes } = await import("../routes/vault");
@@ -46,6 +48,8 @@ describe("vault EVM execution gateway", () => {
     process.env.STEWARD_JWT_SECRET = "gateway-test-jwt-secret-with-enough-entropy-0123456789";
     process.env.STEWARD_AUDIT_HMAC_KEY = "b".repeat(64);
     process.env.STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING = "true";
+    delete process.env.REDIS_URL;
+    delete process.env.REDIS_REQUIRED;
     const { db, client } = await createPGLiteDb("memory://");
     setPGLiteOverride(db, async () => {
       await client.close();
@@ -88,6 +92,10 @@ describe("vault EVM execution gateway", () => {
 
   afterAll(async () => {
     delete process.env.STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING;
+    if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+    else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
+    if (ORIGINAL_REDIS_REQUIRED === undefined) delete process.env.REDIS_REQUIRED;
+    else process.env.REDIS_REQUIRED = ORIGINAL_REDIS_REQUIRED;
     await closeDb();
   });
 

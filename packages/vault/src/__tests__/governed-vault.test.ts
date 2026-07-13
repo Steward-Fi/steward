@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { ExecutionAuthorization, SignRequest } from "@stwd/shared";
-import { GovernedVault, GovernedVaultError } from "../governed-vault";
+import {
+  executionPayloadDigestForGovernedEvmSign,
+  GovernedVault,
+  GovernedVaultError,
+} from "../governed-vault";
 import type { SignTransactionOptions, Vault } from "../vault";
 
 const request: SignRequest = {
@@ -12,13 +16,15 @@ const request: SignRequest = {
   broadcast: false,
 };
 
+const requestPayloadDigest = executionPayloadDigestForGovernedEvmSign(request);
+
 const authorization: ExecutionAuthorization = {
   id: "auth-1",
   requestId: "tx-1",
   tenantId: "tenant-1",
   agentId: "agent-1",
   capability: "wallet.sign_transaction",
-  payloadDigest: "a".repeat(64),
+  payloadDigest: requestPayloadDigest,
   backend: "local-vault",
   nonce: "nonce-1",
   issuedAt: new Date().toISOString(),
@@ -48,6 +54,31 @@ describe("GovernedVault", () => {
 
     expect(result).toBe("0xsigned");
     expect(calls).toEqual([`consume:${authorization.payloadDigest}`, "raw-sign"]);
+  });
+
+  it("fails closed when the supplied digest does not match the actual request", async () => {
+    let rawCalled = false;
+    const rawVault = {
+      async signTransaction() {
+        rawCalled = true;
+        return "0xsigned";
+      },
+    } as unknown as Vault;
+    const governed = new GovernedVault(rawVault, async () => {
+      throw new Error("consume must not be reached");
+    });
+
+    await expect(
+      governed.signTransaction(
+        { ...request, value: "2" },
+        {
+          txId: "tx-mismatch",
+          executionAuthorization: authorization,
+          executionPayloadDigest: authorization.payloadDigest,
+        },
+      ),
+    ).rejects.toThrow("does not match");
+    expect(rawCalled).toBe(false);
   });
 
   it("fails closed before raw signing without authorization", async () => {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ExecutionAuthorization, SignRequest } from "@stwd/shared";
 import type { SignTransactionOptions, Vault } from "./vault";
 
@@ -18,6 +19,7 @@ export class GovernedVaultError extends Error {
     readonly code:
       | "missing_authorization"
       | "missing_payload_digest"
+      | "payload_digest_mismatch"
       | "unsupported_chain_family"
       | "authorization_rejected",
   ) {
@@ -29,6 +31,46 @@ export class GovernedVaultError extends Error {
 export interface GovernedSignTransactionOptions extends SignTransactionOptions {
   executionAuthorization?: ExecutionAuthorization;
   executionPayloadDigest?: string;
+}
+
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
+
+  const output: Record<string, unknown> = {};
+  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+    const item = (value as Record<string, unknown>)[key];
+    if (item !== undefined) output[key] = canonicalize(item);
+  }
+  return output;
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonicalize(value));
+}
+
+export function executionPayloadDigestForGovernedEvmSign(request: SignRequest): string {
+  return createHash("sha256")
+    .update(
+      canonicalJson({
+        agentId: request.agentId,
+        tenantId: request.tenantId,
+        capability: "wallet.sign_transaction",
+        backend: "local-vault",
+        transaction: {
+          to: request.to,
+          value: request.value,
+          data: request.data ?? "0x",
+          chainId: request.chainId,
+          nonce: request.nonce ?? null,
+          gasLimit: request.gasLimit ?? null,
+          broadcast: request.broadcast !== false,
+          venue: request.venue ?? null,
+          walletAddress: request.walletAddress ?? null,
+        },
+      }),
+    )
+    .digest("hex");
 }
 
 export class GovernedVault {
@@ -58,6 +100,13 @@ export class GovernedVault {
       throw new GovernedVaultError(
         "Execution payload digest is required for governed EVM transaction signing",
         "missing_payload_digest",
+      );
+    }
+    const requestPayloadDigest = executionPayloadDigestForGovernedEvmSign(request);
+    if (options.executionPayloadDigest !== requestPayloadDigest) {
+      throw new GovernedVaultError(
+        "Execution payload digest does not match governed EVM transaction request",
+        "payload_digest_mismatch",
       );
     }
 
