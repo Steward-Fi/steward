@@ -455,3 +455,145 @@ export async function verifyAuditChain(
 
   return { valid: true, count };
 }
+
+// ─── Evidence bundle support ──────────────────────────────────────────────────
+
+function toHex(value: unknown): string {
+  const bytes = toU8(value);
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+/**
+ * A single event as it appears in an offline-verifiable evidence bundle. All
+ * fields that feed the row's canonicalization are included so an third-party
+ * verifier can reconstruct linkage (prevHash === prior hmac) WITHOUT the HMAC
+ * key. `prevHash`/`hmac` are hex. Row HMACs are NOT recomputable offline (that
+ * needs the secret key) — the bundle proves linkage + head match, not per-row
+ * recomputation.
+ */
+export interface BundleEvent {
+  seq: number;
+  prevHash: string;
+  hmac: string;
+  actorType: string;
+  actorId: string | null;
+  action: string;
+  resourceType: string | null;
+  resourceId: string | null;
+  metadata: Record<string, unknown>;
+  ipAddress: string | null;
+  userAgent: string | null;
+  requestId: string | null;
+  createdAt: string;
+}
+
+export interface AuditChainHeadInfo {
+  /** Head sequence per the out-of-band high-water-mark. */
+  expectedSeq: number;
+  /** Live event count committed by the high-water-mark. */
+  expectedCount: number;
+  /** Hex HMAC of the head event. */
+  headHmac: string;
+  /** Retention floor (0 when nothing archived). */
+  floorSeq: number;
+}
+
+export interface AuditBundleData {
+  head: AuditChainHeadInfo | null;
+  events: BundleEvent[];
+  /** Hex HMAC of the newest event actually present in `events` (bundle head). */
+  bundleHeadHmac: string | null;
+  /** Seq of the newest event in `events`. */
+  bundleHeadSeq: number | null;
+}
+
+/**
+ * Read the events in [fromSeq, toSeq] for a tenant plus the chain-head
+ * high-water-mark, formatted for an evidence bundle. Pure read; does not touch
+ * the HMAC writer or verifier state.
+ */
+export async function readAuditBundleData(
+  tenantId: string,
+  fromSeq: number,
+  toSeq: number,
+): Promise<AuditBundleData> {
+  const db = getDb();
+
+  const headRows = rowsFromExecute<{
+    expected_seq: number | string;
+    expected_count: number | string;
+    head_hmac: unknown;
+    floor_seq: number | string | null;
+  }>(
+    await db.execute(
+      sql`SELECT expected_seq, expected_count, head_hmac, floor_seq
+          FROM audit_chain_heads WHERE tenant_id = ${tenantId} LIMIT 1`,
+    ),
+  );
+  const headRow = headRows[0];
+  const head: AuditChainHeadInfo | null = headRow
+    ? {
+        expectedSeq: Number(headRow.expected_seq),
+        expectedCount: Number(headRow.expected_count),
+        headHmac: toHex(headRow.head_hmac),
+        floorSeq: headRow.floor_seq != null ? Number(headRow.floor_seq) : 0,
+      }
+    : null;
+
+  const rows = rowsFromExecute<{
+    seq: number | string;
+    prev_hash: unknown;
+    hmac: unknown;
+    actor_type: string;
+    actor_id: string | null;
+    action: string;
+    resource_type: string | null;
+    resource_id: string | null;
+    metadata: Record<string, unknown> | null;
+    ip_address: string | null;
+    user_agent: string | null;
+    request_id: string | null;
+    created_at: Date | string;
+  }>(
+    await db.execute(
+      sql`SELECT seq, prev_hash, hmac, actor_type, actor_id, action, resource_type,
+                 resource_id, metadata, ip_address, user_agent, request_id, created_at
+          FROM audit_events
+          WHERE tenant_id = ${tenantId} AND seq BETWEEN ${fromSeq} AND ${toSeq}
+          ORDER BY seq ASC`,
+    ),
+  );
+
+  const events: BundleEvent[] = rows.map((row) => {
+    const created =
+      row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+    return {
+      seq: Number(row.seq),
+      prevHash: toHex(row.prev_hash),
+      hmac: toHex(row.hmac),
+      actorType: row.actor_type,
+      actorId: row.actor_id,
+      action: row.action,
+      resourceType: row.resource_type,
+      resourceId: row.resource_id,
+      metadata: row.metadata ?? {},
+      ipAddress: row.ip_address,
+      userAgent: row.user_agent,
+      requestId: row.request_id,
+      createdAt: created.toISOString(),
+    };
+  });
+
+  const last = events.length > 0 ? events[events.length - 1] : null;
+
+  return {
+    head,
+    events,
+    bundleHeadHmac: last ? last.hmac : null,
+    bundleHeadSeq: last ? last.seq : null,
+  };
+}

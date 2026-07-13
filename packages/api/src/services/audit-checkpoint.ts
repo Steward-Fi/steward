@@ -31,6 +31,45 @@
 
 import { createPrivateKey, createPublicKey, type KeyObject, sign, verify } from "node:crypto";
 
+// This package is typechecked with @cloudflare/workers-types in scope, whose
+// `Buffer` shadows Node's and lacks `concat` / "base64". We therefore avoid
+// `Buffer` entirely and work with `Uint8Array` + the tiny encoders below.
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0) throw new Error("hex string has odd length");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(normalized);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+function utf8ToBytes(str: string): Uint8Array {
+  return new TextEncoder().encode(str);
+}
+
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
 /** Canonical checkpoint payload. Field order here is NOT authoritative — the
  * signed bytes come from `canonicalCheckpointBytes`, which sorts keys. */
 export interface CheckpointPayload {
@@ -68,12 +107,13 @@ export interface SignedCheckpoint {
  * change to a field (or key ordering) changes the signed bytes, so a verifier
  * that reconstructs it independently detects any post-signing mutation.
  */
-export function canonicalCheckpointBytes(payload: CheckpointPayload): Buffer {
+export function canonicalCheckpointBytes(payload: CheckpointPayload): Uint8Array {
   const ordered: Record<string, unknown> = {};
-  for (const key of Object.keys(payload).sort()) {
-    ordered[key] = (payload as Record<string, unknown>)[key];
+  const source = payload as unknown as Record<string, unknown>;
+  for (const key of Object.keys(source).sort()) {
+    ordered[key] = source[key];
   }
-  return Buffer.from(JSON.stringify(ordered), "utf8");
+  return utf8ToBytes(JSON.stringify(ordered));
 }
 
 class AuditSigningKeyError extends Error {
@@ -90,34 +130,31 @@ const ED25519_SEED_LEN = 32;
 // (SEQUENCE { INTEGER 0, SEQUENCE { OID 1.3.101.112 }, OCTET STRING { OCTET
 // STRING <32 bytes> } }). Prepending this to a raw seed yields a DER a
 // KeyObject can import — lets us accept bare 32-byte seeds with no new deps.
-const PKCS8_ED25519_SEED_PREFIX = Buffer.from(
-  "302e020100300506032b657004220420",
-  "hex",
-);
+const PKCS8_ED25519_SEED_PREFIX = hexToBytes("302e020100300506032b657004220420");
 
-function seedToPkcs8Der(seed: Buffer): Buffer {
-  return Buffer.concat([PKCS8_ED25519_SEED_PREFIX, seed]);
+function seedToPkcs8Der(seed: Uint8Array): Uint8Array {
+  return concatBytes(PKCS8_ED25519_SEED_PREFIX, seed);
 }
 
 function looksLikePem(value: string): boolean {
   return value.includes("-----BEGIN");
 }
 
-function tryDecodeHex(value: string): Buffer | null {
+function tryDecodeHex(value: string): Uint8Array | null {
   const trimmed = value.trim();
   if (trimmed.length === ED25519_SEED_LEN * 2 && /^[0-9a-fA-F]+$/.test(trimmed)) {
-    return Buffer.from(trimmed, "hex");
+    return hexToBytes(trimmed);
   }
   return null;
 }
 
-function tryDecodeBase64Seed(value: string): Buffer | null {
+function tryDecodeBase64Seed(value: string): Uint8Array | null {
   const trimmed = value.trim();
   // Base64 (or base64url) of a 32-byte seed is 43 chars (no pad) or 44 (padded).
   if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(trimmed)) return null;
-  let decoded: Buffer;
+  let decoded: Uint8Array;
   try {
-    decoded = Buffer.from(trimmed.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+    decoded = base64ToBytes(trimmed);
   } catch {
     return null;
   }
@@ -158,7 +195,14 @@ export function parseSigningKey(raw: string): KeyObject {
       );
     }
     try {
-      key = createPrivateKey({ key: seedToPkcs8Der(seed), format: "der", type: "pkcs8" });
+      // Node accepts a Uint8Array here at runtime; the DER key-input type is
+      // narrowed to Buffer, which @cloudflare/workers-types shadows in this
+      // package, so widen through unknown.
+      key = createPrivateKey({
+        key: seedToPkcs8Der(seed) as unknown as string,
+        format: "der",
+        type: "pkcs8",
+      });
     } catch (err) {
       throw new AuditSigningKeyError(
         `STEWARD_AUDIT_SIGNING_KEY seed could not be imported: ${(err as Error).message}`,
@@ -201,7 +245,7 @@ export function createCheckpointSigner(rawKey: string): AuditCheckpointSigner {
       const signature = sign(null, bytes, privateKey);
       return {
         payload,
-        signature: signature.toString("base64"),
+        signature: bytesToBase64(new Uint8Array(signature)),
         publicKey: pubPem,
       };
     },
@@ -261,7 +305,7 @@ export function verifyCheckpoint(checkpoint: SignedCheckpoint): boolean {
       null,
       canonicalCheckpointBytes(checkpoint.payload),
       pub,
-      Buffer.from(checkpoint.signature, "base64"),
+      base64ToBytes(checkpoint.signature),
     );
   } catch {
     return false;
