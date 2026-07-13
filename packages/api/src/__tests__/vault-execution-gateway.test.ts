@@ -14,11 +14,19 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { Vault } from "@stwd/vault";
+import type {
+  ExternalKeyCustodyProvider,
+  ExternalKeyHandleImportRequest,
+  ExternalKeyHandleRegistration,
+  ExternalKeySignTransactionRequest,
+  ExternalKeySignTransactionResult,
+} from "@stwd/vault";
+import { BackendBindingMismatchError, Vault } from "@stwd/vault";
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 import { executionPayloadDigestForEvmSign } from "../services/execution-authorization";
+import { getConfiguredVault } from "../services/vault-factory";
 
 const TENANT_ID = `gateway-tenant-${Date.now()}`;
 const AGENT_ID = `gateway-agent-${Date.now()}`;
@@ -760,6 +768,177 @@ describe("vault EVM execution gateway", () => {
       expect(approval?.status).toBe("pending");
     } finally {
       signSpy.mockRestore();
+    }
+  });
+
+  // ── ROUND 3 / ITEM 3 (PART B): backend-binding TOCTOU — API-level transition —
+  //
+  // The FINDING 4 tests above reject when the wallet ALREADY resolves to a
+  // non-local backend at the gateway precheck (resolveExecutionBackend returns
+  // the non-local backend), so no authorization is ever minted. This test
+  // exercises the harder TOCTOU: the wallet resolves as `local-vault` at MINT
+  // time (precheck passes, an authorization IS minted+consumed and bound to
+  // "local-vault"), then the custody FLIPS to the provider-backed backend
+  // BEFORE the raw signing boundary. The raw Vault.signTransaction re-resolves
+  // the backend from its OWN fresh wallet lookup (independent of the gateway's
+  // resolveExecutionBackend precheck) and, because the authorization is bound to
+  // "local-vault", MUST fail closed with BackendBindingMismatchError BEFORE the
+  // provider is reached.
+  //
+  // We model the flip by making the wallet provider-custody in the DB (the
+  // post-flip state the raw signer sees) while stubbing resolveExecutionBackend
+  // to return "local-vault" (the pre-flip value the gateway precheck read). The
+  // real signTransaction runs (NOT mocked) so the re-resolution + fail-closed
+  // guard actually execute. We register a REAL provider spy on the route's Vault
+  // instance and assert it is NEVER called — proving the guard fires before any
+  // provider routing.
+  //
+  // Required assertions (round-3 PART B):
+  //  (1) the real provider spy is NEVER called,
+  //  (2) the specific BackendBindingMismatchError / backend_binding_mismatch
+  //      code surfaces (HTTP 409 with data.code), and
+  //  (3) the specific PART-A rejection audit
+  //      (vault.execution_authorization.rejected, reason backend_binding_mismatch)
+  //      is written at the API level.
+
+  const TRANSITION_AGENT_ID = `gateway-transition-agent-${Date.now()}`;
+
+  class ProviderSpy implements ExternalKeyCustodyProvider {
+    id = "transition-provider-spy";
+    registerCalls: ExternalKeyHandleImportRequest[] = [];
+    signCalls: ExternalKeySignTransactionRequest[] = [];
+    async registerKeyHandle(
+      request: ExternalKeyHandleImportRequest,
+    ): Promise<ExternalKeyHandleRegistration> {
+      this.registerCalls.push(request);
+      throw new Error("provider registerKeyHandle must not be reached in the transition test");
+    }
+    async signTransaction(
+      request: ExternalKeySignTransactionRequest,
+    ): Promise<ExternalKeySignTransactionResult> {
+      // If this ever runs, the TOCTOU guard failed: a local-vault-bound
+      // authorization reached the provider.
+      this.signCalls.push(request);
+      throw new Error(
+        "provider signTransaction must not be reached for a backend-binding mismatch",
+      );
+    }
+  }
+
+  it("fails closed (backend binding mismatch) on the direct /sign path when a local-vault-bound authorization re-resolves to the provider backend before the provider", async () => {
+    // Seed a wallet that is provider-custody in the DB (the post-flip state the
+    // raw signer's re-resolution will observe), mirroring seedExternalCustodyAgent.
+    await getDb().insert(agents).values({
+      id: TRANSITION_AGENT_ID,
+      tenantId: TENANT_ID,
+      name: "Transition Custody Agent",
+      walletAddress: "0x00000000000000000000000000000000000000ee",
+    });
+    const custodyMetadata: Record<string, unknown> = {
+      custody: "external",
+      externalKey: {
+        providerId: "test-kms",
+        keyId: "key-transition-1",
+        registeredAt: new Date().toISOString(),
+        exportablePrivateKey: false,
+        signingAvailability: "provider-signing",
+      },
+    };
+    await getDb().insert(agentWallets).values({
+      agentId: TRANSITION_AGENT_ID,
+      chainFamily: "evm",
+      address: "0x00000000000000000000000000000000000000ee",
+      metadata: custodyMetadata,
+    });
+    await getDb()
+      .insert(policies)
+      .values({
+        id: `${TRANSITION_AGENT_ID}-approved-addresses`,
+        agentId: TRANSITION_AGENT_ID,
+        type: "approved-addresses",
+        enabled: true,
+        config: {
+          mode: "whitelist",
+          addresses: ["0x1111111111111111111111111111111111111111"],
+        },
+      });
+
+    // Register a REAL provider spy on the route's Vault instance so we can
+    // assert it is NEVER reached. The route resolves its Vault via
+    // getConfiguredVault (the same instance the `vault` proxy in services/context
+    // delegates to), so setting the provider on that instance is what the raw
+    // signer would use if it ever routed to the provider backend.
+    const routeVault = getConfiguredVault({
+      fallbackPassword: process.env.STEWARD_MASTER_PASSWORD,
+    });
+    const providerSpy = new ProviderSpy();
+    const vaultWithProvider = routeVault as unknown as {
+      externalKeyCustodyProvider?: ExternalKeyCustodyProvider;
+    };
+    const priorProvider = vaultWithProvider.externalKeyCustodyProvider;
+    vaultWithProvider.externalKeyCustodyProvider = providerSpy;
+
+    // Stub resolveExecutionBackend to return the PRE-flip value "local-vault"
+    // so the gateway precheck passes and mints+consumes an authorization bound
+    // to local-vault. The raw signTransaction below is NOT mocked, so its own
+    // fresh wallet lookup still observes the provider-custody DB wallet and
+    // fails closed at the signing boundary.
+    const resolveSpy = spyOn(Vault.prototype, "resolveExecutionBackend").mockResolvedValue(
+      "local-vault",
+    );
+
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${TRANSITION_AGENT_ID}/sign`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "Idempotency-Key": "transition-binding-mismatch-1",
+        },
+        body: JSON.stringify({
+          to: "0x1111111111111111111111111111111111111111",
+          value: "1",
+          chainId: 8453,
+          broadcast: false,
+        }),
+      });
+      const body = await res.json();
+
+      // (2) the specific backend_binding_mismatch surfaces as the fail-closed 409.
+      expect(res.status).toBe(409);
+      expect(body.ok).toBe(false);
+      expect(body.data?.code).toBe("backend_binding_mismatch");
+
+      // (1) the real provider spy was NEVER called.
+      expect(providerSpy.signCalls).toHaveLength(0);
+      expect(providerSpy.registerCalls).toHaveLength(0);
+
+      // Prove the guard genuinely engaged: the mint-time precheck resolver was
+      // consulted, and the mismatch error type is the vault-layer one.
+      expect(resolveSpy).toHaveBeenCalled();
+
+      // (3) the PART-A rejection audit is written with reason backend_binding_mismatch.
+      const audits = await getDb()
+        .select({ action: auditEvents.action, metadata: auditEvents.metadata })
+        .from(auditEvents)
+        .where(eq(auditEvents.resourceId, TRANSITION_AGENT_ID));
+      const rejection = audits.find(
+        (row) => row.action === "vault.execution_authorization.rejected",
+      );
+      expect(rejection, "backend-binding-mismatch rejection audit must exist").toBeDefined();
+      const rejectionMeta = rejection?.metadata as Record<string, unknown> | undefined;
+      expect(rejectionMeta?.reason).toBe("backend_binding_mismatch");
+      expect(rejectionMeta?.expectedBackend).toBe("local-vault");
+      expect(rejectionMeta?.resolvedBackend).toBe("third-party-custody");
+
+      // Sanity: the vault-layer error class is exported and matches the code the
+      // API surfaced, keeping the API contract and the vault guard in lockstep.
+      expect(new BackendBindingMismatchError("local-vault", "third-party-custody").code).toBe(
+        "backend_binding_mismatch",
+      );
+    } finally {
+      resolveSpy.mockRestore();
+      vaultWithProvider.externalKeyCustodyProvider = priorProvider;
     }
   });
 });

@@ -30,6 +30,8 @@ export type {
   ExternalKeyHandleImportRequest,
   ExternalKeyHandleRegistration,
   ExternalKeySigningAvailability,
+  ExternalKeySignTransactionRequest,
+  ExternalKeySignTransactionResult,
 } from "./external-key-custody";
 export {
   assertNoExternalPrivateKeyMaterial,

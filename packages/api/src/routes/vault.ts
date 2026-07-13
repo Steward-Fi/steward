@@ -27,6 +27,7 @@ import {
 import {
   assertMoneroAddress,
   assertSolanaPriorityFeeWithinCap,
+  BackendBindingMismatchError,
   type DerivedSolanaPolicyFields,
   deriveSolanaPolicyFields,
   detectSolanaPolicyConflicts,
@@ -1200,6 +1201,62 @@ function executionAuthorizationErrorResponse(
   if (!(error instanceof GovernedVaultError)) return null;
   const status = error.code === "authorization_rejected" ? 403 : 500;
   return c.json<ApiResponse>({ ok: false, error: error.message }, status);
+}
+
+// Fail-closed handler for the TOCTOU backend-binding guard.
+//
+// `BackendBindingMismatchError` is thrown at the vault signing boundary
+// (Vault.signTransaction) AFTER the gateway authorization has been minted and
+// consumed, when the wallet's custody backend has flipped from the
+// gateway-supported "local-vault" to "third-party-custody" between the gateway's
+// resolveExecutionBackend precheck and the raw sign. It is NOT a
+// GovernedVaultError, so without this explicit handler it would fall through to
+// the generic 500 path with no specific audit. Here we write a dedicated
+// rejection audit event (matching the vault.execution_authorization.rejected
+// taxonomy, reason `backend_binding_mismatch`) and return the same 409
+// fail-closed shape the earlier gateway precheck uses, so the two custody-
+// mismatch rejection points are indistinguishable to the caller.
+//
+// Returns null (does NOT swallow) for any other error so the outer catch keeps
+// its existing handling for GovernedVaultError / RPC / generic failures.
+async function backendBindingMismatchResponse(
+  c: Context<{ Variables: AppVariables }>,
+  error: unknown,
+  context: {
+    tenantId: string;
+    agentId: string;
+    txId?: string;
+    authorizationId?: string;
+    chainId?: number;
+  },
+): Promise<Response | null> {
+  if (!(error instanceof BackendBindingMismatchError)) return null;
+  await writeVaultAudit(c, {
+    tenantId: context.tenantId,
+    actorType: "agent",
+    actorId: context.agentId,
+    action: "vault.execution_authorization.rejected",
+    resourceType: context.authorizationId ? "execution_authorization" : "transaction",
+    resourceId: context.authorizationId ?? context.txId ?? context.agentId,
+    metadata: {
+      agentId: context.agentId,
+      reason: error.code,
+      expectedBackend: error.expectedBackend,
+      resolvedBackend: error.resolvedBackend,
+      ...(context.txId ? { txId: context.txId } : {}),
+      ...(context.authorizationId ? { authorizationId: context.authorizationId } : {}),
+      ...(context.chainId !== undefined ? { chainId: context.chainId } : {}),
+    },
+  });
+  return c.json<ApiResponse<{ code: string }>>(
+    {
+      ok: false,
+      error:
+        "This wallet uses third-party custody, which is not supported by the execution gateway. Resubmit through a supported custody path.",
+      data: { code: error.code },
+    },
+    409,
+  );
 }
 
 function isHex(value: unknown): value is `0x${string}` {
@@ -2410,6 +2467,12 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     } catch (e: unknown) {
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
+      const bindingMismatch = await backendBindingMismatchResponse(c, e, {
+        tenantId,
+        agentId,
+        chainId: resolvedChainId,
+      });
+      if (bindingMismatch) return bindingMismatch;
       const authorizationError = executionAuthorizationErrorResponse(c, e);
       if (authorizationError) return authorizationError;
       const requestId = c.get("requestId") || "unknown";
@@ -4155,6 +4218,12 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
       const authorizationError = executionAuthorizationErrorResponse(c, e);
+      const bindingMismatch = await backendBindingMismatchResponse(c, e, {
+        tenantId,
+        agentId,
+        txId,
+        chainId: transactionRow.chainId,
+      });
       if (!irreversibleResult) {
         await db
           .update(approvalQueue)
@@ -4189,6 +4258,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
       }
 
+      if (bindingMismatch) return bindingMismatch;
       if (authorizationError) return authorizationError;
 
       const requestId = c.get("requestId") || "unknown";
