@@ -71,7 +71,7 @@ Transaction records include:
 Steward dispatches webhooks for key events. Configure your webhook URL per-tenant:
 
 ```typescript
-await fetch("https://api.steward.fi/tenants/your-tenant/webhook", {
+await fetch("http://localhost:3200/tenants/your-tenant/webhook", {
   method: "PUT",
   headers: {
     "X-Steward-Key": "your-key",

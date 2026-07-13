@@ -88,7 +88,7 @@ if ("txHash" in result) {
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/vault/my-agent/sign \
+curl -X POST http://localhost:3200/vault/my-agent/sign \
   -H "Authorization: Bearer agent-jwt" \
   -H "Content-Type: application/json" \
   -d '{
@@ -367,7 +367,7 @@ if (result.finalizedTxHex) {
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/vault/my-agent/sign-bitcoin-psbt \
+curl -X POST http://localhost:3200/vault/my-agent/sign-bitcoin-psbt \
   -H "Authorization: Bearer agent-jwt" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: order-123-bitcoin-psbt-v1" \
@@ -484,12 +484,12 @@ await steward.submitEncryptedAgentKeyImport("my-agent", {
 ```
 
 ```bash cURL
-curl -X POST https://api.steward.fi/vault/my-agent/import/init \
+curl -X POST http://localhost:3200/vault/my-agent/import/init \
   -H "Authorization: Bearer tenant-admin-session-jwt" \
   -H "Content-Type: application/json" \
   -d '{"chain":"evm"}'
 
-curl -X POST https://api.steward.fi/vault/my-agent/import/submit \
+curl -X POST http://localhost:3200/vault/my-agent/import/submit \
   -H "Authorization: Bearer tenant-admin-session-jwt" \
   -H "Content-Type: application/json" \
   -d '{
@@ -603,7 +603,7 @@ const history = await steward.getHistory("my-agent");
 ```
 
 ```bash cURL
-curl https://api.steward.fi/vault/my-agent/history \
+curl http://localhost:3200/vault/my-agent/history \
   -H "Authorization: Bearer agent-jwt"
 ```
 </CodeGroup>
@@ -648,7 +648,7 @@ const result = await steward.listTransactions("my-agent", {
 ```
 
 ```bash cURL
-curl "https://api.steward.fi/vault/my-agent/transactions?actionType=transfer&referenceId=customer-order-123" \
+curl "http://localhost:3200/vault/my-agent/transactions?actionType=transfer&referenceId=customer-order-123" \
   -H "Authorization: Bearer agent-jwt"
 ```
 </CodeGroup>
@@ -669,7 +669,7 @@ const tx = await steward.getTransaction("my-agent", "tx_123");
 ```
 
 ```bash cURL
-curl https://api.steward.fi/vault/my-agent/transactions/tx_123 \
+curl http://localhost:3200/vault/my-agent/transactions/tx_123 \
   -H "Authorization: Bearer agent-jwt"
 ```
 </CodeGroup>
@@ -692,7 +692,7 @@ const addresses = await steward.getAddresses("my-agent");
 ```
 
 ```bash cURL
-curl https://api.steward.fi/vault/my-agent/addresses \
+curl http://localhost:3200/vault/my-agent/addresses \
   -H "Authorization: Bearer agent-jwt"
 ```
 </CodeGroup>

@@ -1,8 +1,9 @@
 /**
  * Integration tests for @stwd/eliza-plugin against real Steward API.
  *
- * These tests create a temporary agent on milady-cloud tenant,
- * exercise every plugin component, then clean up.
+ * These tests create a temporary agent on the configured tenant
+ * (STEWARD_TENANT_ID, default "my-app"), exercise every plugin component,
+ * then clean up.
  *
  * Run with: npx vitest run src/__tests__/integration.test.ts
  */
@@ -22,9 +23,14 @@ const describeLive = runLive ? describe : describe.skip;
 
 // ── Config ──────────────────────────────────────────────────────
 
-const API_URL = "https://api.steward.fi";
-const API_KEY = "stw_b1715e3d9fc4aa49b8d2641f9e0349cf";
-const TENANT_ID = "milady-cloud";
+// Opt-in live suite (STEWARD_LIVE_TESTS=1). Steward is self-host-first, so the
+// target instance and its seeded tenant/key are environment-specific. Override
+// via env to point at whatever instance you are exercising; the defaults assume
+// a locally running self-hosted Steward (compose profile exposes :3200) with a
+// tenant/key you have seeded.
+const API_URL = (process.env.STEWARD_URL ?? "http://localhost:3200").replace(/\/$/, "");
+const API_KEY = process.env.STEWARD_API_KEY ?? "stw_your_tenant_key";
+const TENANT_ID = process.env.STEWARD_TENANT_ID ?? "my-app";
 const TEST_AGENT_ID = `eliza-integ-${Date.now()}`;
 
 // ── Helpers ─────────────────────────────────────────────────────

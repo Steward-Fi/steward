@@ -7,7 +7,8 @@
   },
   "servers": [
     {
-      "url": "https://api.steward.fi"
+      "url": "/",
+      "description": "Same origin as this Steward deployment (self-hosted)"
     }
   ],
   "x-steward-sensitive-prefixes": [

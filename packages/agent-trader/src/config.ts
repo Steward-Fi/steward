@@ -16,7 +16,7 @@ import { MAX_SLIPPAGE_BPS } from "./trade-builder.js";
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface StewardConnection {
-  /** Base URL of the Steward API, e.g. https://api.steward.fi */
+  /** Base URL of the Steward API, e.g. http://localhost:3200 for a self-hosted instance */
   apiUrl: string;
   /** Tenant identifier, e.g. "waifu.fun" */
   tenantId: string;

@@ -55,7 +55,7 @@ export interface StewardProviderWithAuthProps extends StewardProviderProps {
    * <StewardProvider
    *   client={client}
    *   agentId="abc"
-   *   auth={{ baseUrl: "https://api.steward.fi" }}
+   *   auth={{ baseUrl: "http://localhost:3200" }}
    *   tenantId="my-app"
    * >
    *   <App />

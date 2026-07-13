@@ -172,13 +172,13 @@ Transactions that pass all policies except auto-approve enter the approval queue
 ```typescript
 // List pending approvals
 const pending = await fetch(
-  `https://api.steward.fi/vault/${agentId}/pending`,
+  `http://localhost:3200/vault/${agentId}/pending`,
   { headers: { Authorization: `Bearer ${agentToken}` } }
 );
 
 // Approve (requires tenant-level auth)
 await fetch(
-  `https://api.steward.fi/vault/${agentId}/approve/${txId}`,
+  `http://localhost:3200/vault/${agentId}/approve/${txId}`,
   {
     method: "POST",
     headers: { "X-Steward-Key": "tenant-key" },
@@ -187,7 +187,7 @@ await fetch(
 
 // Reject
 await fetch(
-  `https://api.steward.fi/vault/${agentId}/reject/${txId}`,
+  `http://localhost:3200/vault/${agentId}/reject/${txId}`,
   {
     method: "POST",
     headers: { "X-Steward-Key": "tenant-key" },

@@ -52,7 +52,7 @@ The SDK handles token refresh automatically. When the access token is within 2 m
 import { StewardAuth } from "@stwd/sdk";
 
 const auth = new StewardAuth({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   storage: localStorage, // persist across page reloads
   onSessionChange: (session) => {
     console.log(session ? "Signed in" : "Signed out");
@@ -100,11 +100,11 @@ See [Cross-Tenant Identity](/auth/cross-tenant) for details on tenant management
     ```typescript
     import { StewardAuth } from "@stwd/sdk";
 
-    const auth = new StewardAuth({ baseUrl: "https://api.steward.fi" });
+    const auth = new StewardAuth({ baseUrl: "http://localhost:3200" });
     const result = await auth.signInWithPasskey("user@example.com");
 
     const client = new StewardClient({
-      baseUrl: "https://api.steward.fi",
+      baseUrl: "http://localhost:3200",
       bearerToken: auth.getToken(),
     });
     ```
@@ -118,7 +118,7 @@ See [Cross-Tenant Identity](/auth/cross-tenant) for details on tenant management
         <StewardProvider
           client={client}
           agentId="my-agent"
-          auth={{ baseUrl: "https://api.steward.fi" }}
+          auth={{ baseUrl: "http://localhost:3200" }}
         >
           <StewardAuthGuard>
             <Dashboard />

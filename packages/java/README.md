@@ -9,7 +9,7 @@ The SDK uses only the Java standard library and can be compiled directly with
 import com.steward.sdk.CreateUserInput;
 import com.steward.sdk.StewardClient;
 
-StewardClient client = new StewardClient(StewardClient.config("https://api.steward.fi")
+StewardClient client = new StewardClient(StewardClient.config("http://localhost:3200")
     .platformKey("steward_platform_...")
     .build());
 
@@ -23,7 +23,7 @@ adds Steward request freshness, HMAC signature, and idempotency headers for
 sensitive mutations.
 
 ```java
-StewardClient client = new StewardClient(StewardClient.config("https://api.steward.fi")
+StewardClient client = new StewardClient(StewardClient.config("http://localhost:3200")
     .appCredentials("app_...", "secret_...")
     .requestSigningSecret("stwd_req_...")
     .requestSigningKeyId("key_...")

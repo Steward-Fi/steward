@@ -100,7 +100,7 @@ For agents that already have keys (e.g., migrating from another system), you can
 
 ```typescript
 // Import requires tenant-level authentication
-const result = await fetch("https://api.steward.fi/vault/my-agent/import", {
+const result = await fetch("http://localhost:3200/vault/my-agent/import", {
   method: "POST",
   headers: {
     "X-Steward-Key": "your-tenant-api-key",

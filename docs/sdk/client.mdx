@@ -13,7 +13,7 @@ The `StewardClient` class provides typed methods for all Steward API operations.
 import { StewardClient } from "@stwd/sdk";
 
 const client = new StewardClient({
-  baseUrl: string;        // Steward API URL (e.g., "https://api.steward.fi")
+  baseUrl: string;        // Steward API URL (e.g., "http://localhost:3200")
   apiKey?: string;        // Tenant API key (X-Steward-Key header)
   bearerToken?: string;   // Agent JWT (Authorization: Bearer header)
   tenantId?: string;      // Optional tenant ID header
