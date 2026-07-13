@@ -29,8 +29,14 @@ Usage:
   steward audit bundle [--from 1] [--to N] [--out bundle.json] [--verify]
 
 Auth:
-  --api-url, --tenant-id, --token, and --platform-key override STEWARD_* env vars.
-  Tenant creation uses X-Steward-Platform-Key. Other API-backed commands use Bearer auth.
+  --api-url, --tenant-id, --token, --tenant-key, and --platform-key override
+  STEWARD_* env vars (STEWARD_API_URL, STEWARD_TENANT_ID, STEWARD_TOKEN,
+  STEWARD_TENANT_KEY, STEWARD_PLATFORM_KEY).
+  Tenant creation uses X-Steward-Platform-Key.
+  Other API-backed commands prefer a Bearer --token; if none is set they fall
+  back to the tenant API key (--tenant-key -> X-Steward-Key), which the API
+  treats as an api-key machine credential. This is the non-interactive path the
+  golden-path script uses (api-key auth bypasses the human-session MFA step-up).
 `;
 
 function createContext(flags: Record<string, string | boolean>): CommandContext {
@@ -40,6 +46,7 @@ function createContext(flags: Record<string, string | boolean>): CommandContext 
       tenantId: stringFlag(flags, "tenant-id"),
       token: stringFlag(flags, "token"),
       platformKey: stringFlag(flags, "platform-key"),
+      tenantKey: stringFlag(flags, "tenant-key"),
     }),
     flags,
     format: boolFlag(flags, "json") ? "json" : "pretty",

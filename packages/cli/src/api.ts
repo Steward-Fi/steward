@@ -3,6 +3,14 @@ export type ApiClientOptions = {
   tenantId?: string;
   token?: string;
   platformKey?: string;
+  /**
+   * Raw tenant API key. Sent as `X-Steward-Key` alongside `X-Steward-Tenant`,
+   * which the API's tenantAuth accepts as an `api-key` machine credential.
+   * This is what lets the operator CLI drive agent/secret/policy/approval
+   * routes non-interactively (api-key auth bypasses the human session MFA
+   * step-up that a browser owner session would require).
+   */
+  tenantKey?: string;
   fetchImpl?: typeof fetch;
 };
 
@@ -27,6 +35,7 @@ export class StewardApiClient {
   private readonly tenantId?: string;
   private readonly token?: string;
   private readonly platformKey?: string;
+  private readonly tenantKey?: string;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = normalizeBaseUrl(options.baseUrl);
@@ -34,6 +43,7 @@ export class StewardApiClient {
     this.tenantId = options.tenantId ?? process.env.STEWARD_TENANT_ID;
     this.token = options.token ?? process.env.STEWARD_TOKEN ?? process.env.STEWARD_API_TOKEN;
     this.platformKey = options.platformKey ?? process.env.STEWARD_PLATFORM_KEY;
+    this.tenantKey = options.tenantKey ?? process.env.STEWARD_TENANT_KEY;
   }
 
   async request<T = unknown>(
@@ -49,6 +59,9 @@ export class StewardApiClient {
       headers["X-Steward-Platform-Key"] = this.platformKey;
     } else if (this.token) {
       headers.Authorization = `Bearer ${this.token}`;
+    } else if (this.tenantKey) {
+      // Tenant API key path: X-Steward-Key + X-Steward-Tenant -> api-key auth.
+      headers["X-Steward-Key"] = this.tenantKey;
     }
     if (options.tenant !== false && this.tenantId) headers["X-Steward-Tenant"] = this.tenantId;
 
