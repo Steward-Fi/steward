@@ -34,7 +34,12 @@ fi
 # can never be promoted into a real credential.
 case "$TENANT_KEY" in
   *change_me* | *change-me* | *changeme* | *golden_demo_change* | *placeholder* | *CHANGEME*)
-    echo "ERROR: STEWARD_GOLDEN_TENANT_KEY looks like a placeholder ('$TENANT_KEY')." >&2
+    # Do NOT interpolate $TENANT_KEY here: this branch handles a value the
+    # operator supplied as a real credential, and echoing it to stderr would
+    # leak the key into terminal scrollback, CI logs, and shared screens (the
+    # exact secrecy failure this script guards against). Keep the message
+    # static so no future edit can reintroduce the key in error output.
+    echo "ERROR: STEWARD_GOLDEN_TENANT_KEY looks like a placeholder; generate a real tenant key." >&2
     echo "       Supply a real, unique key instead." >&2
     exit 1
     ;;
