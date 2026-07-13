@@ -153,19 +153,132 @@ describe("aggregation cap enforcement (vault.ts wiring)", () => {
     expect(ctxField).toBeGreaterThan(evaluate);
   });
 
-  it("records the authoritative aggregation event (awaited) on commit, in-lock", () => {
+  it("records the authoritative aggregation event (awaited) on commit, AFTER signing, in-lock", () => {
     const routeStart = vaultSource.indexOf('vaultRoutes.post("/:agentId/sign"');
     const routeEnd = vaultSource.indexOf('vaultRoutes.post("/:agentId/actions/transfer/quote"');
     const route = vaultSource.slice(routeStart, routeEnd);
 
-    const sign = route.indexOf("await vault.signTransaction(signRequest");
-    const record = route.indexOf("await recordAggregationEvent({");
+    assertRecordAfterSigning(route);
+  });
+});
 
-    expect(sign).toBeGreaterThanOrEqual(0);
-    // Recorded only AFTER the transaction is actually signed/committed …
-    expect(record).toBeGreaterThan(sign);
-    // … and AWAITED (not fire-and-forget) so the next in-lock snapshot includes it.
-    expect(route).toContain("await recordAggregationEvent({");
-    expect(route).toContain("valueRaw: signRequest.value");
+// ─── source-contract helper: signing precedes the awaited record ────────────────
+
+/**
+ * The signing ordering invariant this route MUST uphold on the money path:
+ * every actual signing invocation is issued BEFORE the authoritative
+ * `await recordAggregationEvent({ … })`, and that record is AWAITED (not
+ * fire-and-forget) so the next in-lock snapshot includes this contribution.
+ *
+ * PR #182 refactored EVM signing to the gateway-authorized form
+ * `signTransactionAuthorized(signRequest, …)` while the non-EVM (Solana)
+ * fallback still uses the raw `vault.signTransaction(signRequest, …)`. A brittle
+ * anchor on one literal spelling (or on `await` vs `return`) drifts the moment
+ * either branch is reshaped. Instead we recognize BOTH signing call shapes
+ * structurally, require at least one to be present (fail helpfully if a refactor
+ * removes all recognized signing forms), and assert every present signing form
+ * precedes the record. Moving the record before ANY present signing form fails.
+ *
+ * Exported as a free function so the same contract can be exercised against an
+ * in-memory fixture in this file's proof tests below.
+ */
+function signingCallIndices(route: string): number[] {
+  // Both recognized signing forms on the primary sign money path. Decoupled
+  // from `await` vs `return` and from the surrounding call chain: we anchor on
+  // the signing method name immediately applied to `signRequest`.
+  //   • EVM (gateway-authorized): `…signTransactionAuthorized(signRequest, …)`
+  //   • non-EVM (raw fallback):   `…vault.signTransaction(signRequest, …)`
+  // `signTransactionAuthorized(signRequest` is matched exclusively so it is not
+  // also double-counted by the `signTransaction(signRequest` substring.
+  const indices: number[] = [];
+  const patterns = [
+    /signTransactionAuthorized\(\s*signRequest\b/g,
+    /(?<!Authorized\()\bvault\.signTransaction\(\s*signRequest\b/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of route.matchAll(pattern)) {
+      if (match.index !== undefined) indices.push(match.index);
+    }
+  }
+  return indices.sort((a, b) => a - b);
+}
+
+function assertRecordAfterSigning(route: string): void {
+  const signingIndices = signingCallIndices(route);
+  const record = route.indexOf("await recordAggregationEvent({");
+
+  // The record itself must exist, be AWAITED, and carry the authoritative value.
+  expect(record).toBeGreaterThanOrEqual(0);
+  expect(route).toContain("await recordAggregationEvent({");
+  expect(route).toContain("valueRaw: signRequest.value");
+
+  // At least one recognized signing form must be present. If a refactor removes
+  // BOTH the authorized-EVM and raw-non-EVM signing calls, fail loudly here
+  // rather than silently passing an ordering check over zero signing sites.
+  expect(
+    signingIndices.length,
+    "expected at least one recognized signing call (signTransactionAuthorized(signRequest …) " +
+      "or vault.signTransaction(signRequest …)) on the sign money path",
+  ).toBeGreaterThan(0);
+
+  // EVERY present signing form must precede the awaited record. Moving the
+  // record before any present signing call (the real regression we guard) makes
+  // the earliest signing index exceed the record index and fails here.
+  for (const signIndex of signingIndices) {
+    expect(
+      record,
+      "await recordAggregationEvent(...) must appear AFTER every signing call on the money path",
+    ).toBeGreaterThan(signIndex);
+  }
+}
+
+// ─── 3. proof: the source-contract assertion actually discriminates ─────────────
+//
+// Exercises `assertRecordAfterSigning` against in-memory string fixtures to
+// prove it (a) passes on a route that matches the current shape, (b) fails when
+// NO recognized signing form is present, and (c) fails when the record is moved
+// before a present signing form. This is the effectiveness proof required by
+// the CI-fix scope; it needs no real route source.
+
+describe("aggregation source-contract assertion (self-proof)", () => {
+  const RECORD = "await recordAggregationEvent({\n  valueRaw: signRequest.value,\n});";
+  const EVM_SIGN = "await gv.signTransactionAuthorized(signRequest, { txId });";
+  const RAW_SIGN = "return vault.signTransaction(signRequest, { txId });";
+
+  it("PASSES when both EVM-authorized and raw signing precede the awaited record", () => {
+    const route = `${EVM_SIGN}\n${RAW_SIGN}\n${RECORD}`;
+    expect(() => assertRecordAfterSigning(route)).not.toThrow();
+  });
+
+  it("PASSES for an EVM-only route (authorized signing precedes the record)", () => {
+    const route = `${EVM_SIGN}\n${RECORD}`;
+    expect(() => assertRecordAfterSigning(route)).not.toThrow();
+  });
+
+  it("PASSES for a non-EVM-only route (raw fallback precedes the record)", () => {
+    const route = `${RAW_SIGN}\n${RECORD}`;
+    expect(() => assertRecordAfterSigning(route)).not.toThrow();
+  });
+
+  it("FAILS when NO recognized signing form is present", () => {
+    // A route that records but has no signing call at all must not pass.
+    const route = `const x = 1;\n${RECORD}`;
+    expect(() => assertRecordAfterSigning(route)).toThrow();
+  });
+
+  it("FAILS when the record is moved BEFORE the (only) signing form", () => {
+    const route = `${RECORD}\n${EVM_SIGN}`;
+    expect(() => assertRecordAfterSigning(route)).toThrow();
+  });
+
+  it("FAILS when the record precedes the raw non-EVM signing form", () => {
+    const route = `${RECORD}\n${RAW_SIGN}`;
+    expect(() => assertRecordAfterSigning(route)).toThrow();
+  });
+
+  it("FAILS when the record sits between two signing forms (a present form is not preceded)", () => {
+    // record after EVM sign but before raw sign → the raw sign is not preceded.
+    const route = `${EVM_SIGN}\n${RECORD}\n${RAW_SIGN}`;
+    expect(() => assertRecordAfterSigning(route)).toThrow();
   });
 });
