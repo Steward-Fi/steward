@@ -39,6 +39,7 @@ const route = {
 // secrets join), so we expose them too.
 const noopFn = (...args: unknown[]) => args;
 mock.module("drizzle-orm", () => ({
+  relations: noopFn,
   and: noopFn,
   desc: (arg: unknown) => arg,
   eq: noopFn,
@@ -67,7 +68,24 @@ mock.module("@stwd/db", () => {
     config: "config",
   };
   const proxyAuditLog = {};
+  const pendingProxyRequests = {
+    id: "id",
+    tenantId: "tenantId",
+    agentId: "agentId",
+    status: "status",
+    expiresAt: "expiresAt",
+  };
+  const agents = { id: "id", tenantId: "tenantId" };
+  const tenants = { id: "id" };
   return {
+    sql: noopFn,
+    relations: noopFn,
+    pendingProxyRequests,
+    agents,
+    tenants,
+    closeDb: async () => {},
+    createDb: () => ({}),
+    getDatabaseUrl: () => "postgres://mock",
     and: noopFn,
     desc: (arg: unknown) => arg,
     eq: noopFn,
