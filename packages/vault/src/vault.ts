@@ -527,6 +527,65 @@ export class Vault {
     return { address: wallet.address, metadata: wallet.metadata };
   }
 
+  /**
+   * Resolve which custody backend a sign request would actually route to,
+   * WITHOUT decrypting keys, signing, or calling any third-party provider.
+   *
+   * This mirrors the exact key-resolution precedence in {@link signTransaction}:
+   *   1. A local encrypted chain key (multi-chain table)  -> "local-vault"
+   *   2. Otherwise an third-party-custody wallet             -> "third-party-custody"
+   *   3. Otherwise a legacy local encrypted key / none     -> "local-vault"
+   *
+   * The execution gateway (PR #182) mints ExecutionAuthorizations bound to
+   * backend "local-vault". External custody is NOT a gateway-supported backend
+   * in this PR: an authorization bound to "local-vault" must never be able to
+   * authorize an third-party-custody execution. Callers use this to fail closed
+   * BEFORE minting/consuming when the resolved backend is third-party-custody.
+   */
+  async resolveExecutionBackend(request: {
+    tenantId: string;
+    agentId: string;
+    chainId?: number;
+    venue?: string | null;
+    walletAddress?: string;
+  }): Promise<"local-vault" | "third-party-custody"> {
+    const db = getDb();
+    const chainId = request.chainId || this.config.chainId || 8453;
+    const isSolana = chainId === 101 || chainId === 102;
+    const chainFamilyToUse: WalletChainFamily = isSolana ? "solana" : "evm";
+    const venue = resolveSignVenueSelector({ venue: request.venue ?? undefined });
+
+    // 1. Local encrypted chain key present -> local vault signs.
+    const [chainKey] = await db
+      .select({ id: encryptedChainKeys.id })
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, request.agentId),
+          eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
+          venue
+            ? eq(encryptedChainKeys.venue, venue)
+            : isNull(encryptedChainKeys.venue),
+        ),
+      );
+    if (chainKey) return "local-vault";
+
+    // 2. No local chain key: an third-party-custody wallet takes precedence in
+    //    signTransaction's resolution, so the request would route to the
+    //    third-party provider.
+    const resolvedWallet = await this.getExternalKeyWallet({
+      agentId: request.agentId,
+      chainFamily: chainFamilyToUse,
+      venue,
+    });
+    if (resolvedWallet) return "third-party-custody";
+
+    // 3. No third-party wallet: signTransaction falls back to the legacy local
+    //    encrypted_keys table (or throws missing-key). Either way this is a
+    //    local-vault backend from the gateway's perspective.
+    return "local-vault";
+  }
+
   private async assertNoExternalKeyWalletsForExport(agentId: string): Promise<void> {
     const db = getDb();
     const wallets = await db
