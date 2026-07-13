@@ -4731,3 +4731,44 @@ describe("StewardApiError", () => {
     expect(err.status).toBe(0);
   });
 });
+
+describe("StewardClient proxy approvals", () => {
+  it("registers approval-gated routes", async () => {
+    installMockFetch({
+      ok: true,
+      data: { id: "route-1", requiresApproval: true, createdAt: "now" },
+    });
+    await makeClient().createRoute({
+      secretId: "secret-1",
+      agentId: "agent-1",
+      hostPattern: "api.example.com",
+      injectAs: "header",
+      requiresApproval: true,
+      approvalConfig: { ttlSeconds: 60 },
+    });
+    expect(lastCapture?.url).toEndWith("/secrets/routes");
+    expect(lastCapture?.body).toMatchObject({
+      requiresApproval: true,
+      approvalConfig: { ttlSeconds: 60 },
+    });
+  });
+
+  it("lists, approves, denies, and polls proxy requests", async () => {
+    const client = makeClient();
+    installMockFetch({ ok: true, data: [] });
+    await client.listPendingProxyRequests("pending");
+    expect(lastCapture?.url).toEndWith("/approvals/proxy?status=pending");
+    installMockFetch({ ok: true, data: { id: "p1", status: "approved" } });
+    await client.approveProxyRequest("p1");
+    expect(lastCapture).toMatchObject({
+      method: "POST",
+      url: "https://api.steward.example/approvals/proxy/p1/approve",
+    });
+    installMockFetch({ ok: true, data: { id: "p1", status: "denied" } });
+    await client.denyProxyRequest("p1", "no");
+    expect(lastCapture?.body).toEqual({ reason: "no" });
+    installMockFetch({ ok: true, data: { id: "p1", status: "pending" } });
+    await client.getPendingProxyRequest("p1");
+    expect(lastCapture?.url).toEndWith("/approvals/proxy/p1");
+  });
+});
