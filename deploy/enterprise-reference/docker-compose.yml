@@ -1,7 +1,9 @@
 # Steward enterprise reference profile.
 #
-# Usage:
-#   cp deploy/enterprise-reference/.env.example deploy/enterprise-reference/.env
+# Usage (steward init is the ONLY supported way to produce the env file; it
+# generates a matching POSTGRES_PASSWORD + DATABASE_URL and all secrets. Do NOT
+# copy .env.example as-is — its secret values are intentionally empty and
+# compose's `${VAR:?required}` guards will refuse to start):
 #   steward init --env deploy/enterprise-reference/.env --force
 #   docker compose --env-file deploy/enterprise-reference/.env \
 #     -f deploy/enterprise-reference/docker-compose.yml \
@@ -78,6 +80,10 @@ services:
       NODE_ENV: production
       DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
       REDIS_URL: "redis://redis:6379"
+      # Fail CLOSED on spend-limit / rate-limit enforcement if Redis is
+      # unreachable. Without this the proxy fails OPEN (enforcement silently
+      # bypassed) when redis dies — unacceptable for the reference profile.
+      REDIS_REQUIRED: "true"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
