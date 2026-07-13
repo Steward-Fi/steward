@@ -111,6 +111,13 @@ export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
   "rejected",
 ]);
 
+export const executionAuthorizationStatusEnum = pgEnum("execution_authorization_status", [
+  "active",
+  "consumed",
+  "expired",
+  "revoked",
+]);
+
 const timestamps = {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true })
@@ -873,6 +880,8 @@ export const transactions = pgTable(
     txHash: varchar("tx_hash", { length: 128 }),
     actionType: varchar("action_type", { length: 64 }),
     actionPayload: jsonb("action_payload").$type<Record<string, unknown>>(),
+    executionPayloadDigest: varchar("execution_payload_digest", { length: 64 }),
+    executionPolicyRevisionHash: varchar("execution_policy_revision_hash", { length: 64 }),
     policyResults: jsonb("policy_results").$type<PolicyResult[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     signedAt: timestamp("signed_at", { withTimezone: true }),
@@ -882,6 +891,46 @@ export const transactions = pgTable(
     agentIdIdx: index("transactions_agent_id_idx").on(table.agentId),
     // `value` is a wei amount: must be a non-empty decimal digit string.
     valueIsWei: check("transactions_value_wei_chk", sql`${table.value} ~ '^[0-9]+$'`),
+  }),
+);
+
+export const executionAuthorizationNonces = pgTable(
+  "execution_authorization_nonces",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    authorizationId: varchar("authorization_id", { length: 64 }).notNull(),
+    requestId: varchar("request_id", { length: 64 }).notNull(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    agentId: varchar("agent_id", { length: 64 })
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    capability: varchar("capability", { length: 64 }).notNull(),
+    backend: varchar("backend", { length: 64 }).notNull(),
+    payloadDigest: varchar("payload_digest", { length: 64 }).notNull(),
+    policyRevisionHash: varchar("policy_revision_hash", { length: 64 }),
+    approvalId: varchar("approval_id", { length: 64 }),
+    nonce: varchar("nonce", { length: 64 }).notNull(),
+    signature: text("signature").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    status: executionAuthorizationStatusEnum("status").notNull().default("active"),
+    issuedAt: timestamp("issued_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    authorizationIdUniqueIdx: uniqueIndex("execution_authorization_nonces_auth_id_idx").on(
+      table.authorizationId,
+    ),
+    nonceUniqueIdx: uniqueIndex("execution_authorization_nonces_nonce_idx").on(table.nonce),
+    tenantAgentStatusIdx: index("execution_authorization_nonces_tenant_agent_status_idx").on(
+      table.tenantId,
+      table.agentId,
+      table.status,
+    ),
+    expiryIdx: index("execution_authorization_nonces_expires_at_idx").on(table.expiresAt),
   }),
 );
 
@@ -1491,6 +1540,8 @@ export type Transaction = typeof transactions.$inferSelect;
 export type NewTransaction = typeof transactions.$inferInsert;
 export type ApprovalQueueEntry = typeof approvalQueue.$inferSelect;
 export type NewApprovalQueueEntry = typeof approvalQueue.$inferInsert;
+export type ExecutionAuthorizationNonce = typeof executionAuthorizationNonces.$inferSelect;
+export type NewExecutionAuthorizationNonce = typeof executionAuthorizationNonces.$inferInsert;
 export type Intent = typeof intents.$inferSelect;
 export type NewIntent = typeof intents.$inferInsert;
 export type AgentSigner = typeof agentSigners.$inferSelect;

@@ -30,6 +30,8 @@ export type {
   ExternalKeyHandleImportRequest,
   ExternalKeyHandleRegistration,
   ExternalKeySigningAvailability,
+  ExternalKeySignTransactionRequest,
+  ExternalKeySignTransactionResult,
 } from "./external-key-custody";
 export {
   assertNoExternalPrivateKeyMaterial,
@@ -40,6 +42,11 @@ export {
   InMemoryExternalKeyCustodyProvider,
   normalizeExternalKeyHandleRegistration,
 } from "./external-key-custody";
+export type {
+  ExecutionAuthorizationConsumeCallback,
+  GovernedSignTransactionOptions,
+} from "./governed-vault";
+export { GovernedVault, GovernedVaultError } from "./governed-vault";
 export type { BitcoinAddressType, BitcoinNetwork, DerivedBitcoinKey } from "./hd-wallet";
 export {
   deriveBitcoinKey,
@@ -182,4 +189,4 @@ export type {
   SignBitcoinPsbtResult,
   VaultConfig,
 } from "./vault";
-export { Vault, Vault as VaultClient } from "./vault";
+export { BackendBindingMismatchError, Vault, Vault as VaultClient } from "./vault";

@@ -307,6 +307,42 @@ export interface SignTransactionOptions {
   txId?: string;
   policyResults?: PolicyResult[];
   status?: TxStatus;
+  /**
+   * The custody backend the caller's authorization is cryptographically bound
+   * to (set by the governed execution-gateway path to "local-vault"). When
+   * present, {@link Vault.signTransaction} RE-RESOLVES the backend from the SAME
+   * fresh wallet lookup it will actually sign with and asserts it matches this
+   * bound backend BEFORE routing to any provider. This closes the
+   * resolveExecutionBackend -> sign TOCTOU: if the wallet's backend flips (a
+   * local key is removed and an third-party-custody key inserted) between the
+   * gateway's precheck and the raw sign, a local-vault-bound authorization can
+   * no longer reach the third-party provider. Absent (undefined) preserves the
+   * legacy, un-gateway-bound behavior for non-gateway callers.
+   */
+  expectedBackend?: "local-vault";
+}
+
+/**
+ * Thrown when a governed (gateway-authorized) sign request that is bound to a
+ * specific custody backend re-resolves at signing time to a DIFFERENT backend.
+ * The gateway mints authorizations bound to "local-vault"; if the wallet has
+ * since flipped to third-party custody, the raw signer fails closed here before
+ * any third-party provider is reached (audited, fund-loss-safe).
+ */
+export class BackendBindingMismatchError extends Error {
+  readonly code = "backend_binding_mismatch";
+  constructor(
+    readonly expectedBackend: "local-vault",
+    readonly resolvedBackend: "third-party-custody",
+  ) {
+    super(
+      `Execution backend binding mismatch: authorization is bound to ` +
+        `"${expectedBackend}" but the wallet re-resolved to "${resolvedBackend}" ` +
+        `at signing time. Refusing to route a ${expectedBackend}-bound ` +
+        `authorization to the third-party custody provider.`,
+    );
+    this.name = "BackendBindingMismatchError";
+  }
 }
 
 interface MnemonicWalletMaterial {
@@ -525,6 +561,63 @@ export class Vault {
       );
     if (!wallet || !isExternalKeyWalletMetadata(wallet.metadata)) return undefined;
     return { address: wallet.address, metadata: wallet.metadata };
+  }
+
+  /**
+   * Resolve which custody backend a sign request would actually route to,
+   * WITHOUT decrypting keys, signing, or calling any third-party provider.
+   *
+   * This mirrors the exact key-resolution precedence in {@link signTransaction}:
+   *   1. A local encrypted chain key (multi-chain table)  -> "local-vault"
+   *   2. Otherwise an third-party-custody wallet             -> "third-party-custody"
+   *   3. Otherwise a legacy local encrypted key / none     -> "local-vault"
+   *
+   * The execution gateway (PR #182) mints ExecutionAuthorizations bound to
+   * backend "local-vault". External custody is NOT a gateway-supported backend
+   * in this PR: an authorization bound to "local-vault" must never be able to
+   * authorize an third-party-custody execution. Callers use this to fail closed
+   * BEFORE minting/consuming when the resolved backend is third-party-custody.
+   */
+  async resolveExecutionBackend(request: {
+    tenantId: string;
+    agentId: string;
+    chainId?: number;
+    venue?: string | null;
+    walletAddress?: string;
+  }): Promise<"local-vault" | "third-party-custody"> {
+    const db = getDb();
+    const chainId = request.chainId || this.config.chainId || 8453;
+    const isSolana = chainId === 101 || chainId === 102;
+    const chainFamilyToUse: WalletChainFamily = isSolana ? "solana" : "evm";
+    const venue = resolveSignVenueSelector({ venue: request.venue ?? undefined });
+
+    // 1. Local encrypted chain key present -> local vault signs.
+    const [chainKey] = await db
+      .select({ id: encryptedChainKeys.id })
+      .from(encryptedChainKeys)
+      .where(
+        and(
+          eq(encryptedChainKeys.agentId, request.agentId),
+          eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
+          venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
+        ),
+      );
+    if (chainKey) return "local-vault";
+
+    // 2. No local chain key: an third-party-custody wallet takes precedence in
+    //    signTransaction's resolution, so the request would route to the
+    //    third-party provider.
+    const resolvedWallet = await this.getExternalKeyWallet({
+      agentId: request.agentId,
+      chainFamily: chainFamilyToUse,
+      venue,
+    });
+    if (resolvedWallet) return "third-party-custody";
+
+    // 3. No third-party wallet: signTransaction falls back to the legacy local
+    //    encrypted_keys table (or throws missing-key). Either way this is a
+    //    local-vault backend from the gateway's perspective.
+    return "local-vault";
   }
 
   private async assertNoExternalKeyWalletsForExport(agentId: string): Promise<void> {
@@ -1237,6 +1330,17 @@ export class Vault {
         venue,
       });
       if (externalWallet) {
+        // Backend-binding re-resolution (TOCTOU close).
+        // This branch means the request re-resolved to external custody using
+        // the SAME fresh wallet lookup that will actually sign (no second racy
+        // read). If the caller's authorization was bound to "local-vault" (the
+        // only gateway-supported backend), the wallet's backend has FLIPPED
+        // since the gateway's resolveExecutionBackend precheck. Fail closed
+        // BEFORE any provider routing so a local-vault-bound authorization can
+        // never reach the external custody provider.
+        if (options.expectedBackend === "local-vault") {
+          throw new BackendBindingMismatchError("local-vault", "third-party-custody");
+        }
         if (request.walletAddress && externalWallet.address) {
           if (externalWallet.address.toLowerCase() !== request.walletAddress.toLowerCase()) {
             throw new Error(

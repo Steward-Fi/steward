@@ -2,6 +2,7 @@ export type SecuritySurfaceKind = "wallet-signing" | "key-material-export" | "cr
 
 export type EnforcementBoundary =
   | "route-policy"
+  | "gateway-authorized"
   | "route-policy-with-unsafe-flag"
   | "route-consent-with-unsafe-flag"
   | "route-mfa-break-glass"
@@ -12,6 +13,27 @@ export interface SecuritySurfaceRoute {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "ALL" | "HANDLER";
   path: string;
   notes?: string;
+  /**
+   * For wallet-signing surfaces: whether this specific route is bound to the
+   * PR4 policy-bound execution gateway (GovernedVault mint+consume before raw
+   * signing). `false`/undefined means the route still reaches the raw signer
+   * through route-local policy only and is NOT yet gateway-migrated. This must
+   * be honest per-route; do not claim product-wide enforcement.
+   */
+  gatewayMigrated?: boolean;
+}
+
+/**
+ * A raw EVM `Vault.signTransaction` call site that is NOT yet routed through the
+ * PR4 execution gateway. Enumerated explicitly so the security surface never
+ * over-claims product-wide enforcement. Convergence of these onto GovernedVault
+ * is tracked for PR5b (immediately after #182 merges).
+ */
+export interface LegacyEvmSignCallSite {
+  file: string;
+  approxLine: number;
+  path: string;
+  reason: string;
 }
 
 export interface SecuritySurfaceOperation {
@@ -44,34 +66,64 @@ export const SECURITY_SURFACE_OPERATIONS = [
     capability: "sign_transaction",
     vaultMethods: ["signTransaction"],
     routes: [
-      { file: "packages/api/src/routes/vault.ts", method: "POST", path: "/:agentId/sign" },
       {
         file: "packages/api/src/routes/vault.ts",
         method: "POST",
-        path: "/:agentId/actions/transfer",
-      },
-      {
-        file: "packages/api/src/routes/vault.ts",
-        method: "POST",
-        path: "/:agentId/actions/send-calls",
+        path: "/:agentId/sign",
+        gatewayMigrated: true,
+        notes:
+          "Primary EVM sign. Mints+consumes a policy-bound execution authorization via GovernedVault before raw signing; raw fallback is Solana-only with an invariant guard.",
       },
       {
         file: "packages/api/src/routes/vault.ts",
         method: "POST",
         path: "/:agentId/approve/:txId",
+        gatewayMigrated: true,
+        notes:
+          "Approval replay for the primary EVM transaction surface. Fails closed unless the stored digest + policy-revision binding is present and matches; then mints+consumes an authorization via GovernedVault. Transfer/AA branches are separate and not gateway-migrated.",
+      },
+      {
+        file: "packages/api/src/routes/vault.ts",
+        method: "POST",
+        path: "/:agentId/actions/transfer",
+        gatewayMigrated: false,
+        notes:
+          "Transfer action surface. Route-local policy gated; NOT yet routed through the execution gateway (PR5b).",
+      },
+      {
+        file: "packages/api/src/routes/vault.ts",
+        method: "POST",
+        path: "/:agentId/actions/send-calls",
+        gatewayMigrated: false,
+        notes: "Batch-call action surface; approval replay hard-disabled; not gateway-migrated.",
       },
       {
         file: "packages/api/src/routes/vault.ts",
         method: "POST",
         path: "/:agentId/transactions/:txId/replace",
+        gatewayMigrated: false,
+        notes: "Replace/RBF surface; route-local policy only; not gateway-migrated (PR5b).",
       },
-      { file: "packages/api/src/routes/intents.ts", method: "POST", path: "/:intentId/execute" },
-      { file: "packages/api/src/routes/user.ts", method: "POST", path: "/me/wallet/sign" },
+      {
+        file: "packages/api/src/routes/intents.ts",
+        method: "POST",
+        path: "/:intentId/execute",
+        gatewayMigrated: false,
+        notes: "Legacy intent execution EVM sign; not gateway-migrated (PR5b).",
+      },
+      {
+        file: "packages/api/src/routes/user.ts",
+        method: "POST",
+        path: "/me/wallet/sign",
+        gatewayMigrated: false,
+        notes: "Personal user-session EVM sign; not gateway-migrated (PR5b).",
+      },
       {
         file: "packages/api/src/routes/global-wallet.ts",
         method: "POST",
         path: "/rpc",
-        notes: "eth_sendTransaction compatibility path",
+        notes: "eth_sendTransaction compatibility path; not gateway-migrated (PR5b).",
+        gatewayMigrated: false,
       },
     ],
     auth: [
@@ -90,9 +142,9 @@ export const SECURITY_SURFACE_OPERATIONS = [
     },
     unsafeFlags: ["STEWARD_ALLOW_UNSAFE_CONTRACT_CALL_SIGNING for unconstrained contract calls"],
     evidence: ["transactions row", "vault audit events", "webhook events"],
-    boundary: "route-policy",
+    boundary: "gateway-authorized",
     notes:
-      "Policy is enforced in API routes before Vault.signTransaction; Vault.signTransaction itself does not verify gateway authorization.",
+      "SCOPED CLAIM: only the primary EVM `/vault/:agentId/sign` route and its compatible approval replay (`/vault/:agentId/approve/:txId`, transaction action surface) are gateway-authorized — they mint+consume a policy-bound execution authorization immediately before raw Vault.signTransaction and fail closed otherwise. The remaining EVM sign call sites enumerated in LEGACY_EVM_SIGN_CALL_SITES are NOT yet gateway-migrated and remain route-local-policy only. This is intentionally NOT a product-wide enforcement claim; convergence is tracked for PR5b.",
   },
   {
     id: "wallet.message.sign",
@@ -415,6 +467,156 @@ export const SECURITY_SURFACE_OPERATIONS = [
       "Credential injection happens only after proxy route matching, audit pre-write, replay protection, and secret route validation.",
   },
 ] as const satisfies readonly SecuritySurfaceOperation[];
+
+/**
+ * Explicit enumeration of raw EVM `Vault.signTransaction` call sites that are
+ * NOT yet routed through the PR4 execution gateway. The migrated primary EVM
+ * `/vault/:agentId/sign` route and its compatible approval replay are excluded
+ * because they go through GovernedVault. The vault.ts entries below are
+ * intentionally-legacy branches (transfer action surface); the intents/user/
+ * global-wallet entries are separate legacy route files deliberately left for
+ * route-convergence work in PR5b (immediately after #182 merges) rather than
+ * migrated inside this already-large PR.
+ *
+ * A CI guard (packages/api execution gateway guard test) asserts that the
+ * primary EVM sign route + approval replay cannot reach the raw signer without
+ * GovernedVault authorization, and that this list stays honest.
+ */
+export const LEGACY_EVM_SIGN_CALL_SITES = [
+  {
+    file: "packages/api/src/routes/vault.ts",
+    approxLine: 3047,
+    path: "POST /:agentId/actions/transfer",
+    reason:
+      "Transfer action EVM sign. Route-local policy gated, separate surface from primary sign; PR5b convergence.",
+  },
+  {
+    file: "packages/api/src/routes/vault.ts",
+    approxLine: 3794,
+    path: "POST /:agentId/approve/:txId (transfer branch)",
+    reason:
+      "Approval replay raw fallback for the TRANSFER surface only. An invariant guard throws if a primary-EVM raw-signing candidate reaches this branch; PR5b convergence for transfers.",
+  },
+  {
+    file: "packages/api/src/routes/intents.ts",
+    approxLine: 596,
+    path: "POST /:intentId/execute",
+    reason: "Legacy intent execution EVM sign; PR5b convergence.",
+  },
+  {
+    file: "packages/api/src/routes/intents.ts",
+    approxLine: 715,
+    path: "POST /:intentId/execute (secondary)",
+    reason: "Legacy intent execution EVM sign; PR5b convergence.",
+  },
+  {
+    file: "packages/api/src/routes/user.ts",
+    approxLine: 5138,
+    path: "POST /me/wallet/sign",
+    reason: "Personal user-session EVM sign; PR5b convergence.",
+  },
+  {
+    file: "packages/api/src/routes/global-wallet.ts",
+    approxLine: 1540,
+    path: "POST /rpc (eth_sendTransaction)",
+    reason: "Global wallet compatibility EVM sign; PR5b convergence.",
+  },
+] as const satisfies readonly LegacyEvmSignCallSite[];
+
+/**
+ * Classification of a single raw `Vault.signTransaction(` call site in the
+ * production API source (packages/api/src, excluding __tests__).
+ *
+ *  - "migrated-invariant-guarded": a primary-EVM/approval site that is
+ *    unreachable for EVM flows because a nearby invariant guard throws before
+ *    it (the Solana primary-sign fallback and the transfer approval-replay
+ *    fallback). These are inside the two gateway-migrated routes.
+ *  - "legacy": a not-yet-gateway-migrated EVM sign surface, one-for-one with an
+ *    entry in LEGACY_EVM_SIGN_CALL_SITES (PR5b convergence).
+ */
+export interface RawEvmSignCallSite {
+  file: string;
+  /** Stable nearby source marker (route/function/guard string) unique enough to
+   *  anchor the call site without brittle line numbers. */
+  marker: string;
+  classification: "migrated-invariant-guarded" | "legacy";
+  reason: string;
+}
+
+/**
+ * COMPLETE inventory of every raw `Vault.signTransaction(` production call site
+ * across packages/api/src. The CI guard (packages/api execution gateway guard
+ * test) scans the production source repository-wide and asserts a one-for-one
+ * match: exact per-file raw-call counts against this inventory's per-file
+ * counts, AND that each occurrence anchors to a recognized marker here. Adding
+ * a new raw signTransaction call anywhere (vault.ts / intents.ts / user.ts / a
+ * NEW file) fails the guard until it is classified here; deleting an inventory
+ * entry without removing the call also fails.
+ */
+export const RAW_EVM_SIGN_INVENTORY = [
+  // ── packages/api/src/routes/vault.ts (3 raw calls) ──
+  {
+    file: "packages/api/src/routes/vault.ts",
+    marker: "invariant: primary EVM sign reached raw signer without gateway authorization",
+    classification: "migrated-invariant-guarded",
+    reason:
+      "Primary /sign Solana-only fallback. An isEvmSignRequest invariant guard throws immediately above it, so no EVM request can reach raw signing.",
+  },
+  {
+    file: "packages/api/src/routes/vault.ts",
+    marker: "/:agentId/actions/transfer",
+    classification: "legacy",
+    reason:
+      "Transfer action EVM sign; separate non-migrated surface. One-for-one with LEGACY_EVM_SIGN_CALL_SITES.",
+  },
+  {
+    file: "packages/api/src/routes/vault.ts",
+    marker: "invariant: primary EVM approval reached raw signer without gateway authorization",
+    classification: "migrated-invariant-guarded",
+    reason:
+      "Approval replay TRANSFER fallback. An isRawEvmSigningCandidate invariant guard throws for any primary-EVM candidate before it.",
+  },
+  // ── packages/api/src/routes/intents.ts (2 raw calls) ──
+  {
+    file: "packages/api/src/routes/intents.ts",
+    marker: "Transfer rejected by policy",
+    classification: "legacy",
+    reason:
+      "Legacy intent execution EVM sign (single-transfer branch); PR5b convergence. Anchored to its policy-rejection guard string.",
+  },
+  {
+    file: "packages/api/src/routes/intents.ts",
+    marker: "Batch calls rejected by policy",
+    classification: "legacy",
+    reason:
+      "Legacy intent batch-call execution EVM sign; PR5b convergence. Anchored to its batch policy-rejection guard string.",
+  },
+  // ── packages/api/src/routes/user.ts (1 raw call) ──
+  {
+    file: "packages/api/src/routes/user.ts",
+    marker: "/me/wallet/sign",
+    classification: "legacy",
+    reason: "Personal user-session EVM sign; PR5b convergence.",
+  },
+  // ── packages/api/src/routes/global-wallet.ts (1 raw call) ──
+  {
+    file: "packages/api/src/routes/global-wallet.ts",
+    marker: "eth_sendTransaction",
+    classification: "legacy",
+    reason: "Global wallet compatibility EVM sign; PR5b convergence.",
+  },
+] as const satisfies readonly RawEvmSignCallSite[];
+
+/**
+ * Exact expected raw `Vault.signTransaction(` call count per production source
+ * file. Derived from RAW_EVM_SIGN_INVENTORY so the two never drift. The CI
+ * scan asserts the actual per-file counts equal these.
+ */
+export const RAW_EVM_SIGN_EXPECTED_COUNTS: Readonly<Record<string, number>> =
+  RAW_EVM_SIGN_INVENTORY.reduce<Record<string, number>>((acc, site) => {
+    acc[site.file] = (acc[site.file] ?? 0) + 1;
+    return acc;
+  }, {});
 
 export const SECURITY_SURFACE_VAULT_METHODS = [
   ...new Set(

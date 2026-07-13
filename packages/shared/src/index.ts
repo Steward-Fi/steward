@@ -6,6 +6,7 @@ import type { VenueId } from "./types/venue.js";
 // ─── Chain providers (extensible registry) ───
 export * from "./chains/index.js";
 export * from "./execution-contract.js";
+export * from "./execution-payload.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
 export * from "./security-surface.js";
