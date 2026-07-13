@@ -2171,11 +2171,23 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
               executionAuthorization,
               executionPayloadDigest,
             })
-          : await vault.signTransaction(signRequest, {
-              txId,
-              policyResults: evaluation.results,
-              status: txStatus,
-            });
+          : await (async () => {
+              // Defense-in-depth: every primary EVM sign request has a non-null
+              // executionPayloadDigest and therefore mints+consumes an
+              // authorization above. The raw fallback exists ONLY for the
+              // non-EVM (Solana) chain family. An EVM request reaching here is an
+              // invariant violation (fail-open), not a signable request.
+              if (isEvmSignRequest) {
+                throw new Error(
+                  "invariant: primary EVM sign reached raw signer without gateway authorization",
+                );
+              }
+              return vault.signTransaction(signRequest, {
+                txId,
+                policyResults: evaluation.results,
+                status: txStatus,
+              });
+            })();
 
       await db
         .update(transactions)
@@ -3436,37 +3448,76 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       };
       const currentPolicySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
       const currentExecutionPolicyRevisionHash = policyRevisionHashForPolicySet(currentPolicySet);
-      const isPrimaryEvmApproval =
-        !isSolana && transferPayload === null && !isSendCallsAction && transactionPayload !== null;
+      // A row that is neither Solana, nor a transfer action, nor a send_calls
+      // action would, on the EVM path, reach the raw Vault.signTransaction
+      // fallback. Every such row is a raw-EVM-signing candidate and MUST be
+      // proven to be a validated primary EVM approval (typed transaction action
+      // payload + non-null stored digest + non-null stored policy revision +
+      // digest match). If any invariant is absent/malformed we reject fail-closed
+      // here and NEVER route to raw signing. This closes the legacy/null-digest
+      // and malformed-actionPayload replay-fail-open holes.
+      const isRawEvmSigningCandidate =
+        !isSolana && transferPayload === null && !isSendCallsAction;
+      const isPrimaryEvmApproval = isRawEvmSigningCandidate && transactionPayload !== null;
       const approvalExecutionPayloadDigest = isPrimaryEvmApproval
         ? executionPayloadDigestForEvmSign(approvalSignRequest)
         : null;
-      if (
-        isPrimaryEvmApproval &&
-        transactionRow.executionPayloadDigest &&
-        transactionRow.executionPayloadDigest !== approvalExecutionPayloadDigest
-      ) {
-        await writeVaultAudit(c, {
-          tenantId,
-          actorType: "user",
-          actorId,
-          action: "vault.execution_authorization.rejected",
-          resourceType: "transaction",
-          resourceId: txId,
-          metadata: {
-            agentId,
-            reason: "stored_digest_mismatch",
-            storedPayloadDigest: transactionRow.executionPayloadDigest,
-            replayPayloadDigest: approvalExecutionPayloadDigest,
-          },
-        });
-        return c.json<ApiResponse>(
-          {
-            ok: false,
-            error: "Pending transaction digest no longer matches the replay request",
-          },
-          409,
-        );
+      if (isRawEvmSigningCandidate) {
+        const failClosed = async (reason: string, error: string) => {
+          await writeVaultAudit(c, {
+            tenantId,
+            actorType: "user",
+            actorId,
+            action: "vault.execution_authorization.rejected",
+            resourceType: "transaction",
+            resourceId: txId,
+            metadata: {
+              agentId,
+              reason,
+              hasTransactionActionPayload: transactionPayload !== null,
+              hasStoredPayloadDigest: transactionRow.executionPayloadDigest !== null,
+              hasStoredPolicyRevisionHash:
+                transactionRow.executionPolicyRevisionHash !== null,
+              storedPayloadDigest: transactionRow.executionPayloadDigest,
+              replayPayloadDigest: approvalExecutionPayloadDigest,
+            },
+          });
+          return c.json<ApiResponse>({ ok: false, error }, 409);
+        };
+        // 1. Require a valid typed transaction action payload. A missing/malformed
+        //    actionPayload previously flipped isPrimaryEvmApproval=false and fell
+        //    through to raw signing. Now it fails closed.
+        if (!isPrimaryEvmApproval) {
+          return failClosed(
+            "missing_or_malformed_transaction_action_payload",
+            "This pending EVM approval lacks a valid typed transaction action payload and cannot be replayed. Resubmit the transaction.",
+          );
+        }
+        // 2. Require a non-null stored execution payload digest. Legacy/null-digest
+        //    rows minted before the gateway must be resubmitted, never raw-signed.
+        if (!transactionRow.executionPayloadDigest) {
+          return failClosed(
+            "missing_stored_execution_payload_digest",
+            "This pending EVM approval predates execution-authorization binding (no stored payload digest) and cannot be replayed. Resubmit the transaction.",
+          );
+        }
+        // 3. Require a non-null stored execution policy revision hash. Binds the
+        //    approval decision to the policy snapshot evaluated at queue time.
+        if (!transactionRow.executionPolicyRevisionHash) {
+          return failClosed(
+            "missing_stored_execution_policy_revision_hash",
+            "This pending EVM approval predates policy-revision binding (no stored policy revision hash) and cannot be replayed. Resubmit the transaction.",
+          );
+        }
+        // 4. Require the stored digest (from the immutable approval snapshot) to
+        //    equal the digest recomputed from the replay request. This prevents
+        //    any post-queue mutation of the approved caller intent.
+        if (transactionRow.executionPayloadDigest !== approvalExecutionPayloadDigest) {
+          return failClosed(
+            "stored_digest_mismatch",
+            "Pending transaction digest no longer matches the replay request",
+          );
+        }
       }
       const currentRateLimitResult = await enforceRateLimit(agentId, currentPolicySet);
       if (!currentRateLimitResult.allowed) {
@@ -3730,6 +3781,16 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
             executionPayloadDigest: approvalExecutionPayloadDigest,
           });
         } else {
+          // Defense-in-depth: the fail-closed gate above returns early for every
+          // raw-EVM-signing candidate that is not a validated primary EVM
+          // approval, so this raw fallback must only ever handle non-primary EVM
+          // action surfaces (transfer). A raw-EVM-signing candidate reaching here
+          // is an invariant violation, not a signable request.
+          if (isRawEvmSigningCandidate) {
+            throw new Error(
+              "invariant: primary EVM approval reached raw signer without gateway authorization",
+            );
+          }
           txHash = await vault.signTransaction(approvalSignRequest, {
             txId,
             policyResults: currentEvaluation.results,
