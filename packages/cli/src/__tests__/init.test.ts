@@ -10,7 +10,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const CLI_ENTRY = join(dirname(dirname(fileURLToPath(import.meta.url))), "index.ts");
 
 // Prove the generated Ed25519 seed is compatible with the API's real parser,
 // not a replica: load the actual audit-checkpoint module at runtime. A dynamic
@@ -221,6 +224,60 @@ describe("steward init", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  test("real `steward init` command leaks no generated secret to stdout or stderr", async () => {
+    // Spawn the ACTUAL CLI entrypoint as a subprocess (not runInit internals)
+    // so we prove real command behavior: whatever the command prints to the
+    // operator's terminal must never contain a generated secret value. This
+    // is the real leak surface (logs, CI output, screen-shares), which a
+    // unit test of runInit's return value cannot cover.
+    const dir = mkdtempSync(join(tmpdir(), "steward-cli-"));
+    try {
+      const envPath = join(dir, ".env");
+      const proc = Bun.spawn(["bun", "run", CLI_ENTRY, "init", "--env", envPath], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+        proc.exited,
+      ]);
+
+      expect(exitCode).toBe(0);
+
+      // The command must emit a safe receipt (the InitResult JSON): the env
+      // path + status, and NOTHING secret. Assert the receipt is present so a
+      // future silent/garbled command is caught too.
+      expect(stdout).toContain('"envPath":');
+      expect(stdout).toContain(envPath);
+      expect(stdout).toContain('"auditSigningKeyFormat": "hex-seed"');
+
+      // Read every generated secret from the file the command actually wrote,
+      // then assert none of those complete values appear in either stream.
+      const env = readFileSync(envPath, "utf8");
+      const secretKeys = [
+        "POSTGRES_PASSWORD",
+        "STEWARD_MASTER_PASSWORD",
+        "STEWARD_JWT_SECRET",
+        "STEWARD_SESSION_SECRET",
+        "STEWARD_KDF_SALT",
+        "STEWARD_AUDIT_HMAC_KEY",
+        "STEWARD_AUDIT_SIGNING_KEY",
+        "STEWARD_PLATFORM_KEY",
+        "STEWARD_PROXY_REQUEST_SIGNING_SECRETS",
+      ];
+      const combined = stdout + stderr;
+      for (const key of secretKeys) {
+        const value = envValue(env, key);
+        expect(value).toBeTruthy();
+        // The full generated secret must never surface in operator-visible output.
+        expect(combined).not.toContain(value as string);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 15_000);
 
   test("emitted env contains no secret material outside its assigned values", () => {
     // Guard against accidentally echoing a generated secret into a comment or a
