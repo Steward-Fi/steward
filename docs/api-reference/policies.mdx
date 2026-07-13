@@ -5,7 +5,7 @@ description: "Get and set agent policies for transaction governance."
 
 # Policies API
 
-Manage policies for individual agents. Policies are evaluated before every signing operation.
+Manage policies for individual agents. Supported transaction-signing routes evaluate these policies before invoking the Vault. Compatibility routes such as message and raw-hash signing use separate MFA, signer-permission, and unsafe-feature gates.
 
 ## Get Policies
 
