@@ -1,6 +1,6 @@
 # Steward
 
-**Steward is a governance layer for autonomous AI agents.** It provides encrypted wallet management, policy enforcement, secret storage, credential injection, and embeddable React UI — so agents can transact on-chain and call external APIs without ever touching raw private keys or credentials.
+**Steward is a governance layer for autonomous AI agents.** It provides encrypted wallet management, route-level policy gates, secret storage, credential injection, and embeddable React UI, so agents can transact on-chain and call external APIs without ever touching raw private keys or credentials.
 
 ## What It Does
 
@@ -28,14 +28,14 @@ Proxy-bound agent tokens must be minted with the explicit `api:proxy` scope
 the next 1-2 release cycles, but new deployments should opt in when creating the
 token.
 
-Every transaction and every API call flows through Steward, where it is authenticated, policy-checked, logged, and metered before being forwarded with real credentials injected at the proxy.
+Supported transactions and API calls flow through Steward routes, where they are authenticated, policy-checked, logged, and metered before Vault signing or proxy credential injection happens.
 
 ## Core Primitives
 
 | Primitive | What it does |
 |-----------|-------------|
 | **Wallet Vault** | AES-256-GCM encrypted key storage. Creates EVM + Solana keypairs per agent. Agents request signatures; private keys never leave the vault. |
-| **Policy Engine** | Declarative rules evaluated before every signing request: spending limits, address whitelists, rate limits, time windows, chain filters, auto-approve thresholds. |
+| **Policy Engine** | Declarative rules evaluated by supported signing routes before Vault calls: spending limits, address whitelists, rate limits, time windows, chain filters, auto-approve thresholds. |
 | **Secret Vault** | Encrypted credential storage. The proxy injects secrets at request time; agents never see the raw values. |
 | **API Proxy** | Routes agent HTTP calls through Steward for credential injection, cost tracking, and audit logging. |
 | **Approval Queue** | Large or unusual transactions queue for human review before execution. |

@@ -99,6 +99,7 @@ import {
 import { plaintextKeyExportResponseGateError } from "../services/key-export-plaintext-gate";
 import { lockUserSession } from "../services/session-lock";
 import { createSignerCredentialHash, verifySignerCredential } from "../services/signer-credentials";
+import { getConfiguredVault } from "../services/vault-factory";
 import { redactWalletMetadataSecrets } from "../services/wallet-metadata";
 import { dispatchWebhook } from "../services/webhook-dispatch";
 import {
@@ -1268,15 +1269,7 @@ async function provisionEmbeddedUserWallet(
 
 /** Build a Vault instance from environment. Same defaults as index.ts. */
 function getVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
-  if (!masterPassword) {
-    throw new Error("STEWARD_MASTER_PASSWORD is required");
-  }
-  return new Vault({
-    masterPassword,
-    rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-    chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-  });
+  return getConfiguredVault();
 }
 
 async function getTransactionStats(agentId: string) {

@@ -44,9 +44,9 @@ const metadataBase = (() => {
 
 export const metadata: Metadata = {
   metadataBase,
-  title: "Steward: the open authority and execution layer for AI agents",
+  title: "Steward: self-hostable authority plane for enterprise agents",
   description:
-    "The open-source authority and execution layer for AI agents. Steward holds wallets and credentials, enforces policy before every privileged action, routes approvals, executes across APIs and financial rails, and produces a complete audit trail.",
+    "Steward gives private enterprise agents scoped wallet and API capabilities without exposing secrets, routes sensitive actions through policy and human approval, and records execution evidence. Bring your own runtime, cloud, and custodian.",
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "32x32" },
@@ -57,9 +57,9 @@ export const metadata: Metadata = {
   },
   manifest: "/site.webmanifest",
   openGraph: {
-    title: "Steward: the open authority and execution layer for AI agents",
+    title: "Steward: self-hostable authority plane for enterprise agents",
     description:
-      "Open-source authority and execution for AI agents. Any model, any runtime, any cloud, any chain, on infrastructure you control.",
+      "A self-hostable authority plane for private enterprise agents. Bring your own agent runtime, cloud, and custodian.",
     type: "website",
     images: [
       {
