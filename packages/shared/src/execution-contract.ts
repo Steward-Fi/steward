@@ -81,6 +81,14 @@ export interface ExecutionAuthorization {
   issuedAt: string;
   expiresAt: string;
   status: ExecutionAuthorizationStatus;
+  /**
+   * HMAC-SHA256 over the canonical authorization fields. Optional for
+   * compatibility with callers compiled against the original append-only
+   * contract, but required by the PR4 gateway verifier.
+   */
+  signature?: string;
+  /** Caller-supplied idempotency key bound into the signed authorization. */
+  idempotencyKey?: string;
 }
 
 /**

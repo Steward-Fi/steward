@@ -40,6 +40,11 @@ export {
   InMemoryExternalKeyCustodyProvider,
   normalizeExternalKeyHandleRegistration,
 } from "./external-key-custody";
+export type {
+  ExecutionAuthorizationConsumeCallback,
+  GovernedSignTransactionOptions,
+} from "./governed-vault";
+export { GovernedVault, GovernedVaultError } from "./governed-vault";
 export type { BitcoinAddressType, BitcoinNetwork, DerivedBitcoinKey } from "./hd-wallet";
 export {
   deriveBitcoinKey,
