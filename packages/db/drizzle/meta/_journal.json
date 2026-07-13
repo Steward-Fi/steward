@@ -402,6 +402,13 @@
       "breakpoints": true
     },
     {
+      "idx": 77,
+      "version": "7",
+      "when": 1780137900000,
+      "tag": "0077_proxy_approvals",
+      "breakpoints": true
+    },
+    {
       "idx": 78,
       "version": "7",
       "when": 1780138200000,

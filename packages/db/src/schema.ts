@@ -1616,6 +1616,8 @@ export const secretRoutes = pgTable(
     injectFormat: varchar("inject_format", { length: 255 }).default("{value}"),
     priority: integer("priority").notNull().default(0),
     enabled: boolean("enabled").notNull().default(true),
+    requiresApproval: boolean("requires_approval").notNull().default(false),
+    approvalConfig: jsonb("approval_config").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -1623,6 +1625,61 @@ export const secretRoutes = pgTable(
     agentIdx: index("secret_routes_agent_idx").on(table.agentId),
     secretIdx: index("secret_routes_secret_idx").on(table.secretId),
     hostIdx: index("secret_routes_host_idx").on(table.hostPattern),
+  }),
+);
+
+export const pendingProxyRequestStatusEnum = pgEnum("pending_proxy_request_status", [
+  "pending",
+  "approved",
+  "denied",
+  "executing",
+  "executed",
+  "expired",
+  "failed",
+]);
+
+export const pendingProxyRequests = pgTable(
+  "pending_proxy_requests",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: text("tenant_id").notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    routeId: uuid("route_id").notNull(),
+    method: varchar("method", { length: 10 }).notNull(),
+    targetHost: varchar("target_host", { length: 512 }).notNull(),
+    targetPath: varchar("target_path", { length: 2048 }).notNull(),
+    requestDigest: varchar("request_digest", { length: 64 }).notNull(),
+    preview: jsonb("preview").$type<Record<string, unknown>>().notNull().default({}),
+    safeHeaders: jsonb("safe_headers").$type<Record<string, string>>().notNull().default({}),
+    bodyCiphertext: text("body_ciphertext").notNull(),
+    bodyIv: text("body_iv").notNull(),
+    bodyAuthTag: text("body_auth_tag").notNull(),
+    bodySalt: text("body_salt").notNull(),
+    status: pendingProxyRequestStatusEnum("status").notNull().default("pending"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    approvedBy: varchar("approved_by", { length: 255 }),
+    deniedAt: timestamp("denied_at", { withTimezone: true }),
+    deniedBy: varchar("denied_by", { length: 255 }),
+    denialReason: text("denial_reason"),
+    executedAt: timestamp("executed_at", { withTimezone: true }),
+    executionStatusCode: integer("execution_status_code"),
+    executionError: text("execution_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdateFn(() => sql`now()`),
+  },
+  (table) => ({
+    tenantStatusIdx: index("pending_proxy_requests_tenant_status_idx").on(
+      table.tenantId,
+      table.status,
+      table.createdAt,
+    ),
+    agentIdx: index("pending_proxy_requests_agent_idx").on(table.agentId),
+    routeIdx: index("pending_proxy_requests_route_idx").on(table.routeId),
+    expiresAtIdx: index("pending_proxy_requests_expires_at_idx").on(table.expiresAt),
   }),
 );
 
@@ -1641,6 +1698,8 @@ export type Secret = typeof secrets.$inferSelect;
 export type NewSecret = typeof secrets.$inferInsert;
 export type SecretRoute = typeof secretRoutes.$inferSelect;
 export type NewSecretRoute = typeof secretRoutes.$inferInsert;
+export type PendingProxyRequest = typeof pendingProxyRequests.$inferSelect;
+export type NewPendingProxyRequest = typeof pendingProxyRequests.$inferInsert;
 
 // ─── Proxy Audit Log ─────────────────────────────────────────────────────────
 

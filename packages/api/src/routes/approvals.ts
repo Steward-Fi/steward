@@ -4,7 +4,13 @@
  * Mount: app.route("/approvals", approvalRoutes)
  */
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { executePendingProxyRequest } from "../../../proxy/src/handlers/release";
+import {
+  canonicalProxyApprovalDigest,
+  decryptPendingProxyBody,
+  markExpiredPendingProxyRequests,
+} from "../../../proxy/src/handlers/approvals";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import {
@@ -14,6 +20,7 @@ import {
   approvalQueue,
   autoApprovalRules,
   db,
+  pendingProxyRequests,
   requireTenantLevel,
   safeJsonParse,
   setNoStoreHeaders,
