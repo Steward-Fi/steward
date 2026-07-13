@@ -12,8 +12,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 // Prove the generated Ed25519 seed is compatible with the API's real parser,
-// not a replica: importing the actual audit-checkpoint parsing logic.
-import { parseSigningKey, publicKeyPem } from "../../../api/src/services/audit-checkpoint";
+// not a replica: load the actual audit-checkpoint module at runtime. A dynamic
+// non-literal specifier keeps tsc's rootDir happy (packages/api is outside
+// packages/cli) while bun still resolves it for the test run.
+const auditCheckpointModule = "../../../api/src/services/audit-checkpoint";
+const { parseSigningKey, publicKeyPem } = (await import(auditCheckpointModule)) as {
+  parseSigningKey: (raw: string) => import("node:crypto").KeyObject;
+  publicKeyPem: (key: import("node:crypto").KeyObject) => string;
+};
 import { runInit } from "../init";
 
 function mode(path: string): number {
