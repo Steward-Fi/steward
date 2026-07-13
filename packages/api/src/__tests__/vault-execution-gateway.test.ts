@@ -240,4 +240,144 @@ describe("vault EVM execution gateway", () => {
       signSpy.mockRestore();
     }
   });
+
+  // ── Fail-closed negative cases (BLOCKER 1 regression coverage) ──────────────
+  // Every case proves the raw Vault.signTransaction signer is NEVER called for a
+  // legacy/malformed primary-EVM approval row, and the request is rejected.
+
+  const REPLAY_BASE = {
+    tenantId: TENANT_ID,
+    agentId: AGENT_ID,
+    to: "0x1111111111111111111111111111111111111111",
+    value: "1",
+    data: "0x12345678",
+    chainId: 8453,
+    nonce: 7,
+    gasLimit: "45000",
+    broadcast: false,
+    walletAddress: "0x0000000000000000000000000000000000000001",
+  };
+
+  async function seedPendingEvmApproval(
+    txId: string,
+    overrides: {
+      actionPayload?: Record<string, unknown> | null;
+      executionPayloadDigest?: string | null;
+      executionPolicyRevisionHash?: string | null;
+    },
+  ) {
+    await getDb()
+      .insert(transactions)
+      .values({
+        id: txId,
+        agentId: AGENT_ID,
+        status: "pending",
+        toAddress: REPLAY_BASE.to,
+        value: REPLAY_BASE.value,
+        data: REPLAY_BASE.data,
+        chainId: REPLAY_BASE.chainId,
+        actionPayload:
+          overrides.actionPayload === undefined
+            ? {
+                type: "transaction",
+                broadcast: false,
+                nonce: REPLAY_BASE.nonce,
+                gasLimit: REPLAY_BASE.gasLimit,
+                walletAddress: REPLAY_BASE.walletAddress,
+              }
+            : (overrides.actionPayload ?? undefined),
+        executionPayloadDigest:
+          overrides.executionPayloadDigest === undefined
+            ? executionPayloadDigestForEvmSign(REPLAY_BASE)
+            : (overrides.executionPayloadDigest ?? null),
+        executionPolicyRevisionHash:
+          overrides.executionPolicyRevisionHash === undefined
+            ? "queued-policy-revision"
+            : (overrides.executionPolicyRevisionHash ?? null),
+        policyResults: [],
+      });
+    await getDb()
+      .insert(approvalQueue)
+      .values({
+        id: `aq-${txId}`,
+        txId,
+        agentId: AGENT_ID,
+        status: "pending",
+        requestedByType: "agent",
+        requestedById: AGENT_ID,
+      });
+  }
+
+  async function expectFailClosed(txId: string) {
+    const signSpy = spyOn(Vault.prototype, "signTransaction").mockImplementation(async () => {
+      throw new Error("raw signer must not be called for fail-closed approval");
+    });
+    try {
+      const app = await makeApp();
+      const res = await app.request(`/vault/${AGENT_ID}/approve/${txId}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.ok).toBe(false);
+      // Raw signer NEVER reached.
+      expect(signSpy).toHaveBeenCalledTimes(0);
+      // No authorization nonce was minted for this fail-closed row.
+      const nonceRows = await getDb()
+        .select({ id: executionAuthorizationNonces.id })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.requestId, txId));
+      expect(nonceRows).toHaveLength(0);
+      // The pending approval remains pending (not silently approved).
+      const [approval] = await getDb()
+        .select({ status: approvalQueue.status })
+        .from(approvalQueue)
+        .where(eq(approvalQueue.txId, txId));
+      expect(approval?.status).toBe("pending");
+    } finally {
+      signSpy.mockRestore();
+    }
+  }
+
+  it("fails closed when the stored execution payload digest is null (legacy row)", async () => {
+    const txId = "tx-fail-null-digest";
+    await seedPendingEvmApproval(txId, { executionPayloadDigest: null });
+    await expectFailClosed(txId);
+  });
+
+  it("fails closed when the stored policy revision hash is null (legacy row)", async () => {
+    const txId = "tx-fail-null-policy-revision";
+    await seedPendingEvmApproval(txId, { executionPolicyRevisionHash: null });
+    await expectFailClosed(txId);
+  });
+
+  it("fails closed when the transaction action payload is missing/malformed", async () => {
+    const txId = "tx-fail-malformed-action-payload";
+    // action_type null + non-transaction payload => getTransactionActionPayload
+    // returns null => previously flipped isPrimaryEvmApproval=false and raw-signed.
+    await seedPendingEvmApproval(txId, {
+      actionPayload: { type: "not-a-transaction", broadcast: false },
+    });
+    await expectFailClosed(txId);
+  });
+
+  it("fails closed when the stored digest mismatches the replay (payload mutation)", async () => {
+    const txId = "tx-fail-digest-mutation";
+    // Stored digest reflects nonce=7; mutate the queued action payload nonce to 99
+    // so the recomputed replay digest no longer matches the immutable snapshot.
+    await seedPendingEvmApproval(txId, {
+      actionPayload: {
+        type: "transaction",
+        broadcast: false,
+        nonce: 99,
+        gasLimit: REPLAY_BASE.gasLimit,
+        walletAddress: REPLAY_BASE.walletAddress,
+      },
+      // stored digest still bound to nonce=7
+      executionPayloadDigest: executionPayloadDigestForEvmSign(REPLAY_BASE),
+    });
+    await expectFailClosed(txId);
+  });
 });

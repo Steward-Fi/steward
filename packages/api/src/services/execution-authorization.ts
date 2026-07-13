@@ -11,8 +11,8 @@ import {
   canonicalJsonStringify,
   type ExecutionAuthorization,
   type ExecutionCapability,
-  normalizeEvmExecutionPayload,
   type NormalizedEvmExecutionPayload,
+  normalizeEvmExecutionPayload,
   type PolicyRule,
   type SignRequest,
 } from "@stwd/shared";

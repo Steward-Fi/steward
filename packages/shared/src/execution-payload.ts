@@ -74,9 +74,7 @@ export function isEvmChainId(chainId: number): boolean {
  * request. Throws ExecutionPayloadNormalizationError on any malformed
  * numeric caller field so callers can fail closed rather than digest garbage.
  */
-export function normalizeEvmExecutionPayload(
-  request: SignRequest,
-): NormalizedEvmExecutionPayload {
+export function normalizeEvmExecutionPayload(request: SignRequest): NormalizedEvmExecutionPayload {
   const chainId = normalizeSafeNonNegativeInteger(request.chainId, "chainId");
   if (chainId === null) {
     throw new ExecutionPayloadNormalizationError("chainId is required", "chainId");

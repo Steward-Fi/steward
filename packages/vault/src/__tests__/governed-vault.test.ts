@@ -121,4 +121,31 @@ describe("GovernedVault", () => {
     ).rejects.toThrow("nonce consumed");
     expect(rawCalled).toBe(false);
   });
+
+  it("digest binds normalized intent via the shared canonicalizer (safe-integer validated)", () => {
+    // Field-order independence proves the shared canonicalizer is used.
+    const a = executionPayloadDigestForGovernedEvmSign({
+      chainId: 8453,
+      agentId: "agent-1",
+      tenantId: "tenant-1",
+      to: "0x1111111111111111111111111111111111111111",
+      value: "1",
+      nonce: 5,
+      broadcast: false,
+    });
+    const b = executionPayloadDigestForGovernedEvmSign({
+      to: "0x1111111111111111111111111111111111111111",
+      value: "1",
+      broadcast: false,
+      nonce: 5,
+      tenantId: "tenant-1",
+      agentId: "agent-1",
+      chainId: 8453,
+    });
+    expect(a).toBe(b);
+
+    // Malformed numeric caller fields are rejected before digesting.
+    expect(() => executionPayloadDigestForGovernedEvmSign({ ...request, nonce: -1 })).toThrow();
+    expect(() => executionPayloadDigestForGovernedEvmSign({ ...request, chainId: -1 })).toThrow();
+  });
 });

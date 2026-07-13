@@ -3456,8 +3456,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       // digest match). If any invariant is absent/malformed we reject fail-closed
       // here and NEVER route to raw signing. This closes the legacy/null-digest
       // and malformed-actionPayload replay-fail-open holes.
-      const isRawEvmSigningCandidate =
-        !isSolana && transferPayload === null && !isSendCallsAction;
+      const isRawEvmSigningCandidate = !isSolana && transferPayload === null && !isSendCallsAction;
       const isPrimaryEvmApproval = isRawEvmSigningCandidate && transactionPayload !== null;
       const approvalExecutionPayloadDigest = isPrimaryEvmApproval
         ? executionPayloadDigestForEvmSign(approvalSignRequest)
@@ -3476,8 +3475,7 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               reason,
               hasTransactionActionPayload: transactionPayload !== null,
               hasStoredPayloadDigest: transactionRow.executionPayloadDigest !== null,
-              hasStoredPolicyRevisionHash:
-                transactionRow.executionPolicyRevisionHash !== null,
+              hasStoredPolicyRevisionHash: transactionRow.executionPolicyRevisionHash !== null,
               storedPayloadDigest: transactionRow.executionPayloadDigest,
               replayPayloadDigest: approvalExecutionPayloadDigest,
             },
