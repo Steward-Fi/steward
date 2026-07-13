@@ -5,6 +5,22 @@ import { recordRequiredAudit } from "../middleware/audit";
 import { canonicalProxyApprovalDigest, decryptPendingProxyBody } from "./approvals";
 import { handleProxy } from "./proxy";
 
+// Test-only deterministic barrier awaited between digest verification and the
+// atomic approved -> executing claim. Production default is a no-op, so this
+// adds zero behavior outside tests. Tests inject a function here to open the
+// exact TOCTOU window (row read + digest done, claim not yet issued) without
+// millisecond-sleep races. Mirrors __setForwardProxyRequestForTests in proxy.ts.
+type ReleaseClaimBarrier = (row: PendingProxyRequest) => void | Promise<void>;
+let releaseClaimBarrier: ReleaseClaimBarrier = () => {};
+
+export function __setReleaseClaimBarrierForTests(barrier: ReleaseClaimBarrier): void {
+  releaseClaimBarrier = barrier;
+}
+
+export function __resetReleaseClaimBarrierForTests(): void {
+  releaseClaimBarrier = () => {};
+}
+
 export async function executePendingProxyRequest(row: PendingProxyRequest): Promise<Response> {
   const body = decryptPendingProxyBody(row);
   const headers = new Headers(row.safeHeaders as Record<string, string>);
@@ -165,6 +181,11 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
       409,
     );
   }
+
+  // Test-only barrier: opens the TOCTOU window deterministically. In production
+  // this is a no-op. A test can move expiresAt into the past here to prove the
+  // SQL claim-time guard below (not the earlier JS expiry branch) rejects it.
+  await releaseClaimBarrier(row);
 
   // Atomic approved -> executing claim. Re-check expiry SERVER-SIDE (sql`now()`)
   // inside the same UPDATE so a row read just before its deadline cannot expire
