@@ -393,6 +393,13 @@
       "when": 1780137000000,
       "tag": "0075_monero_chain_family",
       "breakpoints": true
+    },
+    {
+      "idx": 76,
+      "version": "7",
+      "when": 1780137600000,
+      "tag": "0076_audit_checkpoints",
+      "breakpoints": true
     }
   ]
 }
