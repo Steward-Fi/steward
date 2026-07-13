@@ -82,12 +82,7 @@ function configuredMode(): VaultMode {
   } catch {
     throw new Error(`${moduleName} is required when STEWARD_KMS_PROVIDER=${provider}`);
   }
-  if (provider === "pkcs11") {
-    throw new Error(
-      "STEWARD_KMS_PROVIDER=pkcs11 requires a configured PKCS#11 adapter; fromEnv does not provide one in this release",
-    );
-  }
-  return "kms-envelope:aws";
+  return provider === "aws" ? "kms-envelope:aws" : "kms-envelope:pkcs11";
 }
 
 function resolveMasterPassword(options: ConfiguredVaultOptions): string {
