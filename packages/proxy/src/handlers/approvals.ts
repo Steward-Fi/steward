@@ -36,8 +36,6 @@ const SAFE_HEADER_NAMES = new Set([
   "x-steward-request-expires-at",
 ]);
 
-const BODY_SECRET_KEYS = /(?:secret|token|password|credential|api[_-]?key|authorization|cookie)/i;
-
 function approvalKeyStore(): KeyStore {
   const masterPassword = process.env.STEWARD_MASTER_PASSWORD;
   if (!masterPassword) throw new Error("STEWARD_MASTER_PASSWORD is required for proxy approvals");
@@ -118,21 +116,43 @@ async function readBoundedRequestBody(request: Request): Promise<Uint8Array> {
   return body;
 }
 
-function sanitizeBodyPreview(value: unknown, depth = 0): unknown {
-  if (depth > 4) return "[truncated]";
-  if (Array.isArray(value))
-    return value.slice(0, 10).map((item) => sanitizeBodyPreview(item, depth + 1));
-  if (!value || typeof value !== "object") {
-    if (typeof value === "string" && value.length > 256) return `${value.slice(0, 256)}...`;
-    return value;
+/**
+ * Derive a structural schema from a parsed JSON value. This deliberately never
+ * copies scalar VALUES into the output — only field names and value TYPES — so
+ * secrets embedded anywhere in the body (under innocuous keys, in arrays, or as
+ * bare strings) can never leak through the persisted preview. Operators and
+ * agents see the request SHAPE, not its contents.
+ */
+function schemaOfJson(value: unknown, depth = 0): unknown {
+  if (depth > 6) return "unknown";
+  if (value === null) return "null";
+  if (Array.isArray(value)) {
+    // Report element types without preserving element order/values. We sample a
+    // bounded prefix to derive the union of element types.
+    const elementTypes = new Set<string>();
+    for (const item of value.slice(0, 50)) {
+      elementTypes.add(JSON.stringify(schemaOfJson(item, depth + 1)));
+    }
+    const types = [...elementTypes].map((t) => JSON.parse(t) as unknown);
+    return { type: "array", length: value.length, elementTypes: types };
   }
+  const t = typeof value;
+  if (t !== "object") return t; // "string" | "number" | "boolean"
   const out: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 40)) {
-    out[key] = BODY_SECRET_KEYS.test(key) ? "[redacted]" : sanitizeBodyPreview(item, depth + 1);
+  for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 100)) {
+    // Keep field NAMES (structural), never their values.
+    out[key] = schemaOfJson(item, depth + 1);
   }
   return out;
 }
 
+/**
+ * Build a preview that contains ONLY structural metadata about the request body:
+ * content type, byte length, canonical digest, and (for JSON) a value-free
+ * schema. No body values are ever persisted here — this row is later shown to
+ * agents and operators, so it must never carry credentials regardless of what
+ * key they were nested under.
+ */
 export function bodyPreview(headers: Headers, body: Uint8Array): Record<string, unknown> {
   const contentType = headers.get("content-type") ?? "";
   const preview: Record<string, unknown> = {
@@ -143,13 +163,13 @@ export function bodyPreview(headers: Headers, body: Uint8Array): Record<string, 
   if (body.byteLength === 0) return preview;
   if (contentType.includes("application/json")) {
     try {
-      preview.json = sanitizeBodyPreview(JSON.parse(bytesToString(body)));
+      preview.schema = schemaOfJson(JSON.parse(bytesToString(body)));
       return preview;
     } catch {
       preview.parseError = "invalid-json";
     }
   }
-  preview.textPrefix = "[redacted]";
+  // Non-JSON (or unparseable) bodies expose nothing beyond their type + size.
   return preview;
 }
 
