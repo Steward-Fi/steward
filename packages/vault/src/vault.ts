@@ -563,9 +563,7 @@ export class Vault {
         and(
           eq(encryptedChainKeys.agentId, request.agentId),
           eq(encryptedChainKeys.chainFamily, chainFamilyToUse),
-          venue
-            ? eq(encryptedChainKeys.venue, venue)
-            : isNull(encryptedChainKeys.venue),
+          venue ? eq(encryptedChainKeys.venue, venue) : isNull(encryptedChainKeys.venue),
         ),
       );
     if (chainKey) return "local-vault";
