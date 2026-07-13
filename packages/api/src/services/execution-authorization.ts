@@ -7,11 +7,14 @@ import {
   timingSafeEqual,
 } from "node:crypto";
 import { executionAuthorizationNonces, getDb, policies } from "@stwd/db";
-import type {
-  ExecutionAuthorization,
-  ExecutionCapability,
-  PolicyRule,
-  SignRequest,
+import {
+  canonicalJsonStringify,
+  type ExecutionAuthorization,
+  type ExecutionCapability,
+  normalizeEvmExecutionPayload,
+  type NormalizedEvmExecutionPayload,
+  type PolicyRule,
+  type SignRequest,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 
@@ -36,31 +39,20 @@ export class ExecutionAuthorizationError extends Error {
 }
 
 export function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
+  return canonicalJsonStringify(value);
 }
 
 export function sha256Hex(value: unknown): string {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+  return createHash("sha256").update(canonicalJsonStringify(value)).digest("hex");
 }
 
-export function executionPayloadForEvmSign(request: SignRequest): Record<string, unknown> {
-  return {
-    agentId: request.agentId,
-    tenantId: request.tenantId,
-    capability: "wallet.sign_transaction",
-    backend: "local-vault",
-    transaction: {
-      to: request.to,
-      value: request.value,
-      data: request.data ?? "0x",
-      chainId: request.chainId,
-      nonce: request.nonce ?? null,
-      gasLimit: request.gasLimit ?? null,
-      broadcast: request.broadcast !== false,
-      venue: request.venue ?? null,
-      walletAddress: request.walletAddress ?? null,
-    },
-  };
+/**
+ * Canonical normalized EVM sign intent. Delegates to the SINGLE shared
+ * normalizer so the API minting side and the GovernedVault verification side
+ * digest byte-identical payloads. Throws on malformed numeric caller fields.
+ */
+export function executionPayloadForEvmSign(request: SignRequest): NormalizedEvmExecutionPayload {
+  return normalizeEvmExecutionPayload(request);
 }
 
 export function executionPayloadDigestForEvmSign(request: SignRequest): string {
@@ -284,18 +276,4 @@ function constantTimeEqual(left: string, right: string): boolean {
 function base64Url(value: Uint8Array): string {
   const binary = Array.from(value, (byte) => String.fromCharCode(byte)).join("");
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-}
-
-function canonicalize(value: unknown): unknown {
-  if (typeof value === "bigint") return value.toString();
-  if (value === null || typeof value !== "object") return value;
-  if (value instanceof Date) return value.toISOString();
-  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
-  const input = value as Record<string, unknown>;
-  const output: Record<string, unknown> = {};
-  for (const key of Object.keys(input).sort()) {
-    const item = input[key];
-    if (item !== undefined) output[key] = canonicalize(item);
-  }
-  return output;
 }

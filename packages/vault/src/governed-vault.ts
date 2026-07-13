@@ -1,5 +1,10 @@
 import { createHash } from "node:crypto";
-import type { ExecutionAuthorization, SignRequest } from "@stwd/shared";
+import {
+  canonicalJsonStringify,
+  type ExecutionAuthorization,
+  normalizeEvmExecutionPayload,
+  type SignRequest,
+} from "@stwd/shared";
 import type { SignTransactionOptions, Vault } from "./vault";
 
 export type ExecutionAuthorizationConsumeCallback = (
@@ -33,43 +38,18 @@ export interface GovernedSignTransactionOptions extends SignTransactionOptions {
   executionPayloadDigest?: string;
 }
 
-function canonicalize(value: unknown): unknown {
-  if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((entry) => canonicalize(entry));
-
-  const output: Record<string, unknown> = {};
-  for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-    const item = (value as Record<string, unknown>)[key];
-    if (item !== undefined) output[key] = canonicalize(item);
-  }
-  return output;
-}
-
-function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
-}
-
+/**
+ * Digest binds the normalized transaction INTENT (caller-controlled,
+ * policy-relevant fields) via the SINGLE shared canonicalizer/normalizer in
+ * @stwd/shared. It does NOT bind the node-resolved final serialized envelope;
+ * nonce/gas price may still be finalized inside the raw Vault after the
+ * authorization is consumed. The normalizer validates chainId/nonce as
+ * non-negative safe integers and throws on malformed caller fields so a bad
+ * request can never be digested past this boundary.
+ */
 export function executionPayloadDigestForGovernedEvmSign(request: SignRequest): string {
   return createHash("sha256")
-    .update(
-      canonicalJson({
-        agentId: request.agentId,
-        tenantId: request.tenantId,
-        capability: "wallet.sign_transaction",
-        backend: "local-vault",
-        transaction: {
-          to: request.to,
-          value: request.value,
-          data: request.data ?? "0x",
-          chainId: request.chainId,
-          nonce: request.nonce ?? null,
-          gasLimit: request.gasLimit ?? null,
-          broadcast: request.broadcast !== false,
-          venue: request.venue ?? null,
-          walletAddress: request.walletAddress ?? null,
-        },
-      }),
-    )
+    .update(canonicalJsonStringify(normalizeEvmExecutionPayload(request)))
     .digest("hex");
 }
 
