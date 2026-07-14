@@ -1,7 +1,7 @@
 {
   "name": "@stwd/eliza-plugin",
   "version": "0.4.2",
-  "description": "Steward wallet management plugin for ElizaOS agents",
+  "description": "ElizaOS integration for Steward-scoped wallet and provider capabilities",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
