@@ -57,6 +57,7 @@
         "@stwd/plugin-capabilities": "workspace:*",
         "@stwd/plugin-trading": "workspace:*",
         "@stwd/policy-engine": "workspace:*",
+        "@stwd/provider-github": "workspace:*",
         "@stwd/redis": "workspace:*",
         "@stwd/shared": "workspace:*",
         "@stwd/vault": "workspace:*",
@@ -265,6 +266,13 @@
     "packages/policy-engine": {
       "name": "@stwd/policy-engine",
       "version": "0.4.0",
+      "dependencies": {
+        "@stwd/shared": "workspace:*",
+      },
+    },
+    "packages/provider-github": {
+      "name": "@stwd/provider-github",
+      "version": "0.1.0",
       "dependencies": {
         "@stwd/shared": "workspace:*",
       },
@@ -1653,6 +1661,8 @@
     "@stwd/plugin-trading": ["@stwd/plugin-trading@workspace:packages/plugin-trading"],
 
     "@stwd/policy-engine": ["@stwd/policy-engine@workspace:packages/policy-engine"],
+
+    "@stwd/provider-github": ["@stwd/provider-github@workspace:packages/provider-github"],
 
     "@stwd/proxy": ["@stwd/proxy@workspace:packages/proxy"],
 
