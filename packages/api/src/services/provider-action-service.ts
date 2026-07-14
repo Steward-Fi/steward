@@ -350,30 +350,19 @@ class ProviderActionService {
       return await this.outcomeFromBinding(priorBinding);
     }
 
-    // ── Build the request envelope + hash. ──
-    const envelope = this.buildEnvelope(input, {
-      tenantId,
-      actorAgentId,
-      providerAccountId: account.id,
-      operationId: operation.id,
-      operationRevision: operation.revision,
-      actionDigest,
-    });
-    const requestHash = sha256HexPrefixed(jcsStringify(this.envelopeObject(envelope)));
-
     const intentId = `pa_${randomUUID()}`;
 
-    // ── Step 2: single transaction — evaluate access + policy against the SAME
-    // committed snapshot as the inserts (closes the eval->commit TOCTOU window),
-    // then persist intent + binding + required-audit outbox. ──
+    // ── Step 2: single transaction — reload the account + operation, evaluate
+    // access + policy against that fresh tx snapshot, and persist intent + binding
+    // + required-audit outbox in the SAME transaction (closes the eval->commit
+    // TOCTOU window entirely; the strict composite FKs also guarantee the rows
+    // still exist at commit). The request envelope binds the operation revision
+    // read INSIDE the tx. ──
     const accessDecisionId = randomUUID();
     // Outer-scope handles the tx fills so the post-commit branching can read them.
     let access!: { effect: "allow" | "deny"; doc: PersistedAccessDecisionV1 };
-    let policy: {
-      doc: PersistedPolicyDecisionV1;
-      evaluation: ProviderPolicyEvaluationV1;
-      decisionId: string;
-    } | null = null;
+    let policy: PolicyResult | null = null;
+    let requestHash = "";
     const effects: {
       access: "allow" | "deny";
       policy: "not_evaluated" | "hard_deny" | "approval_required" | "allow";
@@ -382,27 +371,67 @@ class ProviderActionService {
 
     try {
       await this.db().transaction(async (tx) => {
-        // Access is evaluated against the tx snapshot; the strict composite FKs on
-        // the binding then guarantee the referenced actor/workspace/account/
-        // operation rows still exist at commit.
+        // Reload the account + operation by identity INSIDE the tx so access,
+        // policy, and the persisted operation revision all read the SAME snapshot.
+        // If either was concurrently deleted, the tx-scoped scope is gone: deny as
+        // scope-not-found equivalent (persistence will fail closed anyway).
+        const [txAccount] = await tx
+          .select()
+          .from(providerAccounts)
+          .where(
+            and(
+              eq(providerAccounts.tenantId, tenantId),
+              eq(providerAccounts.workspaceId, input.workspaceId),
+              eq(providerAccounts.id, account.id),
+            ),
+          )
+          .limit(1);
+        const [txOperation] = await tx
+          .select()
+          .from(providerOperations)
+          .where(
+            and(
+              eq(providerOperations.tenantId, tenantId),
+              eq(providerOperations.workspaceId, input.workspaceId),
+              eq(providerOperations.providerAccountId, account.id),
+              eq(providerOperations.id, operation.id),
+            ),
+          )
+          .limit(1);
+        if (!txAccount || !txOperation) {
+          throw new Error("provider-action: scope disappeared inside transaction");
+        }
+
+        // Bind the request envelope to the tx-read operation revision.
+        const envelope = this.buildEnvelope(input, {
+          tenantId,
+          actorAgentId,
+          providerAccountId: txAccount.id,
+          operationId: txOperation.id,
+          operationRevision: txOperation.revision,
+          actionDigest,
+        });
+        requestHash = sha256HexPrefixed(jcsStringify(this.envelopeObject(envelope)));
+
+        // Access is evaluated against the tx snapshot rows.
         access = await this.evaluateAccess(tx, {
           tenantId,
           workspaceId: input.workspaceId,
           actorAgentId,
-          account,
-          operation,
+          account: txAccount,
+          operation: txOperation,
           environment,
           decisionId: accessDecisionId,
           intentId,
         });
-        // Policy runs only on a successful access decision.
+        // Policy runs only on a successful access decision, over the tx operation.
         policy =
           access.effect === "allow"
             ? await this.evaluatePolicy({
                 tenantId,
                 workspaceId: input.workspaceId,
                 actorAgentId,
-                operation,
+                operation: txOperation,
                 build,
                 intentId,
                 requestHash,
@@ -449,7 +478,7 @@ class ProviderActionService {
           actorAgentId,
           providerAccountId: account.id,
           operationId: operation.id,
-          operationRevision: operation.revision,
+          operationRevision: access.doc.dependencyRevisions.operation,
           canonicalProfile: build.action.profile,
           canonicalActionBytes: Buffer.from(canonicalBytes, "utf8"),
           actionDigest,
