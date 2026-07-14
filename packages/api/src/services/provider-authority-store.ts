@@ -140,8 +140,8 @@ export class ProviderAuthorityStore {
     return row;
   }
 
-  private async activeTenantAdmins(tenantId: string) {
-    return this.db()
+  private async activeTenantAdmins(tenantId: string, at = new Date()) {
+    const rows = await this.db()
       .select()
       .from(providerRoleBindings)
       .where(
@@ -151,6 +151,9 @@ export class ProviderAuthorityStore {
           eq(providerRoleBindings.status, "active"),
         ),
       );
+    return rows.filter(
+      (row) => (!row.notBefore || row.notBefore <= at) && (!row.expiresAt || row.expiresAt > at),
+    );
   }
 
   /** Owner compatibility is bootstrap-only. Creating the first explicit tenant admin closes it permanently. */
@@ -164,7 +167,13 @@ export class ProviderAuthorityStore {
       explicit.some((row) => row.principalType === "human" && row.principalId === ctx.actorUserId)
     )
       return true;
-    return explicit.length === 0 && membership.role === "owner" && ctx.tenantRole === "owner";
+    await this.ensureTenantState(ctx.tenantId);
+    const [state] = await this.db()
+      .select({ bootstrapCompleted: providerAuthorityTenantState.bootstrapCompleted })
+      .from(providerAuthorityTenantState)
+      .where(eq(providerAuthorityTenantState.tenantId, ctx.tenantId))
+      .limit(1);
+    return !state?.bootstrapCompleted && membership.role === "owner" && ctx.tenantRole === "owner";
   }
 
   private async workspaceAdminMandate(
@@ -651,9 +660,14 @@ export class ProviderAuthorityStore {
       const revision = await this.ensureTenantState(ctx.tenantId);
       if (revision !== ctx.expectedRevision)
         throw new ProviderAuthorityError("authority revision conflict", "revision_conflict", 409);
-      if (input.principalType !== "human" || input.workspaceId || input.providerAccountId)
+      if (
+        input.principalType !== "human" ||
+        input.workspaceId ||
+        input.providerAccountId ||
+        input.environment
+      )
         throw new ProviderAuthorityError(
-          "tenant authority admin must be a tenant-scoped human",
+          "tenant authority admin must be a tenant-scoped human without an environment scope",
           "bad_request",
           400,
         );
@@ -672,7 +686,7 @@ export class ProviderAuthorityStore {
       return this.db().transaction(async (tx) => {
         const [cas] = await tx
           .update(providerAuthorityTenantState)
-          .set({ revision: revision + 1, updatedAt: new Date() })
+          .set({ revision: revision + 1, bootstrapCompleted: true, updatedAt: new Date() })
           .where(
             and(
               eq(providerAuthorityTenantState.tenantId, ctx.tenantId),

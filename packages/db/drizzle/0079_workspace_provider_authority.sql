@@ -10,6 +10,7 @@ CREATE UNIQUE INDEX "secret_routes_tenant_id_unique_idx" ON "secret_routes" ("te
 CREATE TABLE "provider_authority_tenant_state" (
   "tenant_id" varchar(64) PRIMARY KEY REFERENCES "tenants"("id") ON DELETE CASCADE,
   "revision" integer NOT NULL DEFAULT 0,
+  "bootstrap_completed" boolean NOT NULL DEFAULT false,
   "created_at" timestamptz NOT NULL DEFAULT now(),
   "updated_at" timestamptz NOT NULL DEFAULT now()
 );

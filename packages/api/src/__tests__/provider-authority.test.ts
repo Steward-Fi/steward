@@ -447,6 +447,30 @@ describe("provider authority foundation", () => {
     expect(mixed.matchedGrantIds).toEqual([]);
   });
 
+  test("expired tenant-admin authority does not act or reopen owner bootstrap", async () => {
+    const [adminBinding] = await getDb()
+      .select()
+      .from(providerRoleBindings)
+      .where(eq(providerRoleBindings.roleKey, "tenant_authority_admin"));
+    await getDb()
+      .update(providerRoleBindings)
+      .set({ expiresAt: new Date(Date.now() - 1_000) })
+      .where(eq(providerRoleBindings.id, adminBinding.id));
+    await expect(
+      store.createWorkspace(
+        mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 2 }),
+        { key: "expired-admin", name: "Denied", environment: "production" },
+      ),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    await expect(
+      store.createWorkspace(mutation({ expectedRevision: 2 }), {
+        key: "bootstrap-cannot-reopen",
+        name: "Denied",
+        environment: "production",
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+  });
+
   test("mandatory audit runs before each successful mutation", () => {
     expect(auditEvents.some((event) => event.action === "provider.role_binding.issue")).toBe(true);
     expect(auditEvents.some((event) => event.action === "provider.workspace.create")).toBe(true);

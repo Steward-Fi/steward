@@ -1662,6 +1662,7 @@ export const providerAuthorityTenantState = pgTable("provider_authority_tenant_s
     .primaryKey()
     .references(() => tenants.id, { onDelete: "cascade" }),
   revision: integer("revision").notNull().default(0),
+  bootstrapCompleted: boolean("bootstrap_completed").notNull().default(false),
   ...timestamps,
 });
 
