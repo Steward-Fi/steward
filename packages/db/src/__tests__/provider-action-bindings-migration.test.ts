@@ -177,9 +177,7 @@ describe("0080 provider_action_bindings migration", () => {
     await seed(client);
     let threw = false;
     try {
-      await client.exec(
-        bindingInsert().replace(`'${DIGEST}'`, `'sha256:NOTHEX'`),
-      );
+      await client.exec(bindingInsert().replace(`'${DIGEST}'`, `'sha256:NOTHEX'`));
     } catch {
       threw = true;
     }
@@ -256,7 +254,9 @@ describe("0080 provider_action_bindings migration", () => {
     // operation FK must reject an operation id that isn't under (ta, wsA, acctA).
     let threw = false;
     try {
-      await client.exec(bindingInsert().replace(`'${IDS.opA}'`, `'00000000-0000-4000-8000-000000000999'`));
+      await client.exec(
+        bindingInsert().replace(`'${IDS.opA}'`, `'00000000-0000-4000-8000-000000000999'`),
+      );
     } catch {
       threw = true;
     }

@@ -144,11 +144,11 @@ describe("composeProviderActionPolicyDecision precedence", () => {
 
   it("rate cap reached => hard_deny; under cap => allow", () => {
     const capRule = rule("c", "allow", { constraints: { maxCallsPerHour: 5 } });
-    expect(composeProviderActionPolicyDecision([capRule], { ...ctx, invokeCount1h: 5 }).effect).toBe(
-      "hard_deny",
-    );
-    expect(composeProviderActionPolicyDecision([capRule], { ...ctx, invokeCount1h: 4 }).effect).toBe(
-      "allow",
-    );
+    expect(
+      composeProviderActionPolicyDecision([capRule], { ...ctx, invokeCount1h: 5 }).effect,
+    ).toBe("hard_deny");
+    expect(
+      composeProviderActionPolicyDecision([capRule], { ...ctx, invokeCount1h: 4 }).effect,
+    ).toBe("allow");
   });
 });

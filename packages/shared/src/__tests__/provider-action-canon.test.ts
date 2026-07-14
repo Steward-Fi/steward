@@ -15,15 +15,15 @@ import { describe, expect, it } from "bun:test";
 import {
   assertDecimalString,
   CanonError,
+  type CanonErrorCode,
   canonicalizeContentType,
   canonicalizeHeaders,
   canonicalizeMethod,
   canonicalizeOrigin,
   canonicalizeQueryPairs,
   computeActionDigest,
-  type CanonErrorCode,
-  type GithubCanonicalActionV1,
   GITHUB_PROVIDER_ACTION_PROFILE,
+  type GithubCanonicalActionV1,
   jcsStringify,
   normalizePath,
   parseRawQuery,
@@ -46,14 +46,11 @@ function expectCanon(fn: () => unknown, code: CanonErrorCode) {
 describe("method", () => {
   it("uppercases lowercase", () => expect(canonicalizeMethod("get")).toBe("GET"));
   it.each([" GET", "GET ", "G ET", "GET\t", "\nGET"])("rejects whitespace %p", (m) =>
-    expectCanon(() => canonicalizeMethod(m), "CANON_METHOD_INVALID"),
-  );
+    expectCanon(() => canonicalizeMethod(m), "CANON_METHOD_INVALID"));
   it.each(["", "GET1", "G3T"])("rejects non-alpha token %p", (m) =>
-    expectCanon(() => canonicalizeMethod(m), "CANON_METHOD_INVALID"),
-  );
+    expectCanon(() => canonicalizeMethod(m), "CANON_METHOD_INVALID"));
   it.each(["CONNECT", "TRACE", "OPTIONS", "PROPFIND"])("rejects unsupported %p", (m) =>
-    expectCanon(() => canonicalizeMethod(m), "CANON_METHOD_UNSUPPORTED"),
-  );
+    expectCanon(() => canonicalizeMethod(m), "CANON_METHOD_UNSUPPORTED"));
 });
 
 // ─── Origin ──────────────────────────────────────────────────────────────────
@@ -65,8 +62,7 @@ describe("origin", () => {
   it("accepts canonical", () =>
     expect(canonicalizeOrigin("https://api.github.com")).toBe("https://api.github.com"));
   it.each(["http://api.github.com", "ftp://api.github.com"])("rejects non-https %p", (o) =>
-    expectCanon(() => canonicalizeOrigin(o), "CANON_ORIGIN_SCHEME_UNSUPPORTED"),
-  );
+    expectCanon(() => canonicalizeOrigin(o), "CANON_ORIGIN_SCHEME_UNSUPPORTED"));
   it("rejects userinfo", () =>
     expectCanon(() => canonicalizeOrigin("https://u@api.github.com"), "CANON_ORIGIN_INVALID"));
   it("rejects query", () =>
@@ -74,7 +70,10 @@ describe("origin", () => {
   it("rejects fragment", () =>
     expectCanon(() => canonicalizeOrigin("https://api.github.com#x"), "CANON_ORIGIN_INVALID"));
   it("rejects nondefault port", () =>
-    expectCanon(() => canonicalizeOrigin("https://api.github.com:8443"), "CANON_ORIGIN_PORT_UNSUPPORTED"));
+    expectCanon(
+      () => canonicalizeOrigin("https://api.github.com:8443"),
+      "CANON_ORIGIN_PORT_UNSUPPORTED",
+    ));
   it("rejects non-ASCII host", () =>
     expectCanon(() => canonicalizeOrigin("https://api.gïthub.com"), "CANON_ORIGIN_HOST_INVALID"));
   it("rejects percent-escaped host", () =>
@@ -114,15 +113,18 @@ describe("path", () => {
   it("rejects trailing slash", () =>
     expectCanon(() => normalizePath("/repos/x/"), "CANON_PATH_EMPTY_SEGMENT"));
   it.each(["/repos/.", "/repos/..", "/..", "/./x"])("rejects dot segment %p", (p) =>
-    expectCanon(() => normalizePath(p), "CANON_PATH_TRAVERSAL"),
-  );
-  it.each(["/repos/%2e", "/repos/%2E", "/repos/%2f", "/repos/%5c", "/repos/%25", "/repos/%00"])(
-    "rejects encoded ambiguity %p",
-    (p) => expectCanon(() => normalizePath(p), "CANON_PATH_ENCODED_AMBIGUITY"),
-  );
+    expectCanon(() => normalizePath(p), "CANON_PATH_TRAVERSAL"));
+  it.each([
+    "/repos/%2e",
+    "/repos/%2E",
+    "/repos/%2f",
+    "/repos/%5c",
+    "/repos/%25",
+    "/repos/%00",
+  ])("rejects encoded ambiguity %p", (p) =>
+    expectCanon(() => normalizePath(p), "CANON_PATH_ENCODED_AMBIGUITY"));
   it.each(["/repos/%2", "/repos/%zz", "/repos/%g0"])("rejects malformed percent %p", (p) =>
-    expectCanon(() => normalizePath(p), "CANON_PATH_PERCENT_INVALID"),
-  );
+    expectCanon(() => normalizePath(p), "CANON_PATH_PERCENT_INVALID"));
   it("rejects encoded high byte", () =>
     expectCanon(() => normalizePath("/repos/%80"), "CANON_PATH_ENCODED_AMBIGUITY"));
 });
@@ -243,8 +245,7 @@ describe("headers", () => {
     "x-http-method-override",
     "x-steward-tenant",
   ])("rejects forbidden header %p", (h) =>
-    expectCanon(() => canonicalizeHeaders([[h, "v"]]), "CANON_HEADER_CREDENTIAL_FORBIDDEN"),
-  );
+    expectCanon(() => canonicalizeHeaders([[h, "v"]]), "CANON_HEADER_CREDENTIAL_FORBIDDEN"));
   it("rejects non-allowlisted header", () =>
     expectCanon(() => canonicalizeHeaders([["x-custom", "v"]]), "CANON_HEADER_UNSUPPORTED"));
   it("rejects CRLF injection in value", () =>
@@ -277,7 +278,8 @@ describe("content-type", () => {
     ["application/json; charset=utf-8", "application/json"],
     ["Application/JSON; CharSet=UTF-8", "application/json"],
     ["application/vnd.github+json", "application/vnd.github+json"],
-  ])("canonicalizes %p", (input, expected) => expect(canonicalizeContentType(input)).toBe(expected));
+  ])("canonicalizes %p", (input, expected) =>
+    expect(canonicalizeContentType(input)).toBe(expected));
   it("rejects form", () =>
     expectCanon(
       () => canonicalizeContentType("application/x-www-form-urlencoded"),
@@ -309,23 +311,21 @@ describe("content-type", () => {
 
 describe("numbers", () => {
   it.each(["0", "12", "-7", "9007199254740991", "-9007199254740991"])("accepts %p", (n) =>
-    expect(parseStrictInteger(n)).toBe(Number(n)),
-  );
+    expect(parseStrictInteger(n)).toBe(Number(n)));
   it.each(["-0", "1.0", "1e0", "1E5", "01", "+1", "00", "1.5"])("rejects format %p", (n) =>
-    expectCanon(() => parseStrictInteger(n), "CANON_NUMBER_FORMAT_UNSUPPORTED"),
-  );
-  it.each(["9007199254740992", "-9007199254740992", "99999999999999999"])("rejects unsafe %p", (n) =>
-    expectCanon(() => parseStrictInteger(n), "CANON_NUMBER_UNSAFE"),
-  );
+    expectCanon(() => parseStrictInteger(n), "CANON_NUMBER_FORMAT_UNSUPPORTED"));
+  it.each([
+    "9007199254740992",
+    "-9007199254740992",
+    "99999999999999999",
+  ])("rejects unsafe %p", (n) => expectCanon(() => parseStrictInteger(n), "CANON_NUMBER_UNSAFE"));
 });
 
 describe("decimal strings", () => {
   it.each(["0", "12", "12.50", "12.5", "0.001"])("accepts %p", (d) =>
-    expect(() => assertDecimalString(d)).not.toThrow(),
-  );
+    expect(() => assertDecimalString(d)).not.toThrow());
   it.each(["-1", "01", "1.", ".5", "1.2.3", "1e3", ""])("rejects %p", (d) =>
-    expectCanon(() => assertDecimalString(d), "CANON_DECIMAL_STRING_INVALID"),
-  );
+    expectCanon(() => assertDecimalString(d), "CANON_DECIMAL_STRING_INVALID"));
   it("preserves trailing-zero distinction (string identity)", () => {
     // 12.50 and 12.5 are different strings and must remain different bytes.
     expect(jcsStringify({ a: "12.50" })).not.toBe(jcsStringify({ a: "12.5" }));
@@ -369,14 +369,16 @@ describe("strictParseJson", () => {
 // ─── JCS runtime-value rejection (Conflict 13) ───────────────────────────────
 
 describe("jcsStringify rejects non-JSON runtime values", () => {
-  it("bigint", () =>
-    expectCanon(() => jcsStringify({ a: 1n }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
+  it("bigint", () => expectCanon(() => jcsStringify({ a: 1n }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
   it("undefined member", () =>
     expectCanon(() => jcsStringify({ a: undefined }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
   it("NaN", () =>
     expectCanon(() => jcsStringify({ a: Number.NaN }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
   it("Infinity", () =>
-    expectCanon(() => jcsStringify({ a: Number.POSITIVE_INFINITY }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
+    expectCanon(
+      () => jcsStringify({ a: Number.POSITIVE_INFINITY }),
+      "CANON_RUNTIME_VALUE_UNSUPPORTED",
+    ));
   it("Date", () =>
     expectCanon(() => jcsStringify({ a: new Date() }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
   it("Map", () => expectCanon(() => jcsStringify(new Map()), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
@@ -385,7 +387,7 @@ describe("jcsStringify rejects non-JSON runtime values", () => {
   it("symbol", () =>
     expectCanon(() => jcsStringify({ a: Symbol("x") }), "CANON_RUNTIME_VALUE_UNSUPPORTED"));
   it("sparse array hole", () => {
-    // eslint-disable-next-line no-sparse-arrays
+    // biome-ignore lint/suspicious/noSparseArray: The hole is intentional to prove JCS rejects sparse arrays.
     const arr = [1, , 3];
     expectCanon(() => jcsStringify(arr), "CANON_RUNTIME_VALUE_UNSUPPORTED");
   });
@@ -427,7 +429,10 @@ describe("digest mutation sensitivity", () => {
     expect(computeActionDigest({ ...base, orderedQueryPairs: [["a", "2"]] })).not.toBe(baseDigest));
   it("header value change", () =>
     expect(
-      computeActionDigest({ ...base, selectedHeaders: [["content-type", "application/vnd.github+json"]] }),
+      computeActionDigest({
+        ...base,
+        selectedHeaders: [["content-type", "application/vnd.github+json"]],
+      }),
     ).not.toBe(baseDigest));
   it("body change", () =>
     expect(computeActionDigest({ ...base, canonicalBody: { body: "bye" } })).not.toBe(baseDigest));

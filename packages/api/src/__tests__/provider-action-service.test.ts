@@ -27,7 +27,6 @@ import {
   providerActionBindings,
   providerGrants,
   providerOperations,
-  providerRoleBindings,
   tenants,
   users,
   workspaces,
@@ -35,7 +34,7 @@ import {
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { buildGithubAction } from "@stwd/provider-github";
 import { computeActionDigest } from "@stwd/shared";
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
 
