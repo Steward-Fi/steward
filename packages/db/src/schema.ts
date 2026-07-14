@@ -1973,9 +1973,7 @@ export const providerActionBindings = pgTable(
     accessReasonCode: varchar("access_reason_code", { length: 96 }).notNull(),
     matchedBindingIds: uuid("matched_binding_ids").array().notNull().default([]),
     matchedGrantIds: uuid("matched_grant_ids").array().notNull().default([]),
-    dependencyRevisions: jsonb("dependency_revisions")
-      .$type<Record<string, unknown>>()
-      .notNull(),
+    dependencyRevisions: jsonb("dependency_revisions").$type<Record<string, unknown>>().notNull(),
     accessDecision: jsonb("access_decision").$type<Record<string, unknown>>().notNull(),
     accessDecisionHash: varchar("access_decision_hash", { length: 71 }).notNull(),
 
@@ -2020,12 +2018,7 @@ export const providerActionBindings = pgTable(
       name: "provider_action_bindings_account_fk",
     }).onDelete("restrict"),
     operationFk: foreignKey({
-      columns: [
-        table.tenantId,
-        table.workspaceId,
-        table.providerAccountId,
-        table.operationId,
-      ],
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId, table.operationId],
       foreignColumns: [
         providerOperations.tenantId,
         providerOperations.workspaceId,
@@ -2034,9 +2027,9 @@ export const providerActionBindings = pgTable(
       ],
       name: "provider_action_bindings_operation_fk",
     }).onDelete("restrict"),
-    accessDecisionIdUnique: uniqueIndex(
-      "provider_action_bindings_access_decision_id_uniq",
-    ).on(table.accessDecisionId),
+    accessDecisionIdUnique: uniqueIndex("provider_action_bindings_access_decision_id_uniq").on(
+      table.accessDecisionId,
+    ),
     requestHashUnique: uniqueIndex("provider_action_bindings_request_hash_uniq").on(
       table.requestHash,
     ),
@@ -2062,6 +2055,39 @@ export const providerActionBindings = pgTable(
 );
 
 export type ProviderActionBinding = typeof providerActionBindings.$inferSelect;
+
+// Transactional required-audit outbox (spec §6.4). A provider-action decision
+// inserts its REQUIRED audit intent here in the SAME transaction as the binding;
+// it is drained into the tamper-evident audit chain immediately after commit and
+// BEFORE the executor stub can run. Guarantees the event is never lost even though
+// the audit chain uses its own advisory-locked transaction.
+export const providerActionAuditOutbox = pgTable(
+  "provider_action_audit_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    intentId: varchar("intent_id", { length: 64 }).notNull(),
+    action: varchar("action", { length: 96 }).notNull(),
+    resourceType: varchar("resource_type", { length: 64 }).notNull(),
+    resourceId: varchar("resource_id", { length: 255 }).notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    intentFk: foreignKey({
+      columns: [table.tenantId, table.intentId],
+      foreignColumns: [intents.tenantId, intents.id],
+      name: "provider_action_audit_outbox_intent_fk",
+    }).onDelete("cascade"),
+    undeliveredIdx: index("provider_action_audit_outbox_undelivered_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type ProviderActionAuditOutbox = typeof providerActionAuditOutbox.$inferSelect;
 
 export const pendingProxyRequestStatusEnum = pgEnum("pending_proxy_request_status", [
   "pending",

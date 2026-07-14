@@ -165,3 +165,32 @@ END $fn$;
 CREATE TRIGGER provider_action_bindings_immutable
   BEFORE UPDATE ON "provider_action_bindings"
   FOR EACH ROW EXECUTE FUNCTION steward_provider_action_binding_guard();
+--> statement-breakpoint
+
+-- Transactional required-audit outbox (spec §6.4). Because the tenant audit
+-- chain is written by its own advisory-locked transaction (writeAuditEvent), a
+-- provider-action decision commits its REQUIRED audit intent DURABLY in the SAME
+-- transaction as the binding by inserting an outbox row here. The row is drained
+-- into the tamper-evident audit chain immediately after commit and BEFORE the
+-- executor stub can run. If the drain fails the request denies
+-- (EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE, 503) with the stub call count zero; the
+-- durable outbox row guarantees the event is never lost.
+CREATE TABLE "provider_action_audit_outbox" (
+  "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  "tenant_id" varchar(64) NOT NULL,
+  "intent_id" varchar(64) NOT NULL,
+  "action" varchar(96) NOT NULL,
+  "resource_type" varchar(64) NOT NULL,
+  "resource_id" varchar(255) NOT NULL,
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "delivered_at" timestamptz,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+
+  CONSTRAINT "provider_action_audit_outbox_intent_fk"
+    FOREIGN KEY ("tenant_id", "intent_id")
+    REFERENCES "intents" ("tenant_id", "id") ON DELETE CASCADE
+);
+--> statement-breakpoint
+CREATE INDEX "provider_action_audit_outbox_undelivered_idx"
+  ON "provider_action_audit_outbox" ("tenant_id", "created_at")
+  WHERE "delivered_at" IS NULL;
