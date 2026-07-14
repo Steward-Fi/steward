@@ -14,9 +14,8 @@
 import { signAgentToken } from "@stwd/auth";
 import {
   CAPABILITY_INTENT_RULE_TYPE,
-  type CapabilityIntentConfig,
+  composeCapabilityIntentDecision,
   type EvaluatorContext,
-  evaluateCapabilityIntent,
   PolicyEngine,
 } from "@stwd/policy-engine";
 import { StewardProxyClient } from "@stwd/proxy-client";
@@ -145,29 +144,8 @@ function syntheticSignRequest(tenantId: string, agentId: string): SignRequest {
   };
 }
 
-function patternMatches(pattern: string, name: string): boolean {
-  if (typeof pattern !== "string" || pattern.length === 0) return false;
-  if (pattern.endsWith(".*")) return name.startsWith(pattern.slice(0, -1));
-  return pattern === name;
-}
-
 function isCapabilityIntentRule(rule: PolicyRule): boolean {
   return (rule.type as string) === (CAPABILITY_INTENT_RULE_TYPE as string);
-}
-
-function isMatchingAllowRule(rule: PolicyRule, name: string): boolean {
-  if (!isCapabilityIntentRule(rule)) return false;
-  const cfg = rule.config as Partial<CapabilityIntentConfig>;
-  if (cfg.effect !== "allow") return false;
-  if (!Array.isArray(cfg.capabilities)) return false;
-  return cfg.capabilities.some((p) => patternMatches(p, name));
-}
-
-function isGoverningRule(rule: PolicyRule, name: string): boolean {
-  if (!isCapabilityIntentRule(rule)) return false;
-  const cfg = rule.config as Partial<CapabilityIntentConfig>;
-  if (!Array.isArray(cfg.capabilities)) return false;
-  return cfg.capabilities.some((p) => patternMatches(p, name));
 }
 
 async function recordAndJson(
@@ -271,44 +249,73 @@ export async function invokeCapabilityThroughProxy(
     capabilityInvokeCount1h: count1h,
   };
 
-  await engine.evaluate(capRules, evaluatorCtx);
+  // FAIL-CLOSED OUTER BOUNDARY. Both the generic engine sweep and the canonical
+  // composer are defensively non-throwing by contract (the composer wraps every
+  // per-rule body; the registry describes hostile thrown values with a
+  // non-throwing helper). But this invoke path is a security gate: a throw here
+  // — from either call, a hostile jsonb getter deserializing `r.config`, or any
+  // unforeseen path — must DENY (403), never escape as a raw 500 (which callers
+  // could treat as a transient/retryable failure and which reveals nothing about
+  // the gate). We therefore wrap the entire evaluate+compose region and translate
+  // ANY escape into a fail-closed deny.
+  let decision: ReturnType<typeof composeCapabilityIntentDecision>;
+  try {
+    await engine.evaluate(capRules, evaluatorCtx);
 
-  const governing = capRules.filter((r) => isGoverningRule(r, cap.name));
-  if (governing.length === 0) {
+    // CANONICAL PRECEDENCE (master-plan §5.3): the policy-engine helper composes
+    // ALL enabled capability-intent rules in the one true order — hard deny
+    // (incl. malformed config / failed hard constraint) > approval_required >
+    // allow > default-deny. This is the single source of truth: an applicable
+    // require-approval can NEVER be shadowed by a matching allow, and a hard deny
+    // can never be softened into an approval.
+    //
+    // We pass the FULL enabled capability-intent set (not a pre-filtered
+    // "governing" subset): a MALFORMED rule config (e.g. a misspelled
+    // `capabilities` key or an unsupported glob) makes a raw governing-match
+    // filter return false, which would silently DROP the broken gate and fail
+    // OPEN if a sibling allow matched. The composer instead parses every rule and
+    // hard-denies on ANY malformation (fail closed), treats well-formed
+    // non-governing rules as inert, and applies the effective default-deny when
+    // no governing allow passes (covers the previous "no policy authorizes this
+    // capability" 403).
+    decision = composeCapabilityIntentDecision(
+      capRules.map((r) => ({
+        id: r.id,
+        type: r.type as string,
+        enabled: r.enabled,
+        config: r.config,
+      })),
+      evaluatorCtx,
+    );
+  } catch {
+    // A throw escaped the (defensively non-throwing) evaluation region. Fail
+    // closed: deny, never 500. The reason is intentionally generic — it must not
+    // leak internals and must not itself risk stringifying a hostile value.
     return recordAndJson(store, {
       tenantId,
       agentId,
       capabilityId: cap.id,
       decision: "deny",
       status: 403,
-      payload: { ok: false, error: "no policy authorizes this capability" } satisfies ApiResponse,
+      payload: { ok: false, error: "policy evaluation failed" } satisfies ApiResponse,
     });
   }
 
-  let sawApproval = false;
-  let matchedAllowPassed = false;
-  let sawDeny = false;
-  let denyReason: string | undefined;
-  for (const rule of governing) {
-    const result = evaluateCapabilityIntent(
-      { id: rule.id, type: rule.type as string, enabled: rule.enabled, config: rule.config },
-      evaluatorCtx,
-    );
-    if (result.requiresManualApproval) {
-      sawApproval = true;
-      continue;
-    }
-    if (!result.passed) {
-      sawDeny = true;
-      denyReason = result.reason ?? "denied by policy";
-      continue;
-    }
-    if (isMatchingAllowRule(rule, cap.name)) matchedAllowPassed = true;
+  if (decision.effect === "hard_deny") {
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 403,
+      payload: {
+        ok: false,
+        error: decision.reason,
+      } satisfies ApiResponse,
+    });
   }
 
-  if (!sawDeny && matchedAllowPassed) {
-    // proceed to proxy delegation.
-  } else if (!sawDeny && sawApproval) {
+  if (decision.effect === "approval_required") {
     let approvalId: string | null = null;
     try {
       approvalId = await store.recordInvocation({
@@ -331,19 +338,9 @@ export async function invokeCapabilityThroughProxy(
       });
     }
     return jsonResponse({ ok: true, data: { approvalId, status: "pending" } }, 202);
-  } else {
-    return recordAndJson(store, {
-      tenantId,
-      agentId,
-      capabilityId: cap.id,
-      decision: "deny",
-      status: 403,
-      payload: {
-        ok: false,
-        error: denyReason ?? "capability invoke denied by policy",
-      } satisfies ApiResponse,
-    });
   }
+
+  // decision.effect === "allow": proceed to proxy delegation.
 
   const proxyEnv = readProxyEnv();
   if (!proxyEnv) {

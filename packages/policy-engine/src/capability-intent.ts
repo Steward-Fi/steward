@@ -59,6 +59,7 @@ import type {
   ContributedPolicyRule,
   PolicyRuleContribution,
 } from "@stwd/shared";
+import { describeThrown } from "@stwd/shared";
 import type { EvaluatorContext } from "./evaluators";
 
 /** the contributed rule-type discriminator. */
@@ -124,6 +125,61 @@ function capabilityMatches(config: CapabilityIntentConfig, name: string): boolea
 }
 
 /**
+ * Recover ONLY the capability SELECTOR (the `capabilities` patterns) from an
+ * otherwise-malformed rule config, WITHOUT validating the rest of the config.
+ *
+ * WHY THIS EXISTS (scope isolation, master-plan §5.3 / §"malformed-input
+ * precedence applies to GOVERNING rules"):
+ *   malformed-input precedence must apply to the rules that GOVERN the requested
+ *   capability. A rule whose selector is well-formed and demonstrably scoped to a
+ *   DIFFERENT capability must not brick an unrelated invoke just because some
+ *   OTHER part of its config (effect, constraints) is malformed — it is not a
+ *   governing rule for this request, so it is inert.
+ *
+ * RECOVERABILITY CONTRACT (fail closed on ambiguous scope):
+ *   - `{ recoverable: true, matches }` when the `capabilities` selector is
+ *     unambiguously well-formed: a non-empty array of non-empty strings whose
+ *     glob usage is legal (same rule as `parseConfig`'s `badPattern` check). We
+ *     can then say for certain whether it governs THIS capability (`matches`).
+ *   - `{ recoverable: false }` when the selector itself cannot be trusted to
+ *     determine scope (missing / not an array / empty / a non-string or empty
+ *     entry / an illegal glob). We CANNOT rule out that this rule was meant to
+ *     govern the requested capability, so the caller must treat it as
+ *     potentially governing and hard-deny (never assume it is inert).
+ *
+ * This deliberately mirrors the selector-shaped checks in `parseConfig` so a
+ * selector that would be REJECTED there is also "unrecoverable" here.
+ */
+function recoverSelectorMatch(
+  rawInput: unknown,
+  name: string,
+): { recoverable: true; matches: boolean } | { recoverable: false } {
+  if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) {
+    return { recoverable: false };
+  }
+  const capabilities = (rawInput as Record<string, unknown>).capabilities;
+  if (
+    !Array.isArray(capabilities) ||
+    capabilities.length === 0 ||
+    !capabilities.every((c) => typeof c === "string" && c.length > 0)
+  ) {
+    return { recoverable: false };
+  }
+  // An illegal glob makes the selector's intended scope ambiguous (a bad pattern
+  // can never match, so treating it as "non-governing" would be exactly the
+  // silent-drop failure `parseConfig`'s badPattern check guards against). Fail
+  // closed: unrecoverable.
+  const badPattern = (capabilities as string[]).find(
+    (p) => p.includes("*") && !(p.endsWith(".*") && !p.slice(0, -2).includes("*")),
+  );
+  if (badPattern !== undefined) {
+    return { recoverable: false };
+  }
+  const matches = (capabilities as string[]).some((pattern) => patternMatches(pattern, name));
+  return { recoverable: true, matches };
+}
+
+/**
  * Validate the (opaque) rule config into a typed shape, or return an error
  * reason. FAIL CLOSED: anything malformed is rejected (the caller denies).
  */
@@ -134,7 +190,24 @@ const ALLOWED_CONSTRAINT_KEYS: ReadonlySet<string> = new Set([
   "argMatches",
 ]);
 
-function parseConfig(raw: Record<string, unknown>): CapabilityIntentConfig | { error: string } {
+function parseConfig(rawInput: unknown): CapabilityIntentConfig | { error: string } {
+  // FAIL CLOSED on a non-object config. `rule.config` is opaque jsonb and can be
+  // null / a string / a number / an array at runtime (untyped storage, bad
+  // migration, hand-edited row). `Object.keys(null)` (and friends) THROW, which
+  // — before this guard — surfaced as an unhandled TypeError => HTTP 500 instead
+  // of a decision. A 500 is worse than a deny for a money-rail gate: it is
+  // ambiguous and can be retried into a race. Treat any non-plain-object config
+  // as malformed => the caller hard-denies (never throws). Arrays are rejected
+  // too: a JSON array is not a valid rule config shape.
+  if (typeof rawInput !== "object" || rawInput === null || Array.isArray(rawInput)) {
+    return {
+      error: `capability-intent: config must be a non-null object (got ${
+        rawInput === null ? "null" : Array.isArray(rawInput) ? "array" : typeof rawInput
+      })`,
+    };
+  }
+  const raw = rawInput as Record<string, unknown>;
+
   // FAIL CLOSED on unknown top-level keys: a misspelled key (e.g. `capabilties`
   // or `effects`) must never be silently ignored, since that could drop the
   // intended gate and let an action through unconstrained.
@@ -379,6 +452,182 @@ export function evaluateCapabilityIntent(
       };
     }
   }
+}
+
+/**
+ * The composed decision over a set of `capability-intent` rules that GOVERN a
+ * single invoked capability, in the canonical precedence order.
+ *
+ * CANONICAL COMPOSITION (master-plan §5.3 / PR2 canonicalization spec §6.3):
+ *   1. a malformed/unknown rule config that GOVERNS this capability, or whose
+ *      SELECTOR is unrecoverable (ambiguous scope), or an unavailable policy
+ *      input => HARD DENY
+ *   2. any matching hard deny (an `effect: "deny"` match, OR an `effect: "allow"`
+ *      match that FAILS a hard constraint, OR a thrown evaluator error) => HARD
+ *      DENY
+ *   3. else any matching `require-approval` => APPROVAL REQUIRED
+ *   4. else any matching passing `allow` => ALLOW
+ *   5. else (no governing rule matched/passed) => HARD DENY / no governing allow
+ *
+ * MALFORMED-INPUT PRECEDENCE IS SCOPED TO GOVERNING RULES (master-plan §5.3).
+ * A malformed rule config does NOT automatically brick every invoke: if the
+ * rule's `capabilities` SELECTOR is well-formed and provably scoped to a
+ * DIFFERENT capability, the rule is not governing this request and stays inert
+ * even though the rest of its config is broken. Only a malformed rule that (a)
+ * governs THIS capability, or (b) has an UNRECOVERABLE selector (so its scope
+ * cannot be determined) => HARD DENY. Ambiguous scope fails closed.
+ *
+ * This is the single source of truth for capability-intent precedence. It FIXES
+ * the prior invoke-layer bug where a passing allow could short-circuit an
+ * applicable require-approval (allow-over-approval). A malformed governing
+ * config, a failed hard constraint, or a thrown evaluator error can NEVER be
+ * softened into an approval, and can never surface as a 500.
+ *
+ * The caller supplies ONLY the rules that already govern the invoked capability
+ * (i.e. their `capabilities` list matches the name). Passing non-governing rules
+ * is harmless — they evaluate as "not applicable" (pass) and are ignored — but
+ * the effective default-deny (outcome 5) is defined over the GOVERNING set, so
+ * the caller must not filter out governing rules before composing.
+ */
+export type CapabilityIntentCompositionEffect = "hard_deny" | "approval_required" | "allow";
+
+export interface CapabilityIntentCompositionResult {
+  readonly effect: CapabilityIntentCompositionEffect;
+  readonly reason: string;
+}
+
+export function composeCapabilityIntentDecision(
+  rules: readonly ContributedPolicyRule[],
+  ctx: EvaluatorContext,
+): CapabilityIntentCompositionResult {
+  // Not a capability invoke at all: nothing to compose. Fail closed — the invoke
+  // layer must only call this on an actual capability invoke with ctx.capability.
+  if (!ctx.capability) {
+    return { effect: "hard_deny", reason: "capability-intent: not a capability invoke" };
+  }
+  const { name } = ctx.capability;
+
+  let approvalReason: string | undefined;
+  let allowReason: string | undefined;
+
+  for (const rule of rules) {
+    // A DISABLED rule is inert, matching `evaluatePolicy`/`PolicyEngine`
+    // semantics (any FALSY `enabled` => skipped, mirroring the generic engine's
+    // `!rule.enabled` check — `false`, `undefined`, `null`, `0`, `""` all mean
+    // "off"). Disabling a policy must reliably turn it off for every caller of
+    // this exported helper — a disabled deny/require-approval (or even a disabled
+    // malformed) rule must NOT block, queue, or hard-deny. We skip it BEFORE
+    // parsing so a disabled-but-malformed rule cannot fail the composition closed
+    // either.
+    if (!rule.enabled) continue;
+
+    // Evaluate this rule defensively. The whole per-rule body — parse, selector
+    // recovery, and evaluation — is wrapped so that NOTHING it does can throw out
+    // of the helper. A thrown error (a hostile jsonb getter, an evaluator bug,
+    // anything) is treated exactly like a malformed config: fail closed on the
+    // GOVERNING scope, never a 500, never an approval. `result === null` means
+    // the rule was inert (non-governing / provably scoped elsewhere) and
+    // contributes nothing.
+    let result: ContributedPolicyResult | null;
+    try {
+      // Parse the config. A malformed/unknown config CANNOT simply hard-deny
+      // every invoke: malformed-input precedence applies to GOVERNING rules only
+      // (master-plan §5.3). A rule scoped (by a well-formed selector) to a
+      // DIFFERENT capability is not governing this request and must stay inert
+      // even if the rest of its config is broken. But if the selector itself is
+      // unrecoverable, we cannot prove the rule is non-governing, so fail closed.
+      const parsed = parseConfig(rule.config);
+      if ("error" in parsed) {
+        // Separate SELECTOR recovery from full-config validation.
+        const sel = recoverSelectorMatch(rule.config, name);
+        if (sel.recoverable && !sel.matches) {
+          // Well-formed selector, provably scoped elsewhere => inert. The
+          // malformed remainder cannot affect a capability this rule doesn't
+          // govern.
+          continue;
+        }
+        // Either the selector matches THIS capability (malformed governing rule)
+        // or the selector is unrecoverable (ambiguous scope). Both HARD DENY and
+        // short-circuit — a broken governing gate must never be silently dropped
+        // and must never be softened into an approval.
+        return { effect: "hard_deny", reason: parsed.error };
+      }
+
+      // Only rules that govern THIS capability contribute. A non-match is inert.
+      if (!capabilityMatches(parsed, name)) {
+        result = null;
+      } else {
+        result = evaluateCapabilityIntent(
+          { id: rule.id, type: rule.type, enabled: rule.enabled, config: rule.config },
+          ctx,
+        );
+      }
+    } catch (err) {
+      // A throw anywhere in the per-rule body. Scope it: if the selector is
+      // recoverable and demonstrably elsewhere, the throw touched a non-governing
+      // rule and is inert. Otherwise fail closed on the governing/ambiguous rule.
+      let scopedElsewhere = false;
+      try {
+        const sel = recoverSelectorMatch(rule.config, name);
+        scopedElsewhere = sel.recoverable && !sel.matches;
+      } catch {
+        scopedElsewhere = false;
+      }
+      if (scopedElsewhere) continue;
+      // describeThrown NEVER throws for any hostile value (throwing
+      // toString/valueOf/Symbol.toPrimitive, Proxy message getter, etc.), so
+      // building this fail-closed reason cannot itself unwind past the return.
+      return {
+        effect: "hard_deny",
+        reason: `capability-intent: evaluator error for capability "${name}" (${describeThrown(
+          err,
+        )})`,
+      };
+    }
+
+    // Inert rule (non-governing / scoped elsewhere): contributes nothing.
+    if (result === null) continue;
+
+    // A matching require-approval fails without passing and carries the flag.
+    if (result.requiresManualApproval === true && result.passed === false) {
+      // Remember it, but keep scanning: a later hard deny must still win.
+      if (approvalReason === undefined) {
+        approvalReason =
+          result.reason ?? `capability-intent: capability "${name}" requires manual approval`;
+      }
+      continue;
+    }
+
+    // A matching rule that did NOT pass and is NOT an approval is a HARD DENY.
+    // This covers both an `effect: "deny"` match and an `effect: "allow"` match
+    // that failed a hard constraint (arg/regex/rate). Deny wins immediately.
+    if (result.passed === false) {
+      return {
+        effect: "hard_deny",
+        reason: result.reason ?? `capability-intent: capability "${name}" denied by policy`,
+      };
+    }
+
+    // A matching passing allow. Record it, but do NOT return yet: an approval or
+    // a hard deny from another governing rule must be able to override it.
+    if (allowReason === undefined) {
+      allowReason = result.reason ?? `capability-intent: capability "${name}" allowed`;
+    }
+  }
+
+  // No hard deny was seen. Approval outranks allow.
+  if (approvalReason !== undefined) {
+    return { effect: "approval_required", reason: approvalReason };
+  }
+  if (allowReason !== undefined) {
+    return { effect: "allow", reason: allowReason };
+  }
+
+  // No governing rule matched with a passing allow => effective default-deny.
+  return {
+    effect: "hard_deny",
+    reason: `capability-intent: no policy authorizes capability "${name}"`,
+  };
 }
 
 /**
