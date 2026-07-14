@@ -4,7 +4,6 @@ Steward is the self-hostable authority plane for private enterprise agents. It g
 
 [![npm](https://img.shields.io/npm/v/@stwd/sdk)](https://www.npmjs.com/package/@stwd/sdk)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![API](https://img.shields.io/badge/API-live-brightgreen)](https://api.steward.fi)
 [![Docs](https://img.shields.io/badge/docs-steward.fi-blue)](https://docs.steward.fi)
 
 ## what exists today
@@ -42,7 +41,8 @@ npm install @stwd/sdk
 import { StewardClient } from "@stwd/sdk";
 
 const steward = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  // point this at your self-hosted Steward instance (see deploy/docker-compose.yml)
+  baseUrl: "http://localhost:3200",
   apiKey: "stw_your_tenant_key",
   tenantId: "my-app",
 });
@@ -79,7 +79,7 @@ function App() {
   return (
     <StewardProvider
       client={stewardClient}
-      auth={{ baseUrl: "https://api.steward.fi" }}
+      auth={{ baseUrl: "http://localhost:3200" }}
     >
       <StewardAuthGuard fallback={<StewardLogin methods={["passkey", "email", "google"]} />}>
         <Dashboard />
@@ -207,7 +207,6 @@ see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, 
 
 - website: [steward.fi](https://steward.fi)
 - docs: [docs.steward.fi](https://docs.steward.fi)
-- API: [api.steward.fi](https://api.steward.fi)
 - npm: [@stwd/sdk](https://www.npmjs.com/package/@stwd/sdk), [@stwd/react](https://www.npmjs.com/package/@stwd/react), [@stwd/eliza-plugin](https://www.npmjs.com/package/@stwd/eliza-plugin)
 
 ## license

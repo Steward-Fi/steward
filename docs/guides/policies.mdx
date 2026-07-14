@@ -30,7 +30,7 @@ await steward.setPolicies("my-agent", [
 ```
 
 ```bash cURL
-curl -X PUT https://api.steward.fi/agents/my-agent/policies \
+curl -X PUT http://localhost:3200/agents/my-agent/policies \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '[{ "id": "limit-1", "type": "spending-limit", "enabled": true, "config": { ... } }]'

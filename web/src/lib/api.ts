@@ -1,6 +1,7 @@
 import { StewardClient } from "@stwd/sdk";
+import { STEWARD_API_URL } from "./steward-api-url";
 
-export const API_URL = process.env.NEXT_PUBLIC_STEWARD_API_URL || "https://api.steward.fi";
+export const API_URL = STEWARD_API_URL;
 
 export type GasSponsorshipProvider =
   | "custom_evm_paymaster"

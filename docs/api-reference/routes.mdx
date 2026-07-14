@@ -56,7 +56,7 @@ POST /secrets/routes
 
 <CodeGroup>
 ```bash OpenAI
-curl -X POST https://api.steward.fi/secrets/routes \
+curl -X POST http://localhost:3200/secrets/routes \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -70,7 +70,7 @@ curl -X POST https://api.steward.fi/secrets/routes \
 ```
 
 ```bash Anthropic
-curl -X POST https://api.steward.fi/secrets/routes \
+curl -X POST http://localhost:3200/secrets/routes \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -84,7 +84,7 @@ curl -X POST https://api.steward.fi/secrets/routes \
 ```
 
 ```bash Query Param Auth
-curl -X POST https://api.steward.fi/secrets/routes \
+curl -X POST http://localhost:3200/secrets/routes \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{
@@ -156,7 +156,7 @@ PUT /secrets/routes/:id
 
 ```bash
 # Disable a route
-curl -X PUT https://api.steward.fi/secrets/routes/route-uuid \
+curl -X PUT http://localhost:3200/secrets/routes/route-uuid \
   -H "X-Steward-Key: your-key" \
   -H "Content-Type: application/json" \
   -d '{ "enabled": false }'

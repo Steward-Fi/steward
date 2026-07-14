@@ -5652,7 +5652,16 @@ export function getOpenApiSpec() {
       description:
         "Generated OpenAPI contract for implemented Steward API surfaces. This contract includes Privy-parity account resources, wallet external IDs, gas spend filtering, transaction reference filtering, and request-hardening inventory markers for sensitive mutating routes.",
     },
-    servers: [{ url: "https://api.steward.fi" }],
+    // Steward is self-host-first: there is no shared hosted API. A relative
+    // server URL means "same origin the spec was served from", so generated
+    // clients and importers target the actual deployment they fetched this
+    // document from (whatever domain/port that is) instead of a hardcoded host.
+    servers: [
+      {
+        url: "/",
+        description: "Same origin as this Steward deployment (self-hosted)",
+      },
+    ],
     "x-steward-sensitive-prefixes": SENSITIVE_PATH_PREFIXES,
     tags: [
       { name: "Auth" },

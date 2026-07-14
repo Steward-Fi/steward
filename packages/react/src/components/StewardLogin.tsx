@@ -150,7 +150,7 @@ function useDynamicWalletPanel(
  *   - Discord OAuth (popup)
  *
  * @example
- * <StewardProvider client={client} agentId="..." auth={{ baseUrl: "https://api.steward.fi" }}>
+ * <StewardProvider client={client} agentId="..." auth={{ baseUrl: "http://localhost:3200" }}>
  *   <StewardLogin
  *     variant="card"
  *     title="welcome back"

@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
+import { STEWARD_API_URL } from "@/lib/steward-api-url";
 
 const SECURITY_HEADERS = [
   ["X-Frame-Options", "DENY"],
@@ -26,18 +27,33 @@ function makeNonce(): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
-function configuredApiOrigin(): string | null {
-  const raw = process.env.NEXT_PUBLIC_STEWARD_API_URL;
-  if (!raw) return null;
+// Resolve the Steward API origin the client will actually call. This uses the
+// SAME resolved base URL as `lib/api.ts` / providers (env override or the
+// self-host default from `lib/steward-api-url.ts`), so the CSP `connect-src`
+// allowlist stays in sync with the request origin.
+function configuredApiUrl(): URL | null {
   try {
-    return new URL(raw).origin;
+    return new URL(STEWARD_API_URL);
   } catch {
     return null;
   }
 }
 
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+// An http origin on a loopback host (the self-host local-dev default,
+// http://localhost:3200) is legitimate and cannot be served over https by the
+// plain-http compose API. Detecting it lets us keep the CSP `connect-src`
+// allowlist correct AND skip `upgrade-insecure-requests` for that origin only,
+// without weakening production (a real deployment sets NEXT_PUBLIC_STEWARD_API_URL
+// to an https origin, so the upgrade stays fully enforced there).
+function isLoopbackHttp(url: URL | null): boolean {
+  return !!url && url.protocol === "http:" && LOOPBACK_HOSTNAMES.has(url.hostname);
+}
+
 function buildCsp(nonce: string): string {
-  const apiOrigin = configuredApiOrigin();
+  const apiUrl = configuredApiUrl();
+  const apiOrigin = apiUrl?.origin ?? null;
   const connectSrc = ["'self'", "https:", "wss:"];
   if (apiOrigin) connectSrc.push(apiOrigin);
 
@@ -54,7 +70,15 @@ function buildCsp(nonce: string): string {
     "base-uri 'self'",
     "form-action 'self'",
   ];
-  if (!ALLOW_INSECURE_HTTP) directives.push("upgrade-insecure-requests");
+  // Keep HTTPS enforcement ON everywhere EXCEPT when the app itself is served
+  // over plain http for local e2e (ALLOW_INSECURE_HTTP) or when the configured
+  // API is an http loopback origin (the self-host local-dev default). In both
+  // cases upgrade-insecure-requests would break same-origin/localhost calls the
+  // plain-http server cannot answer. Production points at an https API origin,
+  // so the upgrade stays fully enforced there.
+  if (!ALLOW_INSECURE_HTTP && !isLoopbackHttp(apiUrl)) {
+    directives.push("upgrade-insecure-requests");
+  }
   return directives.join("; ");
 }
 
