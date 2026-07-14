@@ -1,9 +1,74 @@
 import type { PendingProxyRequest } from "@stwd/db";
-import { and, eq, getDb, inArray, pendingProxyRequests, sql } from "@stwd/db";
+import {
+  and,
+  eq,
+  getDb,
+  inArray,
+  pendingProxyRequests,
+  sql,
+  withTenantAuditedTransaction,
+} from "@stwd/db";
 import type { Context } from "hono";
 import { recordRequiredAudit } from "../middleware/audit";
 import { canonicalProxyApprovalDigest, decryptPendingProxyBody } from "./approvals";
 import { handleProxy } from "./proxy";
+
+/**
+ * Atomically expire a pending|approved proxy-approval row AND append its
+ * tamper-evident `proxy.approval.expired` audit-chain event in ONE transaction.
+ *
+ * Both the poll-time and claim-time expiry paths previously flipped the row to
+ * `expired` in a bare UPDATE and then wrote ONLY a `proxy_audit_log` row via
+ * `recordRequiredAudit` — that operational log is NOT the tamper-evident
+ * `audit_events` chain, so a proxy-side expiry produced no chain evidence and
+ * the state change + its record were not both-or-neither (invariant I14, spec
+ * section 11 item #10). This mirrors the api-side `expireProxyApprovals`, using
+ * the shared `@stwd/db` `withTenantAuditedTransaction` primitive so the proxy
+ * package can extend the chain without importing `@stwd/api`.
+ *
+ * The guarded `status = 'expired' WHERE status IN ('pending','approved') AND
+ * expiresAt <= now()` predicate keeps a post-crash retry idempotent: only one
+ * transaction flips the row and appends exactly one chain event. `guardApproved`
+ * narrows the guard to the approved-only claim-time path (the row was read as
+ * approved and must not race a concurrent claim into `executing`).
+ *
+ * Returns the expired row if this call won the transition, else `null` (already
+ * resolved / not yet expired / lost the race — no audit written).
+ */
+async function expireProxyApprovalWithAudit(
+  row: PendingProxyRequest,
+  opts: { guardApproved?: boolean } = {},
+): Promise<PendingProxyRequest | null> {
+  const statusGuard = opts.guardApproved
+    ? eq(pendingProxyRequests.status, "approved")
+    : inArray(pendingProxyRequests.status, ["pending", "approved"]);
+
+  return withTenantAuditedTransaction(row.tenantId, async (tx, appendRequiredAudit) => {
+    const dbTx = tx as ReturnType<typeof getDb>;
+    const [expired] = await dbTx
+      .update(pendingProxyRequests)
+      .set({ status: "expired", updatedAt: new Date() })
+      .where(
+        and(
+          eq(pendingProxyRequests.id, row.id),
+          statusGuard,
+          sql`${pendingProxyRequests.expiresAt} <= now()`,
+        ),
+      )
+      .returning();
+    if (!expired) return null;
+    await appendRequiredAudit({
+      tenantId: expired.tenantId,
+      actorType: "system",
+      actorId: "proxy-approval-release",
+      action: "proxy.approval.expired",
+      resourceType: "pending_proxy_request",
+      resourceId: expired.id,
+      metadata: { agentId: expired.agentId, routeId: expired.routeId },
+    });
+    return expired;
+  });
+}
 
 // Test-only deterministic barrier awaited between digest verification and the
 // atomic approved -> executing claim. Production default is a no-op, so this
@@ -118,18 +183,14 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
   if (!row) return c.json({ ok: false, error: "Pending proxy request not found" }, 404);
 
   if (row.expiresAt <= new Date() && (row.status === "pending" || row.status === "approved")) {
-    const [expired] = await db
-      .update(pendingProxyRequests)
-      .set({ status: "expired", updatedAt: new Date() })
-      .where(
-        and(
-          eq(pendingProxyRequests.id, row.id),
-          inArray(pendingProxyRequests.status, ["pending", "approved"]),
-        ),
-      )
-      .returning();
+    // Atomic pending|approved -> expired + tamper-evident audit_events chain
+    // event, both-or-neither in one transaction (I14). The SQL `expiresAt <=
+    // now()` re-check inside the helper re-validates expiry server-side.
+    const expired = await expireProxyApprovalWithAudit(row);
     if (expired) {
       row = expired;
+      // Operational proxy_audit_log breadcrumb (separate from the chain event
+      // above). Best-effort request accounting for the release surface.
       await recordRequiredAudit({
         agentId,
         tenantId,
@@ -207,18 +268,13 @@ export async function handlePendingProxyRequest(c: Context): Promise<Response> {
     // "approved" -> now "executing"/terminal), or it expired between the read
     // and the claim. Distinguish by attempting an atomic expiry transition:
     // only an approved-but-expired row will flip here, and we must NOT execute.
-    const [expired] = await db
-      .update(pendingProxyRequests)
-      .set({ status: "expired", updatedAt: new Date() })
-      .where(
-        and(
-          eq(pendingProxyRequests.id, row.id),
-          eq(pendingProxyRequests.status, "approved"),
-          sql`${pendingProxyRequests.expiresAt} <= now()`,
-        ),
-      )
-      .returning();
+    // Atomic approved -> expired + tamper-evident audit_events chain event,
+    // both-or-neither in one transaction (I14). guardApproved keeps the
+    // predicate approved-only so a concurrent claim->executing cannot be
+    // clobbered into expired.
+    const expired = await expireProxyApprovalWithAudit(row, { guardApproved: true });
     if (expired) {
+      // Operational proxy_audit_log breadcrumb (separate from the chain event).
       await recordRequiredAudit({
         agentId,
         tenantId,

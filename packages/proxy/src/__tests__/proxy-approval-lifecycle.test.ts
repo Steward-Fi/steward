@@ -6,7 +6,6 @@ import {
   closeDb,
   eq,
   getDb,
-  inArray,
   pendingProxyRequests,
   proxyAuditLog,
   sql,
@@ -53,6 +52,9 @@ beforeAll(async () => {
   process.env.STEWARD_PGLITE_MEMORY = "true";
   process.env.STEWARD_MASTER_PASSWORD = MASTER_PASSWORD;
   process.env.STEWARD_JWT_SECRET = "proxy-approval-lifecycle-jwt-secret-with-enough-bytes";
+  // Proxy-side approval expiry now extends the tamper-evident audit_events chain
+  // (release.ts -> withTenantAuditedTransaction), so the HMAC key is required.
+  process.env.STEWARD_AUDIT_HMAC_KEY = "proxy-approval-lifecycle-audit-hmac-key-enough-x";
   process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS = "api.example.com";
   process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES = "true";
@@ -93,6 +95,7 @@ afterAll(async () => {
   delete process.env.STEWARD_PGLITE_MEMORY;
   delete process.env.STEWARD_MASTER_PASSWORD;
   delete process.env.STEWARD_JWT_SECRET;
+  delete process.env.STEWARD_AUDIT_HMAC_KEY;
   delete process.env.STEWARD_PROXY_ALLOWED_HOSTS;
   delete process.env.STEWARD_SECRET_ROUTE_ALLOWED_HOSTS;
   delete process.env.STEWARD_ALLOW_BROAD_SECRET_ROUTES;
@@ -187,14 +190,17 @@ describe("proxy approval lifecycle enforcement (PGLite)", () => {
       .set({ status: "approved", approvedAt: new Date(), approvedBy: "operator" })
       .where(eq(pendingProxyRequests.id, held.id));
 
-    // Deny via the EXACT guard the operator deny route ships in this PR:
-    //   status IN (pending, approved) AND expiresAt > now()
-    // and terminal fields (deniedAt/deniedBy/denialReason). Applying the real
-    // guard (rather than a bare status write) means the denial only lands on a
-    // genuinely deniable row; we assert it MATCHED so the test is not vacuous.
-    // The operator session + MFA gating that fronts this UPDATE lives in the
-    // api package and is covered by the api approval-route suite; here we prove
-    // the proxy-side release enforcement never executes the resulting row.
+    // Revoke via the EXACT guard the operator deny route ships for the
+    // approved-but-unconsumed case:
+    //   status = 'approved' AND expiresAt > now()  (approved-CAS revoke path)
+    // and terminal fields (deniedAt/deniedBy/denialReason). The row lands in
+    // `denied`; at the route layer this emits a distinct `proxy.approval.revoked`
+    // audit event (covered by the api approval-route suite). Applying the real
+    // guard (rather than a bare status write) means the revoke only lands on a
+    // genuinely revocable approved row; we assert it MATCHED so the test is not
+    // vacuous. The operator session + MFA gating that fronts this UPDATE lives in
+    // the api package; here we prove the proxy-side release enforcement never
+    // executes the resulting row.
     const denied = await getDb()
       .update(pendingProxyRequests)
       .set({
@@ -208,12 +214,12 @@ describe("proxy approval lifecycle enforcement (PGLite)", () => {
         and(
           eq(pendingProxyRequests.id, held.id),
           eq(pendingProxyRequests.tenantId, tenantId),
-          inArray(pendingProxyRequests.status, ["pending", "approved"]),
+          eq(pendingProxyRequests.status, "approved"),
           sql`${pendingProxyRequests.expiresAt} > now()`,
         ),
       )
       .returning();
-    // Non-vacuous: the guarded deny actually transitioned a live approved row.
+    // Non-vacuous: the guarded revoke actually transitioned a live approved row.
     expect(denied.length).toBe(1);
     expect(denied[0].status).toBe("denied");
 

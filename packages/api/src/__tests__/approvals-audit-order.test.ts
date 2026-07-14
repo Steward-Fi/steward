@@ -74,11 +74,25 @@ describe("approval route audit ordering", () => {
     expect(body).not.toContain("intent.authorized");
   });
 
-  it("updates denied approval and transaction status in the same transaction", () => {
-    expect(routeSource).toContain("const [updated] = await db");
-    expect(routeSource).toContain(".transaction(async (tx) => {");
-    expect(routeSource).toContain(".update(transactions)");
-    expect(routeSource).toContain('status: "rejected"');
+  it("updates denied approval, transaction status, and completion audit in one transaction", () => {
+    // The queue+transaction rejection AND the completion `approval.deny` audit
+    // event now commit in a single audited transaction (invariant I14). The
+    // audit append lives INSIDE the transaction callback, before the return,
+    // so state and evidence are both-or-neither.
+    const denyBody = routeBody('approvalRoutes.post("/:txId/deny", async');
+    expect(denyBody).toContain(
+      "withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit)",
+    );
+    expect(denyBody).toContain(".update(transactions)");
+    expect(denyBody).toContain('status: "rejected"');
+    // The completion audit is appended within the transaction, not after it.
+    const txStart = denyBody.indexOf("withTenantAuditedTransaction(tenantId");
+    const auditWithinTx = denyBody.indexOf('action: "approval.deny"', txStart);
+    const txReturn = denyBody.indexOf("return updatedRows[0];", txStart);
+    expect(auditWithinTx).toBeGreaterThan(txStart);
+    expect(txReturn).toBeGreaterThan(auditWithinTx);
+    // No post-commit best-effort audit + compensating rollback remains.
+    expect(denyBody).not.toContain('.set({ status: "pending", resolvedAt: null');
   });
 
   it("does not resolve stale approval rows for terminal transactions", () => {
@@ -91,7 +105,11 @@ describe("approval route audit ordering", () => {
       expect(body).toContain('entry.transactionStatus !== "pending"');
       if (marker.includes("/deny")) {
         expect(body).toContain('eq(transactions.status, "pending")');
-        expect(body).toContain("Approval transaction already resolved");
+        // A concurrent resolution rolls back the WHOLE audited transaction via
+        // the sentinel error, so the queue rejection cannot commit without the
+        // transaction rejection (and its audit).
+        expect(body).toContain("throw new ApprovalAlreadyResolvedError()");
+        expect(body).toContain("instanceof ApprovalAlreadyResolvedError");
       }
     }
   });

@@ -11,7 +11,7 @@ import {
   userTenants,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { Hono } from "hono";
 import type { AppVariables } from "../services/context";
 
@@ -131,6 +131,38 @@ async function approvedAuditRowsFor(resourceId: string) {
       and(
         eq(auditEvents.action, "proxy.approval.approved"),
         eq(auditEvents.resourceId, resourceId),
+      ),
+    );
+}
+
+async function revokedAuditRowsFor(resourceId: string) {
+  return getDb()
+    .select({
+      action: auditEvents.action,
+      actorType: auditEvents.actorType,
+      resourceType: auditEvents.resourceType,
+      resourceId: auditEvents.resourceId,
+      metadata: auditEvents.metadata,
+    })
+    .from(auditEvents)
+    .where(
+      and(eq(auditEvents.action, "proxy.approval.revoked"), eq(auditEvents.resourceId, resourceId)),
+    );
+}
+
+/** Every decision-class audit event (approved | denied | revoked) for a row. */
+async function decisionAuditRowsFor(resourceId: string) {
+  return getDb()
+    .select({ action: auditEvents.action })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.resourceId, resourceId),
+        inArray(auditEvents.action, [
+          "proxy.approval.approved",
+          "proxy.approval.denied",
+          "proxy.approval.revoked",
+        ]),
       ),
     );
 }
@@ -468,5 +500,102 @@ describe("POST /approvals/proxy/:id/deny — session/MFA route enforcement", () 
     // the single original denial audit must remain intact.
     expect(await approvedAuditRowsFor(id)).toHaveLength(0);
     expect(await denyAuditRowsFor(id)).toHaveLength(1);
+  });
+
+  // ─── Finding 1: concurrent approve/deny race + revoke-of-approved ────────────
+
+  it("deny of an already-approved request is a distinct REVOKE (proxy.approval.revoked, no denied event)", async () => {
+    const id = await seedPendingProxyRequest({ status: "approved" });
+    const token = await ownerSession({ mfaVerifiedAt: Date.now(), mfaMethod: "totp" });
+
+    const res = await app.request(`/approvals/proxy/${id}/deny`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "revoke a live approval before it is claimed" }),
+    });
+    const body = (await res.json()) as { ok: boolean; data?: { status: string } };
+
+    // Deny-of-approved is a load-bearing admin action (revoke-before-consumption,
+    // #181): it succeeds and the row lands terminal `denied`.
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.data?.status).toBe("denied");
+
+    const row = await fetchProxyRequest(id);
+    expect(row?.status).toBe("denied");
+    expect(row?.denialReason).toBe("revoke a live approval before it is claimed");
+
+    // The audit trail records a DISTINCT revoke event, NOT a `denied` decision
+    // (which is reserved for denying a still-pending request).
+    const revoked = await revokedAuditRowsFor(id);
+    expect(revoked).toHaveLength(1);
+    expect((revoked[0]?.metadata as { revokedFrom?: string }).revokedFrom).toBe("approved");
+    expect(await denyAuditRowsFor(id)).toHaveLength(0);
+
+    // Exactly one decision-class event total.
+    expect(await decisionAuditRowsFor(id)).toHaveLength(1);
+  });
+
+  it("concurrent approve+deny on a pending row resolves deterministically (never two conflicting DENIED+APPROVED decisions)", async () => {
+    // The reviewer's P1: the old deny guard `status IN ('pending','approved')`
+    // let a serialized approve-then-deny yield TWO 200s AND two SAME-CLASS
+    // decision events (`proxy.approval.approved` AND `proxy.approval.denied`) on
+    // one row — an incoherent double-decision.
+    //
+    // The fix splits deny into two exclusive CAS transitions (pending-only deny,
+    // approved-only revoke), each per-tenant-serialized by the audited
+    // transaction. The race now resolves into exactly ONE of two coherent
+    // orderings:
+    //   A) deny wins the pending-CAS first  -> deny 200 (denied), approve 409;
+    //      exactly one decision event (`denied`), NO approved event.
+    //   B) approve wins first               -> approve 200 (approved), then deny
+    //      sees `approved`, takes the approved-CAS REVOKE branch -> deny 200,
+    //      emitting a DISTINCT `proxy.approval.revoked` (a deliberate
+    //      revoke-before-consumption, NOT a second `denied` decision). Row ends
+    //      `denied`; audit trail is the coherent sequence approved -> revoked.
+    // In NEITHER ordering do `approved` and `denied` coexist on the row.
+    const id = await seedPendingProxyRequest();
+    const token = await ownerSession({ mfaVerifiedAt: Date.now(), mfaMethod: "totp" });
+
+    const doApprove = () =>
+      app.request(`/approvals/proxy/${id}/approve`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+    const doDeny = () =>
+      app.request(`/approvals/proxy/${id}/deny`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "race deny" }),
+      });
+
+    const [approveRes, denyRes] = await Promise.all([doApprove(), doDeny()]);
+
+    const approvedEvents = await approvedAuditRowsFor(id);
+    const deniedEvents = await denyAuditRowsFor(id);
+    const revokedEvents = await revokedAuditRowsFor(id);
+    const row = await fetchProxyRequest(id);
+
+    if (approveRes.status === 200 && denyRes.status === 200) {
+      // Ordering B: approve then revoke. Coherent sequence, distinct events.
+      expect(row?.status).toBe("denied");
+      expect(approvedEvents).toHaveLength(1);
+      expect(revokedEvents).toHaveLength(1);
+      // Crucially: NO `denied`-class decision on an approved row.
+      expect(deniedEvents).toHaveLength(0);
+    } else {
+      // Ordering A: exactly one 200 (deny) + one 409 (approve). One decision.
+      expect([approveRes.status, denyRes.status].sort()).toEqual([200, 409]);
+      expect(row?.status).toBe("denied");
+      expect(deniedEvents).toHaveLength(1);
+      expect(approvedEvents).toHaveLength(0);
+      expect(revokedEvents).toHaveLength(0);
+    }
+
+    // The invariant that must ALWAYS hold: `approved` and `denied` never coexist
+    // as competing decisions on the same row (the exact double-decision the
+    // reviewer flagged). Approved may coexist only with the distinct `revoked`.
+    expect(!(approvedEvents.length > 0 && deniedEvents.length > 0)).toBe(true);
   });
 });

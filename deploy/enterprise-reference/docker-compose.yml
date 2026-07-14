@@ -87,6 +87,10 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
+      # Proxy-side approval expiry extends the tamper-evident audit chain
+      # (release.ts -> withTenantAuditedTransaction); required or expired-approval
+      # polls fail closed in production.
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
       STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?required}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-true}"
     depends_on:
