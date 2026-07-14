@@ -1,0 +1,16 @@
+{
+  "name": "@stwd/provider-github",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "dev": "tsc --watch",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@stwd/shared": "workspace:*"
+  },
+  "description": "GitHub provider-action adapter — operation argument schemas + canonical action construction over the github.provider-action.v1 profile"
+}
