@@ -191,8 +191,90 @@ export async function writeAuditEvent(ev: AuditEventInput): Promise<void> {
   return withTenantAuditQueue(ev.tenantId, () => appendAuditEvent(ev));
 }
 
-async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
+/**
+ * Minimal transaction handle the audit writer needs. Both Drizzle transaction
+ * objects (postgres-js / neon-http / PGLite) and the top-level db satisfy this,
+ * so the same append core works standalone or joined to a caller's tx.
+ */
+type AuditTxLike = { execute: (query: unknown) => Promise<unknown> };
+
+/**
+ * Extend the tenant's audit chain using an EXISTING transaction. The head read,
+ * event insert, and chain-head high-water-mark update all execute against `tx`,
+ * so they commit or roll back atomically with whatever else the caller did in
+ * the same transaction. This is the primitive that lets a state transition and
+ * its required audit event be both-or-neither (spec I14, evidence before
+ * visibility).
+ *
+ * Callers MUST hold the per-tenant advisory lock (real Postgres) or the
+ * per-tenant in-process queue (PGLite) for the duration of `tx` so concurrent
+ * appends cannot interleave the seq read/insert. `withTenantAuditedTransaction`
+ * arranges both; do not call this directly outside that helper.
+ */
+async function appendAuditEventWithinTx(tx: AuditTxLike, ev: AuditEventInput): Promise<void> {
   const key = getHmacKey();
+
+  const headRows = rowsFromExecute<{ seq: number | string; hmac: unknown }>(
+    await tx.execute(
+      sql`SELECT seq, hmac FROM audit_events WHERE tenant_id = ${ev.tenantId} ORDER BY seq DESC LIMIT 1`,
+    ),
+  );
+  const head = headRows[0];
+  const seq = head ? Number(head.seq) + 1 : 1;
+  const prevHash = head ? toU8(head.hmac) : ZERO_HASH;
+
+  const createdAt = new Date();
+  // postgres-js does not auto-stringify Date objects in raw sql template
+  // params. Convert to ISO and cast on the SQL side instead. See dcf772e.
+  const createdAtIso = createdAt.toISOString();
+  const metadata = redactWebhookSecrets(ev.metadata ?? {});
+  const canonical = canonicalize({
+    tenant_id: ev.tenantId,
+    seq,
+    actor_type: ev.actorType,
+    actor_id: ev.actorId ?? null,
+    action: ev.action,
+    resource_type: ev.resourceType ?? null,
+    resource_id: ev.resourceId ?? null,
+    metadata,
+    ip_address: ev.ipAddress ?? null,
+    user_agent: ev.userAgent ?? null,
+    request_id: ev.requestId ?? null,
+    created_at: createdAt.toISOString(),
+  });
+
+  const hmac = computeHmac(key, prevHash, canonical);
+
+  await tx.execute(sql`
+    INSERT INTO audit_events
+      (tenant_id, seq, prev_hash, hmac, actor_type, actor_id, action,
+       resource_type, resource_id, metadata, ip_address, user_agent,
+       request_id, created_at)
+    VALUES
+      (${ev.tenantId}, ${seq}, ${prevHash}, ${hmac}, ${ev.actorType},
+       ${ev.actorId ?? null}, ${ev.action}, ${ev.resourceType ?? null},
+       ${ev.resourceId ?? null}, ${JSON.stringify(metadata)}::jsonb,
+       ${ev.ipAddress ?? null}, ${ev.userAgent ?? null},
+       ${ev.requestId ?? null}, ${createdAtIso}::timestamptz)
+  `);
+
+  // Advance the out-of-band high-water-mark in the SAME transaction so an
+  // attacker with DB-only write access who later deletes the tail/whole
+  // chain cannot also roll this back without breaking verification.
+  // expected_count increments by 1 per appended row (independent of any
+  // archived floor); head_hmac/expected_seq track the newest row.
+  await tx.execute(sql`
+    INSERT INTO audit_chain_heads (tenant_id, expected_seq, expected_count, head_hmac, updated_at)
+    VALUES (${ev.tenantId}, ${seq}, 1, ${hmac}, now())
+    ON CONFLICT (tenant_id) DO UPDATE
+      SET expected_seq = ${seq},
+          expected_count = audit_chain_heads.expected_count + 1,
+          head_hmac = ${hmac},
+          updated_at = now()
+  `);
+}
+
+async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
   const db = getDb();
 
   for (let attempt = 0; attempt < 5; attempt++) {
@@ -209,65 +291,7 @@ async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
         // the audit_events_tenant_seq_idx UNIQUE index + the conflict-retry loop
         // below catches any residual seq race. So the advisory lock is a no-op
         // we can safely skip in embedded mode.
-
-        const headRows = rowsFromExecute<{ seq: number | string; hmac: unknown }>(
-          await tx.execute(
-            sql`SELECT seq, hmac FROM audit_events WHERE tenant_id = ${ev.tenantId} ORDER BY seq DESC LIMIT 1`,
-          ),
-        );
-        const head = headRows[0];
-        const seq = head ? Number(head.seq) + 1 : 1;
-        const prevHash = head ? toU8(head.hmac) : ZERO_HASH;
-
-        const createdAt = new Date();
-        // postgres-js does not auto-stringify Date objects in raw sql template
-        // params. Convert to ISO and cast on the SQL side instead. See dcf772e.
-        const createdAtIso = createdAt.toISOString();
-        const metadata = redactWebhookSecrets(ev.metadata ?? {});
-        const canonical = canonicalize({
-          tenant_id: ev.tenantId,
-          seq,
-          actor_type: ev.actorType,
-          actor_id: ev.actorId ?? null,
-          action: ev.action,
-          resource_type: ev.resourceType ?? null,
-          resource_id: ev.resourceId ?? null,
-          metadata,
-          ip_address: ev.ipAddress ?? null,
-          user_agent: ev.userAgent ?? null,
-          request_id: ev.requestId ?? null,
-          created_at: createdAt.toISOString(),
-        });
-
-        const hmac = computeHmac(key, prevHash, canonical);
-
-        await tx.execute(sql`
-          INSERT INTO audit_events
-            (tenant_id, seq, prev_hash, hmac, actor_type, actor_id, action,
-             resource_type, resource_id, metadata, ip_address, user_agent,
-             request_id, created_at)
-          VALUES
-            (${ev.tenantId}, ${seq}, ${prevHash}, ${hmac}, ${ev.actorType},
-             ${ev.actorId ?? null}, ${ev.action}, ${ev.resourceType ?? null},
-             ${ev.resourceId ?? null}, ${JSON.stringify(metadata)}::jsonb,
-             ${ev.ipAddress ?? null}, ${ev.userAgent ?? null},
-             ${ev.requestId ?? null}, ${createdAtIso}::timestamptz)
-        `);
-
-        // Advance the out-of-band high-water-mark in the SAME transaction so an
-        // attacker with DB-only write access who later deletes the tail/whole
-        // chain cannot also roll this back without breaking verification.
-        // expected_count increments by 1 per appended row (independent of any
-        // archived floor); head_hmac/expected_seq track the newest row.
-        await tx.execute(sql`
-          INSERT INTO audit_chain_heads (tenant_id, expected_seq, expected_count, head_hmac, updated_at)
-          VALUES (${ev.tenantId}, ${seq}, 1, ${hmac}, now())
-          ON CONFLICT (tenant_id) DO UPDATE
-            SET expected_seq = ${seq},
-                expected_count = audit_chain_heads.expected_count + 1,
-                head_hmac = ${hmac},
-                updated_at = now()
-        `);
+        await appendAuditEventWithinTx(tx as AuditTxLike, ev);
       });
       return;
     } catch (err) {
@@ -278,6 +302,73 @@ async function appendAuditEvent(ev: AuditEventInput): Promise<void> {
       throw err;
     }
   }
+}
+
+/**
+ * Callback signature handed to `withTenantAuditedTransaction`. Appending a
+ * required audit event uses the SAME transaction as the caller's row mutations,
+ * so the state change and its audit record are atomic.
+ */
+export type AppendRequiredAudit = (event: AuditEventInput) => Promise<void>;
+
+/**
+ * Run `fn` inside one tenant-audited transaction. The state mutations the caller
+ * performs on `tx` and every `appendRequiredAudit(...)` event commit or roll
+ * back together, closing the non-atomic "mutate then audit in a separate
+ * transaction" gap (spec section 7.1 / invariant I14).
+ *
+ * Guarantees:
+ *  - one `db.transaction` wraps the whole unit of work;
+ *  - the per-tenant advisory lock (real Postgres) is acquired before any audit
+ *    read, matching `writeAuditEvent`'s chain-serialization contract;
+ *  - PGLite runs are serialized per tenant in-process (advisory lock is a no-op
+ *    there, exactly as in `appendAuditEvent`);
+ *  - serialization / seq conflicts retry the WHOLE unit of work before it is
+ *    known committed, so a retried transition never double-applies or duplicates
+ *    an audit row (the mutations use guarded `WHERE status = ...` predicates and
+ *    are idempotent on retry).
+ *
+ * The caller must not open a nested transaction inside `fn`; use the provided
+ * `tx`. The caller must not call `writeAuditEvent` inside `fn` (that would open
+ * a second transaction and deadlock on the advisory lock); use
+ * `appendRequiredAudit` instead.
+ */
+export async function withTenantAuditedTransaction<T>(
+  tenantId: string,
+  fn: (tx: unknown, appendRequiredAudit: AppendRequiredAudit) => Promise<T>,
+): Promise<T> {
+  const db = getDb();
+
+  return withTenantAuditQueue(tenantId, async () => {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        return await db.transaction(async (tx) => {
+          if (!isPGLiteRuntime()) {
+            await tx.execute(
+              sql`SELECT pg_advisory_xact_lock(hashtextextended(${`steward_audit_${tenantId}`}, 0))`,
+            );
+          }
+          const appendRequiredAudit: AppendRequiredAudit = async (event) => {
+            if (event.tenantId !== tenantId) {
+              throw new Error(
+                "withTenantAuditedTransaction: audit event tenant does not match transaction tenant",
+              );
+            }
+            await appendAuditEventWithinTx(tx as AuditTxLike, event);
+          };
+          return await fn(tx, appendRequiredAudit);
+        });
+      } catch (err) {
+        if (attempt < 4 && isAuditSequenceConflict(err)) {
+          await new Promise((resolve) => setTimeout(resolve, 5 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
+    }
+    // Unreachable: the loop either returns or throws.
+    throw new Error("withTenantAuditedTransaction: exhausted retries");
+  });
 }
 
 /**
