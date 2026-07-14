@@ -5458,7 +5458,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal the current tenant authority revision (provider_authority_tenant_state.revision). Read it from the authorityRevision field returned by GET /v2/workspaces (the only listing that surfaces it). Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
@@ -5765,7 +5766,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
@@ -6227,7 +6229,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal the parent workspace's current revision. Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
@@ -6534,7 +6537,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
@@ -7006,7 +7010,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal the parent provider account's current revision. Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
@@ -7468,7 +7473,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token whose binding target depends on role_key: for role_key='tenant_authority_admin' it MUST equal the tenant authority revision (provider_authority_tenant_state.revision, from the authorityRevision field of GET /v2/workspaces); for every workspace-scoped role (workspace_admin/operator/viewer/approver) it MUST equal the target workspace's current revision. Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
@@ -7775,7 +7781,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
@@ -8237,7 +8244,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal the parent workspace's current revision. Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
@@ -8544,7 +8552,8 @@
                 "properties": {
                   "expectedRevision": {
                     "type": "integer",
-                    "minimum": 0
+                    "minimum": 0,
+                    "description": "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict."
                   },
                   "reason": {
                     "type": "string"
