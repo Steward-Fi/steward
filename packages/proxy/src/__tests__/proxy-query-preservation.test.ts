@@ -24,9 +24,17 @@
 
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
 import { signAgentToken } from "@stwd/auth";
-import { agents, closeDb, getDb, tenants } from "@stwd/db";
+import {
+  agents,
+  closeDb,
+  executionAuthorizationNonces,
+  getDb,
+  pendingProxyRequests,
+  tenants,
+} from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { SecretVault } from "@stwd/vault";
+import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { PROXY_SCOPE } from "../config";
 
@@ -104,11 +112,11 @@ async function ensureAgent(tenantId: string, agentId: string) {
  * Provision a fresh tenant/agent/secret/route and return a signed agent token.
  * The route governs a single exact path on api.github.com for the given method.
  */
-async function provisionRoute(
+async function provisionRouteContext(
   pathPattern: string,
   method: string,
   opts: { requiresApproval?: boolean } = {},
-): Promise<string> {
+): Promise<{ token: string; tenantId: string; agentId: string }> {
   const tenantId = `tenant-q-${crypto.randomUUID()}`;
   const agentId = `agent-q-${crypto.randomUUID()}`;
   await ensureTenant(tenantId);
@@ -127,7 +135,16 @@ async function provisionRoute(
     requiresApproval: opts.requiresApproval ?? false,
   });
 
-  return signAgentToken({ agentId, tenantId, scopes: ["agent", PROXY_SCOPE] }, "1h");
+  const token = await signAgentToken({ agentId, tenantId, scopes: ["agent", PROXY_SCOPE] }, "1h");
+  return { token, tenantId, agentId };
+}
+
+async function provisionRoute(
+  pathPattern: string,
+  method: string,
+  opts: { requiresApproval?: boolean } = {},
+): Promise<string> {
+  return (await provisionRouteContext(pathPattern, method, opts)).token;
 }
 
 function proxyHeaders(token: string): Record<string, string> {
@@ -182,22 +199,27 @@ describe("proxy governed-request query preservation", () => {
     expect(captured?.url.search).toBe("?q=&page=2");
   });
 
-  it("does not decode/re-encode a percent-encoded query value", async () => {
-    captured = null;
-    const token = await provisionRoute("/repos/acme/widgets/issues", "POST");
-    // %2F must stay %2F (not become a literal slash), space stays %20.
-    const res = await buildApp().request(
-      "/github/repos/acme/widgets/issues?q=a%2Fb%20c&sig=%2B%3D",
-      {
+  it("preserves raw query bytes without decoding or canonicalizing", async () => {
+    const cases = [
+      ["literal + versus encoded space", "literal=a+b&encoded=a%20b"],
+      ["UTF-8 percent bytes", "snowman=%E2%98%83"],
+      ["malformed percent escapes", "broken=%ZZ&short=%2"],
+      ["encoded CRLF", "line=one%0D%0Atwo"],
+      ["percent-escape hex case", "upper=%2F&lower=%2f"],
+    ] as const;
+
+    for (const [label, rawQuery] of cases) {
+      captured = null;
+      const token = await provisionRoute("/repos/acme/widgets/issues", "POST");
+      const res = await buildApp().request(`/github/repos/acme/widgets/issues?${rawQuery}`, {
         method: "POST",
         headers: proxyHeaders(token),
         body: JSON.stringify({ hi: 1 }),
-      },
-    );
-    expect(res.status).toBe(200);
-    expect(captured?.url.search).toBe("?q=a%2Fb%20c&sig=%2B%3D");
-    // The pinned path is unaffected by an encoded slash in the query.
-    expect(captured?.url.pathname).toBe("/repos/acme/widgets/issues");
+      });
+      expect(res.status, label).toBe(200);
+      expect(captured?.url.search, label).toBe(`?${rawQuery}`);
+      expect(captured?.url.pathname, label).toBe("/repos/acme/widgets/issues");
+    }
   });
 
   it("forwards no query string when the request has none", async () => {
@@ -255,12 +277,12 @@ describe("proxy governed-request query preservation", () => {
     expect(captured?.url.searchParams.get("path")).toBe("/repos/acme/other");
   });
 
-  it("rejects a query on an approval-gated route (fail closed, not silently dropped)", async () => {
+  it("rejects a query on an approval-gated route without mutating approval state", async () => {
     captured = null;
     // The approval hold/replay path cannot yet round-trip the query, so a
     // query-bearing request on an approval route must be rejected rather than
     // held-and-later-forwarded with the query stripped.
-    const token = await provisionRoute("/repos/acme/widgets/issues", "POST", {
+    const { token, tenantId } = await provisionRouteContext("/repos/acme/widgets/issues", "POST", {
       requiresApproval: true,
     });
     const res = await buildApp().request("/github/repos/acme/widgets/issues?state=open", {
@@ -269,16 +291,27 @@ describe("proxy governed-request query preservation", () => {
       body: JSON.stringify({ hi: 1 }),
     });
     expect(res.status).toBe(400);
-    // Nothing was forwarded upstream.
     expect(captured).toBeNull();
     const json = (await res.json()) as { ok: boolean; error: string };
     expect(json.ok).toBe(false);
     expect(json.error).toContain("approval");
+
+    const pendingRows = await getDb()
+      .select()
+      .from(pendingProxyRequests)
+      .where(eq(pendingProxyRequests.tenantId, tenantId));
+    expect(pendingRows).toHaveLength(0);
+
+    const authorizationNonces = await getDb()
+      .select()
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.tenantId, tenantId));
+    expect(authorizationNonces).toHaveLength(0);
   });
 
   it("still holds an approval-gated request that has no query", async () => {
     captured = null;
-    const token = await provisionRoute("/repos/acme/widgets/issues", "POST", {
+    const { token, tenantId } = await provisionRouteContext("/repos/acme/widgets/issues", "POST", {
       requiresApproval: true,
     });
     const res = await buildApp().request("/github/repos/acme/widgets/issues", {
@@ -291,6 +324,13 @@ describe("proxy governed-request query preservation", () => {
     expect(captured).toBeNull();
     const json = (await res.json()) as { status: string };
     expect(json.status).toBe("pending_approval");
+
+    const pendingRows = await getDb()
+      .select()
+      .from(pendingProxyRequests)
+      .where(eq(pendingProxyRequests.tenantId, tenantId));
+    expect(pendingRows).toHaveLength(1);
+    expect(pendingRows[0]?.status).toBe("pending");
   });
 
   it("treats requests differing only by query as distinct for idempotency", async () => {
@@ -344,35 +384,35 @@ describe("proxy governed-request query preservation", () => {
     expect(second.status).toBe(200);
     expect(captured?.url.search).toBe("?id=2");
 
-    // Reusing ONE key for two different queries must be detected as a DIFFERENT
-    // request (409 "different"), not silently swallowed as a replay of the first.
+    // Semantically equivalent but byte-distinct escape casing is still a
+    // different raw request. Reusing one key must conflict rather than replay.
     const sharedKey = crypto.randomUUID();
-    const a = await buildApp().request("/github/repos/acme/widgets/issues?id=1", {
+    captured = null;
+    const a = await buildApp().request("/github/repos/acme/widgets/issues?path=%2F", {
       method: "POST",
       headers: headersWith(sharedKey),
       body,
     });
     expect(a.status).toBe(200);
-    const b = await buildApp().request("/github/repos/acme/widgets/issues?id=2", {
+    expect(captured?.url.search).toBe("?path=%2F");
+    const b = await buildApp().request("/github/repos/acme/widgets/issues?path=%2f", {
       method: "POST",
       headers: headersWith(sharedKey),
       body,
     });
     expect(b.status).toBe(409);
     const bJson = (await b.json()) as { error: string };
-    // The fix makes the fingerprint query-aware: same key + different query is a
-    // "different request" conflict, not an "already forwarded" replay hit.
     expect(bJson.error).toContain("different");
 
-    // Same key + SAME query + SAME body => a genuine replay (409 "forwarded").
+    // The exact same raw query, key, and body is a genuine replay.
     const replayKey = crypto.randomUUID();
-    const r1 = await buildApp().request("/github/repos/acme/widgets/issues?id=9", {
+    const r1 = await buildApp().request("/github/repos/acme/widgets/issues?path=%2F", {
       method: "POST",
       headers: headersWith(replayKey),
       body,
     });
     expect(r1.status).toBe(200);
-    const r2 = await buildApp().request("/github/repos/acme/widgets/issues?id=9", {
+    const r2 = await buildApp().request("/github/repos/acme/widgets/issues?path=%2F", {
       method: "POST",
       headers: headersWith(replayKey),
       body,
