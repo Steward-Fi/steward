@@ -1631,6 +1631,37 @@ export const secretRoutes = pgTable(
 );
 
 // ─── Workspace-scoped provider authority (governed-provider plan PR1) ─────────
+//
+// ⚠️ RAW-SQL-ONLY INVARIANTS (drift risk — NOT expressible in Drizzle, see
+//    drizzle/0079_workspace_provider_authority.sql):
+//
+//    1. Ownership immutability. A BEFORE UPDATE trigger
+//       `steward_reject_provider_scope_move()` is attached to FIVE tables via
+//       these triggers, and rejects any UPDATE that changes tenant_id /
+//       workspace_id / provider_account_id (RAISE EXCEPTION ... 'immutable',
+//       ERRCODE 23514):
+//         - workspaces_immutable_owner            (ON workspaces)
+//         - provider_accounts_immutable_owner     (ON provider_accounts)
+//         - provider_operations_immutable_owner   (ON provider_operations)
+//         - provider_role_bindings_immutable_owner(ON provider_role_bindings)
+//         - provider_grants_immutable_owner       (ON provider_grants)
+//       Drizzle has no trigger DSL, so these live only in raw SQL. Do NOT
+//       assume a `drizzle-kit generate` reflects them — it will not, and
+//       regenerating without re-adding them silently drops fund-safety guards.
+//
+//    2. provider_role_bindings_lifetime_check CHECK
+//       (not_before IS NULL OR expires_at IS NULL OR expires_at > not_before)
+//       is defined in 0079 raw SQL only and is intentionally absent from the
+//       providerRoleBindings table below (both bounds are nullable there, so
+//       the tri-state predicate is awkward to keep in sync via the Drizzle
+//       `check()` helper). It is the counterpart to providerGrants'
+//       lifetimeCheck (which IS declared in-schema because expires_at is NOT
+//       NULL on grants).
+//
+//    The regression test `packages/db/src/__tests__/provider-authority-migration.test.ts`
+//    ("schema-only invariants ..." cases) asserts all five triggers, the trigger
+//    function, and the lifetime CHECK exist after migration so accidental
+//    removal fails CI.
 
 export const providerEnvironmentEnum = pgEnum("provider_environment", [
   "development",
@@ -1666,6 +1697,8 @@ export const providerAuthorityTenantState = pgTable("provider_authority_tenant_s
   ...timestamps,
 });
 
+// NOTE: owner immutability enforced by `workspaces_immutable_owner` trigger in
+// 0079 raw SQL (tenant_id cannot change). Not visible to drizzle-kit.
 export const workspaces = pgTable(
   "workspaces",
   {
@@ -1688,6 +1721,9 @@ export const workspaces = pgTable(
   }),
 );
 
+// NOTE: owner immutability (tenant_id + workspace_id) enforced by
+// `provider_accounts_immutable_owner` trigger in 0079 raw SQL. Not visible to
+// drizzle-kit.
 export const providerAccounts = pgTable(
   "provider_accounts",
   {
@@ -1732,6 +1768,8 @@ export const providerAccounts = pgTable(
   }),
 );
 
+// NOTE: owner immutability enforced by `provider_operations_immutable_owner`
+// trigger in 0079 raw SQL. Not visible to drizzle-kit.
 export const providerOperations = pgTable(
   "provider_operations",
   {
@@ -1779,6 +1817,10 @@ export const providerOperations = pgTable(
   }),
 );
 
+// NOTE: owner immutability enforced by `provider_role_bindings_immutable_owner`
+// trigger, and the tri-state lifetime rule by
+// `provider_role_bindings_lifetime_check` CHECK — BOTH in 0079 raw SQL only
+// (see the section banner above). Not visible to drizzle-kit.
 export const providerRoleBindings = pgTable(
   "provider_role_bindings",
   {
@@ -1833,6 +1875,9 @@ export const providerRoleBindings = pgTable(
   }),
 );
 
+// NOTE: owner immutability enforced by `provider_grants_immutable_owner`
+// trigger in 0079 raw SQL (lifetimeCheck IS declared in-schema below since
+// expires_at is NOT NULL here). Not visible to drizzle-kit.
 export const providerGrants = pgTable(
   "provider_grants",
   {
