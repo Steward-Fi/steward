@@ -5,6 +5,8 @@
 export interface StewardPluginConfig {
   apiUrl: string;
   proxyUrl?: string;
+  /** HMAC secret used to sign requests sent directly to the Steward proxy. */
+  proxyRequestSigningSecret?: string;
   apiKey?: string;
   bearerToken?: string;
   agentId: string;

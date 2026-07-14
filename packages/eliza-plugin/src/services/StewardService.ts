@@ -1,4 +1,5 @@
 import { type IAgentRuntime, Service } from "@elizaos/core";
+import { StewardProxyClient } from "@stwd/proxy-client";
 import {
   type AgentDashboardResponse,
   type AgentIdentity,
@@ -146,6 +147,10 @@ export class StewardService extends Service {
     return {
       apiUrl,
       proxyUrl: settings.proxyUrl ?? env.STEWARD_PROXY_URL ?? apiUrl,
+      proxyRequestSigningSecret:
+        settings.proxyRequestSigningSecret ??
+        env.STEWARD_PROXY_REQUEST_SIGNING_SECRET ??
+        env.STEWARD_PROXY_REQUEST_SIGNING_SECRETS?.split(",")[0]?.trim(),
       apiKey: settings.apiKey ?? env.STEWARD_API_KEY,
       bearerToken: settings.bearerToken ?? env.STEWARD_JWT,
       agentId: settings.agentId ?? env.STEWARD_AGENT_ID ?? runtimeState.agentId ?? "default",
@@ -239,14 +244,7 @@ export class StewardService extends Service {
 
   private async proxyApprovalRequest<T>(path: string): Promise<T> {
     this.assertConnected();
-    const proxyBase = this.pluginConfig?.proxyUrl;
-    const token = this.pluginConfig?.bearerToken;
-    if (!proxyBase || !token)
-      throw new Error("STEWARD_PROXY_URL and STEWARD_JWT are required for proxy approvals");
-    assertSecureApiUrl(proxyBase);
-    const response = await fetch(`${proxyBase.replace(/\/$/, "")}${path}`, {
-      headers: { authorization: `Bearer ${token}` },
-    });
+    const response = await this.getProxyClient().fetch(path);
     const payload = (await response.json()) as { ok?: boolean; data?: T; error?: string };
     if (!response.ok || !payload.ok || payload.data === undefined)
       throw new Error(payload.error ?? `Proxy approval request failed (${response.status})`);
@@ -262,20 +260,14 @@ export class StewardService extends Service {
     this.assertConnected();
     const target = new URL(input.url);
     if (target.protocol !== "https:") throw new Error("Governed API target must use https://");
-    const proxyBase = this.pluginConfig?.proxyUrl;
-    if (!proxyBase) throw new Error("STEWARD_PROXY_URL is not configured");
-    assertSecureApiUrl(proxyBase);
     const headers = new Headers(input.headers);
-    const token = this.pluginConfig?.bearerToken;
-    if (!token) throw new Error("STEWARD_JWT is required for governed API calls");
-    headers.set("authorization", `Bearer ${token}`);
     let body: string | undefined;
     if (input.body !== undefined) {
       body = typeof input.body === "string" ? input.body : JSON.stringify(input.body);
       if (!headers.has("content-type")) headers.set("content-type", "application/json");
     }
-    const response = await fetch(
-      `${proxyBase.replace(/\/$/, "")}/proxy/${target.host}${target.pathname}${target.search}`,
+    const response = await this.getProxyClient().fetch(
+      `/proxy/${target.host}${target.pathname}${target.search}`,
       {
         method: (input.method ?? "GET").toUpperCase(),
         headers,
@@ -319,6 +311,35 @@ export class StewardService extends Service {
       throw new Error("Steward service not connected");
     }
     return this.client;
+  }
+
+  private getProxyClient(): StewardProxyClient {
+    const config = this.pluginConfig;
+    if (!config?.proxyUrl || !config.bearerToken) {
+      throw new Error("STEWARD_PROXY_URL and STEWARD_JWT are required for proxy requests");
+    }
+    assertSecureApiUrl(config.proxyUrl);
+
+    const signingRequired =
+      process.env.NODE_ENV === "production" ||
+      process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE === "true";
+    if (signingRequired && !config.proxyRequestSigningSecret) {
+      throw new Error(
+        "STEWARD_PROXY_REQUEST_SIGNING_SECRET is required when proxy request signing is enforced",
+      );
+    }
+    if (config.proxyRequestSigningSecret && !config.tenantId) {
+      throw new Error("STEWARD_TENANT_ID is required to sign proxy requests");
+    }
+
+    return new StewardProxyClient({
+      proxyUrl: config.proxyUrl,
+      token: config.bearerToken,
+      signingSecret: config.proxyRequestSigningSecret,
+      tenantId: config.tenantId,
+      agentId: config.agentId,
+      fetch: globalThis.fetch,
+    });
   }
 
   private getAgentId(): string {
