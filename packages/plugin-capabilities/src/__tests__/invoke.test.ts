@@ -373,6 +373,84 @@ describe("invoke: default-deny + effects", () => {
     expect(res.status).toBe(403);
   });
 
+  test("FINDING 1: config null => 403 (hard deny, NOT 500) even beside a passing allow", async () => {
+    // `rule.config` is opaque jsonb and can be null at runtime. The old
+    // parseConfig did `Object.keys(raw)` unguarded => TypeError => HTTP 500.
+    // It must now fail closed as a 403, never a 500.
+    const nullCfg: PolicyRule = {
+      id: "null-cfg",
+      type: "capability-intent" as unknown as PolicyRule["type"],
+      enabled: true,
+      config: null as unknown as Record<string, unknown>,
+    };
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("allow-rule", "allow", undefined, ["github.*"]), nullCfg];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+  });
+
+  for (const [label, badConfig] of [
+    ["string", "not-an-object"],
+    ["number", 42],
+    ["array", ["github.*"]],
+  ] as const) {
+    test(`FINDING 1: config ${label} => 403 (hard deny, NOT 500)`, async () => {
+      const badCfg: PolicyRule = {
+        id: `bad-${label}`,
+        type: "capability-intent" as unknown as PolicyRule["type"],
+        enabled: true,
+        config: badConfig as unknown as Record<string, unknown>,
+      };
+      await seedCapabilityWithGrant();
+      currentPolicySet = [badCfg];
+      const app = buildApp(harness!.db, { agent: true });
+      const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+      expect(res.status).toBe(403);
+    });
+  }
+
+  test("FINDING 2: malformed rule SCOPED ELSEWHERE + valid allow => 503 (authorized, NOT bricked to 403)", async () => {
+    // A malformed rule scoped (valid selector) to a DIFFERENT capability must not
+    // brick this invoke. The valid github allow authorizes => proxy-env-absent
+    // 503, proving the decision was ALLOW (not the malformed-elsewhere hard-deny).
+    const malformedElsewhere: PolicyRule = {
+      id: "malformed-elsewhere",
+      type: "capability-intent" as unknown as PolicyRule["type"],
+      enabled: true,
+      config: { capabilities: ["gitlab.*"], effect: "allow", bogus: true } as unknown as Record<
+        string,
+        unknown
+      >,
+    };
+    await seedCapabilityWithGrant();
+    currentPolicySet = [
+      capRule("allow-rule", "allow", undefined, ["github.*"]),
+      malformedElsewhere,
+    ];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request(
+      "/capabilities/github.pr.comment/invoke",
+      invokeReq({ body: { x: 1 } }),
+    );
+    expect(res.status).toBe(503);
+  });
+
+  test("FINDING 2: malformed rule with UNRECOVERABLE selector + valid allow for another cap => 403 (fail closed on ambiguous scope)", async () => {
+    const unrecoverable: PolicyRule = {
+      id: "unrecoverable",
+      type: "capability-intent" as unknown as PolicyRule["type"],
+      enabled: true,
+      // misspelled `capabilities` => selector unrecoverable => ambiguous scope.
+      config: { capabilties: ["gitlab.*"], effect: "deny" } as unknown as Record<string, unknown>,
+    };
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("allow-rule", "allow", undefined, ["github.*"]), unrecoverable];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+  });
+
   test("REGRESSION malformed rule that does NOT govern (misspelled `capabilities`) is NOT dropped => 403", async () => {
     // This is the fail-OPEN path codex flagged: a malformed rule whose broken
     // config would make a raw governing-match filter return false (here the

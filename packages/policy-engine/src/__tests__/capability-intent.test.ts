@@ -880,4 +880,218 @@ describe("capability-intent — composeCapabilityIntentDecision (disabled rules 
     );
     expect(d.effect).toBe("hard_deny");
   });
+
+  it("a rule with enabled:undefined is inert (falsy-enabled, matches the generic engine)", () => {
+    // NIT alignment: the composer skips ANY falsy `enabled`, not only
+    // `enabled === false`. An undefined-enabled deny must not block a valid allow.
+    const d = composeCapabilityIntentDecision(
+      [
+        {
+          id: "undef-enabled-deny",
+          type: CAPABILITY_INTENT_RULE_TYPE,
+          enabled: undefined,
+          config: { capabilities: ["github.pr.comment"], effect: "deny" },
+        } as unknown as ContributedPolicyRule,
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+});
+
+describe("capability-intent — malformed runtime input never throws (FINDING 1)", () => {
+  // `rule.config` is opaque jsonb: at runtime it can be null / a scalar / an
+  // array (untyped storage, bad migration, hand-edited row). The composer must
+  // turn ANY such malformation into a fail-closed decision, NEVER a thrown
+  // TypeError (which surfaces as an HTTP 500 instead of a deny).
+
+  const ctx = makeContext({ capability: cap() });
+
+  // Build a rule whose config bypasses the compile-time `Record<string,unknown>`
+  // type so we can exercise the true runtime shapes (null / scalar / array).
+  function rawRule(config: unknown, id: string): ContributedPolicyRule {
+    return {
+      id,
+      type: CAPABILITY_INTENT_RULE_TYPE,
+      enabled: true,
+      config,
+    } as ContributedPolicyRule;
+  }
+
+  it("evaluateCapabilityIntent: config null => deny (no throw)", () => {
+    const r = evaluateCapabilityIntent(rawRule(null, "null-cfg"), ctx);
+    expect(r.passed).toBe(false);
+    expect(r.reason).toContain("config must be a non-null object");
+  });
+
+  it("composeCapabilityIntentDecision: config null => hard_deny (no throw), even beside a passing allow", () => {
+    // The null-config rule has an unrecoverable selector => governing-ambiguous
+    // => hard_deny. Critically: it must NOT throw a TypeError.
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision(
+        [
+          rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+          rawRule(null, "null-cfg"),
+        ],
+        ctx,
+      );
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+  });
+
+  for (const [label, badConfig] of [
+    ["string", "not-an-object"],
+    ["number", 42],
+    ["boolean", true],
+    ["array", ["github.*"]],
+  ] as const) {
+    it(`composeCapabilityIntentDecision: config ${label} => hard_deny (no throw)`, () => {
+      let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+      expect(() => {
+        d = composeCapabilityIntentDecision([rawRule(badConfig, `bad-${label}`)], ctx);
+      }).not.toThrow();
+      expect(d?.effect).toBe("hard_deny");
+    });
+  }
+
+  it("composeCapabilityIntentDecision: an evaluator that THROWS => hard_deny (never approval, never 500)", () => {
+    // Inject a throw at the evaluation seam. `constraints.argMatches` is applied
+    // during evaluation; we make Object.entries hit a hostile getter for THIS
+    // rule's constraints object, proving the composer's try/catch converts a
+    // thrown evaluator error into a hard_deny.
+    const hostile: Record<string, unknown> = {};
+    Object.defineProperty(hostile, "boom", {
+      enumerable: true,
+      get() {
+        throw new Error("injected evaluator failure");
+      },
+    });
+    // A well-formed, GOVERNING allow rule whose argMatches constraint iteration
+    // hits the hostile getter and throws inside evaluateConstraints.
+    const throwingRule = rule(
+      { capabilities: ["github.*"], effect: "allow", constraints: { argMatches: hostile } },
+      "throwing-rule",
+    );
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([throwingRule], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+    expect(d?.reason).toContain("evaluator error");
+  });
+});
+
+describe("capability-intent — malformed-input precedence is SCOPED to governing rules (FINDING 2)", () => {
+  // master-plan §5.3: malformed-input precedence applies to GOVERNING rules. A
+  // malformed rule provably scoped to a DIFFERENT capability must not brick an
+  // unrelated invoke; a malformed rule whose SELECTOR is unrecoverable fails
+  // closed (its scope cannot be determined).
+
+  const ctx = makeContext({ capability: cap() }); // requests github.pr.comment
+
+  function rawRule(config: unknown, id: string): ContributedPolicyRule {
+    return {
+      id,
+      type: CAPABILITY_INTENT_RULE_TYPE,
+      enabled: true,
+      config,
+    } as ContributedPolicyRule;
+  }
+
+  it("malformed rule SCOPED ELSEWHERE (valid selector, other capability) + valid allow => ALLOW (inert, not bricked)", () => {
+    // Selector `gitlab.*` is well-formed and provably does NOT govern
+    // github.pr.comment, so the malformed remainder (bogus key) is irrelevant.
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule(
+          { capabilities: ["gitlab.*"], effect: "allow", bogus: true },
+          "malformed-elsewhere",
+        ),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("malformed rule scoped elsewhere with an unknown-constraint typo + valid allow => ALLOW (inert)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule(
+          { capabilities: ["gitlab.*"], effect: "allow", constraints: { maxCallPerHour: 2 } },
+          "malformed-elsewhere-2",
+        ),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("malformed rule with UNRECOVERABLE selector (misspelled capabilities key) + valid allow for another capability => HARD_DENY (fail closed on ambiguous scope)", () => {
+    // The selector cannot be recovered (`capabilities` is missing), so we cannot
+    // prove this rule is non-governing. Fail closed.
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule({ capabilties: ["gitlab.*"], effect: "deny" }, "unrecoverable-selector"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("malformed rule with null config (unrecoverable selector) + valid allow => HARD_DENY (fail closed)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule(null, "null-selector"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("malformed rule with an ILLEGAL glob selector (ambiguous scope) + valid allow => HARD_DENY (fail closed)", () => {
+    // `git*hub.*` is an illegal glob: patternMatches would treat it as an exact
+    // literal that can never match, so we cannot trust it to be non-governing.
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule({ capabilities: ["git*hub.*"], effect: "deny", bogus: true }, "illegal-glob"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("malformed GOVERNING rule (valid selector matches THIS capability, malformed rest) => HARD_DENY (existing semantics preserved)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rawRule(
+          { capabilities: ["github.*"], effect: "allow", bogus: true },
+          "malformed-governing",
+        ),
+        rule({ capabilities: ["github.pr.comment"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("scoping is order-independent: allow-first vs malformed-elsewhere-first both => ALLOW", () => {
+    const malformedElsewhere = rawRule(
+      { capabilities: ["gitlab.*"], effect: "deny", bogus: true },
+      "malformed-elsewhere",
+    );
+    const validAllow = rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule");
+    expect(composeCapabilityIntentDecision([validAllow, malformedElsewhere], ctx).effect).toBe(
+      "allow",
+    );
+    expect(composeCapabilityIntentDecision([malformedElsewhere, validAllow], ctx).effect).toBe(
+      "allow",
+    );
+  });
 });
