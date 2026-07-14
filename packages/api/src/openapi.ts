@@ -179,6 +179,89 @@ function errorResponses(): JsonSchema {
   };
 }
 
+function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
+  const security = [{ bearerAuth: [] }];
+  const mutation = (summary: string, schema: JsonSchema): OpenApiOperation => ({
+    tags: ["Provider Authority"],
+    summary,
+    security,
+    parameters: [idempotencyKeyHeader],
+    requestBody: { required: true, content: { "application/json": { schema } } },
+    responses: {
+      "200": jsonResponse(apiResponse(metadataSchema)),
+      "201": jsonResponse(apiResponse(metadataSchema)),
+      ...errorResponses(),
+    },
+  });
+  const listing = (summary: string, workspace = false): OpenApiOperation => ({
+    tags: ["Provider Authority"],
+    summary,
+    security,
+    parameters: workspace ? [parameter("workspaceId", "query")] : [],
+    responses: {
+      "200": jsonResponse(apiResponse({ type: "array", items: metadataSchema })),
+      ...errorResponses(),
+    },
+  });
+  const revisionReason: JsonSchema = {
+    type: "object",
+    required: ["expectedRevision", "reason"],
+    properties: { expectedRevision: { type: "integer", minimum: 0 }, reason: stringSchema },
+    additionalProperties: true,
+  };
+  return {
+    "/v2/workspaces": {
+      get: listing("List workspaces"),
+      post: mutation("Create workspace", revisionReason),
+    },
+    "/v2/workspaces/{id}/disable": {
+      parameters: [parameter("id", "path")],
+      post: mutation("Disable workspace", revisionReason),
+    },
+    "/v2/provider-accounts": {
+      get: listing("List provider accounts", true),
+      post: mutation("Create provider account", revisionReason),
+    },
+    "/v2/provider-accounts/{id}/disable": {
+      parameters: [parameter("id", "path")],
+      post: mutation("Disable provider account", revisionReason),
+    },
+    "/v2/provider-accounts/{id}/operations": {
+      parameters: [parameter("id", "path")],
+      get: listing("List provider operations", true),
+      post: mutation("Register provider operation", revisionReason),
+    },
+    "/v2/provider-role-bindings": {
+      get: listing("List provider role bindings", true),
+      post: mutation("Issue provider role binding", revisionReason),
+    },
+    "/v2/provider-role-bindings/{id}/revoke": {
+      parameters: [parameter("id", "path")],
+      post: mutation("Revoke provider role binding", revisionReason),
+    },
+    "/v2/provider-grants": {
+      get: listing("List direct provider grants", true),
+      post: mutation("Issue non-delegable provider grant", revisionReason),
+    },
+    "/v2/provider-grants/{id}/revoke": {
+      parameters: [parameter("id", "path")],
+      post: mutation("Revoke provider grant", revisionReason),
+    },
+    "/v2/provider-access/check": {
+      post: {
+        tags: ["Provider Authority"],
+        summary: "Evaluate structural provider access without execution policy",
+        security,
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: metadataSchema } },
+        },
+        responses: { "200": jsonResponse(apiResponse(metadataSchema)), ...errorResponses() },
+      },
+    },
+  };
+}
+
 function parameter(name: string, location: "path" | "query", schema: JsonSchema = stringSchema) {
   return {
     name,
@@ -5685,6 +5768,7 @@ export function getOpenApiSpec() {
       { name: "Global Wallet" },
       { name: "Trading" },
       { name: "Tenant Config" },
+      { name: "Provider Authority" },
     ],
     components: {
       securitySchemes: {
@@ -5708,6 +5792,7 @@ export function getOpenApiSpec() {
     },
     paths: {
       ...authPaths(),
+      ...providerAuthorityPaths(),
       ...accountPaths(),
       ...accountPaths("/v1"),
       ...policyPaths(),

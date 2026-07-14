@@ -47,6 +47,10 @@ export const SENSITIVE_PATH_PREFIXES: readonly string[] = [
   "/v1/condition-sets",
   "/condition_sets",
   "/v1/condition_sets",
+  "/v2/workspaces",
+  "/v2/provider-accounts",
+  "/v2/provider-role-bindings",
+  "/v2/provider-grants",
 ];
 
 /**
