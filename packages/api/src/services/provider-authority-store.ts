@@ -167,31 +167,18 @@ export class ProviderAuthorityStore {
     return explicit.length === 0 && membership.role === "owner" && ctx.tenantRole === "owner";
   }
 
-  private async tenantAdminIsExplicit(
-    ctx: Pick<MutationContext, "tenantId" | "actorUserId">,
-  ): Promise<boolean> {
-    const [row] = await this.db()
-      .select({ id: providerRoleBindings.id })
-      .from(providerRoleBindings)
-      .where(
-        and(
-          eq(providerRoleBindings.tenantId, ctx.tenantId),
-          eq(providerRoleBindings.roleKey, "tenant_authority_admin"),
-          eq(providerRoleBindings.principalType, "human"),
-          eq(providerRoleBindings.principalId, ctx.actorUserId),
-          eq(providerRoleBindings.status, "active"),
-        ),
-      )
-      .limit(1);
-    return Boolean(row);
-  }
-
   private async workspaceAdminMandate(
     tenantId: string,
     workspaceId: string,
     userId: string,
     at = new Date(),
   ) {
+    const [workspace] = await this.db()
+      .select({ environment: workspaces.environment })
+      .from(workspaces)
+      .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, workspaceId)))
+      .limit(1);
+    if (!workspace) return undefined;
     const rows = await this.db()
       .select()
       .from(providerRoleBindings)
@@ -205,7 +192,7 @@ export class ProviderAuthorityStore {
           eq(providerRoleBindings.status, "active"),
         ),
       );
-    return rows.find((row) => activeAt(row, at, row.environment ?? "production"));
+    return rows.find((row) => activeAt(row, at, workspace.environment));
   }
 
   private async requireWorkspaceAdmin(

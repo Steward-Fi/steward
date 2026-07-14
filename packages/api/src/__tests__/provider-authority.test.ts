@@ -223,16 +223,29 @@ describe("provider authority foundation", () => {
   test("enforces matrix scope and non-enumerating cross-workspace/tenant behavior", async () => {
     await getDb()
       .insert(providerRoleBindings)
-      .values({
-        tenantId: "tenant-main",
-        workspaceId: WORKSPACE_A,
-        principalType: "human",
-        principalId: OTHER,
-        roleKey: "workspace_admin",
-        operationKeys: ["github.issue.list"],
-        grantedByUserId: ADMIN,
-        reason: "scoped",
-      });
+      .values([
+        {
+          tenantId: "tenant-main",
+          workspaceId: WORKSPACE_A,
+          principalType: "human",
+          principalId: OTHER,
+          roleKey: "workspace_admin",
+          operationKeys: ["github.issue.list"],
+          grantedByUserId: ADMIN,
+          reason: "scoped",
+        },
+        {
+          tenantId: "tenant-main",
+          workspaceId: WORKSPACE_B,
+          principalType: "human",
+          principalId: OWNER,
+          roleKey: "workspace_admin",
+          operationKeys: ["github.issue.list"],
+          environment: "staging",
+          grantedByUserId: ADMIN,
+          reason: "wrong environment",
+        },
+      ]);
     await expect(
       store.createProviderAccount(
         mutation({ actorUserId: OTHER, tenantRole: "member", expectedRevision: 1 }),
@@ -241,6 +254,17 @@ describe("provider authority foundation", () => {
           adapterKey: "github",
           externalRef: "forbidden",
           displayName: "Forbidden",
+        },
+      ),
+    ).rejects.toMatchObject({ code: "not_found", status: 404 });
+    await expect(
+      store.createProviderAccount(
+        mutation({ actorUserId: OWNER, tenantRole: "owner", expectedRevision: 1 }),
+        {
+          workspaceId: WORKSPACE_B,
+          adapterKey: "github",
+          externalRef: "wrong-environment",
+          displayName: "Wrong Environment",
         },
       ),
     ).rejects.toMatchObject({ code: "not_found", status: 404 });
