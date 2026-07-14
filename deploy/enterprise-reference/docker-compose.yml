@@ -1,0 +1,181 @@
+# Steward enterprise reference profile.
+#
+# Usage (steward init is the ONLY supported way to produce the env file; it
+# generates a matching POSTGRES_PASSWORD + DATABASE_URL and all secrets. Do NOT
+# copy .env.example as-is — its secret values are intentionally empty and
+# compose's `${VAR:?required}` guards will refuse to start):
+#   steward init --env deploy/enterprise-reference/.env --force
+#   docker compose --env-file deploy/enterprise-reference/.env \
+#     -f deploy/enterprise-reference/docker-compose.yml \
+#     --profile enterprise-reference up -d
+
+services:
+  steward-migrate:
+    profiles: ["enterprise-reference"]
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
+    command: ["bun", "packages/db/src/migrate.ts"]
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-true}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - steward-backend
+    restart: "no"
+
+  steward-api:
+    profiles: ["enterprise-reference"]
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
+    environment:
+      PORT: "3200"
+      STEWARD_BIND_HOST: "0.0.0.0"
+      NODE_ENV: production
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
+      REDIS_URL: "redis://redis:6379"
+      STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
+      STEWARD_SESSION_SECRET: "${STEWARD_SESSION_SECRET:?required}"
+      STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
+      STEWARD_AUDIT_SIGNING_KEY: "${STEWARD_AUDIT_SIGNING_KEY:?required}"
+      STEWARD_PLATFORM_KEYS: "${STEWARD_PLATFORM_KEYS:-}"
+      STEWARD_PLATFORM_KEY: "${STEWARD_PLATFORM_KEY:-}"
+      STEWARD_PLATFORM_KEY_SCOPES: "${STEWARD_PLATFORM_KEY_SCOPES:-}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:-}"
+      RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
+      CHAIN_ID: "${CHAIN_ID:-8453}"
+      APP_URL: "${APP_URL:-https://steward.localhost}"
+      PASSKEY_RP_NAME: "${PASSKEY_RP_NAME:-Steward}"
+      PASSKEY_RP_ID: "${PASSKEY_RP_ID:-steward.localhost}"
+      PASSKEY_ORIGIN: "${PASSKEY_ORIGIN:-https://steward.localhost}"
+      SKIP_MIGRATIONS: "true"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-true}"
+    depends_on:
+      steward-migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:3200/ready');process.exit(r.ok?0:1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 8
+    networks:
+      - steward-backend
+
+  steward-proxy:
+    profiles: ["enterprise-reference"]
+    image: steward:${STEWARD_IMAGE_TAG:-enterprise-reference}
+    command: ["bun", "run", "packages/proxy/src/index.ts"]
+    environment:
+      STEWARD_PROXY_PORT: "8080"
+      NODE_ENV: production
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
+      REDIS_URL: "redis://redis:6379"
+      # Fail CLOSED on spend-limit / rate-limit enforcement if Redis is
+      # unreachable. Without this the proxy fails OPEN (enforcement silently
+      # bypassed) when redis dies — unacceptable for the reference profile.
+      REDIS_REQUIRED: "true"
+      STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
+      STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
+      STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
+      STEWARD_PROXY_REQUEST_SIGNING_SECRETS: "${STEWARD_PROXY_REQUEST_SIGNING_SECRETS:?required}"
+      STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-true}"
+    depends_on:
+      steward-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:8080/health');process.exit(r.ok?0:1)"]
+      interval: 15s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+    networks:
+      - steward-backend
+
+  caddy:
+    profiles: ["enterprise-reference"]
+    image: caddy:2.8-alpine
+    ports:
+      - "${STEWARD_TLS_HTTP_PORT:-80}:80"
+      - "${STEWARD_TLS_HTTPS_PORT:-443}:443"
+    environment:
+      STEWARD_DOMAIN: "${STEWARD_DOMAIN:-steward.localhost}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      steward-api:
+        condition: service_healthy
+      steward-proxy:
+        condition: service_healthy
+    networks:
+      - steward-backend
+
+  postgres:
+    profiles: ["enterprise-reference"]
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: steward
+      POSTGRES_USER: steward
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?required}"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./backups:/backups
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U steward -d steward"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - steward-backend
+
+  redis:
+    profiles: ["enterprise-reference"]
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    networks:
+      - steward-backend
+
+  backup:
+    profiles: ["enterprise-reference", "backup"]
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "-ec"]
+    command: "pg_dump \"$${DATABASE_URL}\" > /backups/steward-$$(date -u +%Y%m%dT%H%M%SZ).sql"
+    environment:
+      DATABASE_URL: "${DATABASE_URL:-postgresql://steward:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}@postgres:5432/steward}"
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - steward-backend
+    restart: "no"
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  steward-backend:
+    driver: bridge

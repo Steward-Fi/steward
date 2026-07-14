@@ -1,0 +1,15 @@
+{$STEWARD_DOMAIN} {
+  encode gzip
+
+  # Preserve the full /proxy/... path: the credential proxy's resolveTarget
+  # parses `/proxy/<host>/<path>` for direct mode and the request-signature
+  # verifier signs the third-party URL. Stripping the prefix (handle_path) would
+  # break both, so forward the path unmodified with `handle`.
+  handle /proxy/* {
+    reverse_proxy steward-proxy:8080
+  }
+
+  handle {
+    reverse_proxy steward-api:3200
+  }
+}

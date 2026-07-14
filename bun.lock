@@ -95,6 +95,18 @@
         "@types/node": "^24.5.2",
       },
     },
+    "packages/cli": {
+      "name": "@stwd/cli",
+      "version": "0.4.4",
+      "bin": {
+        "steward": "./src/index.ts",
+      },
+      "devDependencies": {
+        "@types/bun": "latest",
+        "@types/node": "^25.5.0",
+        "typescript": "^5.8.0",
+      },
+    },
     "packages/db": {
       "name": "@stwd/db",
       "version": "0.4.0",
@@ -1617,6 +1629,8 @@
     "@stwd/api": ["@stwd/api@workspace:packages/api"],
 
     "@stwd/auth": ["@stwd/auth@workspace:packages/auth"],
+
+    "@stwd/cli": ["@stwd/cli@workspace:packages/cli"],
 
     "@stwd/db": ["@stwd/db@workspace:packages/db"],
 
