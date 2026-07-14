@@ -21,6 +21,7 @@ import type { ContributedPolicyRule, PolicyRule, SignRequest } from "@stwd/share
 import {
   CAPABILITY_INTENT_RULE_TYPE,
   capabilityIntentContribution,
+  composeCapabilityIntentDecision,
   evaluateCapabilityIntent,
 } from "../capability-intent";
 import { PolicyEngine } from "../engine";
@@ -586,5 +587,297 @@ describe("capability-intent — multi-rule composition (all-must-pass)", () => {
     expect(other.passed).toBe(true);
     expect(allow.passed).toBe(true);
     expect(other.passed && allow.passed).toBe(true);
+  });
+});
+
+describe("capability-intent — composeCapabilityIntentDecision (canonical precedence)", () => {
+  // The canonical composition (master-plan §5.3 / PR2 spec §6.3):
+  //   1. malformed/unknown rule config or unavailable input => hard_deny
+  //   2. any matching hard deny (deny effect OR failed hard constraint) => hard_deny
+  //   3. else any matching require-approval => approval_required
+  //   4. else any matching passing allow => allow
+  //   5. else (no governing passing allow) => hard_deny
+  // These tests are the SINGLE SOURCE OF TRUTH for capability-intent precedence
+  // and directly guard the "allow-over-approval" regression.
+
+  const ctx = makeContext({ capability: cap() });
+
+  it("REGRESSION: approval_required is NOT shadowed by a matching passing allow", () => {
+    // This is the exact bug: allow + require-approval on the SAME capability.
+    // The old invoke-layer logic let the passing allow short-circuit to ALLOW.
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("approval_required");
+  });
+
+  it("REGRESSION holds regardless of rule order (approval listed first)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("approval_required");
+  });
+
+  it("deny + allow => hard_deny (deny wins over allow)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "deny" }, "deny-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("deny + approval => hard_deny (deny wins over approval, never softened)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "deny" }, "deny-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("deny + approval + allow => hard_deny (deny is absolute)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.pr.comment"], effect: "deny" }, "deny-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("approval + allow => approval_required", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("approval_required");
+  });
+
+  it("multiple allows => allow", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-1"),
+        rule({ capabilities: ["github.pr.comment"], effect: "allow" }, "allow-2"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("single matching allow => allow", () => {
+    const d = composeCapabilityIntentDecision(
+      [rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule")],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("malformed rule config present => hard_deny (even alongside a passing allow)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        // unknown top-level key fails closed in parseConfig
+        rule({ capabilities: ["github.*"], effect: "allow", bogus: true }, "malformed-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("malformed rule config => hard_deny, never softened into approval", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+        rule({ capabilities: ["github.*"], effect: "allow", bogus: true }, "malformed-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("failed hard constraint on an allow => hard_deny (counts as deny, not approval)", () => {
+    // allow rule whose maxCallsPerHour is exceeded => the allow FAILS a hard
+    // constraint. That is a hard deny and must win over a co-present approval.
+    const overCtx = makeContext({ capability: cap(), capabilityInvokeCount1h: 5 });
+    const d = composeCapabilityIntentDecision(
+      [
+        rule(
+          { capabilities: ["github.*"], effect: "allow", constraints: { maxCallsPerHour: 2 } },
+          "capped-allow",
+        ),
+        rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+      ],
+      overCtx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("no matching rule (all non-governing) => hard_deny (effective default-deny)", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["gitlab.*"], effect: "allow" }, "other-allow"),
+        rule({ capabilities: ["bitbucket.*"], effect: "deny" }, "other-deny"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("empty rule set => hard_deny (no governing allow)", () => {
+    const d = composeCapabilityIntentDecision([], ctx);
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("no ctx.capability => hard_deny (fail closed, not a capability invoke)", () => {
+    const d = composeCapabilityIntentDecision(
+      [rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule")],
+      makeContext(),
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("precedence is stable under 100 shuffles of a deny+approval+allow set", () => {
+    const base = [
+      rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+      rule({ capabilities: ["github.pr.comment"], effect: "deny" }, "deny-rule"),
+    ];
+    for (let i = 0; i < 100; i++) {
+      const shuffled = [...base];
+      for (let j = shuffled.length - 1; j > 0; j--) {
+        const k = Math.floor(Math.random() * (j + 1));
+        [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
+      }
+      expect(composeCapabilityIntentDecision(shuffled, ctx).effect).toBe("hard_deny");
+    }
+  });
+
+  it("approval+allow precedence is stable under 100 shuffles (approval wins)", () => {
+    const base = [
+      rule({ capabilities: ["github.*"], effect: "allow" }, "allow-1"),
+      rule({ capabilities: ["github.pr.comment"], effect: "allow" }, "allow-2"),
+      rule({ capabilities: ["github.pr.comment"], effect: "require-approval" }, "approval-rule"),
+    ];
+    for (let i = 0; i < 100; i++) {
+      const shuffled = [...base];
+      for (let j = shuffled.length - 1; j > 0; j--) {
+        const k = Math.floor(Math.random() * (j + 1));
+        [shuffled[j], shuffled[k]] = [shuffled[k], shuffled[j]];
+      }
+      expect(composeCapabilityIntentDecision(shuffled, ctx).effect).toBe("approval_required");
+    }
+  });
+});
+
+describe("capability-intent — composeCapabilityIntentDecision (malformed rule cannot be dropped)", () => {
+  const ctx = makeContext({ capability: cap() });
+
+  it("a malformed rule with a misspelled `capabilities` key hard-denies even alongside a matching allow", () => {
+    // The rule's `capabilities` is misspelled, so a naive governing-match filter
+    // (Array.isArray(cfg.capabilities)) would treat it as non-governing and DROP
+    // it, failing open. The composer parses every rule first and hard-denies.
+    const d = composeCapabilityIntentDecision(
+      [
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+        // @ts-expect-error intentionally malformed config for the fail-closed test
+        {
+          id: "typo",
+          type: CAPABILITY_INTENT_RULE_TYPE,
+          enabled: true,
+          config: { capabilties: ["github.*"], effect: "deny" },
+        },
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+
+  it("parseConfig runs BEFORE capabilityMatches, so a malformed non-governing-looking rule still hard-denies", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        // unsupported glob makes parseConfig fail (badPattern) even though it
+        // "looks" like it governs github.* — must hard-deny, not be treated inert.
+        rule({ capabilities: ["git*hub.pr"], effect: "deny" }, "bad-glob"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
+  });
+});
+
+describe("capability-intent — composeCapabilityIntentDecision (disabled rules are inert)", () => {
+  const ctx = makeContext({ capability: cap() });
+
+  function disabled(config: Record<string, unknown>, id: string): ContributedPolicyRule {
+    return { id, type: CAPABILITY_INTENT_RULE_TYPE, enabled: false, config };
+  }
+
+  it("a DISABLED deny rule does NOT block a matching enabled allow", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        disabled({ capabilities: ["github.pr.comment"], effect: "deny" }, "disabled-deny"),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("a DISABLED require-approval rule does NOT queue approval over an enabled allow", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        disabled(
+          { capabilities: ["github.pr.comment"], effect: "require-approval" },
+          "disabled-approval",
+        ),
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("a DISABLED malformed rule does NOT fail the composition closed", () => {
+    const d = composeCapabilityIntentDecision(
+      [
+        // @ts-expect-error intentionally malformed but DISABLED => must be inert
+        {
+          id: "disabled-bad",
+          type: CAPABILITY_INTENT_RULE_TYPE,
+          enabled: false,
+          config: { capabilties: ["github.*"], effect: "deny" },
+        },
+        rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule"),
+      ],
+      ctx,
+    );
+    expect(d.effect).toBe("allow");
+  });
+
+  it("only DISABLED rules present => default-deny (no enabled governing allow)", () => {
+    const d = composeCapabilityIntentDecision(
+      [disabled({ capabilities: ["github.*"], effect: "allow" }, "disabled-allow")],
+      ctx,
+    );
+    expect(d.effect).toBe("hard_deny");
   });
 });

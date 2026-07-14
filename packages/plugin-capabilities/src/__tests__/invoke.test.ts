@@ -309,6 +309,92 @@ describe("invoke: default-deny + effects", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].decision).toBe("error");
   });
+
+  // CANONICAL PRECEDENCE (master-plan §5.3) end-to-end through the invoke route.
+  // These directly guard the fixed allow-over-approval bug: a matching passing
+  // allow must NEVER shadow an applicable require-approval.
+
+  test("REGRESSION allow + require-approval on same capability => 202 (approval NOT shadowed by allow)", async () => {
+    const capId = await seedCapabilityWithGrant();
+    // an allow rule (would authorize) AND a require-approval rule on the same
+    // capability. old code let the passing allow short-circuit to allow (503).
+    currentPolicySet = [
+      capRule("allow-rule", "allow", undefined, ["github.*"]),
+      capRule("approval-rule", "require-approval"),
+    ];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(202);
+    const rows = await invocationRows(capId);
+    expect(rows.length).toBe(1);
+    expect(rows[0].decision).toBe("approval");
+  });
+
+  test("REGRESSION holds regardless of rule order (approval listed first) => 202", async () => {
+    await seedCapabilityWithGrant();
+    currentPolicySet = [
+      capRule("approval-rule", "require-approval"),
+      capRule("allow-rule", "allow", undefined, ["github.*"]),
+    ];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(202);
+  });
+
+  test("deny + approval on same capability => 403 (deny wins, never softened to approval)", async () => {
+    const capId = await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("approval-rule", "require-approval"), capRule("deny-rule", "deny")];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+    const rows = await invocationRows(capId);
+    expect(rows[0].decision).toBe("deny");
+  });
+
+  test("deny + allow on same capability => 403 (deny wins over allow)", async () => {
+    await seedCapabilityWithGrant();
+    currentPolicySet = [
+      capRule("allow-rule", "allow", undefined, ["github.*"]),
+      capRule("deny-rule", "deny"),
+    ];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+  });
+
+  test("malformed rule config alongside a passing allow => 403 (fail closed)", async () => {
+    await seedCapabilityWithGrant();
+    const malformed = capRule("bad-rule", "allow", undefined, ["github.*"]);
+    // inject an unknown config key => parseConfig fails closed => hard deny.
+    (malformed.config as Record<string, unknown>).bogus = true;
+    currentPolicySet = [capRule("allow-rule", "allow", undefined, ["github.*"]), malformed];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+  });
+
+  test("REGRESSION malformed rule that does NOT govern (misspelled `capabilities`) is NOT dropped => 403", async () => {
+    // This is the fail-OPEN path codex flagged: a malformed rule whose broken
+    // config would make a raw governing-match filter return false (here the
+    // `capabilities` key is misspelled `capabilties`, so there is no valid
+    // capabilities list to match on). The composer must still parse it and
+    // hard-deny — it must NOT be silently filtered out before composition, even
+    // when a sibling allow matches the invoked capability.
+    const malformed: PolicyRule = {
+      id: "typo-rule",
+      type: "capability-intent" as unknown as PolicyRule["type"],
+      enabled: true,
+      // NOTE: `capabilties` (typo) + no valid `capabilities` array => parseConfig
+      // fails closed. A raw `Array.isArray(cfg.capabilities)` governing filter
+      // would drop this rule entirely.
+      config: { capabilties: ["github.*"], effect: "deny" } as unknown as Record<string, unknown>,
+    };
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("allow-rule", "allow", undefined, ["github.*"]), malformed];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+  });
 });
 
 describe("invoke: body parsing", () => {

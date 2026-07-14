@@ -1,4 +1,6 @@
 export type {
+  CapabilityIntentCompositionEffect,
+  CapabilityIntentCompositionResult,
   CapabilityIntentConfig,
   CapabilityIntentConstraints,
   CapabilityIntentEffect,
@@ -6,6 +8,7 @@ export type {
 export {
   CAPABILITY_INTENT_RULE_TYPE,
   capabilityIntentContribution,
+  composeCapabilityIntentDecision,
   evaluateCapabilityIntent,
 } from "./capability-intent";
 export type {

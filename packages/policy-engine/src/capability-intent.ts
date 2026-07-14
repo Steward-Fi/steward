@@ -382,6 +382,117 @@ export function evaluateCapabilityIntent(
 }
 
 /**
+ * The composed decision over a set of `capability-intent` rules that GOVERN a
+ * single invoked capability, in the canonical precedence order.
+ *
+ * CANONICAL COMPOSITION (master-plan §5.3 / PR2 canonicalization spec §6.3):
+ *   1. malformed/unknown rule config, or an unavailable policy input => HARD DENY
+ *   2. any matching hard deny (an `effect: "deny"` match, OR an `effect: "allow"`
+ *      match that FAILS a hard constraint) => HARD DENY
+ *   3. else any matching `require-approval` => APPROVAL REQUIRED
+ *   4. else any matching passing `allow` => ALLOW
+ *   5. else (no governing rule matched/passed) => HARD DENY / no governing allow
+ *
+ * This is the single source of truth for capability-intent precedence. It FIXES
+ * the prior invoke-layer bug where a passing allow could short-circuit an
+ * applicable require-approval (allow-over-approval). A malformed config or a
+ * failed hard constraint can NEVER be softened into an approval.
+ *
+ * The caller supplies ONLY the rules that already govern the invoked capability
+ * (i.e. their `capabilities` list matches the name). Passing non-governing rules
+ * is harmless — they evaluate as "not applicable" (pass) and are ignored — but
+ * the effective default-deny (outcome 5) is defined over the GOVERNING set, so
+ * the caller must not filter out governing rules before composing.
+ */
+export type CapabilityIntentCompositionEffect = "hard_deny" | "approval_required" | "allow";
+
+export interface CapabilityIntentCompositionResult {
+  readonly effect: CapabilityIntentCompositionEffect;
+  readonly reason: string;
+}
+
+export function composeCapabilityIntentDecision(
+  rules: readonly ContributedPolicyRule[],
+  ctx: EvaluatorContext,
+): CapabilityIntentCompositionResult {
+  // Not a capability invoke at all: nothing to compose. Fail closed — the invoke
+  // layer must only call this on an actual capability invoke with ctx.capability.
+  if (!ctx.capability) {
+    return { effect: "hard_deny", reason: "capability-intent: not a capability invoke" };
+  }
+  const { name } = ctx.capability;
+
+  let approvalReason: string | undefined;
+  let allowReason: string | undefined;
+
+  for (const rule of rules) {
+    // A DISABLED rule is inert, matching `evaluatePolicy`/`PolicyEngine`
+    // semantics (`!rule.enabled` => skipped). Disabling a policy must reliably
+    // turn it off for every caller of this exported helper — a disabled
+    // deny/require-approval (or even a disabled malformed) rule must NOT block,
+    // queue, or hard-deny. We skip it BEFORE parsing so a disabled-but-malformed
+    // rule cannot fail the whole composition closed either.
+    if (rule.enabled === false) continue;
+
+    // A malformed/unknown rule config is a HARD DENY and short-circuits the whole
+    // composition — a broken gate must never be silently dropped, and must never
+    // be softened into an approval. parseConfig fails closed on any malformation.
+    const parsed = parseConfig(rule.config);
+    if ("error" in parsed) {
+      return { effect: "hard_deny", reason: parsed.error };
+    }
+
+    // Only rules that govern THIS capability contribute. A non-match is inert.
+    if (!capabilityMatches(parsed, name)) continue;
+
+    const result = evaluateCapabilityIntent(
+      { id: rule.id, type: rule.type, enabled: rule.enabled, config: rule.config },
+      ctx,
+    );
+
+    // A matching require-approval fails without passing and carries the flag.
+    if (result.requiresManualApproval === true && result.passed === false) {
+      // Remember it, but keep scanning: a later hard deny must still win.
+      if (approvalReason === undefined) {
+        approvalReason =
+          result.reason ?? `capability-intent: capability "${name}" requires manual approval`;
+      }
+      continue;
+    }
+
+    // A matching rule that did NOT pass and is NOT an approval is a HARD DENY.
+    // This covers both an `effect: "deny"` match and an `effect: "allow"` match
+    // that failed a hard constraint (arg/regex/rate). Deny wins immediately.
+    if (result.passed === false) {
+      return {
+        effect: "hard_deny",
+        reason: result.reason ?? `capability-intent: capability "${name}" denied by policy`,
+      };
+    }
+
+    // A matching passing allow. Record it, but do NOT return yet: an approval or
+    // a hard deny from another governing rule must be able to override it.
+    if (allowReason === undefined) {
+      allowReason = result.reason ?? `capability-intent: capability "${name}" allowed`;
+    }
+  }
+
+  // No hard deny was seen. Approval outranks allow.
+  if (approvalReason !== undefined) {
+    return { effect: "approval_required", reason: approvalReason };
+  }
+  if (allowReason !== undefined) {
+    return { effect: "allow", reason: allowReason };
+  }
+
+  // No governing rule matched with a passing allow => effective default-deny.
+  return {
+    effect: "hard_deny",
+    reason: `capability-intent: no policy authorizes capability "${name}"`,
+  };
+}
+
+/**
  * The `capability-intent` rule as a {@link PolicyRuleContribution}, ready for the
  * W-1a plugin to register via the plugin host with zero rework. Bound to the
  * policy engine's {@link EvaluatorContext}.
