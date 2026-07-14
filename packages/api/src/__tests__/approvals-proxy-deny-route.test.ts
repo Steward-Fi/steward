@@ -117,6 +117,24 @@ async function denyAuditRowsFor(resourceId: string) {
     );
 }
 
+async function approvedAuditRowsFor(resourceId: string) {
+  return getDb()
+    .select({
+      action: auditEvents.action,
+      actorType: auditEvents.actorType,
+      resourceType: auditEvents.resourceType,
+      resourceId: auditEvents.resourceId,
+      metadata: auditEvents.metadata,
+    })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.action, "proxy.approval.approved"),
+        eq(auditEvents.resourceId, resourceId),
+      ),
+    );
+}
+
 beforeAll(async () => {
   previousJwtSecret = process.env.STEWARD_JWT_SECRET;
   previousAuditHmacKey = process.env.STEWARD_AUDIT_HMAC_KEY;
@@ -445,5 +463,10 @@ describe("POST /approvals/proxy/:id/deny — session/MFA route enforcement", () 
     const row = await fetchProxyRequest(id);
     expect(row?.status).toBe("denied");
     expect(row?.denialReason).toBe("deny then attempt approve");
+
+    // Audit hygiene: the rejected approve must not emit an approved event, and
+    // the single original denial audit must remain intact.
+    expect(await approvedAuditRowsFor(id)).toHaveLength(0);
+    expect(await denyAuditRowsFor(id)).toHaveLength(1);
   });
 });
