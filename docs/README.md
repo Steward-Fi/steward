@@ -49,7 +49,7 @@ Supported transactions and API calls flow through Steward routes, where they are
 bun run start:local
 ```
 
-**Hosted** — Backed by PostgreSQL, optional Redis for rate limiting and spend tracking. For production multi-tenant deployments.
+**PostgreSQL** — Backed by PostgreSQL, optional Redis for rate limiting and spend tracking. For self-hosted production deployments that need a durable third-party database.
 
 ```bash
 docker compose up -d

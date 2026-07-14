@@ -59,11 +59,15 @@ If any of these fails, the threat model below does not hold.
    provides limited defense.
 6. **Tenant operators are trusted with their own tenant.** A tenant
    admin can read the policies, approvals, and audit log for their
-   tenant. They cannot read another tenant's data (isolation is
-   row-level + enforced by the API). In self-hosted mode this is
-   trivially true (there's one tenant). In hosted multi-tenant mode,
-   the hosting operator trusts the tenant owner with their own tenant
-   scope.
+   tenant. They cannot read another tenant's data. Isolation is
+   enforced at the service layer: every tenant-scoped query filters
+   on `tenantId` and rows carry a composite foreign key to their
+   tenant. It is NOT database row-level security (RLS is not
+   implemented). Steward ships self-hosted only, and the expected
+   topology is one tenant per deployment, where this is trivially
+   true. An operator who chooses to run multiple tenants in a single
+   self-hosted deployment relies on that service-layer scoping and
+   trusts each tenant owner with their own scope.
 7. **TLS is terminated in front of Steward.** The Compose file binds
    the API to `127.0.0.1`; the expected topology has Caddy / nginx /
    Traefik handling TLS. Steward does not itself terminate TLS in the
@@ -160,11 +164,13 @@ including the Steward API credentials the operator provisioned.
 
 ---
 
-### 3. Malicious co-tenant in hosted deploy
+### 3. Malicious co-tenant in a multi-tenant self-hosted deploy
 
-**Capability.** On the hosted `steward.fi` tier, another tenant on the
-same infrastructure is adversarial. They try to read, modify, or
-exhaust resources belonging to another tenant.
+**Capability.** There is no hosted `steward.fi` service; Steward ships
+self-hosted only. This adversary applies when an operator chooses to
+run multiple tenants in a single self-hosted deployment. Another
+tenant on the same infrastructure is adversarial and tries to read,
+modify, or exhaust resources belonging to another tenant.
 
 **What Steward defends:**
 

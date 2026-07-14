@@ -115,7 +115,7 @@ sequenceDiagram
 
 Steward currently supports two database modes:
 
-- **Hosted/PostgreSQL mode** — API and proxy processes connect to PostgreSQL using `DATABASE_URL`. This is what Docker Compose and production-style deployments use.
+- **PostgreSQL mode** — API and proxy processes connect to PostgreSQL using `DATABASE_URL`. This is what Docker Compose and durable self-hosted deployments use.
 - **Embedded/PGLite mode** — `bun run start:local` runs the API against PGLite, persisted at `~/.steward/data` unless `STEWARD_PGLITE_MEMORY=true` is set. This is intended for local development, desktop sidecars, and tests.
 
 ## Deployment Topology
@@ -173,7 +173,7 @@ flowchart LR
     TK2 --> W2
 ```
 
-- **Tenants** are isolated at the database level — each tenant's agents, secrets, and policies are scoped
+- **Tenants** are isolated at the service layer: every tenant-scoped query filters on `tenantId` and rows carry a composite foreign key to their tenant. This is not database row-level security (RLS is not implemented).
 - **Agents** authenticate with JWTs scoped to their tenant and agent ID
 - **Secrets** are encrypted with per-tenant encryption keys (key hierarchy: master → tenant → secret)
 - **Policies** are evaluated per-agent within their tenant context
