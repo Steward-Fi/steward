@@ -720,17 +720,16 @@ export interface ProviderPolicyRule {
  * default-deny. Never throws for a policy reason: an unexpected internal error
  * becomes hard_deny/POLICY_EVALUATOR_ERROR.
  *
- * NAMING / COEXISTENCE WITH THE LEGACY-PLANE FIX (PR #187):
- * PR #187 adds a `composeCapabilityIntentDecision(rules, ctx)` that fixes the
- * SAME allow-over-approval precedence bug for the LEGACY invoke.ts plane, reusing
+ * NAMING / COEXISTENCE WITH THE LEGACY-PLANE FIX (#187, merged on develop):
+ * `composeCapabilityIntentDecision(rules, ctx)` (above) fixes the SAME
+ * allow-over-approval precedence bug for the LEGACY invoke.ts plane, reusing
  * `ContributedPolicyRule`/`EvaluatorContext` and returning a
  * `CapabilityIntentCompositionResult`. This function is the AUTHORITY-plane analog
  * required by PR2 spec §6.2/§6.3: it returns the full `ProviderPolicyEvaluationV1`
  * document (per-rule results with configured effect / outcome / reason code) that
  * the provider-action service persists as an immutable policy decision. The two
- * are deliberately distinct exports so PR2 and #187 merge cleanly in any order;
- * both enforce identical precedence (hard_deny > approval_required > allow >
- * default-deny).
+ * are deliberately distinct exports; both enforce identical precedence
+ * (hard_deny > approval_required > allow > default-deny).
  */
 export function composeProviderActionPolicyDecision(
   rules: ReadonlyArray<ProviderPolicyRule>,
