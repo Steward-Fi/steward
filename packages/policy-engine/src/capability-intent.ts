@@ -59,6 +59,7 @@ import type {
   ContributedPolicyRule,
   PolicyRuleContribution,
 } from "@stwd/shared";
+import { describeThrown } from "@stwd/shared";
 import type { EvaluatorContext } from "./evaluators";
 
 /** the contributed rule-type discriminator. */
@@ -573,11 +574,14 @@ export function composeCapabilityIntentDecision(
         scopedElsewhere = false;
       }
       if (scopedElsewhere) continue;
+      // describeThrown NEVER throws for any hostile value (throwing
+      // toString/valueOf/Symbol.toPrimitive, Proxy message getter, etc.), so
+      // building this fail-closed reason cannot itself unwind past the return.
       return {
         effect: "hard_deny",
-        reason: `capability-intent: evaluator error for capability "${name}" (${
-          err instanceof Error ? err.message : String(err)
-        })`,
+        reason: `capability-intent: evaluator error for capability "${name}" (${describeThrown(
+          err,
+        )})`,
       };
     }
 

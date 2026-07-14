@@ -473,6 +473,87 @@ describe("invoke: default-deny + effects", () => {
     const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
     expect(res.status).toBe(403);
   });
+
+  // ROUND-2 P0: a GOVERNING capability-intent rule whose evaluation throws a
+  // value whose toString/valueOf/Symbol.toPrimitive all throw used to escape the
+  // composer's catch (which did `String(err)`) as a raw exception => HTTP 500 at
+  // this invoke boundary. It must now fail closed as a 403, NEVER a 500, even
+  // beside a passing allow. The `constraints` getter throws the hostile value
+  // during parseConfig, reproducing an evaluator throw on the governing rule.
+  test("P0: governing rule throws an UNPRINTABLE value => 403 (hard deny, NOT 500), even beside a passing allow", async () => {
+    const hostile = {
+      toString() {
+        throw new Error("toString throws");
+      },
+      valueOf() {
+        throw new Error("valueOf throws");
+      },
+      [Symbol.toPrimitive]() {
+        throw new Error("toPrimitive throws");
+      },
+    };
+    const hostileConfig: Record<string, unknown> = {
+      capabilities: ["github.pr.comment"],
+      effect: "allow",
+    };
+    Object.defineProperty(hostileConfig, "constraints", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw hostile;
+      },
+    });
+    const hostileRule: PolicyRule = {
+      id: "hostile-throw",
+      type: "capability-intent" as unknown as PolicyRule["type"],
+      enabled: true,
+      config: hostileConfig as unknown as Record<string, unknown>,
+    };
+    await seedCapabilityWithGrant();
+    currentPolicySet = [capRule("allow-rule", "allow", undefined, ["github.*"]), hostileRule];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+    // Must NOT be a 500 (the pre-fix escape).
+    expect(res.status).not.toBe(500);
+  });
+
+  test("P0: governing rule throws a Proxy(Error) with a throwing `.message` getter => 403, NOT 500", async () => {
+    const hostile = new Proxy(new Error("real"), {
+      get(_t, prop) {
+        if (prop === "message") throw new Error("hostile message getter");
+        if (prop === "toString" || prop === Symbol.toPrimitive || prop === "valueOf") {
+          return () => {
+            throw new Error("hostile coercion");
+          };
+        }
+        return undefined;
+      },
+    });
+    const hostileConfig: Record<string, unknown> = {
+      capabilities: ["github.pr.comment"],
+      effect: "allow",
+    };
+    Object.defineProperty(hostileConfig, "constraints", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw hostile;
+      },
+    });
+    const hostileRule: PolicyRule = {
+      id: "hostile-proxy",
+      type: "capability-intent" as unknown as PolicyRule["type"],
+      enabled: true,
+      config: hostileConfig as unknown as Record<string, unknown>,
+    };
+    await seedCapabilityWithGrant();
+    currentPolicySet = [hostileRule];
+    const app = buildApp(harness!.db, { agent: true });
+    const res = await app.request("/capabilities/github.pr.comment/invoke", invokeReq({}));
+    expect(res.status).toBe(403);
+    expect(res.status).not.toBe(500);
+  });
 });
 
 describe("invoke: body parsing", () => {

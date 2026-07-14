@@ -249,32 +249,57 @@ export async function invokeCapabilityThroughProxy(
     capabilityInvokeCount1h: count1h,
   };
 
-  await engine.evaluate(capRules, evaluatorCtx);
+  // FAIL-CLOSED OUTER BOUNDARY. Both the generic engine sweep and the canonical
+  // composer are defensively non-throwing by contract (the composer wraps every
+  // per-rule body; the registry describes hostile thrown values with a
+  // non-throwing helper). But this invoke path is a security gate: a throw here
+  // — from either call, a hostile jsonb getter deserializing `r.config`, or any
+  // unforeseen path — must DENY (403), never escape as a raw 500 (which callers
+  // could treat as a transient/retryable failure and which reveals nothing about
+  // the gate). We therefore wrap the entire evaluate+compose region and translate
+  // ANY escape into a fail-closed deny.
+  let decision: ReturnType<typeof composeCapabilityIntentDecision>;
+  try {
+    await engine.evaluate(capRules, evaluatorCtx);
 
-  // CANONICAL PRECEDENCE (master-plan §5.3): the policy-engine helper composes
-  // ALL enabled capability-intent rules in the one true order — hard deny (incl.
-  // malformed config / failed hard constraint) > approval_required > allow >
-  // default-deny. This is the single source of truth: an applicable
-  // require-approval can NEVER be shadowed by a matching allow, and a hard deny
-  // can never be softened into an approval.
-  //
-  // We pass the FULL enabled capability-intent set (not a pre-filtered
-  // "governing" subset): a MALFORMED rule config (e.g. a misspelled
-  // `capabilities` key or an unsupported glob) makes a raw governing-match filter
-  // return false, which would silently DROP the broken gate and fail OPEN if a
-  // sibling allow matched. The composer instead parses every rule and hard-denies
-  // on ANY malformation (fail closed), treats well-formed non-governing rules as
-  // inert, and applies the effective default-deny when no governing allow passes
-  // (covers the previous "no policy authorizes this capability" 403).
-  const decision = composeCapabilityIntentDecision(
-    capRules.map((r) => ({
-      id: r.id,
-      type: r.type as string,
-      enabled: r.enabled,
-      config: r.config,
-    })),
-    evaluatorCtx,
-  );
+    // CANONICAL PRECEDENCE (master-plan §5.3): the policy-engine helper composes
+    // ALL enabled capability-intent rules in the one true order — hard deny
+    // (incl. malformed config / failed hard constraint) > approval_required >
+    // allow > default-deny. This is the single source of truth: an applicable
+    // require-approval can NEVER be shadowed by a matching allow, and a hard deny
+    // can never be softened into an approval.
+    //
+    // We pass the FULL enabled capability-intent set (not a pre-filtered
+    // "governing" subset): a MALFORMED rule config (e.g. a misspelled
+    // `capabilities` key or an unsupported glob) makes a raw governing-match
+    // filter return false, which would silently DROP the broken gate and fail
+    // OPEN if a sibling allow matched. The composer instead parses every rule and
+    // hard-denies on ANY malformation (fail closed), treats well-formed
+    // non-governing rules as inert, and applies the effective default-deny when
+    // no governing allow passes (covers the previous "no policy authorizes this
+    // capability" 403).
+    decision = composeCapabilityIntentDecision(
+      capRules.map((r) => ({
+        id: r.id,
+        type: r.type as string,
+        enabled: r.enabled,
+        config: r.config,
+      })),
+      evaluatorCtx,
+    );
+  } catch {
+    // A throw escaped the (defensively non-throwing) evaluation region. Fail
+    // closed: deny, never 500. The reason is intentionally generic — it must not
+    // leak internals and must not itself risk stringifying a hostile value.
+    return recordAndJson(store, {
+      tenantId,
+      agentId,
+      capabilityId: cap.id,
+      decision: "deny",
+      status: 403,
+      payload: { ok: false, error: "policy evaluation failed" } satisfies ApiResponse,
+    });
+  }
 
   if (decision.effect === "hard_deny") {
     return recordAndJson(store, {

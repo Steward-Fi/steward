@@ -18,6 +18,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import type { ContributedPolicyRule, PolicyRule, SignRequest } from "@stwd/shared";
+import { UNPRINTABLE_THROWN_VALUE } from "@stwd/shared";
 import {
   CAPABILITY_INTENT_RULE_TYPE,
   capabilityIntentContribution,
@@ -1093,5 +1094,126 @@ describe("capability-intent — malformed-input precedence is SCOPED to governin
     expect(composeCapabilityIntentDecision([malformedElsewhere, validAllow], ctx).effect).toBe(
       "allow",
     );
+  });
+});
+
+describe("capability-intent — composer catch is fail-closed against HOSTILE thrown values (P0)", () => {
+  // ROUND-2 P0: the per-rule catch used to build its deny reason with
+  //   `err instanceof Error ? err.message : String(err)`
+  // A thrown value whose toString/valueOf/Symbol.toPrimitive (or a Proxy
+  // `.message` getter) THROWS made that catch block ITSELF throw, unwinding past
+  // the fail-closed `return { effect: "hard_deny" }` and escaping the composer as
+  // a raw exception (=> HTTP 500 at the invoke boundary). These tests assert the
+  // composer NEVER throws and ALWAYS hard-denies for a governing rule whose
+  // evaluation throws an unprintable value.
+  const ctx = makeContext({ capability: cap() });
+
+  // A config that is a GOVERNING match for `github.pr.comment` (valid selector,
+  // so it is not scoped-elsewhere / inert) but whose `constraints` access throws
+  // `thrown` during parseConfig — reproducing an evaluator throw on the governing
+  // rule. `capabilities` and `effect` are plain so recoverSelectorMatch succeeds.
+  function governingConfigThatThrows(thrown: unknown): ContributedPolicyRule {
+    const config: Record<string, unknown> = {
+      capabilities: ["github.pr.comment"],
+      effect: "allow",
+    };
+    Object.defineProperty(config, "constraints", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw thrown;
+      },
+    });
+    return { id: "hostile-throw", type: CAPABILITY_INTENT_RULE_TYPE, enabled: true, config };
+  }
+
+  it("thrown value with a throwing toString => hard_deny, NO exception (the exact probe)", () => {
+    const hostile = {
+      toString() {
+        throw new Error("secondary stringify failure");
+      },
+    };
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([governingConfigThatThrows(hostile)], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+  });
+
+  it("thrown value with throwing toString AND valueOf AND Symbol.toPrimitive => hard_deny, NO exception", () => {
+    const hostile = {
+      toString() {
+        throw new Error("toString throws");
+      },
+      valueOf() {
+        throw new Error("valueOf throws");
+      },
+      [Symbol.toPrimitive]() {
+        throw new Error("toPrimitive throws");
+      },
+    };
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([governingConfigThatThrows(hostile)], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+    // Reason falls back to the static unprintable message (never leaks / throws).
+    expect(d?.reason).toContain(UNPRINTABLE_THROWN_VALUE);
+  });
+
+  it("thrown Proxy(Error) whose `.message` getter throws => hard_deny, NO exception", () => {
+    // instanceof Error is TRUE for this Proxy, so the old `.message` read would
+    // have invoked the throwing get-trap and escaped.
+    const hostile = new Proxy(new Error("real"), {
+      get(_t, prop) {
+        if (prop === "message") throw new Error("hostile message getter");
+        // Also make string coercion hostile so we exercise the full fallback.
+        if (prop === "toString" || prop === Symbol.toPrimitive || prop === "valueOf") {
+          return () => {
+            throw new Error("hostile coercion");
+          };
+        }
+        return undefined;
+      },
+    });
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([governingConfigThatThrows(hostile)], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("hard_deny");
+    expect(d?.reason).toContain(UNPRINTABLE_THROWN_VALUE);
+  });
+
+  it("a hostile throw on a NON-governing (scoped-elsewhere) rule stays inert; sibling allow still wins", () => {
+    // The hostile rule's selector is well-formed and scoped to gitlab.* (NOT this
+    // capability), so the throw is on an inert rule and must not deny.
+    const hostile = {
+      toString() {
+        throw new Error("boom");
+      },
+    };
+    const elsewhereConfig: Record<string, unknown> = {
+      capabilities: ["gitlab.*"],
+      effect: "deny",
+    };
+    Object.defineProperty(elsewhereConfig, "constraints", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw hostile;
+      },
+    });
+    const hostileElsewhere: ContributedPolicyRule = {
+      id: "hostile-elsewhere",
+      type: CAPABILITY_INTENT_RULE_TYPE,
+      enabled: true,
+      config: elsewhereConfig,
+    };
+    const validAllow = rule({ capabilities: ["github.*"], effect: "allow" }, "allow-rule");
+    let d: ReturnType<typeof composeCapabilityIntentDecision> | undefined;
+    expect(() => {
+      d = composeCapabilityIntentDecision([hostileElsewhere, validAllow], ctx);
+    }).not.toThrow();
+    expect(d?.effect).toBe("allow");
   });
 });
