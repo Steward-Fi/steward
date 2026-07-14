@@ -1,11 +1,11 @@
 ---
 title: "Audit Logging"
-description: "Immutable audit trail for every agent action — compliance, debugging, and cost tracking."
+description: "Tamper-evident audit records and signed evidence exports for instrumented Steward actions."
 ---
 
-# Audit Logging
+# Audit logging
 
-Every action in Steward is logged: every signing request, every API proxy call, every policy decision, every credential access. The audit log is append-only, queryable, and exportable.
+Instrumented Steward routes emit queryable and exportable audit events for signing, proxy, policy, credential, and approval activity. Coverage is route-specific. The tenant-scoped HMAC chain and Ed25519 checkpoints make exported evidence tamper-evident after the bundled public key is separately matched to a trusted signing key or fingerprint.
 
 ## What's Logged
 
@@ -153,10 +153,10 @@ Webhook events:
 
 Steward's audit log supports compliance requirements:
 
-- **Immutability** — Append-only log; entries cannot be modified or deleted
-- **Retention** — Configurable per-tenant (default: 90 days hot storage)
-- **Export** — API endpoint for bulk export (CSV/JSON)
-- **Partitioning** — Monthly partitioned tables for query performance at scale
+- **Tamper evidence**: HMAC-linked events and Ed25519-signed checkpoints expose modification after the bundled public key is separately matched to a trusted signing key or fingerprint
+- **Retention**: configurable per tenant
+- **Export**: API endpoints for event export and signed evidence bundles
+- **Trust limit**: an operator controlling all relevant keys can fabricate a self-consistent history
 
 ## Related
 

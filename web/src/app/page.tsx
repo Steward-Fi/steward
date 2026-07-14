@@ -48,18 +48,18 @@ function Hero() {
               className="hero-rise font-display text-hero-landing font-extrabold leading-[0.94] tracking-[-0.035em] text-balance"
               style={{ animationDelay: "0.15s" }}
             >
-              Give agents power.
+              Give agents scope.
               <br />
-              <span className={accent}>Never the keys.</span>
+              <span className={accent}>Keep keys behind the boundary.</span>
             </h1>
 
             <p
               className="hero-rise mt-6 text-lg text-text-secondary max-w-lg leading-relaxed text-pretty"
               style={{ animationDelay: "0.3s" }}
             >
-              The self-hostable authority plane for private enterprise agents. Give agents scoped
-              wallet and API capabilities without exposing secrets, with policy checks, human
-              approval, and an HMAC-chained execution record.
+              Open-source, self-hostable control for configured agent API calls and wallets. Scoped
+              grants, exact-request approval, a governed primary EVM sign path, and signed evidence
+              you can verify offline.
             </p>
 
             <div
@@ -72,7 +72,7 @@ function Hero() {
               <span className="text-border">/</span>
               <span>Your custodian</span>
               <span className="text-border">/</span>
-              <span className={accent}>Your authority plane</span>
+              <span className={accent}>Your governed boundary</span>
             </div>
 
             <div
@@ -158,16 +158,16 @@ function SecretSprawlSection() {
               The problem
             </p>
             <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
-              One Steward credential.
+              One scoped credential.
               <br />
-              <span className={accent}>Zero raw secrets.</span>
+              <span className={accent}>Provider keys stay server-side.</span>
             </h2>
           </Reveal>
           <Reveal delay={0.1}>
             <p className="mt-6 text-text-secondary leading-relaxed max-w-md text-pretty">
-              Handing an agent an API key or a signing key is not security. It is a secret with no
-              boundary, no revocation, and no record. Steward gives the agent one scoped credential
-              and keeps the real authority behind a policy plane.
+              Standing API keys and signing keys widen the blast radius. Steward gives supported
+              agent integrations a scoped credential while configured provider keys stay behind the
+              proxy and governed wallet routes apply policy and approval.
             </p>
           </Reveal>
         </div>
@@ -205,13 +205,13 @@ function PipelineSection() {
     {
       idx: "00",
       label: "Agent intent",
-      body: "The model asks for a privileged action. It never holds the underlying authority.",
+      body: "The model asks for a privileged action through a supported Steward integration.",
       decision: false,
     },
     {
       idx: "01",
       label: "Identity + capability",
-      body: "Steward resolves who is asking and which scoped capabilities they hold.",
+      body: "Steward resolves the authenticated agent and its active capability grants.",
       decision: true,
     },
     {
@@ -223,13 +223,13 @@ function PipelineSection() {
     {
       idx: "03",
       label: "Simulation + execution",
-      body: "Where supported, the action is simulated, then signed and executed across the target rail.",
+      body: "Supported wallet routes sign or execute after their route-specific checks pass.",
       decision: true,
     },
     {
       idx: "04",
       label: "Audit + reconciliation",
-      body: "Requests, decisions, and effects land in an HMAC-chained, machine-readable record.",
+      body: "Instrumented routes emit HMAC-chained events and signed evidence exports.",
       decision: false,
     },
   ];
@@ -334,7 +334,7 @@ function ExecutionSection() {
     {
       tag: "proxy.inject",
       title: "Credential proxy",
-      body: "Outbound API calls get their credentials injected at the edge with zero key exposure to the agent, stripped from logs.",
+      body: "Configured provider calls receive credentials server-side instead of returning them to the supported agent caller.",
     },
     {
       tag: "grant.scope",
@@ -348,8 +348,8 @@ function ExecutionSection() {
     },
     {
       tag: "audit.log",
-      title: "Append-only audit",
-      body: "An HMAC-chained record of every request, decision, and effect. Tamper-evident and machine-readable end to end.",
+      title: "Signed audit evidence",
+      body: "Instrumented actions emit HMAC-chained events and Ed25519-signed bundles verifiable offline against a trusted key fingerprint.",
     },
   ];
 
@@ -367,9 +367,9 @@ function ExecutionSection() {
           </Reveal>
           <Reveal delay={0.1}>
             <p className="mt-6 text-text-secondary leading-relaxed max-w-sm text-pretty">
-              Today Steward provides wallet signing, credential proxying, capability grants,
-              approval workflows, and an HMAC-chained audit record. Trading packages are optional
-              extensions.
+              Steward ships wallet signing, configured credential proxying, scoped grants, exact
+              approval workflows, and signed audit exports. Enforcement coverage remains
+              surface-specific.
             </p>
           </Reveal>
         </div>
@@ -495,7 +495,7 @@ function AgentsSection() {
   const traits = [
     {
       t: "Autonomous execution",
-      d: "Actions fire at machine speed without a human in the loop, until policy says otherwise.",
+      d: "Supported actions can proceed automatically when their route-specific policy allows them.",
     },
     {
       t: "Persistent delegated authority",
@@ -507,7 +507,7 @@ function AgentsSection() {
     },
     {
       t: "Ambiguous-outcome recovery",
-      d: "Durable intents reconcile a dropped call so nothing is lost or executed twice.",
+      d: "Durable intents preserve state for reconciliation when an outcome is ambiguous.",
     },
     {
       t: "Machine-readable audit",
@@ -515,7 +515,7 @@ function AgentsSection() {
     },
     {
       t: "Emergency operator control",
-      d: "A human can freeze everything instantly, without shipping new code to the agent.",
+      d: "An operator can freeze supported signing paths without redeploying the agent.",
     },
   ];
 
@@ -566,7 +566,7 @@ function SpecsSection() {
     { value: "AES-256-GCM", label: "Encryption at rest" },
     { value: "Default deny", label: "Policy model" },
     { value: "7 EVM + Solana", label: "Chains supported" },
-    { value: "< 50ms", label: "Proxy overhead" },
+    { value: "Ed25519", label: "Signed checkpoints" },
   ];
 
   return (
@@ -603,7 +603,7 @@ function SpecsSection() {
 function ComparisonSection() {
   const rows = [
     { feature: "Source", steward: "Open source, MIT", vendor: "Closed, proprietary" },
-    { feature: "Hosting", steward: "Self-host or managed", vendor: "Hosted only" },
+    { feature: "Deployment", steward: "Self-hosted", vendor: "Vendor-defined" },
     {
       feature: "Custody",
       steward: "Operator-held root, optional KMS envelope",
@@ -616,9 +616,9 @@ function ComparisonSection() {
     },
     { feature: "Agent runtime", steward: "Bring your own", vendor: "Vendor-dependent" },
     {
-      feature: "Pricing",
-      steward: "No per-transaction toll",
-      vendor: "Per-seat + per-transaction",
+      feature: "Evidence",
+      steward: "Offline-verifiable signed bundles",
+      vendor: "Vendor-defined",
     },
   ];
 
@@ -717,7 +717,7 @@ function ComparisonSection() {
 
 // --- Open by design / CTA (the one centered moment) ---
 function OpenSourceSection() {
-  const pillars = ["MIT licensed", "Self-hostable", "Vendor-neutral", "No per-transaction toll"];
+  const pillars = ["MIT licensed", "Self-hostable", "Vendor-neutral", "Offline verification"];
 
   return (
     <section className="relative px-6 md:px-10 py-32 md:py-44 border-t border-border-subtle overflow-hidden">
@@ -735,9 +735,9 @@ function OpenSourceSection() {
         </Reveal>
         <Reveal delay={0.1}>
           <p className="mt-7 text-lg text-text-secondary leading-relaxed max-w-xl mx-auto text-pretty">
-            MIT-licensed, self-hostable, and vendor-neutral, with no per-transaction toll. Choose
-            your runtime, cloud, and custodian while keeping policy, approvals, and execution
-            records under operator control.
+            MIT-licensed, self-hostable, and vendor-neutral. Choose your runtime, cloud, identity
+            provider, and custodian while keeping policy, approvals, and signed evidence under
+            operator control.
           </p>
         </Reveal>
         <Reveal delay={0.16}>
@@ -791,7 +791,7 @@ function Footer() {
             <span className="font-display text-base font-bold tracking-tight">steward</span>
           </div>
           <p className="text-xs text-text-tertiary mt-1.5">
-            The self-hostable authority plane for private enterprise agents.
+            Open-source, self-hostable control for configured agent actions.
           </p>
         </div>
         <div className="flex items-center gap-6 text-sm text-text-secondary">

@@ -1,6 +1,6 @@
 # Steward
 
-**Steward is a governance layer for autonomous AI agents.** It provides encrypted wallet management, route-level policy gates, secret storage, credential injection, and embeddable React UI, so agents can transact on-chain and call external APIs without ever touching raw private keys or credentials.
+**Steward is an open-source, self-hostable governed credential proxy and policy and approval layer for agent provider actions and wallets.** Supported integrations use scoped grants and configured routes instead of receiving provider credentials directly. The primary EVM transaction sign path adds a signed, single-use execution authorization before raw signing.
 
 ## What It Does
 
@@ -34,9 +34,9 @@ Supported transactions and API calls flow through Steward routes, where they are
 
 | Primitive | What it does |
 |-----------|-------------|
-| **Wallet Vault** | AES-256-GCM encrypted key storage. Creates EVM + Solana keypairs per agent. Agents request signatures; private keys never leave the vault. |
+| **Wallet Vault** | AES-256-GCM encrypted key storage for EVM and Solana keypairs. Governed API routes request signatures without returning private keys to the caller. |
 | **Policy Engine** | Declarative rules evaluated by supported signing routes before Vault calls: spending limits, address whitelists, rate limits, time windows, chain filters, auto-approve thresholds. |
-| **Secret Vault** | Encrypted credential storage. The proxy injects secrets at request time; agents never see the raw values. |
+| **Secret Vault** | Encrypted credential storage. Configured proxy routes inject secrets server-side instead of returning them to the supported agent caller. |
 | **API Proxy** | Routes agent HTTP calls through Steward for credential injection, cost tracking, and audit logging. |
 | **Approval Queue** | Large or unusual transactions queue for human review before execution. |
 | **Webhooks** | Push notifications on `tx.pending`, `tx.signed`, `tx.approved`, `tx.denied`, `policy.violation`, `spend.threshold`. |

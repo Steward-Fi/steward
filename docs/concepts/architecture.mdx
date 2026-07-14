@@ -5,19 +5,19 @@ description: "How Steward's three pillars work together to secure autonomous age
 
 # Architecture
 
-Steward is the single chokepoint between an AI agent and the outside world. Every API call, every transaction, every secret access flows through Steward, gets policy-checked, gets logged, gets metered.
+Steward provides governed paths for configured agent provider calls and wallet operations. Only requests routed through supported Steward integrations receive these checks and audit events. Arbitrary agent network egress remains outside the boundary.
 
 ## Three Pillars
 
 <CardGroup cols={3}>
   <Card title="Wallet Vault" icon="vault">
-    Encrypted key storage with policy-enforced signing. Agents never see private keys.
+    Encrypted key storage for supported signing paths. Governed routes apply policy before signing.
   </Card>
   <Card title="Secret Vault" icon="key">
-    Encrypted credential storage with an API proxy. Agents never see API keys.
+    Encrypted credential storage with injection on configured proxy routes.
   </Card>
   <Card title="Policy Engine" icon="shield-check">
-    Declarative policy evaluation on every action. Default deny.
+    Declarative policy evaluation on enrolled, governed actions. Default deny.
   </Card>
 </CardGroup>
 

@@ -44,9 +44,9 @@ const metadataBase = (() => {
 
 export const metadata: Metadata = {
   metadataBase,
-  title: "Steward: self-hostable authority plane for enterprise agents",
+  title: "Steward: governed credentials and wallet actions for agents",
   description:
-    "Steward gives private enterprise agents scoped wallet and API capabilities without exposing secrets, routes sensitive actions through policy and human approval, and records execution evidence. Bring your own runtime, cloud, and custodian.",
+    "Open-source, self-hostable governed credential proxy and policy and approval layer for configured agent provider actions and wallets.",
   icons: {
     icon: [
       { url: "/favicon.ico", sizes: "32x32" },
@@ -57,9 +57,9 @@ export const metadata: Metadata = {
   },
   manifest: "/site.webmanifest",
   openGraph: {
-    title: "Steward: self-hostable authority plane for enterprise agents",
+    title: "Steward: governed credentials and wallet actions for agents",
     description:
-      "A self-hostable authority plane for private enterprise agents. Bring your own agent runtime, cloud, and custodian.",
+      "Scoped grants, exact-request approval, a governed primary EVM sign path, and signed evidence verifiable offline.",
     type: "website",
     images: [
       {
