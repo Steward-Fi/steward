@@ -1,0 +1,94 @@
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { PGlite } from "@electric-sql/pglite";
+import { createPGLiteDb } from "../pglite";
+
+setDefaultTimeout(120_000);
+const migrations = new URL("../../drizzle", import.meta.url).pathname;
+
+async function applyFile(client: PGlite, file: string) {
+  const sql = await readFile(join(migrations, file), "utf8");
+  for (const statement of sql.split("--> statement-breakpoint")) {
+    if (statement.trim()) await client.exec(statement);
+  }
+}
+
+async function applyThroughCurrentSchema(client: PGlite) {
+  const files = (await readdir(migrations))
+    .filter((file) => file.endsWith(".sql") && file !== "0079_workspace_provider_authority.sql")
+    .sort();
+  for (const file of files) await applyFile(client, file);
+}
+
+async function seedAuthority(client: PGlite) {
+  await client.exec(`
+    INSERT INTO tenants(id,name,api_key_hash) VALUES ('ta','A','ha'),('tb','B','hb');
+    INSERT INTO users(id,email,created_at,updated_at) VALUES
+      ('00000000-0000-4000-8000-000000000001','owner@example.test',now(),now());
+    INSERT INTO user_tenants(id,user_id,tenant_id,role) VALUES
+      ('00000000-0000-4000-8000-000000000011','00000000-0000-4000-8000-000000000001','ta','owner');
+    INSERT INTO agents(id,tenant_id,name,wallet_address) VALUES ('agent-a','ta','A','0xa'),('agent-b','tb','B','0xb');
+    INSERT INTO workspaces(id,tenant_id,key,name,environment,created_by) VALUES
+      ('00000000-0000-4000-8000-000000000101','ta','client-a','Client A','production','00000000-0000-4000-8000-000000000001'),
+      ('00000000-0000-4000-8000-000000000102','tb','client-b','Client B','production','00000000-0000-4000-8000-000000000001');
+    INSERT INTO provider_accounts(id,tenant_id,workspace_id,adapter_key,external_ref,display_name) VALUES
+      ('00000000-0000-4000-8000-000000000201','ta','00000000-0000-4000-8000-000000000101','github','a','A');
+  `);
+}
+
+describe("provider authority migration", () => {
+  test("migrates an empty database and creates the authority tables", async () => {
+    const { client } = await createPGLiteDb("memory://");
+    const result = await client.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('workspaces','provider_accounts','provider_operations','provider_role_bindings','provider_grants') ORDER BY table_name`,
+    );
+    expect(result.rows.map((row) => row.table_name)).toEqual([
+      "provider_accounts",
+      "provider_grants",
+      "provider_operations",
+      "provider_role_bindings",
+      "workspaces",
+    ]);
+    await client.close();
+  });
+
+  test("upgrades the current schema without changing existing rows", async () => {
+    const client = new PGlite("memory://");
+    await applyThroughCurrentSchema(client);
+    await client.exec(
+      `INSERT INTO tenants(id,name,api_key_hash) VALUES ('existing','Existing','existing-hash')`,
+    );
+    await applyFile(client, "0079_workspace_provider_authority.sql");
+    const tenant = await client.query<{ name: string }>(
+      "SELECT name FROM tenants WHERE id='existing'",
+    );
+    const table = await client.query<{ r: string | null }>(
+      "SELECT to_regclass('public.provider_grants')::text AS r",
+    );
+    expect(tenant.rows[0]?.name).toBe("Existing");
+    expect(table.rows[0]?.r).toBe("provider_grants");
+    await client.close();
+  });
+
+  test("rejects cross-tenant/workspace references and ownership moves", async () => {
+    const { client } = await createPGLiteDb("memory://");
+    await seedAuthority(client);
+    await expect(
+      client.exec(
+        `INSERT INTO provider_accounts(id,tenant_id,workspace_id,adapter_key,external_ref,display_name) VALUES ('00000000-0000-4000-8000-000000000202','tb','00000000-0000-4000-8000-000000000101','github','bad','bad')`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      client.exec(
+        `INSERT INTO provider_grants(id,tenant_id,workspace_id,provider_account_id,agent_id,operation_keys,expires_at,granted_by_user_id,reason) VALUES ('00000000-0000-4000-8000-000000000301','ta','00000000-0000-4000-8000-000000000101','00000000-0000-4000-8000-000000000201','agent-b',ARRAY['github.issue.list'],now()+interval '1 hour','00000000-0000-4000-8000-000000000001','bad')`,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      client.exec(
+        `UPDATE provider_accounts SET workspace_id='00000000-0000-4000-8000-000000000102' WHERE id='00000000-0000-4000-8000-000000000201'`,
+      ),
+    ).rejects.toThrow(/immutable/);
+    await client.close();
+  });
+});
