@@ -255,6 +255,25 @@ const POLICY_DENY_HTTP: Record<string, number> = {
 
 // ─── Service ──────────────────────────────────────────────────────────────────
 
+/**
+ * The subset of the drizzle db handle the evaluators use. Both the top-level db
+ * and a `db.transaction(tx => ...)` executor satisfy it, so access + policy can
+ * be evaluated INSIDE the persisting transaction against the SAME committed
+ * snapshot as the binding insert (closes the eval->commit TOCTOU window; the FK
+ * constraints then guarantee the referenced rows still exist at commit).
+ */
+type DbBase = ReturnType<typeof getDb>;
+/** The db handle OR a transaction executor — both support the queries the
+ *  evaluators run, so access/policy can be evaluated inside the tx. */
+type DbExecutor = DbBase | Parameters<Parameters<DbBase["transaction"]>[0]>[0];
+
+/** The non-null policy evaluation result shape (access=allow path). */
+type PolicyResult = {
+  doc: PersistedPolicyDecisionV1;
+  evaluation: ProviderPolicyEvaluationV1;
+  decisionId: string;
+};
+
 class ProviderActionService {
   private db() {
     return getDb();
@@ -328,7 +347,7 @@ class ProviderActionService {
           httpStatus: 409,
         };
       }
-      return this.outcomeFromBinding(priorBinding);
+      return await this.outcomeFromBinding(priorBinding);
     }
 
     // ── Build the request envelope + hash. ──
@@ -344,67 +363,75 @@ class ProviderActionService {
 
     const intentId = `pa_${randomUUID()}`;
 
-    // ── Evaluate access + policy OUTSIDE-but-consistent, then persist in a tx. ──
-    // Access is evaluated against the resolved, stable rows (their revisions are
-    // captured in the decision). Policy runs only on allow.
+    // ── Step 2: single transaction — evaluate access + policy against the SAME
+    // committed snapshot as the inserts (closes the eval->commit TOCTOU window),
+    // then persist intent + binding + required-audit outbox. ──
     const accessDecisionId = randomUUID();
-    const access = await this.evaluateAccess({
-      tenantId,
-      workspaceId: input.workspaceId,
-      actorAgentId,
-      account,
-      operation,
-      environment,
-      decisionId: accessDecisionId,
-      intentId,
-    });
-
+    // Outer-scope handles the tx fills so the post-commit branching can read them.
+    let access!: { effect: "allow" | "deny"; doc: PersistedAccessDecisionV1 };
     let policy: {
       doc: PersistedPolicyDecisionV1;
       evaluation: ProviderPolicyEvaluationV1;
       decisionId: string;
     } | null = null;
-    if (access.effect === "allow") {
-      policy = await this.evaluatePolicy({
-        tenantId,
-        workspaceId: input.workspaceId,
-        actorAgentId,
-        operation,
-        build,
-        intentId,
-        requestHash,
-        actionDigest,
-      });
-    }
+    const effects: {
+      access: "allow" | "deny";
+      policy: "not_evaluated" | "hard_deny" | "approval_required" | "allow";
+      status: string;
+    } = { access: "deny", policy: "not_evaluated", status: "denied" };
 
-    // Derive final status + effects.
-    const accessEffect: "allow" | "deny" = access.effect;
-    const policyEffect: "not_evaluated" | "hard_deny" | "approval_required" | "allow" =
-      access.effect === "deny"
-        ? "not_evaluated"
-        : (policy as NonNullable<typeof policy>).doc.effect;
-
-    let status: string;
-    if (accessEffect === "deny") status = "denied";
-    else if (policyEffect === "hard_deny") status = "denied";
-    else if (policyEffect === "approval_required") status = "pending_approval";
-    else status = "allowed_stub";
-
-    const accessDecisionHash = sha256HexPrefixed(jcsStringify(access.doc));
-    const policyDecisionHash = policy ? sha256HexPrefixed(jcsStringify(policy.doc)) : null;
-
-    // ── Step 2: single transaction (intent + binding + outbox). ──
     try {
       await this.db().transaction(async (tx) => {
+        // Access is evaluated against the tx snapshot; the strict composite FKs on
+        // the binding then guarantee the referenced actor/workspace/account/
+        // operation rows still exist at commit.
+        access = await this.evaluateAccess(tx, {
+          tenantId,
+          workspaceId: input.workspaceId,
+          actorAgentId,
+          account,
+          operation,
+          environment,
+          decisionId: accessDecisionId,
+          intentId,
+        });
+        // Policy runs only on a successful access decision.
+        policy =
+          access.effect === "allow"
+            ? await this.evaluatePolicy({
+                tenantId,
+                workspaceId: input.workspaceId,
+                actorAgentId,
+                operation,
+                build,
+                intentId,
+                requestHash,
+                actionDigest,
+              })
+            : null;
+
+        effects.access = access.effect;
+        effects.policy =
+          access.effect === "deny" ? "not_evaluated" : (policy as PolicyResult).doc.effect;
+        if (effects.access === "deny") effects.status = "denied";
+        else if (effects.policy === "hard_deny") effects.status = "denied";
+        else if (effects.policy === "approval_required") effects.status = "pending_approval";
+        else effects.status = "allowed_stub";
+
+        const accessDecisionHash = sha256HexPrefixed(jcsStringify(access.doc));
+        const policyDecisionHash = policy
+          ? sha256HexPrefixed(jcsStringify((policy as PolicyResult).doc))
+          : null;
+
         await tx.insert(intents).values({
           id: intentId,
           tenantId,
           agentId: actorAgentId,
           intentType: "provider-action",
           status:
-            status === "denied"
+            effects.status === "denied"
               ? "rejected"
-              : status === "pending_approval"
+              : effects.status === "pending_approval"
                 ? "pending"
                 : "authorized",
           resourceType: "provider-action",
@@ -431,7 +458,7 @@ class ProviderActionService {
           idempotencyKeyHash: input.idempotencyKeyHash,
           safeSummary: build.safeSummary,
           accessDecisionId,
-          accessEffect,
+          accessEffect: effects.access,
           accessReasonCode: access.doc.reasonCode,
           matchedBindingIds: access.doc.matchedBindingIds,
           matchedGrantIds: access.doc.matchedGrantIds,
@@ -439,7 +466,7 @@ class ProviderActionService {
           accessDecision: access.doc as unknown as Record<string, unknown>,
           accessDecisionHash,
           policyDecisionId: policy ? policy.decisionId : null,
-          policyEffect,
+          policyEffect: effects.policy,
           policyReasonCodes: policy ? policy.doc.reasonCodes : [],
           policyResults: policy
             ? (policy.doc.policyResults as unknown as Array<Record<string, unknown>>)
@@ -447,7 +474,7 @@ class ProviderActionService {
           policyRevisionHash: policy ? policy.doc.policyRevisionHash : null,
           policyDecision: policy ? (policy.doc as unknown as Record<string, unknown>) : null,
           policyDecisionHash,
-          status,
+          status: effects.status,
         });
 
         // Required audit intent -> transactional outbox (drained post-commit).
@@ -455,9 +482,9 @@ class ProviderActionService {
           tenantId,
           intentId,
           action:
-            status === "denied"
+            effects.status === "denied"
               ? "provider.action.denied"
-              : status === "pending_approval"
+              : effects.status === "pending_approval"
                 ? "provider.action.approval_required"
                 : "provider.action.allowed",
           resourceType: "provider-action",
@@ -469,19 +496,19 @@ class ProviderActionService {
             requestHash,
             accessDecisionId,
             accessDecisionHash,
-            accessEffect,
+            accessEffect: effects.access,
             accessReasonCode: access.doc.reasonCode,
             policyDecisionId: policy?.decisionId ?? null,
             policyDecisionHash,
-            policyEffect,
+            policyEffect: effects.policy,
             policyReasonCodes: policy?.doc.reasonCodes ?? [],
-            status,
+            status: effects.status,
             requestId: input.requestId ?? null,
           },
         });
       });
     } catch {
-      // Any persistence failure denies; the stub is never called.
+      // Any evaluation or persistence failure denies; the stub is never called.
       return {
         kind: "evidence_failure",
         code: "EVIDENCE_DECISION_PERSIST_FAILED",
@@ -501,7 +528,7 @@ class ProviderActionService {
     }
 
     // ── Terminal outcomes for deny / approval. ──
-    if (accessEffect === "deny") {
+    if (effects.access === "deny") {
       return {
         kind: "access_denied",
         code: access.doc.reasonCode,
@@ -511,8 +538,8 @@ class ProviderActionService {
         actionDigest,
       };
     }
-    if (policyEffect === "hard_deny") {
-      const code = (policy as NonNullable<typeof policy>).doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
+    if (effects.policy === "hard_deny") {
+      const code = (policy as PolicyResult | null)?.doc.reasonCodes[0] ?? "POLICY_HARD_DENY";
       return {
         kind: "policy_denied",
         code,
@@ -522,7 +549,7 @@ class ProviderActionService {
         actionDigest,
       };
     }
-    if (policyEffect === "approval_required") {
+    if (effects.policy === "approval_required") {
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -615,16 +642,19 @@ class ProviderActionService {
   }
 
   // ── Access evaluation (spec §6.1) ──
-  private async evaluateAccess(args: {
-    tenantId: string;
-    workspaceId: string;
-    actorAgentId: string;
-    account: typeof providerAccounts.$inferSelect;
-    operation: typeof providerOperations.$inferSelect;
-    environment: PersistedAccessDecisionV1["environment"];
-    decisionId: string;
-    intentId: string;
-  }): Promise<{ effect: "allow" | "deny"; doc: PersistedAccessDecisionV1 }> {
+  private async evaluateAccess(
+    db: DbExecutor,
+    args: {
+      tenantId: string;
+      workspaceId: string;
+      actorAgentId: string;
+      account: typeof providerAccounts.$inferSelect;
+      operation: typeof providerOperations.$inferSelect;
+      environment: PersistedAccessDecisionV1["environment"];
+      decisionId: string;
+      intentId: string;
+    },
+  ): Promise<{ effect: "allow" | "deny"; doc: PersistedAccessDecisionV1 }> {
     const decidedAt = new Date().toISOString();
     const now = new Date();
     const {
@@ -638,7 +668,7 @@ class ProviderActionService {
       intentId,
     } = args;
 
-    const [workspace] = await this.db()
+    const [workspace] = await db
       .select()
       .from(workspaces)
       .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, workspaceId)))
@@ -683,7 +713,7 @@ class ProviderActionService {
     });
 
     // Actor must be an active agent for the tenant.
-    const [agent] = await this.db()
+    const [agent] = await db
       .select({ id: agents.id })
       .from(agents)
       .where(and(eq(agents.tenantId, tenantId), eq(agents.id, actorAgentId)))
@@ -710,7 +740,7 @@ class ProviderActionService {
     }
 
     // Role bindings governing this agent + workspace.
-    const bindingRows = await this.db()
+    const bindingRows = await db
       .select()
       .from(providerRoleBindings)
       .where(
@@ -734,7 +764,7 @@ class ProviderActionService {
       return false;
     });
 
-    const grantRows = await this.db()
+    const grantRows = await db
       .select()
       .from(providerGrants)
       .where(
@@ -981,7 +1011,9 @@ class ProviderActionService {
     };
   }
 
-  private outcomeFromBinding(b: typeof providerActionBindings.$inferSelect): ProviderActionOutcome {
+  private async outcomeFromBinding(
+    b: typeof providerActionBindings.$inferSelect,
+  ): Promise<ProviderActionOutcome> {
     if (b.status === "denied") {
       if (b.accessEffect === "deny")
         return {
@@ -1011,7 +1043,58 @@ class ProviderActionService {
         requestHash: b.requestHash,
         actionDigest: b.actionDigest,
       };
-    // allowed_stub / stub_succeeded / stub_failed
+    // A binding still in `allowed_stub` means the ORIGINAL request committed the
+    // decision but did NOT yet complete the required-audit drain + stub call (it
+    // crashed / lost the connection between commit and the status transition). A
+    // replay MUST NOT report a fabricated `stub_succeeded`. Instead we
+    // idempotently COMPLETE the pending action: re-drain the required audit, then
+    // run the stub and record the narrow allowed_stub -> stub_succeeded|stub_failed
+    // transition. If audit still cannot be drained we deny (evidence unavailable)
+    // with the stub never called.
+    if (b.status === "allowed_stub") {
+      const drained = await this.drainAuditOutbox(b.tenantId, b.intentId).catch(() => false);
+      if (!drained) {
+        return {
+          kind: "evidence_failure",
+          code: "EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE",
+          httpStatus: 503,
+          intentId: b.intentId,
+        };
+      }
+      let stub: ProviderActionStubResult;
+      try {
+        stub = await executeProviderActionStub(b.intentId);
+      } catch {
+        return {
+          kind: "backend_unavailable",
+          code: "BACKEND_STUB_UNAVAILABLE",
+          httpStatus: 503,
+          intentId: b.intentId,
+          requestHash: b.requestHash,
+          actionDigest: b.actionDigest,
+        };
+      }
+      await this.db()
+        .update(providerActionBindings)
+        .set({ status: stub.status, updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerActionBindings.intentId, b.intentId),
+            eq(providerActionBindings.status, "allowed_stub"),
+          ),
+        );
+      return {
+        kind: "allowed",
+        code: "POLICY_ALLOW",
+        httpStatus: 200,
+        intentId: b.intentId,
+        requestHash: b.requestHash,
+        actionDigest: b.actionDigest,
+        stub,
+      };
+    }
+
+    // stub_succeeded / stub_failed: terminal, report the recorded result.
     return {
       kind: "allowed",
       code: "POLICY_ALLOW",

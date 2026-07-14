@@ -21,6 +21,7 @@ import {
   agents,
   closeDb,
   getDb,
+  intents,
   providerAccounts,
   providerActionAuditOutbox,
   providerActionBindings,
@@ -33,6 +34,7 @@ import {
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import { buildGithubAction } from "@stwd/provider-github";
+import { computeActionDigest } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { providerActionService } from "../services/provider-action-service";
@@ -211,6 +213,7 @@ describe("provider-action service pipeline", () => {
     const db = getDb();
     await db.delete(providerActionAuditOutbox);
     await db.delete(providerActionBindings);
+    await db.delete(intents);
     await db.delete(providerGrants);
     await db.update(providerOperations).set({ requestProfile: {} });
   });
@@ -398,6 +401,89 @@ describe("provider-action service pipeline", () => {
     expect(outbox.length).toBe(1);
     expect(outbox[0].deliveredAt).not.toBeNull();
     expect(await auditCount()).toBe(before + 1);
+  });
+
+  test("replay of a stuck allowed_stub binding COMPLETES it (never fabricates stub_succeeded)", async () => {
+    // A binding stuck in allowed_stub represents the original request crashing
+    // between decision-commit and the stub transition. The immutability trigger
+    // makes allowed_stub reachable ONLY on INSERT (not by reverting a terminal
+    // row), so we seed one directly to model the crash, then replay through the
+    // service. Replay MUST drive the stub to completion, never report a fabricated
+    // stub_succeeded from the stale row.
+    const db = getDb();
+    const intentId = `pa_${crypto.randomUUID()}`;
+    const key = `sha256:${"7".repeat(64)}`;
+    const build = buildGithubAction("github.issue.list", { owner: "octo", repo: "hello" });
+    // The seeded binding's action digest MUST match what the replay recomputes,
+    // otherwise the reused key is (correctly) a replay conflict.
+    const realDigest = computeActionDigest(build.action);
+    await db.insert(intents).values({
+      id: intentId,
+      tenantId: TENANT,
+      agentId: AGENT,
+      intentType: "provider-action",
+      status: "authorized",
+      resourceType: "provider-action",
+      resourceId: OP_A_READ,
+      createdByType: "agent",
+      createdById: AGENT,
+      payload: {},
+      expiresAt: FUTURE,
+    });
+    await db.insert(providerActionBindings).values({
+      intentId,
+      tenantId: TENANT,
+      workspaceId: WORKSPACE_A,
+      actorAgentId: AGENT,
+      providerAccountId: ACCOUNT_A,
+      operationId: OP_A_READ,
+      operationRevision: 1,
+      canonicalProfile: build.action.profile,
+      canonicalActionBytes: Buffer.from("xy", "utf8"),
+      actionDigest: realDigest,
+      requestEnvelope: {},
+      requestHash: `sha256:${"b".repeat(64)}`,
+      idempotencyKeyHash: key,
+      safeSummary: {},
+      accessDecisionId: crypto.randomUUID(),
+      accessEffect: "allow",
+      accessReasonCode: "provider_access_allowed",
+      matchedBindingIds: [],
+      matchedGrantIds: [],
+      dependencyRevisions: {},
+      accessDecision: {},
+      accessDecisionHash: `sha256:${"c".repeat(64)}`,
+      policyDecisionId: crypto.randomUUID(),
+      policyEffect: "allow",
+      policyReasonCodes: ["POLICY_ALLOW"],
+      policyResults: [],
+      policyRevisionHash: `sha256:${"d".repeat(64)}`,
+      policyDecision: {},
+      policyDecisionHash: `sha256:${"e".repeat(64)}`,
+      status: "allowed_stub",
+    });
+    // Enqueue the required-audit outbox row so the replay's drain can complete.
+    await db.insert(providerActionAuditOutbox).values({
+      tenantId: TENANT,
+      intentId,
+      action: "provider.action.allowed",
+      resourceType: "provider-action",
+      resourceId: OP_A_READ,
+      metadata: { actorAgentId: AGENT },
+    });
+
+    await grantAgent(AGENT, WORKSPACE_A, ACCOUNT_A, ["github.issue.list"]);
+    const replay = await providerActionService.createProviderAction(
+      input({ idempotencyKeyHash: key }),
+    );
+    expect(replay.kind).toBe("allowed");
+    if (replay.kind !== "allowed") throw new Error("unreachable");
+    expect(replay.stub.status).toBe("stub_succeeded");
+    const [b] = await db
+      .select()
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.intentId, intentId));
+    expect(b.status).toBe("stub_succeeded");
   });
 
   test("immutability trigger: a committed binding's frozen columns cannot be mutated", async () => {
