@@ -9,6 +9,7 @@ export * from "./execution-contract.js";
 export * from "./execution-payload.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
+export * from "./provider-authority.js";
 export * from "./security-surface.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";

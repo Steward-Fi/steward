@@ -1598,6 +1598,7 @@ export const secrets = pgTable(
       table.version,
     ),
     tenantIdx: index("secrets_tenant_idx").on(table.tenantId),
+    tenantIdUnique: uniqueIndex("secrets_tenant_id_unique_idx").on(table.tenantId, table.id),
   }),
 );
 
@@ -1625,8 +1626,270 @@ export const secretRoutes = pgTable(
     agentIdx: index("secret_routes_agent_idx").on(table.agentId),
     secretIdx: index("secret_routes_secret_idx").on(table.secretId),
     hostIdx: index("secret_routes_host_idx").on(table.hostPattern),
+    tenantIdUnique: uniqueIndex("secret_routes_tenant_id_unique_idx").on(table.tenantId, table.id),
   }),
 );
+
+// ─── Workspace-scoped provider authority (governed-provider plan PR1) ─────────
+
+export const providerEnvironmentEnum = pgEnum("provider_environment", [
+  "development",
+  "staging",
+  "production",
+]);
+export const providerAuthorityStatusEnum = pgEnum("provider_authority_status", [
+  "active",
+  "disabled",
+  "revoked",
+]);
+export const providerPrincipalTypeEnum = pgEnum("provider_principal_type", ["human", "agent"]);
+export const providerRoleEnum = pgEnum("provider_role", [
+  "tenant_authority_admin",
+  "workspace_admin",
+  "workspace_operator",
+  "workspace_viewer",
+  "workspace_approver",
+]);
+export const providerRiskClassEnum = pgEnum("provider_risk_class", [
+  "read",
+  "write",
+  "consequential",
+]);
+
+/** Tenant-level CAS watermark for authority mutations. It is not an access dependency. */
+export const providerAuthorityTenantState = pgTable("provider_authority_tenant_state", {
+  tenantId: varchar("tenant_id", { length: 64 })
+    .primaryKey()
+    .references(() => tenants.id, { onDelete: "cascade" }),
+  revision: integer("revision").notNull().default(0),
+  ...timestamps,
+});
+
+export const workspaces = pgTable(
+  "workspaces",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    key: varchar("key", { length: 128 }).notNull(),
+    name: varchar("name", { length: 255 }).notNull(),
+    environment: providerEnvironmentEnum("environment").notNull(),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    revision: integer("revision").notNull().default(1),
+    createdBy: uuid("created_by").notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    tenantIdUnique: uniqueIndex("workspaces_tenant_id_id_idx").on(table.tenantId, table.id),
+    tenantKeyUnique: uniqueIndex("workspaces_tenant_key_idx").on(table.tenantId, table.key),
+    tenantStatusIdx: index("workspaces_tenant_status_idx").on(table.tenantId, table.status),
+  }),
+);
+
+export const providerAccounts = pgTable(
+  "provider_accounts",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    adapterKey: varchar("adapter_key", { length: 128 }).notNull(),
+    externalRef: varchar("external_ref", { length: 512 }).notNull(),
+    displayName: varchar("display_name", { length: 255 }).notNull(),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    credentialSecretId: uuid("credential_secret_id"),
+    credentialVersion: integer("credential_version"),
+    revision: integer("revision").notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_accounts_tenant_workspace_fk",
+    }).onDelete("cascade"),
+    credentialFk: foreignKey({
+      columns: [table.tenantId, table.credentialSecretId],
+      foreignColumns: [secrets.tenantId, secrets.id],
+      name: "provider_accounts_tenant_credential_fk",
+    }).onDelete("restrict"),
+    tenantWorkspaceIdUnique: uniqueIndex("provider_accounts_tenant_workspace_id_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.id,
+    ),
+    externalRefUnique: uniqueIndex("provider_accounts_workspace_external_ref_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.adapterKey,
+      table.externalRef,
+    ),
+    credentialPairCheck: check(
+      "provider_accounts_credential_pair_check",
+      sql`(${table.credentialSecretId} IS NULL) = (${table.credentialVersion} IS NULL)`,
+    ),
+  }),
+);
+
+export const providerOperations = pgTable(
+  "provider_operations",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    providerAccountId: uuid("provider_account_id").notNull(),
+    operationKey: varchar("operation_key", { length: 128 }).notNull(),
+    riskClass: providerRiskClassEnum("risk_class").notNull(),
+    capabilityId: uuid("capability_id"),
+    secretRouteId: uuid("secret_route_id"),
+    requestProfile: jsonb("request_profile").$type<Record<string, unknown>>().notNull().default({}),
+    responseProfile: jsonb("response_profile")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    revision: integer("revision").notNull().default(1),
+    ...timestamps,
+  },
+  (table) => ({
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_operations_tenant_workspace_account_fk",
+    }).onDelete("cascade"),
+    routeFk: foreignKey({
+      columns: [table.tenantId, table.secretRouteId],
+      foreignColumns: [secretRoutes.tenantId, secretRoutes.id],
+      name: "provider_operations_tenant_route_fk",
+    }).onDelete("restrict"),
+    operationUnique: uniqueIndex("provider_operations_account_key_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.providerAccountId,
+      table.operationKey,
+    ),
+    tenantWorkspaceAccountIdUnique: uniqueIndex(
+      "provider_operations_tenant_workspace_account_id_idx",
+    ).on(table.tenantId, table.workspaceId, table.providerAccountId, table.id),
+  }),
+);
+
+export const providerRoleBindings = pgTable(
+  "provider_role_bindings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 })
+      .notNull()
+      .references(() => tenants.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id"),
+    providerAccountId: uuid("provider_account_id"),
+    principalType: providerPrincipalTypeEnum("principal_type").notNull(),
+    principalId: varchar("principal_id", { length: 64 }).notNull(),
+    roleKey: providerRoleEnum("role_key").notNull(),
+    operationKeys: text("operation_keys").array().notNull().default([]),
+    environment: providerEnvironmentEnum("environment"),
+    notBefore: timestamp("not_before", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    revision: integer("revision").notNull().default(1),
+    grantedByUserId: uuid("granted_by_user_id").notNull(),
+    reason: text("reason").notNull(),
+    ...timestamps,
+  },
+  (table) => ({
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_role_bindings_tenant_workspace_fk",
+    }).onDelete("cascade"),
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_role_bindings_tenant_workspace_account_fk",
+    }).onDelete("cascade"),
+    principalIdx: index("provider_role_bindings_principal_idx").on(
+      table.tenantId,
+      table.principalType,
+      table.principalId,
+      table.status,
+    ),
+    scopeCheck: check(
+      "provider_role_bindings_scope_check",
+      sql`(${table.roleKey} = 'tenant_authority_admin' AND ${table.workspaceId} IS NULL AND ${table.providerAccountId} IS NULL) OR (${table.roleKey} <> 'tenant_authority_admin' AND ${table.workspaceId} IS NOT NULL)`,
+    ),
+    accountNeedsWorkspaceCheck: check(
+      "provider_role_bindings_account_workspace_check",
+      sql`${table.providerAccountId} IS NULL OR ${table.workspaceId} IS NOT NULL`,
+    ),
+  }),
+);
+
+export const providerGrants = pgTable(
+  "provider_grants",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    providerAccountId: uuid("provider_account_id").notNull(),
+    agentId: varchar("agent_id", { length: 64 }).notNull(),
+    operationKeys: text("operation_keys").array().notNull(),
+    environment: providerEnvironmentEnum("environment"),
+    notBefore: timestamp("not_before", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    status: providerAuthorityStatusEnum("status").notNull().default("active"),
+    revision: integer("revision").notNull().default(1),
+    grantedByUserId: uuid("granted_by_user_id").notNull(),
+    reason: text("reason").notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    revokedByUserId: uuid("revoked_by_user_id"),
+    revocationReason: text("revocation_reason"),
+    ...timestamps,
+  },
+  (table) => ({
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_grants_tenant_workspace_account_fk",
+    }).onDelete("cascade"),
+    agentFk: foreignKey({
+      columns: [table.tenantId, table.agentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "provider_grants_tenant_agent_fk",
+    }).onDelete("cascade"),
+    agentScopeIdx: index("provider_grants_agent_scope_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.agentId,
+      table.status,
+    ),
+    operationsNonempty: check(
+      "provider_grants_operations_nonempty_check",
+      sql`cardinality(${table.operationKeys}) > 0`,
+    ),
+    lifetimeCheck: check(
+      "provider_grants_lifetime_check",
+      sql`${table.notBefore} IS NULL OR ${table.expiresAt} > ${table.notBefore}`,
+    ),
+  }),
+);
+
+export type Workspace = typeof workspaces.$inferSelect;
+export type ProviderAccount = typeof providerAccounts.$inferSelect;
+export type ProviderOperation = typeof providerOperations.$inferSelect;
+export type ProviderRoleBinding = typeof providerRoleBindings.$inferSelect;
+export type ProviderGrant = typeof providerGrants.$inferSelect;
 
 export const pendingProxyRequestStatusEnum = pgEnum("pending_proxy_request_status", [
   "pending",
