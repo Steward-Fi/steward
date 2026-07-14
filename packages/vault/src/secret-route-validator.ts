@@ -109,6 +109,8 @@ export type SecretRouteConfigInput = {
   injectKey?: string;
   injectFormat?: string;
   priority?: number;
+  requiresApproval?: boolean;
+  approvalConfig?: Record<string, unknown>;
 };
 
 function allowBroadSecretRoutes(): boolean {

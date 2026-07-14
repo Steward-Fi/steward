@@ -289,6 +289,8 @@ export class SecretVault {
       injectFormat?: string;
       priority?: number;
       enabled?: boolean;
+      requiresApproval?: boolean;
+      approvalConfig?: Record<string, unknown>;
     },
   ): Promise<SecretRoute> {
     const db = getDb();
@@ -335,6 +337,8 @@ export class SecretVault {
         injectFormat: normalizedConfig.injectFormat,
         priority: normalizedConfig.priority,
         enabled: config.enabled ?? true,
+        requiresApproval: config.requiresApproval ?? false,
+        approvalConfig: config.approvalConfig ?? {},
       })
       .returning();
 
@@ -372,6 +376,8 @@ export class SecretVault {
       injectFormat: string;
       priority: number;
       enabled: boolean;
+      requiresApproval: boolean;
+      approvalConfig: Record<string, unknown>;
     }>,
   ): Promise<SecretRoute | null> {
     const db = getDb();
@@ -386,6 +392,8 @@ export class SecretVault {
       "injectFormat",
       "priority",
       "enabled",
+      "requiresApproval",
+      "approvalConfig",
     ] as const) {
       if (updates[key] !== undefined) allowedUpdates[key] = updates[key] as never;
     }

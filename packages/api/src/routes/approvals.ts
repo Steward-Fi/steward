@@ -4,7 +4,7 @@
  * Mount: app.route("/approvals", approvalRoutes)
  */
 
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
 import { writeAuditEvent } from "../services/audit";
 import {
@@ -14,6 +14,7 @@ import {
   approvalQueue,
   autoApprovalRules,
   db,
+  pendingProxyRequests,
   requireTenantLevel,
   safeJsonParse,
   setNoStoreHeaders,
@@ -299,6 +300,202 @@ approvalRoutes.get("/stats", async (c) => {
       avgWaitSeconds: Number(stats?.avgWaitSeconds ?? 0),
     },
   });
+});
+
+// ─── Approval-gated proxy requests ───────────────────────────────────────────
+
+async function requireProxyOperator(
+  c: Context<{ Variables: AppVariables }>,
+): Promise<Response | null> {
+  if (!requireTenantLevel(c) || !requireHumanApprover(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Proxy approvals require an owner or admin user session" },
+      403,
+    );
+  }
+  if (!hasRecentSessionMfa(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Proxy approvals require recent MFA verification" },
+      403,
+    );
+  }
+  return null;
+}
+
+async function expireProxyApprovals(tenantId: string): Promise<void> {
+  const expired = await db
+    .update(pendingProxyRequests)
+    .set({ status: "expired", updatedAt: new Date() })
+    .where(
+      and(
+        eq(pendingProxyRequests.tenantId, tenantId),
+        inArray(pendingProxyRequests.status, ["pending", "approved"]),
+        sql`${pendingProxyRequests.expiresAt} <= now()`,
+      ),
+    )
+    .returning();
+  for (const row of expired) {
+    await writeAuditEvent({
+      tenantId,
+      actorType: "system",
+      actorId: "proxy-approval-expirer",
+      action: "proxy.approval.expired",
+      resourceType: "pending_proxy_request",
+      resourceId: row.id,
+      metadata: { agentId: row.agentId, routeId: row.routeId },
+    });
+  }
+}
+
+approvalRoutes.get("/proxy", async (c) => {
+  const denied = await requireProxyOperator(c);
+  if (denied) return denied;
+  const tenantId = c.get("tenantId");
+  await expireProxyApprovals(tenantId);
+  const status = c.req.query("status");
+  const valid = [
+    "pending",
+    "approved",
+    "denied",
+    "executing",
+    "executed",
+    "expired",
+    "failed",
+  ] as const;
+  if (status && !valid.includes(status as (typeof valid)[number]))
+    return c.json<ApiResponse>({ ok: false, error: "Invalid status" }, 400);
+  const rows = await db
+    .select({
+      id: pendingProxyRequests.id,
+      agentId: pendingProxyRequests.agentId,
+      routeId: pendingProxyRequests.routeId,
+      method: pendingProxyRequests.method,
+      targetHost: pendingProxyRequests.targetHost,
+      targetPath: pendingProxyRequests.targetPath,
+      preview: pendingProxyRequests.preview,
+      status: pendingProxyRequests.status,
+      expiresAt: pendingProxyRequests.expiresAt,
+      createdAt: pendingProxyRequests.createdAt,
+      executionStatusCode: pendingProxyRequests.executionStatusCode,
+    })
+    .from(pendingProxyRequests)
+    .where(
+      and(
+        eq(pendingProxyRequests.tenantId, tenantId),
+        status ? eq(pendingProxyRequests.status, status as (typeof valid)[number]) : undefined,
+      ),
+    )
+    .orderBy(desc(pendingProxyRequests.createdAt))
+    .limit(200);
+  return c.json<ApiResponse>({ ok: true, data: rows });
+});
+
+approvalRoutes.get("/proxy/:id", async (c) => {
+  const denied = await requireProxyOperator(c);
+  if (denied) return denied;
+  const tenantId = c.get("tenantId");
+  await expireProxyApprovals(tenantId);
+  const [row] = await db
+    .select({
+      id: pendingProxyRequests.id,
+      agentId: pendingProxyRequests.agentId,
+      routeId: pendingProxyRequests.routeId,
+      method: pendingProxyRequests.method,
+      targetHost: pendingProxyRequests.targetHost,
+      targetPath: pendingProxyRequests.targetPath,
+      preview: pendingProxyRequests.preview,
+      status: pendingProxyRequests.status,
+      expiresAt: pendingProxyRequests.expiresAt,
+      executionStatusCode: pendingProxyRequests.executionStatusCode,
+      executionError: pendingProxyRequests.executionError,
+    })
+    .from(pendingProxyRequests)
+    .where(
+      and(
+        eq(pendingProxyRequests.id, c.req.param("id")),
+        eq(pendingProxyRequests.tenantId, tenantId),
+      ),
+    )
+    .limit(1);
+  if (!row)
+    return c.json<ApiResponse>({ ok: false, error: "Pending proxy request not found" }, 404);
+  return c.json<ApiResponse>({ ok: true, data: row });
+});
+
+approvalRoutes.post("/proxy/:id/approve", async (c) => {
+  const denied = await requireProxyOperator(c);
+  if (denied) return denied;
+  const tenantId = c.get("tenantId");
+  await expireProxyApprovals(tenantId);
+  const actor = approvalActor(c);
+  const [row] = await db
+    .update(pendingProxyRequests)
+    .set({ status: "approved", approvedAt: new Date(), approvedBy: actor, updatedAt: new Date() })
+    .where(
+      and(
+        eq(pendingProxyRequests.id, c.req.param("id")),
+        eq(pendingProxyRequests.tenantId, tenantId),
+        eq(pendingProxyRequests.status, "pending"),
+        sql`${pendingProxyRequests.expiresAt} > now()`,
+      ),
+    )
+    .returning();
+  if (!row)
+    return c.json<ApiResponse>(
+      { ok: false, error: "Pending proxy request was not found, already resolved, or expired" },
+      409,
+    );
+  await writeApprovalAudit(c, {
+    action: "proxy.approval.approved",
+    resourceType: "pending_proxy_request",
+    resourceId: row.id,
+    metadata: { agentId: row.agentId, routeId: row.routeId, requestDigest: row.requestDigest },
+  });
+  return c.json<ApiResponse>({ ok: true, data: { id: row.id, status: row.status } });
+});
+
+approvalRoutes.post("/proxy/:id/deny", async (c) => {
+  const denied = await requireProxyOperator(c);
+  if (denied) return denied;
+  const tenantId = c.get("tenantId");
+  const body = await safeJsonParse<{ reason?: string }>(c);
+  const reason = parseBoundedText(body?.reason);
+  if (reason === null)
+    return c.json<ApiResponse>(
+      { ok: false, error: `reason must be at most ${MAX_APPROVAL_TEXT_LENGTH} characters` },
+      400,
+    );
+  const actor = approvalActor(c);
+  const [row] = await db
+    .update(pendingProxyRequests)
+    .set({
+      status: "denied",
+      deniedAt: new Date(),
+      deniedBy: actor,
+      denialReason: reason || null,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(pendingProxyRequests.id, c.req.param("id")),
+        eq(pendingProxyRequests.tenantId, tenantId),
+        inArray(pendingProxyRequests.status, ["pending", "approved"]),
+        sql`${pendingProxyRequests.expiresAt} > now()`,
+      ),
+    )
+    .returning();
+  if (!row)
+    return c.json<ApiResponse>(
+      { ok: false, error: "Pending proxy request was not found, already resolved, or expired" },
+      409,
+    );
+  await writeApprovalAudit(c, {
+    action: "proxy.approval.denied",
+    resourceType: "pending_proxy_request",
+    resourceId: row.id,
+    metadata: { agentId: row.agentId, routeId: row.routeId, reason: reason || undefined },
+  });
+  return c.json<ApiResponse>({ ok: true, data: { id: row.id, status: row.status } });
 });
 
 // ─── Approve transaction ──────────────────────────────────────────────────────

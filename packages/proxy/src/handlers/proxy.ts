@@ -31,6 +31,7 @@ import {
   trackProxySpend,
 } from "../middleware/redis-enforcement";
 import { resolveTarget } from "./alias";
+import { holdProxyApprovalRequest } from "./approvals";
 import { compareRouteMatchSpecificity, matchHost, matchPath } from "./matching";
 
 // ─── Secret Vault singleton ──────────────────────────────────────────────────
@@ -1111,6 +1112,76 @@ export async function handleProxy(c: Context): Promise<Response> {
     );
   }
 
+  // Only the in-process release handler can set this context value. Never trust
+  // a request header for approval bypass, since agents control all headers.
+  const approvalReleaseId = c.get("proxyApprovalRelease" as never) as string | undefined;
+  const approvalReleaseRouteId = c.get("proxyApprovalRouteId" as never) as string | undefined;
+  if (approvalReleaseId && approvalReleaseRouteId !== route.id) {
+    await recordRequiredAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 409,
+      latencyMs: Date.now() - startTime,
+      reason: "proxy-approval-route-mismatch",
+    });
+    return c.json({ ok: false, error: "Approved proxy route no longer matches" }, 409);
+  }
+  if (route.requiresApproval && !approvalReleaseId) {
+    try {
+      const held = await holdProxyApprovalRequest({
+        tenantId,
+        agentId,
+        route,
+        method,
+        targetHost: target.host,
+        targetPath: target.path,
+        request: c.req.raw,
+      });
+      await recordRequiredAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 202,
+        latencyMs: Date.now() - startTime,
+        reason: "proxy-approval-held",
+      });
+      return c.json(
+        {
+          ok: true,
+          status: "pending_approval",
+          id: held.id,
+          approvalId: held.id,
+          pollUrl: `/approvals/proxy/${held.id}`,
+          expiresAt: held.expiresAt.toISOString(),
+        },
+        202,
+      );
+    } catch (err) {
+      await recordAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 500,
+        latencyMs: Date.now() - startTime,
+        reason: "proxy-approval-hold-failed",
+      });
+      const error = err instanceof Error ? err.message : "Failed to hold proxy request";
+      const status = error.includes("too large")
+        ? 413
+        : error.includes("Idempotency-Key")
+          ? 409
+          : 500;
+      return c.json({ ok: false, error }, status);
+    }
+  }
+
   // 2.5. Redis rate-limit check (per agent + host)
   const rlResult = await checkProxyRateLimitForHandler(agentId, target.host);
   if (!rlResult.allowed) {
@@ -1279,7 +1350,9 @@ export async function handleProxy(c: Context): Promise<Response> {
     return c.json({ ok: false, error: dnsCheck.error }, dnsCheck.status);
   }
 
-  const replayClaim = await claimUnsafeProxyRequest(c, tenantId, agentId, target, method);
+  const replayClaim = approvalReleaseId
+    ? ({ ok: true, storageKey: "", storage: "memory" } as const)
+    : await claimUnsafeProxyRequest(c, tenantId, agentId, target, method);
   if (!replayClaim.ok) {
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await recordAudit({
