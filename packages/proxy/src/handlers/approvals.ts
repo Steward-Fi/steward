@@ -1,5 +1,5 @@
 import type { PendingProxyRequest, SecretRoute } from "@stwd/db";
-import { and, eq, getDb, lt, pendingProxyRequests } from "@stwd/db";
+import { and, eq, getDb, pendingProxyRequests } from "@stwd/db";
 import { type EncryptedKey, KeyStore } from "@stwd/vault";
 
 const MAX_HELD_PROXY_BODY_BYTES = Number(
@@ -308,21 +308,4 @@ export function decryptPendingProxyBody(row: PendingProxyRequest): Uint8Array {
     name: `pending-proxy:${row.requestDigest}`,
   });
   return base64ToBytes(plaintext);
-}
-
-export async function markExpiredPendingProxyRequests(
-  tenantId?: string,
-): Promise<PendingProxyRequest[]> {
-  const rows = await getDb()
-    .update(pendingProxyRequests)
-    .set({ status: "expired", updatedAt: new Date() })
-    .where(
-      and(
-        eq(pendingProxyRequests.status, "pending"),
-        lt(pendingProxyRequests.expiresAt, new Date()),
-        tenantId ? eq(pendingProxyRequests.tenantId, tenantId) : undefined,
-      ),
-    )
-    .returning();
-  return rows;
 }
