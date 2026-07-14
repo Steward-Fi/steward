@@ -1,93 +1,90 @@
 ---
-title: "what is Steward?"
-description: "a self-hostable authority plane for private enterprise agents, with scoped wallet and API capabilities, policy, approvals, and execution records."
+title: "What is Steward?"
+description: "An open-source, self-hostable governed credential proxy and policy and approval layer for configured agent provider actions and wallets."
 ---
 
-Steward is the self-hostable authority plane for private enterprise agents. It gives agents scoped wallet and API capabilities without exposing secrets, routes sensitive actions through policy and human approval, and produces an HMAC-chained execution record. Bring your own agent runtime, cloud, and custodian.
+Steward is an open-source, self-hostable governed credential proxy and policy and approval layer for agent provider actions and wallets. It ships scoped grants, exact-request approval, policy-bound execution authorization on the primary EVM sign path, and signed audit evidence verifiable offline.
 
-Today, keys are stored encrypted under an operator-held root, with an optional KMS envelope and a seam for third-party custody providers. Policy is evaluated in API route handlers before governed signing operations call the vault. Steward records requests, decisions, and effects in an HMAC-chained audit log. Offline independently verifiable evidence bundles are roadmap work.
+Steward runs in your infrastructure. Configured provider calls can receive credentials at the proxy without returning those credentials to the supported agent caller. Governed wallet routes evaluate policy and approval before signing. The primary EVM transaction sign path adds a signed, short-lived, payload-bound, single-use authorization immediately before raw signing.
+
+Steward also maintains a tenant-scoped HMAC audit chain and exports Ed25519-signed evidence bundles. Verify a bundle offline with `scripts/verify-evidence-bundle.mjs <bundle.json>`. The script checks the signature against the public key carried in the bundle. Separately compare that key with an out-of-band trusted Steward signing key or fingerprint. Verification detects changes relative to that trust root. It does not exclude fabrication by an operator controlling all relevant keys.
 
 <CardGroup cols={2}>
-  <Card title="wallet vault" icon="vault" href="/concepts/wallet-vault">
-    AES-256-GCM encrypted key storage with multi-chain signing (EVM + Solana). agents request signatures, they never see private keys.
+  <Card title="Wallet vault" icon="vault" href="/concepts/wallet-vault">
+    Encrypted wallet-key storage and signing primitives for supported EVM and Solana routes. Policy enforcement is provided by governed execution paths, not by every vault primitive.
   </Card>
-  <Card title="secret vault" icon="key" href="/concepts/secret-vault">
-    encrypted credential storage with automatic injection. agents never see API keys. Steward's proxy injects them at request time.
+  <Card title="Secret vault" icon="key" href="/concepts/secret-vault">
+    Encrypted credential storage for configured proxy routes. The proxy injects credentials server-side instead of returning them to the supported agent caller.
   </Card>
-  <Card title="policy engine" icon="shield-check" href="/concepts/policy-engine">
-    declarative policies evaluated before every action. spending limits, rate limits, address whitelists, time windows, all configurable per agent.
+  <Card title="Policy engine" icon="shield-check" href="/concepts/policy-engine">
+    Declarative policy decisions for supported wallet routes and named provider capabilities, including argument and rate constraints.
   </Card>
   <Card title="API proxy" icon="shuffle" href="/concepts/proxy-gateway">
-    configured third-party API calls flow through Steward. credentials are injected at the proxy, with cost tracking and audit events.
+    Configured provider calls flow through strict route matching, server-side credential injection, and audit events.
   </Card>
 </CardGroup>
 
-## the problem
+## The problem
 
-today, most agent platforms inject plaintext credentials directly into agent containers:
+Agent processes are often given standing provider credentials and wallet keys through environment variables:
 
 ```bash
-# what agent containers look like today
 OPENAI_API_KEY=sk-proj-abc123...
 ANTHROPIC_API_KEY=sk-ant-def456...
 EVM_PRIVATE_KEY=0xdeadbeef...
 DATABASE_URL=postgres://user:pass@host/db
 ```
 
-any code operating from the container, including code triggered by prompt injection, can read these credentials, exfiltrate them, or drain wallets. there is no spending control, no audit trail, and rotating a credential means redeploying every container that uses it.
+Code running in that process may be able to read and misuse those credentials. Rotation also requires updating every process that received the secret.
 
-## the solution
+## The Steward model
 
-with Steward, agent containers only receive two environment variables:
+A supported agent integration can receive a Steward URL and scoped token instead:
 
 ```bash
-# what agent containers look like with Steward
 STEWARD_PROXY_URL=http://steward-proxy:8080
 STEWARD_AGENT_TOKEN=stwd_jwt_...
 ```
 
-configured API calls and wallet actions enter Steward through authenticated routes. governed routes evaluate policy and approvals before calling signing or proxy operations, then record the result.
+Configured provider calls and wallet actions then enter Steward through authenticated routes. Depending on the route, Steward checks grants, evaluates policy, requests exact-action approval, signs or injects a credential, and records evidence.
 
-## who uses Steward?
+<Warning>
+  Coverage is route-specific. Steward does not govern arbitrary agent network egress, every wallet operation, or every action in the product. The shipped execution authorization boundary applies to the primary EVM transaction sign path and compatible approval replay.
+</Warning>
 
-- **private enterprise agents.** agents using scoped wallet or API capabilities for treasury operations, vendor payments, internal systems, and other sensitive workflows.
-- **constrained trading agents.** optional venue packages support bounded financial workflows without making trading the core platform.
-- **production multi-agent deployments.** platforms managing dozens of agents across a node fleet with on-chain transactions on Base mainnet.
-- **agent developers** building autonomous agents that need wallet access or API credential management.
-- **platform operators** running multi-tenant agent hosting who need security, cost control, and compliance.
-- **desktop apps**. local mode with PGLite means Steward can run as an embedded sidecar with no third-party dependencies.
+## Current capabilities
 
-## what's new
+- **Scoped provider grants:** named capabilities support per-agent grants, expiry, revocation, strict host, path, and method matching, argument constraints, and rate constraints.
+- **Exact-request approval:** wallet workflows and provider capabilities can hold a consequential request for human approval and resume the approved request.
+- **Primary EVM execution authorization:** the primary EVM transaction sign path requires a signed, short-lived, payload-bound, backend-bound, single-use authorization before raw signing.
+- **Credential proxy:** configured provider requests receive credentials server-side without returning them to the supported agent caller.
+- **Audit evidence:** HMAC chaining, Ed25519 checkpoints, bundle export, and offline verification, with a separate out-of-band check of the bundled public key.
+- **Self-hosting:** Docker with PostgreSQL and Redis, or embedded PGLite for local and desktop use.
+- **Custody choices:** local encrypted storage, AWS KMS envelope wrapping, a PKCS#11 wrapping adapter, and an external custody interface. Steward does not claim MPC or native HSM signing.
 
-Current authority-plane capabilities include:
+## Direction
 
-- **API proxy.** route any HTTP API call through Steward for credential injection, cost tracking, and audit logging.
-- **webhook events.** get notified on `tx.pending`, `tx.signed`, `spend.threshold`, `policy.violation`, and more.
-- **approval workflow.** large transactions queue for human review. approve or deny via API or the `<ApprovalQueue>` component.
-- **control plane config.** per-tenant configuration of policy exposure, UI feature flags, themes, and approval rules.
-- **embeddable React UI.** drop `@stwd/react` into any app for wallet overview, transaction history, policy controls, and approval queues.
-- **local mode.** run Steward without any third-party database using the built-in PGLite (Postgres-in-WASM) backend.
-- **aggregated dashboard.** single API call returns agent balances, spend stats, recent transactions, policy summary, and pending approvals.
+Steward's direction is an open authority plane across explicitly supported agent execution surfaces. "Authority plane" is shorthand for that direction, not a claim of universal enforcement today.
 
-## quick links
+## Quick links
 
 <CardGroup cols={2}>
-  <Card title="quickstart" icon="rocket" href="/quickstart">
-    get up and running with Steward in 5 minutes.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run Steward in your infrastructure and create a governed wallet flow.
   </Card>
-  <Card title="architecture" icon="sitemap" href="/concepts/architecture">
-    understand how the four pillars work together.
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand the current execution boundaries.
   </Card>
   <Card title="React components" icon="react" href="/sdk/react-components">
-    drop-in UI for wallet management and policy controls.
+    Add wallet, policy, and approval UI to your application.
   </Card>
-  <Card title="local mode" icon="computer" href="/guides/local-mode">
-    run Steward locally with PGLite, no database required.
+  <Card title="Local mode" icon="computer" href="/guides/local-mode">
+    Run Steward locally with PGLite.
   </Card>
   <Card title="SDK reference" icon="code" href="/sdk/installation">
-    install the TypeScript SDK and start building.
+    Install the TypeScript SDK.
   </Card>
   <Card title="API reference" icon="server" href="/api-reference/overview">
-    explore the full REST API.
+    Explore the self-hosted REST API.
   </Card>
 </CardGroup>

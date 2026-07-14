@@ -131,7 +131,7 @@ Configure the Railway service with the normal production environment plus Railwa
 
 Run the proxy as a separate Railway service/process using the same image and command `bun run packages/proxy/src/index.ts`, with `STEWARD_PROXY_PORT` set to the port Railway expects for that service.
 
-A managed hosted API is not available yet. Steward is self-host-first today: run your own instance (see the Docker/compose steps above) and point clients at your deployment URL. A hosted offering is coming soon.
+Steward is self-hosted. Run your own instance with the Docker and Compose steps above, then point clients at that deployment URL.
 
 ### Automated Railway deploys via GitHub Actions (optional)
 

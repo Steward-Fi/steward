@@ -71,7 +71,7 @@ All routes in `packages/api/src/routes/*.ts` are Hono handlers. The proxy
 - **Edge-ready.** Hono's core is a small request/response router that
   compiles to Bun, Node, Cloudflare Workers, Deno, and Vercel Edge without
   code changes. We do not currently deploy to edge targets, but a future
-  hosted tier might (e.g. per-region proxy shards). Hono keeps that door
+  large self-hosted deployment might, such as per-region proxy shards. Hono keeps that door
   open. Express would not.
 - **Small footprint.** No dep tree. Install size under 100 KB. The whole
   framework is ~2000 lines of readable TypeScript.
