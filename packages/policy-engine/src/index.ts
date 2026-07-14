@@ -4,12 +4,18 @@ export type {
   CapabilityIntentConfig,
   CapabilityIntentConstraints,
   CapabilityIntentEffect,
+  ProviderPolicyContext,
+  ProviderPolicyEffect,
+  ProviderPolicyEvaluationV1,
+  ProviderPolicyRule,
+  ProviderPolicyRuleResult,
 } from "./capability-intent";
 export {
   CAPABILITY_INTENT_RULE_TYPE,
   capabilityIntentContribution,
   composeCapabilityIntentDecision,
   evaluateCapabilityIntent,
+  PROVIDER_POLICY_REASON,
 } from "./capability-intent";
 export type {
   AuditHook,
