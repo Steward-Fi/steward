@@ -647,8 +647,8 @@ export const capabilityIntentContribution: PolicyRuleContribution<EvaluatorConte
 // The legacy invoke.ts loop lets a passing allow win even when another rule
 // simultaneously requires approval (origin/develop invoke.ts:288-311). That is
 // an obligation-laundering bug: a required approval must NEVER be dropped by a
-// separate matching allow. `composeCapabilityIntentDecision` centralizes the
-// correct precedence:
+// separate matching allow. `composeProviderActionPolicyDecision` centralizes the
+// correct precedence for the PROVIDER-ACTION (authority) plane:
 //
 //   malformed/unknown input or any matching deny/failed hard constraint => hard_deny
 //   else any matching require-approval                                    => approval_required
@@ -719,8 +719,20 @@ export interface ProviderPolicyRule {
  * applicable. Precedence is strictly hard_deny > approval_required > allow >
  * default-deny. Never throws for a policy reason: an unexpected internal error
  * becomes hard_deny/POLICY_EVALUATOR_ERROR.
+ *
+ * NAMING / COEXISTENCE WITH THE LEGACY-PLANE FIX (PR #187):
+ * PR #187 adds a `composeCapabilityIntentDecision(rules, ctx)` that fixes the
+ * SAME allow-over-approval precedence bug for the LEGACY invoke.ts plane, reusing
+ * `ContributedPolicyRule`/`EvaluatorContext` and returning a
+ * `CapabilityIntentCompositionResult`. This function is the AUTHORITY-plane analog
+ * required by PR2 spec §6.2/§6.3: it returns the full `ProviderPolicyEvaluationV1`
+ * document (per-rule results with configured effect / outcome / reason code) that
+ * the provider-action service persists as an immutable policy decision. The two
+ * are deliberately distinct exports so PR2 and #187 merge cleanly in any order;
+ * both enforce identical precedence (hard_deny > approval_required > allow >
+ * default-deny).
  */
-export function composeCapabilityIntentDecision(
+export function composeProviderActionPolicyDecision(
   rules: ReadonlyArray<ProviderPolicyRule>,
   context: ProviderPolicyContext,
 ): ProviderPolicyEvaluationV1 {
@@ -780,7 +792,12 @@ export function composeCapabilityIntentDecision(
         sawApproval = true;
         reasonCodes.add(PROVIDER_POLICY_REASON.APPROVAL_REQUIRED);
         results.push(
-          mkResult(rule.id, "require-approval", "approval_required", PROVIDER_POLICY_REASON.APPROVAL_REQUIRED),
+          mkResult(
+            rule.id,
+            "require-approval",
+            "approval_required",
+            PROVIDER_POLICY_REASON.APPROVAL_REQUIRED,
+          ),
         );
         continue;
       }

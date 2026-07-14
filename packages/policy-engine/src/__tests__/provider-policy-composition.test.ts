@@ -1,5 +1,5 @@
 /**
- * composeCapabilityIntentDecision precedence + effectiveness.
+ * composeProviderActionPolicyDecision precedence + effectiveness.
  *
  * The key property (Conflict 9 fix): a passing allow must NEVER suppress a
  * simultaneous approval requirement, and any hard deny wins over both. Proven
@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "bun:test";
 import {
-  composeCapabilityIntentDecision,
+  composeProviderActionPolicyDecision,
   PROVIDER_POLICY_REASON,
   type ProviderPolicyContext,
   type ProviderPolicyRule,
@@ -47,31 +47,31 @@ function shuffle<T>(arr: T[]): T[] {
   return a;
 }
 
-describe("composeCapabilityIntentDecision precedence", () => {
+describe("composeProviderActionPolicyDecision precedence", () => {
   it("empty governing rules => hard_deny / no governing allow", () => {
-    const d = composeCapabilityIntentDecision([], ctx);
+    const d = composeProviderActionPolicyDecision([], ctx);
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.NO_GOVERNING_ALLOW);
   });
 
   it("single passing allow => allow", () => {
-    expect(composeCapabilityIntentDecision([rule("r1", "allow")], ctx).effect).toBe("allow");
+    expect(composeProviderActionPolicyDecision([rule("r1", "allow")], ctx).effect).toBe("allow");
   });
 
   it("single require-approval => approval_required", () => {
-    expect(composeCapabilityIntentDecision([rule("r1", "require-approval")], ctx).effect).toBe(
+    expect(composeProviderActionPolicyDecision([rule("r1", "require-approval")], ctx).effect).toBe(
       "approval_required",
     );
   });
 
   it("single deny => hard_deny", () => {
-    expect(composeCapabilityIntentDecision([rule("r1", "deny")], ctx).effect).toBe("hard_deny");
+    expect(composeProviderActionPolicyDecision([rule("r1", "deny")], ctx).effect).toBe("hard_deny");
   });
 
   it("allow + approval => approval_required (THE Conflict-9 fix)", () => {
     const rules = [rule("allow1", "allow"), rule("appr1", "require-approval")];
     for (let i = 0; i < 100; i++) {
-      const d = composeCapabilityIntentDecision(shuffle(rules), ctx);
+      const d = composeProviderActionPolicyDecision(shuffle(rules), ctx);
       expect(d.effect).toBe("approval_required");
     }
   });
@@ -79,14 +79,14 @@ describe("composeCapabilityIntentDecision precedence", () => {
   it("deny + approval => hard_deny under all orders", () => {
     const rules = [rule("deny1", "deny"), rule("appr1", "require-approval")];
     for (let i = 0; i < 100; i++) {
-      expect(composeCapabilityIntentDecision(shuffle(rules), ctx).effect).toBe("hard_deny");
+      expect(composeProviderActionPolicyDecision(shuffle(rules), ctx).effect).toBe("hard_deny");
     }
   });
 
   it("deny + allow => hard_deny", () => {
     const rules = [rule("deny1", "deny"), rule("allow1", "allow")];
     for (let i = 0; i < 100; i++) {
-      expect(composeCapabilityIntentDecision(shuffle(rules), ctx).effect).toBe("hard_deny");
+      expect(composeProviderActionPolicyDecision(shuffle(rules), ctx).effect).toBe("hard_deny");
     }
   });
 
@@ -96,7 +96,7 @@ describe("composeCapabilityIntentDecision precedence", () => {
       rule("appr1", "require-approval"),
     ];
     for (let i = 0; i < 100; i++) {
-      expect(composeCapabilityIntentDecision(shuffle(rules), ctx).effect).toBe("hard_deny");
+      expect(composeProviderActionPolicyDecision(shuffle(rules), ctx).effect).toBe("hard_deny");
     }
   });
 
@@ -107,7 +107,7 @@ describe("composeCapabilityIntentDecision precedence", () => {
       enabled: true,
       config: { capabilities: [OP], effect: "allow", bogusKey: 1 },
     };
-    const d = composeCapabilityIntentDecision([bad], ctx);
+    const d = composeProviderActionPolicyDecision([bad], ctx);
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.CONFIGURATION_INVALID);
   });
@@ -119,35 +119,35 @@ describe("composeCapabilityIntentDecision precedence", () => {
       enabled: true,
       config: {},
     };
-    expect(composeCapabilityIntentDecision([foreign], ctx).effect).toBe("hard_deny");
+    expect(composeProviderActionPolicyDecision([foreign], ctx).effect).toBe("hard_deny");
   });
 
   it("disabled rules are ignored", () => {
     const disabledDeny: ProviderPolicyRule = { ...rule("d", "deny"), enabled: false };
-    const d = composeCapabilityIntentDecision([disabledDeny, rule("a", "allow")], ctx);
+    const d = composeProviderActionPolicyDecision([disabledDeny, rule("a", "allow")], ctx);
     expect(d.effect).toBe("allow");
   });
 
   it("non-governing rule (different capability) is not applicable", () => {
     const other = rule("o", "deny");
     (other.config as { capabilities: string[] }).capabilities = ["github.issue.list"];
-    const d = composeCapabilityIntentDecision([other, rule("a", "allow")], ctx);
+    const d = composeProviderActionPolicyDecision([other, rule("a", "allow")], ctx);
     expect(d.effect).toBe("allow");
   });
 
   it("rate cap with unavailable count => input unavailable => hard_deny", () => {
     const capRule = rule("c", "allow", { constraints: { maxCallsPerHour: 5 } });
-    const d = composeCapabilityIntentDecision([capRule], { ...ctx, invokeCount1h: undefined });
+    const d = composeProviderActionPolicyDecision([capRule], { ...ctx, invokeCount1h: undefined });
     expect(d.effect).toBe("hard_deny");
     expect(d.reasonCodes).toContain(PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE);
   });
 
   it("rate cap reached => hard_deny; under cap => allow", () => {
     const capRule = rule("c", "allow", { constraints: { maxCallsPerHour: 5 } });
-    expect(composeCapabilityIntentDecision([capRule], { ...ctx, invokeCount1h: 5 }).effect).toBe(
+    expect(composeProviderActionPolicyDecision([capRule], { ...ctx, invokeCount1h: 5 }).effect).toBe(
       "hard_deny",
     );
-    expect(composeCapabilityIntentDecision([capRule], { ...ctx, invokeCount1h: 4 }).effect).toBe(
+    expect(composeProviderActionPolicyDecision([capRule], { ...ctx, invokeCount1h: 4 }).effect).toBe(
       "allow",
     );
   });

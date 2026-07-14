@@ -13,7 +13,7 @@ export type {
 export {
   CAPABILITY_INTENT_RULE_TYPE,
   capabilityIntentContribution,
-  composeCapabilityIntentDecision,
+  composeProviderActionPolicyDecision,
   evaluateCapabilityIntent,
   PROVIDER_POLICY_REASON,
 } from "./capability-intent";
