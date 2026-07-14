@@ -182,6 +182,13 @@ describe("provider authority foundation", () => {
   test("every mutation requires authority, recent MFA, idempotency, revision, and successful pre-commit audit", async () => {
     const base = mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 2 });
     await expect(
+      store.createWorkspace(base, {
+        key: 123 as unknown as string,
+        name: "Malformed",
+        environment: "production",
+      }),
+    ).rejects.toMatchObject({ code: "bad_request" });
+    await expect(
       store.createWorkspace(
         { ...base, actorUserId: OTHER, tenantRole: "member" },
         { key: "noauth", name: "No", environment: "production" },
@@ -284,6 +291,19 @@ describe("provider authority foundation", () => {
         },
       ),
     ).rejects.toMatchObject({ code: "not_found", status: 404 });
+    await expect(
+      store.issueRoleBinding(
+        mutation({ actorUserId: ADMIN, tenantRole: "admin", expectedRevision: 1 }),
+        {
+          workspaceId: WORKSPACE_B,
+          principalType: "human",
+          principalId: OTHER,
+          roleKey: "workspace_approver",
+          operationKeys: [],
+          notBefore: new Date("invalid"),
+        },
+      ),
+    ).rejects.toMatchObject({ code: "bad_request" });
     expect(await store.listProviderAccounts("tenant-main", WORKSPACE_B)).toHaveLength(1);
     expect(
       await store.listProviderAccounts("tenant-main", "90000000-0000-4000-8000-000000000001"),

@@ -35,6 +35,16 @@ const PROVIDER_OPERATION_ALLOWLIST: Readonly<
   },
 };
 const PROVIDER_HOST_ALLOWLIST: Readonly<Record<string, string>> = { github: "api.github.com" };
+const ENVIRONMENTS = new Set(["development", "staging", "production"]);
+const PRINCIPAL_TYPES = new Set(["human", "agent"]);
+const ROLES = new Set([
+  "tenant_authority_admin",
+  "workspace_admin",
+  "workspace_operator",
+  "workspace_viewer",
+  "workspace_approver",
+]);
+const RISK_CLASSES = new Set(["read", "write", "consequential"]);
 
 export class ProviderAuthorityError extends Error {
   constructor(
@@ -63,8 +73,8 @@ type MutationContext = ProviderAuthorityMutationContext & { audit: AuthorityAudi
 type BindingInsert = typeof providerRoleBindings.$inferInsert;
 type GrantInsert = typeof providerGrants.$inferInsert;
 
-function assertText(value: string, field: string, max = 512): string {
-  const normalized = value?.trim();
+function assertText(value: unknown, field: string, max = 512): string {
+  const normalized = typeof value === "string" ? value.trim() : "";
   if (!normalized || normalized.length > max) {
     throw new ProviderAuthorityError(
       `${field} is required and must be at most ${max} characters`,
@@ -250,6 +260,8 @@ export class ProviderAuthorityStore {
     input: { key: string; name: string; environment: ProviderEnvironment },
   ) {
     assertMutationContext(ctx);
+    if (!ENVIRONMENTS.has(input.environment))
+      throw new ProviderAuthorityError("invalid environment", "bad_request", 400);
     if (!(await this.hasTenantAdmin(ctx)))
       throw new ProviderAuthorityError("tenant authority required", "forbidden", 403);
     const key = assertText(input.key, "key", 128);
@@ -518,6 +530,8 @@ export class ProviderAuthorityStore {
         409,
       );
     const operationKey = assertText(input.operationKey, "operationKey", 128);
+    if (!RISK_CLASSES.has(input.riskClass))
+      throw new ProviderAuthorityError("invalid riskClass", "bad_request", 400);
     if (!OPERATION_KEY.test(operationKey))
       throw new ProviderAuthorityError("invalid operationKey", "bad_request", 400);
     const allowedMethod = PROVIDER_OPERATION_ALLOWLIST[account.adapterKey]?.[operationKey];
@@ -652,6 +666,20 @@ export class ProviderAuthorityStore {
     >,
   ) {
     assertMutationContext(ctx);
+    if (
+      !PRINCIPAL_TYPES.has(input.principalType) ||
+      !ROLES.has(input.roleKey) ||
+      (input.environment && !ENVIRONMENTS.has(input.environment))
+    ) {
+      throw new ProviderAuthorityError("invalid role binding vocabulary", "bad_request", 400);
+    }
+    if (
+      (input.notBefore && !Number.isFinite(input.notBefore.getTime())) ||
+      (input.expiresAt && !Number.isFinite(input.expiresAt.getTime())) ||
+      (input.notBefore && input.expiresAt && input.expiresAt <= input.notBefore)
+    ) {
+      throw new ProviderAuthorityError("invalid role binding lifetime", "bad_request", 400);
+    }
     await this.validatePrincipal(ctx.tenantId, input.principalType, input.principalId);
     const tenantRole = input.roleKey === "tenant_authority_admin";
     if (tenantRole) {
@@ -919,6 +947,10 @@ export class ProviderAuthorityStore {
     >,
   ) {
     assertMutationContext(ctx);
+    if (input.environment && !ENVIRONMENTS.has(input.environment))
+      throw new ProviderAuthorityError("invalid environment", "bad_request", 400);
+    if (input.notBefore && !Number.isFinite(input.notBefore.getTime()))
+      throw new ProviderAuthorityError("invalid notBefore", "bad_request", 400);
     const mandate = await this.requireWorkspaceAdmin(ctx, input.workspaceId, true);
     await this.validatePrincipal(ctx.tenantId, "agent", input.agentId);
     const [workspace] = await this.db()
