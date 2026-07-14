@@ -17,7 +17,7 @@ export * from "./security-surface.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
 // ─── Per-request app context shape (shared so plugins can type routes) ───
-export type { AppVariables } from "./types/app-variables.js";
+export type { AppVariables, VerifiedAgentPrincipal } from "./types/app-variables.js";
 // ─── Lean-core + opt-in-plugin contract ───
 export type {
   AdapterContribution,

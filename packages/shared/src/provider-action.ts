@@ -364,8 +364,7 @@ class JsonScanner {
           if (this.s[this.i] === "\\" && this.s[this.i + 1] === "u") {
             this.i += 2;
             const lo = this.hex4();
-            if (lo < 0xdc00 || lo > 0xdfff)
-              fail("CANON_UNICODE_INVALID", "invalid low surrogate");
+            if (lo < 0xdc00 || lo > 0xdfff) fail("CANON_UNICODE_INVALID", "invalid low surrogate");
             const combined = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
             return String.fromCodePoint(combined);
           }
@@ -423,7 +422,14 @@ class JsonScanner {
       const c = this.s.charCodeAt(this.i);
       // Consume any lexeme character that could belong to a JSON number so we
       // can inspect and REJECT the profile-forbidden shapes with a precise code.
-      if ((c >= 0x30 && c <= 0x39) || c === 0x2e || c === 0x65 || c === 0x45 || c === 0x2b || c === 0x2d)
+      if (
+        (c >= 0x30 && c <= 0x39) ||
+        c === 0x2e ||
+        c === 0x65 ||
+        c === 0x45 ||
+        c === 0x2b ||
+        c === 0x2d
+      )
         this.i++;
       else break;
     }
@@ -451,7 +457,8 @@ export function parseStrictInteger(lexeme: string): JsonInteger {
     fail("CANON_NUMBER_FORMAT_UNSUPPORTED", `invalid integer lexeme '${lexeme}'`);
   if (lexeme === "-0") fail("CANON_NUMBER_FORMAT_UNSUPPORTED", "negative zero not allowed");
   const n = Number(lexeme);
-  if (!Number.isSafeInteger(n)) fail("CANON_NUMBER_UNSAFE", `integer out of safe range '${lexeme}'`);
+  if (!Number.isSafeInteger(n))
+    fail("CANON_NUMBER_UNSAFE", `integer out of safe range '${lexeme}'`);
   return n;
 }
 
@@ -461,8 +468,7 @@ function assertNoLoneSurrogate(s: string): void {
     const c = s.charCodeAt(i);
     if (c >= 0xd800 && c <= 0xdbff) {
       const next = s.charCodeAt(i + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff))
-        fail("CANON_UNICODE_INVALID", "lone high surrogate");
+      if (!(next >= 0xdc00 && next <= 0xdfff)) fail("CANON_UNICODE_INVALID", "lone high surrogate");
       i++;
     } else if (c >= 0xdc00 && c <= 0xdfff) {
       fail("CANON_UNICODE_INVALID", "lone low surrogate");
@@ -746,7 +752,8 @@ export function canonicalizeMethod(raw: string): CanonicalMethod {
   // No trimming. Must be an ASCII token with no whitespace.
   if (!/^[A-Za-z]+$/.test(raw)) fail("CANON_METHOD_INVALID", `invalid method token '${raw}'`);
   const upper = raw.toUpperCase();
-  if (!ALLOWED_METHODS.has(upper)) fail("CANON_METHOD_UNSUPPORTED", `method not supported '${upper}'`);
+  if (!ALLOWED_METHODS.has(upper))
+    fail("CANON_METHOD_UNSUPPORTED", `method not supported '${upper}'`);
   return upper as CanonicalMethod;
 }
 
@@ -1074,9 +1081,7 @@ const TOKEN_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
  * (section 3.9) owns that and injects the canonical value. Pass content-type in
  * only for non-body header validation contexts.
  */
-export function canonicalizeHeaders(
-  raw: ReadonlyArray<[string, string]>,
-): Array<[string, string]> {
+export function canonicalizeHeaders(raw: ReadonlyArray<[string, string]>): Array<[string, string]> {
   const byName = new Map<string, string>();
   for (const [rawName, rawValue] of raw) {
     if (typeof rawName !== "string" || typeof rawValue !== "string")
@@ -1084,12 +1089,10 @@ export function canonicalizeHeaders(
     const name = rawName.toLowerCase();
     if (!TOKEN_NAME.test(name)) fail("CANON_HEADER_INVALID", `invalid header name '${rawName}'`);
     // Credential / forbidden headers first.
-    if (
-      FORBIDDEN_HEADERS.has(name) ||
-      FORBIDDEN_HEADER_PREFIXES.some((p) => name.startsWith(p))
-    )
+    if (FORBIDDEN_HEADERS.has(name) || FORBIDDEN_HEADER_PREFIXES.some((p) => name.startsWith(p)))
       fail("CANON_HEADER_CREDENTIAL_FORBIDDEN", `forbidden header '${name}'`);
-    if (!HEADER_ALLOWLIST.has(name)) fail("CANON_HEADER_UNSUPPORTED", `non-allowlisted header '${name}'`);
+    if (!HEADER_ALLOWLIST.has(name))
+      fail("CANON_HEADER_UNSUPPORTED", `non-allowlisted header '${name}'`);
     if (byName.has(name)) fail("CANON_HEADER_DUPLICATE", `duplicate header '${name}'`);
     const value = trimOws(rawValue);
     assertHeaderValueClean(value);
@@ -1178,6 +1181,98 @@ export function canonicalizeContentType(raw: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Raw internal HTTP representation → canonical action (section 2.2 / 3.9)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A raw, INTERNAL HTTP representation of a provider action. This is NOT the
+ * public API shape — it is what the GitHub adapter constructs from validated
+ * operation arguments, and what the PR4 proxy recomputation + the offline
+ * verifier feed in. Because ALL of these consumers call
+ * {@link canonicalizeRawInternalAction}, there is exactly ONE canonicalization
+ * path and the golden corpus proves it byte-for-byte.
+ *
+ * Fields are raw/pre-canonical: `method` may be any case, `origin` any
+ * equivalent form, `path` a raw ASCII path, `query` already-decoded logical
+ * pairs (the adapter builds these from validated args, never from a raw string;
+ * a raw-string producer must call {@link parseRawQuery} first), `headers` raw
+ * occurrences, and `body`:
+ *   - `undefined` / absent  => no body (GET/HEAD/bodyless DELETE)
+ *   - a JsonValue           => a JSON body; `contentType` MUST be present
+ */
+export interface RawInternalAction {
+  method: string;
+  origin: string;
+  path: string;
+  query?: ReadonlyArray<QueryPair>;
+  headers?: ReadonlyArray<[string, string]>;
+  /** Raw content-type header value when a body is present; omit for no body. */
+  contentType?: string;
+  /** Already-parsed JSON body value, or absent/undefined for no body. */
+  body?: JsonValue;
+}
+
+/** Methods that MUST NOT carry a request body in this profile. */
+const BODYLESS_METHODS: ReadonlySet<CanonicalMethod> = new Set(["GET", "HEAD"]);
+/** Methods that MAY carry a JSON body. */
+const BODY_METHODS: ReadonlySet<CanonicalMethod> = new Set(["POST", "PUT", "PATCH"]);
+
+/**
+ * Canonicalize a raw internal HTTP representation into the fully-canonical
+ * {@link GithubCanonicalActionV1}, applying the body/content-type matrix
+ * (section 3.9). Throws {@link CanonError} on any ambiguity (never a 500).
+ *
+ * The content-type header is validated and injected HERE (not via
+ * {@link canonicalizeHeaders}, which excludes it for body-bearing actions) so
+ * the body and its media type are canonicalized together per the matrix.
+ */
+export function canonicalizeRawInternalAction(raw: RawInternalAction): GithubCanonicalActionV1 {
+  const method = canonicalizeMethod(raw.method);
+  const origin = canonicalizeOrigin(raw.origin);
+  const normalizedPath = normalizePath(raw.path);
+  const orderedQueryPairs = canonicalizeQueryPairs(raw.query ?? []);
+  const selectedHeaders = canonicalizeHeaders(raw.headers ?? []);
+
+  const hasBody = raw.body !== undefined;
+  const hasContentType = raw.contentType !== undefined;
+
+  let canonicalBody: JsonValue | null = null;
+
+  if (BODYLESS_METHODS.has(method)) {
+    // GET/HEAD: any body or content-type denies.
+    if (hasBody || hasContentType) fail("CANON_BODY_FORBIDDEN", `${method} must not carry a body`);
+  } else if (BODY_METHODS.has(method)) {
+    // POST/PUT/PATCH: a JSON body is required (bodyless mutation is a new profile).
+    if (!hasBody) fail("CANON_BODY_REQUIRED", `${method} requires a body`);
+    if (!hasContentType)
+      fail("CANON_BODY_CONTENT_TYPE_REQUIRED", "body present without content-type");
+    const media = canonicalizeContentType(raw.contentType as string);
+    // Inject the canonical content-type into selectedHeaders (deny a duplicate a
+    // caller may have also passed through the header list).
+    if (selectedHeaders.some(([n]) => n === "content-type"))
+      fail("CANON_HEADER_DUPLICATE", "content-type supplied both as header and body media type");
+    selectedHeaders.push(["content-type", media]);
+    selectedHeaders.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    if (raw.body === null || typeof raw.body !== "object" || Array.isArray(raw.body))
+      fail("CANON_JSON_SHAPE_INVALID", "body must be a JSON object");
+    canonicalBody = raw.body;
+  } else {
+    // DELETE: bodyless only in PR2 (no operation declares a DELETE body).
+    if (hasBody || hasContentType) fail("CANON_BODY_FORBIDDEN", `${method} must not carry a body`);
+  }
+
+  return {
+    profile: GITHUB_PROVIDER_ACTION_PROFILE,
+    method,
+    origin,
+    normalizedPath,
+    orderedQueryPairs,
+    selectedHeaders,
+    canonicalBody,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Decimal business-value validation (section 3.8) — corpus rule
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1200,8 +1295,7 @@ export const GOLDEN_ENVELOPE_BASE = {
   providerAccountId: "22222222-2222-4222-8222-222222222222",
   operationId: "33333333-3333-4333-8333-333333333333",
   operationRevision: 7,
-  idempotencyKeyHash:
-    "sha256:36c27d7668cf64a4354635a421f14d74410e9cd54bf1002bffa82421145c7a57",
+  idempotencyKeyHash: "sha256:36c27d7668cf64a4354635a421f14d74410e9cd54bf1002bffa82421145c7a57",
   requestedAt: "2026-07-14T20:00:00.000Z",
   expiresAt: "2026-07-14T20:05:00.000Z",
   nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -1325,13 +1419,7 @@ export const GOLDEN_VECTORS: GoldenVector[] = [
   {
     id: "GV-07",
     description: "query Unicode decoded value",
-    action: ga(
-      "GET",
-      "/search/issues",
-      [["q", "café repo:octo/hello"]],
-      [],
-      null,
-    ),
+    action: ga("GET", "/search/issues", [["q", "café repo:octo/hello"]], [], null),
     canonicalActionBytes:
       '{"canonicalBody":null,"method":"GET","normalizedPath":"/search/issues","orderedQueryPairs":[["q","café repo:octo/hello"]],"origin":"https://api.github.com","profile":"github.provider-action.v1","selectedHeaders":[]}',
     actionDigest: "sha256:583796c845d1ac8698d7f8b18af21969da588323c4dfa555273d47be491fac37",
@@ -1355,13 +1443,7 @@ export const GOLDEN_VECTORS: GoldenVector[] = [
   {
     id: "GV-09",
     description: "header OWS/case normalized",
-    action: ga(
-      "GET",
-      "/repos/octo/hello/issues",
-      [],
-      [["if-none-match", '"abc"']],
-      null,
-    ),
+    action: ga("GET", "/repos/octo/hello/issues", [], [["if-none-match", '"abc"']], null),
     canonicalActionBytes:
       '{"canonicalBody":null,"method":"GET","normalizedPath":"/repos/octo/hello/issues","orderedQueryPairs":[],"origin":"https://api.github.com","profile":"github.provider-action.v1","selectedHeaders":[["if-none-match","\\"abc\\""]]}',
     actionDigest: "sha256:f9b1ea94ad961932469a55c952ebb531988132bf8c018741ebcb7b9285597a86",
@@ -1473,13 +1555,9 @@ export const GOLDEN_VECTORS: GoldenVector[] = [
   {
     id: "GV-17",
     description: "decimal business value as string",
-    action: ga(
-      "PATCH",
-      "/repos/octo/hello/issues/42",
-      [],
-      [["content-type", "application/json"]],
-      { estimate: "12.50" },
-    ),
+    action: ga("PATCH", "/repos/octo/hello/issues/42", [], [["content-type", "application/json"]], {
+      estimate: "12.50",
+    }),
     canonicalActionBytes:
       '{"canonicalBody":{"estimate":"12.50"},"method":"PATCH","normalizedPath":"/repos/octo/hello/issues/42","orderedQueryPairs":[],"origin":"https://api.github.com","profile":"github.provider-action.v1","selectedHeaders":[["content-type","application/json"]]}',
     actionDigest: "sha256:3c0a35585b46cce53aeb1894f1fa7f96e75e1a623e75d2563df3a2ea83ef26e2",
