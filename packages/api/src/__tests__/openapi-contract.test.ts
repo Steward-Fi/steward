@@ -905,6 +905,17 @@ describe("generated OpenAPI contract", () => {
     expect(simulateBody.properties).toHaveProperty("request");
   });
 
+  it("registers workspace-scoped provider authority v2 surfaces", () => {
+    const paths = getOpenApiSpec().paths;
+    expect(paths["/v2/workspaces"]).toHaveProperty("post");
+    expect(paths["/v2/provider-accounts"]).toHaveProperty("post");
+    expect(paths["/v2/provider-accounts/{id}/operations"]).toHaveProperty("post");
+    expect(paths["/v2/provider-role-bindings"]).toHaveProperty("post");
+    expect(paths["/v2/provider-grants"]).toHaveProperty("post");
+    expect(paths["/v2/provider-grants/{id}/revoke"]).toHaveProperty("post");
+    expect(paths["/v2/provider-access/check"]).toHaveProperty("post");
+  });
+
   it("serves the generated contract at /openapi.json", async () => {
     process.env.DATABASE_URL ??= "postgres://openapi-contract.invalid/steward";
     process.env.STEWARD_MASTER_PASSWORD ??= "openapi-contract-master-password";

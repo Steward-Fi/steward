@@ -179,6 +179,129 @@ function errorResponses(): JsonSchema {
   };
 }
 
+function providerAuthorityPaths(): Record<string, OpenApiPathItem> {
+  const security = [{ bearerAuth: [] }];
+  const mutation = (summary: string, schema: JsonSchema): OpenApiOperation => ({
+    tags: ["Provider Authority"],
+    summary,
+    security,
+    parameters: [idempotencyKeyHeader],
+    requestBody: { required: true, content: { "application/json": { schema } } },
+    responses: {
+      "200": jsonResponse(apiResponse(metadataSchema)),
+      "201": jsonResponse(apiResponse(metadataSchema)),
+      ...errorResponses(),
+    },
+  });
+  const listing = (summary: string, workspace = false): OpenApiOperation => ({
+    tags: ["Provider Authority"],
+    summary,
+    security,
+    parameters: workspace ? [parameter("workspaceId", "query")] : [],
+    responses: {
+      "200": jsonResponse(apiResponse({ type: "array", items: metadataSchema })),
+      ...errorResponses(),
+    },
+  });
+  // `expectedRevision` is an optimistic-concurrency (compare-and-set) token, but
+  // WHICH object's revision it binds to differs per endpoint:
+  //   - tenant    -> the tenant-level authority watermark
+  //                  (provider_authority_tenant_state.revision)
+  //   - workspace -> the parent workspace's revision
+  //   - account   -> the parent provider account's revision
+  //   - self      -> the target object's own current revision
+  // `revisionReason(target)` documents that binding inline so clients read the
+  // right revision before mutating; a mismatch yields 409 revision_conflict.
+  const revisionBindingDescription: Record<string, string> = {
+    tenant:
+      "Compare-and-set token: MUST equal the current tenant authority revision (provider_authority_tenant_state.revision). Read it from the authorityRevision field returned by GET /v2/workspaces (the only listing that surfaces it). Mismatch returns 409 revision_conflict.",
+    workspace:
+      "Compare-and-set token: MUST equal the parent workspace's current revision. Mismatch returns 409 revision_conflict.",
+    account:
+      "Compare-and-set token: MUST equal the parent provider account's current revision. Mismatch returns 409 revision_conflict.",
+    self: "Compare-and-set token: MUST equal this object's own current revision. Mismatch returns 409 revision_conflict.",
+    roleBinding:
+      "Compare-and-set token whose binding target depends on role_key: for role_key='tenant_authority_admin' it MUST equal the tenant authority revision (provider_authority_tenant_state.revision, from the authorityRevision field of GET /v2/workspaces); for every workspace-scoped role (workspace_admin/operator/viewer/approver) it MUST equal the target workspace's current revision. Mismatch returns 409 revision_conflict.",
+  };
+  const revisionReason = (
+    target: "tenant" | "workspace" | "account" | "self" | "roleBinding",
+  ): JsonSchema => ({
+    type: "object",
+    required: ["expectedRevision", "reason"],
+    properties: {
+      expectedRevision: {
+        type: "integer",
+        minimum: 0,
+        description: revisionBindingDescription[target],
+      },
+      reason: stringSchema,
+    },
+    additionalProperties: true,
+  });
+  return {
+    "/v2/workspaces": {
+      get: listing("List workspaces"),
+      // create workspace -> binds to the tenant authority revision
+      post: mutation("Create workspace", revisionReason("tenant")),
+    },
+    "/v2/workspaces/{id}/disable": {
+      parameters: [parameter("id", "path")],
+      // binds to the workspace's own revision
+      post: mutation("Disable workspace", revisionReason("self")),
+    },
+    "/v2/provider-accounts": {
+      get: listing("List provider accounts", true),
+      // create account -> binds to the parent workspace revision
+      post: mutation("Create provider account", revisionReason("workspace")),
+    },
+    "/v2/provider-accounts/{id}/disable": {
+      parameters: [parameter("id", "path")],
+      // binds to the account's own revision
+      post: mutation("Disable provider account", revisionReason("self")),
+    },
+    "/v2/provider-accounts/{id}/operations": {
+      parameters: [parameter("id", "path")],
+      get: listing("List provider operations", true),
+      // register operation -> binds to the parent provider account revision
+      post: mutation("Register provider operation", revisionReason("account")),
+    },
+    "/v2/provider-role-bindings": {
+      get: listing("List provider role bindings", true),
+      // issue role binding -> CONDITIONAL: tenant_authority_admin binds to the
+      // tenant authority revision; every workspace-scoped role binds to the
+      // target workspace's revision (see providerAuthorityStore.issueRoleBinding).
+      post: mutation("Issue provider role binding", revisionReason("roleBinding")),
+    },
+    "/v2/provider-role-bindings/{id}/revoke": {
+      parameters: [parameter("id", "path")],
+      // binds to the role binding's own revision
+      post: mutation("Revoke provider role binding", revisionReason("self")),
+    },
+    "/v2/provider-grants": {
+      get: listing("List direct provider grants", true),
+      // issue grant -> binds to the parent workspace revision
+      post: mutation("Issue non-delegable provider grant", revisionReason("workspace")),
+    },
+    "/v2/provider-grants/{id}/revoke": {
+      parameters: [parameter("id", "path")],
+      // binds to the grant's own revision
+      post: mutation("Revoke provider grant", revisionReason("self")),
+    },
+    "/v2/provider-access/check": {
+      post: {
+        tags: ["Provider Authority"],
+        summary: "Evaluate structural provider access without execution policy",
+        security,
+        requestBody: {
+          required: true,
+          content: { "application/json": { schema: metadataSchema } },
+        },
+        responses: { "200": jsonResponse(apiResponse(metadataSchema)), ...errorResponses() },
+      },
+    },
+  };
+}
+
 function parameter(name: string, location: "path" | "query", schema: JsonSchema = stringSchema) {
   return {
     name,
@@ -5685,6 +5808,7 @@ export function getOpenApiSpec() {
       { name: "Global Wallet" },
       { name: "Trading" },
       { name: "Tenant Config" },
+      { name: "Provider Authority" },
     ],
     components: {
       securitySchemes: {
@@ -5708,6 +5832,7 @@ export function getOpenApiSpec() {
     },
     paths: {
       ...authPaths(),
+      ...providerAuthorityPaths(),
       ...accountPaths(),
       ...accountPaths("/v1"),
       ...policyPaths(),
