@@ -887,6 +887,141 @@ export function computeHeaderAllowlistDigest(action: GithubCanonicalActionV1): s
   return sha256HexPrefixed(jcsStringify(names));
 }
 
+// PR4 deterministic v2 commitment builder + grant-dependency hash + outbound
+// query serialization. These are PURE (no DB, no crypto key) so the API minter
+// and the separate-process proxy verifier reconstruct the SAME commitment bytes
+// from the SAME persisted PR3 approval commitment + PR2 canonical action.
+
+/**
+ * Deterministic grant/binding dependency hash. Binds the EXACT matched
+ * grant/binding ids+revisions the PR3 access decision committed, so a revoked or
+ * re-revised grant fails the claim (X5, P15). Arrays are sorted by uuid bytes
+ * (same rule as the approval commitment) then JCS-serialized.
+ */
+export function computeGrantDependencyHash(access: {
+  matchedBindings: ReadonlyArray<{ id: string; revision: number }>;
+  matchedGrants: ReadonlyArray<{ id: string; revision: number }>;
+}): string {
+  const byUuid = (a: { id: string }, b: { id: string }): number =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  const doc = {
+    matchedBindings: [...access.matchedBindings]
+      .sort(byUuid)
+      .map((b) => ({ id: b.id, revision: b.revision })),
+    matchedGrants: [...access.matchedGrants].sort(byUuid).map((g) => ({ id: g.id, revision: g.revision })),
+  };
+  return sha256HexPrefixed(jcsStringify(doc));
+}
+
+/**
+ * Serialize canonical `orderedQueryPairs` into an outbound query string (WITHOUT
+ * the leading `?`) using the PR2 RFC3986 encoding rule (uppercase percent hex,
+ * `%20` not `+`). Duplicate keys and order are preserved exactly. Empty list ->
+ * "". This is the ONLY governed query source (spec section 5.4): the proxy
+ * rebuilds the outbound query from these canonical pairs, never from a raw stored
+ * string.
+ */
+export function serializeCanonicalOutboundQuery(
+  orderedQueryPairs: ReadonlyArray<readonly [string, string]>,
+): string {
+  return orderedQueryPairs
+    .map(([name, value]) => `${encodeRfc3986(name)}=${encodeRfc3986(value)}`)
+    .join("&");
+}
+
+/** Inputs to reconstruct a v2 commitment from the PR3 approval commitment. */
+export interface ProviderExecutionCommitmentBuildInput {
+  approval: {
+    intentId: string;
+    tenantId: string;
+    workspaceId: string;
+    requestActor: { id: string };
+    providerAccount: { id: string };
+    operation: { id: string; revision: number };
+    requestHash: string;
+    actionDigest: string;
+    accessDecision: {
+      id: string;
+      hash: string;
+      matchedBindings: ReadonlyArray<{ id: string; revision: number }>;
+      matchedGrants: ReadonlyArray<{ id: string; revision: number }>;
+    };
+    policyDecision: { policyRevisionHash: string };
+    executionDependencies: {
+      routeId: string;
+      routeRevision: number;
+      secretId: string;
+      secretVersion: number;
+    };
+  };
+  action: GithubCanonicalActionV1;
+  approvalCommitmentHash: string;
+  approvalId: string;
+  authorizationId: string;
+  executionId: string;
+  requestId: string;
+  providerIdempotencyKey: string;
+  nonce: string;
+  issuedAt: string;
+  expiresAt: string;
+  keyId: string;
+}
+
+/**
+ * Reconstruct the exact v2 commitment document from a PR3 approval commitment +
+ * PR2 canonical action + mint params. Both the API mint and the proxy claim call
+ * this so the commitment bytes (and thus `commitmentHash` and the HMAC) are
+ * byte-identical on both sides. `target` and `headerAllowlistDigest` come from
+ * the canonical action (pinned origin host, normalized path, method, sorted
+ * selected-header names); everything else comes from the committed approval so a
+ * drifted dependency changes the hash (X5).
+ */
+export function buildProviderExecutionCommitmentV2(
+  input: ProviderExecutionCommitmentBuildInput,
+): ProviderExecutionCommitmentV2 {
+  const host = new URL(input.action.origin).host;
+  return {
+    schemaVersion: PROVIDER_EXECUTION_COMMITMENT_SCHEMA_VERSION,
+    authorizationId: input.authorizationId,
+    executionId: input.executionId,
+    intentId: input.approval.intentId,
+    requestId: input.requestId,
+    tenantId: input.approval.tenantId,
+    workspaceId: input.approval.workspaceId,
+    actorAgentId: input.approval.requestActor.id,
+    providerAccountId: input.approval.providerAccount.id,
+    operationId: input.approval.operation.id,
+    operationRevision: input.approval.operation.revision,
+    requestHash: input.approval.requestHash,
+    actionDigest: input.approval.actionDigest,
+    grantDependencyHash: computeGrantDependencyHash(input.approval.accessDecision),
+    policyRevisionHash: input.approval.policyDecision.policyRevisionHash,
+    accessDecisionHash: input.approval.accessDecision.hash,
+    approvalId: input.approvalId,
+    approvalCommitmentHash: input.approvalCommitmentHash,
+    target: {
+      scheme: "https",
+      host,
+      port: 443,
+      normalizedPath: input.action.normalizedPath,
+      method: input.action.method,
+    },
+    headerAllowlistDigest: computeHeaderAllowlistDigest(input.action),
+    routeId: input.approval.executionDependencies.routeId,
+    routeRevision: input.approval.executionDependencies.routeRevision,
+    secretId: input.approval.executionDependencies.secretId,
+    secretVersion: input.approval.executionDependencies.secretVersion,
+    backend: "credential-proxy",
+    providerIdempotencyKey: input.providerIdempotencyKey,
+    maxUses: 1,
+    nonce: input.nonce,
+    issuedAt: input.issuedAt,
+    expiresAt: input.expiresAt,
+    keyId: input.keyId,
+  };
+}
+
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Method canonicalization (section 3.3)
 // ─────────────────────────────────────────────────────────────────────────────
