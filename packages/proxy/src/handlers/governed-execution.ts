@@ -317,6 +317,32 @@ export async function dispatchGovernedExecution(
       executionId: loaded.executionId,
     });
   }
+
+  // Pre-claim live-revision drift check (X5, P13/P14): the nonce bound the
+  // route/secret revision at MINT time. If either rotated AFTER mint, the bound
+  // value is stale vs live. Detect this BEFORE claiming so a rotated route/secret
+  // fails closed with zero decrypt and the nonce is NOT consumed (it can only
+  // expire). The claim predicate compares the nonce to itself, so live drift must
+  // be caught here (and again in the boundary check, defense in depth).
+  {
+    const db = getDb();
+    const [liveRoute] = await db
+      .select({ authorityRevision: secretRoutes.authorityRevision, mode: secretRoutes.authorityMode })
+      .from(secretRoutes)
+      .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.id, loaded.routeId)))
+      .limit(1);
+    if (!liveRoute || liveRoute.mode !== "governed_v2" || liveRoute.authorityRevision !== loaded.routeRevision) {
+      return deny("EXEC_AUTH_STALE_ROUTE", 409, intentId, { executionId: loaded.executionId });
+    }
+    const [liveSecret] = await db
+      .select({ version: secrets.version })
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, loaded.secretId)))
+      .limit(1);
+    if (!liveSecret || liveSecret.version !== loaded.secretVersion) {
+      return deny("EXEC_AUTH_STALE_SECRET", 409, intentId, { executionId: loaded.executionId });
+    }
+  }
   await hook("afterRevalidate");
 
   // ── Atomic single-winner claim (spec §2.3, X3/X4) ──────────────────────────
@@ -368,10 +394,16 @@ export async function dispatchGovernedExecution(
         return;
       }
 
-      // Also advance the binding to `executing` (§2.2) in the same tx.
+      // Also advance the binding execution_ready -> executing (§2.2) in the same
+      // tx. The PR3 transition trigger requires binding_revision to increment by
+      // exactly 1 on every status change.
       await dbTx
         .update(providerActionBindings)
-        .set({ status: "executing", updatedAt: new Date() })
+        .set({
+          status: "executing",
+          bindingRevision: sql`${providerActionBindings.bindingRevision} + 1`,
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(providerActionBindings.tenantId, tenantId),
@@ -468,7 +500,10 @@ async function classifyClaimFailure(
   if (n.status === "revoked") return "EXEC_AUTH_STALE_ROUTE";
   if (n.status === "expired") return "EXEC_AUTH_EXPIRED";
   if (n.status === "consumed") return "EXEC_AUTH_CLAIM_LOST"; // another winner (K01/P43)
-  // Still active but claim lost => a bound fact drifted. Distinguish route/secret.
+  // DB-time expiry FIRST (X4): an active nonce past its deadline is expired, not
+  // stale. Classify it as expired before checking route/secret drift.
+  if (n.expiresAt && (n.expiresAt as Date).getTime() <= Date.now()) return "EXEC_AUTH_EXPIRED";
+  // Still active, unexpired, but claim lost => a bound fact drifted. Distinguish.
   const routeRows = await db
     .select({ authorityRevision: secretRoutes.authorityRevision })
     .from(secretRoutes)
@@ -536,13 +571,21 @@ async function recordPreDispatchDenial(
       .update(executionAuthorizationNonces)
       .set({ dispatchState: "failed", dispatchedAt: new Date(), outcomeRecordedAt: new Date() })
       .where(eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId));
+    // Pre-dispatch denial happens BEFORE the executing transition (the claim set
+    // dispatch_state=claimed but the binding is still execution_ready), so the
+    // legal transition is execution_ready -> failed.
     await dbTx
       .update(providerActionBindings)
-      .set({ status: "failed", updatedAt: new Date() })
+      .set({
+        status: "failed",
+        bindingRevision: sql`${providerActionBindings.bindingRevision} + 1`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(providerActionBindings.tenantId, tenantId),
           eq(providerActionBindings.intentId, loaded.intentId),
+          eq(providerActionBindings.status, "execution_ready"),
         ),
       );
     await dbTx
@@ -721,13 +764,20 @@ async function recordTerminal(
       .update(executionAuthorizationNonces)
       .set({ dispatchState: state, outcomeRecordedAt: new Date() })
       .where(eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId));
+    // executing -> succeeded|failed|outcome_unknown (§2.2). Bump binding_revision
+    // by exactly 1 (PR3 trigger convention) and scope by the executing precursor.
     await dbTx
       .update(providerActionBindings)
-      .set({ status: bindingStatus, updatedAt: new Date() })
+      .set({
+        status: bindingStatus,
+        bindingRevision: sql`${providerActionBindings.bindingRevision} + 1`,
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(providerActionBindings.tenantId, tenantId),
           eq(providerActionBindings.intentId, loaded.intentId),
+          eq(providerActionBindings.status, "executing"),
         ),
       );
     // intents mapping (§2.2): succeeded -> executed; failed -> failed;

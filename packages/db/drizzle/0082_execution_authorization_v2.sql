@@ -193,3 +193,152 @@ END $fn$;
 --> statement-breakpoint
 -- Trigger `secret_routes_bump_authority_revision` already binds this function
 -- (created in 0081). CREATE OR REPLACE above rebinds the new body automatically.
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 3. provider_action_bindings: admit the PR4 execution lifecycle states
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Spec §2.2: PR4 adds the terminal binding states PR3 reserved (executing,
+-- succeeded, failed, outcome_unknown). PR3's state_chk / approval_shape_chk /
+-- transition trigger only know the approval lifecycle up to execution_ready, so
+-- they MUST be extended here or PR4's dispatch transitions fail closed at the DB.
+-- (Deviation flagged in the PR body: PR4 extends PR3-owned constraints because
+-- the states are PR4's, mirroring the G1 "each PR owns the columns/states its
+-- invariants require" adjudication.)
+
+-- 3a0. Extend the status allowlist CHECK to admit the PR4 execution states.
+ALTER TABLE "provider_action_bindings" DROP CONSTRAINT "provider_action_bindings_status_chk";
+--> statement-breakpoint
+ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_status_chk"
+  CHECK ("status" IN (
+    'denied','pending_approval','allowed_stub','stub_succeeded','stub_failed',
+    'approved','execution_ready','approval_denied','approval_expired','approval_stale',
+    'executing','succeeded','failed','outcome_unknown'
+  ));
+--> statement-breakpoint
+
+-- 3a. Extend the state_chk approval arm to include the PR4 execution states.
+ALTER TABLE "provider_action_bindings" DROP CONSTRAINT "provider_action_bindings_state_chk";
+--> statement-breakpoint
+ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_state_chk" CHECK (
+  ("access_effect" = 'deny' AND "policy_effect" = 'not_evaluated' AND "status" = 'denied') OR
+  ("access_effect" = 'allow' AND "policy_effect" = 'hard_deny' AND "status" = 'denied') OR
+  ("access_effect" = 'allow' AND "policy_effect" = 'approval_required'
+    AND "status" IN ('pending_approval','approved','execution_ready',
+                     'approval_denied','approval_expired','approval_stale',
+                     'executing','succeeded','failed','outcome_unknown')) OR
+  ("access_effect" = 'allow' AND "policy_effect" = 'allow'
+    AND "status" IN ('allowed_stub','stub_succeeded','stub_failed'))
+);
+--> statement-breakpoint
+
+-- 3b. Extend the per-state field-shape CHECK for the PR4 execution states. Each
+-- keeps the execution_ready evidence columns (approval actor/approved_at/resume*)
+-- since PR4 does not clear them; they carry through the terminal lifecycle.
+ALTER TABLE "provider_action_bindings" DROP CONSTRAINT "provider_action_bindings_approval_shape_chk";
+--> statement-breakpoint
+ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_approval_shape_chk" CHECK (
+  ("status" NOT IN ('pending_approval','approved','execution_ready','approval_denied','approval_expired','approval_stale','executing','succeeded','failed','outcome_unknown')
+    AND "approval_actor_user_id" IS NULL AND "approved_at" IS NULL AND "denied_at" IS NULL
+    AND "expired_at" IS NULL AND "stale_at" IS NULL
+    AND "resume_actor" IS NULL AND "resume_attempt_id" IS NULL AND "resume_validated_at" IS NULL)
+  OR
+  ("status" = 'pending_approval'
+    AND "approval_queue_id" IS NOT NULL AND "approval_commitment_hash" IS NOT NULL
+    AND "approval_actor_user_id" IS NULL AND "approved_at" IS NULL AND "denied_at" IS NULL
+    AND "expired_at" IS NULL AND "stale_at" IS NULL
+    AND "resume_actor" IS NULL AND "resume_attempt_id" IS NULL AND "resume_validated_at" IS NULL)
+  OR
+  ("status" = 'approved'
+    AND "approval_queue_id" IS NOT NULL AND "approval_commitment_hash" IS NOT NULL
+    AND "approval_actor_user_id" IS NOT NULL AND "approved_at" IS NOT NULL
+    AND "denied_at" IS NULL AND "expired_at" IS NULL AND "stale_at" IS NULL
+    AND "resume_actor" IS NULL AND "resume_attempt_id" IS NULL AND "resume_validated_at" IS NULL)
+  OR
+  -- execution_ready + all PR4 execution states share the same required evidence
+  -- shape (the resume evidence is set once at execution_ready and carried).
+  ("status" IN ('execution_ready','executing','succeeded','failed','outcome_unknown')
+    AND "approval_queue_id" IS NOT NULL AND "approval_commitment_hash" IS NOT NULL
+    AND "approval_actor_user_id" IS NOT NULL AND "approved_at" IS NOT NULL
+    AND "resume_actor" = 'steward-system' AND "resume_attempt_id" IS NOT NULL
+    AND "resume_validated_at" IS NOT NULL)
+  OR
+  ("status" = 'approval_denied'
+    AND "approval_queue_id" IS NOT NULL AND "approval_actor_user_id" IS NOT NULL
+    AND "denied_at" IS NOT NULL
+    AND "approved_at" IS NULL AND "expired_at" IS NULL AND "stale_at" IS NULL
+    AND "resume_actor" IS NULL)
+  OR
+  ("status" = 'approval_expired'
+    AND "approval_queue_id" IS NOT NULL AND "expired_at" IS NOT NULL
+    AND "denied_at" IS NULL AND "stale_at" IS NULL AND "resume_actor" IS NULL)
+  OR
+  ("status" = 'approval_stale'
+    AND "approval_queue_id" IS NOT NULL AND "stale_at" IS NOT NULL
+    AND "stale_reason_code" IS NOT NULL
+    AND "denied_at" IS NULL AND "expired_at" IS NULL AND "resume_actor" IS NULL)
+);
+--> statement-breakpoint
+
+-- 3c. Extend the transition trigger's allowlist with the PR4 execution graph:
+--   execution_ready -> executing
+--   executing       -> succeeded | failed | outcome_unknown
+--   outcome_unknown -> succeeded | failed        (reconciliation, never blind)
+-- PR4 execution transitions increment binding_revision by exactly 1 (same
+-- optimistic-lock convention as PR3). The frozen-column guard + revision rules
+-- are unchanged; only the allowed OLD->NEW pairs grow.
+CREATE OR REPLACE FUNCTION steward_provider_action_binding_guard() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE
+  frozen_old jsonb;
+  frozen_new jsonb;
+  mutable text[] := ARRAY[
+    'status','binding_revision','approval_actor_user_id','approval_queue_id',
+    'approval_commitment_hash','approved_at','denied_at','expired_at','stale_at',
+    'stale_reason_code','resume_actor','resume_attempt_id','resume_validated_at','updated_at'
+  ];
+  col text;
+BEGIN
+  frozen_old := to_jsonb(OLD);
+  frozen_new := to_jsonb(NEW);
+  FOREACH col IN ARRAY mutable LOOP
+    frozen_old := frozen_old - col;
+    frozen_new := frozen_new - col;
+  END LOOP;
+  IF frozen_old IS DISTINCT FROM frozen_new THEN
+    RAISE EXCEPTION 'provider_action_bindings frozen column mutated' USING ERRCODE = '23514';
+  END IF;
+
+  IF OLD.status IS DISTINCT FROM NEW.status THEN
+    IF (OLD.status = 'allowed_stub' AND NEW.status IN ('stub_succeeded','stub_failed')) THEN
+      IF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision THEN
+        RAISE EXCEPTION 'provider_action_bindings stub transition must not change binding_revision'
+          USING ERRCODE = '23514';
+      END IF;
+    ELSIF (
+      -- PR3 approval lifecycle.
+      (OLD.status = 'pending_approval' AND NEW.status IN ('approved','approval_denied','approval_expired','approval_stale')) OR
+      (OLD.status = 'approved'         AND NEW.status IN ('execution_ready','approval_expired','approval_stale')) OR
+      -- PR4 execution lifecycle.
+      (OLD.status = 'execution_ready'  AND NEW.status = 'executing') OR
+      (OLD.status = 'execution_ready'  AND NEW.status = 'failed') OR
+      (OLD.status = 'executing'        AND NEW.status IN ('succeeded','failed','outcome_unknown')) OR
+      (OLD.status = 'outcome_unknown'  AND NEW.status IN ('succeeded','failed'))
+    ) THEN
+      IF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision + 1 THEN
+        RAISE EXCEPTION 'provider_action_bindings binding_revision must increment by exactly one on transition'
+          USING ERRCODE = '23514';
+      END IF;
+    ELSE
+      RAISE EXCEPTION 'illegal provider_action_bindings status transition'
+        USING ERRCODE = '23514';
+    END IF;
+  ELSE
+    IF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision THEN
+      RAISE EXCEPTION 'provider_action_bindings binding_revision changed without a status transition'
+        USING ERRCODE = '23514';
+    END IF;
+  END IF;
+  RETURN NEW;
+END $fn$;
+--> statement-breakpoint
+-- Trigger `provider_action_bindings_immutable` already binds this function
+-- (created in 0081). CREATE OR REPLACE above rebinds the new body automatically.
