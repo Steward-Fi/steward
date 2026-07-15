@@ -780,6 +780,25 @@ async function dispatchOnce(
   await hook("afterUpstream");
 
   const upstreamStatus = response.status;
+  // Drain/cancel the proxy response body on EVERY governed path (codex P2). The
+  // dispatcher records only the OUTCOME; it never streams the body back to a
+  // client. handleProxy releases its in-flight proxy slot via
+  // releaseWhenBodyCloses, so an unconsumed streaming body would leak that slot
+  // and eventually reject later requests for this agent/tenant with a 429. We
+  // cancel after reading status (and, for the 502 case, after cloning to inspect
+  // the forward-failure envelope). cancel() on an already-consumed/absent body is
+  // a safe no-op.
+  // Fire-and-forget: cancel() releases the proxy slot when the underlying body
+  // acknowledges, but we must NOT await it on the outcome path — a slow/parked
+  // upstream body could otherwise block the terminal recording indefinitely. The
+  // slot release happens asynchronously via releaseWhenBodyCloses' cancel().
+  const drainBody = (r: Response): void => {
+    void Promise.resolve()
+      .then(() => r.body?.cancel())
+      .catch(() => {
+        // Best-effort: a body that already errored/closed cannot leak the slot.
+      });
+  };
   // Classification (spec §4.1 step 5, X8). handleProxy collapses a FORWARD-level
   // failure (connection reset / timeout / DNS / abort AFTER we set dispatched_at)
   // into its own 502 JSON envelope `{ ok:false, error:"Upstream request failed" }`.
@@ -792,6 +811,7 @@ async function dispatchOnce(
   const isSuccess = upstreamStatus >= 200 && upstreamStatus < 400;
   await hook("beforeTerminal");
   if (isSuccess) {
+    drainBody(response);
     await recordTerminal(tenantId, loaded, "succeeded", upstreamStatus);
     return {
       ok: true,
@@ -818,6 +838,9 @@ async function dispatchOnce(
       forwardLevelFailure = false;
     }
   }
+  // Cancel the original body (the 502 branch cloned it; every other error status
+  // never touched it) so the proxy in-flight slot is released (codex P2).
+  drainBody(response);
   if (forwardLevelFailure) {
     // Sent-but-no-clean-response → outcome_unknown, NEVER auto-retry (X8, K13/K14).
     await recordTerminal(tenantId, loaded, "outcome_unknown", undefined);

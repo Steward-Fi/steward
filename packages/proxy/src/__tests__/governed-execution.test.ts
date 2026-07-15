@@ -71,7 +71,10 @@ let handleProxy: typeof import("../handlers/proxy")["handleProxy"];
 
 let captured: { url: string; method: string } | null = null;
 let capturedBody: string | null = null;
-let forwarderMode: "ok" | "throw" | "500" = "ok";
+// Set true when the forwarder's streaming response body is cancelled/drained.
+// Proves the governed dispatcher releases the proxy in-flight slot (codex P2).
+let streamingBodyCancelled = false;
+let forwarderMode: "ok" | "throw" | "500" | "stream" = "ok";
 
 const IDS = {
   tenant: "tenant-gov",
@@ -454,6 +457,39 @@ beforeAll(async () => {
     }
     if (forwarderMode === "throw") throw new Error("upstream connection reset");
     if (forwarderMode === "500") return new Response(JSON.stringify({ err: 1 }), { status: 500 });
+    if (forwarderMode === "stream") {
+      // A 200 whose body enqueues ONE chunk then stays OPEN (pull awaits a promise
+      // that only resolves on cancel). The proxy slot is released only when this
+      // body is fully read OR cancelled, so if the governed dispatcher fails to
+      // drain it the slot leaks (and this test would hang / the flag stays false).
+      let firstPull = true;
+      const stream = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          if (firstPull) {
+            firstPull = false;
+            controller.enqueue(new Uint8Array([1, 2, 3]));
+            return;
+          }
+          // Park until cancelled: return a promise that never resolves, so the
+          // only way to end the stream is an explicit cancel().
+          return new Promise<void>(() => {});
+        },
+        cancel() {
+          streamingBodyCancelled = true;
+        },
+      });
+      // A credentialed response whose declared content-length EXCEEDS the proxy's
+      // reflection-scan cap: handleProxy skips buffering it and passes the body
+      // THROUGH (wrapped by releaseWhenBodyCloses). The slot is then released ONLY
+      // when the dispatcher drains that pass-through body — the exact leak path.
+      return new Response(stream, {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(64 * 1024 * 1024), // > 25MB cap
+        },
+      });
+    }
     return new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -478,6 +514,7 @@ afterAll(async () => {
 beforeEach(async () => {
   captured = null;
   capturedBody = null;
+  streamingBodyCancelled = false;
   forwarderMode = "ok";
   const db = getDb();
   // Clean per-test rows (order: children first).
@@ -992,6 +1029,20 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     );
     expect(res.status).toBe(403);
     expect(captured).toBeNull();
+  });
+
+  it("P36: a successful governed dispatch DRAINS the proxy response body so the in-flight slot is released (codex P2 slot leak)", async () => {
+    const { intentId } = await seedExecutionReady();
+    forwarderMode = "stream"; // 200 with an open, never-auto-closing body
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(true);
+    // The dispatcher drains the body fire-and-forget (never blocking the outcome
+    // path), so the cancel resolves on a subsequent microtask/tick. Poll briefly.
+    for (let i = 0; i < 50 && !streamingBodyCancelled; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    // Without the drain the proxy slot (released only on body close/cancel) leaks.
+    expect(streamingBodyCancelled).toBe(true);
   });
 
   it("P35: the forwarded body is JCS-serialized (byte-identical to the committed canonical action), NOT JSON.stringify insertion order (codex P2)", async () => {

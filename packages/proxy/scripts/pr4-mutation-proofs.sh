@@ -222,6 +222,13 @@ proof "M19 governed dispatch re-enters legacy approval hold (P34)" "packages/pro
 proof "M20 body via JSON.stringify not JCS (P35)" "packages/proxy" "$GOV_TEST" "P35" "$GOV" \
   's/jcsStringify(loaded.canonicalAction.canonicalBody)/JSON.stringify(loaded.canonicalAction.canonicalBody)/'
 
+# M21: drop the success-path response-body drain → P36 (a successful governed
+#      dispatch of a pass-through streaming body must cancel it so the proxy
+#      in-flight slot is released; leaving it undrained leaks the slot). Remove the
+#      FIRST drainBody(response) call (the isSuccess branch).
+proof "M21 drop success-path body drain (P36)" "packages/proxy" "$GOV_TEST" "P36" "$GOV" \
+  '0,/drainBody(response);/s/drainBody(response);//'
+
 echo ""
 echo "==================================================="
 echo "PR4 MUTATION PROOFS: $pass_count killed, $fail_count invalid"
