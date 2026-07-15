@@ -41,6 +41,7 @@ services:
       REDIS_URL: "redis://redis:6379"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"
       STEWARD_SESSION_SECRET: "${STEWARD_SESSION_SECRET:?required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?required}"
@@ -86,6 +87,7 @@ services:
       REDIS_REQUIRED: "true"
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?required}"
+      STEWARD_EXECUTION_AUTH_SECRET: "${STEWARD_EXECUTION_AUTH_SECRET:?required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?required}"
       # Proxy-side approval expiry extends the tamper-evident audit chain
       # (release.ts -> withTenantAuditedTransaction); required or expired-approval
