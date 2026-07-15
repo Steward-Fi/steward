@@ -59,6 +59,7 @@ import { intentRoutes } from "./routes/intents";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
 import { registerProviderActionRoutes } from "./routes/provider-actions";
+import { registerProviderApprovalRoutes } from "./routes/provider-approvals";
 import { providerAuthorityRoutes } from "./routes/provider-authority";
 import { secretsRoutes } from "./routes/secrets";
 import { tenantConfigRoutes } from "./routes/tenant-config";
@@ -252,6 +253,9 @@ export function mountCoreIdempotencyAndRoutes(
   // middleware directly on the app (see registerProviderActionRoutes) to avoid a
   // second `/v2` sub-app mount colliding with the authority wildcard.
   registerProviderActionRoutes(app);
+  // PR3 approval + safe-resume routes (also registered directly to avoid the
+  // /v2 authority-wildcard collision).
+  registerProviderApprovalRoutes(app);
 
   app.route("/condition-sets", conditionSetRoutes);
   app.route("/condition_sets", conditionSetRoutes);

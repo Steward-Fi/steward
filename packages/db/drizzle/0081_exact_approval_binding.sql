@@ -320,19 +320,25 @@ BEGIN
 
   -- Transition allowlist.
   IF OLD.status IS DISTINCT FROM NEW.status THEN
-    IF NOT (
-      -- PR2 stub lineage (unchanged).
-      (OLD.status = 'allowed_stub' AND NEW.status IN ('stub_succeeded','stub_failed')) OR
+    IF (OLD.status = 'allowed_stub' AND NEW.status IN ('stub_succeeded','stub_failed')) THEN
+      -- PR2 stub lineage: does NOT participate in the binding_revision optimistic
+      -- lock (PR2 sets only status/updated_at). Leave binding_revision unchanged.
+      IF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision THEN
+        RAISE EXCEPTION 'provider_action_bindings stub transition must not change binding_revision'
+          USING ERRCODE = '23514';
+      END IF;
+    ELSIF (
       -- PR3 approval lifecycle.
       (OLD.status = 'pending_approval' AND NEW.status IN ('approved','approval_denied','approval_expired','approval_stale')) OR
       (OLD.status = 'approved'         AND NEW.status IN ('execution_ready','approval_expired','approval_stale'))
     ) THEN
+      -- Every PR3 lifecycle transition increments binding_revision by exactly 1.
+      IF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision + 1 THEN
+        RAISE EXCEPTION 'provider_action_bindings binding_revision must increment by exactly one on transition'
+          USING ERRCODE = '23514';
+      END IF;
+    ELSE
       RAISE EXCEPTION 'illegal provider_action_bindings status transition'
-        USING ERRCODE = '23514';
-    END IF;
-    -- Every state-changing transition increments binding_revision by exactly 1.
-    IF NEW.binding_revision IS DISTINCT FROM OLD.binding_revision + 1 THEN
-      RAISE EXCEPTION 'provider_action_bindings binding_revision must increment by exactly one on transition'
         USING ERRCODE = '23514';
     END IF;
   ELSE

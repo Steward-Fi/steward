@@ -54,6 +54,7 @@ import {
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
 import { writeAuditEvent } from "./audit";
+import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 
 const EVALUATOR_VERSION = "provider-action.v1";
 const POLICY_TYPE = "capability-intent" as const;
@@ -471,7 +472,43 @@ class ProviderActionService {
           expiresAt: new Date(input.expiresAt),
         });
 
+        // PR3 (§6.3): for the approval-required arm, build the exact approval
+        // commitment + queue row inside THIS create transaction (AFTER the intent
+        // insert the queue FK references). A missing PR1 execution dependency
+        // (route/credential) throws ApprovalArmError => creation fails closed.
+        let approvalQueueId: string | null = null;
+        let approvalCommitmentHash: string | null = null;
+        if (effects.status === "pending_approval") {
+          const arm = await buildApprovalArm({
+            tx,
+            tenantId,
+            workspaceId: input.workspaceId,
+            intentId,
+            actorAgentId,
+            actorRevision: access.doc.dependencyRevisions.actor,
+            account: txAccount,
+            operation: txOperation,
+            requestHash,
+            actionDigest,
+            accessDecisionId,
+            accessDecisionHash,
+            matchedBindings: access.doc.dependencyRevisions.bindings,
+            matchedGrants: access.doc.dependencyRevisions.grants,
+            policyDecisionId: (policy as PolicyResult).decisionId,
+            policyDecisionHash: policyDecisionHash as string,
+            policyRevisionHash: (policy as PolicyResult).doc.policyRevisionHash,
+            evaluatorVersion: EVALUATOR_VERSION,
+            requesterSeparation: extractRequesterSeparation(txOperation.requestProfile),
+            requestedAt: input.requestedAt,
+            expiresAt: input.expiresAt,
+          });
+          approvalQueueId = arm.queueId;
+          approvalCommitmentHash = arm.commitmentHash;
+        }
+
         await tx.insert(providerActionBindings).values({
+          approvalQueueId,
+          approvalCommitmentHash,
           intentId,
           tenantId,
           workspaceId: input.workspaceId,
@@ -507,6 +544,9 @@ class ProviderActionService {
         });
 
         // Required audit intent -> transactional outbox (drained post-commit).
+        // PR5 C1: correlated lifecycle events set resource_type='provider_action'
+        // and resource_id=intents.id (not the operation id) so PR5 can correlate
+        // online by the lifecycle root.
         await tx.insert(providerActionAuditOutbox).values({
           tenantId,
           intentId,
@@ -516,9 +556,12 @@ class ProviderActionService {
               : effects.status === "pending_approval"
                 ? "provider.action.approval_required"
                 : "provider.action.allowed",
-          resourceType: "provider-action",
-          resourceId: operation.id,
+          resourceType: "provider_action",
+          resourceId: intentId,
           metadata: {
+            // PR5 C1: metadata.intentId is the offline-authoritative correlation
+            // key (inside the signed eventsDigest).
+            intentId,
             actorAgentId,
             operationKey: input.operationKey,
             actionDigest,
@@ -933,33 +976,82 @@ class ProviderActionService {
     return { doc, evaluation, decisionId };
   }
 
-  // ── Required-audit outbox drain (post-commit, pre-stub) ──
-  private async drainAuditOutbox(tenantId: string, intentId: string): Promise<boolean> {
+  /**
+   * C2 crash-recovery sweeper (spec §7.3). The required-audit outbox row commits
+   * IN-TX with the intent/binding, but its drain into the signed chain happens
+   * post-commit. A crash between commit and drain leaves an intent with an
+   * UNDELIVERED outbox row and therefore ZERO signed correlated events — which
+   * would break the C2 invariant (every persisted intent has >=1 signed event).
+   *
+   * This sweeper drains every undelivered outbox row for the tenant (optionally
+   * scoped to one intent). It is safe to run repeatedly and concurrently: the
+   * drain marks `delivered_at` per row after the signed append, and
+   * `writeAuditEvent` is itself per-tenant serialized, so a signed event is
+   * produced EXACTLY ONCE per outbox row. Call it opportunistically (any read
+   * path) and/or from a periodic job; a killed drain is always recoverable.
+   *
+   * Returns the number of rows delivered in this pass.
+   */
+  async recoverUnsignedIntents(tenantId: string, intentId?: string): Promise<number> {
     const rows = await this.db()
       .select()
       .from(providerActionAuditOutbox)
       .where(
         and(
           eq(providerActionAuditOutbox.tenantId, tenantId),
-          eq(providerActionAuditOutbox.intentId, intentId),
+          intentId
+            ? eq(providerActionAuditOutbox.intentId, intentId)
+            : (sql`true` as unknown as ReturnType<typeof eq>),
           sql`${providerActionAuditOutbox.deliveredAt} IS NULL`,
         ),
       );
+    let delivered = 0;
     for (const row of rows) {
-      await writeAuditEvent({
-        tenantId: row.tenantId,
-        actorType: "agent",
-        actorId: (row.metadata as { actorAgentId?: string }).actorAgentId ?? null,
-        action: row.action,
-        resourceType: row.resourceType,
-        resourceId: row.resourceId,
-        metadata: row.metadata as Record<string, unknown>,
-      });
-      await this.db()
+      // Guarded claim: only deliver rows still undelivered. A concurrent sweeper
+      // that already delivered this row leaves delivered_at set; the signed
+      // append below is only reached after a successful CAS on delivered_at, so
+      // no row is signed twice.
+      const claimed = await this.db()
         .update(providerActionAuditOutbox)
         .set({ deliveredAt: new Date() })
-        .where(eq(providerActionAuditOutbox.id, row.id));
+        .where(
+          and(
+            eq(providerActionAuditOutbox.id, row.id),
+            sql`${providerActionAuditOutbox.deliveredAt} IS NULL`,
+          ),
+        )
+        .returning({ id: providerActionAuditOutbox.id });
+      if (claimed.length === 0) continue; // another pass won the row
+      try {
+        await writeAuditEvent({
+          tenantId: row.tenantId,
+          actorType: "agent",
+          actorId: (row.metadata as { actorAgentId?: string }).actorAgentId ?? null,
+          action: row.action,
+          resourceType: row.resourceType,
+          resourceId: row.resourceId,
+          metadata: row.metadata as Record<string, unknown>,
+        });
+        delivered += 1;
+      } catch (err) {
+        // Signing failed AFTER we claimed the row: release the claim so a later
+        // pass retries (the event must never be silently dropped).
+        await this.db()
+          .update(providerActionAuditOutbox)
+          .set({ deliveredAt: null })
+          .where(eq(providerActionAuditOutbox.id, row.id));
+        throw err;
+      }
     }
+    return delivered;
+  }
+
+  // ── Required-audit outbox drain (post-commit, pre-stub) ──
+  private async drainAuditOutbox(tenantId: string, intentId: string): Promise<boolean> {
+    // Delegate to the CAS-guarded recovery path so the inline drain and the
+    // crash-recovery sweeper share exactly-once semantics (spec §7.3). Any signer
+    // failure propagates (caller maps it to EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE).
+    await this.recoverUnsignedIntents(tenantId, intentId);
     return true;
   }
 
@@ -1187,6 +1279,20 @@ function extractCapabilityIntentRules(
     });
   }
   return rules;
+}
+
+/**
+ * Extract the operation's requester-separation requirement (spec I10). PR1 does
+ * not yet ship a structured approval-requirements field, so PR3 reads it from
+ * `request_profile.approvalRequirements.requesterSeparation` when present
+ * (forward-compatible) and defaults to false. Documented deviation: when PR1
+ * lands a first-class approval-requirements field the commitment builder should
+ * read that instead.
+ */
+export function extractRequesterSeparation(requestProfile: Record<string, unknown>): boolean {
+  const reqs = (requestProfile as { approvalRequirements?: unknown }).approvalRequirements;
+  if (typeof reqs !== "object" || reqs === null) return false;
+  return (reqs as { requesterSeparation?: unknown }).requesterSeparation === true;
 }
 
 function capabilitySelectorMatches(config: Record<string, unknown>, operationKey: string): boolean {
