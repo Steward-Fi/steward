@@ -14,7 +14,7 @@ import {
   test,
 } from "bun:test";
 import { signAccessToken } from "@stwd/auth";
-import { closeDb } from "@stwd/db";
+import { agents, closeDb, getDb, providerRoleBindings, userTenants } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
 import type { Hono } from "hono";
 import type { AppVariables } from "../services/context";
@@ -70,19 +70,38 @@ async function wipeAndSeed() {
   await seedFixture();
 }
 
-async function humanToken(userId: string, mfaVerifiedAt: number | null = freshMfa()) {
+async function humanToken(
+  userId: string,
+  mfaVerifiedAt: number | null = freshMfa(),
+  tenantId = F.TENANT,
+) {
   const payload: Record<string, unknown> = {
     address: `0xuser-${userId.slice(0, 6)}`,
-    tenantId: F.TENANT,
+    tenantId,
     userId,
   };
   if (mfaVerifiedAt !== null) payload.mfaVerifiedAt = mfaVerifiedAt;
   return signAccessToken(payload as never, "10m");
 }
 
-async function agentToken() {
+async function agentToken(agentId = F.AGENT, tenantId = F.TENANT, userId?: string) {
   const { signAgentToken } = await import("@stwd/auth");
-  return signAgentToken({ agentId: F.AGENT, tenantId: F.TENANT, scopes: [] }, "10m");
+  return signAgentToken({ agentId, tenantId, scopes: [], ...(userId ? { userId } : {}) }, "10m");
+}
+
+async function expectExecuteErrorShapeMatchesGet(executeResponse: Response, getResponse: Response) {
+  expect(executeResponse.status).toBe(getResponse.status);
+  const executeBody = (await executeResponse.json()) as {
+    ok: false;
+    error: { code: string; message: string; requestId: unknown };
+  };
+  const getBody = (await getResponse.json()) as typeof executeBody;
+  expect(Object.keys(executeBody).sort()).toEqual(Object.keys(getBody).sort());
+  expect(Object.keys(executeBody.error).sort()).toEqual(Object.keys(getBody.error).sort());
+  expect(executeBody.error.code).toBe(getBody.error.code);
+  expect(executeBody.error.message).toBe(getBody.error.message);
+  expect(typeof executeBody.error.requestId).toBe(typeof getBody.error.requestId);
+  return executeBody;
 }
 
 function decideReq(intentId: string, token: string, body: unknown) {
@@ -187,6 +206,139 @@ describe("PR3 approval + execute routes", () => {
     const execBody = (await execRes.json()) as { status: string; resumeAttemptId: string };
     expect(execBody.status).toBe("execution_ready");
     expect(execBody.resumeAttemptId).toBeTruthy();
+  });
+
+  test("execute permits the original requesting agent", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    const approveRes = await decideReq(intentId, await humanToken(F.APPROVER), {
+      decision: "approve",
+      expectedVersion: 1,
+      expectedRequestHash: requestHash,
+      expectedActionDigest: actionDigest,
+      idempotencyKey: "route-agent-execute",
+    });
+    expect(approveRes.status).toBe(200);
+
+    const execRes = await app.request(`/v2/provider-actions/${intentId}/execute`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await agentToken()}`,
+        "x-steward-tenant": F.TENANT,
+      },
+    });
+    expect(execRes.status).toBe(200);
+    expect((await execRes.json()) as { status: string }).toMatchObject({
+      status: "execution_ready",
+    });
+  });
+
+  test("execute does not let an agent token borrow an embedded human approver claim", async () => {
+    const unrelatedAgentId = "agent-unrelated";
+    await getDb().insert(agents).values({
+      id: unrelatedAgentId,
+      tenantId: F.TENANT,
+      name: "Unrelated",
+      walletAddress: "0x2",
+    });
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    const approveRes = await decideReq(intentId, await humanToken(F.APPROVER), {
+      decision: "approve",
+      expectedVersion: 1,
+      expectedRequestHash: requestHash,
+      expectedActionDigest: actionDigest,
+      idempotencyKey: "route-mixed-identity-execute",
+    });
+    expect(approveRes.status).toBe(200);
+
+    const execRes = await app.request(`/v2/provider-actions/${intentId}/execute`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await agentToken(unrelatedAgentId, F.TENANT, F.APPROVER)}`,
+        "x-steward-tenant": F.TENANT,
+      },
+    });
+    expect(execRes.status).toBe(404);
+    expect(((await execRes.json()) as { error: { code: string } }).error.code).toBe(
+      "SCOPE_RESOURCE_NOT_FOUND",
+    );
+    expect((await bindingRow(intentId)).status).toBe("approved");
+  });
+
+  test("execute permits a current workspace admin with matching environment scope", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    const approveRes = await decideReq(intentId, await humanToken(F.APPROVER), {
+      decision: "approve",
+      expectedVersion: 1,
+      expectedRequestHash: requestHash,
+      expectedActionDigest: actionDigest,
+      idempotencyKey: "route-admin-execute",
+    });
+    expect(approveRes.status).toBe(200);
+    await getDb().insert(providerRoleBindings).values({
+      tenantId: F.TENANT,
+      workspaceId: F.WORKSPACE,
+      principalType: "human",
+      principalId: F.APPROVER_2,
+      roleKey: "workspace_admin",
+      operationKeys: [],
+      environment: "production",
+      status: "active",
+      grantedByUserId: F.GRANTOR,
+      reason: "route-admin",
+    });
+
+    const execRes = await app.request(`/v2/provider-actions/${intentId}/execute`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${await humanToken(F.APPROVER_2)}`,
+        "x-steward-tenant": F.TENANT,
+      },
+    });
+    expect(execRes.status).toBe(200);
+    expect((await execRes.json()) as { status: string }).toMatchObject({
+      status: "execution_ready",
+    });
+  });
+
+  test("execute hides an existing action from an unrelated tenant principal with GET-shape parity", async () => {
+    const { intentId } = await createApprovalRequired();
+    const token = await humanToken(F.APPROVER_2);
+    const executeResponse = await app.request(`/v2/provider-actions/${intentId}/execute`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "x-steward-tenant": F.TENANT },
+    });
+    const getResponse = await app.request(`/v2/provider-actions/${intentId}/approval`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}`, "x-steward-tenant": F.TENANT },
+    });
+
+    const body = await expectExecuteErrorShapeMatchesGet(executeResponse, getResponse);
+    expect(executeResponse.status).toBe(404);
+    expect(body.error.code).toBe("SCOPE_RESOURCE_NOT_FOUND");
+    expect((await bindingRow(intentId)).status).toBe("pending_approval");
+  });
+
+  test("execute hides a cross-tenant action with GET-shape parity", async () => {
+    const { intentId } = await createApprovalRequired();
+    await getDb().insert(userTenants).values({
+      userId: F.APPROVER_2,
+      tenantId: F.TENANT_B,
+      role: "member",
+    });
+    const token = await humanToken(F.APPROVER_2, freshMfa(), F.TENANT_B);
+    const executeResponse = await app.request(`/v2/provider-actions/${intentId}/execute`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "x-steward-tenant": F.TENANT_B },
+    });
+    const getResponse = await app.request(`/v2/provider-actions/${intentId}/approval`, {
+      method: "GET",
+      headers: { authorization: `Bearer ${token}`, "x-steward-tenant": F.TENANT_B },
+    });
+
+    const body = await expectExecuteErrorShapeMatchesGet(executeResponse, getResponse);
+    expect(executeResponse.status).toBe(404);
+    expect(body.error.code).toBe("SCOPE_RESOURCE_NOT_FOUND");
+    expect((await bindingRow(intentId)).status).toBe("pending_approval");
   });
 
   test("GET approval requires recent MFA => 403 APPROVAL_MFA_REQUIRED when MFA missing", async () => {

@@ -16,6 +16,7 @@ import {
   test,
 } from "bun:test";
 import {
+  __resetAuditHmacKeyCacheForTests,
   approvalQueue,
   closeDb,
   getDb,
@@ -69,6 +70,19 @@ async function wipe() {
     tenants,
   ]) {
     await db.delete(t);
+  }
+}
+
+async function withRealAuditFailure<T>(run: () => Promise<T>): Promise<T> {
+  const previous = process.env.STEWARD_AUDIT_HMAC_KEY;
+  process.env.STEWARD_AUDIT_HMAC_KEY = "too-weak";
+  __resetAuditHmacKeyCacheForTests();
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env.STEWARD_AUDIT_HMAC_KEY;
+    else process.env.STEWARD_AUDIT_HMAC_KEY = previous;
+    __resetAuditHmacKeyCacheForTests();
   }
 }
 
@@ -200,6 +214,27 @@ describe("PR3 concurrency + fault matrix", () => {
   // so a genuinely-concurrent mid-transaction commit cannot be injected without
   // deadlock; committing the change immediately before resume is the equivalent
   // deterministic oracle for the revalidation-at-claim predicate.)
+  test("P2-2: resume transaction rechecks the execute caller and rejects unrelated principals", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    const approved = await providerApprovalService.decide(
+      decideBody(intentId, requestHash, actionDigest),
+    );
+    expect(approved.ok).toBe(true);
+
+    const result = await providerApprovalService.resume({
+      intentId,
+      tenantId: F.TENANT,
+      caller: { userId: F.APPROVER_2 },
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: "SCOPE_RESOURCE_NOT_FOUND",
+      httpStatus: 404,
+    });
+    expect((await bindingRow(intentId)).status).toBe("approved");
+    expect((await queueRow(intentId)).status).toBe("approved");
+  });
+
   test("C06: grant revoked before the resume claim => stale, no ready state", async () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
     await providerApprovalService.decide(decideBody(intentId, requestHash, actionDigest));
@@ -280,6 +315,54 @@ describe("PR3 concurrency + fault matrix", () => {
     expect(q.status).toBe("pending");
     const i = await getDb().select().from(intents).where(eq(intents.id, intentId));
     expect(i[0].status).toBe("pending");
+    expect(await auditCount()).toBe(auditsBefore);
+  });
+
+  test("P2-1 decide: real audit persistence failure returns exact audit-unavailable code and rolls back", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    const auditsBefore = await auditCount();
+    const res = await withRealAuditFailure(() =>
+      providerApprovalService.decide(decideBody(intentId, requestHash, actionDigest)),
+    );
+
+    expect(res).toEqual({
+      ok: false,
+      code: "EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE",
+      httpStatus: 503,
+    });
+    const binding = await bindingRow(intentId);
+    expect(binding.status).toBe("pending_approval");
+    expect(binding.bindingRevision).toBe(1);
+    expect((await queueRow(intentId)).status).toBe("pending");
+    const [intent] = await getDb().select().from(intents).where(eq(intents.id, intentId));
+    expect(intent.status).toBe("pending");
+    expect(await auditCount()).toBe(auditsBefore);
+  });
+
+  test("P2-1 resume: real audit persistence failure returns exact audit-unavailable code and rolls back", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    const approved = await providerApprovalService.decide(
+      decideBody(intentId, requestHash, actionDigest),
+    );
+    expect(approved.ok).toBe(true);
+    const auditsBefore = await auditCount();
+
+    const res = await withRealAuditFailure(() =>
+      providerApprovalService.resume({ intentId, tenantId: F.TENANT }),
+    );
+
+    expect(res).toEqual({
+      ok: false,
+      code: "EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE",
+      httpStatus: 503,
+    });
+    const binding = await bindingRow(intentId);
+    expect(binding.status).toBe("approved");
+    expect(binding.bindingRevision).toBe(2);
+    expect(binding.resumeAttemptId).toBeNull();
+    expect((await queueRow(intentId)).status).toBe("approved");
+    const [intent] = await getDb().select().from(intents).where(eq(intents.id, intentId));
+    expect(intent.executedBy).toBeNull();
     expect(await auditCount()).toBe(auditsBefore);
   });
 

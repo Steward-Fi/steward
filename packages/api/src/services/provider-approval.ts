@@ -698,6 +698,59 @@ class ProviderApprovalService {
   // or APPROVAL_POLICY_STALE. PR3 does not re-run the evaluator here; operation
   // revision + policy revision hash equality is the exact-binding rule.
 
+  /**
+   * Current human workspace authority, shared by approval decisions and the
+   * execute-route caller gate. This is the PR3 authority predicate: current
+   * tenant membership plus an active, in-window role binding for the exact
+   * workspace and its current environment.
+   */
+  private async hasWorkspaceRoleAuthority(
+    tx: DbExecutor,
+    binding: BindingRow,
+    userId: string,
+    tenantId: string,
+    roleKeys: ReadonlySet<"workspace_approver" | "workspace_admin">,
+  ): Promise<{ ok: true } | { ok: false; reason: "membership" | "role" }> {
+    const [membership] = await tx
+      .select({ id: userTenants.id })
+      .from(userTenants)
+      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
+      .limit(1)
+      .for("update");
+    if (!membership) return { ok: false, reason: "membership" };
+
+    const [workspace] = await tx
+      .select({ environment: workspaces.environment })
+      .from(workspaces)
+      .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, binding.workspaceId)))
+      .limit(1)
+      .for("update");
+    if (!workspace) return { ok: false, reason: "role" };
+
+    const now = new Date();
+    const authorityRows = await tx
+      .select()
+      .from(providerRoleBindings)
+      .where(
+        and(
+          eq(providerRoleBindings.tenantId, tenantId),
+          eq(providerRoleBindings.workspaceId, binding.workspaceId),
+          eq(providerRoleBindings.principalType, "human"),
+          eq(providerRoleBindings.principalId, userId),
+          eq(providerRoleBindings.status, "active"),
+        ),
+      )
+      .for("update");
+    const eligible = authorityRows.some(
+      (row) =>
+        roleKeys.has(row.roleKey as "workspace_approver" | "workspace_admin") &&
+        (!row.notBefore || row.notBefore <= now) &&
+        (!row.expiresAt || row.expiresAt > now) &&
+        (!row.environment || row.environment === workspace.environment),
+    );
+    return eligible ? { ok: true } : { ok: false, reason: "role" };
+  }
+
   // ── Approver eligibility (spec §3.2, §3.3) ──
   private async checkApprover(
     tx: DbExecutor,
@@ -708,54 +761,17 @@ class ProviderApprovalService {
     sessionMfaVerifiedAt: number | undefined,
     atResume: boolean,
   ): Promise<{ ok: true } | { ok: false; code: string; httpStatus: number }> {
-    // Current tenant membership row must exist.
-    const [membership] = await tx
-      .select({ id: userTenants.id })
-      .from(userTenants)
-      .where(and(eq(userTenants.userId, userId), eq(userTenants.tenantId, tenantId)))
-      .limit(1);
-    if (!membership) {
-      return atResume
-        ? { ok: false, code: "APPROVAL_APPROVER_STALE", httpStatus: 409 }
-        : { ok: false, code: "APPROVAL_MEMBERSHIP_INACTIVE", httpStatus: 403 };
-    }
-
-    // The action's environment is the committed workspace environment. An
-    // environment-scoped approver binding must match it (a NULL binding env =
-    // all environments). This mirrors the actor access checks which gate on
-    // workspace.environment (codex P1).
-    const [workspace] = await tx
-      .select({ environment: workspaces.environment })
-      .from(workspaces)
-      .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, binding.workspaceId)))
-      .limit(1);
-    const actionEnv = workspace?.environment;
-
-    // Active, in-window, in-environment workspace_approver binding for THIS exact
-    // workspace.
-    const now = new Date();
-    const approverRows = await tx
-      .select()
-      .from(providerRoleBindings)
-      .where(
-        and(
-          eq(providerRoleBindings.tenantId, tenantId),
-          eq(providerRoleBindings.workspaceId, binding.workspaceId),
-          eq(providerRoleBindings.principalType, "human"),
-          eq(providerRoleBindings.principalId, userId),
-          eq(providerRoleBindings.roleKey, "workspace_approver"),
-          eq(providerRoleBindings.status, "active"),
-        ),
-      );
-    const eligible = approverRows.some(
-      (b) =>
-        (!b.notBefore || b.notBefore <= now) &&
-        (!b.expiresAt || b.expiresAt > now) &&
-        (!b.environment || b.environment === actionEnv),
+    const authority = await this.hasWorkspaceRoleAuthority(
+      tx,
+      binding,
+      userId,
+      tenantId,
+      new Set(["workspace_approver"]),
     );
-    if (!eligible) {
-      return atResume
-        ? { ok: false, code: "APPROVAL_APPROVER_STALE", httpStatus: 409 }
+    if (!authority.ok) {
+      if (atResume) return { ok: false, code: "APPROVAL_APPROVER_STALE", httpStatus: 409 };
+      return authority.reason === "membership"
+        ? { ok: false, code: "APPROVAL_MEMBERSHIP_INACTIVE", httpStatus: 403 }
         : { ok: false, code: "APPROVAL_ROLE_REQUIRED", httpStatus: 403 };
     }
 
@@ -1000,9 +1016,7 @@ class ProviderApprovalService {
     try {
       return await withTenantAuditedTransaction(input.tenantId, async (txRaw, appendRaw) => {
         const tx = txRaw as DbExecutor;
-        const append = appendRaw as unknown as (
-          ev: { tenantId: string } & Record<string, unknown>,
-        ) => Promise<void>;
+        const append = mapRequiredAuditFailure(appendRaw as unknown as ApprovalAuditAppend);
 
         const loaded = await this.loadCase(tx, input.tenantId, input.intentId, true);
         await this.hook("afterScopeLoad");
@@ -1342,6 +1356,7 @@ class ProviderApprovalService {
   async resume(input: {
     intentId: string;
     tenantId: string;
+    caller?: { agentId?: string; userId?: string };
     ipAddress?: string | null;
     userAgent?: string | null;
     requestId?: string | null;
@@ -1349,15 +1364,16 @@ class ProviderApprovalService {
     try {
       return await withTenantAuditedTransaction(input.tenantId, async (txRaw, appendRaw) => {
         const tx = txRaw as DbExecutor;
-        const append = appendRaw as unknown as (
-          ev: { tenantId: string } & Record<string, unknown>,
-        ) => Promise<void>;
+        const append = mapRequiredAuditFailure(appendRaw as unknown as ApprovalAuditAppend);
 
         const loaded = await this.loadCase(tx, input.tenantId, input.intentId, true);
         await this.hook("afterScopeLoad");
         if ("notFound" in loaded) return fail("SCOPE_RESOURCE_NOT_FOUND", 404);
         if ("notApproval" in loaded) return fail("APPROVAL_NOT_REQUIRED", 409);
         const { binding, queue } = loaded;
+        if (input.caller && !(await this.isExecuteCallerAuthorized(tx, binding, input.caller))) {
+          return fail("SCOPE_RESOURCE_NOT_FOUND", 404);
+        }
 
         // Idempotent: already execution_ready returns same state.
         if (binding.status === "execution_ready") {
@@ -1540,6 +1556,42 @@ class ProviderApprovalService {
     }
   }
 
+  private async isExecuteCallerAuthorized(
+    tx: DbExecutor,
+    binding: BindingRow,
+    caller: { agentId?: string; userId?: string },
+  ): Promise<boolean> {
+    if (caller.agentId && caller.agentId === binding.actorAgentId) return true;
+    return Boolean(
+      caller.userId &&
+        (
+          await this.hasWorkspaceRoleAuthority(
+            tx,
+            binding,
+            caller.userId,
+            binding.tenantId,
+            new Set(["workspace_approver", "workspace_admin"]),
+          )
+        ).ok,
+    );
+  }
+
+  // ── Execute-route caller authority, §9.1 ──
+  async authorizeExecuteCaller(
+    tenantId: string,
+    intentId: string,
+    caller: { agentId?: string; userId?: string },
+  ): Promise<{ ok: true } | { ok: false; code: "SCOPE_RESOURCE_NOT_FOUND"; httpStatus: 404 }> {
+    const loaded = await this.loadCase(this.db(), tenantId, intentId, false);
+    if ("notFound" in loaded || "notApproval" in loaded) {
+      return { ok: false, code: "SCOPE_RESOURCE_NOT_FOUND", httpStatus: 404 };
+    }
+    if (await this.isExecuteCallerAuthorized(this.db(), loaded.binding, caller)) {
+      return { ok: true };
+    }
+    return { ok: false, code: "SCOPE_RESOURCE_NOT_FOUND", httpStatus: 404 };
+  }
+
   // ── GET approval detail for an eligible approver (safe summary + labels), §9.1 ──
   // The GET endpoint requires an eligible workspace approver with recent MFA
   // (even safe summaries are sensitive). Non-enumerating: any ineligibility on a
@@ -1604,6 +1656,26 @@ class ProviderApprovalService {
 // ── module helpers ──
 
 class AuditUnavailableError extends Error {}
+
+type ApprovalAuditAppend = (event: { tenantId: string } & Record<string, unknown>) => Promise<void>;
+
+function mapRequiredAuditFailure(append: ApprovalAuditAppend): ApprovalAuditAppend {
+  return async (event) => {
+    try {
+      await append(event);
+    } catch (cause) {
+      const causeMessage = cause instanceof Error ? cause.message : String(cause);
+      const error = new AuditUnavailableError(
+        `required approval audit persistence failed: ${causeMessage}`,
+      );
+      error.cause = cause;
+      if (cause && typeof cause === "object" && "code" in cause) {
+        Object.assign(error, { code: (cause as { code?: unknown }).code });
+      }
+      throw error;
+    }
+  };
+}
 
 function setsEqual(a: Set<string>, b: Set<string>): boolean {
   if (a.size !== b.size) return false;
