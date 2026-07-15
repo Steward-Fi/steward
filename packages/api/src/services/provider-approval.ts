@@ -755,18 +755,34 @@ class ProviderApprovalService {
     loaded: LoadedCase,
   ): Promise<boolean> {
     const { binding, queue } = loaded;
-    // DB time.
-    const [{ due }] = (await tx.execute(
-      sql`SELECT (${queue.expiresAt} <= now()) AS due`,
-    )) as unknown as Array<{ due: boolean }>;
+    // DB time. drizzle's tx.execute returns either an array (postgres-js) or a
+    // { rows } object (pglite/neon), so normalize.
+    const dueRes = await tx.execute(sql`SELECT (${queue.expiresAt} <= now()) AS due`);
+    const dueRows = (
+      Array.isArray(dueRes) ? dueRes : ((dueRes as { rows?: unknown[] }).rows ?? [])
+    ) as Array<{ due: boolean }>;
+    const due = dueRows[0]?.due === true;
     if (!due) return false;
     if (!(queue.status === "pending" || queue.status === "approved")) return false;
 
     const before = binding.bindingRevision;
     const after = before + 1;
+    // The decision-shape CHECK requires expired/stale rows to carry decision
+    // IS NULL / consumed_at IS NULL. An approved-then-expired row must clear its
+    // queue decision fields; the immutable decision evidence is preserved on the
+    // binding (approval_actor_user_id/approved_at) and in the signed
+    // provider.approval.decided audit event (I3 evidence, I14).
     await tx
       .update(approvalQueue)
-      .set({ status: "expired" })
+      .set({
+        status: "expired",
+        decision: null,
+        resolvedAt: null,
+        resolvedByType: null,
+        resolvedById: null,
+        resolvedBy: null,
+        mfaVerifiedAt: null,
+      })
       .where(
         and(
           eq(approvalQueue.id, queue.id),
@@ -819,9 +835,19 @@ class ProviderApprovalService {
   ): Promise<void> {
     const before = binding.bindingRevision;
     const after = before + 1;
+    // See expireIfDue: stale rows must carry decision IS NULL per the shape CHECK;
+    // the immutable decision evidence lives on the binding + audit chain.
     await tx
       .update(approvalQueue)
-      .set({ status: "stale" })
+      .set({
+        status: "stale",
+        decision: null,
+        resolvedAt: null,
+        resolvedByType: null,
+        resolvedById: null,
+        resolvedBy: null,
+        mfaVerifiedAt: null,
+      })
       .where(
         and(eq(approvalQueue.id, queue.id), sql`${approvalQueue.status} IN ('pending','approved')`),
       );
