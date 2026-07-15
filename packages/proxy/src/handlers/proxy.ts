@@ -1107,6 +1107,48 @@ export async function handleProxy(c: Context): Promise<Response> {
       403,
     );
   }
+  // ── PR4 governed-route authority gate (spec §5.1, X1/X7) ──────────────────
+  // The gate is on the SELECTED route row, so a governed route is unreachable
+  // via direct /proxy, named aliases, or /proxy/<host>/... regardless of how it
+  // was addressed. A governed route is permitted ONLY when the request arrived
+  // through dispatchGovernedExecution, which sets a non-forgeable in-process
+  // `governedExecutionClaim` context (never from a header — mirror the
+  // proxyApprovalRelease rule). Any unknown authority_mode default-denies so a
+  // reverted/older proxy that no longer understands governed mode still fails
+  // closed (§6.3).
+  const authorityMode = (route as { authorityMode?: string }).authorityMode ?? "legacy";
+  if (authorityMode !== "legacy") {
+    const governedClaim = c.get("governedExecutionClaim" as never) as
+      | { authorizationId: string; executionId: string; routeId: string }
+      | undefined;
+    const claimMatches =
+      authorityMode === "governed_v2" &&
+      governedClaim !== undefined &&
+      governedClaim.routeId === route.id;
+    if (!claimMatches) {
+      await recordRequiredAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 403,
+        latencyMs: Date.now() - startTime,
+        reason:
+          authorityMode === "governed_v2"
+            ? "governed-route-direct-denied"
+            : "governed-route-unknown-authority-mode",
+      });
+      return c.json(
+        {
+          ok: false,
+          error: "GOVERNED_ROUTE_DIRECT_DENIED",
+        },
+        403,
+      );
+    }
+  }
+
   if (route.injectAs === "query") {
     await recordAudit({
       agentId,

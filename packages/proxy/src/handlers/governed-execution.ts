@@ -1,0 +1,770 @@
+/**
+ * governed-execution.ts — PR4 governed dispatch entry (spec §2.3, §4.1, §5.3,
+ * §6). This is the ONLY caller allowed to reach a governed route's decrypt.
+ *
+ * WHY THIS LIVES IN @stwd/proxy (contradiction C2, resolved & reported): the
+ * proxy runs as a SEPARATE PROCESS from the API and does NOT depend on @stwd/api,
+ * yet §5.3 requires dispatchGovernedExecution to call handleProxy (which lives
+ * here). So the claim + the governed handleProxy invocation live in the proxy;
+ * the MINT stays in the API inside the PR3 resume tx. The v2 signing crypto is in
+ * @stwd/shared so both sides agree. The claim is one atomic DB UPDATE regardless
+ * of process, preserving X1-X4.
+ *
+ * FLOW (single writer, spec §2.3 / §4.1):
+ *   1. load the execution_ready binding + its v2 nonce by intent_id;
+ *   2. atomic single-winner claim UPDATE (every bound fact re-checked at DB time,
+ *      X3/X4) + append provider.execution.claimed in the SAME audited tx (I14);
+ *   3. signing-boundary revalidation (exact equality on route/operation/account/
+ *      secret + verify the v2 signature, X5) — defense in depth beyond the claim;
+ *   4. build the non-forgeable in-process governedExecutionClaim context and call
+ *      handleProxy (which permits the already-selected governed route, §5.1);
+ *   5. record the terminal dispatch outcome (succeeded / failed /
+ *      outcome_unknown), NEVER a blind retry (X8).
+ *
+ * The governedExecutionClaim context is set ONLY here (never from a request
+ * header/body/query/cookie), mirroring executePendingProxyRequest's
+ * proxyApprovalRelease. No decrypt happens until AFTER the claim commits.
+ */
+
+import { createHash } from "node:crypto";
+import type { Context } from "hono";
+import {
+  approvalQueue,
+  executionAuthorizationNonces,
+  getDb,
+  intents,
+  providerAccounts,
+  providerActionBindings,
+  providerOperations,
+  secretRoutes,
+  secrets,
+  withTenantAuditedTransaction,
+} from "@stwd/db";
+import {
+  buildProviderExecutionCommitmentV2,
+  decodeUtf8Strict,
+  type GithubCanonicalActionV1,
+  isExecutionAuthV2SecretConfigured,
+  type ProviderApprovalCommitmentV1,
+  computeProviderExecutionCommitmentHash,
+  serializeCanonicalOutboundQuery,
+  strictParseJson,
+  verifyProviderExecutionCommitmentV2,
+} from "@stwd/shared";
+import { and, eq, sql } from "drizzle-orm";
+import { handleProxy } from "./proxy";
+
+// ─── Error codes (spec §6.1) ───────────────────────────────────────────────────
+
+export type GovernedDispatchCode =
+  | "EXEC_AUTH_NOT_READY"
+  | "EXEC_AUTH_CLAIM_LOST"
+  | "EXEC_AUTH_EXPIRED"
+  | "EXEC_AUTH_STALE_ROUTE"
+  | "EXEC_AUTH_STALE_SECRET"
+  | "EXEC_AUTH_STALE_DEPENDENCY"
+  | "EXEC_AUTH_ACCOUNT_DISABLED"
+  | "EXEC_AUTH_KEY_UNAVAILABLE"
+  | "EXEC_AUTH_SIGNATURE_INVALID"
+  | "EXEC_DISPATCH_OUTCOME_UNKNOWN"
+  | "EXEC_DISPATCH_UPSTREAM_ERROR"
+  | "EXEC_AUDIT_UNAVAILABLE"
+  | "EXEC_TERMINAL_STATE";
+
+export interface GovernedDispatchResult {
+  ok: boolean;
+  code: GovernedDispatchCode | "EXEC_DISPATCH_SUCCEEDED";
+  httpStatus: number;
+  intentId: string;
+  executionId?: string;
+  dispatchState?: string;
+  upstreamStatusCode?: number;
+}
+
+// Test-only fault-injection hooks (production no-ops; not settable from runtime
+// input). Named per spec §9 fault barriers.
+export interface GovernedDispatchHooks {
+  afterLoad?: () => void | Promise<void>;
+  afterClaim?: () => void | Promise<void>;
+  afterRevalidate?: () => void | Promise<void>;
+  beforeForward?: () => void | Promise<void>;
+  afterDispatchedAt?: () => void | Promise<void>;
+  afterUpstream?: () => void | Promise<void>;
+  beforeTerminal?: () => void | Promise<void>;
+}
+
+let dispatchHooks: GovernedDispatchHooks = {};
+export function __setGovernedDispatchHooksForTests(hooks: GovernedDispatchHooks): void {
+  dispatchHooks = hooks;
+}
+export function __resetGovernedDispatchHooksForTests(): void {
+  dispatchHooks = {};
+}
+async function hook(name: keyof GovernedDispatchHooks): Promise<void> {
+  const h = dispatchHooks[name];
+  if (h) await h();
+}
+
+class AuditUnavailableError extends Error {}
+
+interface LoadedGovernedExecution {
+  intentId: string;
+  tenantId: string;
+  workspaceId: string;
+  actorAgentId: string;
+  authorizationId: string;
+  nonce: string;
+  executionId: string;
+  providerAccountId: string;
+  operationId: string;
+  operationRevision: number;
+  routeId: string;
+  routeRevision: number;
+  secretId: string;
+  secretVersion: number;
+  requestHash: string;
+  actionDigest: string;
+  commitmentHash: string;
+  grantDependencyHash: string;
+  providerIdempotencyKey: string;
+  keyId: string;
+  signature: string;
+  approvalId: string;
+  approvalCommitmentHash: string;
+  approvalCommitment: ProviderApprovalCommitmentV1;
+  canonicalAction: GithubCanonicalActionV1;
+  requestId: string;
+  dispatchState: string;
+  authStatus: string;
+  issuedAt: string;
+  expiresAt: string;
+}
+
+/**
+ * Load the execution_ready binding + its active v2 authorization by intent_id.
+ * Returns null when the intent is not execution_ready or has no active v2 nonce.
+ */
+async function loadGovernedExecution(
+  tenantId: string,
+  intentId: string,
+): Promise<LoadedGovernedExecution | null> {
+  const db = getDb();
+  const rows = await db
+    .select({
+      binding: providerActionBindings,
+      nonce: executionAuthorizationNonces,
+    })
+    .from(providerActionBindings)
+    .innerJoin(
+      executionAuthorizationNonces,
+      and(
+        eq(executionAuthorizationNonces.intentId, providerActionBindings.intentId),
+        eq(executionAuthorizationNonces.version, 2),
+      ),
+    )
+    .where(
+      and(
+        eq(providerActionBindings.tenantId, tenantId),
+        eq(providerActionBindings.intentId, intentId),
+      ),
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  const { binding, nonce } = row;
+
+  // The persisted PR3 approval commitment lives on the approval_queue row; the
+  // binding carries approval_queue_id. Reload it (jsonb) by that id.
+  if (!binding.approvalQueueId) return null;
+  const queueRows = await db
+    .select({
+      id: approvalQueue.id,
+      approvalCommitment: approvalQueue.approvalCommitment,
+      approvalCommitmentHash: approvalQueue.approvalCommitmentHash,
+    })
+    .from(approvalQueue)
+    .where(
+      and(eq(approvalQueue.tenantId, tenantId), eq(approvalQueue.id, binding.approvalQueueId)),
+    )
+    .limit(1);
+  const q = queueRows[0];
+  if (!q || !q.approvalCommitment) return null;
+
+  const canonicalAction = parseCanonicalAction(
+    new Uint8Array(binding.canonicalActionBytes as Uint8Array),
+  );
+
+  return {
+    intentId: binding.intentId,
+    tenantId: binding.tenantId,
+    workspaceId: binding.workspaceId,
+    actorAgentId: binding.actorAgentId,
+    authorizationId: nonce.authorizationId,
+    nonce: nonce.nonce,
+    executionId: nonce.executionId as string,
+    providerAccountId: binding.providerAccountId,
+    operationId: binding.operationId,
+    operationRevision: binding.operationRevision,
+    routeId: nonce.routeId as string,
+    routeRevision: nonce.routeRevision as number,
+    secretId: nonce.secretId as string,
+    secretVersion: nonce.secretVersion as number,
+    requestHash: nonce.requestHash as string,
+    actionDigest: nonce.actionDigest as string,
+    commitmentHash: nonce.commitmentHash as string,
+    grantDependencyHash: nonce.grantDependencyHash as string,
+    providerIdempotencyKey: nonce.providerIdempotencyKey as string,
+    keyId: nonce.keyId as string,
+    signature: nonce.signature,
+    approvalId: q.id,
+    approvalCommitmentHash: q.approvalCommitmentHash ?? "",
+    approvalCommitment: q.approvalCommitment as unknown as ProviderApprovalCommitmentV1,
+    canonicalAction,
+    requestId: nonce.requestId,
+    dispatchState: (nonce.dispatchState as string) ?? "none",
+    authStatus: nonce.status,
+    issuedAt: (nonce.issuedAt as Date).toISOString(),
+    expiresAt: (nonce.expiresAt as Date).toISOString(),
+  };
+}
+
+function parseCanonicalAction(bytes: Uint8Array): GithubCanonicalActionV1 {
+  return strictParseJson(decodeUtf8Strict(bytes)) as unknown as GithubCanonicalActionV1;
+}
+
+function deny(
+  code: GovernedDispatchCode,
+  httpStatus: number,
+  intentId: string,
+  extra?: Partial<GovernedDispatchResult>,
+): GovernedDispatchResult {
+  return { ok: false, code, httpStatus, intentId, ...extra };
+}
+
+/**
+ * Dispatch a governed, approved (execution_ready) provider action exactly once.
+ *
+ * @param intentId the PR3 intent (lifecycle root).
+ * @param tenantId owning tenant.
+ */
+export async function dispatchGovernedExecution(
+  intentId: string,
+  tenantId: string,
+): Promise<GovernedDispatchResult> {
+  // Fail closed if the v2 secret is absent (X7, P48/F06). No decrypt, no claim.
+  if (!isExecutionAuthV2SecretConfigured()) {
+    return deny("EXEC_AUTH_KEY_UNAVAILABLE", 503, intentId);
+  }
+
+  const loaded = await loadGovernedExecution(tenantId, intentId);
+  await hook("afterLoad");
+  if (!loaded) return deny("EXEC_AUTH_NOT_READY", 409, intentId);
+
+  // Terminal / already-dispatched: never re-dispatch (X8, P26). A consumed nonce
+  // with a terminal dispatch_state returns its current state without dispatching.
+  if (loaded.authStatus !== "active" || loaded.dispatchState !== "none") {
+    if (loaded.dispatchState === "outcome_unknown")
+      return deny("EXEC_DISPATCH_OUTCOME_UNKNOWN", 202, intentId, {
+        executionId: loaded.executionId,
+        dispatchState: loaded.dispatchState,
+      });
+    return deny("EXEC_TERMINAL_STATE", 409, intentId, {
+      executionId: loaded.executionId,
+      dispatchState: loaded.dispatchState,
+    });
+  }
+
+  // ── Signing-boundary revalidation (X5, §4.1 step 3) ────────────────────────
+  // Recompute the v2 commitment from the persisted approval + canonical action +
+  // the mint's exact issuedAt/expiresAt/keyId (read from the nonce row), require
+  // it equals the stored commitment_hash, and verify the HMAC signature over it.
+  // This is exact-equality on route/operation/account/secret/approval commitment
+  // + a domain-separated signature check BEFORE any decrypt (defense in depth
+  // beyond the claim predicate; a tampered stored commitment_hash / signature is
+  // caught here even if the claim's varchar equality somehow passed).
+  const rebuilt = buildProviderExecutionCommitmentV2({
+    approval: loaded.approvalCommitment,
+    action: loaded.canonicalAction,
+    approvalCommitmentHash: loaded.approvalCommitmentHash,
+    approvalId: loaded.approvalId,
+    authorizationId: loaded.authorizationId,
+    executionId: loaded.executionId,
+    requestId: loaded.requestId,
+    providerIdempotencyKey: loaded.providerIdempotencyKey,
+    nonce: loaded.nonce,
+    issuedAt: loaded.issuedAt,
+    expiresAt: loaded.expiresAt,
+    keyId: loaded.keyId,
+  });
+  if (computeProviderExecutionCommitmentHash(rebuilt) !== loaded.commitmentHash) {
+    // A bound fact drifted (or the stored hash was tampered): fail closed, no
+    // decrypt. The claim has not run yet, so nothing to roll back.
+    return deny("EXEC_AUTH_STALE_DEPENDENCY", 409, intentId, {
+      executionId: loaded.executionId,
+    });
+  }
+  let signatureValid: boolean;
+  try {
+    signatureValid = verifyProviderExecutionCommitmentV2(rebuilt, loaded.signature);
+  } catch {
+    // Secret unavailable at the verify boundary => fail closed (X7, P48).
+    return deny("EXEC_AUTH_KEY_UNAVAILABLE", 503, intentId, {
+      executionId: loaded.executionId,
+    });
+  }
+  if (!signatureValid) {
+    return deny("EXEC_AUTH_SIGNATURE_INVALID", 403, intentId, {
+      executionId: loaded.executionId,
+    });
+  }
+  await hook("afterRevalidate");
+
+  // ── Atomic single-winner claim (spec §2.3, X3/X4) ──────────────────────────
+  // Every bound fact is re-checked at DB time in the SAME statement. Zero rows =>
+  // claim lost (expired / already consumed / any bound fact drifted). The claim +
+  // its audit commit atomically via withTenantAuditedTransaction (I14/G3).
+  let claimed = false;
+  let claimReason: GovernedDispatchCode | null = null;
+  try {
+    await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+      const dbTx = tx as ReturnType<typeof getDb>;
+      const updated = await dbTx
+        .update(executionAuthorizationNonces)
+        .set({
+          status: "consumed",
+          consumedAt: new Date(),
+          dispatchState: "claimed",
+        })
+        .where(
+          and(
+            eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId),
+            eq(executionAuthorizationNonces.nonce, loaded.nonce),
+            eq(executionAuthorizationNonces.version, 2),
+            eq(executionAuthorizationNonces.status, "active"),
+            sql`${executionAuthorizationNonces.expiresAt} > now()`,
+            eq(executionAuthorizationNonces.tenantId, tenantId),
+            eq(executionAuthorizationNonces.workspaceId, loaded.workspaceId),
+            eq(executionAuthorizationNonces.agentId, loaded.actorAgentId),
+            eq(executionAuthorizationNonces.executionId, loaded.executionId),
+            eq(executionAuthorizationNonces.intentId, loaded.intentId),
+            eq(executionAuthorizationNonces.providerAccountId, loaded.providerAccountId),
+            eq(executionAuthorizationNonces.operationId, loaded.operationId),
+            eq(executionAuthorizationNonces.operationRevision, loaded.operationRevision),
+            eq(executionAuthorizationNonces.routeId, loaded.routeId),
+            eq(executionAuthorizationNonces.routeRevision, loaded.routeRevision),
+            eq(executionAuthorizationNonces.secretId, loaded.secretId),
+            eq(executionAuthorizationNonces.secretVersion, loaded.secretVersion),
+            eq(executionAuthorizationNonces.requestHash, loaded.requestHash),
+            eq(executionAuthorizationNonces.actionDigest, loaded.actionDigest),
+            eq(executionAuthorizationNonces.commitmentHash, loaded.commitmentHash),
+          ),
+        )
+        .returning({ id: executionAuthorizationNonces.id });
+
+      if (updated.length === 0) {
+        // Losers of a concurrent race (or drift) do NOT dispatch. We still need
+        // to classify why so callers get the exact §6.1 code; do a lightweight
+        // re-read AFTER the failed claim.
+        return;
+      }
+
+      // Also advance the binding to `executing` (§2.2) in the same tx.
+      await dbTx
+        .update(providerActionBindings)
+        .set({ status: "executing", updatedAt: new Date() })
+        .where(
+          and(
+            eq(providerActionBindings.tenantId, tenantId),
+            eq(providerActionBindings.intentId, loaded.intentId),
+            eq(providerActionBindings.status, "execution_ready"),
+          ),
+        );
+
+      try {
+        await appendRequiredAudit({
+          tenantId,
+          actorType: "system",
+          actorId: "steward-system",
+          action: "provider.execution.claimed",
+          resourceType: "provider_action",
+          resourceId: loaded.intentId,
+          metadata: {
+            schemaVersion: "steward.provider-execution-audit.v1",
+            intentId: loaded.intentId,
+            executionId: loaded.executionId,
+            authorizationId: loaded.authorizationId,
+            dispatchState: "claimed",
+            routeId: loaded.routeId,
+            routeRevision: loaded.routeRevision,
+            secretVersion: loaded.secretVersion,
+            commitmentHash: loaded.commitmentHash,
+            providerIdempotencyKeyHash: sha256Hex(loaded.providerIdempotencyKey),
+          },
+        });
+      } catch (e) {
+        throw new AuditUnavailableError((e as Error).message);
+      }
+      claimed = true;
+    });
+  } catch (e) {
+    if (e instanceof AuditUnavailableError) {
+      // The whole claim tx rolled back (F07/P50/K11): nonce stays active, no
+      // decrypt. Fail closed.
+      return deny("EXEC_AUDIT_UNAVAILABLE", 503, intentId);
+    }
+    throw e;
+  }
+  await hook("afterClaim");
+
+  if (!claimed) {
+    claimReason = await classifyClaimFailure(tenantId, loaded);
+    return deny(claimReason, claimReason === "EXEC_AUTH_EXPIRED" ? 410 : 409, intentId, {
+      executionId: loaded.executionId,
+    });
+  }
+
+  // ── Post-claim boundary account/workspace status check (§4.1 step 3) ───────
+  // The claim SQL cannot express account/workspace disabled as an equality, so
+  // re-check here BEFORE decrypt. A disabled-but-same-revision account fails.
+  const boundary = await revalidateAccountBoundary(tenantId, loaded);
+  await hook("afterRevalidate");
+  if (!boundary.ok) {
+    await recordPreDispatchDenial(tenantId, loaded, boundary.code);
+    return deny(boundary.code, 409, intentId, { executionId: loaded.executionId });
+  }
+
+  // ── Dispatch exactly once via handleProxy with the governed context ────────
+  await hook("beforeForward");
+  return dispatchOnce(tenantId, loaded);
+}
+
+// sha256 hex-prefixed (audit records the HASH of the provider idempotency key,
+// NEVER the raw key — PR5 C3 data minimization).
+function sha256Hex(value: string): string {
+  return `sha256:${createHash("sha256").update(value, "utf8").digest("hex")}`;
+}
+
+/**
+ * Classify why a claim returned zero rows by re-reading the current nonce/route/
+ * secret state. Non-enumerating: any foreign/absent yields a generic lost code.
+ */
+async function classifyClaimFailure(
+  tenantId: string,
+  loaded: LoadedGovernedExecution,
+): Promise<GovernedDispatchCode> {
+  const db = getDb();
+  const rows = await db
+    .select({ nonce: executionAuthorizationNonces })
+    .from(executionAuthorizationNonces)
+    .where(
+      and(
+        eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId),
+        eq(executionAuthorizationNonces.version, 2),
+      ),
+    )
+    .limit(1);
+  const n = rows[0]?.nonce;
+  if (!n) return "EXEC_AUTH_CLAIM_LOST";
+  if (n.status === "revoked") return "EXEC_AUTH_STALE_ROUTE";
+  if (n.status === "expired") return "EXEC_AUTH_EXPIRED";
+  if (n.status === "consumed") return "EXEC_AUTH_CLAIM_LOST"; // another winner (K01/P43)
+  // Still active but claim lost => a bound fact drifted. Distinguish route/secret.
+  const routeRows = await db
+    .select({ authorityRevision: secretRoutes.authorityRevision })
+    .from(secretRoutes)
+    .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.id, loaded.routeId)))
+    .limit(1);
+  const currentRouteRev = routeRows[0]?.authorityRevision;
+  if (currentRouteRev !== undefined && currentRouteRev !== loaded.routeRevision)
+    return "EXEC_AUTH_STALE_ROUTE";
+  const secretRows = await db
+    .select({ version: secrets.version })
+    .from(secrets)
+    .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, loaded.secretId)))
+    .limit(1);
+  const currentSecretVer = secretRows[0]?.version;
+  if (currentSecretVer !== undefined && currentSecretVer !== loaded.secretVersion)
+    return "EXEC_AUTH_STALE_SECRET";
+  // Expiry at DB time.
+  const expRows = await db
+    .select({ expiresAt: executionAuthorizationNonces.expiresAt })
+    .from(executionAuthorizationNonces)
+    .where(eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId))
+    .limit(1);
+  if (expRows[0]?.expiresAt && expRows[0].expiresAt.getTime() <= Date.now())
+    return "EXEC_AUTH_EXPIRED";
+  return "EXEC_AUTH_STALE_DEPENDENCY";
+}
+
+async function revalidateAccountBoundary(
+  tenantId: string,
+  loaded: LoadedGovernedExecution,
+): Promise<{ ok: true } | { ok: false; code: GovernedDispatchCode }> {
+  const db = getDb();
+  const accRows = await db
+    .select({ status: providerAccounts.status, revision: providerAccounts.revision })
+    .from(providerAccounts)
+    .where(
+      and(eq(providerAccounts.tenantId, tenantId), eq(providerAccounts.id, loaded.providerAccountId)),
+    )
+    .limit(1);
+  const acc = accRows[0];
+  if (!acc || acc.status !== "active") return { ok: false, code: "EXEC_AUTH_ACCOUNT_DISABLED" };
+  const opRows = await db
+    .select({ revision: providerOperations.revision })
+    .from(providerOperations)
+    .where(
+      and(eq(providerOperations.tenantId, tenantId), eq(providerOperations.id, loaded.operationId)),
+    )
+    .limit(1);
+  const op = opRows[0];
+  if (!op || op.revision !== loaded.operationRevision)
+    return { ok: false, code: "EXEC_AUTH_STALE_DEPENDENCY" };
+  return { ok: true };
+}
+
+async function recordPreDispatchDenial(
+  tenantId: string,
+  loaded: LoadedGovernedExecution,
+  code: GovernedDispatchCode,
+): Promise<void> {
+  // Pre-dispatch post-claim denial: dispatch_state 'failed', binding 'failed'
+  // (§2.2, §4.1 step 3). Never re-open the claim.
+  await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+    const dbTx = tx as ReturnType<typeof getDb>;
+    await dbTx
+      .update(executionAuthorizationNonces)
+      .set({ dispatchState: "failed", dispatchedAt: new Date(), outcomeRecordedAt: new Date() })
+      .where(eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId));
+    await dbTx
+      .update(providerActionBindings)
+      .set({ status: "failed", updatedAt: new Date() })
+      .where(
+        and(
+          eq(providerActionBindings.tenantId, tenantId),
+          eq(providerActionBindings.intentId, loaded.intentId),
+        ),
+      );
+    await dbTx
+      .update(intents)
+      .set({ status: "failed", failedBy: "steward-system", failedAt: new Date() })
+      .where(eq(intents.id, loaded.intentId));
+    await appendRequiredAudit({
+      tenantId,
+      actorType: "system",
+      actorId: "steward-system",
+      action: "provider.execution.denied_at_boundary",
+      resourceType: "provider_action",
+      resourceId: loaded.intentId,
+      metadata: {
+        schemaVersion: "steward.provider-execution-audit.v1",
+        intentId: loaded.intentId,
+        executionId: loaded.executionId,
+        authorizationId: loaded.authorizationId,
+        dispatchState: "failed",
+        reasonCode: code,
+      },
+    });
+  });
+}
+
+/**
+ * Build the non-forgeable in-process governedExecutionClaim context and call
+ * handleProxy exactly once, then record the terminal outcome (§4.1 steps 4-6).
+ */
+async function dispatchOnce(
+  tenantId: string,
+  loaded: LoadedGovernedExecution,
+): Promise<GovernedDispatchResult> {
+  // Rebuild the outbound query from the CANONICAL orderedQueryPairs (spec §5.4),
+  // never from a raw stored string.
+  const outboundQuery = serializeCanonicalOutboundQuery(loaded.canonicalAction.orderedQueryPairs);
+  const host = new URL(loaded.canonicalAction.origin).host;
+  const path = `/proxy/${host}${loaded.canonicalAction.normalizedPath}`;
+  const search = outboundQuery === "" ? "" : `?${outboundQuery}`;
+  const url = `https://steward-proxy.local${path}${search}`;
+
+  const method = loaded.canonicalAction.method;
+  const headers = new Headers();
+  for (const [name, value] of loaded.canonicalAction.selectedHeaders) headers.set(name, value);
+  const bodyBytes =
+    loaded.canonicalAction.canonicalBody === null
+      ? undefined
+      : new TextEncoder().encode(JSON.stringify(loaded.canonicalAction.canonicalBody));
+  const request = new Request(url, {
+    method,
+    headers,
+    body: method === "GET" || method === "HEAD" ? undefined : bodyBytes,
+  });
+
+  const responseHeaders = new Headers();
+  const context = {
+    req: {
+      method,
+      path,
+      raw: request,
+      header: (name: string) => request.headers.get(name) ?? undefined,
+    },
+    get: (key: string) => {
+      if (key === "agentId") return loaded.actorAgentId;
+      if (key === "tenantId") return tenantId;
+      if (key === "governedExecutionClaim")
+        return {
+          authorizationId: loaded.authorizationId,
+          executionId: loaded.executionId,
+          routeId: loaded.routeId,
+        };
+      return undefined;
+    },
+    header: (name: string, value: string) => responseHeaders.set(name, value),
+    json: (payload: unknown, status?: number) =>
+      new Response(JSON.stringify(payload), {
+        status: status ?? 200,
+        headers: {
+          "content-type": "application/json",
+          ...Object.fromEntries(responseHeaders.entries()),
+        },
+      }),
+  } as unknown as Context;
+
+  // Mark dispatched BEFORE awaiting the upstream body so a crash mid-flight
+  // leaves an evidenced `dispatched` (→ reconciler treats as outcome_unknown,
+  // F03/K08). Never blind retry (X8).
+  await setDispatched(tenantId, loaded);
+  await hook("afterDispatchedAt");
+
+  let response: Response;
+  try {
+    response = await handleProxy(context);
+  } catch {
+    // Timeout / connection reset / abort AFTER dispatch => outcome_unknown,
+    // NEVER auto-retry (X8, K13/K14).
+    await hook("afterUpstream");
+    await recordTerminal(tenantId, loaded, "outcome_unknown", undefined);
+    return deny("EXEC_DISPATCH_OUTCOME_UNKNOWN", 202, loaded.intentId, {
+      executionId: loaded.executionId,
+      dispatchState: "outcome_unknown",
+    });
+  }
+  await hook("afterUpstream");
+
+  const upstreamStatus = response.status;
+  // Unambiguous upstream response classification. handleProxy returns a 5xx JSON
+  // envelope for a forward failure; a 2xx/4xx from the upstream is unambiguous.
+  const isSuccess = upstreamStatus >= 200 && upstreamStatus < 400;
+  await hook("beforeTerminal");
+  if (isSuccess) {
+    await recordTerminal(tenantId, loaded, "succeeded", upstreamStatus);
+    return {
+      ok: true,
+      code: "EXEC_DISPATCH_SUCCEEDED",
+      httpStatus: upstreamStatus,
+      intentId: loaded.intentId,
+      executionId: loaded.executionId,
+      dispatchState: "succeeded",
+      upstreamStatusCode: upstreamStatus,
+    };
+  }
+  await recordTerminal(tenantId, loaded, "failed", upstreamStatus);
+  return deny("EXEC_DISPATCH_UPSTREAM_ERROR", 502, loaded.intentId, {
+    executionId: loaded.executionId,
+    dispatchState: "failed",
+    upstreamStatusCode: upstreamStatus,
+  });
+}
+
+async function setDispatched(
+  tenantId: string,
+  loaded: LoadedGovernedExecution,
+): Promise<void> {
+  await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+    const dbTx = tx as ReturnType<typeof getDb>;
+    await dbTx
+      .update(executionAuthorizationNonces)
+      .set({ dispatchState: "dispatched", dispatchedAt: new Date() })
+      .where(
+        and(
+          eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId),
+          eq(executionAuthorizationNonces.dispatchState, "claimed"),
+        ),
+      );
+    await appendRequiredAudit({
+      tenantId,
+      actorType: "system",
+      actorId: "steward-system",
+      action: "provider.execution.dispatched",
+      resourceType: "provider_action",
+      resourceId: loaded.intentId,
+      metadata: {
+        schemaVersion: "steward.provider-execution-audit.v1",
+        intentId: loaded.intentId,
+        executionId: loaded.executionId,
+        authorizationId: loaded.authorizationId,
+        dispatchState: "dispatched",
+        providerIdempotencyKeyHash: sha256Hex(loaded.providerIdempotencyKey),
+      },
+    });
+  });
+}
+
+async function recordTerminal(
+  tenantId: string,
+  loaded: LoadedGovernedExecution,
+  state: "succeeded" | "failed" | "outcome_unknown",
+  upstreamStatusCode: number | undefined,
+): Promise<void> {
+  const bindingStatus =
+    state === "succeeded" ? "succeeded" : state === "failed" ? "failed" : "outcome_unknown";
+  await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
+    const dbTx = tx as ReturnType<typeof getDb>;
+    await dbTx
+      .update(executionAuthorizationNonces)
+      .set({ dispatchState: state, outcomeRecordedAt: new Date() })
+      .where(eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId));
+    await dbTx
+      .update(providerActionBindings)
+      .set({ status: bindingStatus, updatedAt: new Date() })
+      .where(
+        and(
+          eq(providerActionBindings.tenantId, tenantId),
+          eq(providerActionBindings.intentId, loaded.intentId),
+        ),
+      );
+    // intents mapping (§2.2): succeeded -> executed; failed -> failed;
+    // outcome_unknown -> stays authorized (no confirmed effect).
+    if (state === "succeeded") {
+      await dbTx
+        .update(intents)
+        .set({ status: "executed", executedBy: "steward-system", executedAt: new Date() })
+        .where(eq(intents.id, loaded.intentId));
+    } else if (state === "failed") {
+      await dbTx
+        .update(intents)
+        .set({ status: "failed", failedBy: "steward-system", failedAt: new Date() })
+        .where(eq(intents.id, loaded.intentId));
+    }
+    const action =
+      state === "succeeded"
+        ? "provider.execution.succeeded"
+        : state === "failed"
+          ? "provider.execution.failed"
+          : "provider.execution.outcome_unknown";
+    await appendRequiredAudit({
+      tenantId,
+      actorType: "system",
+      actorId: "steward-system",
+      action,
+      resourceType: "provider_action",
+      resourceId: loaded.intentId,
+      metadata: {
+        schemaVersion: "steward.provider-execution-audit.v1",
+        intentId: loaded.intentId,
+        executionId: loaded.executionId,
+        authorizationId: loaded.authorizationId,
+        dispatchState: state,
+        ...(upstreamStatusCode !== undefined ? { upstreamStatusCode } : {}),
+        providerIdempotencyKeyHash: sha256Hex(loaded.providerIdempotencyKey),
+      },
+    });
+  });
+}
