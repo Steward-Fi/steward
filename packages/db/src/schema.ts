@@ -109,6 +109,11 @@ export const approvalQueueStatusEnum = pgEnum("approval_queue_status", [
   "pending",
   "approved",
   "rejected",
+  // PR3 provider-action arm lifecycle statuses (0081). The legacy transaction
+  // arm only ever uses pending/approved/rejected.
+  "expired",
+  "stale",
+  "consumed",
 ]);
 
 export const executionAuthorizationStatusEnum = pgEnum("execution_authorization_status", [
@@ -986,13 +991,19 @@ export const sponsoredGasEvents = pgTable(
   }),
 );
 
+// PR3 (0081): approval_queue is a discriminated union. The legacy transaction
+// arm (approval_kind='transaction') keeps tx_id + the original columns; the new
+// provider_action arm carries the exact-binding tuple. `tx_id` is now nullable
+// (arm CHECK re-requires it for transaction rows). Several PR3 invariants (the
+// arm CHECK, the decision-shape CHECK, and the partial unique indexes) live in
+// 0081 raw SQL and are NOT visible to drizzle-kit.
 export const approvalQueue = pgTable(
   "approval_queue",
   {
     id: varchar("id", { length: 64 }).primaryKey(),
-    txId: varchar("tx_id", { length: 64 })
-      .notNull()
-      .references(() => transactions.id, { onDelete: "cascade" }),
+    txId: varchar("tx_id", { length: 64 }).references(() => transactions.id, {
+      onDelete: "cascade",
+    }),
     agentId: varchar("agent_id", { length: 64 })
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
@@ -1004,6 +1015,26 @@ export const approvalQueue = pgTable(
     resolvedBy: varchar("resolved_by", { length: 255 }),
     resolvedByType: varchar("resolved_by_type", { length: 32 }),
     resolvedById: varchar("resolved_by_id", { length: 255 }),
+    // ── PR3 provider-action arm (0081) ──
+    approvalKind: varchar("approval_kind", { length: 32 }).notNull().default("transaction"),
+    intentId: varchar("intent_id", { length: 64 }),
+    tenantId: varchar("tenant_id", { length: 64 }),
+    workspaceId: uuid("workspace_id"),
+    requestHash: varchar("request_hash", { length: 71 }),
+    actionDigest: varchar("action_digest", { length: 71 }),
+    approvalCommitment: jsonb("approval_commitment").$type<Record<string, unknown>>(),
+    approvalCommitmentHash: varchar("approval_commitment_hash", { length: 71 }),
+    expectedBindingRevision: integer("expected_binding_revision"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    decision: varchar("decision", { length: 16 }),
+    reasonCode: varchar("reason_code", { length: 96 }),
+    reason: text("reason"),
+    mfaVerifiedAt: timestamp("mfa_verified_at", { withTimezone: true }),
+    mfaAgeMsAtDecision: integer("mfa_age_ms_at_decision"),
+    decisionIdempotencyKeyHash: varchar("decision_idempotency_key_hash", { length: 71 }),
+    decisionRequestHash: varchar("decision_request_hash", { length: 71 }),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    consumedBy: varchar("consumed_by", { length: 64 }),
   },
   (table) => ({
     txIdUniqueIdx: uniqueIndex("approval_queue_tx_id_idx").on(table.txId),
@@ -1619,6 +1650,12 @@ export const secretRoutes = pgTable(
     enabled: boolean("enabled").notNull().default(true),
     requiresApproval: boolean("requires_approval").notNull().default(false),
     approvalConfig: jsonb("approval_config").$type<Record<string, unknown>>().notNull().default({}),
+    // PR3 (0081, G1 adjudication): a route revision that a route/secret rotation
+    // increments. Bound by PR3's approval commitment so resume can detect route
+    // rotation. Maintained by the `secret_routes_bump_authority_revision`
+    // BEFORE UPDATE trigger (raw SQL only, not visible to drizzle-kit). PR4's
+    // 0082 adds authority_mode + provider_operation_id and extends the trigger.
+    authorityRevision: integer("authority_revision").notNull().default(1),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -1989,6 +2026,23 @@ export const providerActionBindings = pgTable(
     policyDecisionHash: varchar("policy_decision_hash", { length: 71 }),
 
     status: varchar("status", { length: 32 }).notNull(),
+    // ── PR3 approval lifecycle columns (0081) ──
+    // Mutable only via the PR3 transition trigger; binding_revision increments by
+    // exactly one per state-changing transition. Several invariants (transition
+    // graph, per-state field-shape CHECK, frozen-column freeze) live in 0081 raw
+    // SQL and are not visible to drizzle-kit.
+    bindingRevision: integer("binding_revision").notNull().default(1),
+    approvalQueueId: varchar("approval_queue_id", { length: 64 }),
+    approvalActorUserId: uuid("approval_actor_user_id"),
+    approvalCommitmentHash: varchar("approval_commitment_hash", { length: 71 }),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    deniedAt: timestamp("denied_at", { withTimezone: true }),
+    expiredAt: timestamp("expired_at", { withTimezone: true }),
+    staleAt: timestamp("stale_at", { withTimezone: true }),
+    staleReasonCode: varchar("stale_reason_code", { length: 96 }),
+    resumeActor: varchar("resume_actor", { length: 64 }),
+    resumeAttemptId: uuid("resume_attempt_id"),
+    resumeValidatedAt: timestamp("resume_validated_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

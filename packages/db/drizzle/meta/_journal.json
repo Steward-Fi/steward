@@ -428,6 +428,13 @@
       "when": 1784054400000,
       "tag": "0080_provider_action_bindings",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1784140800000,
+      "tag": "0081_exact_approval_binding",
+      "breakpoints": true
     }
   ]
 }

@@ -27,6 +27,8 @@ import {
   providerActionBindings,
   providerGrants,
   providerOperations,
+  secretRoutes,
+  secrets,
   tenants,
   users,
   workspaces,
@@ -51,6 +53,8 @@ const OP_A_READ = "40000000-0000-4000-8000-000000000001";
 const OP_A_WRITE = "40000000-0000-4000-8000-000000000002";
 const OP_B_READ = "40000000-0000-4000-8000-000000000003";
 const GRANTOR = "10000000-0000-4000-8000-000000000001";
+const SECRET_A = "50000000-0000-4000-8000-000000000001";
+const ROUTE_A = "60000000-0000-4000-8000-000000000001";
 const FUTURE = new Date(Date.now() + 365 * 24 * 3600_000);
 
 function principal(agentId = AGENT): ProviderPrincipalV1 {
@@ -114,6 +118,32 @@ async function seedCore() {
       createdBy: GRANTOR,
     },
   ]);
+  // A secret + route so the PR3 approval commitment can bind route/credential
+  // revisions (spec §5.2: missing route/credential fails approval creation).
+  await db.insert(secrets).values([
+    {
+      id: SECRET_A,
+      tenantId: TENANT,
+      name: "github-a",
+      ciphertext: "x",
+      iv: "x",
+      authTag: "x",
+      salt: "x",
+      version: 1,
+    },
+  ]);
+  await db.insert(secretRoutes).values([
+    {
+      id: ROUTE_A,
+      tenantId: TENANT,
+      secretId: SECRET_A,
+      hostPattern: "api.github.com",
+      pathPattern: "/*",
+      method: "*",
+      injectAs: "header",
+      injectKey: "authorization",
+    },
+  ]);
   await db.insert(providerAccounts).values([
     {
       id: ACCOUNT_A,
@@ -122,6 +152,8 @@ async function seedCore() {
       adapterKey: "github",
       externalRef: "a",
       displayName: "A",
+      credentialSecretId: SECRET_A,
+      credentialVersion: 1,
     },
     {
       id: ACCOUNT_B,
@@ -140,6 +172,7 @@ async function seedCore() {
       providerAccountId: ACCOUNT_A,
       operationKey: "github.issue.list",
       riskClass: "read",
+      secretRouteId: ROUTE_A,
     },
     {
       id: OP_A_WRITE,
@@ -148,6 +181,7 @@ async function seedCore() {
       providerAccountId: ACCOUNT_A,
       operationKey: "github.pr.comment.create",
       riskClass: "consequential",
+      secretRouteId: ROUTE_A,
     },
     {
       id: OP_B_READ,

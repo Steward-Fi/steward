@@ -53,7 +53,8 @@ import {
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
-import { writeAuditEvent } from "./audit";
+import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
+import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 
 const EVALUATOR_VERSION = "provider-action.v1";
 const POLICY_TYPE = "capability-intent" as const;
@@ -471,7 +472,43 @@ class ProviderActionService {
           expiresAt: new Date(input.expiresAt),
         });
 
+        // PR3 (§6.3): for the approval-required arm, build the exact approval
+        // commitment + queue row inside THIS create transaction (AFTER the intent
+        // insert the queue FK references). A missing PR1 execution dependency
+        // (route/credential) throws ApprovalArmError => creation fails closed.
+        let approvalQueueId: string | null = null;
+        let approvalCommitmentHash: string | null = null;
+        if (effects.status === "pending_approval") {
+          const arm = await buildApprovalArm({
+            tx,
+            tenantId,
+            workspaceId: input.workspaceId,
+            intentId,
+            actorAgentId,
+            actorRevision: access.doc.dependencyRevisions.actor,
+            account: txAccount,
+            operation: txOperation,
+            requestHash,
+            actionDigest,
+            accessDecisionId,
+            accessDecisionHash,
+            matchedBindings: access.doc.dependencyRevisions.bindings,
+            matchedGrants: access.doc.dependencyRevisions.grants,
+            policyDecisionId: (policy as PolicyResult).decisionId,
+            policyDecisionHash: policyDecisionHash as string,
+            policyRevisionHash: (policy as PolicyResult).doc.policyRevisionHash,
+            evaluatorVersion: EVALUATOR_VERSION,
+            requesterSeparation: extractRequesterSeparation(txOperation.requestProfile),
+            requestedAt: input.requestedAt,
+            expiresAt: input.expiresAt,
+          });
+          approvalQueueId = arm.queueId;
+          approvalCommitmentHash = arm.commitmentHash;
+        }
+
         await tx.insert(providerActionBindings).values({
+          approvalQueueId,
+          approvalCommitmentHash,
           intentId,
           tenantId,
           workspaceId: input.workspaceId,
@@ -507,6 +544,9 @@ class ProviderActionService {
         });
 
         // Required audit intent -> transactional outbox (drained post-commit).
+        // PR5 C1: correlated lifecycle events set resource_type='provider_action'
+        // and resource_id=intents.id (not the operation id) so PR5 can correlate
+        // online by the lifecycle root.
         await tx.insert(providerActionAuditOutbox).values({
           tenantId,
           intentId,
@@ -516,9 +556,12 @@ class ProviderActionService {
               : effects.status === "pending_approval"
                 ? "provider.action.approval_required"
                 : "provider.action.allowed",
-          resourceType: "provider-action",
-          resourceId: operation.id,
+          resourceType: "provider_action",
+          resourceId: intentId,
           metadata: {
+            // PR5 C1: metadata.intentId is the offline-authoritative correlation
+            // key (inside the signed eventsDigest).
+            intentId,
             actorAgentId,
             operationKey: input.operationKey,
             actionDigest,
@@ -536,8 +579,19 @@ class ProviderActionService {
           },
         });
       });
-    } catch {
-      // Any evaluation or persistence failure denies; the stub is never called.
+    } catch (e) {
+      // A missing PR1 execution dependency (route/credential) fails approval
+      // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
+      // partial approval arm is ever visible.
+      if (e instanceof ApprovalArmError) {
+        return {
+          kind: "evidence_failure",
+          code: "EVIDENCE_DECISION_PERSIST_FAILED",
+          httpStatus: 503,
+        };
+      }
+      // Any other evaluation or persistence failure denies; the stub is never
+      // called.
       return {
         kind: "evidence_failure",
         code: "EVIDENCE_DECISION_PERSIST_FAILED",
@@ -933,33 +987,93 @@ class ProviderActionService {
     return { doc, evaluation, decisionId };
   }
 
-  // ── Required-audit outbox drain (post-commit, pre-stub) ──
-  private async drainAuditOutbox(tenantId: string, intentId: string): Promise<boolean> {
+  /**
+   * C2 crash-recovery sweeper (spec §7.3). The required-audit outbox row commits
+   * IN-TX with the intent/binding, but its drain into the signed chain happens
+   * post-commit. A crash between commit and drain leaves an intent with an
+   * UNDELIVERED outbox row and therefore ZERO signed correlated events — which
+   * would break the C2 invariant (every persisted intent has >=1 signed event).
+   *
+   * This sweeper drains every undelivered outbox row for the tenant (optionally
+   * scoped to one intent). It is safe to run repeatedly and concurrently: the
+   * drain marks `delivered_at` per row after the signed append, and
+   * `writeAuditEvent` is itself per-tenant serialized, so a signed event is
+   * produced EXACTLY ONCE per outbox row. Call it opportunistically (any read
+   * path) and/or from a periodic job; a killed drain is always recoverable.
+   *
+   * Returns the number of rows delivered in this pass.
+   */
+  async recoverUnsignedIntents(tenantId: string, intentId?: string): Promise<number> {
     const rows = await this.db()
       .select()
       .from(providerActionAuditOutbox)
       .where(
         and(
           eq(providerActionAuditOutbox.tenantId, tenantId),
-          eq(providerActionAuditOutbox.intentId, intentId),
+          intentId
+            ? eq(providerActionAuditOutbox.intentId, intentId)
+            : (sql`true` as unknown as ReturnType<typeof eq>),
           sql`${providerActionAuditOutbox.deliveredAt} IS NULL`,
         ),
       );
+    let delivered = 0;
     for (const row of rows) {
-      await writeAuditEvent({
-        tenantId: row.tenantId,
-        actorType: "agent",
-        actorId: (row.metadata as { actorAgentId?: string }).actorAgentId ?? null,
-        action: row.action,
-        resourceType: row.resourceType,
-        resourceId: row.resourceId,
-        metadata: row.metadata as Record<string, unknown>,
+      // Crash-safe exactly-once (codex P1). The SOURCE OF TRUTH for "is this
+      // event signed?" is the audit chain itself, keyed by the deterministic
+      // correlation (tenant, resource_id=intentId, action). `delivered_at` is
+      // only an optimization. We serialize the whole check+sign+mark per tenant
+      // (same queue writeAuditEvent uses) so two in-process sweeps cannot both
+      // sign, and if a prior sweep crashed AFTER signing but BEFORE marking, this
+      // sweep observes the existing signed event and just marks the row — never
+      // a duplicate, never a permanently-unsigned intent.
+      const signedNow = await withTenantAuditQueue(row.tenantId, async () => {
+        const existing = await this.db().execute(
+          sql`SELECT 1 FROM audit_events
+              WHERE tenant_id = ${row.tenantId}
+                AND resource_type = ${row.resourceType}
+                AND resource_id = ${row.resourceId}
+                AND action = ${row.action}
+              LIMIT 1`,
+        );
+        const existingRows = Array.isArray(existing)
+          ? existing
+          : ((existing as { rows?: unknown[] }).rows ?? []);
+        if (existingRows.length === 0) {
+          await appendAuditEvent({
+            tenantId: row.tenantId,
+            actorType: "agent",
+            actorId: (row.metadata as { actorAgentId?: string }).actorAgentId ?? null,
+            action: row.action,
+            resourceType: row.resourceType,
+            resourceId: row.resourceId,
+            metadata: row.metadata as Record<string, unknown>,
+          });
+          return true;
+        }
+        return false;
       });
-      await this.db()
+      // Mark delivered whether we just signed it or found it already signed.
+      const marked = await this.db()
         .update(providerActionAuditOutbox)
         .set({ deliveredAt: new Date() })
-        .where(eq(providerActionAuditOutbox.id, row.id));
+        .where(
+          and(
+            eq(providerActionAuditOutbox.id, row.id),
+            sql`${providerActionAuditOutbox.deliveredAt} IS NULL`,
+          ),
+        )
+        .returning({ id: providerActionAuditOutbox.id });
+      if (marked.length > 0 && signedNow) delivered += 1;
     }
+    return delivered;
+  }
+
+  // ── Required-audit outbox drain (post-commit, pre-stub) ──
+  private async drainAuditOutbox(tenantId: string, intentId: string): Promise<boolean> {
+    // Delegate to the CAS-guarded recovery path so the inline drain and the
+    // crash-recovery sweeper share exactly-once semantics (spec §7.3). Any signer
+    // failure propagates (caller maps it to EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE).
+    await this.recoverUnsignedIntents(tenantId, intentId);
     return true;
   }
 
@@ -1063,7 +1177,21 @@ class ProviderActionService {
         actionDigest: b.actionDigest,
       };
     }
-    if (b.status === "pending_approval")
+    // Approval-required lineage (PR3). A create-replay of a governed provider
+    // action must NEVER report POLICY_ALLOW/stub_succeeded (that would fabricate
+    // an allow for an action that requires a human decision). The agent's create
+    // contract is 202 APPROVAL_REQUIRED regardless of where the out-of-band
+    // approval lifecycle currently sits (pending/approved/denied/expired/stale/
+    // execution_ready); the human decision + safe resume happen through the
+    // /v2/provider-actions approval + execute routes, not this create path.
+    if (
+      b.status === "pending_approval" ||
+      b.status === "approved" ||
+      b.status === "execution_ready" ||
+      b.status === "approval_denied" ||
+      b.status === "approval_expired" ||
+      b.status === "approval_stale"
+    )
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
@@ -1187,6 +1315,20 @@ function extractCapabilityIntentRules(
     });
   }
   return rules;
+}
+
+/**
+ * Extract the operation's requester-separation requirement (spec I10). PR1 does
+ * not yet ship a structured approval-requirements field, so PR3 reads it from
+ * `request_profile.approvalRequirements.requesterSeparation` when present
+ * (forward-compatible) and defaults to false. Documented deviation: when PR1
+ * lands a first-class approval-requirements field the commitment builder should
+ * read that instead.
+ */
+export function extractRequesterSeparation(requestProfile: Record<string, unknown>): boolean {
+  const reqs = (requestProfile as { approvalRequirements?: unknown }).approvalRequirements;
+  if (typeof reqs !== "object" || reqs === null) return false;
+  return (reqs as { requesterSeparation?: unknown }).requesterSeparation === true;
 }
 
 function capabilitySelectorMatches(config: Record<string, unknown>, operationKey: string): boolean {
