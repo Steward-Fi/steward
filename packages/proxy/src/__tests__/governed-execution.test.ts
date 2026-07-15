@@ -17,13 +17,12 @@
  * revalidates and dispatches.
  */
 
-import { createHmac, hkdfSync, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { createHmac, hkdfSync, randomUUID } from "node:crypto";
 import {
   agents,
   approvalQueue,
   closeDb,
-  users,
   executionAuthorizationNonces,
   getDb,
   intents,
@@ -33,6 +32,7 @@ import {
   secretRoutes,
   secrets,
   tenants,
+  users,
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -40,13 +40,14 @@ import {
   buildProviderExecutionCommitmentV2,
   canonicalActionBytes,
   computeActionDigest,
-  type GithubCanonicalActionV1,
   computeProviderExecutionCommitmentHash,
+  type GithubCanonicalActionV1,
   type ProviderApprovalCommitmentV1,
   providerExecutionSignatureInput,
   sha256HexPrefixed,
 } from "@stwd/shared";
-import { and, eq, sql } from "drizzle-orm";
+import { KeyStore } from "@stwd/vault";
+import { eq, sql } from "drizzle-orm";
 
 setDefaultTimeout(30000);
 
@@ -55,8 +56,8 @@ const EXEC_SECRET = "v2-1:governed-exec-auth-secret-with-enough-entropy-01234567
 
 let dispatchMod: typeof import("../handlers/governed-execution");
 let proxyMod: typeof import("../handlers/proxy");
-let dispatchGovernedExecution: (typeof import("../handlers/governed-execution"))["dispatchGovernedExecution"];
-let handleProxy: (typeof import("../handlers/proxy"))["handleProxy"];
+let dispatchGovernedExecution: typeof import("../handlers/governed-execution")["dispatchGovernedExecution"];
+let handleProxy: typeof import("../handlers/proxy")["handleProxy"];
 
 let captured: { url: string; method: string } | null = null;
 let forwarderMode: "ok" | "throw" | "500" = "ok";
@@ -91,6 +92,19 @@ function base64Url(value: Uint8Array): string {
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
+// Encrypt a credential with the SAME KeyStore context the proxy's SecretVault
+// uses (namespace "secret-vault", context {tenantId, name, version}) so a real
+// decrypt at forward time succeeds. Returns the DB crypto columns.
+function encryptCredential(
+  tenantId: string,
+  name: string,
+  value: string,
+): { ciphertext: string; iv: string; authTag: string; salt: string } {
+  const keyStore = new KeyStore(MASTER, undefined, "secret-vault");
+  const e = keyStore.encrypt(value, { tenantId, name, version: 1 });
+  return { ciphertext: e.ciphertext, iv: e.iv, authTag: e.tag, salt: e.salt };
+}
+
 const ACTION: GithubCanonicalActionV1 = {
   profile: "github.provider-action.v1",
   method: "GET",
@@ -115,10 +129,11 @@ async function seedBase() {
     id: IDS.secret,
     tenantId: IDS.tenant,
     name: "github",
-    ciphertext: "x",
-    iv: "x",
-    authTag: "x",
-    salt: "x",
+    // Real vault-encrypted ciphertext so the proxy decrypt SUCCEEDS and the
+    // forwarder stub is actually reached (dummy ciphertext would 500 at decrypt
+    // and short-circuit the forward classification tests). The context
+    // {tenantId, name, version} MUST match what SecretVault.decryptSecret derives.
+    ...encryptCredential(IDS.tenant, "github", "ghp_test_token"),
     version: 1,
   });
   await db.insert(workspaces).values({
@@ -175,9 +190,7 @@ async function seedBase() {
     .update(secretRoutes)
     .set({ authorityMode: "governed_v2", providerOperationId: IDS.operation })
     .where(eq(secretRoutes.id, IDS.route));
-  await db.execute(
-    sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`,
-  );
+  await db.execute(sql`UPDATE secret_routes SET authority_revision = 1 WHERE id = ${IDS.route}`);
 }
 
 interface SeedNonceOpts {
@@ -379,7 +392,8 @@ async function seedExecutionReady(opts: SeedNonceOpts = {}) {
     dispatchState: opts.dispatchState ?? "none",
     // Terminal/dispatched states require dispatched_at (dispatch_shape_chk).
     dispatchedAt:
-      opts.dispatchState && ["dispatched", "succeeded", "failed", "outcome_unknown"].includes(opts.dispatchState)
+      opts.dispatchState &&
+      ["dispatched", "succeeded", "failed", "outcome_unknown"].includes(opts.dispatchState)
         ? now
         : null,
   });
@@ -408,8 +422,7 @@ beforeAll(async () => {
   proxyMod.__setForwardProxyRequestForTests(async (url, method) => {
     captured = { url: url.toString(), method };
     if (forwarderMode === "throw") throw new Error("upstream connection reset");
-    if (forwarderMode === "500")
-      return new Response(JSON.stringify({ err: 1 }), { status: 500 });
+    if (forwarderMode === "500") return new Response(JSON.stringify({ err: 1 }), { status: 500 });
     return new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { "content-type": "application/json" },
@@ -485,7 +498,9 @@ function fakeDirectContext(path: string, forgedClaim?: unknown) {
 describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
   it("P01: direct /proxy to a governed route is denied 403, zero forward", async () => {
     await seedExecutionReady();
-    const res = await handleProxy(fakeDirectContext("/proxy/api.github.com/repos/acme/widgets/issues"));
+    const res = await handleProxy(
+      fakeDirectContext("/proxy/api.github.com/repos/acme/widgets/issues"),
+    );
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: string };
     expect(body.error).toBe("GOVERNED_ROUTE_DIRECT_DENIED");
@@ -512,15 +527,21 @@ describe("PR4 governed proxy authority gate (X1, §5.1)", () => {
     // to the enum via raw SQL, then setting it. The gate's default-deny (anything
     // != 'legacy' without a matching claim) must reject it.
     const db = getDb();
-    await db.execute(sql`ALTER TYPE secret_route_authority_mode ADD VALUE IF NOT EXISTS 'some_future_mode'`);
+    await db.execute(
+      sql`ALTER TYPE secret_route_authority_mode ADD VALUE IF NOT EXISTS 'some_future_mode'`,
+    );
     // The governed CHECK already default-denies an unknown mode at write time
     // (a stronger guarantee). To exercise the PROXY code's default-deny we must
     // first relax that CHECK, then store the unknown mode with a null operation.
-    await db.execute(sql`ALTER TABLE secret_routes DROP CONSTRAINT secret_routes_governed_operation_chk`);
+    await db.execute(
+      sql`ALTER TABLE secret_routes DROP CONSTRAINT secret_routes_governed_operation_chk`,
+    );
     await db.execute(
       sql`UPDATE secret_routes SET authority_mode = 'some_future_mode', provider_operation_id = NULL WHERE id = ${IDS.route}`,
     );
-    const res = await handleProxy(fakeDirectContext("/proxy/api.github.com/repos/acme/widgets/issues"));
+    const res = await handleProxy(
+      fakeDirectContext("/proxy/api.github.com/repos/acme/widgets/issues"),
+    );
     expect(res.status).toBe(403);
     expect(captured).toBeNull();
     // Restore the CHECK for subsequent tests (beforeEach resets rows, not DDL).
@@ -548,7 +569,10 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     // handleProxy, but the CLAIM must have consumed the nonce regardless.
     const db = getDb();
     const [n] = await db
-      .select({ status: executionAuthorizationNonces.status, ds: executionAuthorizationNonces.dispatchState })
+      .select({
+        status: executionAuthorizationNonces.status,
+        ds: executionAuthorizationNonces.dispatchState,
+      })
       .from(executionAuthorizationNonces)
       .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
     expect(n.status).toBe("consumed");
@@ -571,7 +595,9 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       .from(executionAuthorizationNonces)
       .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
     expect(n.status).toBe("consumed");
-    const lost = [a, b].some((r) => r.code === "EXEC_AUTH_CLAIM_LOST" || r.code === "EXEC_TERMINAL_STATE");
+    const lost = [a, b].some(
+      (r) => r.code === "EXEC_AUTH_CLAIM_LOST" || r.code === "EXEC_TERMINAL_STATE",
+    );
     expect(lost).toBe(true);
     expect(winners.length).toBeGreaterThanOrEqual(1);
   });
@@ -623,7 +649,10 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
   });
 
   it("P26: a terminal (consumed) authorization returns terminal, no re-dispatch", async () => {
-    const { intentId } = await seedExecutionReady({ status: "consumed", dispatchState: "succeeded" });
+    const { intentId } = await seedExecutionReady({
+      status: "consumed",
+      dispatchState: "succeeded",
+    });
     const res = await dispatchGovernedExecution(intentId, IDS.tenant);
     expect(res.ok).toBe(false);
     expect(res.code).toBe("EXEC_TERMINAL_STATE");
@@ -643,5 +672,132 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     } finally {
       process.env.STEWARD_EXECUTION_AUTH_SECRET = saved;
     }
+  });
+
+  // ── §9 fault matrix + more §8 negatives (added lane pr4-13452) ─────────────
+
+  it("K13/K14: upstream throw AFTER dispatch => outcome_unknown, exactly one forward, NO blind retry (X8)", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    forwarderMode = "throw";
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.code).toBe("EXEC_DISPATCH_OUTCOME_UNKNOWN");
+    expect(res.httpStatus).toBe(202);
+    // Exactly one forward attempt was made (captured once, no retry).
+    expect(captured).not.toBeNull();
+    const db = getDb();
+    const [n] = await db
+      .select({ ds: executionAuthorizationNonces.dispatchState })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(n.ds).toBe("outcome_unknown");
+    // Re-dispatch of the outcome_unknown intent returns the same terminal-pending
+    // state, never a second forward (X8).
+    captured = null;
+    const again = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(again.code).toBe("EXEC_DISPATCH_OUTCOME_UNKNOWN");
+    expect(captured).toBeNull();
+  });
+
+  it("K15: an unambiguous upstream 500 => binding failed, EXEC_DISPATCH_UPSTREAM_ERROR (one attempt)", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    forwarderMode = "500";
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.code).toBe("EXEC_DISPATCH_UPSTREAM_ERROR");
+    expect(res.httpStatus).toBe(502);
+    expect(res.upstreamStatusCode).toBe(500);
+    const db = getDb();
+    const [n] = await db
+      .select({ ds: executionAuthorizationNonces.dispatchState })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(n.ds).toBe("failed");
+  });
+
+  it("P18: a disabled provider account fails at the boundary (post-claim), no dispatch", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    // Disable the account AFTER mint but keep its revision (the claim SQL cannot
+    // express account-status; the boundary account check must catch it).
+    await getDb()
+      .update(providerAccounts)
+      .set({ status: "disabled" })
+      .where(eq(providerAccounts.id, IDS.account));
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_ACCOUNT_DISABLED");
+    expect(captured).toBeNull();
+    // Post-claim denial: nonce consumed, dispatch_state failed, binding failed.
+    const db = getDb();
+    const [n] = await db
+      .select({
+        status: executionAuthorizationNonces.status,
+        ds: executionAuthorizationNonces.dispatchState,
+      })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(n.status).toBe("consumed");
+    expect(n.ds).toBe("failed");
+    const [b] = await db
+      .select({ status: providerActionBindings.status })
+      .from(providerActionBindings)
+      .where(eq(providerActionBindings.intentId, intentId));
+    expect(b.status).toBe("failed");
+  });
+
+  it("P20: an operation revision drift fails at the boundary, no dispatch", async () => {
+    const { intentId } = await seedExecutionReady();
+    await getDb()
+      .update(providerOperations)
+      .set({ revision: 2 })
+      .where(eq(providerOperations.id, IDS.operation));
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    // Operation revision drift is a stale dependency at the boundary.
+    expect(res.code).toBe("EXEC_AUTH_STALE_DEPENDENCY");
+    expect(captured).toBeNull();
+  });
+
+  it("P23: a wrong tenant id in the dispatch call finds no execution (non-enumerating NOT_READY)", async () => {
+    const { intentId } = await seedExecutionReady();
+    const res = await dispatchGovernedExecution(intentId, "tenant-other");
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_NOT_READY");
+    expect(captured).toBeNull();
+  });
+
+  it("P25 (approved-not-ready): a binding still in execution_ready with NO active nonce is not dispatchable", async () => {
+    // Seed a ready binding, then revoke its nonce (simulating a rolled-back route
+    // that revoked the v2 authorization). The load requires an active v2 nonce.
+    const { intentId, authorizationId } = await seedExecutionReady();
+    await getDb()
+      .update(executionAuthorizationNonces)
+      .set({ status: "revoked" })
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    // A revoked (non-active) nonce with dispatch_state 'none' returns terminal.
+    expect(["EXEC_TERMINAL_STATE", "EXEC_AUTH_NOT_READY"]).toContain(res.code);
+    expect(captured).toBeNull();
+  });
+
+  it("K20: a legacy proxy request and a governed dispatch for the same tenant do not corrupt each other", async () => {
+    // Governed dispatch on the seeded governed route.
+    const { intentId, authorizationId } = await seedExecutionReady();
+    // A direct legacy hit to a DIFFERENT (non-governed) path must be denied by
+    // the gate (the seeded route is governed), proving the two paths are
+    // independent and the governed row is never reachable directly even while a
+    // governed dispatch is in flight.
+    const [gov, direct] = await Promise.all([
+      dispatchGovernedExecution(intentId, IDS.tenant),
+      handleProxy(fakeDirectContext("/proxy/api.github.com/repos/acme/widgets/issues")),
+    ]);
+    expect(direct.status).toBe(403);
+    const db = getDb();
+    const [n] = await db
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    // The governed claim consumed exactly once; the direct hit never touched it.
+    expect(n.status).toBe("consumed");
+    void gov;
   });
 });

@@ -27,7 +27,6 @@
  */
 
 import { createHash } from "node:crypto";
-import type { Context } from "hono";
 import {
   approvalQueue,
   executionAuthorizationNonces,
@@ -42,16 +41,17 @@ import {
 } from "@stwd/db";
 import {
   buildProviderExecutionCommitmentV2,
+  computeProviderExecutionCommitmentHash,
   decodeUtf8Strict,
   type GithubCanonicalActionV1,
   isExecutionAuthV2SecretConfigured,
   type ProviderApprovalCommitmentV1,
-  computeProviderExecutionCommitmentHash,
   serializeCanonicalOutboundQuery,
   strictParseJson,
   verifyProviderExecutionCommitmentV2,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
+import type { Context } from "hono";
 import { handleProxy } from "./proxy";
 
 // ─── Error codes (spec §6.1) ───────────────────────────────────────────────────
@@ -183,9 +183,7 @@ async function loadGovernedExecution(
       approvalCommitmentHash: approvalQueue.approvalCommitmentHash,
     })
     .from(approvalQueue)
-    .where(
-      and(eq(approvalQueue.tenantId, tenantId), eq(approvalQueue.id, binding.approvalQueueId)),
-    )
+    .where(and(eq(approvalQueue.tenantId, tenantId), eq(approvalQueue.id, binding.approvalQueueId)))
     .limit(1);
   const q = queueRows[0];
   if (!q || !q.approvalCommitment) return null;
@@ -327,11 +325,18 @@ export async function dispatchGovernedExecution(
   {
     const db = getDb();
     const [liveRoute] = await db
-      .select({ authorityRevision: secretRoutes.authorityRevision, mode: secretRoutes.authorityMode })
+      .select({
+        authorityRevision: secretRoutes.authorityRevision,
+        mode: secretRoutes.authorityMode,
+      })
       .from(secretRoutes)
       .where(and(eq(secretRoutes.tenantId, tenantId), eq(secretRoutes.id, loaded.routeId)))
       .limit(1);
-    if (!liveRoute || liveRoute.mode !== "governed_v2" || liveRoute.authorityRevision !== loaded.routeRevision) {
+    if (
+      !liveRoute ||
+      liveRoute.mode !== "governed_v2" ||
+      liveRoute.authorityRevision !== loaded.routeRevision
+    ) {
       return deny("EXEC_AUTH_STALE_ROUTE", 409, intentId, { executionId: loaded.executionId });
     }
     const [liveSecret] = await db
@@ -540,7 +545,10 @@ async function revalidateAccountBoundary(
     .select({ status: providerAccounts.status, revision: providerAccounts.revision })
     .from(providerAccounts)
     .where(
-      and(eq(providerAccounts.tenantId, tenantId), eq(providerAccounts.id, loaded.providerAccountId)),
+      and(
+        eq(providerAccounts.tenantId, tenantId),
+        eq(providerAccounts.id, loaded.providerAccountId),
+      ),
     )
     .limit(1);
   const acc = accRows[0];
@@ -571,9 +579,12 @@ async function recordPreDispatchDenial(
       .update(executionAuthorizationNonces)
       .set({ dispatchState: "failed", dispatchedAt: new Date(), outcomeRecordedAt: new Date() })
       .where(eq(executionAuthorizationNonces.authorizationId, loaded.authorizationId));
-    // Pre-dispatch denial happens BEFORE the executing transition (the claim set
-    // dispatch_state=claimed but the binding is still execution_ready), so the
-    // legal transition is execution_ready -> failed.
+    // Pre-dispatch denial happens AFTER the claim already transitioned the
+    // binding execution_ready -> executing (the claim tx set status='executing',
+    // dispatch_state='claimed'). The boundary account/dependency check then fails
+    // BEFORE any decrypt/forward, so the legal binding transition here is
+    // executing -> failed (both execution_ready->failed and executing->failed are
+    // admitted by the 0082 transition trigger; the live precursor is executing).
     await dbTx
       .update(providerActionBindings)
       .set({
@@ -585,7 +596,7 @@ async function recordPreDispatchDenial(
         and(
           eq(providerActionBindings.tenantId, tenantId),
           eq(providerActionBindings.intentId, loaded.intentId),
-          eq(providerActionBindings.status, "execution_ready"),
+          eq(providerActionBindings.status, "executing"),
         ),
       );
     await dbTx
@@ -692,8 +703,15 @@ async function dispatchOnce(
   await hook("afterUpstream");
 
   const upstreamStatus = response.status;
-  // Unambiguous upstream response classification. handleProxy returns a 5xx JSON
-  // envelope for a forward failure; a 2xx/4xx from the upstream is unambiguous.
+  // Classification (spec §4.1 step 5, X8). handleProxy collapses a FORWARD-level
+  // failure (connection reset / timeout / DNS / abort AFTER we set dispatched_at)
+  // into its own 502 JSON envelope `{ ok:false, error:"Upstream request failed" }`.
+  // That case is genuinely AMBIGUOUS — we sent the request but never got a clean
+  // upstream response, so we CANNOT prove the provider had no effect → it MUST be
+  // outcome_unknown (never a blind retry, X8), NOT a definitive `failed`. A status
+  // that actually came FROM the upstream (a received 2xx/3xx/4xx/5xx) is
+  // unambiguous. We detect the proxy's own forward-failure envelope by its exact
+  // shape so a genuine upstream 502 is still classified as a definitive failure.
   const isSuccess = upstreamStatus >= 200 && upstreamStatus < 400;
   await hook("beforeTerminal");
   if (isSuccess) {
@@ -708,6 +726,30 @@ async function dispatchOnce(
       upstreamStatusCode: upstreamStatus,
     };
   }
+
+  // Distinguish the proxy's forward-failure envelope (ambiguous) from a received
+  // upstream error (unambiguous). Reading the (already-buffered) response body is
+  // safe here; it is the proxy's own JSON, never the upstream credentialed body.
+  let forwardLevelFailure = false;
+  if (upstreamStatus === 502) {
+    try {
+      const cloned = response.clone();
+      const parsed = (await cloned.json()) as { ok?: boolean; error?: string };
+      forwardLevelFailure = parsed?.ok === false && parsed?.error === "Upstream request failed";
+    } catch {
+      // A non-JSON 502 is treated as a received upstream error (unambiguous).
+      forwardLevelFailure = false;
+    }
+  }
+  if (forwardLevelFailure) {
+    // Sent-but-no-clean-response → outcome_unknown, NEVER auto-retry (X8, K13/K14).
+    await recordTerminal(tenantId, loaded, "outcome_unknown", undefined);
+    return deny("EXEC_DISPATCH_OUTCOME_UNKNOWN", 202, loaded.intentId, {
+      executionId: loaded.executionId,
+      dispatchState: "outcome_unknown",
+    });
+  }
+
   await recordTerminal(tenantId, loaded, "failed", upstreamStatus);
   return deny("EXEC_DISPATCH_UPSTREAM_ERROR", 502, loaded.intentId, {
     executionId: loaded.executionId,
@@ -716,10 +758,7 @@ async function dispatchOnce(
   });
 }
 
-async function setDispatched(
-  tenantId: string,
-  loaded: LoadedGovernedExecution,
-): Promise<void> {
+async function setDispatched(tenantId: string, loaded: LoadedGovernedExecution): Promise<void> {
   await withTenantAuditedTransaction(tenantId, async (tx, appendRequiredAudit) => {
     const dbTx = tx as ReturnType<typeof getDb>;
     await dbTx
