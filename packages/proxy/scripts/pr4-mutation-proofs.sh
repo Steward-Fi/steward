@@ -27,25 +27,45 @@ PLUGIN_TEST="src/__tests__/invoke.test.ts"
 pass_count=0
 fail_count=0
 
-# run_test <pkg-dir> <test-file> <filter> -> 0 if all pass (0 fail), else 1
-run_test() {
+# _run_once <pkg-dir> <test-file> <filter> -> 0 if all pass (0 fail), else 1.
+_run_once() {
   local dir="$1" file="$2" filter="$3" out
-  out=$(cd "$dir" && timeout 120 bun test --timeout 30000 "$file" -t "$filter" 2>&1)
+  out=$(cd "$dir" && timeout 180 bun test --timeout 30000 "$file" -t "$filter" 2>&1)
   echo "$out" | grep -qE "^ *[1-9][0-9]* pass$" && echo "$out" | grep -qE "^ *0 fail$"
+}
+
+# run_baseline: retries up to 3x. The VPS is memory-constrained and back-to-back
+# bun test processes occasionally time out / OOM transiently. A proof is only
+# meaningful when the CLEAN predicate CAN pass, so the baseline gets retries.
+run_baseline() {
+  local i
+  for i in 1 2 3; do
+    if _run_once "$1" "$2" "$3"; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+
+# run_mutated: SINGLE shot, NO retry. A killed predicate must fail on its own
+# merit; retrying a mutated run would give a flaky (e.g. concurrency K01) mutation
+# multiple chances to pass and weaken the proof. If the single mutated run passes,
+# the predicate was NOT killed — that is a real invalid proof, not transient noise.
+run_mutated() {
+  _run_once "$1" "$2" "$3"
 }
 
 # proof <name> <pkg-dir> <test-file> <filter> <target> <sed-expr>
 proof() {
   local name="$1" dir="$2" file="$3" filter="$4" target="$5" sedexpr="$6"
   echo "=== PROOF: $name ==="
-  if run_test "$dir" "$file" "$filter"; then
+  if run_baseline "$dir" "$file" "$filter"; then
     echo "  baseline PASS ✓"
   else
     echo "  baseline UNEXPECTED FAIL ✗ (proof invalid)"; fail_count=$((fail_count+1)); return
   fi
   cp "$target" "$target.bak"
   sed -i "$sedexpr" "$target"
-  if run_test "$dir" "$file" "$filter"; then
+  if run_mutated "$dir" "$file" "$filter"; then
     echo "  post-mutation still PASSES ✗ (mutation did not kill the test)"; fail_count=$((fail_count+1))
   else
     echo "  post-mutation FAILS ✓ (predicate killed)"; pass_count=$((pass_count+1))
@@ -126,6 +146,22 @@ proof "M11 timeout classified as success not outcome_unknown (K13)" "packages/pr
 #      signature-invalid guard off.
 proof "M12 accept invalid v2 signature at boundary (P11)" "packages/proxy" "$GOV_TEST" "P11" "$GOV" \
   's/if (!signatureValid) {/if (false) {/'
+
+# M13: remove the read-side binding-ready guard → P1a-read (an active nonce whose
+#      binding is already NOT execution_ready at read time must be denied
+#      EXEC_AUTH_NOT_READY before any claim). Neutralizing the read guard lets the
+#      flow fall through to the claim tx, which returns a DIFFERENT code
+#      (EXEC_AUTH_CLAIM_LOST) — the P1a-read assertion on EXEC_AUTH_NOT_READY fails.
+proof "M13 remove read-side binding-ready guard (P1a-read)" "packages/proxy" "$GOV_TEST" "P1a-read" "$GOV" \
+  's/if (loaded.bindingStatus !== "execution_ready") {/if (false) {/'
+
+# M14: remove the atomic claim-tx binding-transition gate → P1a-race (a binding
+#      advanced past execution_ready AFTER the read guard, between revalidate and
+#      claim, must be caught INSIDE the claim tx and roll the whole claim back so
+#      the nonce is NEVER consumed). Neutralizing the zero-row rollback lets the
+#      nonce claim succeed + dispatch against a non-ready binding — P1a-race fails.
+proof "M14 remove atomic claim-tx binding gate (P1a-race)" "packages/proxy" "$GOV_TEST" "P1a-race" "$GOV" \
+  's/if (bindingAdvanced.length === 0) {/if (false) {/'
 
 echo ""
 echo "==================================================="

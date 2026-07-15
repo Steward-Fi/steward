@@ -38,6 +38,7 @@ import {
   secretRoutes,
   secrets,
   withTenantAuditedTransaction,
+  workspaces,
 } from "@stwd/db";
 import {
   buildProviderExecutionCommitmentV2,
@@ -106,6 +107,10 @@ async function hook(name: keyof GovernedDispatchHooks): Promise<void> {
 }
 
 class AuditUnavailableError extends Error {}
+// Thrown inside the claim tx when the binding was not execution_ready at claim
+// time (codex P1a): rolls the whole claim back so the nonce is never consumed
+// against a non-ready binding. Classified as a lost claim by the caller.
+class BindingNotReadyError extends Error {}
 
 interface LoadedGovernedExecution {
   intentId: string;
@@ -136,6 +141,7 @@ interface LoadedGovernedExecution {
   requestId: string;
   dispatchState: string;
   authStatus: string;
+  bindingStatus: string;
   issuedAt: string;
   expiresAt: string;
 }
@@ -221,6 +227,7 @@ async function loadGovernedExecution(
     requestId: nonce.requestId,
     dispatchState: (nonce.dispatchState as string) ?? "none",
     authStatus: nonce.status,
+    bindingStatus: binding.status,
     issuedAt: (nonce.issuedAt as Date).toISOString(),
     expiresAt: (nonce.expiresAt as Date).toISOString(),
   };
@@ -260,6 +267,9 @@ export async function dispatchGovernedExecution(
 
   // Terminal / already-dispatched: never re-dispatch (X8, P26). A consumed nonce
   // with a terminal dispatch_state returns its current state without dispatching.
+  // This is checked BEFORE the binding-ready guard so a re-read of an already
+  // dispatched/outcome_unknown execution returns its true state (its binding is
+  // no longer execution_ready by then).
   if (loaded.authStatus !== "active" || loaded.dispatchState !== "none") {
     if (loaded.dispatchState === "outcome_unknown")
       return deny("EXEC_DISPATCH_OUTCOME_UNKNOWN", 202, intentId, {
@@ -270,6 +280,16 @@ export async function dispatchGovernedExecution(
       executionId: loaded.executionId,
       dispatchState: loaded.dispatchState,
     });
+  }
+
+  // For a FRESH (active nonce, dispatch_state='none') execution, the ONLY
+  // dispatchable binding state is execution_ready (codex P1a, §2.2). A binding
+  // that has advanced past execution_ready via another path (while its nonce
+  // somehow lingers active/none) must never reach the claim. This is the early
+  // read-side guard; the claim tx ALSO gates the execution_ready -> executing
+  // transition atomically so a race cannot slip a non-ready binding through.
+  if (loaded.bindingStatus !== "execution_ready") {
+    return deny("EXEC_AUTH_NOT_READY", 409, intentId, { executionId: loaded.executionId });
   }
 
   // ── Signing-boundary revalidation (X5, §4.1 step 3) ────────────────────────
@@ -399,10 +419,15 @@ export async function dispatchGovernedExecution(
         return;
       }
 
-      // Also advance the binding execution_ready -> executing (§2.2) in the same
-      // tx. The PR3 transition trigger requires binding_revision to increment by
-      // exactly 1 on every status change.
-      await dbTx
+      // Advance the binding execution_ready -> executing (§2.2) in the SAME tx and
+      // make that transition part of the claim success condition (codex P1a): the
+      // nonce claim and the binding lifecycle are one atomic step, so a nonce can
+      // NEVER be consumed while the binding is not execution_ready (e.g. already
+      // terminal from another path). The PR3 transition trigger requires
+      // binding_revision to increment by exactly 1. If the scoped update affects
+      // ZERO rows, the binding was not in execution_ready → roll the whole claim
+      // back (no consumed nonce, no dispatch, fail closed).
+      const bindingAdvanced = await dbTx
         .update(providerActionBindings)
         .set({
           status: "executing",
@@ -415,7 +440,14 @@ export async function dispatchGovernedExecution(
             eq(providerActionBindings.intentId, loaded.intentId),
             eq(providerActionBindings.status, "execution_ready"),
           ),
-        );
+        )
+        .returning({ intentId: providerActionBindings.intentId });
+      if (bindingAdvanced.length === 0) {
+        // The binding was NOT execution_ready (terminal / rolled back / raced).
+        // Undo the nonce claim by throwing to roll back the whole tx, then
+        // classify as a lost claim (no dispatch, X4/§2.2).
+        throw new BindingNotReadyError();
+      }
 
       try {
         await appendRequiredAudit({
@@ -448,6 +480,12 @@ export async function dispatchGovernedExecution(
       // The whole claim tx rolled back (F07/P50/K11): nonce stays active, no
       // decrypt. Fail closed.
       return deny("EXEC_AUDIT_UNAVAILABLE", 503, intentId);
+    }
+    if (e instanceof BindingNotReadyError) {
+      // The nonce claim rolled back because the binding was not execution_ready
+      // (codex P1a): the nonce is NOT consumed, nothing dispatched. Classify as a
+      // lost claim (the binding lifecycle, not the nonce, is the blocker).
+      return deny("EXEC_AUTH_CLAIM_LOST", 409, intentId, { executionId: loaded.executionId });
     }
     throw e;
   }
@@ -541,27 +579,52 @@ async function revalidateAccountBoundary(
   loaded: LoadedGovernedExecution,
 ): Promise<{ ok: true } | { ok: false; code: GovernedDispatchCode }> {
   const db = getDb();
+  // Workspace status: a disabled/revoked workspace must fail closed before any
+  // decrypt (codex P1b). The claim SQL cannot express the workspace status.
+  const wsRows = await db
+    .select({ status: workspaces.status })
+    .from(workspaces)
+    .where(and(eq(workspaces.tenantId, tenantId), eq(workspaces.id, loaded.workspaceId)))
+    .limit(1);
+  const ws = wsRows[0];
+  if (!ws || ws.status !== "active") return { ok: false, code: "EXEC_AUTH_ACCOUNT_DISABLED" };
+
+  // Provider account: must exist, be active, AND live in the bound workspace
+  // (scope the lookup by workspace so a same-id account moved/rebound elsewhere
+  // cannot pass, mirroring the approval boundary).
   const accRows = await db
-    .select({ status: providerAccounts.status, revision: providerAccounts.revision })
+    .select({ status: providerAccounts.status })
     .from(providerAccounts)
     .where(
       and(
         eq(providerAccounts.tenantId, tenantId),
+        eq(providerAccounts.workspaceId, loaded.workspaceId),
         eq(providerAccounts.id, loaded.providerAccountId),
       ),
     )
     .limit(1);
   const acc = accRows[0];
   if (!acc || acc.status !== "active") return { ok: false, code: "EXEC_AUTH_ACCOUNT_DISABLED" };
+
+  // Provider operation: must exist, be active, live in the bound workspace +
+  // account, AND its revision must still equal the committed one (codex P1b: the
+  // operation STATUS and scope were not checked before). A disabled operation or
+  // a revision drift fails closed.
   const opRows = await db
-    .select({ revision: providerOperations.revision })
+    .select({ status: providerOperations.status, revision: providerOperations.revision })
     .from(providerOperations)
     .where(
-      and(eq(providerOperations.tenantId, tenantId), eq(providerOperations.id, loaded.operationId)),
+      and(
+        eq(providerOperations.tenantId, tenantId),
+        eq(providerOperations.workspaceId, loaded.workspaceId),
+        eq(providerOperations.providerAccountId, loaded.providerAccountId),
+        eq(providerOperations.id, loaded.operationId),
+      ),
     )
     .limit(1);
   const op = opRows[0];
-  if (!op || op.revision !== loaded.operationRevision)
+  if (!op || op.status !== "active") return { ok: false, code: "EXEC_AUTH_ACCOUNT_DISABLED" };
+  if (op.revision !== loaded.operationRevision)
     return { ok: false, code: "EXEC_AUTH_STALE_DEPENDENCY" };
   return { ok: true };
 }

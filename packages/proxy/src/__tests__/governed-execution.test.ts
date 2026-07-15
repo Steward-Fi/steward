@@ -17,7 +17,16 @@
  * revalidates and dispatches.
  */
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, setDefaultTimeout } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  setDefaultTimeout,
+} from "bun:test";
 import { createHmac, hkdfSync, randomUUID } from "node:crypto";
 import {
   agents,
@@ -466,6 +475,11 @@ beforeEach(async () => {
   await seedBase();
 });
 
+afterEach(() => {
+  // Reset any fault-injection hooks so a race test cannot leak into the next.
+  dispatchMod.__resetGovernedDispatchHooksForTests();
+});
+
 // Build a minimal Hono-like context for handleProxy with an optional forged
 // governedExecutionClaim (P05) to prove the header/context cannot be smuggled.
 function fakeDirectContext(path: string, forgedClaim?: unknown) {
@@ -741,6 +755,81 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
       .from(providerActionBindings)
       .where(eq(providerActionBindings.intentId, intentId));
     expect(b.status).toBe("failed");
+  });
+
+  it("P19: a disabled workspace fails at the boundary (post-claim), no dispatch (codex P1b)", async () => {
+    const { intentId } = await seedExecutionReady();
+    await getDb()
+      .update(workspaces)
+      .set({ status: "disabled" })
+      .where(eq(workspaces.id, IDS.workspace));
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_ACCOUNT_DISABLED");
+    expect(captured).toBeNull();
+  });
+
+  it("P18b: a disabled provider operation fails at the boundary (codex P1b), no dispatch", async () => {
+    const { intentId } = await seedExecutionReady();
+    await getDb()
+      .update(providerOperations)
+      .set({ status: "disabled" })
+      .where(eq(providerOperations.id, IDS.operation));
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_ACCOUNT_DISABLED");
+    expect(captured).toBeNull();
+  });
+
+  it("P1a-read: an active nonce whose binding is NOT execution_ready at read time is denied by the read-side guard (no claim, no forward)", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    // Force the binding to a terminal state while the nonce stays active/none
+    // (simulating a lifecycle advanced by another path). The read-side guard must
+    // refuse before any claim: nonce NOT consumed.
+    await getDb().execute(
+      sql`UPDATE provider_action_bindings SET status = 'executing', binding_revision = binding_revision + 1 WHERE intent_id = ${intentId}`,
+    );
+    await getDb().execute(
+      sql`UPDATE provider_action_bindings SET status = 'succeeded', binding_revision = binding_revision + 1 WHERE intent_id = ${intentId}`,
+    );
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    expect(res.code).toBe("EXEC_AUTH_NOT_READY");
+    expect(captured).toBeNull();
+    // Nonce stays active (never consumed against a non-ready binding).
+    const [n] = await getDb()
+      .select({ status: executionAuthorizationNonces.status })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(n.status).toBe("active");
+  });
+
+  it("P1a-race: a binding advanced past execution_ready AFTER the read guard (between revalidate and claim) is caught atomically inside the claim tx; the whole claim rolls back so the nonce is NEVER consumed", async () => {
+    const { intentId, authorizationId } = await seedExecutionReady();
+    // The binding IS execution_ready at read time, so the read-side guard passes.
+    // We race it: the afterRevalidate hook (fires immediately before the claim tx)
+    // advances the binding out of execution_ready, so ONLY the atomic claim-tx
+    // binding-transition gate can catch it. This isolates the claim-tx gate from
+    // the read-side guard (proven separately by P1a-read).
+    dispatchMod.__setGovernedDispatchHooksForTests({
+      afterRevalidate: async () => {
+        await getDb().execute(
+          sql`UPDATE provider_action_bindings SET status = 'executing', binding_revision = binding_revision + 1 WHERE intent_id = ${intentId}`,
+        );
+      },
+    });
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    expect(res.ok).toBe(false);
+    // The claim-tx gate rolls the claim back and classifies it as a lost claim.
+    expect(res.code).toBe("EXEC_AUTH_CLAIM_LOST");
+    expect(captured).toBeNull();
+    // The nonce claim was rolled back with the binding transition: still active.
+    const [n] = await getDb()
+      .select({ status: executionAuthorizationNonces.status, dispatchState: executionAuthorizationNonces.dispatchState })
+      .from(executionAuthorizationNonces)
+      .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+    expect(n.status).toBe("active");
+    expect(n.dispatchState).toBe("none");
   });
 
   it("P20: an operation revision drift fails at the boundary, no dispatch", async () => {
