@@ -743,6 +743,151 @@ export function computeRequestHash(e: ProviderRequestEnvelopeV1): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PR4: provider execution authorization v2 commitment (spec §3)
+//
+// The v2 authorization is bound by an HMAC over a canonical commitment document
+// serialized with the SAME strict RFC 8785 JCS used above (adjudication conflict
+// 13 in-house JCS). The commitment binds the EXACT outbound bytes, the EXACT PR3
+// approval, rotation revisions, and the pinned request line so a claimed
+// authorization cannot be replayed against a different route/method/path/header
+// profile/secret. `commitmentHash` is a content hash; the HMAC signature is
+// domain-separated (§3.1) so a v2 signature can never collide with the v1
+// signature payload or an audit HMAC.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const PROVIDER_EXECUTION_COMMITMENT_SCHEMA_VERSION =
+  "steward.provider-execution-authorization.v2" as const;
+
+/**
+ * Domain-separation prefix mixed into the HMAC input (NOT into commitmentHash).
+ * A v2 signature is `HMAC(v2Key, SIG_DOMAIN || JCS(commitment))`; a v1 signature
+ * is `HMAC(v1Key, JCS(v1Payload))` with no prefix and a different key, so the two
+ * can never be confused (spec §3.1, P12).
+ */
+export const PROVIDER_EXECUTION_SIGNATURE_DOMAIN =
+  "steward.execution-authorization.v2\n" as const;
+
+export interface ProviderExecutionCommitmentTargetV2 {
+  scheme: "https";
+  host: string;
+  port: 443;
+  normalizedPath: string;
+  method: CanonicalMethod;
+}
+
+export interface ProviderExecutionCommitmentV2 {
+  schemaVersion: typeof PROVIDER_EXECUTION_COMMITMENT_SCHEMA_VERSION;
+  authorizationId: string;
+  executionId: string;
+  intentId: string;
+  requestId: string;
+  tenantId: string;
+  workspaceId: string;
+  actorAgentId: string;
+  providerAccountId: string;
+  operationId: string;
+  operationRevision: number;
+  requestHash: string;
+  actionDigest: string;
+  grantDependencyHash: string;
+  policyRevisionHash: string;
+  accessDecisionHash: string;
+  approvalId: string;
+  approvalCommitmentHash: string;
+  target: ProviderExecutionCommitmentTargetV2;
+  headerAllowlistDigest: string;
+  routeId: string;
+  routeRevision: number;
+  secretId: string;
+  secretVersion: number;
+  backend: "credential-proxy";
+  providerIdempotencyKey: string;
+  maxUses: 1;
+  nonce: string;
+  issuedAt: string;
+  expiresAt: string;
+  keyId: string;
+}
+
+function toExecutionCommitmentObject(c: ProviderExecutionCommitmentV2): Record<string, unknown> {
+  // Build a plain object graph (no class instances) so the JCS serializer never
+  // sees a Date/Map/etc. Property order here is irrelevant (JCS re-sorts).
+  return {
+    schemaVersion: c.schemaVersion,
+    authorizationId: c.authorizationId,
+    executionId: c.executionId,
+    intentId: c.intentId,
+    requestId: c.requestId,
+    tenantId: c.tenantId,
+    workspaceId: c.workspaceId,
+    actorAgentId: c.actorAgentId,
+    providerAccountId: c.providerAccountId,
+    operationId: c.operationId,
+    operationRevision: c.operationRevision,
+    requestHash: c.requestHash,
+    actionDigest: c.actionDigest,
+    grantDependencyHash: c.grantDependencyHash,
+    policyRevisionHash: c.policyRevisionHash,
+    accessDecisionHash: c.accessDecisionHash,
+    approvalId: c.approvalId,
+    approvalCommitmentHash: c.approvalCommitmentHash,
+    target: {
+      scheme: c.target.scheme,
+      host: c.target.host,
+      port: c.target.port,
+      normalizedPath: c.target.normalizedPath,
+      method: c.target.method,
+    },
+    headerAllowlistDigest: c.headerAllowlistDigest,
+    routeId: c.routeId,
+    routeRevision: c.routeRevision,
+    secretId: c.secretId,
+    secretVersion: c.secretVersion,
+    backend: c.backend,
+    providerIdempotencyKey: c.providerIdempotencyKey,
+    maxUses: c.maxUses,
+    nonce: c.nonce,
+    issuedAt: c.issuedAt,
+    expiresAt: c.expiresAt,
+    keyId: c.keyId,
+  };
+}
+
+/** JCS bytes of the v2 commitment (UTF-8 string, no trailing newline). */
+export function providerExecutionCommitmentBytes(c: ProviderExecutionCommitmentV2): string {
+  return jcsStringify(toExecutionCommitmentObject(c));
+}
+
+/** `commitmentHash` = sha256: hex of JCS(commitment). Content hash, NOT the HMAC. */
+export function computeProviderExecutionCommitmentHash(c: ProviderExecutionCommitmentV2): string {
+  return sha256HexPrefixed(providerExecutionCommitmentBytes(c));
+}
+
+/**
+ * Domain-separated signature input: `SIG_DOMAIN || JCS(commitment)`. The caller
+ * HMACs this with the v2-derived key. Kept in @stwd/shared so the (future) proxy
+ * verifier and the API minter agree on the exact bytes.
+ */
+export function providerExecutionSignatureInput(c: ProviderExecutionCommitmentV2): string {
+  return `${PROVIDER_EXECUTION_SIGNATURE_DOMAIN}${providerExecutionCommitmentBytes(c)}`;
+}
+
+/**
+ * sha256: hex of JCS of the sorted selected-header NAME set from a PR2 canonical
+ * action. Binds the outbound header profile into the commitment so a claimed
+ * authorization cannot be replayed with a different header set (P31/P32/P33).
+ * Only header NAMES are committed (values are already in the actionDigest); the
+ * injected credential header is never among selectedHeaders (PR2 rule).
+ */
+export function computeHeaderAllowlistDigest(action: GithubCanonicalActionV1): string {
+  const names = action.selectedHeaders
+    .map(([name]) => name)
+    .slice()
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return sha256HexPrefixed(jcsStringify(names));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Method canonicalization (section 3.3)
 // ─────────────────────────────────────────────────────────────────────────────
 

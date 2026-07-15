@@ -77,6 +77,15 @@ export interface TenantEmailConfig {
 
 export const chainFamilyEnum = pgEnum("chain_family", ["evm", "solana", "bitcoin", "monero"]);
 
+// PR4 (0082): governed provider route authority mode. `legacy` = the historical
+// direct-proxy credential path; `governed_v2` = decrypt/inject only reachable via
+// a claimed v2 execution authorization (dispatchGovernedExecution). A route is
+// never both. Default `legacy` => migration 0082 changes nothing at deploy (X9).
+export const secretRouteAuthorityModeEnum = pgEnum("secret_route_authority_mode", [
+  "legacy",
+  "governed_v2",
+]);
+
 export const policyTypeEnum = pgEnum("policy_type", [
   "spending-limit",
   "approved-addresses",
@@ -924,6 +933,32 @@ export const executionAuthorizationNonces = pgTable(
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     consumedAt: timestamp("consumed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // ─── PR4 (0082): provider execution authorization v2 extension ───────────
+    // version=1 rows are the legacy wallet/EVM nonce (all v2 fields null).
+    // version=2 rows carry the full provider commitment binding + dispatch
+    // state machine. Enforced by exec_auth_nonces_v2_arm_chk (raw SQL, 0082).
+    // The v2 fields are the DB-time claim predicate (§2.3) and the reconciler's
+    // dispatch-state source of truth (§4).
+    version: integer("version").notNull().default(1),
+    executionId: varchar("execution_id", { length: 64 }),
+    intentId: varchar("intent_id", { length: 64 }),
+    workspaceId: uuid("workspace_id"),
+    providerAccountId: uuid("provider_account_id"),
+    operationId: uuid("operation_id"),
+    operationRevision: integer("operation_revision"),
+    requestHash: varchar("request_hash", { length: 71 }),
+    actionDigest: varchar("action_digest", { length: 71 }),
+    grantDependencyHash: varchar("grant_dependency_hash", { length: 71 }),
+    routeId: uuid("route_id"),
+    routeRevision: integer("route_revision"),
+    secretId: uuid("secret_id"),
+    secretVersion: integer("secret_version"),
+    providerIdempotencyKey: varchar("provider_idempotency_key", { length: 255 }),
+    commitmentHash: varchar("commitment_hash", { length: 71 }),
+    keyId: varchar("key_id", { length: 64 }),
+    dispatchState: varchar("dispatch_state", { length: 24 }).notNull().default("none"),
+    dispatchedAt: timestamp("dispatched_at", { withTimezone: true }),
+    outcomeRecordedAt: timestamp("outcome_recorded_at", { withTimezone: true }),
   },
   (table) => ({
     authorizationIdUniqueIdx: uniqueIndex("execution_authorization_nonces_auth_id_idx").on(
@@ -936,6 +971,15 @@ export const executionAuthorizationNonces = pgTable(
       table.status,
     ),
     expiryIdx: index("execution_authorization_nonces_expires_at_idx").on(table.expiresAt),
+    // Partial-unique v2 indexes + composite FKs + CHECK constraints are RAW SQL
+    // ONLY (0082): drizzle cannot express partial predicates or composite FKs.
+    // The migration test asserts they exist after migrate.
+    v2IntentUniqIdx: uniqueIndex("exec_auth_nonces_intent_uniq")
+      .on(table.intentId)
+      .where(sql`version = 2`),
+    v2ExecutionUniqIdx: uniqueIndex("exec_auth_nonces_execution_uniq")
+      .on(table.executionId)
+      .where(sql`version = 2`),
   }),
 );
 
@@ -1656,6 +1700,12 @@ export const secretRoutes = pgTable(
     // BEFORE UPDATE trigger (raw SQL only, not visible to drizzle-kit). PR4's
     // 0082 adds authority_mode + provider_operation_id and extends the trigger.
     authorityRevision: integer("authority_revision").notNull().default(1),
+    // PR4 (0082): governed cutover columns. authority_mode default 'legacy' means
+    // every existing route behaves exactly as today until explicitly enrolled
+    // (PR8). A governed route MUST name its provider_operation_id (raw-SQL CHECK
+    // secret_routes_governed_operation_chk); a legacy route MUST NOT.
+    authorityMode: secretRouteAuthorityModeEnum("authority_mode").notNull().default("legacy"),
+    providerOperationId: uuid("provider_operation_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
