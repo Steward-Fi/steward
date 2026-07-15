@@ -579,8 +579,19 @@ class ProviderActionService {
           },
         });
       });
-    } catch {
-      // Any evaluation or persistence failure denies; the stub is never called.
+    } catch (e) {
+      // A missing PR1 execution dependency (route/credential) fails approval
+      // creation CLOSED (spec §5.2) — surfaced as an evidence failure so no
+      // partial approval arm is ever visible.
+      if (e instanceof ApprovalArmError) {
+        return {
+          kind: "evidence_failure",
+          code: "EVIDENCE_DECISION_PERSIST_FAILED",
+          httpStatus: 503,
+        };
+      }
+      // Any other evaluation or persistence failure denies; the stub is never
+      // called.
       return {
         kind: "evidence_failure",
         code: "EVIDENCE_DECISION_PERSIST_FAILED",

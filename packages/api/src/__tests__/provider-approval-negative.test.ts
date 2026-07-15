@@ -15,7 +15,6 @@ import {
   test,
 } from "bun:test";
 import {
-  agents,
   approvalQueue,
   closeDb,
   getDb,
@@ -29,8 +28,8 @@ import {
   secretRoutes,
   secrets,
   tenants,
-  userTenants,
   users,
+  userTenants,
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -308,10 +307,7 @@ describe("PR3 negative matrix", () => {
 
   test("N31: matched grant revision changes => APPROVAL_GRANT_STALE", async () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
-    await getDb()
-      .update(providerGrants)
-      .set({ revision: 2 })
-      .where(eq(providerGrants.id, F.GRANT));
+    await getDb().update(providerGrants).set({ revision: 2 }).where(eq(providerGrants.id, F.GRANT));
     await expectFail(approve(intentId, requestHash, actionDigest), "APPROVAL_GRANT_STALE");
   });
 
@@ -383,7 +379,10 @@ describe("PR3 negative matrix", () => {
   test("N44: denial omits reason code => APPROVAL_REASON_REQUIRED", async () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
     await expectFail(
-      approve(intentId, requestHash, actionDigest, { decision: "deny", idempotencyKey: "no-reason" }),
+      approve(intentId, requestHash, actionDigest, {
+        decision: "deny",
+        idempotencyKey: "no-reason",
+      }),
       "APPROVAL_REASON_REQUIRED",
     );
   });

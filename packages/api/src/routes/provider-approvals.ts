@@ -14,13 +14,8 @@
  * with the provider-authority wildcard.
  */
 
-import {
-  decodeUtf8Strict,
-  isApprovalReasonCode,
-  strictParseJson,
-} from "@stwd/shared";
-import type { Context } from "hono";
-import type { Hono } from "hono";
+import { decodeUtf8Strict, isApprovalReasonCode, strictParseJson } from "@stwd/shared";
+import type { Context, Hono } from "hono";
 import { type AppVariables, setNoStoreHeaders, tenantAuth } from "../services/context";
 import { providerApprovalService } from "../services/provider-approval";
 
@@ -265,10 +260,7 @@ async function handlePostExecute(c: RouteContext) {
  * requirement where the spec demands it.
  */
 export function registerProviderApprovalRoutes(app: Hono<{ Variables: AppVariables }>): void {
-  const paths = [
-    "/v2/provider-actions/:id/approval",
-    "/v2/provider-actions/:id/execute",
-  ];
+  const paths = ["/v2/provider-actions/:id/approval", "/v2/provider-actions/:id/execute"];
   for (const p of paths) {
     app.use(p, async (c, next) => {
       setNoStoreHeaders(c);

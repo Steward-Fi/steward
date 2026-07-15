@@ -29,8 +29,8 @@ import {
   secretRoutes,
   secrets,
   tenants,
-  userTenants,
   users,
+  userTenants,
   workspaces,
 } from "@stwd/db";
 import { createPGLiteDb, setPGLiteOverride } from "@stwd/db/pglite";
@@ -177,12 +177,12 @@ describe("PR3 concurrency + fault matrix", () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
     await providerApprovalService.decide(decideBody(intentId, requestHash, actionDigest));
     const results = await Promise.all(
-      Array.from({ length: 25 }, () => providerApprovalService.resume({ intentId, tenantId: F.TENANT })),
+      Array.from({ length: 25 }, () =>
+        providerApprovalService.resume({ intentId, tenantId: F.TENANT }),
+      ),
     );
     const readyIds = new Set(
-      results
-        .filter((r) => r.ok)
-        .map((r) => (r as { resumeAttemptId?: string }).resumeAttemptId),
+      results.filter((r) => r.ok).map((r) => (r as { resumeAttemptId?: string }).resumeAttemptId),
     );
     expect(readyIds.size).toBe(1);
     const b = await bindingRow(intentId);
@@ -242,7 +242,9 @@ describe("PR3 concurrency + fault matrix", () => {
         throw new AuditUnavailableError("audit unavailable");
       },
     };
-    const res = await providerApprovalService.decide(decideBody(intentId, requestHash, actionDigest));
+    const res = await providerApprovalService.decide(
+      decideBody(intentId, requestHash, actionDigest),
+    );
     expect(res.ok).toBe(false);
     if (res.ok) throw new Error();
     expect(res.code).toBe("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE");

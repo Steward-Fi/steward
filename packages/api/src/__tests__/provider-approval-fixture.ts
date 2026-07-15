@@ -11,7 +11,6 @@ import {
   getDb,
   intents,
   providerAccounts,
-  providerActionAuditOutbox,
   providerActionBindings,
   providerGrants,
   providerOperations,
@@ -19,8 +18,8 @@ import {
   secretRoutes,
   secrets,
   tenants,
-  userTenants,
   users,
+  userTenants,
   workspaces,
 } from "@stwd/db";
 import { buildGithubAction } from "@stwd/provider-github";
@@ -235,7 +234,9 @@ export async function createApprovalRequired(idem = "aaaaaaaa"): Promise<{
     requestId: null,
   });
   if (out.kind !== "approval_required") {
-    throw new Error(`expected approval_required, got ${out.kind} (${(out as { code?: string }).code})`);
+    throw new Error(
+      `expected approval_required, got ${out.kind} (${(out as { code?: string }).code})`,
+    );
   }
   return { intentId: out.intentId, requestHash: out.requestHash, actionDigest: out.actionDigest };
 }
@@ -275,7 +276,9 @@ export async function auditCount(tenantId = F.TENANT, action?: string): Promise<
 export async function correlatedAudit(
   intentId: string,
   tenantId = F.TENANT,
-): Promise<Array<{ action: string; resource_type: string; resource_id: string; intent_meta: string }>> {
+): Promise<
+  Array<{ action: string; resource_type: string; resource_id: string; intent_meta: string }>
+> {
   const rows = await getDb().execute(
     sql`SELECT action, resource_type, resource_id, (metadata->>'intentId') AS intent_meta
         FROM audit_events
@@ -283,7 +286,12 @@ export async function correlatedAudit(
         ORDER BY seq ASC`,
   );
   const arr = Array.isArray(rows) ? rows : ((rows as { rows?: unknown[] }).rows ?? []);
-  return arr as Array<{ action: string; resource_type: string; resource_id: string; intent_meta: string }>;
+  return arr as Array<{
+    action: string;
+    resource_type: string;
+    resource_id: string;
+    intent_meta: string;
+  }>;
 }
 
 export function freshMfa(): number {

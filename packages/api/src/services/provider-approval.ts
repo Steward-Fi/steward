@@ -36,12 +36,12 @@ import {
   workspaces,
 } from "@stwd/db";
 import {
-  type ProviderApprovalAuditPayloadV1,
-  type ProviderApprovalCommitmentV1,
   computeApprovalCommitmentHash,
   computeDecisionRequestHash,
   jcsStringify,
   PROVIDER_APPROVAL_AUDIT_SCHEMA,
+  type ProviderApprovalAuditPayloadV1,
+  type ProviderApprovalCommitmentV1,
   sha256HexPrefixed,
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
@@ -291,10 +291,6 @@ function buildAuditPayload(
   };
 }
 
-function auditActor(actorType: "agent" | "user" | "system", actorId: string | null) {
-  return { actorType, actorId };
-}
-
 // ─── The service ──────────────────────────────────────────────────────────────
 
 class ProviderApprovalService {
@@ -304,16 +300,18 @@ class ProviderApprovalService {
 
   // Test-only fault-injection hooks (production defaults are no-ops; not settable
   // from runtime input). Named per spec §13.
-  faultHooks: Partial<Record<
-    | "afterScopeLoad"
-    | "afterIntegrity"
-    | "afterAuthority"
-    | "afterMfa"
-    | "beforeAudit"
-    | "afterAudit"
-    | "beforeCommit",
-    () => void | Promise<void>
-  >> = {};
+  faultHooks: Partial<
+    Record<
+      | "afterScopeLoad"
+      | "afterIntegrity"
+      | "afterAuthority"
+      | "afterMfa"
+      | "beforeAudit"
+      | "afterAudit"
+      | "beforeCommit",
+      () => void | Promise<void>
+    >
+  > = {};
 
   private async hook(name: keyof ProviderApprovalService["faultHooks"]): Promise<void> {
     const h = this.faultHooks[name];
@@ -511,7 +509,11 @@ class ProviderApprovalService {
         ),
       )
       .limit(1);
-    if (!operation || operation.status !== "active" || operation.revision !== c.operation.revision) {
+    if (
+      !operation ||
+      operation.status !== "active" ||
+      operation.revision !== c.operation.revision
+    ) {
       return { ok: false, code: "APPROVAL_OPERATION_STALE" };
     }
 
@@ -523,7 +525,10 @@ class ProviderApprovalService {
       .select({ id: secretRoutes.id, authorityRevision: secretRoutes.authorityRevision })
       .from(secretRoutes)
       .where(
-        and(eq(secretRoutes.tenantId, binding.tenantId), eq(secretRoutes.id, operation.secretRouteId)),
+        and(
+          eq(secretRoutes.tenantId, binding.tenantId),
+          eq(secretRoutes.id, operation.secretRouteId),
+        ),
       )
       .limit(1);
     if (!route || route.authorityRevision !== c.executionDependencies.routeRevision) {
@@ -541,7 +546,13 @@ class ProviderApprovalService {
     // that changed/vanished stales, even if another allow remains (I6/N32).
     for (const g of c.accessDecision.matchedGrants) {
       const [row] = await tx
-        .select({ revision: providerGrants.revision, status: providerGrants.status, notBefore: providerGrants.notBefore, expiresAt: providerGrants.expiresAt, environment: providerGrants.environment })
+        .select({
+          revision: providerGrants.revision,
+          status: providerGrants.status,
+          notBefore: providerGrants.notBefore,
+          expiresAt: providerGrants.expiresAt,
+          environment: providerGrants.environment,
+        })
         .from(providerGrants)
         .where(and(eq(providerGrants.tenantId, binding.tenantId), eq(providerGrants.id, g.id)))
         .limit(1);
@@ -554,9 +565,19 @@ class ProviderApprovalService {
     }
     for (const b of c.accessDecision.matchedBindings) {
       const [row] = await tx
-        .select({ revision: providerRoleBindings.revision, status: providerRoleBindings.status, notBefore: providerRoleBindings.notBefore, expiresAt: providerRoleBindings.expiresAt })
+        .select({
+          revision: providerRoleBindings.revision,
+          status: providerRoleBindings.status,
+          notBefore: providerRoleBindings.notBefore,
+          expiresAt: providerRoleBindings.expiresAt,
+        })
         .from(providerRoleBindings)
-        .where(and(eq(providerRoleBindings.tenantId, binding.tenantId), eq(providerRoleBindings.id, b.id)))
+        .where(
+          and(
+            eq(providerRoleBindings.tenantId, binding.tenantId),
+            eq(providerRoleBindings.id, b.id),
+          ),
+        )
         .limit(1);
       if (!row || row.status !== "active" || row.revision !== b.revision) {
         return { ok: false, code: "APPROVAL_GRANT_STALE" };
@@ -634,7 +655,8 @@ class ProviderApprovalService {
           if (b.notBefore && b.notBefore > now) return false;
           if (b.expiresAt && b.expiresAt <= now) return false;
           if (b.environment && b.environment !== env) return false;
-          if (b.providerAccountId && b.providerAccountId !== binding.providerAccountId) return false;
+          if (b.providerAccountId && b.providerAccountId !== binding.providerAccountId)
+            return false;
           if (b.roleKey === "workspace_operator")
             return b.operationKeys.includes(operation.operationKey);
           if (b.roleKey === "workspace_viewer")
@@ -784,14 +806,16 @@ class ProviderApprovalService {
         mfaVerifiedAt: null,
       })
       .where(
-        and(
-          eq(approvalQueue.id, queue.id),
-          sql`${approvalQueue.status} IN ('pending','approved')`,
-        ),
+        and(eq(approvalQueue.id, queue.id), sql`${approvalQueue.status} IN ('pending','approved')`),
       );
     await tx
       .update(providerActionBindings)
-      .set({ status: "approval_expired", bindingRevision: after, expiredAt: new Date(), updatedAt: new Date() })
+      .set({
+        status: "approval_expired",
+        bindingRevision: after,
+        expiredAt: new Date(),
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(providerActionBindings.intentId, binding.intentId),
@@ -800,7 +824,12 @@ class ProviderApprovalService {
       );
     await tx
       .update(intents)
-      .set({ status: "expired", expiredBy: RESUME_ACTOR, expiredAt: new Date(), updatedAt: new Date() })
+      .set({
+        status: "expired",
+        expiredBy: RESUME_ACTOR,
+        expiredAt: new Date(),
+        updatedAt: new Date(),
+      })
       .where(eq(intents.id, binding.intentId));
 
     const payload = buildAuditPayload(binding, queue, {
@@ -1212,7 +1241,8 @@ class ProviderApprovalService {
         };
       });
     } catch (e) {
-      if (e instanceof AuditUnavailableError) return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
+      if (e instanceof AuditUnavailableError)
+        return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
       return fail("APPROVAL_PERSISTENCE_FAILED", 503);
     }
   }
@@ -1384,7 +1414,8 @@ class ProviderApprovalService {
         };
       });
     } catch (e) {
-      if (e instanceof AuditUnavailableError) return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
+      if (e instanceof AuditUnavailableError)
+        return fail("EVIDENCE_REQUIRED_AUDIT_UNAVAILABLE", 503);
       return fail("RESUME_PREPARATION_FAILED", 503);
     }
   }
@@ -1399,12 +1430,13 @@ class ProviderApprovalService {
     userId: string,
     sessionMfaVerifiedAt: number,
   ): Promise<
-    | { ok: true; data: Record<string, unknown> }
-    | { ok: false; code: string; httpStatus: number }
+    { ok: true; data: Record<string, unknown> } | { ok: false; code: string; httpStatus: number }
   > {
     const loaded = await this.loadCase(this.db(), tenantId, intentId, false);
-    if ("notFound" in loaded) return { ok: false, code: "SCOPE_RESOURCE_NOT_FOUND", httpStatus: 404 };
-    if ("notApproval" in loaded) return { ok: false, code: "APPROVAL_NOT_REQUIRED", httpStatus: 409 };
+    if ("notFound" in loaded)
+      return { ok: false, code: "SCOPE_RESOURCE_NOT_FOUND", httpStatus: 404 };
+    if ("notApproval" in loaded)
+      return { ok: false, code: "APPROVAL_NOT_REQUIRED", httpStatus: 409 };
     const { binding, queue } = loaded;
     const approver = await this.checkApprover(
       this.db(),
@@ -1445,4 +1477,4 @@ function setsEqual(a: Set<string>, b: Set<string>): boolean {
 }
 
 export const providerApprovalService = new ProviderApprovalService();
-export { ProviderApprovalService, AuditUnavailableError };
+export { AuditUnavailableError, ProviderApprovalService };

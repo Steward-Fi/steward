@@ -85,7 +85,11 @@ export function canonicalApprovalCommitmentObject(
     intentId: c.intentId,
     tenantId: c.tenantId,
     workspaceId: c.workspaceId,
-    requestActor: { type: c.requestActor.type, id: c.requestActor.id, revision: c.requestActor.revision },
+    requestActor: {
+      type: c.requestActor.type,
+      id: c.requestActor.id,
+      revision: c.requestActor.revision,
+    },
     providerAccount: {
       id: c.providerAccount.id,
       revision: c.providerAccount.revision,
@@ -143,8 +147,7 @@ export function computeApprovalCommitmentHash(c: ProviderApprovalCommitmentV1): 
 
 // ─── Human decision document (spec §8.2) ──────────────────────────────────────
 
-export const PROVIDER_APPROVAL_DECISION_SCHEMA =
-  "steward.provider-approval-decision.v1" as const;
+export const PROVIDER_APPROVAL_DECISION_SCHEMA = "steward.provider-approval-decision.v1" as const;
 
 export interface ProviderApprovalDecisionCommitmentV1 {
   schemaVersion: typeof PROVIDER_APPROVAL_DECISION_SCHEMA;
