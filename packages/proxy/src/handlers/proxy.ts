@@ -1117,14 +1117,43 @@ export async function handleProxy(c: Context): Promise<Response> {
   // reverted/older proxy that no longer understands governed mode still fails
   // closed (§6.3).
   const authorityMode = (route as { authorityMode?: string }).authorityMode ?? "legacy";
+  const governedClaim = c.get("governedExecutionClaim" as never) as
+    | {
+        authorizationId: string;
+        executionId: string;
+        routeId: string;
+        routeRevision?: number;
+        secretId?: string;
+        secretVersion?: number;
+      }
+    | undefined;
+  // Set once the governed claim is verified against the selected route; the
+  // single-use v2 nonce it represents is the replay guard, so a verified governed
+  // dispatch skips the header-based Idempotency-Key claim below (codex P1).
+  let isVerifiedGovernedDispatch = false;
   if (authorityMode !== "legacy") {
-    const governedClaim = c.get("governedExecutionClaim" as never) as
-      | { authorizationId: string; executionId: string; routeId: string }
-      | undefined;
+    // The claim must match the SELECTED route by id AND by the exact revision +
+    // secret binding it was minted against (codex P1). A rotated route/secret
+    // after the claim (routeId unchanged) would otherwise decrypt with the CURRENT
+    // credential; requiring the claimed authorityRevision + secretId here fails
+    // closed on any such drift before the decrypt. The secret VERSION is
+    // additionally re-checked at decrypt time (the version lives on the secret,
+    // not the route row).
+    const routeSecretId = (route as { secretId?: string }).secretId;
+    const routeRevision = (route as { authorityRevision?: number }).authorityRevision;
     const claimMatches =
       authorityMode === "governed_v2" &&
       governedClaim !== undefined &&
-      governedClaim.routeId === route.id;
+      governedClaim.routeId === route.id &&
+      governedClaim.routeRevision !== undefined &&
+      governedClaim.routeRevision === routeRevision &&
+      governedClaim.secretId !== undefined &&
+      governedClaim.secretId === routeSecretId &&
+      // secretVersion is REQUIRED for a verified governed claim (codex P2): a
+      // partial claim that omits it must NOT be treated as verified, otherwise the
+      // decrypt-time version recheck below (guarded on secretVersion !== undefined)
+      // would be skipped and a rotated secret could be decrypted. Missing = stale.
+      governedClaim.secretVersion !== undefined;
     if (!claimMatches) {
       await recordRequiredAudit({
         agentId,
@@ -1147,6 +1176,7 @@ export async function handleProxy(c: Context): Promise<Response> {
         403,
       );
     }
+    isVerifiedGovernedDispatch = true;
   }
 
   if (route.injectAs === "query") {
@@ -1434,9 +1464,16 @@ export async function handleProxy(c: Context): Promise<Response> {
     return c.json({ ok: false, error: dnsCheck.error }, dnsCheck.status);
   }
 
-  const replayClaim = approvalReleaseId
-    ? ({ ok: true, storageKey: "", storage: "memory" } as const)
-    : await claimUnsafeProxyRequest(c, tenantId, agentId, target, method, rawQuery);
+  // A governed dispatch (verified single-use v2 nonce, already atomically
+  // consumed by the claim) and an approval-release both carry their OWN replay
+  // protection, so neither goes through the header Idempotency-Key claim. Without
+  // this, mutating governed actions (POST/PUT/PATCH/DELETE) would 400 for a
+  // missing Idempotency-Key AFTER the nonce was already spent (codex P1) — the
+  // provider-action header allowlist does not even permit that header.
+  const replayClaim =
+    approvalReleaseId || isVerifiedGovernedDispatch
+      ? ({ ok: true, storageKey: "", storage: "memory" } as const)
+      : await claimUnsafeProxyRequest(c, tenantId, agentId, target, method, rawQuery);
   if (!replayClaim.ok) {
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await recordAudit({
@@ -1491,6 +1528,36 @@ export async function handleProxy(c: Context): Promise<Response> {
   }
 
   // 3. Decrypt credential
+  //
+  // Governed stale-secret backstop (codex P1): the gate above pinned the claimed
+  // secretId, but the secret VERSION can still rotate in the window between the
+  // claim and this decrypt. A governed dispatch must decrypt the EXACT version it
+  // was authorized against, never a freshly-rotated credential. Re-read the live
+  // version and fail closed (409 stale) on drift before touching the vault.
+  if (authorityMode === "governed_v2" && governedClaim?.secretVersion !== undefined) {
+    const [liveSecret] = await getDb()
+      .select({ version: secrets.version })
+      .from(secrets)
+      .where(and(eq(secrets.tenantId, tenantId), eq(secrets.id, route.secretId)))
+      .limit(1);
+    if (!liveSecret || liveSecret.version !== governedClaim.secretVersion) {
+      await recordRequiredAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 409,
+        latencyMs: Date.now() - startTime,
+        reason: "governed-stale-secret-version",
+      });
+      await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
+      await releaseUnsafeProxyRequest(replayClaim);
+      proxySlot.release();
+      return c.json({ ok: false, error: "EXEC_AUTH_STALE_SECRET" }, 409);
+    }
+  }
+
   let credential: string;
   try {
     credential = await decryptSecret(tenantId, route.secretId);

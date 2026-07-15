@@ -730,6 +730,14 @@ async function dispatchOnce(
           authorizationId: loaded.authorizationId,
           executionId: loaded.executionId,
           routeId: loaded.routeId,
+          // Carry the CLAIMED route revision + secret binding so the proxy gate can
+          // fail closed if the route/secret was rotated between the claim and the
+          // decrypt (codex P1 stale-credential race): a matching routeId alone is
+          // not sufficient because the current route.secretId/version drives the
+          // decrypt. The proxy gate re-verifies these against the live route.
+          routeRevision: loaded.routeRevision,
+          secretId: loaded.secretId,
+          secretVersion: loaded.secretVersion,
         };
       return undefined;
     },

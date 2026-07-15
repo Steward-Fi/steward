@@ -163,6 +163,32 @@ proof "M13 remove read-side binding-ready guard (P1a-read)" "packages/proxy" "$G
 proof "M14 remove atomic claim-tx binding gate (P1a-race)" "packages/proxy" "$GOV_TEST" "P1a-race" "$GOV" \
   's/if (bindingAdvanced.length === 0) {/if (false) {/'
 
+# M15: drop the decrypt-time secret-VERSION recheck → P31 (a secret rotated AFTER
+#      the claim but before decrypt must fail closed; the gate only pinned the
+#      secretId, so removing the version recheck lets a governed dispatch decrypt
+#      the freshly-rotated credential). Force the stale-version guard off.
+proof "M15 drop decrypt-time secret-version recheck (P31)" "packages/proxy" "$GOV_TEST" "P31" "$PROXY" \
+  's/liveSecret.version !== governedClaim.secretVersion/false/'
+
+# M16: put governed dispatches back through the header Idempotency-Key replay
+#      guard → P30 (a mutating governed action carries its own single-use nonce and
+#      must bypass claimUnsafeProxyRequest; routing it back through the guard 400s
+#      the missing Idempotency-Key after the nonce was spent). Drop the bypass.
+proof "M16 governed dispatch back through replay guard (P30)" "packages/proxy" "$GOV_TEST" "P30" "$PROXY" \
+  's/approvalReleaseId || isVerifiedGovernedDispatch/approvalReleaseId/'
+
+# M17: accept a claim whose routeRevision does NOT match the live route → P32 (a
+#      forged/stale claim with the right routeId but a rotated route revision must
+#      be denied at the gate before decrypt). Force the revision equality true.
+proof "M17 accept mismatched claim routeRevision at gate (P32)" "packages/proxy" "$GOV_TEST" "P32" "$PROXY" \
+  's/governedClaim.routeRevision === routeRevision/true/'
+
+# M18: treat a claim that OMITS secretVersion as verified → P33 (codex P2: a
+#      partial claim without secretVersion would skip the decrypt-time version
+#      recheck, so it must NOT be verified at the gate). Drop the requirement.
+proof "M18 accept claim missing secretVersion at gate (P33)" "packages/proxy" "$GOV_TEST" "P33" "$PROXY" \
+  's/governedClaim.secretVersion !== undefined;/true;/'
+
 echo ""
 echo "==================================================="
 echo "PR4 MUTATION PROOFS: $pass_count killed, $fail_count invalid"

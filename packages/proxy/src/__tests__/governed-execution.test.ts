@@ -825,7 +825,10 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(captured).toBeNull();
     // The nonce claim was rolled back with the binding transition: still active.
     const [n] = await getDb()
-      .select({ status: executionAuthorizationNonces.status, dispatchState: executionAuthorizationNonces.dispatchState })
+      .select({
+        status: executionAuthorizationNonces.status,
+        dispatchState: executionAuthorizationNonces.dispatchState,
+      })
       .from(executionAuthorizationNonces)
       .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
     expect(n.status).toBe("active");
@@ -865,6 +868,99 @@ describe("PR4 dispatchGovernedExecution claim + dispatch", () => {
     expect(res.ok).toBe(false);
     // A revoked (non-active) nonce with dispatch_state 'none' returns terminal.
     expect(["EXEC_TERMINAL_STATE", "EXEC_AUTH_NOT_READY"]).toContain(res.code);
+    expect(captured).toBeNull();
+  });
+
+  it("P30: a MUTATING (POST) governed action dispatches without an Idempotency-Key 400 (codex P1: the single-use v2 nonce is the replay guard)", async () => {
+    // Point the seeded action + route at a POST so handleProxy's unsafe-method
+    // idempotency guard would fire for a legacy request. A governed dispatch must
+    // bypass that guard (it carries its own single-use nonce), so the forward is
+    // reached instead of a local 400 for a missing Idempotency-Key.
+    const savedMethod = ACTION.method;
+    const savedBody = ACTION.canonicalBody;
+    (ACTION as { method: string }).method = "POST";
+    (ACTION as { canonicalBody: unknown }).canonicalBody = { title: "bug" };
+    try {
+      const { intentId, authorizationId } = await seedExecutionReady();
+      const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+      // The forward was reached (no 400 idempotency short-circuit) and the method
+      // is the mutating one.
+      expect(captured).not.toBeNull();
+      expect(captured?.method).toBe("POST");
+      // Nonce consumed exactly once, dispatched.
+      const [n] = await getDb()
+        .select({
+          status: executionAuthorizationNonces.status,
+          ds: executionAuthorizationNonces.dispatchState,
+        })
+        .from(executionAuthorizationNonces)
+        .where(eq(executionAuthorizationNonces.authorizationId, authorizationId));
+      expect(n.status).toBe("consumed");
+      expect(n.ds).not.toBe("none");
+      void res;
+    } finally {
+      (ACTION as { method: string }).method = savedMethod;
+      (ACTION as { canonicalBody: unknown }).canonicalBody = savedBody;
+    }
+  });
+
+  it("P31: a secret VERSION rotated AFTER the claim but before decrypt fails closed (409 stale) with no forward (codex P1 stale-credential race)", async () => {
+    // The claim succeeds (route + secret bound), then between claim and decrypt the
+    // backing secret is rotated to a new version via the beforeForward hook. The
+    // decrypt-time recheck must refuse to decrypt the freshly-rotated credential.
+    const { intentId } = await seedExecutionReady();
+    dispatchMod.__setGovernedDispatchHooksForTests({
+      beforeForward: async () => {
+        await getDb().update(secrets).set({ version: 99 }).where(eq(secrets.id, IDS.secret));
+      },
+    });
+    const res = await dispatchGovernedExecution(intentId, IDS.tenant);
+    // NO credential was forwarded against the rotated secret.
+    expect(captured).toBeNull();
+    // Crucially, the denial is the 409 stale-secret gate, NOT a 500 decrypt
+    // failure. This distinguishes the intended recheck from decrypt happening to
+    // fail on the rotated version (which would also leave captured null): the
+    // proxy returns EXEC_AUTH_STALE_SECRET (409), classified here as a failed
+    // dispatch carrying upstreamStatusCode 409.
+    expect(res.ok).toBe(false);
+    expect(res.upstreamStatusCode).toBe(409);
+  });
+
+  it("P32: a forged direct claim with the right routeId + secretId but a WRONG routeRevision is denied at the gate (codex P1 stale-route)", async () => {
+    await seedExecutionReady();
+    // Correct routeId + secretId (so ONLY the routeRevision guard can deny it),
+    // stale/forged routeRevision. The gate must fail closed before any decrypt.
+    const forged = handleProxy(
+      fakeDirectContext("/proxy/api.github.com/repos/acme/widgets/issues", {
+        authorizationId: "forged",
+        executionId: "forged",
+        routeId: IDS.route,
+        routeRevision: 999,
+        secretId: IDS.secret,
+        secretVersion: 1,
+      }),
+    );
+    const res = await forged;
+    expect(res.status).toBe(403);
+    expect(captured).toBeNull();
+  });
+
+  it("P33: a governed claim that OMITS secretVersion is not verified at the gate (codex P2: missing = stale, fail closed)", async () => {
+    await seedExecutionReady();
+    // Correct routeId + routeRevision + secretId, but NO secretVersion. Without
+    // it the decrypt-time version recheck could be skipped, so the gate must
+    // refuse to treat the claim as verified.
+    const res = await handleProxy(
+      fakeDirectContext("/proxy/api.github.com/repos/acme/widgets/issues", {
+        authorizationId: "forged",
+        executionId: "forged",
+        routeId: IDS.route,
+        routeRevision: 1,
+        secretId: IDS.secret,
+        // secretVersion intentionally omitted
+      }),
+    );
+    expect(res.status).toBe(403);
     expect(captured).toBeNull();
   });
 
