@@ -15,12 +15,31 @@
  */
 
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import type { PGlite } from "@electric-sql/pglite";
+import { readdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { PGlite } from "@electric-sql/pglite";
 import { createPGLiteDb } from "../pglite";
 
 setDefaultTimeout(120_000);
 
 let client: PGlite;
+
+const migrationsDir = new URL("../../drizzle", import.meta.url).pathname;
+const MIG_0081 = "0081_exact_approval_binding.sql";
+
+async function applyFile(c: PGlite, file: string) {
+  const sql = await readFile(join(migrationsDir, file), "utf8");
+  for (const stmt of sql.split("--> statement-breakpoint")) {
+    if (stmt.trim()) await c.exec(stmt);
+  }
+}
+
+async function applyThrough(c: PGlite, upToExclusive: string) {
+  const files = (await readdir(migrationsDir))
+    .filter((f) => f.endsWith(".sql") && f < upToExclusive)
+    .sort();
+  for (const f of files) await applyFile(c, f);
+}
 
 describe("PR3 exact-approval migration (0081)", () => {
   beforeAll(async () => {
@@ -115,6 +134,49 @@ describe("PR3 exact-approval migration (0081)", () => {
        WHERE table_name='approval_queue' AND column_name='tx_id'`,
     );
     expect(txcol.rows[0].is_nullable).toBe("YES");
+  });
+
+  test("backfill: a legacy PR2 pending_approval binding migrates to approval_stale without failing the shape CHECK (P1 codex)", async () => {
+    // Build the pre-0081 schema, insert a pending_approval binding (as PR2 would
+    // leave it), THEN apply 0081 and assert the migration succeeds + reclassifies.
+    const c = new PGlite("memory://");
+    await applyThrough(c, MIG_0081);
+    await c.exec(`
+      INSERT INTO tenants(id,name,api_key_hash) VALUES ('t','T','h');
+      INSERT INTO users(id,email,created_at,updated_at) VALUES
+        ('00000000-0000-4000-8000-000000000001','o@e.test',now(),now());
+      INSERT INTO agents(id,tenant_id,name,wallet_address) VALUES ('ag','t','A','0x1');
+      INSERT INTO workspaces(id,tenant_id,key,name,environment,created_by) VALUES
+        ('00000000-0000-4000-8000-000000000101','t','w','W','production','00000000-0000-4000-8000-000000000001');
+      INSERT INTO provider_accounts(id,tenant_id,workspace_id,adapter_key,external_ref,display_name) VALUES
+        ('00000000-0000-4000-8000-000000000201','t','00000000-0000-4000-8000-000000000101','github','a','A');
+      INSERT INTO provider_operations(id,tenant_id,workspace_id,provider_account_id,operation_key,risk_class) VALUES
+        ('00000000-0000-4000-8000-000000000301','t','00000000-0000-4000-8000-000000000101','00000000-0000-4000-8000-000000000201','github.pr.comment.create','consequential');
+      INSERT INTO intents(id,tenant_id,agent_id,intent_type,status,resource_type,resource_id,created_by_type,created_by_id)
+        VALUES ('pa_legacy','t','ag','provider-action','pending','provider-action','x','agent','ag');
+      INSERT INTO provider_action_bindings(
+        intent_id,tenant_id,workspace_id,actor_agent_id,provider_account_id,operation_id,operation_revision,
+        canonical_profile,canonical_action_bytes,action_digest,request_envelope,request_hash,idempotency_key_hash,
+        safe_summary,access_decision_id,access_effect,access_reason_code,dependency_revisions,access_decision,
+        access_decision_hash,policy_decision_id,policy_effect,policy_revision_hash,policy_decision,policy_decision_hash,status)
+      VALUES (
+        'pa_legacy','t','00000000-0000-4000-8000-000000000101','ag','00000000-0000-4000-8000-000000000201',
+        '00000000-0000-4000-8000-000000000301',1,'github.provider-action.v1',decode('7b7d','hex'),
+        'sha256:${"a".repeat(64)}','{}'::jsonb,'sha256:${"b".repeat(64)}','sha256:${"c".repeat(64)}','{}'::jsonb,
+        '00000000-0000-4000-8000-000000000401','allow','ok','{}'::jsonb,'{}'::jsonb,'sha256:${"d".repeat(64)}',
+        '00000000-0000-4000-8000-000000000501','approval_required','sha256:${"e".repeat(64)}','{}'::jsonb,
+        'sha256:${"f".repeat(64)}','pending_approval');
+    `);
+    // Apply 0081 — must NOT fail on the shape CHECK.
+    await applyFile(c, MIG_0081);
+    const b = await c.query<{ status: string; stale_reason_code: string | null }>(
+      `SELECT status, stale_reason_code FROM provider_action_bindings WHERE intent_id='pa_legacy'`,
+    );
+    expect(b.rows[0].status).toBe("approval_stale");
+    expect(b.rows[0].stale_reason_code).toBe("APPROVAL_MIGRATED_PR3");
+    const i = await c.query<{ status: string }>(`SELECT status FROM intents WHERE id='pa_legacy'`);
+    expect(i.rows[0].status).toBe("canceled");
+    await c.close();
   });
 
   test("the enum carries the PR3 provider lifecycle statuses", async () => {

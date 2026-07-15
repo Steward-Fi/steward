@@ -53,7 +53,7 @@ import {
 } from "@stwd/shared";
 import { and, eq, sql } from "drizzle-orm";
 import type { ProviderPrincipalV1 } from "../middleware/provider-principal";
-import { writeAuditEvent } from "./audit";
+import { appendAuditEvent, withTenantAuditQueue, writeAuditEvent } from "./audit";
 import { ApprovalArmError, buildApprovalArm } from "./provider-approval";
 
 const EVALUATOR_VERSION = "provider-action.v1";
@@ -1018,11 +1018,42 @@ class ProviderActionService {
       );
     let delivered = 0;
     for (const row of rows) {
-      // Guarded claim: only deliver rows still undelivered. A concurrent sweeper
-      // that already delivered this row leaves delivered_at set; the signed
-      // append below is only reached after a successful CAS on delivered_at, so
-      // no row is signed twice.
-      const claimed = await this.db()
+      // Crash-safe exactly-once (codex P1). The SOURCE OF TRUTH for "is this
+      // event signed?" is the audit chain itself, keyed by the deterministic
+      // correlation (tenant, resource_id=intentId, action). `delivered_at` is
+      // only an optimization. We serialize the whole check+sign+mark per tenant
+      // (same queue writeAuditEvent uses) so two in-process sweeps cannot both
+      // sign, and if a prior sweep crashed AFTER signing but BEFORE marking, this
+      // sweep observes the existing signed event and just marks the row — never
+      // a duplicate, never a permanently-unsigned intent.
+      const signedNow = await withTenantAuditQueue(row.tenantId, async () => {
+        const existing = await this.db().execute(
+          sql`SELECT 1 FROM audit_events
+              WHERE tenant_id = ${row.tenantId}
+                AND resource_type = ${row.resourceType}
+                AND resource_id = ${row.resourceId}
+                AND action = ${row.action}
+              LIMIT 1`,
+        );
+        const existingRows = Array.isArray(existing)
+          ? existing
+          : ((existing as { rows?: unknown[] }).rows ?? []);
+        if (existingRows.length === 0) {
+          await appendAuditEvent({
+            tenantId: row.tenantId,
+            actorType: "agent",
+            actorId: (row.metadata as { actorAgentId?: string }).actorAgentId ?? null,
+            action: row.action,
+            resourceType: row.resourceType,
+            resourceId: row.resourceId,
+            metadata: row.metadata as Record<string, unknown>,
+          });
+          return true;
+        }
+        return false;
+      });
+      // Mark delivered whether we just signed it or found it already signed.
+      const marked = await this.db()
         .update(providerActionAuditOutbox)
         .set({ deliveredAt: new Date() })
         .where(
@@ -1032,27 +1063,7 @@ class ProviderActionService {
           ),
         )
         .returning({ id: providerActionAuditOutbox.id });
-      if (claimed.length === 0) continue; // another pass won the row
-      try {
-        await writeAuditEvent({
-          tenantId: row.tenantId,
-          actorType: "agent",
-          actorId: (row.metadata as { actorAgentId?: string }).actorAgentId ?? null,
-          action: row.action,
-          resourceType: row.resourceType,
-          resourceId: row.resourceId,
-          metadata: row.metadata as Record<string, unknown>,
-        });
-        delivered += 1;
-      } catch (err) {
-        // Signing failed AFTER we claimed the row: release the claim so a later
-        // pass retries (the event must never be silently dropped).
-        await this.db()
-          .update(providerActionAuditOutbox)
-          .set({ deliveredAt: null })
-          .where(eq(providerActionAuditOutbox.id, row.id));
-        throw err;
-      }
+      if (marked.length > 0 && signedNow) delivered += 1;
     }
     return delivered;
   }

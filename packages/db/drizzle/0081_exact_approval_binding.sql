@@ -244,6 +244,47 @@ ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_
 );
 --> statement-breakpoint
 
+-- Drop the PR2 immutability trigger BEFORE the legacy backfill so the backfill
+-- UPDATE (pending_approval -> approval_stale on pre-existing rows) is not
+-- rejected by the PR2 transition allowlist / frozen-column guard. The PR3
+-- transition trigger is (re)created at the end of this migration.
+DROP TRIGGER IF EXISTS provider_action_bindings_immutable ON "provider_action_bindings";
+--> statement-breakpoint
+DROP FUNCTION IF EXISTS steward_provider_action_binding_guard();
+--> statement-breakpoint
+
+-- Backfill legacy PR2 `pending_approval` rows BEFORE adding the shape CHECK. On
+-- a database that already carries approval-required actions created under PR2
+-- (before this migration), the new approval columns are NULL, and the pending
+-- branch of the shape CHECK requires approval_queue_id + approval_commitment_hash
+-- to be NOT NULL. Rather than fabricate an unverifiable commitment for a legacy
+-- row, transition any pre-existing pending_approval binding (and its intent) to
+-- the terminal `approval_stale` classification with a stable migration reason so
+-- the requester must re-request under the exact-binding regime. This keeps the
+-- migration forward-safe on deployments with outstanding approvals.
+UPDATE "provider_action_bindings"
+  SET "status" = 'approval_stale',
+      "stale_at" = now(),
+      "stale_reason_code" = 'APPROVAL_MIGRATED_PR3',
+      -- approval_queue_id is required by the stale branch of the shape CHECK; a
+      -- legacy pending row has none, so synthesize a stable placeholder id that
+      -- references no queue row (the stale branch only requires NOT NULL).
+      "approval_queue_id" = 'aq_migrated_' || "intent_id",
+      "updated_at" = now()
+  WHERE "status" = 'pending_approval';
+--> statement-breakpoint
+UPDATE "intents" i
+  SET "status" = 'canceled',
+      "canceled_by" = 'steward-system',
+      "canceled_at" = now(),
+      "cancellation_reason" = 'APPROVAL_MIGRATED_PR3',
+      "updated_at" = now()
+  FROM "provider_action_bindings" b
+  WHERE b."intent_id" = i."id"
+    AND b."stale_reason_code" = 'APPROVAL_MIGRATED_PR3'
+    AND i."status" = 'pending';
+--> statement-breakpoint
+
 -- Per-state field-shape CHECK (spec §4.2): which lifecycle columns must be set
 -- for each approval status. Non-approval statuses (PR2 lineage) carry none.
 ALTER TABLE "provider_action_bindings" ADD CONSTRAINT "provider_action_bindings_approval_shape_chk" CHECK (

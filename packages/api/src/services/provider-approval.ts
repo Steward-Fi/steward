@@ -1447,7 +1447,22 @@ class ProviderApprovalService {
       sessionMfaVerifiedAt,
       false,
     );
-    if (!approver.ok) return { ok: false, code: approver.code, httpStatus: approver.httpStatus };
+    if (!approver.ok) {
+      // Non-enumeration (I16, codex P2): an ineligible tenant member must NOT be
+      // able to distinguish an existing approval action from an absent one on
+      // this READ path. Membership/role/separation eligibility failures collapse
+      // to the same 404 as an absent id. MFA failures are surfaced (they are not
+      // enumeration signals: the caller already proved tenant membership and the
+      // MFA gate is enforced at the route before this call).
+      if (
+        approver.code === "APPROVAL_MFA_REQUIRED" ||
+        approver.code === "APPROVAL_MFA_STALE" ||
+        approver.code === "APPROVAL_MFA_TIMESTAMP_INVALID"
+      ) {
+        return { ok: false, code: approver.code, httpStatus: approver.httpStatus };
+      }
+      return { ok: false, code: "SCOPE_RESOURCE_NOT_FOUND", httpStatus: 404 };
+    }
     return {
       ok: true,
       data: {

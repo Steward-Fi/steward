@@ -195,7 +195,7 @@ describe("PR3 approval lifecycle", () => {
     expect(q.status).toBe("consumed");
     expect(q.consumedBy).toBe("steward-system");
     const i = await intentRow(intentId);
-    // execution_ready must NOT set executed/executed_at (no third-party execution).
+    // execution_ready must NOT set executed/executed_at (no external execution).
     expect(i.status).toBe("authorized");
     expect(i.executedAt).toBeNull();
     expect(i.executedBy).toBe("steward-system");
