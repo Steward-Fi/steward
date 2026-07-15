@@ -9,6 +9,7 @@ export * from "./execution-contract.js";
 export * from "./execution-payload.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
+export * from "./provider-action.js";
 export * from "./provider-authority.js";
 // ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
 export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
@@ -16,7 +17,7 @@ export * from "./security-surface.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
 // ─── Per-request app context shape (shared so plugins can type routes) ───
-export type { AppVariables } from "./types/app-variables.js";
+export type { AppVariables, VerifiedAgentPrincipal } from "./types/app-variables.js";
 // ─── Lean-core + opt-in-plugin contract ───
 export type {
   AdapterContribution,

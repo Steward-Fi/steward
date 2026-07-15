@@ -58,6 +58,7 @@ import { globalWalletRoutes } from "./routes/global-wallet";
 import { intentRoutes } from "./routes/intents";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
+import { registerProviderActionRoutes } from "./routes/provider-actions";
 import { providerAuthorityRoutes } from "./routes/provider-authority";
 import { secretsRoutes } from "./routes/secrets";
 import { tenantConfigRoutes } from "./routes/tenant-config";
@@ -247,6 +248,11 @@ export function mountCoreIdempotencyAndRoutes(
   app.route("/v1/users", fiatRoutes);
   app.route("/policies", policiesStandaloneRoutes);
   app.route("/v2", providerAuthorityRoutes);
+  // provider-actions registers its concrete `/v2/provider-actions` handler + auth
+  // middleware directly on the app (see registerProviderActionRoutes) to avoid a
+  // second `/v2` sub-app mount colliding with the authority wildcard.
+  registerProviderActionRoutes(app);
+
   app.route("/condition-sets", conditionSetRoutes);
   app.route("/condition_sets", conditionSetRoutes);
   app.route("/v1/condition_sets", conditionSetRoutes);

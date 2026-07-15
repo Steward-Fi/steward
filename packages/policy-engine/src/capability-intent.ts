@@ -641,3 +641,251 @@ export const capabilityIntentContribution: PolicyRuleContribution<EvaluatorConte
     "gate a named capability invoke: allow / deny / require-approval + arg and hourly-invoke constraints (fail-closed)",
   evaluate: evaluateCapabilityIntent,
 };
+
+// ─── Provider-action policy composition (PR2, Conflict 9 fix) ──────────────────
+//
+// The legacy invoke.ts loop lets a passing allow win even when another rule
+// simultaneously requires approval (origin/develop invoke.ts:288-311). That is
+// an obligation-laundering bug: a required approval must NEVER be dropped by a
+// separate matching allow. `composeProviderActionPolicyDecision` centralizes the
+// correct precedence for the PROVIDER-ACTION (authority) plane:
+//
+//   malformed/unknown input or any matching deny/failed hard constraint => hard_deny
+//   else any matching require-approval                                    => approval_required
+//   else any matching passing allow                                        => allow
+//   else                                                                   => hard_deny (POLICY_NO_GOVERNING_ALLOW)
+//
+// Conditions here are applicability-only (which rules govern this operation);
+// they never emit approval/MFA/rate obligations from the access layer. A thrown
+// evaluator error is hard_deny, never approval.
+
+/** Stable provider-policy reason codes (mirror the spec deny table). */
+export const PROVIDER_POLICY_REASON = {
+  ALLOW: "POLICY_ALLOW",
+  NO_GOVERNING_ALLOW: "POLICY_NO_GOVERNING_ALLOW",
+  HARD_DENY: "POLICY_HARD_DENY",
+  APPROVAL_REQUIRED: "APPROVAL_REQUIRED",
+  CONFIGURATION_INVALID: "POLICY_CONFIGURATION_INVALID",
+  INPUT_UNAVAILABLE: "POLICY_INPUT_UNAVAILABLE",
+  EVALUATOR_ERROR: "POLICY_EVALUATOR_ERROR",
+} as const;
+
+export type ProviderPolicyEffect = "hard_deny" | "approval_required" | "allow";
+
+/** Adapter-derived, validated inputs a provider policy may read. It does NOT
+ *  lift arbitrary scalar fields from raw JSON: only the operation key, the
+ *  adapter-validated arguments, canonical method/host/path, and the
+ *  authoritative trailing-hour invoke count. */
+export interface ProviderPolicyContext {
+  readonly operationKey: string;
+  readonly args: Record<string, unknown>;
+  readonly method: string;
+  readonly host: string;
+  readonly path: string;
+  /** Authoritative trailing-hour invoke count. `undefined` => input
+   *  unavailable => fail closed (hard_deny, POLICY_INPUT_UNAVAILABLE). */
+  readonly invokeCount1h?: number;
+}
+
+export interface ProviderPolicyRuleResult {
+  readonly policyId: string;
+  readonly policyType: "capability-intent";
+  readonly applicable: true;
+  readonly configuredEffect: CapabilityIntentEffect;
+  readonly outcome: "pass" | "hard_deny" | "approval_required";
+  readonly reasonCode: string;
+  /** JCS hash of {id,type,enabled,config}; filled by the caller which owns the
+   *  hashing dependency. Left as a stable placeholder here. */
+  readonly ruleRevisionHash: string;
+}
+
+export interface ProviderPolicyEvaluationV1 {
+  readonly effect: ProviderPolicyEffect;
+  readonly reasonCodes: string[];
+  readonly results: ProviderPolicyRuleResult[];
+}
+
+/** The subset of a capability-intent rule the provider composer needs. */
+export interface ProviderPolicyRule {
+  readonly id: string;
+  readonly type: string;
+  readonly enabled: boolean;
+  readonly config: Record<string, unknown>;
+}
+
+/**
+ * Compose a provider-action policy decision from the governing capability-intent
+ * rules. Only enabled `capability-intent` rules that name the operation key are
+ * applicable. Precedence is strictly hard_deny > approval_required > allow >
+ * default-deny. Never throws for a policy reason: an unexpected internal error
+ * becomes hard_deny/POLICY_EVALUATOR_ERROR.
+ *
+ * NAMING / COEXISTENCE WITH THE LEGACY-PLANE FIX (#187, merged on develop):
+ * `composeCapabilityIntentDecision(rules, ctx)` (above) fixes the SAME
+ * allow-over-approval precedence bug for the LEGACY invoke.ts plane, reusing
+ * `ContributedPolicyRule`/`EvaluatorContext` and returning a
+ * `CapabilityIntentCompositionResult`. This function is the AUTHORITY-plane analog
+ * required by PR2 spec §6.2/§6.3: it returns the full `ProviderPolicyEvaluationV1`
+ * document (per-rule results with configured effect / outcome / reason code) that
+ * the provider-action service persists as an immutable policy decision. The two
+ * are deliberately distinct exports; both enforce identical precedence
+ * (hard_deny > approval_required > allow > default-deny).
+ */
+export function composeProviderActionPolicyDecision(
+  rules: ReadonlyArray<ProviderPolicyRule>,
+  context: ProviderPolicyContext,
+): ProviderPolicyEvaluationV1 {
+  try {
+    const results: ProviderPolicyRuleResult[] = [];
+    let sawHardDeny = false;
+    let sawApproval = false;
+    let sawPassingAllow = false;
+    const reasonCodes = new Set<string>();
+
+    for (const rule of rules) {
+      if (!rule.enabled) continue;
+      if (rule.type !== CAPABILITY_INTENT_RULE_TYPE) {
+        // An unknown/foreign governing rule type is not something we can reason
+        // about safely -> hard deny (fail closed).
+        sawHardDeny = true;
+        reasonCodes.add(PROVIDER_POLICY_REASON.CONFIGURATION_INVALID);
+        results.push({
+          policyId: rule.id,
+          policyType: "capability-intent",
+          applicable: true,
+          configuredEffect: "deny",
+          outcome: "hard_deny",
+          reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID,
+          ruleRevisionHash: "",
+        });
+        continue;
+      }
+
+      const parsed = parseConfig(rule.config);
+      if ("error" in parsed) {
+        sawHardDeny = true;
+        reasonCodes.add(PROVIDER_POLICY_REASON.CONFIGURATION_INVALID);
+        results.push({
+          policyId: rule.id,
+          policyType: "capability-intent",
+          applicable: true,
+          configuredEffect: "deny",
+          outcome: "hard_deny",
+          reasonCode: PROVIDER_POLICY_REASON.CONFIGURATION_INVALID,
+          ruleRevisionHash: "",
+        });
+        continue;
+      }
+
+      // Not applicable: a rule that does not name this operation key is silent.
+      if (!capabilityMatches(parsed, context.operationKey)) continue;
+
+      if (parsed.effect === "deny") {
+        sawHardDeny = true;
+        reasonCodes.add(PROVIDER_POLICY_REASON.HARD_DENY);
+        results.push(mkResult(rule.id, "deny", "hard_deny", PROVIDER_POLICY_REASON.HARD_DENY));
+        continue;
+      }
+
+      if (parsed.effect === "require-approval") {
+        sawApproval = true;
+        reasonCodes.add(PROVIDER_POLICY_REASON.APPROVAL_REQUIRED);
+        results.push(
+          mkResult(
+            rule.id,
+            "require-approval",
+            "approval_required",
+            PROVIDER_POLICY_REASON.APPROVAL_REQUIRED,
+          ),
+        );
+        continue;
+      }
+
+      // effect === allow: evaluate its hard constraints. A FAILED hard
+      // constraint is a hard deny (a rate cap / arg gate is not negotiable via
+      // approval).
+      const denial = evaluateProviderConstraints(parsed.constraints, context);
+      if (denial) {
+        sawHardDeny = true;
+        reasonCodes.add(denial);
+        results.push(mkResult(rule.id, "allow", "hard_deny", denial));
+        continue;
+      }
+      sawPassingAllow = true;
+      results.push(mkResult(rule.id, "allow", "pass", PROVIDER_POLICY_REASON.ALLOW));
+    }
+
+    let effect: ProviderPolicyEffect;
+    if (sawHardDeny) effect = "hard_deny";
+    else if (sawApproval) effect = "approval_required";
+    else if (sawPassingAllow) effect = "allow";
+    else {
+      effect = "hard_deny";
+      reasonCodes.add(PROVIDER_POLICY_REASON.NO_GOVERNING_ALLOW);
+    }
+    return { effect, reasonCodes: [...reasonCodes], results };
+  } catch {
+    return {
+      effect: "hard_deny",
+      reasonCodes: [PROVIDER_POLICY_REASON.EVALUATOR_ERROR],
+      results: [],
+    };
+  }
+}
+
+function mkResult(
+  policyId: string,
+  configuredEffect: CapabilityIntentEffect,
+  outcome: ProviderPolicyRuleResult["outcome"],
+  reasonCode: string,
+): ProviderPolicyRuleResult {
+  return {
+    policyId,
+    policyType: "capability-intent",
+    applicable: true,
+    configuredEffect,
+    outcome,
+    reasonCode,
+    ruleRevisionHash: "",
+  };
+}
+
+/**
+ * Evaluate an allow rule's hard constraints against provider-policy context.
+ * Returns a stable reason code on the FIRST failed constraint, or null when all
+ * hold. Missing/unavailable invoke count with a rate cap set => input
+ * unavailable (fail closed).
+ */
+function evaluateProviderConstraints(
+  constraints: CapabilityIntentConstraints | undefined,
+  ctx: ProviderPolicyContext,
+): string | null {
+  if (!constraints) return null;
+  const { args } = ctx;
+
+  if (constraints.argEquals) {
+    for (const [key, expected] of Object.entries(constraints.argEquals)) {
+      if (!Object.hasOwn(args, key) || args[key] !== expected)
+        return PROVIDER_POLICY_REASON.HARD_DENY;
+    }
+  }
+  if (constraints.argMatches) {
+    for (const [key, pattern] of Object.entries(constraints.argMatches)) {
+      let re: RegExp;
+      try {
+        re = new RegExp(`^(?:${pattern})$`);
+      } catch {
+        return PROVIDER_POLICY_REASON.CONFIGURATION_INVALID;
+      }
+      const value = args[key];
+      if (typeof value !== "string" || !re.test(value)) return PROVIDER_POLICY_REASON.HARD_DENY;
+    }
+  }
+  if (constraints.maxCallsPerHour !== undefined) {
+    const count = ctx.invokeCount1h;
+    if (typeof count !== "number" || !Number.isFinite(count))
+      return PROVIDER_POLICY_REASON.INPUT_UNAVAILABLE;
+    if (count >= constraints.maxCallsPerHour) return PROVIDER_POLICY_REASON.HARD_DENY;
+  }
+  return null;
+}

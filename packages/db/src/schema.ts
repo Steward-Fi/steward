@@ -1937,6 +1937,158 @@ export type ProviderOperation = typeof providerOperations.$inferSelect;
 export type ProviderRoleBinding = typeof providerRoleBindings.$inferSelect;
 export type ProviderGrant = typeof providerGrants.$inferSelect;
 
+// ─── Provider action bindings (PR2) ──────────────────────────────────────────
+// The 1:1 typed companion to `intents` that carries the canonical provider
+// action, request envelope, and the two separate (access + policy) decision
+// documents with distinct IDs/hashes. `intents` stays the sole lifecycle root.
+//
+// NOTE: several invariants live ONLY in 0080 raw SQL and are not visible to
+// drizzle-kit: (a) the composite FKs to intents/agents/workspaces/accounts/
+// operations, (b) the CHECK constraints (digest regex, effect enums, the
+// access/policy/status state machine, byte-size bounds), and (c) the
+// `provider_action_bindings_immutable` BEFORE UPDATE trigger that freezes every
+// column except status/updated_at and allows only the
+// allowed_stub -> stub_succeeded|stub_failed transition in PR2.
+export const providerActionBindings = pgTable(
+  "provider_action_bindings",
+  {
+    intentId: varchar("intent_id", { length: 64 }).primaryKey(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    actorAgentId: varchar("actor_agent_id", { length: 64 }).notNull(),
+    providerAccountId: uuid("provider_account_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    operationRevision: integer("operation_revision").notNull(),
+
+    canonicalProfile: varchar("canonical_profile", { length: 96 }).notNull(),
+    canonicalActionBytes: bytea("canonical_action_bytes").notNull(),
+    actionDigest: varchar("action_digest", { length: 71 }).notNull(),
+    requestEnvelope: jsonb("request_envelope").$type<Record<string, unknown>>().notNull(),
+    requestHash: varchar("request_hash", { length: 71 }).notNull(),
+    idempotencyKeyHash: varchar("idempotency_key_hash", { length: 71 }).notNull(),
+    safeSummary: jsonb("safe_summary").$type<Record<string, unknown>>().notNull(),
+
+    accessDecisionId: uuid("access_decision_id").notNull(),
+    accessEffect: varchar("access_effect", { length: 16 }).notNull(),
+    accessReasonCode: varchar("access_reason_code", { length: 96 }).notNull(),
+    matchedBindingIds: uuid("matched_binding_ids").array().notNull().default([]),
+    matchedGrantIds: uuid("matched_grant_ids").array().notNull().default([]),
+    dependencyRevisions: jsonb("dependency_revisions").$type<Record<string, unknown>>().notNull(),
+    accessDecision: jsonb("access_decision").$type<Record<string, unknown>>().notNull(),
+    accessDecisionHash: varchar("access_decision_hash", { length: 71 }).notNull(),
+
+    policyDecisionId: uuid("policy_decision_id"),
+    policyEffect: varchar("policy_effect", { length: 24 }).notNull(),
+    policyReasonCodes: text("policy_reason_codes").array().notNull().default([]),
+    policyResults: jsonb("policy_results")
+      .$type<Array<Record<string, unknown>>>()
+      .notNull()
+      .default([]),
+    policyRevisionHash: varchar("policy_revision_hash", { length: 71 }),
+    policyDecision: jsonb("policy_decision").$type<Record<string, unknown>>(),
+    policyDecisionHash: varchar("policy_decision_hash", { length: 71 }),
+
+    status: varchar("status", { length: 32 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    intentFk: foreignKey({
+      columns: [table.tenantId, table.intentId],
+      foreignColumns: [intents.tenantId, intents.id],
+      name: "provider_action_bindings_intent_fk",
+    }).onDelete("cascade"),
+    actorFk: foreignKey({
+      columns: [table.tenantId, table.actorAgentId],
+      foreignColumns: [agents.tenantId, agents.id],
+      name: "provider_action_bindings_actor_fk",
+    }).onDelete("restrict"),
+    workspaceFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId],
+      foreignColumns: [workspaces.tenantId, workspaces.id],
+      name: "provider_action_bindings_workspace_fk",
+    }).onDelete("restrict"),
+    accountFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId],
+      foreignColumns: [
+        providerAccounts.tenantId,
+        providerAccounts.workspaceId,
+        providerAccounts.id,
+      ],
+      name: "provider_action_bindings_account_fk",
+    }).onDelete("restrict"),
+    operationFk: foreignKey({
+      columns: [table.tenantId, table.workspaceId, table.providerAccountId, table.operationId],
+      foreignColumns: [
+        providerOperations.tenantId,
+        providerOperations.workspaceId,
+        providerOperations.providerAccountId,
+        providerOperations.id,
+      ],
+      name: "provider_action_bindings_operation_fk",
+    }).onDelete("restrict"),
+    accessDecisionIdUnique: uniqueIndex("provider_action_bindings_access_decision_id_uniq").on(
+      table.accessDecisionId,
+    ),
+    requestHashUnique: uniqueIndex("provider_action_bindings_request_hash_uniq").on(
+      table.requestHash,
+    ),
+    idempotencyUnique: uniqueIndex("provider_action_bindings_idempotency_uniq").on(
+      table.tenantId,
+      table.workspaceId,
+      table.actorAgentId,
+      table.operationId,
+      table.idempotencyKeyHash,
+    ),
+    scopeCreatedIdx: index("provider_action_bindings_scope_created_idx").on(
+      table.tenantId,
+      table.workspaceId,
+      table.createdAt,
+    ),
+    actorStatusCreatedIdx: index("provider_action_bindings_actor_status_created_idx").on(
+      table.tenantId,
+      table.actorAgentId,
+      table.status,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type ProviderActionBinding = typeof providerActionBindings.$inferSelect;
+
+// Transactional required-audit outbox (spec §6.4). A provider-action decision
+// inserts its REQUIRED audit intent here in the SAME transaction as the binding;
+// it is drained into the tamper-evident audit chain immediately after commit and
+// BEFORE the executor stub can run. Guarantees the event is never lost even though
+// the audit chain uses its own advisory-locked transaction.
+export const providerActionAuditOutbox = pgTable(
+  "provider_action_audit_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: varchar("tenant_id", { length: 64 }).notNull(),
+    intentId: varchar("intent_id", { length: 64 }).notNull(),
+    action: varchar("action", { length: 96 }).notNull(),
+    resourceType: varchar("resource_type", { length: 64 }).notNull(),
+    resourceId: varchar("resource_id", { length: 255 }).notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    intentFk: foreignKey({
+      columns: [table.tenantId, table.intentId],
+      foreignColumns: [intents.tenantId, intents.id],
+      name: "provider_action_audit_outbox_intent_fk",
+    }).onDelete("cascade"),
+    undeliveredIdx: index("provider_action_audit_outbox_undelivered_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export type ProviderActionAuditOutbox = typeof providerActionAuditOutbox.$inferSelect;
+
 export const pendingProxyRequestStatusEnum = pgEnum("pending_proxy_request_status", [
   "pending",
   "approved",

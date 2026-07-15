@@ -6,6 +6,7 @@ import { createPGLiteDb } from "../pglite";
 
 setDefaultTimeout(120_000);
 const migrations = new URL("../../drizzle", import.meta.url).pathname;
+const migrationUnderTest = "0079_workspace_provider_authority.sql";
 
 async function applyFile(client: PGlite, file: string) {
   const sql = await readFile(join(migrations, file), "utf8");
@@ -15,8 +16,10 @@ async function applyFile(client: PGlite, file: string) {
 }
 
 async function applyThroughCurrentSchema(client: PGlite) {
+  // Build the pre-0079 baseline only. A filename boundary prevents this migration
+  // test from sweeping 0080 (or any future migration) ahead of the migration under test.
   const files = (await readdir(migrations))
-    .filter((file) => file.endsWith(".sql") && file !== "0079_workspace_provider_authority.sql")
+    .filter((file) => file.endsWith(".sql") && file < migrationUnderTest)
     .sort();
   for (const file of files) await applyFile(client, file);
 }
@@ -59,7 +62,7 @@ describe("provider authority migration", () => {
     await client.exec(
       `INSERT INTO tenants(id,name,api_key_hash) VALUES ('existing','Existing','existing-hash')`,
     );
-    await applyFile(client, "0079_workspace_provider_authority.sql");
+    await applyFile(client, migrationUnderTest);
     const tenant = await client.query<{ name: string }>(
       "SELECT name FROM tenants WHERE id='existing'",
     );
