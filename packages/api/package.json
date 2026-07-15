@@ -25,6 +25,7 @@
     "wrangler:dry-run": "wrangler deploy --dry-run --outdir=dist"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.700.0",
     "@hono/zod-openapi": "^1.4.0",
     "@stwd/adapters": "workspace:*",
     "@stwd/auth": "workspace:*",
@@ -33,12 +34,14 @@
     "@stwd/plugin-trading": "workspace:*",
     "@stwd/plugin-wxmr": "workspace:*",
     "@stwd/policy-engine": "workspace:*",
+    "@stwd/provider-github": "workspace:*",
     "@stwd/redis": "workspace:*",
     "@stwd/shared": "workspace:*",
     "@stwd/vault": "workspace:*",
     "@stwd/webhooks": "workspace:*",
     "bs58": "^6.0.0",
     "drizzle-orm": "^0.44.5",
+    "graphene-pk11": "^2.2.0",
     "hono": "^4.12.18",
     "jose": "^6.2.1",
     "viem": "^2.30.0",

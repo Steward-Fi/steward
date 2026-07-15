@@ -58,8 +58,11 @@ operations in production:
    API from within the monorepo. It is not published with an interface
    that encourages direct calls from outside the API.
 
-Combined, that means a **non-compromised API process enforces every
-policy on every signing call**, and this is the boundary we claim.
+This describes the original route-level boundary. The current primary EVM
+transaction sign path and compatible approval replay also require a signed,
+payload-bound, backend-bound, single-use execution authorization before raw
+signing. Other signing and proxy surfaces retain their documented,
+route-specific boundaries.
 
 ### What this does NOT protect against
 
@@ -94,8 +97,8 @@ Be explicit:
   typos and wrong chains.
 
 These are real wins. The overclaim is not "policies work" — they do —
-it's "policies are cryptographically impossible to bypass," which is
-not true of the v1 architecture.
+it's an unqualified product-wide enforcement claim. The stronger execution
+authorization boundary is earned only for the enrolled primary EVM sign path.
 
 ## Decision (future direction, sketched)
 

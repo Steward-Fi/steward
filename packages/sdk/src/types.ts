@@ -2,7 +2,7 @@
 // These mirror @stwd/shared but are bundled here for npm distribution
 
 /** Identifies the blockchain family for a wallet key/address. */
-export type ChainFamily = "evm" | "solana" | "bitcoin";
+export type ChainFamily = "evm" | "solana" | "bitcoin" | "monero";
 
 export type BitcoinNetwork = "mainnet" | "testnet";
 export type BitcoinAddressType = "p2wpkh" | "p2tr";
@@ -19,8 +19,23 @@ export interface BitcoinWalletMetadata {
   caip2: string;
 }
 
+export type MoneroNetwork = "mainnet" | "stagenet";
+
+/** Public Monero wallet metadata — never contains private spend/view keys. */
+export interface MoneroWalletMetadata {
+  network: MoneroNetwork;
+  address: string;
+  publicSpendKey: string;
+  publicViewKey: string;
+  /** Chain height at wallet creation; wallet scanning starts here. */
+  restoreHeight: number;
+  account: number;
+  caip2: string;
+}
+
 export interface WalletAddressMetadata {
   bitcoin?: BitcoinWalletMetadata;
+  monero?: MoneroWalletMetadata;
   [key: string]: unknown;
 }
 
@@ -34,7 +49,7 @@ export interface AgentIdentity {
    * All addresses for this agent, keyed by chain family.
    * Present for agents created with multi-wallet support.
    */
-  walletAddresses?: { evm?: string; solana?: string; bitcoin?: string };
+  walletAddresses?: { evm?: string; solana?: string; bitcoin?: string; monero?: string };
   erc8004TokenId?: string;
   platformId?: string;
   createdAt: Date;
@@ -2063,6 +2078,8 @@ export interface RouteRecord {
   bodyPath?: string;
   priority?: number;
   enabled?: boolean;
+  requiresApproval?: boolean;
+  approvalConfig?: Record<string, unknown>;
   createdAt: string;
 }
 
@@ -2084,6 +2101,31 @@ export interface CreateRoutePayload {
   bodyPath?: string;
   priority?: number;
   enabled?: boolean;
+  requiresApproval?: boolean;
+  approvalConfig?: Record<string, unknown>;
+}
+
+export type PendingProxyRequestStatus =
+  | "pending"
+  | "approved"
+  | "denied"
+  | "executing"
+  | "executed"
+  | "expired"
+  | "failed";
+export interface PendingProxyRequest {
+  id: string;
+  agentId: string;
+  routeId: string;
+  method: string;
+  targetHost: string;
+  targetPath: string;
+  preview: Record<string, unknown>;
+  status: PendingProxyRequestStatus;
+  expiresAt: string;
+  createdAt?: string;
+  executionStatusCode?: number | null;
+  executionError?: string | null;
 }
 
 export type UpdateRoutePayload = Partial<Omit<CreateRoutePayload, "secretId">>;

@@ -2,10 +2,12 @@
 # Steward — Production Docker Compose
 #
 # Services:
-#   steward-api    — REST API + vault (port 3200)
-#   steward-proxy  — Credential injection proxy (port 8080)
-#   postgres       — PostgreSQL 16 (internal only)
-#   redis          — Redis 7 for rate limiting + token store (internal only)
+#   steward-api        — REST API + vault (port 3200)
+#   steward-proxy      — Credential injection proxy (port 8080)
+#   postgres           — PostgreSQL 16 (internal only)
+#   redis              — Redis 7 for rate limiting + token store (internal only)
+#   monero-wallet-rpc  — optional wallet2 sidecar for Monero support
+#                        (profile "monero"; internal only, remote public daemon)
 #
 # Usage:
 #   cp .env.example .env && $EDITOR .env
@@ -48,6 +50,8 @@ services:
       AGENT_TOKEN_EXPIRY: "${AGENT_TOKEN_EXPIRY:-24h}"
       RPC_URL: "${RPC_URL:-https://mainnet.base.org}"
       CHAIN_ID: "${CHAIN_ID:-8453}"
+      STEWARD_PLUGINS: "${STEWARD_PLUGINS:-}"
+      WXMR_SOLANA_RPC_URL: "${WXMR_SOLANA_RPC_URL:-}"
       REDIS_URL: "redis://redis:6379"
       RESEND_API_KEY: "${RESEND_API_KEY:-}"
       EMAIL_FROM: "${EMAIL_FROM:-login@steward.fi}"
@@ -63,6 +67,16 @@ services:
       STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       SIWE_ALLOWED_DOMAINS: "${SIWE_ALLOWED_DOMAINS:-}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
+      # ── Monero (optional; empty = Monero endpoints fail closed with 503) ──
+      # Enable the monero-wallet-rpc sidecar with: COMPOSE_PROFILES=monero
+      # and set STEWARD_MONERO_WALLET_RPC_URL to the sidecar's endpoint below.
+      STEWARD_MONERO_WALLET_RPC_URL: "${STEWARD_MONERO_WALLET_RPC_URL:-}"
+      # Only consulted when the RPC URL above is set; username matches the
+      # sidecar's --rpc-login.
+      STEWARD_MONERO_WALLET_RPC_LOGIN: "steward:${MONERO_WALLET_RPC_PASSWORD:-}"
+      STEWARD_MONERO_DAEMON_URL: "${STEWARD_MONERO_DAEMON_URL:-http://node.sethforprivacy.com:18089}"
+      STEWARD_MONERO_NETWORK: "${STEWARD_MONERO_NETWORK:-mainnet}"
+      STEWARD_MAX_MONERO_FEE_PICONERO: "${STEWARD_MAX_MONERO_FEE_PICONERO:-}"
     ports:
       - "127.0.0.1:${PORT:-3200}:3200"
     healthcheck:
@@ -101,6 +115,11 @@ services:
       STEWARD_MASTER_PASSWORD: "${STEWARD_MASTER_PASSWORD:?STEWARD_MASTER_PASSWORD is required}"
       STEWARD_JWT_SECRET: "${STEWARD_JWT_SECRET:?STEWARD_JWT_SECRET is required}"
       STEWARD_KDF_SALT: "${STEWARD_KDF_SALT:?STEWARD_KDF_SALT is required - generate with: openssl rand -hex 32}"
+      # Proxy-side approval expiry now extends the tamper-evident audit chain
+      # (release.ts -> withTenantAuditedTransaction), so the audit HMAC key is
+      # required here just like on the api service, or expired-approval polls
+      # fail closed with a 5xx in production.
+      STEWARD_AUDIT_HMAC_KEY: "${STEWARD_AUDIT_HMAC_KEY:?STEWARD_AUDIT_HMAC_KEY is required - generate with: openssl rand -hex 32}"
       STEWARD_ALLOW_INSECURE_DB: "${STEWARD_ALLOW_INSECURE_DB:-}"
       REDIS_URL: "redis://redis:6379"
     ports:
@@ -119,6 +138,66 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+  # ── Monero wallet-rpc sidecar (optional, profile: monero) ────────────────────
+  # Official wallet2 (monero-wallet-rpc) maintained as a container image by
+  # sethforprivacy, pointed at a remote public daemon — no local monerod, no
+  # blockchain storage. Wallet files under /home/monero/wallets are a
+  # DISPOSABLE scan cache: the canonical (encrypted) keys live in Postgres and
+  # the vault rehydrates wallets via generate_from_keys at any time.
+  #
+  # Custody: private keys only ever transit the internal backend network
+  # between steward-api and this sidecar; the remote daemon sees block
+  # requests and fully-signed transactions, never key material.
+  #
+  # Enable with:
+  #   COMPOSE_PROFILES=monero docker compose up -d
+  #   plus MONERO_WALLET_RPC_PASSWORD and
+  #   STEWARD_MONERO_WALLET_RPC_URL=http://monero-wallet-rpc:18083/json_rpc in .env
+  monero-wallet-rpc:
+    # Pinned to the Monero release this integration was validated against.
+    image: ghcr.io/sethforprivacy/simple-monero-wallet-rpc:v0.18.5.0@sha256:7ed1d6c565313de6a8afc33f75f7b1ca31aebd15f59558428d2bbc6b6de16950
+    container_name: steward-monero-wallet-rpc
+    profiles: ["monero"]
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        secret_file=/run/secrets/monero_wallet_rpc_password
+        if [ ! -r "$$secret_file" ]; then
+          echo "MONERO_WALLET_RPC_PASSWORD must be set and non-empty when the monero profile is enabled" >&2
+          exit 1
+        fi
+        password=$$(cat "$$secret_file")
+        if [ -z "$$password" ]; then
+          echo "MONERO_WALLET_RPC_PASSWORD must be set and non-empty when the monero profile is enabled" >&2
+          exit 1
+        fi
+        exec /entrypoint.sh \
+          "--daemon-address=${MONERO_DAEMON_ADDRESS:-node.sethforprivacy.com:18089}" \
+          "--untrusted-daemon" \
+          "--wallet-dir=/home/monero/wallet" \
+          "--rpc-bind-ip=0.0.0.0" \
+          "--rpc-bind-port=18083" \
+          "--confirm-external-bind" \
+          "--rpc-login=steward:$$password" \
+          "--log-level=0"
+    volumes:
+      - monero-wallet-cache:/home/monero/wallet
+    secrets:
+      - source: monero-wallet-rpc-password
+        target: monero_wallet_rpc_password
+    # Dual-homed like steward-api: `backend` is internal-only (so only
+    # steward-api can reach the RPC port), `public` provides egress to the
+    # remote daemon. No host port is published.
+    networks:
+      - public
+      - backend
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
 
   # ── PostgreSQL 16 ─────────────────────────────────────────────────────────────
   postgres:
@@ -180,6 +259,14 @@ volumes:
     driver: local
   redis-data:
     driver: local
+  # Disposable Monero wallet scan cache (canonical keys live in Postgres).
+  monero-wallet-cache:
+    driver: local
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
+secrets:
+  monero-wallet-rpc-password:
+    environment: MONERO_WALLET_RPC_PASSWORD
 
 # ── Networks ──────────────────────────────────────────────────────────────────
 networks:

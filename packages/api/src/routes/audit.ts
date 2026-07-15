@@ -5,11 +5,26 @@
  * Mount: app.route("/audit", auditRoutes)
  */
 
-import { proxyAuditLog } from "@stwd/db";
+import { auditCheckpoints, proxyAuditLog } from "@stwd/db";
 import { and, count, desc, eq, gte, inArray, lte, type SQL, sql } from "drizzle-orm";
 import { type Context, Hono } from "hono";
-import { verifyAuditChain } from "../services/audit";
 import {
+  type AuditBundleData,
+  type BundleEvent,
+  readAuditBundleData,
+  verifyAuditChain,
+} from "../services/audit";
+import {
+  AuditSigningKeyError,
+  type CheckpointEventContent,
+  type CheckpointPayload,
+  eventsContentDigest,
+  getCheckpointSigner,
+  isCheckpointSigningConfigured,
+  type SignedCheckpoint,
+} from "../services/audit-checkpoint";
+import {
+  API_VERSION,
   type ApiResponse,
   type AppVariables,
   agents,
@@ -24,6 +39,19 @@ export const auditRoutes = new Hono<{ Variables: AppVariables }>();
 const MAX_AUDIT_PAGE = 5_000;
 const MAX_AUDIT_OFFSET = 1_000_000;
 const MAX_AUDIT_VERIFY_RANGE = 10_000;
+// An evidence bundle inlines every event in the range as JSON; cap it so a
+// single request can't materialize an unbounded chain in memory.
+const MAX_AUDIT_BUNDLE_EVENTS = 10_000;
+// The canonicalization the offline verifier must reproduce for each event.
+// Bumped only alongside a verifier change.
+const BUNDLE_CANONICALIZATION_SPEC =
+  "steward-audit-hmac-chain/v1: hmac = HMAC-SHA256(key, prev_hash_bytes || " +
+  "canonical_json(event)); canonical_json sorts object keys, drops whitespace, " +
+  "encodes null for absent fields and ISO-8601 for timestamps. Offline verifier " +
+  "checks event linkage (each prevHash === prior hmac) + head == checkpoint, and " +
+  "the Ed25519 signature over the canonical checkpoint payload. Per-row HMAC " +
+  "recomputation requires the operator's secret key and is NOT part of offline " +
+  "verification.";
 const MAX_AUDIT_EXPORT_RANGE_MS = 31 * 24 * 60 * 60 * 1000;
 const AUDIT_READ_MFA_MAX_AGE_MS = 5 * 60_000;
 const MAX_AUDIT_METADATA_FILTERS = 5;
@@ -198,6 +226,16 @@ function rowsFromExecute<T>(result: unknown): T[] {
     return (result as { rows: T[] }).rows;
   }
   return [];
+}
+
+// Node's `Buffer` is shadowed by @cloudflare/workers-types in this package, so
+// decode hex to a Uint8Array for the bytea column by hand.
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
 }
 
 /** Resolve the set of agentIds belonging to the authenticated tenant. */
@@ -816,6 +854,172 @@ auditRoutes.post("/verify", async (c) => {
           ? undefined
           : "Partial verification is anchored to the stored predecessor hash and is not proof that earlier audit rows are intact.",
     },
+  });
+});
+
+// ─── GET /audit/bundle ────────────────────────────────────────────────────
+//
+// Offline-verifiable evidence bundle. Returns the tenant's audit events in the
+// requested seq range plus an Ed25519-signed checkpoint over the chain head, so
+// an third-party auditor can verify the export offline (no Steward access, no
+// secret) with scripts/verify-evidence-bundle.mjs. The signature commits to the
+// head HMAC; the event list lets the verifier confirm linkage and that the head
+// row matches the signed checkpoint.
+auditRoutes.get("/bundle", async (c) => {
+  const tenantId = c.get("tenantId");
+
+  if (!isCheckpointSigningConfigured()) {
+    if (process.env.NODE_ENV === "production") {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "Offline evidence bundles require STEWARD_AUDIT_SIGNING_KEY. Generate an " +
+            "Ed25519 key (openssl genpkey -algorithm ed25519) and configure it.",
+        },
+        503,
+      );
+    }
+    console.warn(
+      "⚠️ [audit] STEWARD_AUDIT_SIGNING_KEY not set — /audit/bundle disabled. " +
+        "Set it to produce offline-verifiable evidence bundles.",
+    );
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Offline evidence bundles are disabled: STEWARD_AUDIT_SIGNING_KEY is not " +
+          "configured (development).",
+      },
+      503,
+    );
+  }
+
+  const parsedFromSeq = parsePositiveIntegerParam(
+    c.req.query("from"),
+    "from",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  if (!parsedFromSeq.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedFromSeq.error }, 400);
+  }
+  const fromSeq = parsedFromSeq.value;
+  const toRaw = c.req.query("to");
+  const parsedToSeq = toRaw
+    ? parsePositiveIntegerParam(toRaw, "to", fromSeq, Number.MAX_SAFE_INTEGER)
+    : ({ ok: true, value: undefined } as const);
+  if (!parsedToSeq.ok) {
+    return c.json<ApiResponse>({ ok: false, error: parsedToSeq.error }, 400);
+  }
+  const requestedToSeq = parsedToSeq.value;
+  const toSeq = requestedToSeq ?? fromSeq + MAX_AUDIT_BUNDLE_EVENTS - 1;
+  if (toSeq < fromSeq) {
+    return c.json<ApiResponse>({ ok: false, error: "to must be greater than from" }, 400);
+  }
+  if (toSeq - fromSeq + 1 > MAX_AUDIT_BUNDLE_EVENTS) {
+    return c.json<ApiResponse>(
+      { ok: false, error: `audit bundle range must not exceed ${MAX_AUDIT_BUNDLE_EVENTS} events` },
+      400,
+    );
+  }
+
+  let bundleData: AuditBundleData;
+  try {
+    bundleData = await readAuditBundleData(tenantId, fromSeq, toSeq);
+  } catch (err) {
+    console.error(`[audit] bundle read failed for tenant ${tenantId}:`, err);
+    return c.json<ApiResponse>({ ok: false, error: "Failed to read audit chain" }, 500);
+  }
+
+  const { head, events } = bundleData;
+
+  // Sign a checkpoint over the CHAIN head (the newest event overall), not the
+  // bundle's upper bound — the checkpoint attests to the full head so a partial
+  // export can still be tied to the operator's committed head. The verifier only
+  // enforces head==checkpoint when the export INCLUDES the head event.
+  // Content commitment over EVERY exported event's canonical fields (not just
+  // the chain pointers). Signing this authenticates each event to an offline
+  // auditor who lacks the HMAC key: any post-export field mutation breaks the
+  // signature. The verifier recomputes this digest independently.
+  const digestEvents: CheckpointEventContent[] = events.map((ev) => ({
+    tenantId,
+    seq: ev.seq,
+    actorType: ev.actorType,
+    actorId: ev.actorId,
+    action: ev.action,
+    resourceType: ev.resourceType,
+    resourceId: ev.resourceId,
+    metadata: ev.metadata,
+    ipAddress: ev.ipAddress,
+    userAgent: ev.userAgent,
+    requestId: ev.requestId,
+    createdAt: ev.createdAt,
+  }));
+
+  let checkpointPayload: CheckpointPayload;
+  let signed: SignedCheckpoint;
+  try {
+    const signer = getCheckpointSigner();
+    const nowIso = new Date().toISOString();
+    checkpointPayload = {
+      v: 1,
+      tenantId,
+      seq: head?.expectedSeq ?? 0,
+      headHmac: head?.headHmac ?? "",
+      expectedCount: head?.expectedCount ?? 0,
+      floorSeq: head?.floorSeq ?? 0,
+      timestamp: nowIso,
+      softwareVersion: API_VERSION,
+      eventsDigest: eventsContentDigest(digestEvents),
+      eventsFromSeq: events.length > 0 ? events[0].seq : 0,
+      eventsToSeq: events.length > 0 ? events[events.length - 1].seq : 0,
+    };
+    signed = signer.sign(checkpointPayload);
+  } catch (err) {
+    if (err instanceof AuditSigningKeyError) {
+      return c.json<ApiResponse>({ ok: false, error: err.message }, 503);
+    }
+    console.error(`[audit] checkpoint signing failed for tenant ${tenantId}:`, err);
+    return c.json<ApiResponse>({ ok: false, error: "Failed to sign checkpoint" }, 500);
+  }
+
+  // Persist the checkpoint (append-only provenance). Best-effort: a persistence
+  // failure must not deny the auditor their signed bundle, which is fully
+  // self-contained. head may be null for a tenant with zero events.
+  if (head) {
+    try {
+      await db.insert(auditCheckpoints).values({
+        tenantId,
+        seq: checkpointPayload.seq,
+        headHmac: hexToBytes(checkpointPayload.headHmac),
+        payload: checkpointPayload as unknown as Record<string, unknown>,
+        signature: signed.signature,
+        publicKey: signed.publicKey,
+      });
+    } catch (err) {
+      console.error(`[audit] checkpoint persistence failed for tenant ${tenantId}:`, err);
+    }
+  }
+
+  const bundleEvents: BundleEvent[] = events;
+  const includesHead =
+    head != null &&
+    bundleData.bundleHeadSeq != null &&
+    bundleData.bundleHeadSeq === head.expectedSeq;
+
+  return c.json({
+    version: 1 as const,
+    tenantId,
+    range: { from: fromSeq, to: toSeq, includesHead },
+    canonicalizationSpec: BUNDLE_CANONICALIZATION_SPEC,
+    events: bundleEvents,
+    checkpoint: {
+      payload: signed.payload,
+      signature: signed.signature,
+      publicKey: signed.publicKey,
+    },
+    generatedAt: new Date().toISOString(),
   });
 });
 

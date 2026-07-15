@@ -31,7 +31,9 @@ import {
   trackProxySpend,
 } from "../middleware/redis-enforcement";
 import { resolveTarget } from "./alias";
+import { holdProxyApprovalRequest } from "./approvals";
 import { compareRouteMatchSpecificity, matchHost, matchPath } from "./matching";
+import { applyGovernedQuery, extractRawQuery } from "./query-forwarding";
 
 // ─── Secret Vault singleton ──────────────────────────────────────────────────
 
@@ -527,6 +529,7 @@ async function claimUnsafeProxyRequest(
   agentId: string,
   target: { host: string; path: string },
   method: string,
+  rawQuery: string,
 ): Promise<ProxyReplayClaimResult> {
   const signedRequest = Boolean(requestHeader(c, "x-steward-signature"));
   if (SAFE_PROXY_METHODS.has(method.toUpperCase()) && !signedRequest) {
@@ -552,8 +555,14 @@ async function claimUnsafeProxyRequest(
     };
   }
 
+  // The query is part of the request we forward upstream, so it must be part of
+  // the replay/idempotency identity: two requests that differ only by their
+  // query (e.g. ?id=1 vs ?id=2) are distinct operations and must not collide on
+  // the same Idempotency-Key. `rawQuery` preserves exact bytes + ordering.
   const fingerprint = await sha256Hex(
-    [tenantId, agentId, method.toUpperCase(), target.host, target.path, bodyHash].join("\n"),
+    [tenantId, agentId, method.toUpperCase(), target.host, target.path, rawQuery, bodyHash].join(
+      "\n",
+    ),
   );
   const storageKey = `proxy:idempotency:${await sha256Hex([tenantId, agentId, key].join("\n"))}`;
   const claim: ProxyReplayClaim = {
@@ -576,7 +585,7 @@ async function claimUnsafeProxyRequest(
     const existing = rawExisting ? safeJsonParseString<ProxyReplayClaim>(rawExisting) : null;
     if (!existing || existing.expiresAt <= Date.now()) {
       await redis.del(storageKey);
-      return claimUnsafeProxyRequest(c, tenantId, agentId, target, method);
+      return claimUnsafeProxyRequest(c, tenantId, agentId, target, method, rawQuery);
     }
     if (existing.fingerprint !== fingerprint) {
       return {
@@ -1069,6 +1078,14 @@ export async function handleProxy(c: Context): Promise<Response> {
     );
   }
 
+  // Extract the client's raw query string once (encoding + ordered duplicate
+  // keys preserved, fragment stripped). Target resolution and route matching
+  // above intentionally used the path only, so the query never influences which
+  // route/host we select; it is only forwarded onto the pinned upstream below,
+  // and mixed into the replay/idempotency fingerprint so that two otherwise
+  // identical requests with different queries are treated as distinct.
+  const rawQuery = extractRawQuery(c.req.raw.url);
+
   // 2. Find matching secret route
   const route = await findMatchingRoute(tenantId, agentId, target.host, target.path, method);
   if (!route) {
@@ -1109,6 +1126,102 @@ export async function handleProxy(c: Context): Promise<Response> {
       },
       403,
     );
+  }
+
+  // Only the in-process release handler can set this context value. Never trust
+  // a request header for approval bypass, since agents control all headers.
+  const approvalReleaseId = c.get("proxyApprovalRelease" as never) as string | undefined;
+  const approvalReleaseRouteId = c.get("proxyApprovalRouteId" as never) as string | undefined;
+  if (approvalReleaseId && approvalReleaseRouteId !== route.id) {
+    await recordRequiredAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 409,
+      latencyMs: Date.now() - startTime,
+      reason: "proxy-approval-route-mismatch",
+    });
+    return c.json({ ok: false, error: "Approved proxy route no longer matches" }, 409);
+  }
+  if (route.requiresApproval && !approvalReleaseId) {
+    // Fail closed on approval-gated routes that carry a query. The approval
+    // hold/replay path reconstructs the request from the stored path only and
+    // cannot yet round-trip the query, so executing it later would forward a
+    // semantically different (query-stripped) request than the one the agent
+    // submitted and the human approved. Rejecting here is safer than silently
+    // changing the approved request. (Direct, non-approval routes preserve the
+    // query via applyGovernedQuery below.)
+    if (rawQuery !== "") {
+      await recordAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 400,
+        latencyMs: Date.now() - startTime,
+        reason: "proxy-approval-query-unsupported",
+      });
+      return c.json(
+        {
+          ok: false,
+          error: "Query strings are not supported on approval-gated proxy routes",
+        },
+        400,
+      );
+    }
+    try {
+      const held = await holdProxyApprovalRequest({
+        tenantId,
+        agentId,
+        route,
+        method,
+        targetHost: target.host,
+        targetPath: target.path,
+        request: c.req.raw,
+      });
+      await recordRequiredAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 202,
+        latencyMs: Date.now() - startTime,
+        reason: "proxy-approval-held",
+      });
+      return c.json(
+        {
+          ok: true,
+          status: "pending_approval",
+          id: held.id,
+          approvalId: held.id,
+          pollUrl: `/approvals/proxy/${held.id}`,
+          expiresAt: held.expiresAt.toISOString(),
+        },
+        202,
+      );
+    } catch (err) {
+      await recordAudit({
+        agentId,
+        tenantId,
+        targetHost: target.host,
+        targetPath: target.path,
+        method,
+        statusCode: 500,
+        latencyMs: Date.now() - startTime,
+        reason: "proxy-approval-hold-failed",
+      });
+      const error = err instanceof Error ? err.message : "Failed to hold proxy request";
+      const status = error.includes("too large")
+        ? 413
+        : error.includes("Idempotency-Key")
+          ? 409
+          : 500;
+      return c.json({ ok: false, error }, status);
+    }
   }
 
   // 2.5. Redis rate-limit check (per agent + host)
@@ -1279,7 +1392,9 @@ export async function handleProxy(c: Context): Promise<Response> {
     return c.json({ ok: false, error: dnsCheck.error }, dnsCheck.status);
   }
 
-  const replayClaim = await claimUnsafeProxyRequest(c, tenantId, agentId, target, method);
+  const replayClaim = approvalReleaseId
+    ? ({ ok: true, storageKey: "", storage: "memory" } as const)
+    : await claimUnsafeProxyRequest(c, tenantId, agentId, target, method, rawQuery);
   if (!replayClaim.ok) {
     await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
     await recordAudit({
@@ -1356,7 +1471,32 @@ export async function handleProxy(c: Context): Promise<Response> {
   }
 
   // 4. Build outbound request
-  const outboundUrl = new URL(target.url);
+  //
+  // Compose the client's query string onto the pinned upstream target. Target
+  // resolution above (and route matching) intentionally used the path only, so
+  // the query cannot influence which route/host we selected. Here we forward the
+  // client's exact query bytes (encoding + ordered duplicate keys preserved)
+  // while re-validating that the query did not alter the pinned
+  // scheme/host/port/path or introduce userinfo/fragment.
+  const governedQuery = applyGovernedQuery(new URL(target.url), rawQuery);
+  if (!governedQuery.ok) {
+    credential = "";
+    await recordAudit({
+      agentId,
+      tenantId,
+      targetHost: target.host,
+      targetPath: target.path,
+      method,
+      statusCode: 400,
+      latencyMs: Date.now() - startTime,
+      reason: `query-forwarding-rejected:${governedQuery.reason}`,
+    });
+    await releaseProxySpendReservation(agentId, tenantId, target.host, spendReservation);
+    await releaseUnsafeProxyRequest(replayClaim);
+    proxySlot.release();
+    return c.json({ ok: false, error: "Invalid proxy request target" }, 400);
+  }
+  const outboundUrl = governedQuery.url;
   const outboundHeaders = new Headers();
 
   const skipHeaders = stripHopByHopHeaders(c.req.raw.headers);

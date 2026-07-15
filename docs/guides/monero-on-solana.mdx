@@ -137,6 +137,8 @@ Quotes expire quickly. Request a fresh quote if the fee changes or the quote
 expires, then let the user open the returned URL and connect the `owner` Solana
 wallet. Steward authorizes the handoff, but it cannot enforce policy after the
 user leaves Steward or independently verify completion at the external site.
+The wxmr handoff is independent of Steward's native Monero vault support: it
+never selects or spends a Steward Monero wallet automatically.
 Because completion is not observable, the external transfer is not added to
 Steward's daily spend counter. The check authorizes only the handoff response; it
 is not vault-layer enforcement of what happens at wxmr.io.

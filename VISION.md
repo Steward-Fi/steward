@@ -1,99 +1,88 @@
 # Steward Vision
 
+Steward is an open-source, self-hostable governed credential proxy and policy and approval layer for agent provider actions and wallets. It ships scoped grants, exact-request approval, policy-bound execution authorization on the primary EVM sign path, and signed audit evidence verifiable offline.
+
 ## Mission
 
-Every agent deserves a bank account it can't be robbed of.
+Agents should receive narrowly scoped authority without receiving the underlying provider credential or wallet key.
 
-AI agents are managing real money, signing real transactions, calling paid APIs. The infrastructure securing those operations is a `.env` file with plaintext keys. One prompt injection, one leaked log, one compromised dependency, and everything is gone.
+Agents increasingly sign transactions and call private APIs. Giving an agent a standing secret expands the blast radius of prompt injection, compromised dependencies, and leaked logs. Steward reduces that exposure through configured credential routes, scoped capability grants, wallet policy and approval workflows, and evidence that operators can export and verify outside the running service.
 
-Steward exists to make that impossible. Not through trust, through architecture: encrypted vaults, policy enforcement at the signing layer, credential isolation at the proxy layer. Agents operate autonomously within constraints their operators define. No exceptions, no workarounds.
+Steward's direction is an open authority plane for agent execution. That is an architectural goal, not a claim that every action or execution surface is governed today.
 
----
+## Current product boundary
 
-## Architecture
+Steward currently provides these distinct boundaries:
 
-Four pillars. Each solves a distinct problem. Together they form a complete security and auth layer for any agent platform.
+### Credential proxy
 
-### Vault
-AES-256-GCM encrypted key storage. Per-agent encryption keys derived from master password + agent ID via PBKDF2. Private keys are decrypted ephemerally for signing and never returned to callers. Supports EVM (7 chains) and Solana (Ed25519).
+Configured provider calls can receive a stored credential at the proxy instead of in the supported agent process. Capability definitions bind host, path, method, injection settings, and a per-agent grant with expiry and revocation. The proxy does not govern arbitrary network egress.
 
-### Policy Engine
-Composable rules evaluated synchronously before every signing operation. Six types: spending limits (per-tx, daily, weekly), approved address lists, rate limits, time windows, auto-approve thresholds, and allowed chains. Hard policies reject. Soft policies (auto-approve-threshold) queue for human review. All policies must pass for a transaction to be signed. The engine is stateless; spend and rate context are pre-fetched and injected.
+### Wallet vault
 
-### Auth
-User authentication with passkeys (WebAuthn), email magic links, Sign-In With Ethereum, and OAuth (Google, Discord). JWT sessions with refresh token rotation. Users are global identities that can belong to multiple tenants. On first login, users get an auto-provisioned embedded wallet.
+Local wallet keys are encrypted with AES-256-GCM. Optional AWS KMS envelope wrapping, an operator-supplied PKCS#11 wrapping adapter, and an external-custody interface are available. Local and KMS envelope modes expose plaintext key material to the application at sign time. Steward does not claim MPC custody or native HSM signing.
 
-### Proxy Gateway
-Sits between agents and any third-party API (OpenAI, exchanges, RPC providers). Agents send requests to the proxy. Steward authenticates the agent, decrypts the right credential from the vault, injects it into the outbound request, and streams the response back. The agent never touches the raw key. Full audit trail, rate limiting, and spend tracking on every call.
+### Policy and approval
 
----
+Governed API routes evaluate policy before calling their signing or proxy operation. Wallet workflows support approval queues, generic intents, recent-MFA controls, and stale-state checks. Provider capabilities support exact-request approval and resume. Coverage is route-specific and must not be inferred for an unlisted surface.
+
+### Primary EVM execution authorization
+
+The primary EVM transaction sign path and compatible approval replay require a signed, payload-bound, backend-bound, short-lived, single-use authorization immediately before raw signing. This is an earned enforcement claim for that path, not a product-wide signing claim.
+
+### Audit evidence
+
+Steward maintains a tenant-scoped HMAC audit chain and can export Ed25519-signed checkpoints and event bundles. The standalone verifier checks bundles offline against the public key carried in the bundle. Operators must separately match that key to an out-of-band trusted Steward signing key or fingerprint. This detects modification relative to that trust root, but it cannot exclude fabrication by an operator controlling all relevant keys.
+
+## Product direction
+
+The long-term authority plane should answer:
+
+> May this principal perform this exact action, against this scoped resource, using this credential or wallet, under the applicable policy and approval, right now?
+
+Reaching that direction requires explicit enrollment and tests for each claimed execution surface. A broad authority-plane claim is earned only when materially different adapters share a governed boundary, alternate paths are closed for the claimed surfaces, and a real deployment proves the operating model.
+
+Near-term work should deepen the current open and self-hosted product:
+
+- make scoped provider grants and exact-request approvals easier to configure;
+- extend execution authorization only through explicit, tested surface enrollment;
+- keep the credential, policy, approval, execution, and evidence contracts inspectable;
+- publish precise support matrices and trust limits;
+- improve self-hosted deployment, backup, restore, rotation, and monitoring guidance;
+- integrate external identity, secrets, and custody systems without replacing them.
 
 ## Positioning
 
-The agent wallet market has fragmented into closed platforms and low-level primitives. Nobody occupies the quadrant Steward targets:
+Steward is not trying to replace an enterprise directory, a generic authorization engine, a secrets manager, or a specialist custody vendor.
 
-**High abstraction + open source + self-hostable.**
+- Identity systems establish who the human or agent is.
+- Authorization engines can contribute allow or deny decisions.
+- Secrets managers and custody systems protect secret or key material.
+- Steward connects scoped agent authority, policy, approval, governed execution paths, and exportable evidence for its supported surfaces.
 
-Six capabilities define the space. Most platforms cover two or three:
+The open-source and self-hostable ethos is part of the security model. Operators can inspect the enforcement code, run the full stack in their own infrastructure, export their data and evidence, and choose their runtime, cloud, identity provider, secrets system, and custodian.
 
-| Capability | What it means |
-|---|---|
-| **Open source** | Audit the code. Fork it. No black boxes. |
-| **Self-hostable** | Run it on your infra. No vendor dependency. No token required. |
-| **Auth** | User login (passkeys, email, OAuth, SIWE). Not just API keys. |
-| **Policy enforcement** | Rules enforced at the vault, not the application layer. |
-| **Agent-native** | Built for autonomous operation, not retrofitted from consumer auth. |
-| **Credential proxy** | Manages all sensitive credentials, not just wallet keys. |
+## Deployment
 
-Steward checks all six. Existing platforms each miss critical boxes — most are closed and hosted-only, depend on an external MPC network, lack auth or policy enforcement, or expose only low-level signing primitives without auth, policies, or a credential proxy.
+Steward ships two self-hosted modes:
 
----
+- **Docker:** API, proxy, PostgreSQL, and Redis for a networked deployment.
+- **Embedded:** PGLite for local development, CLI agents, and desktop applications.
 
-## Two Deployment Modes
-
-**Hosted** (steward.fi / your cloud): Multi-tenant, production-grade. Drop-in replacement for closed embedded-wallet platforms. Your app is a tenant. Zero infra overhead.
-
-**Embedded** (PGLite): Local-first, runs in-process. Same vault, same policies, same SDK. For desktop apps, CLI agents, self-hosted deployments. No third-party database, no network dependency.
-
-Same API surface. Same guarantees. Write the integration once.
-
----
-
-## Roadmap
-
-### Shipped
-- Vault with AES-256-GCM encryption, EVM + Solana
-- Policy engine with 6 composable rule types
-- Multi-tenant API with full tenant isolation
-- Auth: passkeys, email magic links, SIWE, Google OAuth, Discord OAuth
-- JWT sessions with refresh token rotation
-- Cross-tenant user identity
-- TypeScript SDK (`@stwd/sdk`)
-- React components (`@stwd/react`): login, wallet, policies, approvals
-- ElizaOS plugin (`@stwd/eliza-plugin`)
-- Proxy gateway with credential injection
-- Embedded mode (PGLite)
-- Production Docker setup (API + proxy + Postgres + Redis)
-- Webhook system with HMAC-signed delivery
-
-### Next
-- Milady Cloud integration as auth + wallet layer
-- Dashboard self-service (tenant creation, policy configuration, API key management)
-- Production hardening (security audit, token store persistence, monitoring)
-- Babylon integration
-- Pluggable key storage backends (AWS KMS, Hashicorp Vault)
-- Strata Reserve deployment
-
----
+The modes share much of the API surface, but their operating and security properties differ. Operators should select and test a deployment profile appropriate to their threat model.
 
 ## Values
 
-**Open source.** MIT license. The code is the documentation. If you don't trust it, read it.
+**Open source.** Steward is MIT licensed. Trust-critical contracts and the offline verifier remain inspectable.
 
-**Developer-first.** `npm install @stwd/sdk` and you're building. No sales calls, no onboarding decks, no "contact us for pricing."
+**Self-hostable.** Steward runs in operator-controlled infrastructure. Public documentation does not depend on a managed control plane.
 
-**No vendor lock-in.** Self-host the entire stack. Export your data. Switch providers. Your keys, your infra, your choice.
+**Scoped by default.** Provider capabilities and wallet operations should be bounded to the smallest practical route, action, lifetime, and principal.
 
-**No token required.** Steward is infrastructure, not a protocol. No governance token, no staking requirement, no on-chain dependency for basic operations.
+**Approval binds the request.** Human review should authorize an exact immutable request, not a reusable blanket permission.
 
-**Policy is architecture, not advice.** Rules are enforced at the cryptographic signing layer. Not in middleware. Not in application code. Not as suggestions. If the policy says no, the vault won't sign it.
+**Enforcement claims are surface-specific.** A governed path may claim only the boundary implemented and tested on that path.
+
+**Evidence is portable.** Operators can export signed evidence, verify it offline, and separately match the bundled public key to a trusted signing key or fingerprint.
+
+**Trust limits are explicit.** Steward does not imply MPC, native HSM signing, operator-proof logs, prompt-injection immunity, or universal action coverage where those properties are not implemented.

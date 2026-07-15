@@ -30,7 +30,7 @@ import 'package:steward_flutter/steward.dart';
 
 final client = StewardClient(
   StewardClientConfig(
-    baseUrl: 'https://api.steward.fi',
+    baseUrl: 'http://localhost:3200',
     bearerToken: session.token,
     tenantId: 'my-app',
   ),
@@ -52,7 +52,7 @@ await client.registerUserPushSubscription(
 final storage = MemoryStewardSessionStorage();
 final auth = StewardAuth(
   StewardAuthConfig(
-    baseUrl: 'https://api.steward.fi',
+    baseUrl: 'http://localhost:3200',
     tenantId: 'my-app',
     storage: storage,
   ),

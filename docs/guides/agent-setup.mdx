@@ -19,7 +19,7 @@ This guide walks through creating a Steward agent from scratch — wallet creati
 import { StewardClient } from "@stwd/sdk";
 
 const steward = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   apiKey: "stwd_your_tenant_api_key",
 });
 ```
@@ -120,7 +120,7 @@ For the agent to authenticate its own requests, generate a scoped JWT:
 
 ```typescript
 const tokenResponse = await fetch(
-  "https://api.steward.fi/agents/my-trading-bot/token",
+  "http://localhost:3200/agents/my-trading-bot/token",
   {
     method: "POST",
     headers: {
@@ -142,7 +142,7 @@ In your agent code, create a client with the agent token:
 
 ```typescript
 const agentClient = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  baseUrl: "http://localhost:3200",
   bearerToken: process.env.STEWARD_AGENT_TOKEN,
 });
 

@@ -157,6 +157,12 @@ export function createPriceOracle(options?: { cacheTtlMs?: number }): PriceOracl
 
   const oracle: PriceOracle = {
     async getNativeUsdPrice(chainId: number): Promise<number | null> {
+      // Monero (301/302) has no wrapped-native DexScreener pair, so this
+      // returns null and every USD-denominated policy rule fails closed
+      // (denies) for Monero requests. This is deliberate: quoting XMR via an
+      // unrelated proxy pair would be dishonest pricing in a money path. Use
+      // piconero-denominated limits for Monero until a vetted XMR price
+      // source is added here.
       const wrappedAddress = getWrappedNativeAddress(chainId);
       if (!wrappedAddress) {
         console.warn(`[price-oracle] No wrapped native address for chainId ${chainId}`);

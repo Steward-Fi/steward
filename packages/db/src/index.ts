@@ -7,6 +7,19 @@ export { and, asc, count, desc, eq, gte, inArray, lt, lte, sql } from "drizzle-o
 // that bun's test loader resolves (works at runtime via the cjs fallback,
 // fails under `bun test` with "Export named 'isNull' not found").
 export { gt, isNotNull, isNull, or } from "drizzle-orm/sql";
+export {
+  __resetAuditHmacKeyCacheForTests,
+  type ActorType as AuditActorType,
+  type AppendRequiredAudit,
+  type AuditEventInput,
+  type AuditTxLike,
+  appendAuditEvent,
+  appendAuditEventWithinTx,
+  redactWebhookSecrets,
+  withTenantAuditedTransaction,
+  withTenantAuditQueue,
+  writeAuditEvent,
+} from "./audit-chain";
 export type { DatabaseDriver } from "./client";
 export {
   closeDb,
@@ -90,28 +103,29 @@ export function toAgentIdentity(agent: Agent): DbAgentIdentity {
  */
 export async function getAgentWalletAddresses(
   agentId: string,
-): Promise<{ evm?: string; solana?: string; bitcoin?: string }> {
+): Promise<{ evm?: string; solana?: string; bitcoin?: string; monero?: string }> {
   const { getDb } = await import("./client");
   const { agentWallets } = await import("./schema");
   const db = getDb();
   const rows = await db.select().from(agentWallets).where(eq(agentWallets.agentId, agentId));
 
-  const result: { evm?: string; solana?: string; bitcoin?: string } = {};
+  const result: { evm?: string; solana?: string; bitcoin?: string; monero?: string } = {};
   for (const row of rows) {
     if (row.chainFamily === "evm") result.evm = row.address;
     if (row.chainFamily === "solana") result.solana = row.address;
     if (row.chainFamily === "bitcoin") result.bitcoin = row.address;
+    if (row.chainFamily === "monero") result.monero = row.address;
   }
   return result;
 }
 
 /**
  * Query wallet addresses for multiple agents in a single DB round-trip.
- * Returns a Map from agentId → { evm?, solana? }.
+ * Returns a Map from agentId → { evm?, solana?, bitcoin?, monero? }.
  */
 export async function getAgentWalletAddressesBatch(
   agentIds: string[],
-): Promise<Map<string, { evm?: string; solana?: string; bitcoin?: string }>> {
+): Promise<Map<string, { evm?: string; solana?: string; bitcoin?: string; monero?: string }>> {
   if (agentIds.length === 0) return new Map();
 
   const { getDb } = await import("./client");
@@ -119,13 +133,17 @@ export async function getAgentWalletAddressesBatch(
   const db = getDb();
   const rows = await db.select().from(agentWallets).where(inArray(agentWallets.agentId, agentIds));
 
-  const result = new Map<string, { evm?: string; solana?: string; bitcoin?: string }>();
+  const result = new Map<
+    string,
+    { evm?: string; solana?: string; bitcoin?: string; monero?: string }
+  >();
   for (const row of rows) {
     if (!result.has(row.agentId)) result.set(row.agentId, {});
     const entry = result.get(row.agentId)!;
     if (row.chainFamily === "evm") entry.evm = row.address;
     if (row.chainFamily === "solana") entry.solana = row.address;
     if (row.chainFamily === "bitcoin") entry.bitcoin = row.address;
+    if (row.chainFamily === "monero") entry.monero = row.address;
   }
   return result;
 }

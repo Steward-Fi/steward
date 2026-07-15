@@ -5,12 +5,20 @@ import type { VenueId } from "./types/venue.js";
 
 // ─── Chain providers (extensible registry) ───
 export * from "./chains/index.js";
+export * from "./execution-contract.js";
+export * from "./execution-payload.js";
 export type { PriceOracle } from "./price-oracle.js";
 export { createPriceOracle } from "./price-oracle.js";
+export * from "./provider-action.js";
+export * from "./provider-approval.js";
+export * from "./provider-authority.js";
+// ─── Non-throwing description of an arbitrary thrown value (fail-closed catches) ───
+export { describeThrown, UNPRINTABLE_THROWN_VALUE } from "./safe-error.js";
+export * from "./security-surface.js";
 // ─── Token Registry & Price Oracle ───
 export * from "./tokens.js";
 // ─── Per-request app context shape (shared so plugins can type routes) ───
-export type { AppVariables } from "./types/app-variables.js";
+export type { AppVariables, VerifiedAgentPrincipal } from "./types/app-variables.js";
 // ─── Lean-core + opt-in-plugin contract ───
 export type {
   AdapterContribution,
@@ -163,7 +171,7 @@ export interface AutoApprovalRuleRecord {
 // ─── Chain Family ───
 
 /** Identifies the blockchain family for a wallet key/address. */
-export type ChainFamily = "evm" | "solana" | "bitcoin";
+export type ChainFamily = "evm" | "solana" | "bitcoin" | "monero";
 
 export type BitcoinNetwork = "mainnet" | "testnet";
 export type BitcoinAddressType = "p2wpkh" | "p2tr";
@@ -180,8 +188,29 @@ export interface BitcoinWalletMetadata {
   caip2: string;
 }
 
+export type MoneroNetwork = "mainnet" | "stagenet";
+
+/**
+ * Public wallet metadata for a Monero wallet. Contains PUBLIC keys only.
+ *
+ * Monero-specific caveat: the private view key is a secret in Monero's
+ * privacy model (it grants incoming-transaction visibility) and lives in the
+ * encrypted key payload alongside the spend key — it must NEVER appear here.
+ */
+export interface MoneroWalletMetadata {
+  network: MoneroNetwork;
+  address: string;
+  publicSpendKey: string;
+  publicViewKey: string;
+  /** Chain height at wallet creation; scanning starts here (light-sync). */
+  restoreHeight: number;
+  account: number;
+  caip2: string;
+}
+
 export interface WalletAddressMetadata {
   bitcoin?: BitcoinWalletMetadata;
+  monero?: MoneroWalletMetadata;
   [key: string]: unknown;
 }
 
@@ -197,7 +226,7 @@ export interface AgentIdentity {
    * All addresses for this agent, keyed by chain family.
    * Present for agents created with multi-wallet support.
    */
-  walletAddresses?: { evm?: string; solana?: string; bitcoin?: string };
+  walletAddresses?: { evm?: string; solana?: string; bitcoin?: string; monero?: string };
   erc8004TokenId?: string;
   platformId?: string; // e.g. waifu.fun agent ID
   createdAt: Date;

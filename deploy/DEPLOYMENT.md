@@ -33,7 +33,7 @@ Steward runs as two **systemd services** on each Milady node, built from source 
 │    └─ Reach proxy at:   http://172.18.0.1:8080        │
 │       (Docker bridge gateway IP)                      │
 │                                                       │
-│  External: api.steward.fi → milady-core-1:3200        │
+│  External: <your-domain> → milady-core-1:3200         │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -425,7 +425,7 @@ Note: The root `docker-compose.yml` includes a local Postgres. For Neon, use the
 
 | Node | IP | API (:3200) | Proxy (:8080) | Notes |
 |------|-----|------------|--------------|-------|
-| milady-core-1 | 88.99.66.168 | ✅ Running | ✅ Running | Primary, hosts api.steward.fi |
+| milady-core-1 | 88.99.66.168 | ✅ Running | ✅ Running | Primary; front with your own domain/TLS |
 | milady-core-2 | 178.63.251.122 | ✅ Running | ✅ Running | |
 | milady-core-3 | 138.201.80.125 | ✅ Running | ✅ Running | |
 | milady-core-4 | 85.10.193.52 | ✅ Running | ✅ Running | |

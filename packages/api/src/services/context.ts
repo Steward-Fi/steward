@@ -47,10 +47,11 @@ import {
   type Tenant,
   type TenantConfig,
 } from "@stwd/shared";
-import { Vault } from "@stwd/vault";
+import type { Vault } from "@stwd/vault";
 import { WebhookDispatcher } from "@stwd/webhooks";
 import { and, eq, gte, sql } from "drizzle-orm";
 import type { Context, Next } from "hono";
+import { getConfiguredVault } from "./vault-factory";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -361,19 +362,8 @@ export const db: DbHandle = new Proxy({} as DbHandle, {
 // per-password memo keeps the route vault in lockstep with whatever password
 // sealed each key. MASTER_PASSWORD (captured at import) is the fallback when the
 // env var is transiently unset (e.g. another file's afterAll deleted it).
-const vaultsByPassword = new Map<string, Vault>();
 function activeVault(): Vault {
-  const masterPassword = process.env.STEWARD_MASTER_PASSWORD?.trim() || MASTER_PASSWORD;
-  let resolved = vaultsByPassword.get(masterPassword);
-  if (!resolved) {
-    resolved = new Vault({
-      masterPassword,
-      rpcUrl: process.env.RPC_URL || "https://sepolia.base.org",
-      chainId: parseInt(process.env.CHAIN_ID || "84532", 10),
-    });
-    vaultsByPassword.set(masterPassword, resolved);
-  }
-  return resolved;
+  return getConfiguredVault({ fallbackPassword: MASTER_PASSWORD });
 }
 export const vault: Vault = new Proxy({} as Vault, {
   get(_target, property) {
@@ -1059,6 +1049,7 @@ export {
   encryptedChainKeys,
   encryptedKeys,
   intents,
+  pendingProxyRequests,
   policies,
   tenants,
   toPolicyRule,

@@ -64,6 +64,8 @@ export const NATIVE_TOKENS: Record<number, TokenInfo> = {
   84532: { address: "native", symbol: "ETH", decimals: 18, chainId: 84532 },
   101: { address: "native", symbol: "SOL", decimals: 9, chainId: 101 },
   102: { address: "native", symbol: "SOL", decimals: 9, chainId: 102 },
+  301: { address: "native", symbol: "XMR", decimals: 12, chainId: 301 },
+  302: { address: "native", symbol: "XMR", decimals: 12, chainId: 302 },
 };
 
 // ─── Wrapped Native Tokens (for price lookups) ───────────────────────────────

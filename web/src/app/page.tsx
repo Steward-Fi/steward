@@ -8,8 +8,12 @@ import { Reveal, StaggerContainer, StaggerItem } from "@/components/motion-wrapp
 import { Nav } from "@/components/nav";
 
 const easeOutExpo: [number, number, number, number] = [0.16, 1, 0.3, 1];
+const accent = "text-[oklch(0.78_0.15_55)]";
 
 // --- Hero Section ---
+// Asymmetric split: left headline + neutrality line, right = a governed-action
+// panel showing a real StewardClient call flow with an allow, an approval hold,
+// and a policy-denied line. Policy-denied is a feature, so it is shown.
 function Hero() {
   const ref = useRef<HTMLDivElement>(null);
   const { scrollYProgress } = useScroll({
@@ -22,60 +26,58 @@ function Hero() {
   return (
     <section
       ref={ref}
-      className="relative min-h-[88vh] lg:min-h-screen flex items-center px-6 md:px-10 pt-28 pb-20 lg:pb-16 overflow-hidden"
+      className="relative h-[100dvh] min-h-[560px] max-h-[1100px] flex items-center px-6 md:px-10 pt-16 overflow-hidden"
     >
-      {/* Grid lines background */}
+      {/* Single structural line, no decoration kit */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-0 left-[20%] w-px h-full bg-border-subtle opacity-40" />
-        <div className="absolute top-0 left-[40%] w-px h-full bg-border-subtle opacity-20" />
-        <div className="absolute top-0 left-[70%] w-px h-full bg-border-subtle opacity-30" />
-        <div className="absolute top-[30%] left-0 w-full h-px bg-border-subtle opacity-20" />
-        <div className="absolute top-[60%] left-0 w-full h-px bg-border-subtle opacity-15" />
-      </div>
-
-      {/* Accent glow */}
-      <div className="absolute top-1/3 left-1/4 w-[600px] h-[600px] rounded-full pointer-events-none opacity-[0.07] blur-[120px] bg-[oklch(0.75_0.15_55)]" />
-
-      {/* Compass star watermark */}
-      <div className="absolute top-1/2 right-[4%] -translate-y-1/2 opacity-[0.04] pointer-events-none hidden lg:block">
-        <Image src="/logo.png" alt="" width={620} height={620} className="w-[520px] h-[520px]" />
+        <div className="absolute top-0 left-[62%] w-px h-full bg-border-subtle opacity-30 hidden lg:block" />
       </div>
 
       <motion.div style={{ opacity, y }} className="relative max-w-[1400px] mx-auto w-full">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-14 items-center">
           {/* Left: headline */}
           <div className="lg:col-span-7">
-            <div
-              className="hero-rise inline-flex items-center gap-2 mb-7 border border-border rounded-full pl-1.5 pr-3.5 py-1"
-              style={{ animationDelay: "0.1s" }}
+            <p
+              className="hero-fade font-mono text-[0.7rem] uppercase tracking-[0.18em] text-text-tertiary mb-6"
+              style={{ animationDelay: "0.05s" }}
             >
-              <span className="text-[10px] font-mono uppercase tracking-wider bg-[oklch(0.2_0.04_55)] text-[oklch(0.82_0.14_55)] px-2 py-0.5 rounded-full">
-                MIT
-              </span>
-              <span className="text-xs text-text-secondary">Open source, self-hostable</span>
-            </div>
+              Open source, MIT
+            </p>
 
             <h1
-              className="hero-rise font-display text-hero-landing font-extrabold leading-[0.9] tracking-[-0.035em] text-balance"
-              style={{ animationDelay: "0.2s" }}
+              className="hero-rise font-display text-hero-landing font-extrabold leading-[0.94] tracking-[-0.035em] text-balance"
+              style={{ animationDelay: "0.15s" }}
             >
-              Wallets and policy for
+              Give agents scope.
               <br />
-              <span className="text-[oklch(0.78_0.15_55)]">humans and agents.</span>
+              <span className={accent}>Keep keys behind the boundary.</span>
             </h1>
 
             <p
-              className="hero-rise mt-8 text-lg text-text-secondary max-w-xl leading-relaxed text-pretty"
-              style={{ animationDelay: "0.38s" }}
+              className="hero-rise mt-6 text-lg text-text-secondary max-w-lg leading-relaxed text-pretty"
+              style={{ animationDelay: "0.3s" }}
             >
-              Embedded wallets, custody, and spend policy in one rail. Self-hostable, open source,
-              and free of per-transaction tolls. The infrastructure Privy should have been, owned by
-              you instead of rented.
+              Open-source, self-hostable control for configured agent API calls and wallets. Scoped
+              grants, exact-request approval, a governed primary EVM sign path, and signed evidence
+              you can verify offline.
             </p>
 
             <div
-              className="hero-rise mt-10 flex flex-wrap items-center gap-4"
-              style={{ animationDelay: "0.52s" }}
+              className="hero-fade mt-6 flex flex-wrap items-center gap-x-3 gap-y-1.5 font-mono text-[0.7rem] uppercase tracking-wider text-text-tertiary"
+              style={{ animationDelay: "0.42s" }}
+            >
+              <span>Your runtime</span>
+              <span className="text-border">/</span>
+              <span>Your cloud</span>
+              <span className="text-border">/</span>
+              <span>Your custodian</span>
+              <span className="text-border">/</span>
+              <span className={accent}>Your governed boundary</span>
+            </div>
+
+            <div
+              className="hero-rise mt-8 flex flex-wrap items-center gap-4"
+              style={{ animationDelay: "0.5s" }}
             >
               <a
                 href="/dashboard"
@@ -93,51 +95,29 @@ function Hero() {
                 View Source
               </a>
             </div>
-
-            <div
-              className="hero-fade mt-12 flex flex-wrap items-center gap-x-6 gap-y-2.5 text-sm"
-              style={{ animationDelay: "0.68s" }}
-            >
-              <span className="text-xs uppercase tracking-wider text-text-tertiary font-mono">
-                The rail under
-              </span>
-              <span className="text-text font-medium">Waifu</span>
-              <span className="w-px h-3.5 bg-border" />
-              <span className="text-text font-medium">Consumer apps</span>
-              <span className="w-px h-3.5 bg-border" />
-              <span className="text-text font-medium">Tokenized assets</span>
-            </div>
           </div>
 
-          {/* Right: compact code preview */}
+          {/* Right: governed-action panel */}
           <div
             className="hero-rise lg:col-span-5 hidden lg:block"
-            style={{ animationDelay: "0.5s" }}
+            style={{ animationDelay: "0.4s" }}
           >
             <div className="border border-border bg-bg-elevated rounded-sm shadow-[0_24px_80px_-20px_rgba(0,0,0,0.7)]">
               <CodeBlock
                 filename="agent.ts"
                 language="typescript"
-                typeEffect
-                code={`import { StewardClient } from "@stwd/sdk"
-
-const agent = new StewardClient({
-  proxy: process.env.STEWARD_PROXY_URL,
-  token: process.env.STEWARD_AGENT_TOKEN,
+                code={`// Agent asks. Steward evaluates.
+const payment = await steward.signTransaction(agentId, {
+  to: "0xApprovedVendor",
+  value: "500000000000000000",
 })
+// -> route policy check -> sign -> "0x9f3c..."
 
-// Sign a swap, no private key in memory
-await agent.sign({
-  to: "0x1inch...",
-  value: parseEther("0.5"),
-  data: swapCalldata,
-})
+// Over the daily cap: held for a human
+// -> { status: "pending_approval" }
 
-// Call OpenAI, no API key in env
-const res = await agent.proxy("openai", {
-  path: "/v1/chat/completions",
-  body: { model: "gpt-4o", messages },
-})`}
+// Not on the allowlist: denied
+// -> PolicyDenied: destination not permitted`}
               />
             </div>
           </div>
@@ -147,414 +127,465 @@ const res = await agent.proxy("openai", {
   );
 }
 
-// --- Problem Statement ---
-function ProblemSection() {
-  const problems = [
+// --- Secret sprawl problem ---
+// Asymmetric: sticky claim on the left, prose + a tight failure ledger on the right.
+function SecretSprawlSection() {
+  const failures = [
     {
-      title: "Wallet vendors tax you",
-      desc: "Per-user and per-transaction pricing that punishes growth. The more your product works, the more it costs to exist. Prohibitive the moment an agent signs at machine speed.",
+      k: "keys in env",
+      v: "API keys and private keys sit in environment variables, readable by anything in the process.",
     },
     {
-      title: "Policy is an afterthought",
-      desc: "Custody is solved. Governed custody is not. Spend limits, allowlists, and kill-switches get bolted on, never enforced in the vault itself, where it actually matters.",
+      k: "policy in prompts",
+      v: "Permissions live in the system prompt. A jailbreak, a bad tool call, and the boundary is gone.",
     },
     {
-      title: "You are a tenant on their stack",
-      desc: "Closed source, hosted-only, your keys and data on someone else's infrastructure. When you outgrow them or they change terms, there is no door out.",
-    },
-  ];
-
-  return (
-    <section className="relative px-6 md:px-10 py-24 md:py-32">
-      <div className="max-w-[1400px] mx-auto">
-        <Reveal direction="up">
-          <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] max-w-3xl text-balance">
-            Closed wallets meter you, fence you, and lock you in.{" "}
-            <span className="text-[oklch(0.78_0.15_55)]">That&apos;s the problem.</span>
-          </h2>
-        </Reveal>
-
-        <StaggerContainer
-          staggerDelay={0.12}
-          className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle mt-16 rounded-sm overflow-hidden"
-        >
-          {problems.map((problem) => (
-            <StaggerItem key={problem.title}>
-              <div className="bg-bg p-8 md:p-10 h-full">
-                <h3 className="font-display text-xl font-bold mb-3 leading-snug">
-                  {problem.title}
-                </h3>
-                <p className="text-[0.95rem] text-text-secondary leading-relaxed text-pretty">
-                  {problem.desc}
-                </p>
-              </div>
-            </StaggerItem>
-          ))}
-        </StaggerContainer>
-      </div>
-    </section>
-  );
-}
-
-// --- vs Privy comparison beat ---
-function ComparisonSection() {
-  const rows = [
-    { feature: "Source", steward: "Open source, MIT", vendor: "Closed, proprietary" },
-    { feature: "Hosting", steward: "Self-host or managed", vendor: "Hosted only" },
-    { feature: "Pricing", steward: "No per-transaction toll", vendor: "Per-MAU + per-transaction" },
-    { feature: "Keys and data", steward: "You own them", vendor: "On their infrastructure" },
-    { feature: "Policy engine", steward: "Enforced in the vault", vendor: "Bolted on, if any" },
-    { feature: "Agents", steward: "First-class actors", vendor: "Human-paced pricing" },
-  ];
-
-  return (
-    <section className="relative px-6 md:px-10 py-24 md:py-32 border-t border-border-subtle">
-      <div className="max-w-[1400px] mx-auto">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
-          <div className="lg:col-span-4 lg:sticky lg:top-28">
-            <Reveal>
-              <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
-                Own the rail.{" "}
-                <span className="text-[oklch(0.78_0.15_55)]">Don&apos;t rent it.</span>
-              </h2>
-            </Reveal>
-            <Reveal delay={0.1}>
-              <p className="mt-6 text-text-secondary leading-relaxed max-w-sm text-pretty">
-                Closed wallet vendors meter your growth and hold your keys. Steward gives you the
-                same embedded wallets and the policy layer they never built, on infrastructure you
-                control.
-              </p>
-            </Reveal>
-          </div>
-
-          <div className="lg:col-span-8">
-            <Reveal delay={0.1}>
-              {/* Desktop / tablet: three-column table. Steward column carries an accent
-                  rail + tint so the decision reads in a glance. */}
-              <div className="hidden sm:block border border-border rounded-sm overflow-hidden">
-                {/* Header */}
-                <div className="grid grid-cols-[1.2fr_1fr_1fr] bg-bg-elevated border-b border-border">
-                  <div className="px-5 py-4 text-xs uppercase tracking-wider text-text-tertiary font-mono">
-                    Capability
-                  </div>
-                  <div className="px-5 py-4 flex items-center gap-2 border-l border-border-subtle bg-[oklch(0.2_0.04_55)]/40 border-t-2 border-t-[oklch(0.75_0.15_55)]">
-                    <Image src="/logo.png" alt="" width={16} height={16} className="w-4 h-4" />
-                    <span className="font-display font-bold text-sm">Steward</span>
-                  </div>
-                  <div className="px-5 py-4 text-sm text-text-tertiary border-l border-border-subtle font-medium">
-                    Privy-style vendors
-                  </div>
-                </div>
-                {/* Rows */}
-                {rows.map((row, i) => (
-                  <motion.div
-                    key={row.feature}
-                    initial={{ opacity: 0, y: 8 }}
-                    whileInView={{ opacity: 1, y: 0 }}
-                    viewport={{ once: true, amount: 0.6 }}
-                    transition={{ duration: 0.4, delay: i * 0.05, ease: easeOutExpo }}
-                    className={`grid grid-cols-[1.2fr_1fr_1fr] ${
-                      i !== rows.length - 1 ? "border-b border-border-subtle" : ""
-                    }`}
-                  >
-                    <div className="px-5 py-4 text-sm text-text-secondary flex items-center">
-                      {row.feature}
-                    </div>
-                    <div className="px-5 py-4 text-sm text-text font-medium flex items-center gap-2.5 border-l border-border-subtle bg-[oklch(0.2_0.04_55)]/40">
-                      <span className="text-[oklch(0.8_0.16_55)] flex-shrink-0 font-bold">
-                        &#10003;
-                      </span>
-                      {row.steward}
-                    </div>
-                    <div className="px-5 py-4 text-sm text-text-tertiary flex items-center gap-2.5 border-l border-border-subtle">
-                      <span className="text-text-tertiary flex-shrink-0">&#10005;</span>
-                      {row.vendor}
-                    </div>
-                  </motion.div>
-                ))}
-              </div>
-
-              {/* Mobile: stacked per-capability cards */}
-              <div className="sm:hidden border border-border rounded-sm divide-y divide-border-subtle overflow-hidden">
-                {rows.map((row) => (
-                  <div key={row.feature} className="p-5">
-                    <div className="text-xs uppercase tracking-wider text-text-tertiary font-mono mb-3">
-                      {row.feature}
-                    </div>
-                    <div className="flex items-start gap-2.5 text-sm text-text">
-                      <span className="text-[oklch(0.78_0.15_55)] flex-shrink-0 mt-px">
-                        &#10003;
-                      </span>
-                      <span>
-                        <span className="font-medium">Steward</span>{" "}
-                        <span className="text-text-secondary">{row.steward}</span>
-                      </span>
-                    </div>
-                    <div className="flex items-start gap-2.5 text-sm text-text-tertiary mt-2">
-                      <span className="flex-shrink-0 mt-px">&#10005;</span>
-                      <span>
-                        Privy-style vendors{" "}
-                        {row.vendor.charAt(0).toLowerCase() + row.vendor.slice(1)}
-                      </span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </Reveal>
-          </div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-// --- Architecture (the one place numbered markers earn it: a real 3-layer stack) ---
-function ArchitectureSection() {
-  const layers = [
-    {
-      num: "01",
-      label: "Vault",
-      detail: "AES-256-GCM encryption at rest",
-      items: [
-        "Embedded wallets for humans and agents, keys encrypted and never exposed",
-        "API credentials stored and injected at the proxy layer",
-        "Scoped tokens and self-managed sessions per actor",
-      ],
+      k: "no revocation",
+      v: "A leaked key stays valid until someone notices and rotates it everywhere by hand.",
     },
     {
-      num: "02",
-      label: "Policy Engine",
-      detail: "Default deny, explicit allow",
-      items: [
-        "Spending limits per actor, daily, monthly, and per-transaction",
-        "Rate limiting with sliding windows per API, per actor",
-        "Approved address and contract allowlists, plus an atomic freeze switch",
-      ],
-    },
-    {
-      num: "03",
-      label: "Proxy Gateway",
-      detail: "The only door out",
-      items: [
-        "Every outbound call flows through Steward",
-        "Credentials injected at the edge, stripped from logs",
-        "Full cost attribution and audit trail per actor",
-      ],
+      k: "no audit",
+      v: "No record of who asked for what, what was allowed, and what actually executed.",
     },
   ];
 
   return (
     <section className="relative px-6 md:px-10 py-24 md:py-32 border-t border-border-subtle">
-      <div className="max-w-[1400px] mx-auto">
-        <Reveal>
-          <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] max-w-3xl text-balance">
-            Three layers between your agent{" "}
-            <span className="text-[oklch(0.78_0.15_55)]">and the real world.</span>
-          </h2>
-        </Reveal>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-px bg-border-subtle mt-16 rounded-sm overflow-hidden">
-          {layers.map((layer, i) => (
-            <Reveal key={layer.num} delay={i * 0.1} className="bg-bg p-8 md:p-10">
-              <div className="flex items-baseline gap-3">
-                <span className="font-mono text-sm text-[oklch(0.6_0.1_55)] tracking-tight">
-                  {layer.num}
-                </span>
-                <span className="h-px flex-1 bg-border-subtle translate-y-[-2px]" />
-              </div>
-              <h3 className="font-display text-xl font-bold mt-5 mb-1">{layer.label}</h3>
-              <p className="text-xs text-text-tertiary tracking-wide uppercase mb-5 font-mono">
-                {layer.detail}
-              </p>
-              <ul className="space-y-3">
-                {layer.items.map((item) => (
-                  <li
-                    key={item}
-                    className="text-sm text-text-secondary leading-relaxed flex gap-2.5"
-                  >
-                    <span className="text-[oklch(0.78_0.15_55)] mt-1.5 w-1 h-1 rounded-full bg-current flex-shrink-0" />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </Reveal>
-          ))}
+      <div className="max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
+        <div className="lg:col-span-5 lg:sticky lg:top-28">
+          <Reveal>
+            <p className="font-mono text-xs uppercase tracking-wider text-text-tertiary mb-5">
+              The problem
+            </p>
+            <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
+              One scoped credential.
+              <br />
+              <span className={accent}>Provider keys stay server-side.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={0.1}>
+            <p className="mt-6 text-text-secondary leading-relaxed max-w-md text-pretty">
+              Standing API keys and signing keys widen the blast radius. Steward gives supported
+              agent integrations a scoped credential while configured provider keys stay behind the
+              proxy and governed wallet routes apply policy and approval.
+            </p>
+          </Reveal>
         </div>
 
-        {/* Flow diagram */}
-        <Reveal delay={0.3} className="mt-14">
-          <FlowDiagram />
-        </Reveal>
-      </div>
-    </section>
-  );
-}
-
-function FlowDiagram() {
-  const nodes = [
-    { label: "Agent", sub: "SDK / HTTP" },
-    { label: "Policy Engine", sub: "Evaluate rules" },
-    { label: "Proxy", sub: "Inject credentials" },
-    { label: "Vault", sub: "Sign or forward" },
-  ];
-
-  return (
-    <div className="flex items-center justify-between overflow-x-auto py-6">
-      {nodes.map((node, i) => (
-        <div key={node.label} className="flex items-center flex-1 min-w-0">
-          <motion.div
-            initial={{ opacity: 0, scale: 0.92 }}
-            whileInView={{ opacity: 1, scale: 1 }}
-            viewport={{ once: true }}
-            transition={{
-              delay: i * 0.15,
-              duration: 0.4,
-              ease: [0.25, 1, 0.5, 1],
-            }}
-            className="border border-border px-5 py-3 bg-bg-elevated flex-shrink-0 rounded-sm"
+        <div className="lg:col-span-7">
+          <StaggerContainer
+            staggerDelay={0.08}
+            className="border-t border-border-subtle divide-y divide-border-subtle"
           >
-            <div className="text-sm font-display font-bold">{node.label}</div>
-            <div className="text-xs text-text-tertiary mt-0.5 font-mono">{node.sub}</div>
-          </motion.div>
-          {i < nodes.length - 1 && (
-            <motion.div
-              initial={{ opacity: 0, scaleX: 0 }}
-              whileInView={{ opacity: 1, scaleX: 1 }}
-              viewport={{ once: true }}
-              transition={{
-                delay: i * 0.15 + 0.2,
-                duration: 0.3,
-                ease: [0.25, 1, 0.5, 1],
-              }}
-              className="flex-1 h-px bg-border origin-left mx-1 relative min-w-[16px]"
-            >
-              <div className="absolute right-0 top-1/2 -translate-y-1/2 w-0 h-0 border-t-[4px] border-t-transparent border-b-[4px] border-b-transparent border-l-[6px] border-l-border" />
-            </motion.div>
-          )}
+            {failures.map((f) => (
+              <StaggerItem key={f.k}>
+                <div className="grid grid-cols-1 sm:grid-cols-[minmax(0,10rem)_1fr] gap-2 sm:gap-8 py-6">
+                  <div className="font-mono text-sm text-[oklch(0.78_0.15_55)] tracking-tight">
+                    {f.k}
+                  </div>
+                  <p className="text-[0.95rem] text-text-secondary leading-relaxed text-pretty">
+                    {f.v}
+                  </p>
+                </div>
+              </StaggerItem>
+            ))}
+          </StaggerContainer>
         </div>
-      ))}
-    </div>
+      </div>
+    </section>
   );
 }
 
-// --- SDK Section ---
+// --- The trust boundary pipeline: the spine of the page ---
+// Sticky claim on the left, stepped-reveal vertical flow on the right.
+// Amber marks ONLY the decision points (identity/capability, policy/approval,
+// simulation/execution). Works with reduced motion (reveals resolve to visible).
+function PipelineSection() {
+  const steps = [
+    {
+      idx: "00",
+      label: "Agent intent",
+      body: "The model asks for a privileged action through a supported Steward integration.",
+      decision: false,
+    },
+    {
+      idx: "01",
+      label: "Identity + capability",
+      body: "Steward resolves the authenticated agent and its active capability grants.",
+      decision: true,
+    },
+    {
+      idx: "02",
+      label: "Policy + approval",
+      body: "Rules evaluate under default-deny. Anything over a threshold routes to a human.",
+      decision: true,
+    },
+    {
+      idx: "03",
+      label: "Simulation + execution",
+      body: "Supported wallet routes sign or execute after their route-specific checks pass.",
+      decision: true,
+    },
+    {
+      idx: "04",
+      label: "Audit + reconciliation",
+      body: "Instrumented routes emit HMAC-chained events and signed evidence exports.",
+      decision: false,
+    },
+  ];
+
+  return (
+    <section className="relative px-6 md:px-10 py-24 md:py-36 border-t border-border-subtle overflow-hidden">
+      <div className="absolute top-1/4 right-[10%] w-[520px] h-[520px] rounded-full pointer-events-none opacity-[0.05] blur-[130px] bg-[oklch(0.75_0.15_55)]" />
+      <div className="relative max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
+        <div className="lg:col-span-5 lg:sticky lg:top-28">
+          <Reveal>
+            <p className="font-mono text-xs uppercase tracking-wider text-text-tertiary mb-5">
+              The trust boundary
+            </p>
+            <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
+              Between agent intent and <span className={accent}>real-world effects.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={0.1}>
+            <p className="mt-6 text-text-secondary leading-relaxed max-w-md text-pretty">
+              Privileged actions enter Steward through authenticated API routes. Those routes
+              evaluate policy and approvals before calling the relevant signing or proxy operation,
+              then record the request, decision, and effect.
+            </p>
+          </Reveal>
+          <Reveal delay={0.18}>
+            <div className="mt-8 inline-flex items-center gap-2.5 border border-border rounded-sm px-3.5 py-2 bg-bg-elevated">
+              <span className="w-1.5 h-1.5 rounded-full bg-[oklch(0.78_0.15_55)]" />
+              <span className="font-mono text-xs text-text-secondary tracking-tight">
+                amber marks the decision points
+              </span>
+            </div>
+          </Reveal>
+        </div>
+
+        <div className="lg:col-span-7">
+          <ol className="relative">
+            {/* Spine line */}
+            <div className="absolute left-[11px] top-2 bottom-2 w-px bg-border-subtle" />
+            {steps.map((step, i) => (
+              <motion.li
+                key={step.idx}
+                initial={{ opacity: 0, y: 16 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true, amount: 0.6 }}
+                transition={{ duration: 0.5, delay: i * 0.08, ease: easeOutExpo }}
+                className="relative pl-12 pb-10 last:pb-0"
+              >
+                {/* Node */}
+                <span
+                  className={`absolute left-0 top-1 flex items-center justify-center w-[23px] h-[23px] rounded-full border ${
+                    step.decision
+                      ? "border-[oklch(0.75_0.15_55)] bg-[oklch(0.2_0.04_55)]"
+                      : "border-border bg-bg"
+                  }`}
+                >
+                  <span
+                    className={`w-[7px] h-[7px] rounded-full ${
+                      step.decision ? "bg-[oklch(0.78_0.15_55)]" : "bg-text-tertiary"
+                    }`}
+                  />
+                </span>
+                <div className="flex items-baseline gap-3">
+                  <span className="font-mono text-xs text-text-tertiary tracking-tight">
+                    {step.idx}
+                  </span>
+                  <h3 className="font-display text-lg md:text-xl font-bold leading-snug">
+                    {step.label}
+                  </h3>
+                  {step.decision && (
+                    <span className="font-mono text-[10px] uppercase tracking-wider text-[oklch(0.8_0.14_55)] border border-[oklch(0.4_0.08_55)] rounded-full px-2 py-0.5">
+                      decision
+                    </span>
+                  )}
+                </div>
+                <p className="mt-2 text-[0.95rem] text-text-secondary leading-relaxed max-w-lg text-pretty">
+                  {step.body}
+                </p>
+              </motion.li>
+            ))}
+          </ol>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// --- Execution proof: real capabilities ---
+// Sticky claim + a border-divided ledger of real capabilities. No card grid.
+// Amber verbs mark the enforced decision moments.
+function ExecutionSection() {
+  const rows = [
+    {
+      tag: "evm.swap",
+      title: "Governed EVM swap",
+      body: "Prepare and execute an EVM swap through policy-aware API routes, with durable intents for reconciliation.",
+    },
+    {
+      tag: "trade.session",
+      title: "Venue-scoped trading",
+      body: "Optional Hyperliquid and Polymarket packages support venue-scoped sessions, spend caps, and operator controls.",
+    },
+    {
+      tag: "proxy.inject",
+      title: "Credential proxy",
+      body: "Configured provider calls receive credentials server-side instead of returning them to the supported agent caller.",
+    },
+    {
+      tag: "grant.scope",
+      title: "Capability grants",
+      body: "Scoped API access, not blanket tokens. github.pr.comment is allowed. github.repo.delete is denied. The grant is the contract.",
+    },
+    {
+      tag: "sign.freeze",
+      title: "Atomic freeze",
+      body: "An operator freeze control can halt signing without redeploying the agent.",
+    },
+    {
+      tag: "audit.log",
+      title: "Signed audit evidence",
+      body: "Instrumented actions emit HMAC-chained events and Ed25519-signed bundles verifiable offline against a trusted key fingerprint.",
+    },
+  ];
+
+  return (
+    <section className="relative px-6 md:px-10 py-24 md:py-32 border-t border-border-subtle">
+      <div className="max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
+        <div className="lg:col-span-4 lg:sticky lg:top-28">
+          <Reveal>
+            <p className="font-mono text-xs uppercase tracking-wider text-text-tertiary mb-5">
+              Execution
+            </p>
+            <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
+              Wallet and API authority. <span className={accent}>One operator plane.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={0.1}>
+            <p className="mt-6 text-text-secondary leading-relaxed max-w-sm text-pretty">
+              Steward ships wallet signing, configured credential proxying, scoped grants, exact
+              approval workflows, and signed audit exports. Enforcement coverage remains
+              surface-specific.
+            </p>
+          </Reveal>
+        </div>
+
+        <div className="lg:col-span-8">
+          <StaggerContainer
+            staggerDelay={0.07}
+            className="border-t border-border-subtle divide-y divide-border-subtle"
+          >
+            {rows.map((r) => (
+              <StaggerItem key={r.tag}>
+                <div className="group py-6 grid grid-cols-1 sm:grid-cols-[1fr_1.6fr] gap-2 sm:gap-8">
+                  <div>
+                    <h3 className="font-display text-lg font-bold leading-snug">{r.title}</h3>
+                    <span className="font-mono text-xs text-text-tertiary group-hover:text-[oklch(0.78_0.15_55)] transition-colors">
+                      {r.tag}
+                    </span>
+                  </div>
+                  <p className="text-[0.95rem] text-text-secondary leading-relaxed text-pretty">
+                    {r.body}
+                  </p>
+                </div>
+              </StaggerItem>
+            ))}
+          </StaggerContainer>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// --- SDK Section: real surface ---
 function SDKSection() {
   const snippets = [
     {
-      filename: "sign-transaction.ts",
-      code: `import { StewardClient } from "@stwd/sdk"
-
-const steward = new StewardClient({
-  baseUrl: process.env.STEWARD_PROXY_URL,
-  bearerToken: process.env.STEWARD_AGENT_TOKEN,
+      filename: "trade-session.ts",
+      code: `// A venue-scoped session: bounded size, freezable
+const session = await steward.tradeSessions.create({
+  agentId,
+  venue: "hyperliquid",
+  spendCapUsd: "5000",
+  expiresIn: "24h",
 })
 
-// Policy-enforced signing
-const tx = await steward.signTransaction(agentId, {
-  to: "0xDEX...",
-  value: "100000000000000000",
-})`,
+await steward.trade.hyperliquid.submitOrder({
+  sessionId: session.id,
+  market: "ETH", side: "buy", sizeUsd: "250",
+})
+// Over the cap or after freeze: rejected at the edge`,
     },
     {
-      filename: "api-proxy.ts",
-      code: `// Credentials injected, agent never sees the key
+      filename: "capability-grant.ts",
+      code: `// Scoped API access, not a blanket token
+await steward.setPolicies(agentId, [
+  { type: "capability",
+    config: { allow: ["github.pr.comment"] } },
+  { type: "capability",
+    config: { deny: ["github.repo.delete"] } },
+  { type: "spending-limit",
+    config: { maxPerTx: "1e18", maxPerDay: "10e18" } },
+])`,
+    },
+    {
+      filename: "proxy.ts",
+      code: `// Credential injected at the edge, never in the agent
 const openai = new OpenAI({
-  baseURL: \`\${process.env.STEWARD_PROXY_URL}/openai/v1\`,
+  baseURL: \`\${process.env.STEWARD_URL}/proxy/openai/v1\`,
 })
 
-const completion = await openai.chat.completions.create({
+const res = await openai.chat.completions.create({
   model: "gpt-4o",
   messages: [{ role: "user", content: "..." }],
 })
-// Costs tracked, rate-limited, audited`,
-    },
-    {
-      filename: "policies.ts",
-      code: `await steward.setPolicies(agentId, [
-  { type: "spending-limit",
-    config: { maxPerTx: "1e18",
-              maxPerDay: "10e18" } },
-  { type: "rate-limit",
-    config: { window: "1m",
-              maxRequests: 60 } },
-  { type: "approved-addresses",
-    config: { addresses: [
-      "0xUniswap...",
-      "0xTreasury..."] } },
-])`,
+// Rate-limited, cost-attributed, audited`,
     },
   ];
 
   return (
     <section className="relative px-6 md:px-10 py-24 md:py-32 border-t border-border-subtle">
-      <div className="max-w-[1400px] mx-auto">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16">
-          <div className="lg:col-span-4 lg:sticky lg:top-28 self-start">
-            <Reveal>
-              <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02]">
-                Sign transactions.
-                <br />
-                Proxy APIs.
-                <br />
-                <span className="text-[oklch(0.78_0.15_55)]">Enforce everything.</span>
-              </h2>
-            </Reveal>
-            <Reveal delay={0.15}>
-              <p className="mt-6 text-text-secondary leading-relaxed text-pretty">
-                Create a wallet, attach policy, approve agent spend. A TypeScript SDK for
-                policy-checked signing and credential-injected API proxying that works with any
-                agent framework.
-              </p>
-            </Reveal>
-            <Reveal delay={0.25}>
-              <div className="mt-7 inline-flex items-center gap-2 border border-border rounded-sm px-3 py-2 bg-bg-elevated">
-                <span className="text-text-tertiary font-mono text-xs">$</span>
-                <code className="text-sm text-text font-mono">npm i @stwd/sdk</code>
+      <div className="max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16">
+        <div className="lg:col-span-4 lg:sticky lg:top-28 self-start">
+          <Reveal>
+            <p className="font-mono text-xs uppercase tracking-wider text-text-tertiary mb-5">
+              SDK
+            </p>
+            <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02]">
+              Ask for the action.
+              <br />
+              <span className={accent}>Steward evaluates it.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={0.15}>
+            <p className="mt-6 text-text-secondary leading-relaxed text-pretty">
+              One TypeScript client for signing, grants, proxying, and optional trading extensions.
+              Bring your own agent framework, model, cloud, and custody integration.
+            </p>
+          </Reveal>
+          <Reveal delay={0.25}>
+            <div className="mt-7 inline-flex items-center gap-2 border border-border rounded-sm px-3 py-2 bg-bg-elevated">
+              <span className="text-text-tertiary font-mono text-xs">$</span>
+              <code className="text-sm text-text font-mono">npm i @stwd/sdk</code>
+            </div>
+          </Reveal>
+        </div>
+
+        <div className="lg:col-span-8 space-y-4">
+          {snippets.map((snippet, i) => (
+            <Reveal key={snippet.filename} delay={i * 0.1} direction="right">
+              <div className="border border-border bg-bg-elevated rounded-sm">
+                <CodeBlock filename={snippet.filename} language="typescript" code={snippet.code} />
               </div>
             </Reveal>
-          </div>
-
-          <div className="lg:col-span-8 space-y-4">
-            {snippets.map((snippet, i) => (
-              <Reveal key={snippet.filename} delay={i * 0.1} direction="right">
-                <div className="border border-border bg-bg-elevated rounded-sm">
-                  <CodeBlock
-                    filename={snippet.filename}
-                    language="typescript"
-                    code={snippet.code}
-                  />
-                </div>
-              </Reveal>
-            ))}
-          </div>
+          ))}
         </div>
       </div>
     </section>
   );
 }
 
-// --- Specs ---
+// --- Built for agents ---
+// Sticky claim + a two-column divided ledger of what agent-native means.
+function AgentsSection() {
+  const traits = [
+    {
+      t: "Autonomous execution",
+      d: "Supported actions can proceed automatically when their route-specific policy allows them.",
+    },
+    {
+      t: "Persistent delegated authority",
+      d: "Authority is granted once and bounded, not re-entered per session like a human login.",
+    },
+    {
+      t: "Bounded financial permissions",
+      d: "Caps, allowlists, and windows are evaluated in Steward API routes before those routes call the vault.",
+    },
+    {
+      t: "Ambiguous-outcome recovery",
+      d: "Durable intents preserve state for reconciliation when an outcome is ambiguous.",
+    },
+    {
+      t: "Machine-readable audit",
+      d: "The record is structured for programs, not just for a human reading a dashboard.",
+    },
+    {
+      t: "Emergency operator control",
+      d: "An operator can freeze supported signing paths without redeploying the agent.",
+    },
+  ];
+
+  return (
+    <section className="relative px-6 md:px-10 py-24 md:py-32 border-t border-border-subtle">
+      <div className="max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
+        <div className="lg:col-span-5 lg:sticky lg:top-28">
+          <Reveal>
+            <p className="font-mono text-xs uppercase tracking-wider text-text-tertiary mb-5">
+              Agent-native
+            </p>
+            <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
+              Built for agents,{" "}
+              <span className={accent}>not adapted from human infrastructure.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={0.1}>
+            <p className="mt-6 text-text-secondary leading-relaxed max-w-md text-pretty">
+              Human auth assumes a person clicks to confirm. Agents act continuously, hold authority
+              across sessions, and fail in ambiguous ways. Steward is designed for that reality.
+            </p>
+          </Reveal>
+        </div>
+
+        <div className="lg:col-span-7">
+          <StaggerContainer
+            staggerDelay={0.07}
+            className="grid grid-cols-1 sm:grid-cols-2 border-t border-l border-border-subtle"
+          >
+            {traits.map((tr) => (
+              <StaggerItem key={tr.t}>
+                <div className="h-full border-b border-r border-border-subtle p-6">
+                  <h3 className="font-display text-base font-bold mb-2 leading-snug">{tr.t}</h3>
+                  <p className="text-sm text-text-secondary leading-relaxed text-pretty">{tr.d}</p>
+                </div>
+              </StaggerItem>
+            ))}
+          </StaggerContainer>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+// --- Specs strip ---
 function SpecsSection() {
   const specs = [
     { value: "AES-256-GCM", label: "Encryption at rest" },
     { value: "Default deny", label: "Policy model" },
     { value: "7 EVM + Solana", label: "Chains supported" },
-    { value: "< 50ms", label: "Proxy overhead" },
+    { value: "Ed25519", label: "Signed checkpoints" },
   ];
 
   return (
-    <section className="relative px-6 md:px-10 py-20 md:py-28 border-t border-border-subtle">
+    <section className="relative px-6 md:px-10 py-20 md:py-24 border-t border-border-subtle">
       <div className="max-w-[1400px] mx-auto">
         <Reveal>
           <p className="text-text-secondary text-sm mb-8 max-w-2xl">
-            Built to enterprise security standards. Audited paths, encrypted at rest, fast enough to
-            sit in front of every call.
+            Designed for private enterprise deployments, with encrypted storage, explicit policy
+            paths, and operator-controlled infrastructure.
           </p>
         </Reveal>
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-px bg-border-subtle rounded-sm overflow-hidden">
+        <div className="grid grid-cols-2 lg:grid-cols-4 border-t border-l border-border-subtle">
           {specs.map((spec, i) => (
-            <Reveal key={spec.label} delay={i * 0.1} className="bg-bg p-8 md:p-10 text-center">
-              <div className="font-display text-2xl md:text-[1.75rem] font-extrabold tracking-tight">
+            <Reveal
+              key={spec.label}
+              delay={i * 0.08}
+              className="border-b border-r border-border-subtle p-7 md:p-8"
+            >
+              <div className="font-mono text-xl md:text-2xl font-bold tracking-tight tabular-nums">
                 {spec.value}
               </div>
               <div className="text-xs text-text-secondary mt-2 tracking-wide uppercase font-mono">
@@ -568,74 +599,126 @@ function SpecsSection() {
   );
 }
 
-// --- For Platforms ---
-function PlatformsSection() {
-  const tenants = [
+// --- Compact comparison (small, late, not the centerpiece) ---
+function ComparisonSection() {
+  const rows = [
+    { feature: "Source", steward: "Open source, MIT", vendor: "Closed, proprietary" },
+    { feature: "Deployment", steward: "Self-hosted", vendor: "Vendor-defined" },
     {
-      name: "DeFi & Trading",
-      desc: "Trading bots, yield agents, and liquidity managers with enforced spending limits and approved counterparties",
+      feature: "Custody",
+      steward: "Operator-held root, optional KMS envelope",
+      vendor: "Vendor-defined",
     },
     {
-      name: "Apps & Agent Platforms",
-      desc: "Consumer apps and agent frameworks that need embedded wallets and secure API access for users and agents alike",
+      feature: "Policy engine",
+      steward: "Evaluated in API action routes",
+      vendor: "Vendor-defined",
     },
+    { feature: "Agent runtime", steward: "Bring your own", vendor: "Vendor-dependent" },
     {
-      name: "Treasuries & Rewards",
-      desc: "DAO treasuries, perks systems, and micro-payment agents with multi-party approval flows",
-    },
-    {
-      name: "RWA & Settlement",
-      desc: "Commodity finance, collateral management, and tokenized asset operations",
+      feature: "Evidence",
+      steward: "Offline-verifiable signed bundles",
+      vendor: "Vendor-defined",
     },
   ];
 
   return (
-    <section className="relative px-6 md:px-10 py-24 md:py-32 border-t border-border-subtle">
-      <div className="max-w-[1400px] mx-auto">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16">
-          <div className="lg:col-span-5">
-            <Reveal>
-              <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
-                One rail. <span className="text-[oklch(0.78_0.15_55)]">Every actor.</span>
-              </h2>
-            </Reveal>
-            <Reveal delay={0.1}>
-              <p className="mt-6 text-lg text-text-secondary leading-relaxed max-w-md text-pretty">
-                One Steward instance for thousands of humans and agents across isolated tenants.
-                Each tenant gets its own policies, credentials, and webhook endpoints. Self-hosted.
-                No per-transaction toll.
-              </p>
-            </Reveal>
-          </div>
+    <section className="relative px-6 md:px-10 py-24 md:py-28 border-t border-border-subtle">
+      <div className="max-w-[1400px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
+        <div className="lg:col-span-4 lg:sticky lg:top-28">
+          <Reveal>
+            <p className="font-mono text-xs uppercase tracking-wider text-text-tertiary mb-5">
+              Versus closed custody
+            </p>
+            <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] text-balance">
+              Own the rail. <span className={accent}>Don&apos;t rent it.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={0.1}>
+            <p className="mt-6 text-text-secondary leading-relaxed max-w-sm text-pretty">
+              Steward is self-hostable and vendor-neutral. It stores keys encrypted under an
+              operator-held root, supports an optional KMS envelope, and exposes a seam for
+              third-party custody providers.
+            </p>
+          </Reveal>
+        </div>
 
-          <div className="lg:col-span-7">
-            <StaggerContainer
-              staggerDelay={0.1}
-              className="grid grid-cols-1 sm:grid-cols-2 gap-px bg-border-subtle rounded-sm overflow-hidden"
-            >
-              {tenants.map((tenant) => (
-                <StaggerItem key={tenant.name}>
-                  <div className="bg-bg p-7 h-full group hover:bg-bg-elevated transition-colors">
-                    <div className="flex items-center gap-2.5 mb-2.5">
-                      <span className="w-1.5 h-1.5 rounded-full bg-[oklch(0.78_0.15_55)] group-hover:scale-150 transition-transform" />
-                      <div className="font-display font-bold text-base">{tenant.name}</div>
-                    </div>
-                    <div className="text-sm text-text-secondary leading-relaxed text-pretty">
-                      {tenant.desc}
-                    </div>
+        <div className="lg:col-span-8">
+          <Reveal delay={0.1}>
+            <div className="hidden sm:block border border-border rounded-sm overflow-hidden">
+              <div className="grid grid-cols-[1.2fr_1fr_1fr] bg-bg-elevated border-b border-border">
+                <div className="px-5 py-3.5 text-xs uppercase tracking-wider text-text-tertiary font-mono">
+                  Capability
+                </div>
+                <div className="px-5 py-3.5 flex items-center gap-2 border-l border-border-subtle bg-[oklch(0.2_0.04_55)]/40 border-t-2 border-t-[oklch(0.75_0.15_55)]">
+                  <Image src="/logo.png" alt="" width={16} height={16} className="w-4 h-4" />
+                  <span className="font-display font-bold text-sm">Steward</span>
+                </div>
+                <div className="px-5 py-3.5 text-sm text-text-tertiary border-l border-border-subtle font-medium">
+                  Closed custody vendors
+                </div>
+              </div>
+              {rows.map((row, i) => (
+                <motion.div
+                  key={row.feature}
+                  initial={{ opacity: 0, y: 8 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true, amount: 0.6 }}
+                  transition={{ duration: 0.4, delay: i * 0.05, ease: easeOutExpo }}
+                  className={`grid grid-cols-[1.2fr_1fr_1fr] ${
+                    i !== rows.length - 1 ? "border-b border-border-subtle" : ""
+                  }`}
+                >
+                  <div className="px-5 py-3.5 text-sm text-text-secondary flex items-center">
+                    {row.feature}
                   </div>
-                </StaggerItem>
+                  <div className="px-5 py-3.5 text-sm text-text font-medium flex items-center gap-2.5 border-l border-border-subtle bg-[oklch(0.2_0.04_55)]/40">
+                    <span className="text-[oklch(0.8_0.16_55)] flex-shrink-0 font-bold">
+                      &#10003;
+                    </span>
+                    {row.steward}
+                  </div>
+                  <div className="px-5 py-3.5 text-sm text-text-tertiary flex items-center gap-2.5 border-l border-border-subtle">
+                    <span className="text-text-tertiary flex-shrink-0">&#10005;</span>
+                    {row.vendor}
+                  </div>
+                </motion.div>
               ))}
-            </StaggerContainer>
-          </div>
+            </div>
+
+            <div className="sm:hidden border border-border rounded-sm divide-y divide-border-subtle overflow-hidden">
+              {rows.map((row) => (
+                <div key={row.feature} className="p-5">
+                  <div className="text-xs uppercase tracking-wider text-text-tertiary font-mono mb-3">
+                    {row.feature}
+                  </div>
+                  <div className="flex items-start gap-2.5 text-sm text-text">
+                    <span className="text-[oklch(0.78_0.15_55)] flex-shrink-0 mt-px">&#10003;</span>
+                    <span>
+                      <span className="font-medium">Steward</span>{" "}
+                      <span className="text-text-secondary">{row.steward}</span>
+                    </span>
+                  </div>
+                  <div className="flex items-start gap-2.5 text-sm text-text-tertiary mt-2">
+                    <span className="flex-shrink-0 mt-px">&#10005;</span>
+                    <span>
+                      Closed vendors {row.vendor.charAt(0).toLowerCase() + row.vendor.slice(1)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Reveal>
         </div>
       </div>
     </section>
   );
 }
 
-// --- Open Source / CTA ---
+// --- Open by design / CTA (the one centered moment) ---
 function OpenSourceSection() {
+  const pillars = ["MIT licensed", "Self-hostable", "Vendor-neutral", "Offline verification"];
+
   return (
     <section className="relative px-6 md:px-10 py-32 md:py-44 border-t border-border-subtle overflow-hidden">
       <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
@@ -643,19 +726,31 @@ function OpenSourceSection() {
       </div>
       <div className="relative max-w-[1400px] mx-auto text-center">
         <Reveal>
+          <p className="font-mono text-xs uppercase tracking-wider text-text-tertiary mb-6">
+            Open by design
+          </p>
           <h2 className="font-display text-hero-sm font-extrabold tracking-[-0.02em] leading-[1.02] max-w-3xl mx-auto text-balance">
-            Infrastructure you own,{" "}
-            <span className="text-[oklch(0.78_0.15_55)]">not a dependency you rent.</span>
+            Agents can act. <span className={accent}>Steward keeps them accountable.</span>
           </h2>
         </Reveal>
         <Reveal delay={0.1}>
           <p className="mt-7 text-lg text-text-secondary leading-relaxed max-w-xl mx-auto text-pretty">
-            MIT-licensed, self-hostable, and free of per-transaction fees. Everything closed wallet
-            vendors are not. Run it on your own infrastructure, keep your keys and your data, and
-            never pay a toll on your own growth.
+            MIT-licensed, self-hostable, and vendor-neutral. Choose your runtime, cloud, identity
+            provider, and custodian while keeping policy, approvals, and signed evidence under
+            operator control.
           </p>
         </Reveal>
-        <Reveal delay={0.2}>
+        <Reveal delay={0.16}>
+          <div className="mt-8 flex flex-wrap items-center justify-center gap-x-3 gap-y-2 font-mono text-[0.7rem] uppercase tracking-wider text-text-tertiary">
+            {pillars.map((p, i) => (
+              <span key={p} className="flex items-center gap-3">
+                {i > 0 && <span className="text-border">/</span>}
+                <span>{p}</span>
+              </span>
+            ))}
+          </div>
+        </Reveal>
+        <Reveal delay={0.24}>
           <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
             <a
               href="/dashboard"
@@ -696,7 +791,7 @@ function Footer() {
             <span className="font-display text-base font-bold tracking-tight">steward</span>
           </div>
           <p className="text-xs text-text-tertiary mt-1.5">
-            The open wallet and governance rail for humans and agents.
+            Open-source, self-hostable control for configured agent actions.
           </p>
         </div>
         <div className="flex items-center gap-6 text-sm text-text-secondary">
@@ -736,12 +831,13 @@ export default function LandingPage() {
     <main>
       <Nav />
       <Hero />
-      <ProblemSection />
-      <ComparisonSection />
-      <ArchitectureSection />
+      <SecretSprawlSection />
+      <PipelineSection />
+      <ExecutionSection />
       <SDKSection />
+      <AgentsSection />
       <SpecsSection />
-      <PlatformsSection />
+      <ComparisonSection />
       <OpenSourceSection />
       <Footer />
     </main>

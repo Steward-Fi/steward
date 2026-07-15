@@ -58,6 +58,9 @@ import { globalWalletRoutes } from "./routes/global-wallet";
 import { intentRoutes } from "./routes/intents";
 import { platformRoutes } from "./routes/platform";
 import { policiesStandaloneRoutes } from "./routes/policies-standalone";
+import { registerProviderActionRoutes } from "./routes/provider-actions";
+import { registerProviderApprovalRoutes } from "./routes/provider-approvals";
+import { providerAuthorityRoutes } from "./routes/provider-authority";
 import { secretsRoutes } from "./routes/secrets";
 import { tenantConfigRoutes } from "./routes/tenant-config";
 import { tenantRoutes } from "./routes/tenants";
@@ -179,6 +182,15 @@ export function createApp(): Hono<{ Variables: AppVariables }> {
   app.use("/condition_sets/*", (c, next) => tenantAuth(c, next));
   app.use("/v1/condition_sets", (c, next) => tenantAuth(c, next));
   app.use("/v1/condition_sets/*", (c, next) => tenantAuth(c, next));
+  app.use("/v2/workspaces", (c, next) => tenantAuth(c, next));
+  app.use("/v2/workspaces/*", (c, next) => tenantAuth(c, next));
+  app.use("/v2/provider-accounts", (c, next) => tenantAuth(c, next));
+  app.use("/v2/provider-accounts/*", (c, next) => tenantAuth(c, next));
+  app.use("/v2/provider-role-bindings", (c, next) => tenantAuth(c, next));
+  app.use("/v2/provider-role-bindings/*", (c, next) => tenantAuth(c, next));
+  app.use("/v2/provider-grants", (c, next) => tenantAuth(c, next));
+  app.use("/v2/provider-grants/*", (c, next) => tenantAuth(c, next));
+  app.use("/v2/provider-access/check", (c, next) => tenantAuth(c, next));
 
   return app;
 }
@@ -236,6 +248,15 @@ export function mountCoreIdempotencyAndRoutes(
   app.route("/v1/adapters", adapterRoutes);
   app.route("/v1/users", fiatRoutes);
   app.route("/policies", policiesStandaloneRoutes);
+  app.route("/v2", providerAuthorityRoutes);
+  // provider-actions registers its concrete `/v2/provider-actions` handler + auth
+  // middleware directly on the app (see registerProviderActionRoutes) to avoid a
+  // second `/v2` sub-app mount colliding with the authority wildcard.
+  registerProviderActionRoutes(app);
+  // PR3 approval + safe-resume routes (also registered directly to avoid the
+  // /v2 authority-wildcard collision).
+  registerProviderApprovalRoutes(app);
+
   app.route("/condition-sets", conditionSetRoutes);
   app.route("/condition_sets", conditionSetRoutes);
   app.route("/v1/condition_sets", conditionSetRoutes);

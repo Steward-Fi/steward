@@ -305,7 +305,7 @@ export interface StewardIdentityTokenResult {
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 export interface StewardAuthConfig {
-  /** Base URL of the Steward API, e.g. "https://api.steward.fi" */
+  /** Base URL of the Steward API, e.g. "http://localhost:3200" for a self-hosted instance */
   baseUrl: string;
   /**
    * Optional storage backend for persisting access and refresh tokens.

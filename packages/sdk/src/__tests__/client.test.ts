@@ -8,6 +8,8 @@ import {
   type StewardClientConfig,
 } from "../client";
 import type {
+  BridgeBuildResult as RootBridgeBuildResult,
+  BridgeHandoff as RootBridgeHandoff,
   DigitalAssetAccount as RootDigitalAssetAccount,
   DigitalAssetAccountAggregation as RootDigitalAssetAccountAggregation,
   DigitalAssetAccountMutationInput as RootDigitalAssetAccountMutationInput,
@@ -216,6 +218,30 @@ describe("root SDK parity exports", () => {
     const exported = true satisfies boolean;
     expect(exported).toBe(true);
     void (null as PublicParityTypes | null);
+  });
+
+  it("exports bridge handoff contracts", () => {
+    const handoff: RootBridgeHandoff = {
+      kind: "external-handoff",
+      category: "bridge",
+      provider: "wxmr",
+      quoteId: "quote-1",
+      direction: "monero-to-solana",
+      url: "https://wxmr.io/",
+      fromChainId: 301,
+      toChainId: 101,
+      amountIn: "100000000000",
+      estimatedUsd: 25,
+      recipient: "11111111111111111111111111111111",
+      expiresAt: Date.now() + 60_000,
+      feeBps: 0,
+      feeScope: "not-applicable",
+      feeObservedAt: Date.now(),
+      notices: [],
+    };
+    const buildResult: RootBridgeBuildResult = handoff;
+
+    expect(buildResult.kind).toBe("external-handoff");
   });
 });
 
@@ -4823,5 +4849,46 @@ describe("StewardApiError", () => {
   it("status 0 indicates a network-level failure (no HTTP response)", () => {
     const err = new StewardApiError("Network request failed", 0);
     expect(err.status).toBe(0);
+  });
+});
+
+describe("StewardClient proxy approvals", () => {
+  it("registers approval-gated routes", async () => {
+    installMockFetch({
+      ok: true,
+      data: { id: "route-1", requiresApproval: true, createdAt: "now" },
+    });
+    await makeClient().createRoute({
+      secretId: "secret-1",
+      agentId: "agent-1",
+      hostPattern: "api.example.com",
+      injectAs: "header",
+      requiresApproval: true,
+      approvalConfig: { ttlSeconds: 60 },
+    });
+    expect(lastCapture?.url).toEndWith("/secrets/routes");
+    expect(lastCapture?.body).toMatchObject({
+      requiresApproval: true,
+      approvalConfig: { ttlSeconds: 60 },
+    });
+  });
+
+  it("lists, approves, denies, and polls proxy requests", async () => {
+    const client = makeClient();
+    installMockFetch({ ok: true, data: [] });
+    await client.listPendingProxyRequests("pending");
+    expect(lastCapture?.url).toEndWith("/approvals/proxy?status=pending");
+    installMockFetch({ ok: true, data: { id: "p1", status: "approved" } });
+    await client.approveProxyRequest("p1");
+    expect(lastCapture).toMatchObject({
+      method: "POST",
+      url: "https://api.steward.example/approvals/proxy/p1/approve",
+    });
+    installMockFetch({ ok: true, data: { id: "p1", status: "denied" } });
+    await client.denyProxyRequest("p1", "no");
+    expect(lastCapture?.body).toEqual({ reason: "no" });
+    installMockFetch({ ok: true, data: { id: "p1", status: "pending" } });
+    await client.getPendingProxyRequest("p1");
+    expect(lastCapture?.url).toEndWith("/approvals/proxy/p1");
   });
 });

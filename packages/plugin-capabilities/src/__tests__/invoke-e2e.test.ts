@@ -41,6 +41,8 @@ setDefaultTimeout(30000);
 const MASTER_PASSWORD = "cap-invoke-e2e-master-password";
 const SIGNING_SECRET = "cap-invoke-e2e-signing-secret-with-enough-bytes";
 const FAKE_PAT = "ghp_test_e2e_do_not_use_0123456789abcdef";
+const FAKE_OPENAI_KEY = "sk-test-openai-e2e-do-not-use-0123456789abcdef";
+const STEWARD_TOKEN_SENTINEL = "steward-agent-token-sentinel-never-upstream";
 const PROXY_URL = "https://proxy.cap-e2e.test";
 const MIGRATIONS_FOLDER = fileURLToPath(new URL("../../drizzle", import.meta.url));
 
@@ -53,6 +55,7 @@ interface ForwardedCapture {
   url: string;
   method: string;
   headers: Headers;
+  bodyText: string | null;
 }
 let lastForwarded: ForwardedCapture | null = null;
 let proxyApp: Hono | null = null;
@@ -65,13 +68,14 @@ function capRule(
   id: string,
   effect: "allow" | "deny" | "require-approval",
   constraints?: Record<string, unknown>,
+  capabilities: string[] = ["github.pr.comment"],
 ): PolicyRule {
   return {
     id,
     type: "capability-intent" as unknown as PolicyRule["type"],
     enabled: true,
     config: {
-      capabilities: ["github.pr.comment"],
+      capabilities,
       effect,
       ...(constraints ? { constraints } : {}),
     },
@@ -84,7 +88,7 @@ beforeAll(async () => {
   process.env.STEWARD_JWT_SECRET = "cap-invoke-e2e-jwt-secret-with-enough-bytes-0123456789";
   process.env.STEWARD_PROXY_REQUIRE_REQUEST_SIGNATURE = "true";
   process.env.STEWARD_PROXY_REQUEST_SIGNING_SECRET = SIGNING_SECRET;
-  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com";
+  process.env.STEWARD_PROXY_ALLOWED_HOSTS = "api.github.com,api.openai.com";
   // the invoke route reads these to build its proxy client (fail-closed if absent).
   process.env.STEWARD_PROXY_URL = PROXY_URL;
 
@@ -108,8 +112,21 @@ beforeAll(async () => {
   // deterministic public ip so route-match -> decrypt -> inject -> forward runs
   // with no external network (mirrors the #149 e2e).
   setResolveProxyHostForTests(async () => [{ address: "93.184.216.34", family: 4 }]);
-  setForwardProxyRequestForTests(async (url, method, headers) => {
-    lastForwarded = { url: url.toString(), method, headers };
+  setForwardProxyRequestForTests(async (url, method, headers, body) => {
+    const bodyText = body ? await new Response(body).text() : null;
+    lastForwarded = { url: url.toString(), method, headers, bodyText };
+    if (url.hostname === "api.openai.com") {
+      return new Response(
+        JSON.stringify({
+          id: "chatcmpl-test",
+          object: "chat.completion",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
     return new Response(JSON.stringify({ id: 12345, body: "ok" }), {
       status: 201,
       headers: { "content-type": "application/json" },
@@ -220,16 +237,43 @@ function buildCtx(): StewardAppContext {
 }
 
 /** the invoke app (test mw stamps the agent-token context). */
-function buildInvokeApp(): Hono<{ Variables: AppVariables }> {
+function buildInvokeApp(auth = true): Hono<{ Variables: AppVariables }> {
   const app = new Hono<{ Variables: AppVariables }>();
   app.use("*", async (c, next) => {
-    c.set("tenantId", tenantId);
-    c.set("agentScope", agentId);
-    c.set("authType", "agent-token" as never);
+    if (auth) {
+      c.set("tenantId", tenantId);
+      c.set("agentScope", agentId);
+      c.set("authType", "agent-token" as never);
+    }
     await next();
   });
   app.route("/capabilities", createInvokeRoutes(buildCtx()));
   return app;
+}
+
+async function seedOpenAIChatCapability(opts?: { grant?: boolean }): Promise<string> {
+  const vault = new SecretVault(MASTER_PASSWORD);
+  const secret = await vault.createSecret(tenantId, "openai-key", FAKE_OPENAI_KEY);
+  const store = new CapabilityStore(getDb());
+  const cap = await store.createCapability({
+    tenantId,
+    name: "openai.chat",
+    spec: {
+      secretId: secret.id,
+      host: "api.openai.com",
+      pathPattern: "/v1/chat/completions",
+      method: "POST",
+      injectAs: "header",
+      injectKey: "authorization",
+      injectFormat: "Bearer {value}",
+    },
+    constraints: {},
+    enabled: true,
+  });
+  if (opts?.grant !== false) {
+    await store.createGrant({ tenantId, capabilityId: cap.id, agentId, expiresAt: null });
+  }
+  return cap.id;
 }
 
 async function agentInvocations(capabilityId: string) {
@@ -285,6 +329,57 @@ describe("invoke e2e: full arc through the real proxy", () => {
       body: JSON.stringify({ args: { repo: "evil/app" }, body: { body: "x" } }),
     });
     expect(res.status).toBe(403);
+    expect(lastForwarded).toBeNull();
+    // the internal gate marker must never leak on the envelope route either.
+    expect(res.headers.get("x-steward-cap-gate")).toBeNull();
+  });
+
+  // ROUND-2 P0 (full arc): a GOVERNING capability-intent rule whose evaluation
+  // throws an unprintable value (throwing toString/valueOf/Symbol.toPrimitive)
+  // used to escape the composer's catch as a raw exception => HTTP 500. End to
+  // end it must fail closed: 403, NEVER a 500, and NEVER forward to the proxy
+  // (no credential injection on a gate failure).
+  it("P0: governing rule throws an UNPRINTABLE value => 403 (NOT 500), never forwards", async () => {
+    await seedCapability();
+    const hostile = {
+      toString() {
+        throw new Error("toString throws");
+      },
+      valueOf() {
+        throw new Error("valueOf throws");
+      },
+      [Symbol.toPrimitive]() {
+        throw new Error("toPrimitive throws");
+      },
+    };
+    const hostileConfig: Record<string, unknown> = {
+      capabilities: ["github.pr.comment"],
+      effect: "allow",
+    };
+    Object.defineProperty(hostileConfig, "constraints", {
+      enumerable: true,
+      configurable: true,
+      get() {
+        throw hostile;
+      },
+    });
+    currentPolicySet = [
+      {
+        id: "hostile-throw-e2e",
+        type: "capability-intent" as unknown as PolicyRule["type"],
+        enabled: true,
+        config: hostileConfig as unknown as Record<string, unknown>,
+      },
+    ];
+    const app = buildInvokeApp();
+    const res = await app.request("/capabilities/github.pr.comment/invoke", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(res.status).toBe(403);
+    expect(res.status).not.toBe(500);
+    // fail-closed: the credential must never have been injected/forwarded.
     expect(lastForwarded).toBeNull();
   });
 
@@ -364,5 +459,228 @@ describe("invoke e2e: full arc through the real proxy", () => {
     const rows = await agentInvocations(capId);
     expect(rows.filter((r) => r.decision === "allow").length).toBe(1);
     expect(rows.filter((r) => r.decision === "deny").length).toBe(1);
+  });
+});
+
+describe("OpenAI-compatible capability adapter", () => {
+  it("chat completions forwards via proxy and returns upstream JSON directly", async () => {
+    const capId = await seedOpenAIChatCapability();
+    currentPolicySet = [capRule("r-openai", "allow", undefined, ["openai.chat"])];
+    const app = buildInvokeApp();
+
+    const res = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${STEWARD_TOKEN_SENTINEL}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { id: string; object: string; ok?: boolean };
+    expect(body.id).toBe("chatcmpl-test");
+    expect(body.object).toBe("chat.completion");
+    expect(body.ok).toBeUndefined();
+
+    expect(lastForwarded).not.toBeNull();
+    expect(lastForwarded?.url).toBe("https://api.openai.com/v1/chat/completions");
+    expect(lastForwarded?.method).toBe("POST");
+    expect(lastForwarded?.headers.get("authorization")).toBe(`Bearer ${FAKE_OPENAI_KEY}`);
+    expect(lastForwarded?.headers.get("authorization")).not.toContain(STEWARD_TOKEN_SENTINEL);
+    expect(lastForwarded?.bodyText).toContain("gpt-test");
+
+    const rows = await agentInvocations(capId);
+    expect(rows.length).toBe(1);
+    expect(rows[0].decision).toBe("allow");
+  });
+
+  it("argEquals on model gates the adapter: matching model allowed, other model denied", async () => {
+    const capId = await seedOpenAIChatCapability();
+    currentPolicySet = [
+      capRule("r-openai", "allow", { argEquals: { model: "gpt-allowed" } }, ["openai.chat"]),
+    ];
+    const app = buildInvokeApp();
+
+    const okRes = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-allowed", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(okRes.status).toBe(200);
+
+    const denyRes = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-forbidden", messages: [{ role: "user", content: "hi" }] }),
+    });
+    expect(denyRes.status).toBe(403);
+    const denyBody = (await denyRes.json()) as { error?: { type?: string } };
+    expect(denyBody.error?.type).toBe("permission_error");
+
+    const rows = await agentInvocations(capId);
+    expect(rows.filter((r) => r.decision === "allow").length).toBe(1);
+    expect(rows.filter((r) => r.decision === "deny").length).toBe(1);
+  });
+
+  it("stream:true is rejected at the adapter with an OpenAI-error (proxy blocks streaming after credential injection)", async () => {
+    const capId = await seedOpenAIChatCapability();
+    currentPolicySet = [capRule("r-openai", "allow", undefined, ["openai.chat"])];
+    const app = buildInvokeApp();
+
+    const res = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${STEWARD_TOKEN_SENTINEL}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-test",
+        stream: true,
+        messages: [{ role: "user", content: "ping" }],
+      }),
+    });
+
+    // The credential-injection proxy fails closed on streaming responses; the
+    // adapter rejects stream:true up front with a clean, SDK-parseable error and
+    // never forwards.
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as {
+      error?: { message?: string; type?: string };
+      ok?: boolean;
+    };
+    expect(body.ok).toBeUndefined();
+    expect(body.error?.type).toBe("invalid_request_error");
+    expect(body.error?.message).toContain("streaming");
+    expect(lastForwarded).toBeNull();
+
+    // no invocation recorded: the guard runs before the policy/proxy path.
+    const rows = await agentInvocations(capId);
+    expect(rows.length).toBe(0);
+  });
+
+  it("missing grant => 403 and no proxy forward", async () => {
+    await seedOpenAIChatCapability({ grant: false });
+    currentPolicySet = [capRule("r-openai", "allow", undefined, ["openai.chat"])];
+    const app = buildInvokeApp();
+    const res = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
+    expect(res.status).toBe(403);
+    expect(lastForwarded).toBeNull();
+  });
+
+  it("no matching allow => 403 default-deny in OpenAI-error shape", async () => {
+    await seedOpenAIChatCapability();
+    currentPolicySet = [];
+    const app = buildInvokeApp();
+    const res = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
+    expect(res.status).toBe(403);
+    expect(lastForwarded).toBeNull();
+    // OpenAI-SDK-parseable error shape (not the Steward {ok:false} wrapper).
+    const body = (await res.json()) as {
+      error?: { message?: string; type?: string };
+      ok?: boolean;
+    };
+    expect(body.ok).toBeUndefined();
+    expect(typeof body.error?.message).toBe("string");
+    expect(body.error?.type).toBe("permission_error");
+    // the internal gate marker must not leak to the client.
+    expect(res.headers.get("x-steward-cap-gate")).toBeNull();
+  });
+
+  it("unauthenticated adapter request => 401 in OpenAI-error shape", async () => {
+    await seedOpenAIChatCapability();
+    currentPolicySet = [capRule("r-openai", "allow", undefined, ["openai.chat"])];
+    const app = buildInvokeApp(false);
+    const res = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { error?: { message?: string; type?: string } };
+    expect(typeof body.error?.message).toBe("string");
+    expect(body.error?.type).toBe("invalid_request_error");
+    expect(lastForwarded).toBeNull();
+  });
+
+  it("require-approval => 202 and no proxy forward", async () => {
+    const capId = await seedOpenAIChatCapability();
+    currentPolicySet = [capRule("r-openai", "require-approval", undefined, ["openai.chat"])];
+    const app = buildInvokeApp();
+    const res = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", messages: [] }),
+    });
+    expect(res.status).toBe(202);
+    expect(lastForwarded).toBeNull();
+    const rows = await agentInvocations(capId);
+    expect(rows.length).toBe(1);
+    expect(rows[0].decision).toBe("approval");
+  });
+
+  it("maxCallsPerHour=1 denies the second adapter request", async () => {
+    const capId = await seedOpenAIChatCapability();
+    currentPolicySet = [capRule("r-openai", "allow", { maxCallsPerHour: 1 }, ["openai.chat"])];
+    const app = buildInvokeApp();
+
+    const first = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "one" }] }),
+    });
+    expect(first.status).toBe(200);
+
+    const second = await app.request("/capabilities/openai.chat/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-test", messages: [{ role: "user", content: "two" }] }),
+    });
+    expect(second.status).toBe(403);
+
+    const rows = await agentInvocations(capId);
+    expect(rows.filter((r) => r.decision === "allow").length).toBe(1);
+    expect(rows.filter((r) => r.decision === "deny").length).toBe(1);
+  });
+
+  it("models list requires agent auth + active grant and does not use proxy env or secret", async () => {
+    await seedOpenAIChatCapability();
+    const originalProxyUrl = process.env.STEWARD_PROXY_URL;
+    delete process.env.STEWARD_PROXY_URL;
+    try {
+      const authed = buildInvokeApp();
+      const res = await authed.request("/capabilities/openai.chat/openai/v1/models", {
+        method: "GET",
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ object: "list", data: [] });
+      expect(lastForwarded).toBeNull();
+
+      const unauthed = buildInvokeApp(false);
+      const noAuth = await unauthed.request("/capabilities/openai.chat/openai/v1/models", {
+        method: "GET",
+      });
+      expect(noAuth.status).toBe(401);
+    } finally {
+      process.env.STEWARD_PROXY_URL = originalProxyUrl;
+    }
+  });
+
+  it("models list fails closed without an active grant", async () => {
+    await seedOpenAIChatCapability({ grant: false });
+    const app = buildInvokeApp();
+    const res = await app.request("/capabilities/openai.chat/openai/v1/models", { method: "GET" });
+    expect(res.status).toBe(403);
   });
 });

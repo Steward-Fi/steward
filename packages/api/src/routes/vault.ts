@@ -18,21 +18,28 @@ import {
 import { tenantConfigs as tenantConfigsTable, users, userTenants } from "@stwd/db";
 import { recordAggregationEvent } from "@stwd/redis";
 import {
+  ExecutionPayloadNormalizationError,
   type PolicyResult,
   rawSigningChainSupport,
   type TenantAuthAbuseConfig,
   toCaip2,
 } from "@stwd/shared";
 import {
+  assertMoneroAddress,
   assertSolanaPriorityFeeWithinCap,
+  BackendBindingMismatchError,
   type DerivedSolanaPolicyFields,
   deriveSolanaPolicyFields,
   detectSolanaPolicyConflicts,
   ENTRY_POINT_V07,
   type ExportPrivateKeyResult,
+  GovernedVault,
+  GovernedVaultError,
   getUserOperationHash,
   isVaultSigningFrozenError,
+  MoneroNotConfiguredError,
   packUserOperation,
+  parseMoneroWalletScope,
   parseSolanaTransaction,
   readEip7702Delegation,
   type UnpackedUserOperationFields,
@@ -76,6 +83,12 @@ import {
   transactions,
   vault,
 } from "../services/context";
+import {
+  consumeExecutionAuthorization,
+  executionPayloadDigestForEvmSign,
+  mintExecutionAuthorization,
+  policyRevisionHashForPolicySet,
+} from "../services/execution-authorization";
 import {
   recordSponsoredGasEvent,
   reserveSponsoredGasEvent,
@@ -663,11 +676,22 @@ function sendCallsActionPayload(input: {
   };
 }
 
-function transactionActionPayload(input: { broadcast: boolean; referenceId?: string | null }) {
+function transactionActionPayload(input: {
+  broadcast: boolean;
+  referenceId?: string | null;
+  nonce?: number | null;
+  gasLimit?: string | null;
+  venue?: string | null;
+  walletAddress?: string | null;
+}) {
   return {
     type: "transaction",
     broadcast: input.broadcast,
     ...(input.referenceId ? { referenceId: input.referenceId } : {}),
+    ...(input.nonce !== undefined && input.nonce !== null ? { nonce: input.nonce } : {}),
+    ...(input.gasLimit ? { gasLimit: input.gasLimit } : {}),
+    ...(input.venue ? { venue: input.venue } : {}),
+    ...(input.walletAddress ? { walletAddress: input.walletAddress } : {}),
   };
 }
 
@@ -823,18 +847,129 @@ function getSendCallsActionPayload(payload: unknown): {
   };
 }
 
+/**
+ * Raised when a stored `transaction` action payload contains a present field of
+ * the wrong type / out-of-range value. Replaying such a payload previously
+ * silently coerced or dropped the offending field (e.g. a non-boolean broadcast
+ * coerced to true, a string/float/negative/unsafe nonce dropped, wrong-type
+ * gasLimit/venue/walletAddress dropped). That silent normalization changed the
+ * caller's approved intent under the approval digest and could route a mutated
+ * request to raw signing. The strict validator now throws instead, and the
+ * approval replay path converts this into a fail-closed 409 with a specific
+ * rejection audit (malformed_transaction_action_payload).
+ */
+class TransactionActionPayloadValidationError extends Error {
+  constructor(
+    message: string,
+    readonly field: string,
+  ) {
+    super(message);
+    this.name = "TransactionActionPayloadValidationError";
+  }
+}
+
+/**
+ * STRICT validator for a stored `transaction` action payload.
+ *
+ * Returns null ONLY when the payload is not a transaction-typed action (so
+ * transfer/send_calls actions flow past unaffected). For a transaction-typed
+ * payload every present optional field is validated to its exact contract and a
+ * violation THROWS TransactionActionPayloadValidationError rather than being
+ * silently coerced/dropped. This keeps the replay digest an honest reflection
+ * of the approved caller intent.
+ */
 function getTransactionActionPayload(payload: unknown): {
   type: "transaction";
   broadcast: boolean;
   referenceId?: string;
+  nonce?: number;
+  gasLimit?: string;
+  venue?: string;
+  walletAddress?: string;
 } | null {
   if (!payload || typeof payload !== "object") return null;
   const value = payload as Record<string, unknown>;
   if (value.type !== "transaction") return null;
+
+  // broadcast: REQUIRED boolean. A missing or non-boolean broadcast was
+  // previously coerced (value.broadcast !== false) to true, silently promoting
+  // an ambiguous payload to a broadcast execution. Require it explicitly.
+  if (typeof value.broadcast !== "boolean") {
+    throw new TransactionActionPayloadValidationError(
+      "transaction action payload 'broadcast' must be a boolean",
+      "broadcast",
+    );
+  }
+
+  // nonce: OPTIONAL, but a PRESENT value (including an explicit null) must be a
+  // non-negative safe integer. Absence is distinguished from a present-null via
+  // Object.hasOwn: a legitimately-minted payload omits the key entirely (the
+  // transactionActionPayload builder spreads it in only when defined+non-null,
+  // and jsonb storage never injects nulls for omitted keys), so a present null
+  // can only come from a malformed/adversarial payload and must fail closed
+  // rather than be silently normalized to "omitted". A string/object/float/
+  // negative/unsafe-integer nonce was likewise previously dropped, silently
+  // changing the digested intent.
+  let nonce: number | undefined;
+  if (Object.hasOwn(value, "nonce")) {
+    if (typeof value.nonce !== "number" || !Number.isSafeInteger(value.nonce) || value.nonce < 0) {
+      throw new TransactionActionPayloadValidationError(
+        "transaction action payload 'nonce' must be a non-negative safe integer",
+        "nonce",
+      );
+    }
+    nonce = value.nonce;
+  }
+
+  // gasLimit: OPTIONAL, but a PRESENT value (including explicit null) must be a
+  // decimal uint string (its actual contract, e.g. "65000"). Absence vs
+  // present-null distinguished via Object.hasOwn; a wrong-type or present-null
+  // gasLimit was previously dropped.
+  let gasLimit: string | undefined;
+  if (Object.hasOwn(value, "gasLimit")) {
+    if (!isUint256DecimalString(value.gasLimit)) {
+      throw new TransactionActionPayloadValidationError(
+        "transaction action payload 'gasLimit' must be a decimal uint string",
+        "gasLimit",
+      );
+    }
+    gasLimit = value.gasLimit;
+  }
+
+  // venue / walletAddress: OPTIONAL, but a PRESENT value (including explicit
+  // null) must be a string. Absence vs present-null distinguished via
+  // Object.hasOwn; wrong-type or present-null values were previously dropped,
+  // changing the resolved signing wallet/venue.
+  let venue: string | undefined;
+  if (Object.hasOwn(value, "venue")) {
+    if (typeof value.venue !== "string") {
+      throw new TransactionActionPayloadValidationError(
+        "transaction action payload 'venue' must be a string",
+        "venue",
+      );
+    }
+    venue = value.venue;
+  }
+
+  let walletAddress: string | undefined;
+  if (Object.hasOwn(value, "walletAddress")) {
+    if (typeof value.walletAddress !== "string") {
+      throw new TransactionActionPayloadValidationError(
+        "transaction action payload 'walletAddress' must be a string",
+        "walletAddress",
+      );
+    }
+    walletAddress = value.walletAddress;
+  }
+
   return {
     type: "transaction",
-    broadcast: value.broadcast !== false,
+    broadcast: value.broadcast,
     referenceId: actionReferenceId(value) ?? undefined,
+    nonce,
+    gasLimit,
+    venue,
+    walletAddress,
   };
 }
 
@@ -1059,6 +1194,71 @@ function hasCalldata(value: unknown): boolean {
   return typeof value === "string" && value.trim() !== "" && value.trim().toLowerCase() !== "0x";
 }
 
+function executionAuthorizationErrorResponse(
+  c: Context<{ Variables: AppVariables }>,
+  error: unknown,
+): Response | null {
+  if (!(error instanceof GovernedVaultError)) return null;
+  const status = error.code === "authorization_rejected" ? 403 : 500;
+  return c.json<ApiResponse>({ ok: false, error: error.message }, status);
+}
+
+// Fail-closed handler for the TOCTOU backend-binding guard.
+//
+// `BackendBindingMismatchError` is thrown at the vault signing boundary
+// (Vault.signTransaction) AFTER the gateway authorization has been minted and
+// consumed, when the wallet's custody backend has flipped from the
+// gateway-supported "local-vault" to "third-party-custody" between the gateway's
+// resolveExecutionBackend precheck and the raw sign. It is NOT a
+// GovernedVaultError, so without this explicit handler it would fall through to
+// the generic 500 path with no specific audit. Here we write a dedicated
+// rejection audit event (matching the vault.execution_authorization.rejected
+// taxonomy, reason `backend_binding_mismatch`) and return the same 409
+// fail-closed shape the earlier gateway precheck uses, so the two custody-
+// mismatch rejection points are indistinguishable to the caller.
+//
+// Returns null (does NOT swallow) for any other error so the outer catch keeps
+// its existing handling for GovernedVaultError / RPC / generic failures.
+async function backendBindingMismatchResponse(
+  c: Context<{ Variables: AppVariables }>,
+  error: unknown,
+  context: {
+    tenantId: string;
+    agentId: string;
+    txId?: string;
+    authorizationId?: string;
+    chainId?: number;
+  },
+): Promise<Response | null> {
+  if (!(error instanceof BackendBindingMismatchError)) return null;
+  await writeVaultAudit(c, {
+    tenantId: context.tenantId,
+    actorType: "agent",
+    actorId: context.agentId,
+    action: "vault.execution_authorization.rejected",
+    resourceType: context.authorizationId ? "execution_authorization" : "transaction",
+    resourceId: context.authorizationId ?? context.txId ?? context.agentId,
+    metadata: {
+      agentId: context.agentId,
+      reason: error.code,
+      expectedBackend: error.expectedBackend,
+      resolvedBackend: error.resolvedBackend,
+      ...(context.txId ? { txId: context.txId } : {}),
+      ...(context.authorizationId ? { authorizationId: context.authorizationId } : {}),
+      ...(context.chainId !== undefined ? { chainId: context.chainId } : {}),
+    },
+  });
+  return c.json<ApiResponse<{ code: string }>>(
+    {
+      ok: false,
+      error:
+        "This wallet uses third-party custody, which is not supported by the execution gateway. Resubmit through a supported custody path.",
+      data: { code: error.code },
+    },
+    409,
+  );
+}
+
 function isHex(value: unknown): value is `0x${string}` {
   return typeof value === "string" && /^0x[0-9a-fA-F]*$/.test(value);
 }
@@ -1181,6 +1381,53 @@ function maxBitcoinPsbtFeeSats(): bigint {
   const configured = process.env.STEWARD_MAX_BITCOIN_PSBT_FEE_SATS;
   if (configured && /^\d+$/.test(configured)) return BigInt(configured);
   return DEFAULT_MAX_BITCOIN_PSBT_FEE_SATS;
+}
+
+/** Default Monero fee ceiling: 0.1 XMR — far above any sane network fee. */
+const DEFAULT_MAX_MONERO_FEE_PICONERO = 100_000_000_000n;
+
+function maxMoneroFeePiconero(): bigint {
+  const configured = process.env.STEWARD_MAX_MONERO_FEE_PICONERO;
+  if (configured && /^\d+$/.test(configured)) return BigInt(configured);
+  return DEFAULT_MAX_MONERO_FEE_PICONERO;
+}
+
+/** Positive uint64 decimal string (piconero). */
+function isPiconeroAmountString(value: unknown): value is string {
+  if (typeof value !== "string" || !/^[0-9]{1,20}$/.test(value)) return false;
+  const amount = BigInt(value);
+  return amount > 0n && amount <= 2n ** 64n - 1n;
+}
+
+/**
+ * Maps Monero vault failures to their HTTP shape: 423 for signing freezes,
+ * 503 when the wallet-rpc backend is not configured (fail closed, e.g. the
+ * Workers deployment), 404 for unknown wallet scopes. Returns null so callers
+ * fall through to their own handling otherwise.
+ */
+function moneroErrorResponse(
+  c: Context<{ Variables: AppVariables }>,
+  error: unknown,
+): Response | null {
+  const frozen = frozenSigningResponse(c, error);
+  if (frozen) return frozen;
+  if (
+    error instanceof MoneroNotConfiguredError ||
+    (error instanceof Error && error.name === "MoneroNotConfiguredError")
+  ) {
+    return c.json<ApiResponse>({ ok: false, error: error.message }, 503);
+  }
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.includes("No signing key found")) {
+    return c.json<ApiResponse>({ ok: false, error: "Monero wallet not found for this scope" }, 404);
+  }
+  if (raw.includes("Monero wallet scope must look like")) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must look like monero:<network>:<account>" },
+      400,
+    );
+  }
+  return null;
 }
 
 function parseBigIntString(value: unknown): bigint | null {
@@ -1827,6 +2074,53 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
 
   const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
   const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+  const isEvmSignRequest = resolvedChainId !== 101 && resolvedChainId !== 102;
+  const executionPayloadDigest = isEvmSignRequest
+    ? executionPayloadDigestForEvmSign(signRequest)
+    : null;
+  const executionPolicyRevisionHash = isEvmSignRequest
+    ? policyRevisionHashForPolicySet(policySet)
+    : null;
+
+  // FINDING 4: the execution authorization minted below is cryptographically
+  // bound to backend "local-vault". Resolve the backend this request would
+  // ACTUALLY route to BEFORE minting/signing. External custody is NOT a
+  // gateway-supported backend in #182; a local-vault-bound authorization must
+  // never authorize an third-party-custody execution. Fail closed before the
+  // third-party custody provider is ever reached.
+  if (isEvmSignRequest) {
+    const resolvedBackend = await vault.resolveExecutionBackend({
+      tenantId,
+      agentId,
+      chainId: signRequest.chainId,
+      venue: signRequest.venue,
+      walletAddress: signRequest.walletAddress,
+    });
+    if (resolvedBackend !== "local-vault") {
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "agent",
+        actorId: agentId,
+        action: "vault.execution_authorization.rejected",
+        resourceType: "transaction",
+        resourceId: agentId,
+        metadata: {
+          agentId,
+          reason: "third-party_custody_not_gateway_supported",
+          resolvedBackend,
+          chainId: signRequest.chainId,
+        },
+      });
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error:
+            "This wallet uses third-party custody, which is not supported by the execution gateway. Resubmit through a supported custody path.",
+        },
+        409,
+      );
+    }
+  }
 
   // ── Redis rate-limit check (before policy evaluation) ──────────────────────
   const rateLimitResult = await enforceRateLimit(agentId, policySet);
@@ -1883,9 +2177,15 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
             value: signRequest.value,
             data: signRequest.data,
             chainId: signRequest.chainId,
+            executionPayloadDigest,
+            executionPolicyRevisionHash,
             policyResults: evaluation.results,
             actionPayload: transactionActionPayload({
               broadcast: signRequest.broadcast !== false,
+              nonce: signRequest.nonce,
+              gasLimit: signRequest.gasLimit,
+              venue: signRequest.venue,
+              walletAddress: signRequest.walletAddress,
             }),
           });
           await tx
@@ -1941,6 +2241,8 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
         value: signRequest.value,
         data: signRequest.data,
         chainId: signRequest.chainId,
+        executionPayloadDigest,
+        executionPolicyRevisionHash,
         policyResults: evaluation.results,
       });
 
@@ -1980,6 +2282,35 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     try {
       const txId = crypto.randomUUID();
       const txStatus: "broadcast" | "signed" = shouldBroadcast ? "broadcast" : "signed";
+      const executionAuthorization =
+        isEvmSignRequest && executionPayloadDigest
+          ? await mintExecutionAuthorization({
+              requestId: txId,
+              tenantId,
+              agentId,
+              capability: "wallet.sign_transaction",
+              payloadDigest: executionPayloadDigest,
+              backend: "local-vault",
+              policyRevisionHash: executionPolicyRevisionHash ?? undefined,
+              idempotencyKey: c.req.header("Idempotency-Key") ?? undefined,
+            })
+          : null;
+      if (executionAuthorization && executionPayloadDigest) {
+        await writeVaultAudit(c, {
+          tenantId,
+          actorType: "agent",
+          actorId: agentId,
+          action: "vault.execution_authorization.minted",
+          resourceType: "execution_authorization",
+          resourceId: executionAuthorization.id,
+          metadata: {
+            txId,
+            payloadDigest: executionPayloadDigest,
+            policyRevisionHash: executionPolicyRevisionHash,
+            expiresAt: executionAuthorization.expiresAt,
+          },
+        });
+      }
       await writeVaultAudit(c, {
         tenantId,
         actorType: "agent",
@@ -1996,17 +2327,73 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
           policyResults: evaluation.results,
         },
       });
-      const result = await vault.signTransaction(signRequest, {
-        txId,
-        policyResults: evaluation.results,
-        status: txStatus,
-      });
+      const result =
+        executionAuthorization && executionPayloadDigest
+          ? await new GovernedVault(vault, async (authorization, expected) => {
+              try {
+                await consumeExecutionAuthorization(authorization, expected);
+                await writeVaultAudit(c, {
+                  tenantId,
+                  actorType: "agent",
+                  actorId: agentId,
+                  action: "vault.execution_authorization.consumed",
+                  resourceType: "execution_authorization",
+                  resourceId: authorization.id,
+                  metadata: {
+                    txId,
+                    payloadDigest: expected.payloadDigest,
+                    capability: expected.capability,
+                    backend: expected.backend,
+                  },
+                });
+              } catch (error) {
+                await writeVaultAudit(c, {
+                  tenantId,
+                  actorType: "agent",
+                  actorId: agentId,
+                  action: "vault.execution_authorization.rejected",
+                  resourceType: "execution_authorization",
+                  resourceId: authorization.id,
+                  metadata: {
+                    txId,
+                    payloadDigest: expected.payloadDigest,
+                    error: error instanceof Error ? error.message : "authorization rejected",
+                  },
+                });
+                throw error;
+              }
+            }).signTransactionAuthorized(signRequest, {
+              txId,
+              policyResults: evaluation.results,
+              status: txStatus,
+              executionAuthorization,
+              executionPayloadDigest,
+            })
+          : await (async () => {
+              // Defense-in-depth: every primary EVM sign request has a non-null
+              // executionPayloadDigest and therefore mints+consumes an
+              // authorization above. The raw fallback exists ONLY for the
+              // non-EVM (Solana) chain family. An EVM request reaching here is an
+              // invariant violation (fail-open), not a signable request.
+              if (isEvmSignRequest) {
+                throw new Error(
+                  "invariant: primary EVM sign reached raw signer without gateway authorization",
+                );
+              }
+              return vault.signTransaction(signRequest, {
+                txId,
+                policyResults: evaluation.results,
+                status: txStatus,
+              });
+            })();
 
       await db
         .update(transactions)
         .set({
           status: txStatus,
           txHash: shouldBroadcast ? result : undefined,
+          executionPayloadDigest,
+          executionPolicyRevisionHash,
           policyResults: evaluation.results,
           signedAt: new Date(),
         })
@@ -2080,6 +2467,14 @@ vaultRoutes.post("/:agentId/sign", async (c) => {
     } catch (e: unknown) {
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
+      const bindingMismatch = await backendBindingMismatchResponse(c, e, {
+        tenantId,
+        agentId,
+        chainId: resolvedChainId,
+      });
+      if (bindingMismatch) return bindingMismatch;
+      const authorizationError = executionAuthorizationErrorResponse(c, e);
+      if (authorizationError) return authorizationError;
       const requestId = c.get("requestId") || "unknown";
       const rawMessage = e instanceof Error ? e.message : "Unknown error";
       console.error(`[${requestId}] Sign transaction failed for agent ${agentId}:`, e);
@@ -3188,10 +3583,43 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     transactionRow.actionType === "send_calls"
       ? getSendCallsActionPayload(transactionRow.actionPayload)
       : null;
-  const transactionPayload =
-    !transactionRow.actionType || transactionRow.actionType === "transaction"
-      ? getTransactionActionPayload(transactionRow.actionPayload)
-      : null;
+  // Validate the stored transaction action payload strictly. A malformed present
+  // field (wrong-type broadcast, string/float/negative/unsafe nonce, wrong-type
+  // gasLimit/venue/walletAddress) THROWS here rather than being silently
+  // coerced/dropped. We fail closed with a specific rejection audit and 409 so
+  // no mutated intent can ever reach the replay digest / raw signer.
+  let transactionPayload: ReturnType<typeof getTransactionActionPayload> = null;
+  if (!transactionRow.actionType || transactionRow.actionType === "transaction") {
+    try {
+      transactionPayload = getTransactionActionPayload(transactionRow.actionPayload);
+    } catch (error) {
+      if (error instanceof TransactionActionPayloadValidationError) {
+        await writeVaultAudit(c, {
+          tenantId,
+          actorType: "user",
+          actorId,
+          action: "vault.execution_authorization.rejected",
+          resourceType: "transaction",
+          resourceId: txId,
+          metadata: {
+            agentId,
+            reason: "malformed_transaction_action_payload",
+            field: error.field,
+            error: error.message,
+          },
+        });
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error:
+              "This pending EVM approval has a malformed transaction action payload and cannot be replayed. Resubmit the transaction.",
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  }
   const isSendCallsAction = sendCallsPayload !== null;
   if (
     transactionRow.actionType === "send_calls" ||
@@ -3246,13 +3674,139 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
       const approvalSignRequest: SignRequest = {
         ...toSignRequest(transactionRow),
         tenantId,
+        nonce: transactionPayload?.nonce,
         gasLimit:
           transferPayload && transferPayload.token !== "native" && transactionRow.data
             ? "65000"
-            : undefined,
+            : transactionPayload?.gasLimit,
         broadcast: requestedBroadcast,
+        venue: transactionPayload?.venue,
+        walletAddress: transactionPayload?.walletAddress,
       };
       const currentPolicySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+      const currentExecutionPolicyRevisionHash = policyRevisionHashForPolicySet(currentPolicySet);
+      // A row that is neither Solana, nor a transfer action, nor a send_calls
+      // action would, on the EVM path, reach the raw Vault.signTransaction
+      // fallback. Every such row is a raw-EVM-signing candidate and MUST be
+      // proven to be a validated primary EVM approval (typed transaction action
+      // payload + non-null stored digest + non-null stored policy revision +
+      // digest match). If any invariant is absent/malformed we reject fail-closed
+      // here and NEVER route to raw signing. This closes the legacy/null-digest
+      // and malformed-actionPayload replay-fail-open holes.
+      const isRawEvmSigningCandidate = !isSolana && transferPayload === null && !isSendCallsAction;
+      const isPrimaryEvmApproval = isRawEvmSigningCandidate && transactionPayload !== null;
+
+      const failClosed = async (
+        reason: string,
+        error: string,
+        replayPayloadDigest: string | null,
+        extraMetadata?: Record<string, unknown>,
+      ) => {
+        await writeVaultAudit(c, {
+          tenantId,
+          actorType: "user",
+          actorId,
+          action: "vault.execution_authorization.rejected",
+          resourceType: "transaction",
+          resourceId: txId,
+          metadata: {
+            agentId,
+            reason,
+            hasTransactionActionPayload: transactionPayload !== null,
+            hasStoredPayloadDigest: transactionRow.executionPayloadDigest !== null,
+            hasStoredPolicyRevisionHash: transactionRow.executionPolicyRevisionHash !== null,
+            storedPayloadDigest: transactionRow.executionPayloadDigest,
+            replayPayloadDigest,
+            ...extraMetadata,
+          },
+        });
+        return c.json<ApiResponse>({ ok: false, error }, 409);
+      };
+
+      // Compute the replay digest inside a guarded block. The shared normalizer
+      // throws ExecutionPayloadNormalizationError on any malformed numeric caller
+      // field (e.g. an unsafe-integer nonce). Previously this threw BEFORE the
+      // failClosed helper and the outer catch only handles GovernedVaultError, so
+      // signing was prevented but no specific rejection audit was produced. We now
+      // convert it into the same fail-closed 409 path with a specific reason.
+      let approvalExecutionPayloadDigest: string | null = null;
+      if (isPrimaryEvmApproval) {
+        try {
+          approvalExecutionPayloadDigest = executionPayloadDigestForEvmSign(approvalSignRequest);
+        } catch (error) {
+          if (error instanceof ExecutionPayloadNormalizationError) {
+            return failClosed(
+              "malformed_transaction_action_payload",
+              "This pending EVM approval has a malformed transaction action payload and cannot be replayed. Resubmit the transaction.",
+              null,
+              { field: error.field, error: error.message },
+            );
+          }
+          throw error;
+        }
+      }
+
+      if (isRawEvmSigningCandidate) {
+        // 1. Require a valid typed transaction action payload. A missing/malformed
+        //    actionPayload previously flipped isPrimaryEvmApproval=false and fell
+        //    through to raw signing. Now it fails closed.
+        if (!isPrimaryEvmApproval) {
+          return failClosed(
+            "missing_or_malformed_transaction_action_payload",
+            "This pending EVM approval lacks a valid typed transaction action payload and cannot be replayed. Resubmit the transaction.",
+            approvalExecutionPayloadDigest,
+          );
+        }
+        // 2. Require a non-null stored execution payload digest. Legacy/null-digest
+        //    rows minted before the gateway must be resubmitted, never raw-signed.
+        if (!transactionRow.executionPayloadDigest) {
+          return failClosed(
+            "missing_stored_execution_payload_digest",
+            "This pending EVM approval predates execution-authorization binding (no stored payload digest) and cannot be replayed. Resubmit the transaction.",
+            approvalExecutionPayloadDigest,
+          );
+        }
+        // 3. Require a non-null stored execution policy revision hash. Binds the
+        //    approval decision to the policy snapshot evaluated at queue time.
+        if (!transactionRow.executionPolicyRevisionHash) {
+          return failClosed(
+            "missing_stored_execution_policy_revision_hash",
+            "This pending EVM approval predates policy-revision binding (no stored policy revision hash) and cannot be replayed. Resubmit the transaction.",
+            approvalExecutionPayloadDigest,
+          );
+        }
+        // 4. Require the stored digest (from the immutable approval snapshot) to
+        //    equal the digest recomputed from the replay request. This prevents
+        //    any post-queue mutation of the approved caller intent.
+        if (transactionRow.executionPayloadDigest !== approvalExecutionPayloadDigest) {
+          return failClosed(
+            "stored_digest_mismatch",
+            "Pending transaction digest no longer matches the replay request",
+            approvalExecutionPayloadDigest,
+          );
+        }
+        // 5. FINDING 4: the authorization is cryptographically bound to backend
+        //    "local-vault". Resolve the backend the request would ACTUALLY route
+        //    to before minting. External custody is NOT gateway-supported in
+        //    #182; a local-vault-bound authorization must never authorize an
+        //    third-party-custody execution. Fail closed before the provider is
+        //    reached.
+        const resolvedBackend = await vault.resolveExecutionBackend({
+          tenantId,
+          agentId,
+          chainId: approvalSignRequest.chainId,
+          venue: approvalSignRequest.venue,
+          walletAddress: approvalSignRequest.walletAddress,
+        });
+        if (resolvedBackend !== "local-vault") {
+          return failClosed(
+            "third-party_custody_not_gateway_supported",
+            "This wallet uses third-party custody, which is not supported by the execution gateway. Resubmit through a supported custody path.",
+            approvalExecutionPayloadDigest,
+            { resolvedBackend },
+          );
+        }
+      }
       const currentRateLimitResult = await enforceRateLimit(agentId, currentPolicySet);
       if (!currentRateLimitResult.allowed) {
         if (currentRateLimitResult.headers) {
@@ -3444,11 +3998,93 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         irreversibleResult = shouldBroadcast;
         if (shouldBroadcast) completedTxHash = txHash;
       } else {
-        txHash = await vault.signTransaction(approvalSignRequest, {
-          txId,
-          policyResults: currentEvaluation.results,
-          status: shouldBroadcast ? "broadcast" : "signed",
-        });
+        if (isPrimaryEvmApproval && approvalExecutionPayloadDigest) {
+          const executionAuthorization = await mintExecutionAuthorization({
+            requestId: txId,
+            tenantId,
+            agentId,
+            capability: "wallet.sign_transaction",
+            payloadDigest: approvalExecutionPayloadDigest,
+            backend: "local-vault",
+            policyRevisionHash: currentExecutionPolicyRevisionHash,
+            approvalId: txId,
+            idempotencyKey: c.req.header("Idempotency-Key") ?? undefined,
+          });
+          await writeVaultAudit(c, {
+            tenantId,
+            actorType: "user",
+            actorId,
+            action: "vault.execution_authorization.minted",
+            resourceType: "execution_authorization",
+            resourceId: executionAuthorization.id,
+            metadata: {
+              txId,
+              payloadDigest: approvalExecutionPayloadDigest,
+              originalPayloadDigest: transactionRow.executionPayloadDigest,
+              originalPolicyRevisionHash: transactionRow.executionPolicyRevisionHash,
+              policyRevisionHash: currentExecutionPolicyRevisionHash,
+              approvalId: txId,
+              expiresAt: executionAuthorization.expiresAt,
+            },
+          });
+          const governedVault = new GovernedVault(vault, async (authorization, expected) => {
+            try {
+              await consumeExecutionAuthorization(authorization, expected);
+              await writeVaultAudit(c, {
+                tenantId,
+                actorType: "user",
+                actorId,
+                action: "vault.execution_authorization.consumed",
+                resourceType: "execution_authorization",
+                resourceId: authorization.id,
+                metadata: {
+                  txId,
+                  payloadDigest: expected.payloadDigest,
+                  capability: expected.capability,
+                  backend: expected.backend,
+                },
+              });
+            } catch (error) {
+              await writeVaultAudit(c, {
+                tenantId,
+                actorType: "user",
+                actorId,
+                action: "vault.execution_authorization.rejected",
+                resourceType: "execution_authorization",
+                resourceId: authorization.id,
+                metadata: {
+                  txId,
+                  payloadDigest: expected.payloadDigest,
+                  error: error instanceof Error ? error.message : "authorization rejected",
+                },
+              });
+              throw error;
+            }
+          });
+          txHash = await governedVault.signTransactionAuthorized(approvalSignRequest, {
+            txId,
+            policyResults: currentEvaluation.results,
+            status: shouldBroadcast ? "broadcast" : "signed",
+            executionAuthorization,
+            executionPayloadDigest: approvalExecutionPayloadDigest,
+          });
+        } else {
+          // Defense-in-depth: the fail-closed gate above returns early for every
+          // raw-EVM-signing candidate that is not a validated primary EVM
+          // approval, so this raw fallback must only ever handle non-primary EVM
+          // action surfaces (transfer). A raw-EVM-signing candidate reaching here
+          // is an invariant violation, not a signable request.
+          if (isRawEvmSigningCandidate) {
+            throw new Error(
+              "invariant: primary EVM approval reached raw signer without gateway authorization",
+            );
+          }
+          txHash = await vault.signTransaction(approvalSignRequest, {
+            txId,
+            policyResults: currentEvaluation.results,
+            status: shouldBroadcast ? "broadcast" : "signed",
+          });
+        }
         irreversibleResult = shouldBroadcast;
         if (shouldBroadcast) completedTxHash = txHash;
       }
@@ -3469,6 +4105,11 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
         .set({
           status: nextStatus,
           txHash: shouldBroadcast ? txHash : null,
+          executionPayloadDigest:
+            approvalExecutionPayloadDigest ?? transactionRow.executionPayloadDigest,
+          executionPolicyRevisionHash: isPrimaryEvmApproval
+            ? currentExecutionPolicyRevisionHash
+            : transactionRow.executionPolicyRevisionHash,
           policyResults: currentEvaluation.results,
           actionPayload: transferPayload
             ? transferActionPayload({
@@ -3483,6 +4124,10 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
               ? transactionActionPayload({
                   broadcast: transactionPayload.broadcast,
                   referenceId: transactionPayload.referenceId,
+                  nonce: transactionPayload.nonce,
+                  gasLimit: transactionPayload.gasLimit,
+                  venue: transactionPayload.venue,
+                  walletAddress: transactionPayload.walletAddress,
                 })
               : transactionRow.actionPayload,
           signedAt: resolvedAt,
@@ -3572,6 +4217,13 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
     } catch (e: unknown) {
       const frozen = frozenSigningResponse(c, e);
       if (frozen) return frozen;
+      const authorizationError = executionAuthorizationErrorResponse(c, e);
+      const bindingMismatch = await backendBindingMismatchResponse(c, e, {
+        tenantId,
+        agentId,
+        txId,
+        chainId: transactionRow.chainId,
+      });
       if (!irreversibleResult) {
         await db
           .update(approvalQueue)
@@ -3605,6 +4257,9 @@ vaultRoutes.post("/:agentId/approve/:txId", async (c) => {
           })
           .where(and(eq(transactions.id, txId), eq(transactions.agentId, agentId)));
       }
+
+      if (bindingMismatch) return bindingMismatch;
+      if (authorizationError) return authorizationError;
 
       const requestId = c.get("requestId") || "unknown";
       const rawMessage = e instanceof Error ? e.message : "Unknown error";
@@ -4669,6 +5324,18 @@ vaultRoutes.post("/:agentId/sign-raw-digest", async (c) => {
       400,
     );
   }
+  if (chainSupport.capability !== "raw-digest") {
+    // e.g. Monero: ed25519 keys but CLSAG ring signatures — a raw ed25519
+    // digest signature would be meaningless/dangerous. Fail closed and point
+    // at the dedicated transfer route.
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error: `${body.chain} does not support raw-digest signing; use the dedicated /vault/:agentId/${body.chain}/transfer route`,
+      },
+      400,
+    );
+  }
   if (body.curve !== "secp256k1" && body.curve !== "ed25519") {
     const error =
       body.curve === "stark"
@@ -5204,6 +5871,545 @@ vaultRoutes.post("/:agentId/sign-bitcoin-psbt", async (c) => {
       });
       const status = isFinalizationFailure || noSpendableInput ? 400 : 500;
       return c.json<ApiResponse>({ ok: false, error }, status);
+    }
+  });
+});
+
+// GET /vault/:agentId/monero/balance?walletScope=monero:mainnet:0
+// Read-only wallet balance via the monero-wallet-rpc sidecar. The first call
+// after a long idle period refreshes the wallet scan and can take a few
+// seconds; restoreHeight-at-creation keeps that incremental. 503 when Monero
+// support is not configured (fail closed, never a mock balance).
+// resp: { ok: true, data: { balancePiconero, unlockedPiconero, blocksToUnlock, syncedHeight, walletScope, walletAddress, network } }
+vaultRoutes.get("/:agentId/monero/balance", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+  const walletScope = c.req.query("walletScope");
+  if (
+    !isNonEmptyString(walletScope) ||
+    walletScope.length > 256 ||
+    !walletScope.startsWith("monero:")
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must be a non-empty Monero wallet scope" },
+      400,
+    );
+  }
+
+  try {
+    const balance = await vault.getMoneroBalance({ tenantId, agentId, walletScope });
+    return c.json<ApiResponse>({
+      ok: true,
+      data: {
+        balancePiconero: balance.balancePiconero.toString(),
+        unlockedPiconero: balance.unlockedPiconero.toString(),
+        blocksToUnlock: balance.blocksToUnlock,
+        syncedHeight: balance.syncedHeight,
+        walletScope: balance.walletScope,
+        walletAddress: balance.walletAddress,
+        network: balance.network,
+      },
+    });
+  } catch (e) {
+    const mapped = moneroErrorResponse(c, e);
+    if (mapped) return mapped;
+    console.error(`[Vault] monero/balance failed for ${tenantId}/${agentId}:`, e);
+    return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
+  }
+});
+
+// POST /vault/:agentId/monero/transfer
+// Builds, signs, and RELAYS a native Monero transfer through the vault's
+// monero-wallet-rpc backend. Two-phase under the hood: destinations are
+// policy-evaluated first, wallet2 then builds the transaction (do_not_relay)
+// so the exact fee is known, the fee-inclusive aggregate is re-evaluated, and
+// only then is the transaction relayed to the remote daemon. An explicit
+// raw-signing-chain policy keeps the capability opt-in and fail-closed per
+// agent; the vault never accepts a caller-built transaction blob, so policy
+// fields are authoritative by construction.
+// body: { "walletScope": "monero:mainnet:0", "destinations": [{ "address": "4...", "amountPiconero": "1000000000000" }], "priority"?: 0-3, "referenceId"?: "caller-id" }
+// resp: { ok: true, data: { transactionId, txHash, feePiconero, amountPiconero, totalPiconero, walletScope, walletAddress, network } }
+vaultRoutes.post("/:agentId/monero/transfer", async (c) => {
+  if (!requireAgentAccess(c)) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Forbidden: token scope does not match agent" },
+      403,
+    );
+  }
+  const tenantId = c.get("tenantId");
+  const agentId = c.req.param("agentId");
+  const agent = await ensureAgentForTenant(tenantId, agentId);
+  if (!agent) {
+    return c.json<ApiResponse>({ ok: false, error: "Agent not found" }, 404);
+  }
+
+  const body = await safeJsonParse<{
+    walletScope?: unknown;
+    destinations?: unknown;
+    priority?: unknown;
+    referenceId?: unknown;
+  }>(c);
+  if (!body) {
+    return c.json<ApiResponse>({ ok: false, error: "Invalid JSON in request body" }, 400);
+  }
+  if (
+    !isNonEmptyString(body.walletScope) ||
+    body.walletScope.length > 256 ||
+    !body.walletScope.startsWith("monero:")
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must be a non-empty Monero wallet scope" },
+      400,
+    );
+  }
+  const walletScope = body.walletScope;
+  let scopeNetwork: "mainnet" | "stagenet";
+  try {
+    scopeNetwork = parseMoneroWalletScope(walletScope).network;
+  } catch {
+    return c.json<ApiResponse>(
+      { ok: false, error: "walletScope must look like monero:<network>:<account>" },
+      400,
+    );
+  }
+  if (!Array.isArray(body.destinations) || body.destinations.length === 0) {
+    return c.json<ApiResponse>({ ok: false, error: "destinations must be a non-empty array" }, 400);
+  }
+  if (body.destinations.length > 15) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "destinations must contain at most 15 entries" },
+      400,
+    );
+  }
+  const destinations: Array<{ address: string; amountPiconero: string }> = [];
+  for (const [index, entry] of body.destinations.entries()) {
+    const destination = entry as { address?: unknown; amountPiconero?: unknown };
+    if (!isNonEmptyString(destination.address) || destination.address.length > 128) {
+      return c.json<ApiResponse>(
+        { ok: false, error: `destinations[${index}].address must be a Monero address` },
+        400,
+      );
+    }
+    try {
+      // Base58 + checksum + network-prefix validation. Base58 is
+      // case-significant, so no normalization happens anywhere in this path.
+      assertMoneroAddress(destination.address, scopeNetwork);
+    } catch (e) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `destinations[${index}].address is invalid: ${e instanceof Error ? e.message : "malformed"}`,
+        },
+        400,
+      );
+    }
+    if (!isPiconeroAmountString(destination.amountPiconero)) {
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: `destinations[${index}].amountPiconero must be a positive decimal piconero string`,
+        },
+        400,
+      );
+    }
+    destinations.push({
+      address: destination.address,
+      amountPiconero: destination.amountPiconero,
+    });
+  }
+  if (
+    body.priority !== undefined &&
+    (typeof body.priority !== "number" ||
+      !Number.isInteger(body.priority) ||
+      body.priority < 0 ||
+      body.priority > 3)
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "priority must be an integer between 0 and 3" },
+      400,
+    );
+  }
+  const priority = body.priority as number | undefined;
+  const referenceId = parseReferenceId(body.referenceId);
+  if (referenceId === null) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "referenceId must be a non-empty string up to 128 characters" },
+      400,
+    );
+  }
+
+  // Honest-capability gate: Monero is a transfer-intent chain — the generic
+  // raw-digest surface can never serve it, and this route can never serve
+  // anything else.
+  const chainSupport = rawSigningChainSupport("monero");
+  if (
+    !chainSupport?.supported ||
+    chainSupport.curve !== "ed25519" ||
+    chainSupport.capability !== "transfer-intent"
+  ) {
+    return c.json<ApiResponse>(
+      { ok: false, error: "Monero transfers are not supported by the raw-signing policy model" },
+      400,
+    );
+  }
+  const signerAuthorization = await requireSignerPermission(
+    c,
+    tenantId,
+    agentId,
+    "sign_transaction",
+  );
+  if (!signerAuthorization.ok) return signerAuthorization.response;
+
+  const policySet = await getScopedPolicySet(tenantId, agentId, c.get("agentPolicyIds"));
+  const hasMoneroSigningPolicy = policySet.some((p) => p.enabled && p.type === "raw-signing-chain");
+  if (!hasMoneroSigningPolicy) {
+    return c.json<ApiResponse>(
+      {
+        ok: false,
+        error:
+          "Monero transfers require a `raw-signing-chain` policy for this agent. Add one that explicitly allows monero and ed25519.",
+      },
+      403,
+    );
+  }
+  const conditionSets = await loadConditionSetsForPolicies(tenantId, policySet);
+  const rateLimitResult = await enforceRateLimit(agentId, policySet);
+  if (!rateLimitResult.allowed) {
+    if (rateLimitResult.headers) {
+      for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+    }
+    return c.json<ApiResponse>(
+      { ok: false, error: rateLimitResult.reason || "Rate limit exceeded" },
+      429,
+    );
+  }
+  if (rateLimitResult.headers) {
+    for (const [key, value] of Object.entries(rateLimitResult.headers)) c.header(key, value);
+  }
+
+  // This route broadcasts: require idempotency and honor referenceId dedupe.
+  const idempotencyResponse = requireBroadcastActionIdempotency(c, true, "Monero transfers");
+  if (idempotencyResponse) return idempotencyResponse;
+  const existingAction = await findActionByReferenceId(agentId, "monero_transfer", referenceId);
+  if (existingAction) {
+    return c.json<ApiResponse>({
+      ok: existingAction.status !== "rejected" && existingAction.status !== "failed",
+      error:
+        existingAction.status === "rejected"
+          ? "Monero transfer rejected by policy"
+          : existingAction.status === "failed"
+            ? "Monero transfer failed"
+            : undefined,
+      data: {
+        transactionId: existingAction.id,
+        txHash: existingAction.txHash ?? null,
+        status: existingAction.status,
+        deduplicated: true,
+      },
+    });
+  }
+
+  const destinationTotalPiconero = destinations.reduce(
+    (total, destination) => total + BigInt(destination.amountPiconero),
+    0n,
+  );
+  const moneroChainId = scopeNetwork === "mainnet" ? 301 : 302;
+
+  return withAgentSpendLock(agentId, async () => {
+    const lockedExistingAction = await findActionByReferenceId(
+      agentId,
+      "monero_transfer",
+      referenceId,
+    );
+    if (lockedExistingAction) {
+      return c.json<ApiResponse>({
+        ok: lockedExistingAction.status !== "rejected" && lockedExistingAction.status !== "failed",
+        data: {
+          transactionId: lockedExistingAction.id,
+          txHash: lockedExistingAction.txHash ?? null,
+          status: lockedExistingAction.status,
+          deduplicated: true,
+        },
+      });
+    }
+
+    const stats = await getTransactionStats(agentId);
+    const policyResults: PolicyResult[] = [];
+    // NOTE: USD-denominated rules fail closed for Monero (the price oracle has
+    // no XMR source), so operators must use piconero-denominated limits.
+    for (const [index, destination] of destinations.entries()) {
+      const evaluation = await policyEngine.evaluate(policySet, {
+        request: {
+          agentId,
+          tenantId,
+          to: destination.address,
+          value: destination.amountPiconero,
+          chainId: moneroChainId,
+          broadcast: true,
+        },
+        recentTxCount1h: stats.recentTxCount1h,
+        recentTxCount24h: stats.recentTxCount24h,
+        spentToday: stats.spentToday,
+        spentThisWeek: stats.spentThisWeek,
+        priceOracle,
+        conditionSets,
+        rawSigning: { chain: "monero", curve: "ed25519" },
+      });
+      const destinationResults = evaluation.results.map((result) => ({
+        ...result,
+        destinationIndex: index,
+      }));
+      policyResults.push(...destinationResults);
+      if (!evaluation.approved) {
+        return c.json<ApiResponse>(
+          {
+            ok: false,
+            error: "Monero transfer rejected by policy",
+            data: {
+              destination: {
+                index,
+                address: destination.address,
+                amountPiconero: destination.amountPiconero,
+              },
+              policyResults: destinationResults,
+            },
+          },
+          403,
+        );
+      }
+    }
+
+    // Build + sign WITHOUT relaying so the exact fee is known before the
+    // aggregate policy decision and before anything reaches the network.
+    let prepared: Awaited<ReturnType<typeof vault.prepareMoneroTransfer>>;
+    try {
+      prepared = await vault.prepareMoneroTransfer({
+        tenantId,
+        agentId,
+        walletScope,
+        destinations,
+        priority,
+      });
+    } catch (e) {
+      const mapped = moneroErrorResponse(c, e);
+      if (mapped) return mapped;
+      console.error(`[Vault] monero/transfer prepare failed for ${tenantId}/${agentId}:`, e);
+      const raw = e instanceof Error ? e.message : String(e);
+      const isFundsError = /not enough (unlocked )?money|not enough outputs/i.test(raw);
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: isFundsError ? "Insufficient unlocked Monero balance" : sanitizeErrorMessage(e),
+        },
+        isFundsError ? 400 : 500,
+      );
+    }
+
+    const discardPrepared = async () => {
+      try {
+        await vault.discardMoneroTransfer({ tenantId, agentId, walletScope });
+      } catch {
+        // Best-effort: the wallet cache self-heals on rehydration.
+      }
+    };
+
+    const feePiconero = prepared.feePiconero;
+    const maxFee = maxMoneroFeePiconero();
+    if (feePiconero > maxFee) {
+      await discardPrepared();
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Monero transfer fee exceeds configured maximum",
+          data: { feePiconero: feePiconero.toString(), maxFeePiconero: maxFee.toString() },
+        },
+        403,
+      );
+    }
+    const totalPiconero = destinationTotalPiconero + feePiconero;
+
+    const aggregateEvaluation = await policyEngine.evaluate(policySet, {
+      request: {
+        agentId,
+        tenantId,
+        to: destinations[0].address,
+        value: totalPiconero.toString(),
+        chainId: moneroChainId,
+        broadcast: true,
+      },
+      recentTxCount1h: stats.recentTxCount1h,
+      recentTxCount24h: stats.recentTxCount24h,
+      spentToday: stats.spentToday,
+      spentThisWeek: stats.spentThisWeek,
+      priceOracle,
+      conditionSets,
+      rawSigning: { chain: "monero", curve: "ed25519" },
+    });
+    const aggregatePolicyResults = aggregateEvaluation.results.map((result) => ({
+      ...result,
+      aggregate: true,
+    }));
+    policyResults.push(...aggregatePolicyResults);
+    if (!aggregateEvaluation.approved) {
+      await discardPrepared();
+      return c.json<ApiResponse>(
+        {
+          ok: false,
+          error: "Monero transfer rejected by policy",
+          data: {
+            aggregate: {
+              destinationTotalPiconero: destinationTotalPiconero.toString(),
+              feePiconero: feePiconero.toString(),
+              totalPiconero: totalPiconero.toString(),
+            },
+            policyResults: aggregatePolicyResults,
+          },
+        },
+        403,
+      );
+    }
+
+    await writeVaultAudit(c, {
+      tenantId,
+      actorType: "user",
+      actorId: c.get("userId") ?? c.get("authType") ?? null,
+      action: "vault.monero_transfer.authorized",
+      resourceType: "wallet",
+      resourceId: agentId,
+      metadata: {
+        walletScope,
+        network: prepared.network,
+        destinations,
+        destinationTotalPiconero: destinationTotalPiconero.toString(),
+        feePiconero: feePiconero.toString(),
+        totalPiconero: totalPiconero.toString(),
+        priority: priority ?? 0,
+        referenceId: referenceId ?? null,
+        policyResults,
+        ...signerAuthAuditMetadata(signerAuthorization.auth),
+      },
+    });
+
+    try {
+      const relayed = await vault.relayMoneroTransfer({
+        tenantId,
+        agentId,
+        walletScope,
+        txMetadata: prepared.txMetadata,
+      });
+
+      const transactionId = crypto.randomUUID();
+      await db.insert(transactions).values({
+        id: transactionId,
+        agentId,
+        status: "broadcast",
+        toAddress: destinations[0].address,
+        value: totalPiconero.toString(),
+        data: null,
+        chainId: moneroChainId,
+        // Monero hashes are stored WITHOUT a 0x prefix; the EVM receipt
+        // poller skips non-0x hashes by design.
+        txHash: relayed.txHash,
+        actionType: "monero_transfer",
+        actionPayload: {
+          type: "monero_transfer",
+          walletScope: prepared.walletScope,
+          walletAddress: prepared.walletAddress,
+          network: prepared.network,
+          destinations,
+          destinationTotalPiconero: destinationTotalPiconero.toString(),
+          feePiconero: feePiconero.toString(),
+          totalPiconero: totalPiconero.toString(),
+          priority: priority ?? 0,
+          referenceId: referenceId ?? null,
+        },
+        policyResults,
+        signedAt: new Date(),
+      });
+
+      recordVaultSpend(agentId, tenantId, totalPiconero.toString(), moneroChainId).catch((err) =>
+        console.error(`[Vault] recordVaultSpend failed for ${agentId}:`, err),
+      );
+
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: "vault.monero_transfer.relayed",
+        resourceType: "wallet",
+        resourceId: agentId,
+        metadata: {
+          transactionId,
+          walletScope: prepared.walletScope,
+          walletAddress: prepared.walletAddress,
+          network: prepared.network,
+          txHash: relayed.txHash,
+          destinationTotalPiconero: destinationTotalPiconero.toString(),
+          feePiconero: feePiconero.toString(),
+          totalPiconero: totalPiconero.toString(),
+          referenceId: referenceId ?? null,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+      });
+
+      dispatchWebhook(tenantId, agentId, "tx_signed", {
+        transactionId,
+        chainId: moneroChainId,
+        caip2: toCaip2(moneroChainId),
+        txHash: relayed.txHash,
+        to: destinations[0].address,
+        value: totalPiconero.toString(),
+        actionType: "monero_transfer",
+      });
+
+      setNoStoreHeaders(c);
+      return c.json<ApiResponse>({
+        ok: true,
+        data: {
+          transactionId,
+          txHash: relayed.txHash,
+          feePiconero: feePiconero.toString(),
+          amountPiconero: destinationTotalPiconero.toString(),
+          totalPiconero: totalPiconero.toString(),
+          walletScope: prepared.walletScope,
+          walletAddress: prepared.walletAddress,
+          network: prepared.network,
+        },
+      });
+    } catch (e) {
+      await discardPrepared();
+      console.error(`[Vault] monero/transfer relay failed for ${tenantId}/${agentId}:`, e);
+      await writeVaultAudit(c, {
+        tenantId,
+        actorType: "user",
+        actorId: c.get("userId") ?? c.get("authType") ?? null,
+        action: "vault.monero_transfer.failed",
+        resourceType: "wallet",
+        resourceId: agentId,
+        metadata: {
+          walletScope,
+          destinations,
+          feePiconero: feePiconero.toString(),
+          totalPiconero: totalPiconero.toString(),
+          referenceId: referenceId ?? null,
+          error: sanitizeErrorMessage(e),
+          policyResults,
+          ...signerAuthAuditMetadata(signerAuthorization.auth),
+        },
+      });
+      const mapped = moneroErrorResponse(c, e);
+      if (mapped) return mapped;
+      return c.json<ApiResponse>({ ok: false, error: sanitizeErrorMessage(e) }, 500);
     }
   });
 });
@@ -6965,7 +8171,10 @@ vaultRoutes.get("/:agentId/addresses", async (c) => {
     return c.json<
       ApiResponse<{
         agentId: string;
-        addresses: Array<{ chainFamily: "evm" | "solana" | "bitcoin"; address: string }>;
+        addresses: Array<{
+          chainFamily: "evm" | "solana" | "bitcoin" | "monero";
+          address: string;
+        }>;
       }>
     >({
       ok: true,

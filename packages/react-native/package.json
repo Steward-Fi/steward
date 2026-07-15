@@ -1,7 +1,7 @@
 {
   "name": "@stwd/react-native",
   "version": "0.1.0",
-  "description": "React Native and Expo helpers for Steward authentication and API clients",
+  "description": "React Native and Expo helpers for Steward authentication and governed API clients",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

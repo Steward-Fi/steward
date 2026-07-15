@@ -310,6 +310,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Validate Monero compose profile contract
+        run: scripts/test-compose-monero.sh
+
       - name: Start compose stack
         env:
           POSTGRES_DB: "steward_test"

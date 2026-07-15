@@ -1,54 +1,40 @@
 # Steward
 
-auth + wallet infrastructure for autonomous agents. open source. self-hostable. policy enforced at the signing layer.
+Steward is an open-source, self-hostable governed credential proxy and policy and approval layer for agent provider actions and wallets. It ships scoped grants, exact-request approval, policy-bound execution authorization on the primary EVM sign path, and signed audit evidence verifiable offline. Bring your own agent runtime, cloud, identity provider, and custodian.
 
 [![npm](https://img.shields.io/npm/v/@stwd/sdk)](https://www.npmjs.com/package/@stwd/sdk)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![API](https://img.shields.io/badge/API-live-brightgreen)](https://api.steward.fi)
 [![Docs](https://img.shields.io/badge/docs-steward.fi-blue)](https://docs.steward.fi)
 
----
+## What exists today
 
-## the problem
+Steward provides encrypted wallet and credential storage, authenticated tenant-scoped APIs, policy evaluation and approval workflows, a credential-injecting proxy, operator freeze controls, and signed audit evidence. Wallet and configured provider capabilities are the core. Trading venue packages are optional extensions.
 
-AI agents need wallet keys, API keys, database credentials. today these live as plaintext environment variables, one prompt injection away from exfiltration. no spending controls, no audit trail, no kill switch.
+| Area | Current implementation |
+|---|---|
+| **Custody** | Wallet keys and credentials are encrypted at rest under an operator-held root. Optional AWS KMS envelope wrapping is available, along with an operator-supplied PKCS#11 wrapping adapter and an external custody interface. Local and KMS envelope modes expose plaintext key material to the application at sign time. |
+| **Scoped grants** | Named provider capabilities can bind an agent grant to a configured host, path, method, credential route, expiry, and revocation state. Grants are tenant-scoped today, not first-class client-workspace grants. |
+| **Policy and approval** | Governed routes evaluate policy before calling signing or proxy operations. Wallet workflows support human approval, and provider capabilities support an exact-request approval and resume flow. |
+| **Execution authorization** | The primary EVM transaction sign path and compatible approval replay require a signed, payload-bound, backend-bound, single-use authorization immediately before raw signing. This boundary does not cover every signing or proxy surface. |
+| **Audit evidence** | Steward writes a tenant-scoped HMAC audit chain and exports Ed25519-signed evidence bundles through `/audit/bundle`. Bundles can be checked offline with `scripts/verify-evidence-bundle.mjs`. The verifier checks the signature against the public key carried in the bundle, so operators must separately compare that key with an out-of-band trusted signing key or fingerprint. An operator controlling all relevant keys can fabricate a self-consistent history. |
+| **Deployment** | Self-hosted Docker and embedded PGLite modes are available. Operators bring their own runtime, cloud, identity, and custody configuration. |
 
-existing embedded-wallet platforms were built for consumer apps, not agents. they're closed source, can't be self-hosted, charge per-transaction fees, and have no concept of policy enforcement or autonomous operation.
+## Architecture
 
-## the solution
-
-Steward sits between agents and everything they access. four pillars:
-
-1. **vault.** AES-256-GCM encrypted keys. EVM (7 chains) + Solana. keys never exist in plaintext outside a signing operation.
-2. **policy engine.** 6 composable rule types evaluated before every action. spending limits, rate limits, address whitelists, time windows, auto-approve thresholds.
-3. **auth.** passkeys, email magic links, SIWE, Google/Discord OAuth. JWT sessions with refresh token rotation.
-4. **proxy gateway.** credential injection for any third-party API. agents never see raw keys. full audit trail.
-
-## how it works in practice
-
-an agent (or the app delegating to one) holds only a Steward URL and a scoped JWT. it never holds private keys. when it wants to act, its LLM sends a signing request; the policy engine evaluates the request against the agent's policy; the vault signs or refuses; an audit event is emitted either way.
-
-the key never reaches the model, and compromised app code cannot exceed the policy. spend caps, allowlists, rate limits, and an atomic freeze switch are enforced in the vault itself, before any signature is produced.
-
----
-
-## architecture
-
-```
-agent / app              Steward                        third-party
-┌─────────────┐    ┌──────────────────────┐    ┌──────────────────┐
-│ STEWARD_URL │───>│ auth (JWT/passkey)   │    │ chains (EVM/Sol) │
-│ STEWARD_JWT │    │ policy engine        │───>│ OpenAI/Anthropic │
-│             │    │ wallet vault         │    │ any API          │
-│ no API keys │    │ secret vault         │    └──────────────────┘
-│ no priv keys│    │ proxy gateway        │
-└─────────────┘    │ audit log            │
-                   └──────────────────────┘
+```text
+agent runtime           Steward governed paths               target systems
+┌─────────────┐      ┌────────────────────────────┐      ┌──────────────────┐
+│ scoped token│─────>│ auth + route policy checks │─────>│ configured APIs  │
+│ no raw keys │      │ exact-request approvals    │      │ chains/custodian │
+│ no API keys │      │ wallet + secret storage    │      └──────────────────┘
+└─────────────┘      │ credential proxy           │
+                     │ signed audit evidence      │
+                     └────────────────────────────┘
 ```
 
----
+Steward's long-term direction is an open authority plane across supported agent execution surfaces. Today, enforcement is surface-specific. Consult the security surface inventory and documentation before treating any path as governed.
 
-## quick start
+## Quick start
 
 ```bash
 npm install @stwd/sdk
@@ -58,30 +44,27 @@ npm install @stwd/sdk
 import { StewardClient } from "@stwd/sdk";
 
 const steward = new StewardClient({
-  baseUrl: "https://api.steward.fi",
+  // Point this at your self-hosted Steward instance.
+  baseUrl: "http://localhost:3200",
   apiKey: "stw_your_tenant_key",
   tenantId: "my-app",
 });
 
-// create an agent with EVM + Solana wallets
-const agent = await steward.createWallet("trading-bot", "Trading Bot");
-console.log(agent.walletAddresses); // { evm: "0x...", solana: "..." }
+const agent = await steward.createWallet("operations-bot", "Operations Bot");
+console.log(agent.walletAddresses);
 
-// sign a transaction (policy-enforced)
-const result = await steward.signTransaction("trading-bot", {
+const result = await steward.signTransaction("operations-bot", {
   to: "0xRecipient",
-  value: "10000000000000000", // 0.01 ETH
-  chainId: 8453, // Base
+  value: "10000000000000000",
+  chainId: 8453,
 });
 ```
 
-see the full [quickstart guide](docs/quickstart.mdx) for auth setup and policies. see the [deployment guide](docs/deployment.md) for self-hosting.
+See the full [quickstart guide](docs/quickstart.mdx) for authentication setup and policies. See the [deployment guide](docs/deployment.md) for self-hosting.
 
----
+## Auth widget
 
-## auth widget
-
-drop-in React components for login and wallet management:
+Install React components for login and wallet management:
 
 ```bash
 npm install @stwd/react @stwd/sdk
@@ -95,7 +78,7 @@ function App() {
   return (
     <StewardProvider
       client={stewardClient}
-      auth={{ baseUrl: "https://api.steward.fi" }}
+      auth={{ baseUrl: "http://localhost:3200" }}
     >
       <StewardAuthGuard fallback={<StewardLogin methods={["passkey", "email", "google"]} />}>
         <Dashboard />
@@ -105,129 +88,106 @@ function App() {
 }
 ```
 
-components: `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `StewardTenantPicker`, `WalletOverview`, `PolicyControls`, `ApprovalQueue`, `SpendDashboard`, `TransactionHistory`.
+Components include `StewardLogin`, `StewardAuthGuard`, `StewardUserButton`, `StewardTenantPicker`, `WalletOverview`, `PolicyControls`, `ApprovalQueue`, `SpendDashboard`, and `TransactionHistory`.
 
----
+## Packages
 
-## packages
+| Package | Description |
+|---|---|
+| [`@stwd/sdk`](https://www.npmjs.com/package/@stwd/sdk) | TypeScript client for Steward's governed wallet and provider capability APIs. |
+| [`@stwd/react`](https://www.npmjs.com/package/@stwd/react) | React components for Steward authentication, wallets, policies, and approvals. |
+| [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin) | ElizaOS integration for Steward-scoped wallet and provider capabilities. |
+| [`@stwd/mcp`](https://www.npmjs.com/package/@stwd/mcp) | MCP tools for invoking Steward-authorized wallet and provider capabilities. |
+| `@stwd/api` | Steward authorization, approval, execution, and evidence API. |
+| `@stwd/vault` | Local and pluggable wallet-key storage and signing primitives. Policy enforcement is provided by governed execution paths. |
+| `@stwd/policy-engine` | Composable policy decisions for scoped provider capabilities and wallet actions. |
+| `@stwd/proxy` | Credential-injecting proxy for configured routes. |
+| `@stwd/plugin-wxmr` | Opt-in wxmr.io integration for Monero on Solana bridge handoffs. |
 
-| package | version | description |
-|---|---|---|
-| [`@stwd/sdk`](https://www.npmjs.com/package/@stwd/sdk) | ![npm](https://img.shields.io/npm/v/@stwd/sdk) | TypeScript client for browser + Node. zero deps. |
-| [`@stwd/react`](https://www.npmjs.com/package/@stwd/react) | ![npm](https://img.shields.io/npm/v/@stwd/react) | drop-in React components: login, wallet, policies, approvals. |
-| [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin) | ![npm](https://img.shields.io/npm/v/@stwd/eliza-plugin) | ELIZA OS integration: sign, transfer, balance, approval evaluator. |
-| `@stwd/api` | internal | Hono REST API. 30+ endpoints, multi-tenant, dual auth. |
-| `@stwd/vault` | internal | wallet + secret encryption. AES-256-GCM, EVM + Solana. |
-| `@stwd/policy-engine` | internal | composable policy evaluation. 6 rule types, 1000+ lines of tests. |
-| `@stwd/proxy` | internal | API proxy with credential injection, alias system, audit trail. |
-| `@stwd/auth` | internal | passkeys (WebAuthn), email magic links, SIWE, OAuth. |
-| `@stwd/webhooks` | internal | HMAC-signed event delivery with retries. |
-| `@stwd/db` | internal | Drizzle ORM schema, migrations, PGLite adapter. |
-| `@stwd/shared` | internal | types, chain metadata, constants. |
-| `@stwd/plugin-wxmr` | internal | opt-in, bidirectional Monero-on-Solana bridge handoff through wxmr.io. |
+## Self-hosting
 
----
-
-## self-hosting
-
-Steward runs anywhere. two options:
-
-**docker (recommended for production):**
+### Docker
 
 ```bash
 git clone https://github.com/Steward-Fi/steward.git && cd steward
 cp .env.example .env
-# set STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_PLATFORM_KEYS,
-# STEWARD_SESSION_SECRET, and STEWARD_JWT_SECRET in .env
+# Set STEWARD_MASTER_PASSWORD, POSTGRES_PASSWORD, STEWARD_PLATFORM_KEYS,
+# STEWARD_SESSION_SECRET, and STEWARD_JWT_SECRET in .env.
 docker compose up -d
 curl http://127.0.0.1:3200/ready
 ```
 
-starts the API (`:3200`), proxy (`:8080`), Postgres, and Redis. API migrations run automatically on startup unless `SKIP_MIGRATIONS` is set.
+This starts the API on port 3200, the proxy on port 8080, PostgreSQL, and Redis. API migrations run automatically on startup unless `SKIP_MIGRATIONS` is set.
 
-**embedded mode (no third-party dependencies):**
+### Embedded mode
 
 ```bash
 bun run start:local
 ```
 
-uses PGLite (in-process Postgres via WASM). data persists to `~/.steward/data/`. good for local development, CLI agents, and desktop apps.
+Embedded mode uses PGLite, an in-process PostgreSQL-compatible database through WASM. Data persists to `~/.steward/data/`. It is intended for local development, CLI agents, and desktop apps.
 
-**required env vars:**
+### Required environment variables
 
-| variable | description |
+| Variable | Description |
 |---|---|
-| `STEWARD_MASTER_PASSWORD` | derives all vault encryption keys. **no recovery if lost.** |
-| `DATABASE_URL` | Postgres connection string (not needed in embedded mode) |
-| `STEWARD_SESSION_SECRET` | JWT signing secret (defaults to master password) |
-| `REDIS_URL` | Redis for rate limiting + token store (optional) |
-| `RESEND_API_KEY` | for email magic link auth (optional) |
-| `PASSKEY_RP_ID` | WebAuthn relying party domain (optional) |
-| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth (optional) |
-| `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth (optional) |
+| `STEWARD_MASTER_PASSWORD` | Derives vault encryption keys. There is no recovery if it is lost. |
+| `DATABASE_URL` | PostgreSQL connection string, not needed in embedded mode. |
+| `STEWARD_SESSION_SECRET` | JWT signing secret, defaults to the master password. |
+| `REDIS_URL` | Redis for rate limiting and the token store, optional. |
+| `RESEND_API_KEY` | Email magic-link authentication, optional. |
+| `PASSKEY_RP_ID` | WebAuthn relying-party domain, optional. |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Google OAuth, optional. |
+| `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | Discord OAuth, optional. |
 
-full list in [`.env.example`](.env.example). see [deployment guide](docs/deployment.md) for production setup.
+See [`.env.example`](.env.example) for the full list.
 
----
+## Shipped capabilities
 
-## features
+- **Credential proxy:** configured routes inject provider credentials server-side without returning them to the supported agent caller.
+- **Scoped grants:** named capabilities support per-agent grants, expiry, revocation, argument constraints, and rate constraints.
+- **Wallet policy and approval:** supported wallet routes evaluate policy and can hold an exact request for human review.
+- **Primary EVM execution authorization:** the primary EVM transaction sign path uses a signed, short-lived, single-use execution authorization immediately before raw signing.
+- **Signed audit evidence:** tenant-scoped HMAC chaining, Ed25519 checkpoints, bundle export, and an offline verifier.
+- **Encrypted custody:** local AES encryption, optional AWS KMS envelope wrapping, a PKCS#11 wrapping adapter, and an external-custody interface.
+- **Authentication:** passkeys, email magic links, SIWE, Google OAuth, and Discord OAuth.
+- **SDKs and integrations:** TypeScript SDK, React components, ElizaOS plugin, and MCP server.
+- **Self-hosting:** Docker with PostgreSQL and Redis, plus embedded PGLite mode.
 
-- [x] **vault**: AES-256-GCM encrypted wallets, EVM (7 chains) + Solana
-- [x] **policy engine**: 6 composable types (spending-limit, approved-addresses, rate-limit, time-window, auto-approve-threshold, allowed-chains)
-- [x] **auth**: passkeys (WebAuthn), email magic links, SIWE, Google OAuth, Discord OAuth
-- [x] **JWT sessions**: access + refresh token rotation, revoke single/all sessions
-- [x] **cross-tenant identity**: one user, one wallet, multiple apps
-- [x] **multi-tenant API**: full tenant isolation at middleware + DB level
-- [x] **proxy gateway**: credential injection, alias system, spend tracking, audit trail
-- [x] **React components**: login widget, wallet overview, policy controls, approval queue
-- [x] **TypeScript SDK**: typed client, browser + Node, all wallet/policy/auth ops
-- [x] **ELIZA OS plugin**: sign, transfer, balance, approval evaluator
-- [x] **embedded mode**: PGLite, zero third-party dependencies, same API surface
-- [x] **docker**: multi-stage Dockerfile, docker-compose with Postgres + Redis
-- [x] **webhooks**: HMAC-signed events (tx.signed, tx.pending, policy.violation, etc.)
-- [x] **per-tenant CORS**: configurable allowed origins per tenant
+## Scope and trust limits
 
----
+- Steward governs configured routes and supported signing paths. It does not govern arbitrary agent network egress or every action in the product.
+- The primary EVM sign path has the shipped execution authorization boundary. Other wallet and proxy paths have their own documented boundaries.
+- Steward does not claim MPC custody, native HSM signing, non-custodial operation, or that keys never enter application memory.
+- Evidence bundles are tamper-evident after the bundled public key is separately matched to a trusted signing key or fingerprint. They are not operator-proof when the operator controls the audit and signing keys.
+- Steward does not prove that a policy-allowed action is semantically legitimate or safe from prompt injection.
 
-## what Steward offers
+## Supported wallet networks
 
-- **open source.** MIT licensed, full source available.
-- **self-hostable.** docker, embedded PGLite, or hosted.
-- **full auth surface.** passkey / email / SIWE / OAuth.
-- **policy enforcement at the vault layer.** 6 composable rule types evaluated before any signature is produced. compromised app code cannot bypass.
-- **agent-native.** built from day one for autonomous operation: approval queues, audit log, kill-switch.
-- **credential proxy.** inject keys for any third-party API. agents never see raw secrets.
+Wallet primitives support Ethereum, Base, Polygon, Arbitrum, BSC, Gnosis, Base Sepolia, BSC Testnet, Solana, Bitcoin, and Monero. Support differs by route, operation, custody backend, and deployment. This list is not a claim that every network shares the primary EVM execution authorization boundary.
 
----
+The opt-in `@stwd/plugin-wxmr` integration prepares handoffs in both directions
+between native Monero and Monero on Solana. Steward policy-checks the handoff
+request, but the plugin does not sign, submit, settle, or verify completion of
+the bridge operation; users complete it interactively at [wxmr.io](https://wxmr.io).
 
-## supported chains
+## Integrations
 
-Ethereum, Base, Polygon, Arbitrum, BSC, Base Sepolia, BSC Testnet, Solana. The
-opt-in wxmr integration adds a bridge route between Monero mainnet and Monero on
-Solana without adding native Monero key custody to Steward.
+- [ElizaOS](https://elizaos.ai) through [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin)
+- [Monero on Solana](https://wxmr.io) bridge handoffs through the opt-in `@stwd/plugin-wxmr` integration ([guide](docs/guides/monero-on-solana.mdx))
+- wagmi v2 and v3, with a MetaMask Connect EVM connector
+- Model Context Protocol server for AI agents and IDEs
 
----
+## Contributing
 
-## integrations
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and pull-request guidelines.
 
-- [ElizaOS](https://elizaos.ai) (via [`@stwd/eliza-plugin`](https://www.npmjs.com/package/@stwd/eliza-plugin))
-- [Monero on Solana](https://wxmr.io) for policy-checked, interactive bridging in both directions ([guide](docs/guides/monero-on-solana.mdx))
-- wagmi v2 and v3, with a first-class MetaMask Connect (EVM) connector
-- Model Context Protocol (MCP) server for AI agents and IDEs
+## Links
 
----
-
-## contributing
-
-see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and PR guidelines.
-
-## links
-
-- website: [steward.fi](https://steward.fi)
-- docs: [docs.steward.fi](https://docs.steward.fi)
-- API: [api.steward.fi](https://api.steward.fi)
+- Website: [steward.fi](https://steward.fi)
+- Docs: [docs.steward.fi](https://docs.steward.fi)
 - npm: [@stwd/sdk](https://www.npmjs.com/package/@stwd/sdk), [@stwd/react](https://www.npmjs.com/package/@stwd/react), [@stwd/eliza-plugin](https://www.npmjs.com/package/@stwd/eliza-plugin)
 
-## license
+## License
 
 [MIT](LICENSE)
