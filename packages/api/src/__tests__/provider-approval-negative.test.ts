@@ -332,6 +332,15 @@ describe("PR3 negative matrix", () => {
     await expectFail(approve(intentId, requestHash, actionDigest), "APPROVAL_OPERATION_STALE");
   });
 
+  test("codex P1: workspace authority revision bumped (still active) => APPROVAL_DEPENDENCY_STALE", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    // Bump the workspace revision while it stays active; the committed access
+    // decision recorded the original revision, so this must stale the action.
+    await getDb().update(workspaces).set({ revision: 99 }).where(eq(workspaces.id, F.WORKSPACE));
+    await expectFail(approve(intentId, requestHash, actionDigest), "APPROVAL_DEPENDENCY_STALE");
+    expect((await bindingRow(intentId)).status).toBe("approval_stale");
+  });
+
   test("N35: provider account disabled => APPROVAL_PROVIDER_ACCOUNT_STALE", async () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
     await getDb()
@@ -523,6 +532,37 @@ describe("PR3 negative matrix", () => {
       approve(out.intentId, out.requestHash, out.actionDigest),
       "APPROVAL_NOT_REQUIRED",
     );
+  });
+
+  test("codex P1: create-replay of a governed action AFTER it was approved reports 202 APPROVAL_REQUIRED, never POLICY_ALLOW", async () => {
+    const { providerActionService } = await import("../services/provider-action-service");
+    const { buildGithubAction } = await import("@stwd/provider-github");
+    const { principal } = await import("./provider-approval-fixture");
+    const now = new Date();
+    const createInput = {
+      principal: principal(),
+      workspaceId: F.WORKSPACE,
+      providerAccountId: F.ACCOUNT,
+      operationKey: F.OP_KEY,
+      build: buildGithubAction(F.OP_KEY, { owner: "o", repo: "r", pullNumber: 1, body: "x" }),
+      idempotencyKeyHash: `sha256:${"9".repeat(64)}`,
+      requestedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 300_000).toISOString(),
+      nonce: "Y".repeat(32),
+      requestId: null,
+    };
+    const first = await providerActionService.createProviderAction(createInput);
+    expect(first.kind).toBe("approval_required");
+    if (first.kind !== "approval_required") throw new Error();
+    // Approve it out-of-band.
+    await approve(first.intentId, first.requestHash, first.actionDigest, {
+      idempotencyKey: "replay-approve-key",
+    });
+    expect((await bindingRow(first.intentId)).status).toBe("approved");
+    // A create-replay with the same idem key must still report 202, NOT allow.
+    const replay = await providerActionService.createProviderAction(createInput);
+    expect(replay.kind).toBe("approval_required");
+    expect((replay as { code: string }).code).toBe("APPROVAL_REQUIRED");
   });
 
   // ── Positive isolation: Client B change does NOT stale Client A (I6) ──

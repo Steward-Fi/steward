@@ -466,13 +466,25 @@ class ProviderApprovalService {
       .limit(1);
     if (!agent) return { ok: false, code: "APPROVAL_DEPENDENCY_STALE" };
 
-    // Workspace current + revision.
+    // Workspace current + EXACT committed revision. The committed value lives in
+    // the persisted PR2 access decision (dependencyRevisions.workspace); a
+    // workspace-authority revision bump while the workspace stays active must
+    // stale the action (exact dependency binding, codex P1).
     const [workspace] = await tx
       .select()
       .from(workspaces)
       .where(and(eq(workspaces.tenantId, binding.tenantId), eq(workspaces.id, binding.workspaceId)))
       .limit(1);
     if (!workspace || workspace.status !== "active") {
+      return { ok: false, code: "APPROVAL_DEPENDENCY_STALE" };
+    }
+    const committedWorkspaceRevision = (
+      binding.dependencyRevisions as { workspace?: number } | null
+    )?.workspace;
+    if (
+      typeof committedWorkspaceRevision === "number" &&
+      workspace.revision !== committedWorkspaceRevision
+    ) {
       return { ok: false, code: "APPROVAL_DEPENDENCY_STALE" };
     }
 

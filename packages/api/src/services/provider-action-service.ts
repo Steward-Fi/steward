@@ -1177,7 +1177,21 @@ class ProviderActionService {
         actionDigest: b.actionDigest,
       };
     }
-    if (b.status === "pending_approval")
+    // Approval-required lineage (PR3). A create-replay of a governed provider
+    // action must NEVER report POLICY_ALLOW/stub_succeeded (that would fabricate
+    // an allow for an action that requires a human decision). The agent's create
+    // contract is 202 APPROVAL_REQUIRED regardless of where the out-of-band
+    // approval lifecycle currently sits (pending/approved/denied/expired/stale/
+    // execution_ready); the human decision + safe resume happen through the
+    // /v2/provider-actions approval + execute routes, not this create path.
+    if (
+      b.status === "pending_approval" ||
+      b.status === "approved" ||
+      b.status === "execution_ready" ||
+      b.status === "approval_denied" ||
+      b.status === "approval_expired" ||
+      b.status === "approval_stale"
+    )
       return {
         kind: "approval_required",
         code: "APPROVAL_REQUIRED",
