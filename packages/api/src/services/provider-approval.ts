@@ -986,15 +986,47 @@ class ProviderApprovalService {
           reason: input.reason,
         });
 
-        if (queue.decisionIdempotencyKeyHash) {
-          if (
-            queue.resolvedById === input.authenticatedUserId &&
-            queue.decisionIdempotencyKeyHash === idemHash
-          ) {
-            if (queue.decisionRequestHash === decisionReqHash) {
-              // Exact retry → return existing decision.
-              return this.decisionReplay(binding, queue);
-            }
+        // Decision idempotency replay. Only replay when THIS queue row is still
+        // in a DECIDED state (approved/rejected/consumed). If the row later
+        // expired/staled (which clears `decision` to NULL but retains the idem
+        // hash), an exact retry must NOT report a stale success — it falls through
+        // to the expiry/terminal handling below (codex P2).
+        if (
+          queue.decisionIdempotencyKeyHash &&
+          queue.resolvedById === input.authenticatedUserId &&
+          queue.decisionIdempotencyKeyHash === idemHash &&
+          queue.decision != null &&
+          (queue.status === "approved" ||
+            queue.status === "rejected" ||
+            queue.status === "consumed")
+        ) {
+          if (queue.decisionRequestHash === decisionReqHash) {
+            // Exact retry → return existing decision.
+            return this.decisionReplay(binding, queue);
+          }
+          return fail("APPROVAL_IDEMPOTENCY_CONFLICT", 409);
+        }
+
+        // Cross-action idempotency conflict (codex P2): the same approver reusing
+        // this decision key on a DIFFERENT intent would violate the partial
+        // unique index (tenant_id, resolved_by_id, decision_idempotency_key_hash)
+        // and surface as an opaque 503. Detect it here and return the precise
+        // 409 instead. Only relevant when we are about to WRITE the key (i.e. the
+        // current row has not already recorded it).
+        if (queue.decisionIdempotencyKeyHash !== idemHash) {
+          const [conflict] = await tx
+            .select({ id: approvalQueue.id })
+            .from(approvalQueue)
+            .where(
+              and(
+                eq(approvalQueue.approvalKind, "provider_action"),
+                eq(approvalQueue.tenantId, input.tenantId),
+                eq(approvalQueue.resolvedById, input.authenticatedUserId),
+                eq(approvalQueue.decisionIdempotencyKeyHash, idemHash),
+              ),
+            )
+            .limit(1);
+          if (conflict && conflict.id !== queue.id) {
             return fail("APPROVAL_IDEMPOTENCY_CONFLICT", 409);
           }
         }

@@ -423,6 +423,45 @@ describe("PR3 negative matrix", () => {
     );
   });
 
+  test("codex P2a: exact retry with a decided key AFTER the action transitioned to expired => APPROVAL_EXPIRED, not a stale replay", async () => {
+    const { intentId, requestHash, actionDigest } = await createApprovalRequired();
+    // Approve with key K (records the idem hash + decision on the queue row).
+    await approve(intentId, requestHash, actionDigest, { idempotencyKey: "expiry-replay-K" });
+    // Push the (approved) row past its deadline, then drive the resume path once
+    // so the service TRANSITIONS it to expired (clearing queue.decision but
+    // retaining the idem hash) — this is exactly the state codex flagged.
+    await getDb()
+      .update(approvalQueue)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(approvalQueue.intentId, intentId));
+    const exp = await providerApprovalService.resume({ intentId, tenantId: F.TENANT });
+    expect(exp.ok).toBe(false);
+    expect((await bindingRow(intentId)).status).toBe("approval_expired");
+    // Now an EXACT retry of the ORIGINAL decision body + key must surface the
+    // terminal expiry, NOT a stale "approved" replay.
+    await expectFail(
+      approve(intentId, requestHash, actionDigest, { idempotencyKey: "expiry-replay-K" }),
+      "APPROVAL_EXPIRED",
+    );
+  });
+
+  test("codex P2b: same approver reuses a decision key on a DIFFERENT intent => APPROVAL_IDEMPOTENCY_CONFLICT (not 503)", async () => {
+    const a = await createApprovalRequired("aaaaaaaa");
+    const b = await createApprovalRequired("bbbbbbbb");
+    // Approve action A with key K.
+    await approve(a.intentId, a.requestHash, a.actionDigest, { idempotencyKey: "cross-key-K" });
+    // Reuse key K by the SAME approver on action B => precise 409, not a 503.
+    const res = await approve(b.intentId, b.requestHash, b.actionDigest, {
+      idempotencyKey: "cross-key-K",
+    });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error();
+    expect(res.code).toBe("APPROVAL_IDEMPOTENCY_CONFLICT");
+    expect((res as { httpStatus: number }).httpStatus).toBe(409);
+    // B is untouched.
+    expect((await bindingRow(b.intentId)).status).toBe("pending_approval");
+  });
+
   test("N43: action expired exactly at decision DB time => APPROVAL_EXPIRED, expired tuple", async () => {
     const { intentId, requestHash, actionDigest } = await createApprovalRequired();
     await getDb()
